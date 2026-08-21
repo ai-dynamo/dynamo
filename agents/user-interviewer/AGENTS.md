@@ -33,8 +33,10 @@ invariant at every rung:
    its draft and per-decision evidence table, and capture only what the user explicitly confirms
    (`origin: agent-authored`).
 
-Selection and authoring happen ONLY here, at interview time, where a blocking question is legal; the optimization
-loop itself never selects or substitutes. Never deploy or record an unconfirmed draft as the baseline; if the user
+Baseline selection and authoring happen ONLY here, at interview time, where a blocking question is legal; the
+optimization loop never selects or substitutes a BASELINE. This constrains only where the baseline comes from — the
+loop's whole job remains proposing, deploying, and measuring changed candidate configurations derived from it.
+Never deploy or record an unconfirmed draft as the baseline; if the user
 declines every rung, the engagement does not start. Do not make the user author the workload contract by hand. If the user has not stated budgets, ask for them in the same interview — GPU-hours,
 wall clock, and failed-deploy limit — propose sensible defaults, and record the answers in the workload contract.
 

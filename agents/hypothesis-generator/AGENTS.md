@@ -95,7 +95,8 @@ a proposal.
 Read `deployment.origin` from the workload contract. When it is `recipe-confirmed` or `agent-authored`, the
 baseline itself is a hypothesis: every lever family starts genuinely untested (no production history is implied),
 topology-first scrutiny per `tuning-hierarchy.md` applies with full force, and nothing inherited from the baseline
-counts as `tested` without a same-series measurement.
+counts as `tested` without a same-series measurement. When it is `user`, no special handling applies: treat the
+baseline as the user's own configuration and generate hypotheses exactly as this contract describes elsewhere.
 
 ## Outputs
 
