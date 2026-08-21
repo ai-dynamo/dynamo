@@ -11,12 +11,7 @@ from typing import Mapping, Optional, Union
 
 from dynamo.workflow.builder import Workflow
 from dynamo.workflow.ir import WorkflowIR
-from dynamo.workflow.plan import (
-    Binding,
-    ExecutionPlan,
-    InlineBinding,
-    RemoteBinding,
-)
+from dynamo.workflow.plan import Binding, ExecutionPlan, InlineBinding, RemoteBinding
 from dynamo.workflow.types import WorkflowValidationError, validate_name
 
 
