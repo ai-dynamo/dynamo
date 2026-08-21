@@ -67,6 +67,7 @@ VLLM_ARGS_NO_BLOCK_SIZE: Dict[str, Any] = {
     "enforce_eager": True,  # Disable CUDA graphs for faster startup & lower memory
 }
 
+# Twice vLLM's 165,900,288-byte minimum for TinyLlama at max_model_len=1024.
 DISAGG_KV_CACHE_MEMORY_BYTES = 331_801_000
 
 # Avoid device-wide profiling across the two prefill workers on GPU 0.
@@ -663,7 +664,7 @@ def test_router_decisions_vllm_dp(
     )
 
 
-# Keep sequential: this test pins its decode worker to GPU 1.
+# The parallel lane reserves one GPU per test; this case requires GPUs 0 and 1.
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.requested_vllm_kv_cache_bytes(DISAGG_KV_CACHE_MEMORY_BYTES)
