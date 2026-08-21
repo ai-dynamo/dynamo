@@ -171,9 +171,14 @@ jobs:
           TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
           echo "flags for docker buildx: ${TAGGING_FLAGS}"
 
+          # deploy/operator/Dockerfile's licenses stage does `COPY --from=compliance`,
+          # which resolves as an image unless the named build context is supplied.
+          # Without this the build fails pulling docker.io/library/compliance.
+          # .github/actions/build-deploy-component passes the same flag.
           docker buildx build --push \
               --platform linux/amd64,linux/arm64 \
               --build-arg DOCKER_PROXY=${ECR_REGISTRY}/dockerhub/ \
+              --build-context compliance=../../container/compliance \
               ${TAGGING_FLAGS} -f Dockerfile .
 
           echo "### Operator Container Images" >> $GITHUB_STEP_SUMMARY
