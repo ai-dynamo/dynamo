@@ -749,8 +749,10 @@ mod tests {
     use crate::protocols::agents::{
         HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_PARENT_AGENT_ID,
         HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_PARENT_THREAD_ID, HEADER_CODEX_THREAD_ID,
-        HEADER_CODEX_TURN_METADATA, HEADER_DYNAMO_PARENT_SESSION_ID, HEADER_DYNAMO_SESSION_FINAL,
-        HEADER_DYNAMO_SESSION_ID, HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
+        HEADER_CODEX_TURN_METADATA, HEADER_DEEPSEEK_HARNESS_COMPACT,
+        HEADER_DEEPSEEK_HARNESS_PARENT_SESSION_ID, HEADER_DEEPSEEK_HARNESS_SESSION_ID,
+        HEADER_DYNAMO_PARENT_SESSION_ID, HEADER_DYNAMO_SESSION_FINAL, HEADER_DYNAMO_SESSION_ID,
+        HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
     };
 
     #[derive(Default)]
@@ -1050,6 +1052,7 @@ mod tests {
         let cases = [
             (HEADER_CLAUDE_CODE_SESSION_ID, "claude-run-1", None, None),
             (HEADER_CODEX_THREAD_ID, "codex-root", None, None),
+            (HEADER_DEEPSEEK_HARNESS_SESSION_ID, "dsh-run-1", None, None),
             (
                 HEADER_OPENCODE_SESSION_ID,
                 "opencode-run-1",
@@ -1146,6 +1149,38 @@ mod tests {
     }
 
     #[test]
+    fn agent_context_from_deepseek_harness_headers_preserves_compaction() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HEADER_DEEPSEEK_HARNESS_SESSION_ID,
+            "dsh-session".parse().unwrap(),
+        );
+        headers.insert(
+            HEADER_DEEPSEEK_HARNESS_PARENT_SESSION_ID,
+            "dsh-parent".parse().unwrap(),
+        );
+        headers.insert(HEADER_DEEPSEEK_HARNESS_COMPACT, "1".parse().unwrap());
+
+        let agent_context = agent_context_from_headers(&headers).unwrap();
+        assert_eq!(agent_context.session_id, "dsh-session");
+        assert_eq!(
+            agent_context.parent_session_id.as_deref(),
+            Some("dsh-parent")
+        );
+        assert_eq!(agent_context.compaction, Some(AgentCompaction::default()));
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "dsh-session"
+        );
+
+        headers.insert(HEADER_DEEPSEEK_HARNESS_COMPACT, "0".parse().unwrap());
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().compaction,
+            None
+        );
+    }
+
+    #[test]
     fn agent_context_from_codex_thread_headers_preserves_subagent_lineage() {
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_CODEX_THREAD_ID, "codex-child".parse().unwrap());
@@ -1202,6 +1237,10 @@ mod tests {
             "claude-session".parse().unwrap(),
         );
         headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
+        headers.insert(
+            HEADER_DEEPSEEK_HARNESS_SESSION_ID,
+            "dsh-session".parse().unwrap(),
+        );
         headers.insert(
             HEADER_OPENCODE_SESSION_ID,
             "opencode-session".parse().unwrap(),
