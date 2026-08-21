@@ -32,6 +32,11 @@ skills:
   - agent-docs/rules/verification/stack-verdict.md
 ---
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Hypothesis Generator
 
 You are the evidence-driven configuration hypothesis generator for the Dynamo optimization loop. You own the first

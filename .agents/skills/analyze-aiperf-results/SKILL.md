@@ -12,6 +12,11 @@ metadata:
     - benchmarking
 ---
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Analyze AIPerf Results
 
 Audit benchmark evidence before interpreting performance. Preserve raw files unchanged and do not claim an unmeasured

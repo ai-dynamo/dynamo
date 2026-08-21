@@ -25,6 +25,11 @@ skills:
   - agent-docs/rules/verification/stack-verdict.md
 ---
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Hypothesis Challenger
 
 You are the independent adversarial reviewer between hypothesis generation and GPU spend. Assume the proposal may be

@@ -11,6 +11,11 @@ metadata:
     - deployment
 ---
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Deploy Dynamo Recipe
 
 ## Purpose
@@ -66,7 +71,10 @@ Create exactly one directory for the assigned candidate:
 
 Create `applied_manifests/` beneath it. Copy the assigned DGD and every explicitly handed-off support manifest used by
 the deployment into that directory with stable names such as `deploy.yaml`, `model-cache.yaml`,
-`model-download.yaml`, and `model-validate.yaml`. Never modify the handed-off source files.
+`model-download.yaml`, and `model-validate.yaml`. Which support manifests exist is recipe-dependent: some recipes ship
+precision-suffixed download manifests (`recipes/deepseek-v4/*` ship `model-download-fp8.yaml` and
+`model-download-nvfp4.yaml`), some fold the download into the model-cache manifest, and few ship a validation job at
+all. Copy what the handoff actually contains. Never modify the handed-off source files.
 
 Update these run-scoped copies in place when a compatibility fix is required, then reapply them. Record every change
 and reason in `deployment_ledger.json`; do not retain numbered intermediate copies. After a successful smoke test,
@@ -157,12 +165,14 @@ If the effective cluster context differs from what `<EXP_ROOT>/manifest.yaml` re
 cluster-context entry before mutating anything.
 
 Read each support manifest's `kind` and `metadata.name`; never infer a Kubernetes resource name from its filename. Set
-`DOWNLOAD_JOB` and `VALIDATE_JOB` from the corresponding Job manifests.
+`DOWNLOAD_MANIFEST` and `DOWNLOAD_JOB` from the handed-off download manifest, and `VALIDATE_MANIFEST` and
+`VALIDATE_JOB` from the validation manifest. Both are optional: skip the corresponding block when the recipe ships no
+such manifest, and never assume the literal filename `model-download.yaml`.
 
 ```bash
 set -euo pipefail
 kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/model-cache.yaml" -n "${NAMESPACE}"
-kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/model-download.yaml" -n "${NAMESPACE}"
+kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/${DOWNLOAD_MANIFEST}" -n "${NAMESPACE}"
 job_state=""
 for _ in $(seq 1 200); do  # 200 x 30s = 100 min bound
   # NOTE: match by substring - a successful Job on Kubernetes 1.31+ carries BOTH
@@ -179,7 +189,7 @@ If a validation job exists, run it after download and before the DGD:
 
 ```bash
 set -euo pipefail
-kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/model-validate.yaml" -n "${NAMESPACE}"
+kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/${VALIDATE_MANIFEST}" -n "${NAMESPACE}"
 job_state=""
 for _ in $(seq 1 120); do  # 120 x 30s = 60 min bound
   job_state="$(kubectl --context "${KUBE_CONTEXT}" get "job/${VALIDATE_JOB}" -n "${NAMESPACE}" \

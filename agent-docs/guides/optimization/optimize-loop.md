@@ -31,6 +31,11 @@ rules:
   - agent-docs/rules/verification/stack-verdict.md
 ---
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Optimize Loop
 
 Use this workflow for an end-to-end Dynamo configuration optimization job. The baseline DGD comes from the

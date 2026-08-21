@@ -15,6 +15,11 @@ metadata:
     - kubernetes
 ---
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Perform Adversarial Review
 
 Try to falsify a proposed optimization experiment before it consumes GPU time. Review the proposal; do not generate a

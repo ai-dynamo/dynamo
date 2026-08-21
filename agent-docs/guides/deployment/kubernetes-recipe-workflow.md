@@ -21,9 +21,18 @@ retained beyond the deployment ledger.
 
 ```bash
 kubectl --context "${KUBE_CONTEXT}" get namespace "${NAMESPACE}"
-kubectl --context "${KUBE_CONTEXT}" get crd | grep -i dynamo || { echo "Dynamo CRDs missing"; exit 1; }
-kubectl --context "${KUBE_CONTEXT}" get storageclass
-kubectl --context "${KUBE_CONTEXT}" get nodes -o wide
+# CRD presence gate: a Forbidden here is tolerated because deploy-dynamo-recipe's server
+# dry-run re-checks it authoritatively; a confirmed absence stops before any mutation.
+crds="$(kubectl --context "${KUBE_CONTEXT}" get crd 2>&1 || true)"
+case "${crds}" in
+  *Forbidden*) echo "WARN: cluster-scope CRD list forbidden for this identity; deferring to server dry-run" ;;
+  *dynamographdeployment*) : ;;
+  *) echo "Dynamo CRDs missing"; exit 1 ;;
+esac
+# Advisory reads: storage classes and node inventory inform sizing but a namespace-scoped
+# identity may lack cluster-scope list rights. Record a Forbidden as a run limitation; do not fail.
+kubectl --context "${KUBE_CONTEXT}" get storageclass || echo "WARN: storageclass list forbidden; record as limitation"
+kubectl --context "${KUBE_CONTEXT}" get nodes -o wide || echo "WARN: node list forbidden; record as limitation"
 ```
 
 Check secrets only by name. Never print, decode, or persist secret values.
@@ -42,14 +51,16 @@ kubectl --context "${KUBE_CONTEXT}" get pvc -n "${NAMESPACE}"
 ```
 
 Run model download and validation jobs when present. Read each Job name from its manifest's `metadata.name`; never infer
-the resource name from the filename.
+the resource name from the filename. Both the existence and the filename of these manifests are recipe-dependent — some
+recipes ship precision-suffixed download manifests, and some fold the download into the model-cache manifest — so take
+the filename from the handoff and skip the block entirely when the recipe ships no such job.
 
 ```bash
-kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/model-download.yaml" -n "${NAMESPACE}"
+kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/${DOWNLOAD_MANIFEST}" -n "${NAMESPACE}"
 # Poll the job true condition with a bounded loop (Complete -> proceed, Failed -> exit 1); a Failed job must
 # fail fast, not burn the timeout. Use the scripted poll block from deploy-dynamo-recipe SKILL.md.
 
-kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/model-validate.yaml" -n "${NAMESPACE}"
+kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/${VALIDATE_MANIFEST}" -n "${NAMESPACE}"
 # Same bounded Complete/Failed poll as the download job (60 min bound).
 ```
 
@@ -59,7 +70,7 @@ Apply the selected DGD from its run-scoped copy:
 kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/deploy.yaml" -n "${NAMESPACE}"
 kubectl --context "${KUBE_CONTEXT}" get dynamographdeployment -n "${NAMESPACE}"
 kubectl --context "${KUBE_CONTEXT}" get pods -n "${NAMESPACE}" -o wide
-kubectl get svc -n "${NAMESPACE}"
+kubectl --context "${KUBE_CONTEXT}" get svc -n "${NAMESPACE}"
 ```
 
 ## Readiness Signals
