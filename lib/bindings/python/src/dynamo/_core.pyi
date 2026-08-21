@@ -2832,11 +2832,6 @@ class KvStateAttachmentOwner:
     async def start(self) -> None:
         ...
 
-    async def set_cache_readable(
-        self, global_dp_rank: int, readable: bool
-    ) -> None:
-        ...
-
     async def close(self) -> None:
         ...
 
