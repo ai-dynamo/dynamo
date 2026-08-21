@@ -97,6 +97,8 @@ def test_diffusion_generator_kwargs_omits_unset_master_port():
 
     assert kwargs["num_gpus"] == 1
     assert "master_port" not in kwargs
+
+
 def test_override_server_args_supports_legacy_xpu_pin():
     server_args = SimpleNamespace(enable_memory_saver=False)
 
