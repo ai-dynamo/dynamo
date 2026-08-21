@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -22,6 +22,7 @@ use pythonize::depythonize;
 
 #[cfg(not(test))]
 pub fn add_to_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<RequestKey>()?;
     module.add_class::<NativeResponseEgress>()?;
     Ok(())
 }
@@ -46,6 +47,29 @@ pub(crate) enum FrameSendError {
     Failed(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[cfg_attr(not(test), pyclass(frozen))]
+pub struct RequestKey {
+    client_id: u64,
+    generation: u64,
+}
+
+#[cfg(not(test))]
+#[pymethods]
+impl RequestKey {
+    #[getter]
+    #[pyo3(name = "client_id")]
+    fn py_client_id(&self) -> u64 {
+        self.client_id
+    }
+
+    #[getter]
+    #[pyo3(name = "generation")]
+    fn py_generation(&self) -> u64 {
+        self.generation
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ChoiceDelta {
     index: usize,
@@ -60,6 +84,8 @@ struct ChoiceDelta {
 #[derive(Debug, Deserialize)]
 pub(crate) struct ResponseEvent {
     client_id: u64,
+    generation: u64,
+    sequence: u64,
     #[serde(default)]
     outputs: Vec<ChoiceDelta>,
     #[serde(default)]
@@ -70,9 +96,16 @@ pub(crate) struct ResponseEvent {
 
 #[cfg(test)]
 impl ResponseEvent {
-    fn tokens(client_id: u64, new_token_ids: Vec<Vec<u32>>, is_final: bool) -> Self {
+    fn tokens_for(
+        request: RequestKey,
+        sequence: u64,
+        new_token_ids: Vec<Vec<u32>>,
+        is_final: bool,
+    ) -> Self {
         Self {
-            client_id,
+            client_id: request.client_id,
+            generation: request.generation,
+            sequence,
             outputs: new_token_ids
                 .into_iter()
                 .enumerate()
@@ -88,9 +121,11 @@ impl ResponseEvent {
         }
     }
 
-    fn error(client_id: u64, message: &str) -> Self {
+    fn error_for(request: RequestKey, sequence: u64, message: &str) -> Self {
         Self {
-            client_id,
+            client_id: request.client_id,
+            generation: request.generation,
+            sequence,
             outputs: Vec::new(),
             is_final: true,
             error_msg: Some(message.to_string()),
@@ -196,6 +231,8 @@ impl RequestStreamState {
 }
 
 struct RegisteredRequest {
+    key: RequestKey,
+    next_sequence: AtomicU64,
     response_state: Mutex<RequestStreamState>,
     sink: Arc<dyn ResponseFrameSink>,
     cancelled: AtomicBool,
@@ -204,7 +241,7 @@ struct RegisteredRequest {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct BatchOutcome {
-    pub(crate) completed_client_ids: Vec<u64>,
+    pub(crate) completed_requests: Vec<RequestKey>,
     pub(crate) responses_processed: usize,
     pub(crate) responses_dropped: usize,
     pub(crate) frames_sent: usize,
@@ -213,24 +250,61 @@ pub(crate) struct BatchOutcome {
 #[derive(Debug)]
 struct IndexedOutcome {
     ordinal: usize,
-    client_id: u64,
+    request_key: RequestKey,
     completed: bool,
     processed: bool,
     frames_sent: usize,
 }
 
-#[derive(Default)]
 struct ProcessorShared {
     requests: Mutex<HashMap<u64, Arc<RegisteredRequest>>>,
+    next_generation: AtomicU64,
     shutting_down: AtomicBool,
     responses_processed: AtomicUsize,
     responses_dropped: AtomicUsize,
     frames_sent: AtomicUsize,
 }
 
+impl Default for ProcessorShared {
+    fn default() -> Self {
+        Self {
+            requests: Mutex::new(HashMap::new()),
+            next_generation: AtomicU64::new(1),
+            shutting_down: AtomicBool::new(false),
+            responses_processed: AtomicUsize::new(0),
+            responses_dropped: AtomicUsize::new(0),
+            frames_sent: AtomicUsize::new(0),
+        }
+    }
+}
 impl ProcessorShared {
+    fn terminate_protocol_error(
+        &self,
+        ordinal: usize,
+        request: Arc<RegisteredRequest>,
+        message: String,
+    ) -> IndexedOutcome {
+        self.responses_dropped.fetch_add(1, Ordering::Relaxed);
+        let frames_sent = usize::from(request.sink.close_with_error(message));
+        self.frames_sent.fetch_add(frames_sent, Ordering::Relaxed);
+        let completed = !request.cancelled.load(Ordering::Acquire);
+        self.remove(request.key, &request);
+        IndexedOutcome {
+            ordinal,
+            request_key: request.key,
+            completed,
+            processed: false,
+            frames_sent,
+        }
+    }
+
     fn process_response(&self, ordinal: usize, response: ResponseEvent) -> IndexedOutcome {
         let client_id = response.client_id;
+        let request_key = RequestKey {
+            client_id,
+            generation: response.generation,
+        };
+        let sequence = response.sequence;
         let request = self
             .requests
             .lock()
@@ -241,18 +315,57 @@ impl ProcessorShared {
             self.responses_dropped.fetch_add(1, Ordering::Relaxed);
             return IndexedOutcome {
                 ordinal,
-                client_id,
+                request_key,
                 completed: false,
                 processed: false,
                 frames_sent: 0,
             };
         };
 
+        if request.key != request_key {
+            self.responses_dropped.fetch_add(1, Ordering::Relaxed);
+            return IndexedOutcome {
+                ordinal,
+                request_key,
+                completed: false,
+                processed: false,
+                frames_sent: 0,
+            };
+        }
+
+        let expected_sequence = request.next_sequence.load(Ordering::Relaxed);
+        if sequence < expected_sequence {
+            self.responses_dropped.fetch_add(1, Ordering::Relaxed);
+            return IndexedOutcome {
+                ordinal,
+                request_key,
+                completed: false,
+                processed: false,
+                frames_sent: 0,
+            };
+        }
+        if sequence > expected_sequence {
+            return self.terminate_protocol_error(
+                ordinal,
+                request,
+                format!(
+                    "response sequence gap for client {client_id}: expected sequence {expected_sequence}, received {sequence}"
+                ),
+            );
+        }
+        if sequence == u64::MAX && !response.is_final && response.error_msg.is_none() {
+            return self.terminate_protocol_error(
+                ordinal,
+                request,
+                format!("response sequence space exhausted for client {client_id}"),
+            );
+        }
+
         self.responses_processed.fetch_add(1, Ordering::Relaxed);
         if request.cancelled.load(Ordering::Acquire) || self.shutting_down.load(Ordering::Acquire) {
             return IndexedOutcome {
                 ordinal,
-                client_id,
+                request_key,
                 completed: false,
                 processed: true,
                 frames_sent: 0,
@@ -278,7 +391,7 @@ impl ProcessorShared {
                 {
                     return IndexedOutcome {
                         ordinal,
-                        client_id,
+                        request_key,
                         completed: false,
                         processed: true,
                         frames_sent: 0,
@@ -330,28 +443,33 @@ impl ProcessorShared {
 
         let completed = terminal && !request.cancelled.load(Ordering::Acquire);
         if terminal {
-            self.remove(client_id, &request);
+            self.remove(request_key, &request);
+        } else {
+            request.next_sequence.store(
+                sequence.checked_add(1).expect("sequence validated"),
+                Ordering::Relaxed,
+            );
         }
 
         IndexedOutcome {
             ordinal,
-            client_id,
+            request_key,
             completed,
             processed: true,
             frames_sent,
         }
     }
 
-    fn remove(&self, client_id: u64, request: &Arc<RegisteredRequest>) {
+    fn remove(&self, key: RequestKey, request: &Arc<RegisteredRequest>) {
         let mut requests = self
             .requests
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if requests
-            .get(&client_id)
-            .is_some_and(|current| Arc::ptr_eq(current, request))
+            .get(&key.client_id)
+            .is_some_and(|current| current.key == key && Arc::ptr_eq(current, request))
         {
-            requests.remove(&client_id);
+            requests.remove(&key.client_id);
         }
     }
 
@@ -430,7 +548,7 @@ impl ShardedResponseEgress {
         prompt_tokens: usize,
         num_choices: usize,
         sink: Arc<dyn ResponseFrameSink>,
-    ) -> Result<(), String> {
+    ) -> Result<RequestKey, String> {
         if num_choices == 0 {
             return Err("num_choices must be at least 1".to_string());
         }
@@ -443,18 +561,33 @@ impl ShardedResponseEgress {
         if requests.contains_key(&client_id) {
             return Err(format!("client {client_id} is already registered"));
         }
+        let generation = self
+            .shared
+            .next_generation
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| "response request generation space is exhausted".to_string())?;
+        let key = RequestKey {
+            client_id,
+            generation,
+        };
         requests.insert(
             client_id,
             Arc::new(RegisteredRequest {
+                key,
+                next_sequence: AtomicU64::new(0),
                 response_state: Mutex::new(RequestStreamState::new(prompt_tokens, num_choices)),
                 sink,
                 cancelled: AtomicBool::new(false),
                 send_gate: Mutex::new(()),
             }),
         );
-        Ok(())
+        Ok(key)
     }
 
+    /// Submit events in sequence order for each request. Concurrent producers must serialize
+    /// submission per `RequestKey`; a forward sequence gap is a terminal protocol error.
     pub(crate) fn process_batch(
         &self,
         responses: Vec<ResponseEvent>,
@@ -509,19 +642,28 @@ impl ShardedResponseEgress {
             }
             outcome.frames_sent += response.frames_sent;
             if response.completed {
-                outcome.completed_client_ids.push(response.client_id);
+                outcome.completed_requests.push(response.request_key);
             }
         }
         Ok(outcome)
     }
 
-    pub(crate) fn cancel(&self, client_id: u64) -> bool {
-        let request = self
-            .shared
-            .requests
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&client_id);
+    pub(crate) fn cancel(&self, key: RequestKey) -> bool {
+        let request = {
+            let mut requests = self
+                .shared
+                .requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if requests
+                .get(&key.client_id)
+                .is_some_and(|request| request.key == key)
+            {
+                requests.remove(&key.client_id)
+            } else {
+                None
+            }
+        };
         if let Some(request) = request {
             let _send_guard = request
                 .send_gate
@@ -663,7 +805,7 @@ impl NativeResponseEgress {
         prompt_tokens: usize,
         num_choices: usize,
         response_sender: PyRef<'_, crate::push_egress::ResponseSender>,
-    ) -> PyResult<()> {
+    ) -> PyResult<RequestKey> {
         self.processor
             .register(
                 client_id,
@@ -676,18 +818,23 @@ impl NativeResponseEgress {
             .map_err(PyValueError::new_err)
     }
 
-    fn process_batch(&self, py: Python<'_>, responses: &Bound<'_, PyAny>) -> PyResult<Vec<u64>> {
+    fn process_batch(
+        &self,
+        py: Python<'_>,
+        responses: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<RequestKey>> {
         let responses = depythonize::<Vec<ResponseEvent>>(responses).map_err(|error| {
             PyValueError::new_err(format!("invalid engine response batch: {error}"))
         })?;
         let outcome = py
             .allow_threads(|| self.processor.process_batch(responses))
             .map_err(PyValueError::new_err)?;
-        Ok(outcome.completed_client_ids)
+        Ok(outcome.completed_requests)
     }
 
-    fn cancel(&self, py: Python<'_>, client_id: u64) -> bool {
-        py.allow_threads(|| self.processor.cancel(client_id))
+    fn cancel(&self, py: Python<'_>, request: PyRef<'_, RequestKey>) -> bool {
+        let key = *request;
+        py.allow_threads(|| self.processor.cancel(key))
     }
 
     #[getter]
@@ -723,8 +870,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ChoiceDelta, FrameSendError, RequestStreamState, ResponseEvent, ResponseFrameSink,
-        ShardedResponseEgress,
+        ChoiceDelta, FrameSendError, RequestKey, RequestStreamState, ResponseEvent,
+        ResponseFrameSink, ShardedResponseEgress,
     };
 
     #[derive(Default)]
@@ -903,6 +1050,8 @@ mod tests {
         let first = state
             .apply(ResponseEvent {
                 client_id: 1,
+                generation: 1,
+                sequence: 0,
                 outputs: vec![
                     ChoiceDelta {
                         index: 0,
@@ -932,6 +1081,8 @@ mod tests {
         let final_frames = state
             .apply(ResponseEvent {
                 client_id: 1,
+                generation: 1,
+                sequence: 1,
                 outputs: vec![
                     ChoiceDelta {
                         index: 0,
@@ -987,6 +1138,8 @@ mod tests {
         let frames = state
             .apply(ResponseEvent {
                 client_id: 1,
+                generation: 1,
+                sequence: 0,
                 outputs: vec![
                     ChoiceDelta {
                         index: 2,
@@ -1020,6 +1173,8 @@ mod tests {
         let mut state = RequestStreamState::new(0, 1);
         let invalid = state.apply(ResponseEvent {
             client_id: 1,
+            generation: 1,
+            sequence: 0,
             outputs: vec![
                 ChoiceDelta {
                     index: 0,
@@ -1040,7 +1195,15 @@ mod tests {
         assert!(invalid.is_err());
 
         let valid = state
-            .apply(ResponseEvent::tokens(1, vec![vec![3]], false))
+            .apply(ResponseEvent::tokens_for(
+                RequestKey {
+                    client_id: 1,
+                    generation: 1,
+                },
+                1,
+                vec![vec![3]],
+                false,
+            ))
             .expect("state remains usable");
         assert_eq!(valid, vec![json!({"token_ids": [3], "index": 0})]);
     }
@@ -1059,10 +1222,10 @@ mod tests {
             client_id: 3,
             released: Arc::new((Mutex::new(false), Condvar::new())),
         });
-        processor
+        let key_zero = processor
             .register(2, 0, 1, sink_zero.clone())
             .expect("register shard zero client");
-        processor
+        let key_one = processor
             .register(3, 0, 1, sink_one.clone())
             .expect("register shard one client");
 
@@ -1070,8 +1233,8 @@ mod tests {
             let processor = processor.clone();
             thread::spawn(move || {
                 processor.process_batch(vec![
-                    ResponseEvent::tokens(2, vec![vec![1]], false),
-                    ResponseEvent::tokens(3, vec![vec![2]], false),
+                    ResponseEvent::tokens_for(key_zero, 0, vec![vec![1]], false),
+                    ResponseEvent::tokens_for(key_one, 0, vec![vec![2]], false),
                 ])
             })
         };
@@ -1095,14 +1258,14 @@ mod tests {
     fn same_client_responses_remain_fifo() {
         let processor = ShardedResponseEgress::new(4, 1).expect("valid processor");
         let sink = Arc::new(RecordingSink::default());
-        processor
+        let key = processor
             .register(9, 2, 1, sink.clone())
             .expect("register client 9");
 
         let outcome = processor
             .process_batch(vec![
-                ResponseEvent::tokens(9, vec![vec![10]], false),
-                ResponseEvent::tokens(9, vec![vec![11]], true),
+                ResponseEvent::tokens_for(key, 0, vec![vec![10]], false),
+                ResponseEvent::tokens_for(key, 1, vec![vec![11]], true),
             ])
             .expect("process ordered batch");
 
@@ -1112,7 +1275,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(frames[0].data, Some(json!({"token_ids": [10], "index": 0})));
         assert_eq!(frames[1].data.as_ref().unwrap()["token_ids"], json!([11]));
-        assert_eq!(outcome.completed_client_ids, vec![9]);
+        assert_eq!(outcome.completed_requests, vec![key]);
         assert!(sink.closed.load(Ordering::Relaxed));
     }
 
@@ -1126,17 +1289,22 @@ mod tests {
             released: Arc::new((Mutex::new(false), Condvar::new())),
         });
         let other_sink = Arc::new(RecordingSink::default());
-        processor
+        let blocking_key = processor
             .register(2, 0, 1, blocking_sink.clone())
             .expect("register blocking client");
-        processor
+        let other_key = processor
             .register(3, 0, 1, other_sink)
             .expect("register other client");
 
         let first = {
             let processor = processor.clone();
             thread::spawn(move || {
-                processor.process_batch(vec![ResponseEvent::tokens(2, vec![vec![1]], false)])
+                processor.process_batch(vec![ResponseEvent::tokens_for(
+                    blocking_key,
+                    0,
+                    vec![vec![1]],
+                    false,
+                )])
             })
         };
         entered_rx
@@ -1147,8 +1315,12 @@ mod tests {
         let second = {
             let processor = processor.clone();
             thread::spawn(move || {
-                let result =
-                    processor.process_batch(vec![ResponseEvent::tokens(3, vec![vec![2]], false)]);
+                let result = processor.process_batch(vec![ResponseEvent::tokens_for(
+                    other_key,
+                    0,
+                    vec![vec![2]],
+                    false,
+                )]);
                 done_tx.send(result).expect("test receiver remains open");
             })
         };
@@ -1170,25 +1342,25 @@ mod tests {
     }
 
     #[test]
-    fn completion_ids_follow_input_order_across_shards() {
+    fn completion_keys_follow_input_order_across_shards() {
         let processor = ShardedResponseEgress::new(4, 1).expect("valid processor");
         let sink_three = Arc::new(RecordingSink::default());
         let sink_zero = Arc::new(RecordingSink::default());
-        processor
+        let key_three = processor
             .register(3, 0, 1, sink_three)
             .expect("register client 3");
-        processor
+        let key_zero = processor
             .register(4, 0, 1, sink_zero)
             .expect("register client 4");
 
         let outcome = processor
             .process_batch(vec![
-                ResponseEvent::tokens(3, vec![vec![3]], true),
-                ResponseEvent::tokens(4, vec![vec![4]], true),
+                ResponseEvent::tokens_for(key_three, 0, vec![vec![3]], true),
+                ResponseEvent::tokens_for(key_zero, 0, vec![vec![4]], true),
             ])
             .expect("process cross-shard completions");
 
-        assert_eq!(outcome.completed_client_ids, vec![3, 4]);
+        assert_eq!(outcome.completed_requests, vec![key_three, key_zero]);
         assert_eq!(processor.active_requests(), 0);
     }
 
@@ -1196,18 +1368,23 @@ mod tests {
     fn error_closes_request_and_late_response_is_dropped() {
         let processor = ShardedResponseEgress::new(2, 1).expect("valid processor");
         let sink = Arc::new(RecordingSink::default());
-        processor
+        let key = processor
             .register(6, 0, 1, sink.clone())
             .expect("register client 6");
 
         let error = processor
-            .process_batch(vec![ResponseEvent::error(6, "engine failed")])
+            .process_batch(vec![ResponseEvent::error_for(key, 0, "engine failed")])
             .expect("process terminal error");
         let late = processor
-            .process_batch(vec![ResponseEvent::tokens(6, vec![vec![99]], true)])
+            .process_batch(vec![ResponseEvent::tokens_for(
+                key,
+                1,
+                vec![vec![99]],
+                true,
+            )])
             .expect("drop late response");
 
-        assert_eq!(error.completed_client_ids, vec![6]);
+        assert_eq!(error.completed_requests, vec![key]);
         assert_eq!(late.responses_dropped, 1);
         assert_eq!(
             sink.errors
@@ -1228,14 +1405,19 @@ mod tests {
             client_id: 4,
             released: Arc::new((Mutex::new(false), Condvar::new())),
         });
-        processor
+        let key = processor
             .register(4, 0, 1, sink.clone())
             .expect("register client 4");
 
         let processing = {
             let processor = processor.clone();
             thread::spawn(move || {
-                processor.process_batch(vec![ResponseEvent::tokens(4, vec![vec![1]], false)])
+                processor.process_batch(vec![ResponseEvent::tokens_for(
+                    key,
+                    0,
+                    vec![vec![1]],
+                    false,
+                )])
             })
         };
         entered_rx
@@ -1247,7 +1429,7 @@ mod tests {
             let processor = processor.clone();
             thread::spawn(move || {
                 cancelled_tx
-                    .send(processor.cancel(4))
+                    .send(processor.cancel(key))
                     .expect("test receiver remains open");
             })
         };
@@ -1274,14 +1456,19 @@ mod tests {
             resume: Mutex::new(resume_rx),
             frames: AtomicUsize::new(0),
         });
-        processor
+        let key = processor
             .register(8, 0, 1, sink.clone())
             .expect("register client 8");
 
         let processing = {
             let processor = processor.clone();
             thread::spawn(move || {
-                processor.process_batch(vec![ResponseEvent::tokens(8, vec![vec![1]], false)])
+                processor.process_batch(vec![ResponseEvent::tokens_for(
+                    key,
+                    0,
+                    vec![vec![1]],
+                    false,
+                )])
             })
         };
         entered_rx
@@ -1293,7 +1480,7 @@ mod tests {
             let processor = processor.clone();
             thread::spawn(move || {
                 cancelled_tx
-                    .send(processor.cancel(8))
+                    .send(processor.cancel(key))
                     .expect("test receiver remains open");
             })
         };
@@ -1306,7 +1493,12 @@ mod tests {
         assert_eq!(cancelled_rx.recv_timeout(Duration::from_secs(1)), Ok(true));
         let frames_at_cancel = sink.frames.load(Ordering::Relaxed);
         processor
-            .process_batch(vec![ResponseEvent::tokens(8, vec![vec![2]], false)])
+            .process_batch(vec![ResponseEvent::tokens_for(
+                key,
+                1,
+                vec![vec![2]],
+                false,
+            )])
             .expect("late response is dropped");
 
         processing
@@ -1331,8 +1523,8 @@ mod tests {
         let second_key = egress
             .register(7, 0, 1, second_sink.clone())
             .expect("reuse client ID");
-        assert_eq!(first_key.client_id(), second_key.client_id());
-        assert_ne!(first_key.generation(), second_key.generation());
+        assert_eq!(first_key.client_id, second_key.client_id);
+        assert_ne!(first_key.generation, second_key.generation);
 
         let stale = egress
             .process_batch(vec![ResponseEvent::tokens_for(
@@ -1352,7 +1544,7 @@ mod tests {
             .expect("current event is processed");
 
         assert_eq!(stale.responses_dropped, 1);
-        assert_eq!(current.completed_client_ids, vec![7]);
+        assert_eq!(current.completed_requests, vec![second_key]);
         assert_eq!(second_sink.frames.lock().unwrap().len(), 1);
     }
 
@@ -1412,5 +1604,29 @@ mod tests {
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].data.as_ref().unwrap()["token_ids"], json!([10]));
         assert_eq!(frames[1].data.as_ref().unwrap()["token_ids"], json!([11]));
+    }
+
+    #[test]
+    fn forward_sequence_gap_terminates_the_registration() {
+        let egress = ShardedResponseEgress::new(1, 1).expect("valid egress");
+        let sink = Arc::new(RecordingSink::default());
+        let key = egress
+            .register(17, 0, 1, sink.clone())
+            .expect("register request");
+
+        let gap = egress
+            .process_batch(vec![ResponseEvent::tokens_for(
+                key,
+                1,
+                vec![vec![10]],
+                false,
+            )])
+            .expect("sequence gap is handled");
+
+        assert_eq!(gap.responses_dropped, 1);
+        assert_eq!(gap.completed_requests, vec![key]);
+        assert_eq!(egress.active_requests(), 0);
+        assert_eq!(sink.errors.lock().unwrap().len(), 1);
+        assert!(sink.errors.lock().unwrap()[0].contains("expected sequence 0, received 1"));
     }
 }
