@@ -13,11 +13,9 @@ from dynamo.workflow import (
     RemoteBinding,
     StageContext,
     StageContract,
-    ValueSpec,
     Workflow,
     WorkflowExecutionError,
     WorkflowOrchestrator,
-    WorkflowValidationError,
     compile_workflow,
 )
 from dynamo.workflow.remote import RemoteStageClient, RemoteStageServer
@@ -32,8 +30,8 @@ pytestmark = [
 
 CONTRACT = StageContract(
     id="normalize",
-    inputs={"text": ValueSpec(type="text")},
-    outputs={"normalized": ValueSpec(type="text")},
+    inputs={"text"},
+    outputs={"normalized"},
 )
 
 
@@ -151,6 +149,22 @@ async def test_remote_client_rejects_non_mapping_response() -> None:
         await client.run("normalize", CONTRACT, {"text": "HELLO"}, _context())
 
 
+async def test_remote_client_adds_stage_context_to_transport_failures() -> None:
+    class FailingClient:
+        async def round_robin(self, request, *, annotated, context=None):
+            raise TypeError("unsupported payload")
+
+    with pytest.raises(
+        WorkflowExecutionError,
+        match="remote stage 'normalize'.*transport boundary",
+    ) as error:
+        await RemoteStageClient(FailingClient()).run(
+            "normalize", CONTRACT, {"text": object()}, _context()
+        )
+
+    assert isinstance(error.value.__cause__, TypeError)
+
+
 class _Runner:
     contract = CONTRACT
 
@@ -209,41 +223,47 @@ async def test_remote_server_cancels_runner_when_transport_stops() -> None:
     assert runner.cancelled.is_set()
 
 
-def test_inline_server_rejects_undeclared_tensor_fallback() -> None:
-    class TensorRunner:
+async def test_remote_server_accepts_opaque_values_without_type_declarations() -> None:
+    value = object()
+
+    class OpaqueRunner:
         contract = StageContract(
-            id="tensor",
-            inputs={"tensor": ValueSpec(type="tensor")},
-            outputs={"result": ValueSpec(type="json")},
+            id="opaque",
+            inputs={"value"},
+            outputs={"result"},
         )
 
         async def run(self, inputs, context):
-            return {"result": {}}
+            return {"result": inputs["value"]}
 
-    with pytest.raises(WorkflowValidationError, match="does not support.*tensor"):
-        RemoteStageServer("tensor", TensorRunner())
+    response = (
+        await RemoteStageServer("opaque", OpaqueRunner())
+        .generate({"value": value})
+        .__anext__()
+    )
+
+    assert response["result"] is value
 
 
-TOKENS = ValueSpec(type="json")
 TEXT_ENCODER = StageContract(
     id="text-encoder",
-    inputs={"text": ValueSpec(type="text")},
-    outputs={"tokens": TOKENS},
+    inputs={"text"},
+    outputs={"tokens"},
 )
 KEYWORD_CLASSIFIER = StageContract(
     id="keyword-classifier",
-    inputs={"tokens": TOKENS},
-    outputs={"scores": ValueSpec(type="json")},
+    inputs={"tokens"},
+    outputs={"scores"},
 )
 TEXT_GENERATOR = StageContract(
     id="text-generator",
-    inputs={"tokens": TOKENS},
-    outputs={"text": ValueSpec(type="text")},
+    inputs={"tokens"},
+    outputs={"text"},
 )
 RESPONSE = StageContract(
     id="response",
-    inputs={"scores": ValueSpec(type="json"), "text": ValueSpec(type="text")},
-    outputs={"chunk": ValueSpec(type="json")},
+    inputs={"scores", "text"},
+    outputs={"chunk"},
 )
 
 
@@ -332,7 +352,7 @@ class _Runtime:
 
 async def test_three_remote_stages_fan_out_and_join_through_direct_mappings() -> None:
     workflow = Workflow("remote-text-fanout")
-    text = workflow.input("text", ValueSpec(type="text"))
+    text = workflow.input("text")
     encoder = workflow.stage("encoder", TEXT_ENCODER, text=text)
     classifier = workflow.stage("classifier", KEYWORD_CLASSIFIER, tokens=encoder.tokens)
     generator = workflow.stage("generator", TEXT_GENERATOR, tokens=encoder.tokens)
@@ -373,7 +393,7 @@ async def test_three_remote_stages_fan_out_and_join_through_direct_mappings() ->
 
 async def test_remote_branches_join_in_an_inline_response_stage() -> None:
     workflow = Workflow("mixed-text-fanout")
-    text = workflow.input("text", ValueSpec(type="text"))
+    text = workflow.input("text")
     encoder = workflow.stage("encoder", TEXT_ENCODER, text=text)
     classifier = workflow.stage("classifier", KEYWORD_CLASSIFIER, tokens=encoder.tokens)
     generator = workflow.stage("generator", TEXT_GENERATOR, tokens=encoder.tokens)

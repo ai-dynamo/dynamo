@@ -4,16 +4,14 @@
 from collections.abc import Mapping
 from typing import Any
 
-from dynamo.workflow import StageContext, StageContract, ValueSpec
-
-TOKENS = ValueSpec(type="json")
+from dynamo.workflow import StageContext, StageContract
 
 
 class TextEncoder:
     contract = StageContract(
         id="text-encoder",
-        inputs={"text": ValueSpec(type="text")},
-        outputs={"tokens": TOKENS},
+        inputs={"text"},
+        outputs={"tokens"},
     )
 
     async def run(
@@ -26,8 +24,8 @@ class TextEncoder:
 class KeywordClassifier:
     contract = StageContract(
         id="keyword-classifier",
-        inputs={"tokens": TOKENS},
-        outputs={"scores": ValueSpec(type="json")},
+        inputs={"tokens"},
+        outputs={"scores"},
     )
 
     async def run(
@@ -43,8 +41,8 @@ class KeywordClassifier:
 class TextGenerator:
     contract = StageContract(
         id="text-generator",
-        inputs={"tokens": TOKENS},
-        outputs={"text": ValueSpec(type="text")},
+        inputs={"tokens"},
+        outputs={"text"},
     )
 
     async def run(

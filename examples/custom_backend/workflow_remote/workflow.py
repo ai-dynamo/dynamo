@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from dynamo.workflow import ValueSpec, Workflow
+from dynamo.workflow import Workflow
 from examples.custom_backend.workflow_remote.stages import (
     KeywordClassifier,
     TextEncoder,
@@ -11,7 +11,7 @@ from examples.custom_backend.workflow_remote.stages import (
 
 def define_workflow() -> Workflow:
     workflow = Workflow("remote-text-fanout")
-    text = workflow.input("text", ValueSpec(type="text"))
+    text = workflow.input("text")
     encoder = workflow.stage("encoder", TextEncoder.contract, text=text)
     classifier = workflow.stage(
         "classifier", KeywordClassifier.contract, tokens=encoder.tokens
