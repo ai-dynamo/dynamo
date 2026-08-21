@@ -116,9 +116,20 @@ impl DiscoveredModel {
             nonzero(parallelism.pipeline_parallel_size).ok_or_else(|| {
                 client::protocol_error("vLLM reports a pipeline-parallel size of zero")
             })?;
-        let world_size = tensor_parallel_size
+        let engine_world_size = u32::try_from(parallelism.world_size)
+            .ok()
+            .and_then(nonzero)
+            .ok_or_else(|| client::protocol_error("vLLM reports an invalid engine world size"))?;
+        let expected_minimum_world_size = tensor_parallel_size
             .checked_mul(pipeline_parallel_size)
-            .and_then(|size| size.checked_mul(parallelism.data_parallel_size))
+            .ok_or_else(|| client::protocol_error("vLLM reports an invalid RL world size"))?;
+        if engine_world_size % expected_minimum_world_size != 0 {
+            return Err(client::protocol_error(
+                "vLLM reports an engine world size that is not divisible by TP * PP",
+            ));
+        }
+        let world_size = engine_world_size
+            .checked_mul(parallelism.data_parallel_size)
             .ok_or_else(|| client::protocol_error("vLLM reports an invalid RL world size"))?;
         RlWorkerMetadata::new(world_size, admin_base_url)
             .map_err(|error| client::protocol_error(error.to_string()))
