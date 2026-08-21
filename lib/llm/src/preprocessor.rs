@@ -394,6 +394,88 @@ fn scrub_synthetic_chunk_metadata(
     Some(())
 }
 
+/// Estimates reasoning-token usage from the parser-classified Chat Completion stream.
+///
+/// This is intentionally chunk-granular: if one decoded chunk contains both reasoning
+/// and visible content, every token in that chunk is counted as reasoning. The estimate
+/// therefore overcounts visible-content tokens in mixed chunks. A positive count supplied
+/// by the backend remains authoritative.
+#[derive(Debug, Default)]
+struct ReasoningUsageEstimator {
+    total: u32,
+    active_choices: HashSet<u32>,
+}
+
+impl ReasoningUsageEstimator {
+    fn observe(&mut self, chunk: &NvCreateChatCompletionStreamResponse) {
+        let token_count = chunk
+            .llm_metrics
+            .as_ref()
+            .map_or(0, |metrics| metrics.chunk_tokens)
+            .try_into()
+            .unwrap_or(u32::MAX);
+
+        let has_reasoning = chunk
+            .inner
+            .choices
+            .iter()
+            .any(|choice| choice.delta.reasoning_content.is_some());
+        let active_without_visible_output = chunk.inner.choices.iter().any(|choice| {
+            self.active_choices.contains(&choice.index) && !choice_has_visible_output(choice)
+        });
+        let usage_chunk_while_reasoning =
+            chunk.inner.choices.is_empty() && !self.active_choices.is_empty();
+
+        if token_count > 0
+            && (has_reasoning || active_without_visible_output || usage_chunk_while_reasoning)
+        {
+            self.total = self.total.saturating_add(token_count);
+        }
+
+        for choice in &chunk.inner.choices {
+            if choice.delta.reasoning_content.is_some() {
+                self.active_choices.insert(choice.index);
+            } else if choice_has_visible_output(choice) {
+                self.active_choices.remove(&choice.index);
+            }
+        }
+    }
+
+    fn annotate(&self, usage: &mut dynamo_protocols::types::CompletionUsage) {
+        let details = usage.completion_tokens_details.get_or_insert_default();
+        if details.reasoning_tokens.unwrap_or(0) == 0 {
+            details.reasoning_tokens = Some(self.total);
+        }
+    }
+}
+
+fn choice_has_visible_output(choice: &dynamo_protocols::types::ChatChoiceStream) -> bool {
+    choice.delta.content.is_some()
+        || choice
+            .delta
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+}
+
+fn annotate_reasoning_usage<S>(
+    stream: S,
+) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+where
+    S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+{
+    let mut estimator = ReasoningUsageEstimator::default();
+    stream.map(move |mut response| {
+        if let Some(chunk) = response.data.as_mut() {
+            estimator.observe(chunk);
+            if let Some(usage) = chunk.inner.usage.as_mut() {
+                estimator.annotate(usage);
+            }
+        }
+        response
+    })
+}
+
 /// Drain what a choice still holds on the `defer_reasoning_for_nonempty_content`
 /// path, returning `(content, reasoning_content)` to add to its delta. Shared by
 /// the terminal-chunk drain and the end-of-stream fallback so the two cannot
@@ -3217,6 +3299,11 @@ impl OpenAIPreprocessor {
             } else {
                 stream
             };
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
+            Box::pin(annotate_reasoning_usage(stream))
+        } else {
+            stream
+        };
 
         // Check if tools are present and if we should apply jail
         let has_tools = request
@@ -5440,6 +5527,125 @@ mod tests {
             nvext: None,
             llm_metrics: None,
         })
+    }
+
+    fn reasoning_usage_chunk(
+        reasoning: Option<&str>,
+        content: Option<&str>,
+        chunk_tokens: usize,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = chat_stream_chunk(0, None);
+        let data = chunk.data.as_mut().unwrap();
+        data.inner.choices[0].delta.reasoning_content = reasoning.map(str::to_string);
+        data.inner.choices[0].delta.content = content
+            .map(str::to_string)
+            .map(ChatCompletionMessageContent::Text);
+        data.llm_metrics = Some(LLMMetricAnnotation {
+            chunk_tokens,
+            ..Default::default()
+        });
+        chunk
+    }
+
+    fn reasoning_usage_trailer(
+        completion_tokens: u32,
+        backend_reasoning_tokens: Option<u32>,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = chat_stream_chunk(0, None);
+        let data = chunk.data.as_mut().unwrap();
+        data.inner.choices.clear();
+        let mut usage = dynamo_protocols::types::CompletionUsage {
+            prompt_tokens: 5,
+            completion_tokens,
+            total_tokens: 5 + completion_tokens,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        };
+        if let Some(reasoning_tokens) = backend_reasoning_tokens {
+            usage
+                .completion_tokens_details
+                .get_or_insert_default()
+                .reasoning_tokens = Some(reasoning_tokens);
+        }
+        data.inner.usage = Some(usage);
+        data.llm_metrics = Some(LLMMetricAnnotation {
+            output_tokens: completion_tokens as usize,
+            ..Default::default()
+        });
+        chunk
+    }
+
+    #[tokio::test]
+    async fn reasoning_usage_estimator_stamps_shared_chat_usage() {
+        let output = annotate_reasoning_usage(stream::iter(vec![
+            reasoning_usage_chunk(Some("think"), None, 1),
+            reasoning_usage_chunk(Some(" more"), None, 1),
+            reasoning_usage_chunk(None, None, 1),
+            reasoning_usage_chunk(None, Some("answer"), 1),
+            reasoning_usage_trailer(4, None),
+        ]))
+        .collect::<Vec<_>>()
+        .await;
+
+        let usage = output
+            .last()
+            .and_then(|response| response.data.as_ref())
+            .and_then(|chunk| chunk.inner.usage.as_ref())
+            .unwrap();
+        assert_eq!(
+            usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens),
+            Some(3)
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_usage_estimator_documents_mixed_chunk_overcount() {
+        let output = annotate_reasoning_usage(stream::iter(vec![
+            reasoning_usage_chunk(Some("think"), Some("answer"), 4),
+            reasoning_usage_trailer(4, None),
+        ]))
+        .collect::<Vec<_>>()
+        .await;
+
+        let usage = output
+            .last()
+            .and_then(|response| response.data.as_ref())
+            .and_then(|chunk| chunk.inner.usage.as_ref())
+            .unwrap();
+        assert_eq!(
+            usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens),
+            Some(4),
+            "the chunk-granular estimate intentionally attributes the mixed chunk to reasoning"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_usage_estimator_preserves_positive_backend_count() {
+        let output = annotate_reasoning_usage(stream::iter(vec![
+            reasoning_usage_chunk(Some("two estimated tokens"), None, 2),
+            reasoning_usage_trailer(2, Some(1)),
+        ]))
+        .collect::<Vec<_>>()
+        .await;
+
+        let usage = output
+            .last()
+            .and_then(|response| response.data.as_ref())
+            .and_then(|chunk| chunk.inner.usage.as_ref())
+            .unwrap();
+        assert_eq!(
+            usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens),
+            Some(1)
+        );
     }
 
     #[tokio::test]
