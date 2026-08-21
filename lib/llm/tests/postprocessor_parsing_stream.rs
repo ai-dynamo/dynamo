@@ -4583,6 +4583,71 @@ async fn postprocessor_parsing_stream_muse_required_does_not_route_to_unified() 
     );
 }
 
+/// A structural-tag request must stay on the guided-decode + jail path, exactly as a
+/// forced `tool_choice` does: it emits guided JSON, not the native ATEM markup the
+/// unified parser reads. The guard carries `!uses_tool_call_structural_tag` for that,
+/// and nothing pinned it — a refactor could drop the clause and every other muse test
+/// would still pass, because they all run with the flag false.
+///
+/// `solo_output` hardcodes `false, false`, so this drives
+/// `postprocessor_parsing_stream` directly to set the flag.
+#[tokio::test]
+async fn postprocessor_parsing_stream_muse_structural_tag_does_not_route_to_unified() {
+    let preprocessor = build_preprocessor(None, Some("muse_glimmer"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+
+    let mut input: Vec<NvCreateChatCompletionStreamResponse> = MUSE_MARKUP_SHAPE
+        .iter()
+        .map(|text| mock_multi_choice_content_chunk(&[(0, *text)]))
+        .collect();
+    input.push(mock_multi_choice_final_chunk(&[0]));
+
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(
+            stream::iter(input.into_iter().map(Annotated::from_data)),
+            &request,
+            false,
+            // The one axis under test.
+            true,
+        )
+        .expect("postprocessor_parsing_stream should build");
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+    let out = demux_by_choice(&output_chunks)
+        .remove(&0)
+        .map(|acc| ChoiceOutput {
+            reasoning: acc.reasoning,
+            content: acc.content,
+            tool_calls: acc
+                .tool_calls
+                .into_values()
+                .map(|tc| (tc.name, tc.arguments))
+                .collect(),
+        })
+        .unwrap_or_default();
+
+    // No reasoning parser is configured, so any `reasoning_content` at all could only
+    // have come from the unified parser engaging.
+    assert!(
+        out.reasoning.is_empty(),
+        "structural-tag must NOT route to unified; reasoning stayed {:?}",
+        out.reasoning
+    );
+    // The positive jail signal: that path does not strip muse markers.
+    assert!(
+        out.content.contains("<|start|>"),
+        "the jail path leaves muse markup in content; got {:?}",
+        out.content
+    );
+    assert!(
+        out.tool_calls
+            .iter()
+            .all(|(name, _)| name.as_deref() != Some("get_weather")),
+        "the unified parser must not produce a native-markup call here: {:?}",
+        out.tool_calls
+    );
+}
+
 /// `unified_family` keys on EITHER parser name, so a card that sets only
 /// `--dyn-reasoning-parser muse_glimmer` must route the stream to unified as well.
 /// The batch path pins this (`test_muse_unified_batch_finalize_routes_on_reasoning_name_only`);
