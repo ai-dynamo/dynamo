@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -10,7 +11,7 @@ use super::*;
 use crate::component::Instance;
 use crate::discovery::EndpointInstanceId;
 use crate::dynamo_nvtx_range;
-use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
+use crate::engine::{AsyncEngine, AsyncEngineContextProvider, Data, EngineContextGuard};
 use crate::error::{DynamoError, ErrorType};
 use crate::logging::inject_trace_headers_into_map;
 use crate::metrics::frontend_perf::STAGE_DURATION_SECONDS;
@@ -43,6 +44,89 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
+
+const FIRST_RESPONSE_GUARD_CONTEXT_KEY: &str = "dynamo.request_plane.first_response_guard";
+
+struct FirstResponseGuard {
+    guard: EngineContextGuard,
+}
+
+/// Keep a frontend-owned resource alive until the addressed worker produces
+/// its first response item or closes the response stream.
+pub fn attach_first_response_guard<T: Data>(
+    context: &mut context::Context<T>,
+    guard: EngineContextGuard,
+) {
+    context.insert(
+        FIRST_RESPONSE_GUARD_CONTEXT_KEY,
+        FirstResponseGuard { guard },
+    );
+}
+
+/// Copy a first-response guard to a derived request context.
+pub fn propagate_first_response_guard<S: Data, T: Data>(
+    source: &context::Context<S>,
+    target: &mut context::Context<T>,
+) -> Result<(), Error> {
+    if let Some(guard) = source
+        .get_optional::<FirstResponseGuard>(FIRST_RESPONSE_GUARD_CONTEXT_KEY)
+        .map_err(Error::msg)?
+    {
+        attach_first_response_guard(target, guard.guard.clone());
+    }
+    Ok(())
+}
+
+// Dispatch independently of the caller, then relay responses. This keeps the
+// guard alive if the caller cancels before the worker has consumed it.
+async fn dispatch_with_first_response_guard<F, U>(
+    dispatch: F,
+    guard: Arc<FirstResponseGuard>,
+) -> Result<ManyOut<U>, Error>
+where
+    F: Future<Output = Result<ManyOut<U>, Error>> + Send + 'static,
+    U: Data,
+{
+    let (dispatch_tx, dispatch_rx) = tokio::sync::oneshot::channel();
+
+    tokio::spawn(
+        async move {
+            let mut response = match dispatch.await {
+                Ok(response) => response,
+                Err(error) => {
+                    let _ = dispatch_tx.send(Err(error));
+                    return;
+                }
+            };
+
+            let response_context = response.context();
+            let (response_tx, response_rx) = tokio::sync::mpsc::channel(1);
+            let relayed: ManyOut<U> =
+                ResponseStream::new(Box::pin(ReceiverStream::new(response_rx)), response_context);
+            let _ = dispatch_tx.send(Ok(relayed));
+
+            let first = response.next().await;
+            drop(guard);
+
+            let Some(first) = first else {
+                return;
+            };
+            if response_tx.send(first).await.is_err() {
+                return;
+            }
+            while let Some(item) = response.next().await {
+                if response_tx.send(item).await.is_err() {
+                    return;
+                }
+            }
+        }
+        .in_current_span(),
+    );
+
+    dispatch_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("retained request dispatch ended before setup completed"))?
+}
 
 /// Stream transformation helper that:
 /// - decodes a response byte stream from network into the fully-shaped `ManyOut<U>`
@@ -381,6 +465,7 @@ impl<T> AddressedRequest<T> {
     }
 }
 
+#[derive(Clone)]
 pub struct AddressedPushRouter {
     // Request transport (unified trait object - works with all transports)
     req_client: Arc<dyn RequestPlaneClient>,
@@ -765,6 +850,26 @@ where
         let (addressed_request, context) = request.transfer(());
         let (request, address, instance_info) = addressed_request.into_parts();
 
+        let first_response_guard = context
+            .get_optional::<FirstResponseGuard>(FIRST_RESPONSE_GUARD_CONTEXT_KEY)
+            .map_err(Error::msg)?;
+
+        if let Some(guard) = first_response_guard {
+            let router = self.clone();
+            let dispatch = async move {
+                router
+                    .dispatch_and_finalize::<T, U>(
+                        &context,
+                        address,
+                        instance_info.as_ref(),
+                        Some(&request),
+                        None,
+                    )
+                    .await
+            };
+            return dispatch_with_first_response_guard(dispatch, guard).await;
+        }
+
         self.dispatch_and_finalize::<T, U>(
             &context,
             address,
@@ -864,16 +969,30 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo, RequestControlMessage, RequestPlanePayloadCodec,
-        RequestType, ResponseType, TwoPartCodec, build_request_envelope, payload_codec_for_worker,
-        serialize_control_message,
+        CONTROL_MESSAGE_MAX_BYTES, ConnectionInfo, FIRST_RESPONSE_GUARD_CONTEXT_KEY,
+        FirstResponseGuard, RequestControlMessage, RequestPlanePayloadCodec, RequestType,
+        ResponseType, TwoPartCodec, attach_first_response_guard, build_request_envelope,
+        dispatch_with_first_response_guard, payload_codec_for_worker,
+        propagate_first_response_guard, serialize_control_message,
     };
     use crate::{
         component::{Instance, TransportType},
-        pipeline::Context,
+        pipeline::{AsyncEngineContextProvider, Context, ManyOut, ResponseStream},
     };
     use serde::{Deserialize, Serialize};
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, sync::Arc, time::Duration};
+    use tokio::sync::{oneshot, oneshot::error::TryRecvError};
+    use tokio_stream::wrappers::ReceiverStream;
+
+    struct DropSignal(Option<oneshot::Sender<()>>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
 
     fn base_control_message(metadata: BTreeMap<String, String>) -> RequestControlMessage {
         RequestControlMessage {
@@ -957,5 +1076,49 @@ mod tests {
             .to_string();
         assert!(err.contains("request control message too large"));
         assert!(err.contains(&CONTROL_MESSAGE_MAX_BYTES.to_string()));
+    }
+
+    #[tokio::test]
+    async fn first_response_guard_outlives_cancelled_dispatch_waiter() {
+        let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(1);
+        let response_context = Context::new(()).context();
+        let (dispatch_started_tx, dispatch_started_rx) = oneshot::channel();
+        let (release_dispatch_tx, release_dispatch_rx) = oneshot::channel();
+        let (guard_dropped_tx, mut guard_dropped_rx) = oneshot::channel();
+        let mut source_context = Context::new(());
+        attach_first_response_guard(
+            &mut source_context,
+            Arc::new(DropSignal(Some(guard_dropped_tx))),
+        );
+        let mut derived_context = Context::new(());
+        propagate_first_response_guard(&source_context, &mut derived_context).unwrap();
+        let guard = derived_context
+            .get::<FirstResponseGuard>(FIRST_RESPONSE_GUARD_CONTEXT_KEY)
+            .unwrap();
+        drop(source_context);
+        drop(derived_context);
+
+        let waiter = tokio::spawn(dispatch_with_first_response_guard(
+            async move {
+                let _ = dispatch_started_tx.send(());
+                let _ = release_dispatch_rx.await;
+                let response: ManyOut<u64> =
+                    ResponseStream::new(Box::pin(ReceiverStream::new(raw_rx)), response_context);
+                Ok(response)
+            },
+            guard,
+        ));
+
+        dispatch_started_rx.await.unwrap();
+        waiter.abort();
+        let _ = waiter.await;
+        assert_eq!(guard_dropped_rx.try_recv(), Err(TryRecvError::Empty));
+
+        release_dispatch_tx.send(()).unwrap();
+        raw_tx.send(1_u64).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), guard_dropped_rx)
+            .await
+            .expect("source guard was not released after the first worker response")
+            .unwrap();
     }
 }
