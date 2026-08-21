@@ -430,4 +430,6 @@ gaps:
 - 'status tension: recipes/README.md lists Ultra as benchmarked, but runtime image is Day-0 dev (1.3.0-nemotron-ultra-dev.1);
   page marks experimental'
 - Day-0 and Refresh targets each use one shared perf Job (env-block retargeting)
+- 'Dynamo 1.4.0 structured output: reasoning-enabled response_format json_object or json_schema may return malformed JSON with HTTP 200 with the bundled OSS vLLM; fixed upstream by vLLM PR #44993'
+- 'Dynamo 1.4.0 tool calling: reasoning-enabled required or named tool_choice may omit structured tool_calls with the bundled OSS vLLM; fixed upstream by vLLM PR #44993'
 - maintainer unknown
