@@ -2,16 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import FrozenInstanceError
-from typing import Any
 
 import pytest
 
 from dynamo.workflow import (
     StageContract,
     StageIR,
-    StreamSpec,
     ValueRef,
-    ValueSpec,
     Workflow,
     WorkflowIR,
     WorkflowValidationError,
@@ -25,39 +22,31 @@ pytestmark = [
 ]
 
 
-def _contracts():
-    embedding = ValueSpec(type="tensor", dtype="float32", shape=("dynamic", 4))
+def _contracts() -> tuple[StageContract, StageContract, StageContract]:
     encoder = StageContract(
         id="encoder",
-        inputs={"image": ValueSpec(type="image", mode="RGB")},
-        outputs={"embedding": embedding},
+        inputs={"image"},
+        outputs={"embedding"},
     )
     classifier = StageContract(
         id="classifier",
-        inputs={"embedding": embedding},
-        outputs={"scores": ValueSpec(type="json")},
+        inputs={"embedding"},
+        outputs={"scores"},
     )
     generator = StageContract(
         id="generator",
-        inputs={
-            "embedding": embedding,
-            "prompt": ValueSpec(type="text"),
-        },
-        outputs={"text": ValueSpec(type="text")},
+        inputs={"embedding", "prompt"},
+        outputs={"text"},
     )
     return encoder, classifier, generator
 
 
 def _workflow() -> WorkflowIR:
     encoder_contract, classifier_contract, generator_contract = _contracts()
-
-    class EncoderWorker:
-        contract = encoder_contract
-
     workflow = Workflow("vision-response")
-    image = workflow.input("image", ValueSpec(type="image", mode="RGB"))
-    prompt = workflow.input("prompt", ValueSpec(type="text"))
-    encoder = workflow.stage("encoder", EncoderWorker.contract, image=image)
+    image = workflow.input("image")
+    prompt = workflow.input("prompt")
+    encoder = workflow.stage("encoder", encoder_contract, image=image)
     classifier = workflow.stage(
         "classifier",
         classifier_contract,
@@ -74,7 +63,7 @@ def _workflow() -> WorkflowIR:
     return workflow.build()
 
 
-def test_builds_fanout_workflow_from_declared_output_attributes():
+def test_builds_fanout_workflow_from_declared_output_attributes() -> None:
     workflow = _workflow()
 
     assert [stage.id for stage in workflow.stages] == [
@@ -82,31 +71,25 @@ def test_builds_fanout_workflow_from_declared_output_attributes():
         "classifier",
         "generator",
     ]
-    assert workflow.output_spec("scores") == ValueSpec(type="json")
-    encoder_ref = workflow.stages[1].inputs["embedding"]
-    assert encoder_ref == ValueRef.for_stage_output("encoder", "embedding")
+    assert workflow.inputs == frozenset({"image", "prompt"})
+    assert workflow.stages[1].inputs["embedding"] == ValueRef.for_stage_output(
+        "encoder", "embedding"
+    )
 
 
 def test_stage_requires_contract_and_accepts_mapping_expansion() -> None:
     contract = StageContract(
         id="hyphenated-input",
-        inputs={"input-value": ValueSpec(type="text")},
-        outputs={"text": ValueSpec(type="text")},
+        inputs={"input-value"},
+        outputs={"text"},
     )
 
     class ContractProvider:
-        contract = StageContract(
-            id="provider",
-            outputs={"text": ValueSpec(type="text")},
-        )
+        contract = StageContract(id="provider", outputs={"text"})
 
     workflow = Workflow("explicit-contract")
-    value = workflow.input("value", ValueSpec(type="text"))
-    stage = workflow.stage(
-        "producer",
-        contract,
-        **{"input-value": value},
-    )
+    value = workflow.input("value")
+    stage = workflow.stage("producer", contract, **{"input-value": value})
     workflow.output("text", stage.text)
 
     assert workflow.build().stages[0].inputs == {"input-value": value}
@@ -114,54 +97,69 @@ def test_stage_requires_contract_and_accepts_mapping_expansion() -> None:
         workflow.stage("implicit", ContractProvider, **{"input-value": value})
 
 
-def test_ir_keeps_complete_contracts_inline() -> None:
+def test_ir_keeps_complete_name_only_contracts_inline() -> None:
     workflow = Workflow("echo-flow")
-    value = workflow.input("text", ValueSpec(type="text"))
+    value = workflow.input("text")
     echo = workflow.stage(
         "echo",
-        StageContract(
-            id="echo-contract",
-            inputs={"text": ValueSpec(type="text")},
-            outputs={"text": ValueSpec(type="text")},
-        ),
+        StageContract(id="echo-contract", inputs={"text"}, outputs={"text"}),
         text=value,
     )
     workflow.output("text", echo.text)
 
     workflow_ir = workflow.build()
-    assert workflow_ir.inputs == {"text": ValueSpec(type="text")}
+    assert workflow_ir.inputs == frozenset({"text"})
     assert workflow_ir.outputs == {"text": ValueRef.for_stage_output("echo", "text")}
     assert workflow_ir.stages == (
         StageIR(
             id="echo",
             contract=StageContract(
-                id="echo-contract",
-                inputs={"text": ValueSpec(type="text")},
-                outputs={"text": ValueSpec(type="text")},
+                id="echo-contract", inputs={"text"}, outputs={"text"}
             ),
             inputs={"text": ValueRef.for_input("text")},
         ),
     )
 
 
-def test_output_method_handles_attribute_collisions_and_invalid_names():
-    contract = StageContract(
-        id="producer",
-        outputs={
-            "output": ValueSpec(type="text"),
-            "hyphen-name": ValueSpec(type="text"),
-            "text": ValueSpec(type="text"),
-        },
-    )
-    workflow = Workflow("fallback")
-    seed = workflow.input("seed", ValueSpec(type="text"))
-    passthrough = StageContract(
-        id="passthrough",
-        inputs={"seed": ValueSpec(type="text")},
-        outputs=contract.outputs,
-    )
-    producer = workflow.stage("producer", passthrough, seed=seed)
+def test_contracts_require_name_sets_and_are_immutable() -> None:
+    contract = StageContract(id="source", outputs={"text"})
 
+    assert contract.inputs == frozenset()
+    assert contract.outputs == frozenset({"text"})
+    with pytest.raises(FrozenInstanceError):
+        contract.id = "changed"
+    with pytest.raises(WorkflowValidationError, match="set of names"):
+        StageContract(id="mapping", outputs={"text": object()})
+    with pytest.raises(WorkflowValidationError, match="non-empty string"):
+        StageContract(id="empty-name", outputs={""})
+    with pytest.raises(WorkflowValidationError, match="at least one output"):
+        StageContract(id="no-output")
+
+
+def test_workflow_inputs_require_name_sets() -> None:
+    with pytest.raises(WorkflowValidationError, match="set of names"):
+        WorkflowIR(
+            name="mapping-inputs",
+            inputs={"value": object()},
+            stages=(),
+            outputs={"value": ValueRef.for_input("value")},
+        )
+
+
+def test_output_method_handles_attribute_collisions_and_invalid_names() -> None:
+    workflow = Workflow("fallback")
+    seed = workflow.input("seed")
+    producer = workflow.stage(
+        "producer",
+        StageContract(
+            id="producer",
+            inputs={"seed"},
+            outputs={"output", "hyphen-name", "text"},
+        ),
+        seed=seed,
+    )
+
+    assert producer.output_names == ("hyphen-name", "output", "text")
     assert producer.text == producer.output("text")
     assert producer.output("output").output_name == "output"
     assert producer.output("hyphen-name").output_name == "hyphen-name"
@@ -169,104 +167,21 @@ def test_output_method_handles_attribute_collisions_and_invalid_names():
         producer.output("missing")
 
 
-def test_contracts_are_deeply_immutable():
-    contract = StageContract(id="source", outputs={"text": ValueSpec(type="text")})
-
-    with pytest.raises(TypeError):
-        contract.outputs["other"] = ValueSpec(type="text")
-    with pytest.raises(FrozenInstanceError):
-        contract.id = "changed"
-
-
-def test_stream_specs_are_typed_and_connect_only_to_compatible_streams() -> None:
-    chunks = StreamSpec(item=ValueSpec(type="json"))
-    workflow = Workflow("stream-flow")
-    source = workflow.input("chunks", chunks)
-    consumer = workflow.stage(
-        "consumer",
-        StageContract(
-            id="stream-consumer",
-            inputs={"chunks": chunks},
-            outputs={"chunks": chunks},
-        ),
-        chunks=source,
-    )
-    workflow.output("chunks", consumer.chunks)
-
-    assert workflow.build().output_spec("chunks") == chunks
-
-    with pytest.raises(WorkflowValidationError, match="stream output"):
-        workflow.stage(
-            "value-consumer",
-            StageContract(
-                id="value-consumer",
-                inputs={"value": ValueSpec(type="json")},
-                outputs={"value": ValueSpec(type="json")},
-            ),
-            value=consumer.chunks,
-        )
-
-
-def test_stream_specs_require_value_items() -> None:
-    with pytest.raises(WorkflowValidationError, match="stream items"):
-        StreamSpec(item="json")
-
-
-@pytest.mark.parametrize(
-    "spec",
-    [
-        {"type": []},
-        {"type": "meaning"},
-        {"type": "text", "dtype": "float32"},
-        {"type": "tensor", "dtype": []},
-        {"type": "tensor", "dtype": "fp8"},
-        {"type": "tensor", "shape": "dynamic"},
-        {"type": "tensor", "shape": [-1, 4]},
-        {"type": "image", "mode": 123},
-        {"type": "image", "mode": float("nan")},
-        {"type": "image", "mode": "\ud800"},
-        {"type": "object"},
-        {"type": "object", "class_id": 123},
-        {"type": "object", "class_id": "\ud800"},
-    ],
-)
-def test_rejects_invalid_value_specs(spec: dict[str, Any]) -> None:
-    with pytest.raises(WorkflowValidationError):
-        ValueSpec(**spec)
-
-
-def test_rejects_incompatible_edge_and_foreign_reference():
-    consumer = StageContract(
-        id="consumer",
-        inputs={"value": ValueSpec(type="tensor", dtype="float32", shape=(4,))},
-        outputs={"text": ValueSpec(type="text")},
-    )
-    workflow = Workflow("incompatible")
-    value = workflow.input(
-        "value", ValueSpec(type="tensor", dtype="float16", shape=(4,))
-    )
+def test_rejects_foreign_reference() -> None:
+    consumer = StageContract(id="consumer", inputs={"value"}, outputs={"value"})
+    workflow = Workflow("consumer")
     other = Workflow("other")
-    foreign = other.input("value", ValueSpec(type="tensor"))
+    foreign = other.input("value")
 
-    with pytest.raises(WorkflowValidationError, match="incompatible"):
-        workflow.stage("consumer", consumer, value=value)
     with pytest.raises(WorkflowValidationError, match="different workflow"):
         workflow.stage("consumer", consumer, value=foreign)
 
 
-def test_rejects_missing_inputs_and_conflicting_contract_ids():
-    first = StageContract(
-        id="shared",
-        inputs={"value": ValueSpec(type="text")},
-        outputs={"text": ValueSpec(type="text")},
-    )
-    conflicting = StageContract(
-        id="shared",
-        inputs={"value": ValueSpec(type="text")},
-        outputs={"json": ValueSpec(type="json")},
-    )
+def test_rejects_missing_inputs_and_conflicting_contract_ids() -> None:
+    first = StageContract(id="shared", inputs={"value"}, outputs={"text"})
+    conflicting = StageContract(id="shared", inputs={"value"}, outputs={"json"})
     workflow = Workflow("contracts")
-    value = workflow.input("value", ValueSpec(type="text"))
+    value = workflow.input("value")
     first_stage = workflow.stage("first", first, value=value)
 
     with pytest.raises(WorkflowValidationError, match="missing"):
@@ -298,9 +213,8 @@ def test_ir_rejects_conflicting_inline_contracts() -> None:
         )
 
 
-def test_ir_rejects_cycles_unreachable_and_dead_stages():
-    text = ValueSpec(type="text")
-    contract = StageContract(id="node", inputs={"value": text}, outputs={"value": text})
+def test_ir_rejects_cycles_unreachable_and_dead_stages() -> None:
+    contract = StageContract(id="node", inputs={"value"}, outputs={"value"})
     cycle = (
         StageIR(
             id="a",
@@ -316,33 +230,35 @@ def test_ir_rejects_cycles_unreachable_and_dead_stages():
     with pytest.raises(WorkflowValidationError, match="cycle"):
         WorkflowIR(
             name="cycle",
-            inputs={"seed": text},
+            inputs={"seed"},
             stages=cycle,
             outputs={"value": ValueRef.for_stage_output("a", "value")},
         )
 
-    source = StageContract(id="source", outputs={"value": text})
+    source = StageContract(id="source", outputs={"value"})
     with pytest.raises(WorkflowValidationError, match="not reachable"):
         WorkflowIR(
             name="unreachable",
-            inputs={"seed": text},
+            inputs={"seed"},
             stages=(StageIR(id="source", contract=source),),
             outputs={"value": ValueRef.for_stage_output("source", "value")},
         )
 
     dead_stage = StageIR(
-        id="dead", contract=contract, inputs={"value": ValueRef.for_input("seed")}
+        id="dead",
+        contract=contract,
+        inputs={"value": ValueRef.for_input("seed")},
     )
     with pytest.raises(WorkflowValidationError, match="do not contribute"):
         WorkflowIR(
             name="dead",
-            inputs={"seed": text},
+            inputs={"seed"},
             stages=(dead_stage,),
             outputs={"value": ValueRef.for_input("seed")},
         )
 
 
-def test_ir_rejects_unknown_references():
+def test_ir_rejects_unknown_references() -> None:
     workflow = _workflow()
     outputs = dict(workflow.outputs)
     outputs["text"] = ValueRef.for_stage_output("missing", "text")

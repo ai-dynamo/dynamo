@@ -6,18 +6,15 @@
 from __future__ import annotations
 
 import heapq
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Mapping, Optional, Sequence, Tuple, TypeVar, cast
+from typing import FrozenSet, Mapping, Optional, Sequence, Tuple, TypeVar, cast
 
 from dynamo.workflow.types import (
-    PortSpec,
     StageContract,
-    StreamSpec,
     ValueRef,
-    ValueSpec,
     WorkflowValidationError,
-    compatibility_error,
     validate_name,
 )
 
@@ -56,27 +53,21 @@ class WorkflowIR:
     """A validated, deterministic workflow graph without placement details."""
 
     name: str
-    inputs: Mapping[str, PortSpec]
+    inputs: FrozenSet[str]
     stages: Tuple[StageIR, ...]
     outputs: Mapping[str, ValueRef]
 
     def __post_init__(self) -> None:
         validate_name(self.name, "workflow name")
-        if not isinstance(self.inputs, Mapping) or not isinstance(
-            self.outputs, Mapping
-        ):
-            raise WorkflowValidationError(
-                "workflow inputs and outputs must be mappings"
-            )
+        if not isinstance(self.inputs, AbstractSet):
+            raise WorkflowValidationError("workflow inputs must be a set of names")
+        if not isinstance(self.outputs, Mapping):
+            raise WorkflowValidationError("workflow outputs must be a mapping")
 
-        inputs: dict[str, PortSpec] = {}
-        for name, spec in sorted(self.inputs.items()):
+        inputs: set[str] = set()
+        for name in self.inputs:
             validate_name(name, "workflow input")
-            if not isinstance(spec, (ValueSpec, StreamSpec)):
-                raise WorkflowValidationError(
-                    f"workflow input {name!r} must use ValueSpec or StreamSpec"
-                )
-            inputs[name] = spec
+            inputs.add(name)
 
         outputs: dict[str, ValueRef] = {}
         for name, reference in sorted(self.outputs.items()):
@@ -91,13 +82,13 @@ class WorkflowIR:
 
         stages = tuple(self.stages)
         ordered = self._validate_and_order(inputs, stages, outputs)
-        object.__setattr__(self, "inputs", _freeze_mapping(inputs))
+        object.__setattr__(self, "inputs", frozenset(inputs))
         object.__setattr__(self, "stages", ordered)
         object.__setattr__(self, "outputs", _freeze_mapping(outputs))
 
     @staticmethod
     def _validate_and_order(
-        workflow_inputs: Mapping[str, PortSpec],
+        workflow_inputs: AbstractSet[str],
         stages: Sequence[StageIR],
         workflow_outputs: Mapping[str, ValueRef],
     ) -> Tuple[StageIR, ...]:
@@ -128,17 +119,10 @@ class WorkflowIR:
                     f"stage {stage.id!r} inputs differ from its contract; "
                     f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
                 )
-            for port_name, reference in stage.inputs.items():
-                producer_spec, producer_stage = WorkflowIR._resolve_reference(
+            for reference in stage.inputs.values():
+                producer_stage = WorkflowIR._resolve_reference(
                     reference, workflow_inputs, by_id
                 )
-                error = compatibility_error(
-                    producer_spec, stage.contract.inputs[port_name]
-                )
-                if error is not None:
-                    raise WorkflowValidationError(
-                        f"stage {stage.id!r} input {port_name!r} is incompatible: {error}"
-                    )
                 if producer_stage is None:
                     input_reachable.add(stage.id)
                 else:
@@ -179,7 +163,7 @@ class WorkflowIR:
         live: set[str] = set()
         pending: list[str] = []
         for reference in workflow_outputs.values():
-            _, producer_stage = WorkflowIR._resolve_reference(
+            producer_stage = WorkflowIR._resolve_reference(
                 reference, workflow_inputs, by_id
             )
             if producer_stage is not None:
@@ -201,15 +185,15 @@ class WorkflowIR:
     @staticmethod
     def _resolve_reference(
         reference: ValueRef,
-        workflow_inputs: Mapping[str, PortSpec],
+        workflow_inputs: AbstractSet[str],
         stages: Mapping[str, StageIR],
-    ) -> tuple[PortSpec, Optional[str]]:
+    ) -> Optional[str]:
         if reference.input_name is not None:
             if reference.input_name not in workflow_inputs:
                 raise WorkflowValidationError(
                     f"unknown workflow input {reference.input_name!r}"
                 )
-            return workflow_inputs[reference.input_name], None
+            return None
 
         stage_id = cast(str, reference.stage_id)
         output_name = cast(str, reference.output_name)
@@ -220,13 +204,4 @@ class WorkflowIR:
             raise WorkflowValidationError(
                 f"unknown output {output_name!r} on stage {stage_id!r}"
             )
-        return stage.contract.outputs[output_name], stage_id
-
-    def output_spec(self, name: str) -> PortSpec:
-        """Return the value description inferred for one workflow output."""
-
-        if name not in self.outputs:
-            raise KeyError(name)
-        by_id = {stage.id: stage for stage in self.stages}
-        spec, _ = self._resolve_reference(self.outputs[name], self.inputs, by_id)
-        return spec
+        return stage_id

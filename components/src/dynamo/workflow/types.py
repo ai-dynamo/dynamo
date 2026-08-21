@@ -1,38 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Logical value and stage contracts for Dynamo workflows."""
+"""Named stage contracts and value references for Dynamo workflows."""
 
 from __future__ import annotations
 
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
-from types import MappingProxyType
-from typing import Mapping, Optional, Tuple, Union
+from typing import FrozenSet, Optional
 
 
 class WorkflowValidationError(ValueError):
     """Raised when a workflow contract or graph is invalid."""
-
-
-ShapeDimension = Union[int, str]
-_VALUE_TYPES = frozenset({"tensor", "text", "image", "bytes", "json", "object"})
-_TENSOR_DTYPES = frozenset(
-    {
-        "bool",
-        "uint8",
-        "uint16",
-        "uint32",
-        "uint64",
-        "int8",
-        "int16",
-        "int32",
-        "int64",
-        "float16",
-        "bfloat16",
-        "float32",
-        "float64",
-    }
-)
 
 
 def validate_name(name: str, kind: str) -> None:
@@ -60,162 +39,12 @@ def _validate_utf8(value: str, kind: str) -> None:
 
 
 @dataclass(frozen=True)
-class ValueSpec:
-    """A small logical description of a value crossing a workflow port."""
-
-    type: str
-    dtype: Optional[str] = None
-    shape: Optional[Tuple[ShapeDimension, ...]] = None
-    mode: Optional[str] = None
-    class_id: Optional[str] = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.type, str):
-            raise WorkflowValidationError("value type must be a string")
-        if self.type not in _VALUE_TYPES:
-            raise WorkflowValidationError(
-                f"unsupported value type {self.type!r}; expected one of {sorted(_VALUE_TYPES)}"
-            )
-
-        if self.shape is not None:
-            if not isinstance(self.shape, (list, tuple)):
-                raise WorkflowValidationError("tensor shape must be a list or tuple")
-            object.__setattr__(self, "shape", tuple(self.shape))
-
-        if self.type == "tensor":
-            self._validate_tensor()
-            self._reject("mode", self.mode)
-            self._reject("class_id", self.class_id)
-        elif self.type == "image":
-            self._reject("dtype", self.dtype)
-            self._reject("shape", self.shape)
-            self._reject("class_id", self.class_id)
-            if self.mode is not None and (
-                not isinstance(self.mode, str) or not self.mode
-            ):
-                raise WorkflowValidationError(
-                    "image mode must be a non-empty string when set"
-                )
-            if self.mode is not None:
-                _validate_utf8(self.mode, "image mode")
-        elif self.type == "object":
-            self._reject("dtype", self.dtype)
-            self._reject("shape", self.shape)
-            self._reject("mode", self.mode)
-            if not isinstance(self.class_id, str) or not self.class_id:
-                raise WorkflowValidationError(
-                    "object values require a non-empty class_id"
-                )
-            _validate_utf8(self.class_id, "object class_id")
-        else:
-            self._reject("dtype", self.dtype)
-            self._reject("shape", self.shape)
-            self._reject("mode", self.mode)
-            self._reject("class_id", self.class_id)
-
-    @staticmethod
-    def _reject(field_name: str, value: object) -> None:
-        if value is not None:
-            raise WorkflowValidationError(
-                f"{field_name} is not valid for this value type"
-            )
-
-    def _validate_tensor(self) -> None:
-        if self.dtype is not None:
-            if not isinstance(self.dtype, str):
-                raise WorkflowValidationError("tensor dtype must be a string")
-            if self.dtype not in _TENSOR_DTYPES:
-                raise WorkflowValidationError(
-                    f"unsupported tensor dtype {self.dtype!r}; expected one of "
-                    f"{sorted(_TENSOR_DTYPES)}"
-                )
-        if self.shape is None:
-            return
-        for dimension in self.shape:
-            if dimension == "dynamic":
-                continue
-            if isinstance(dimension, bool) or not isinstance(dimension, int):
-                raise WorkflowValidationError(
-                    "tensor shape dimensions must be non-negative integers or 'dynamic'"
-                )
-            if dimension < 0:
-                raise WorkflowValidationError(
-                    "tensor shape dimensions must be non-negative integers or 'dynamic'"
-                )
-
-
-@dataclass(frozen=True)
-class StreamSpec:
-    """The item contract for a logical stream crossing a workflow port.
-
-    Streaming execution is intentionally not implemented by the current compiler.
-    """
-
-    item: ValueSpec
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.item, ValueSpec):
-            raise WorkflowValidationError("stream items must use ValueSpec")
-
-
-PortSpec = Union[ValueSpec, StreamSpec]
-
-
-def compatibility_error(producer: PortSpec, consumer: PortSpec) -> Optional[str]:
-    """Explain why a producer cannot satisfy a consumer, or return ``None``."""
-
-    if isinstance(producer, StreamSpec) or isinstance(consumer, StreamSpec):
-        if not isinstance(producer, StreamSpec):
-            return "value output does not satisfy a stream input"
-        if not isinstance(consumer, StreamSpec):
-            return "stream output does not satisfy a value input"
-        item_error = compatibility_error(producer.item, consumer.item)
-        return None if item_error is None else f"stream item {item_error}"
-
-    if producer.type != consumer.type:
-        return f"type {producer.type!r} does not satisfy {consumer.type!r}"
-
-    if consumer.type == "tensor":
-        if consumer.dtype is not None and producer.dtype != consumer.dtype:
-            return (
-                f"producer dtype {producer.dtype!r} does not guarantee "
-                f"consumer dtype {consumer.dtype!r}"
-            )
-        if consumer.shape is not None:
-            if producer.shape is None:
-                return "producer does not guarantee the consumer tensor shape"
-            if len(producer.shape) != len(consumer.shape):
-                return "producer and consumer tensor ranks differ"
-            for produced, consumed in zip(producer.shape, consumer.shape):
-                if consumed != "dynamic" and produced != consumed:
-                    return (
-                        f"producer dimension {produced!r} does not guarantee "
-                        f"consumer dimension {consumed!r}"
-                    )
-
-    if consumer.type == "image" and consumer.mode is not None:
-        if producer.mode != consumer.mode:
-            return (
-                f"producer mode {producer.mode!r} does not guarantee "
-                f"consumer mode {consumer.mode!r}"
-            )
-
-    if consumer.type == "object" and producer.class_id != consumer.class_id:
-        return (
-            f"producer class_id {producer.class_id!r} does not satisfy "
-            f"consumer class_id {consumer.class_id!r}"
-        )
-
-    return None
-
-
-@dataclass(frozen=True)
 class StageContract:
     """The complete named input and output surface of a workflow stage."""
 
     id: str
-    inputs: Mapping[str, PortSpec] = field(default_factory=dict)
-    outputs: Mapping[str, PortSpec] = field(default_factory=dict)
+    inputs: FrozenSet[str] = field(default_factory=frozenset)
+    outputs: FrozenSet[str] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
         validate_name(self.id, "contract id")
@@ -227,20 +56,14 @@ class StageContract:
         object.__setattr__(self, "outputs", outputs)
 
     @staticmethod
-    def _freeze_ports(
-        ports: Mapping[str, PortSpec], kind: str
-    ) -> Mapping[str, PortSpec]:
-        if not isinstance(ports, Mapping):
-            raise WorkflowValidationError(f"{kind}s must be a mapping")
-        frozen: dict[str, PortSpec] = {}
-        for name, spec in sorted(ports.items()):
+    def _freeze_ports(ports: AbstractSet[str], kind: str) -> FrozenSet[str]:
+        if not isinstance(ports, AbstractSet):
+            raise WorkflowValidationError(f"{kind}s must be a set of names")
+        frozen: set[str] = set()
+        for name in ports:
             validate_name(name, kind)
-            if not isinstance(spec, (ValueSpec, StreamSpec)):
-                raise WorkflowValidationError(
-                    f"{kind} {name!r} must use ValueSpec or StreamSpec"
-                )
-            frozen[name] = spec
-        return MappingProxyType(frozen)
+            frozen.add(name)
+        return frozenset(frozen)
 
 
 @dataclass(frozen=True)

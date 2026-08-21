@@ -5,23 +5,13 @@
 
 from dynamo.workflow.builder import StageHandle, Workflow
 from dynamo.workflow.ir import StageIR, WorkflowIR
-from dynamo.workflow.types import (
-    PortSpec,
-    StageContract,
-    StreamSpec,
-    ValueRef,
-    ValueSpec,
-    WorkflowValidationError,
-)
+from dynamo.workflow.types import StageContract, ValueRef, WorkflowValidationError
 
 __all__ = [
-    "PortSpec",
     "StageContract",
     "StageHandle",
     "StageIR",
-    "StreamSpec",
     "ValueRef",
-    "ValueSpec",
     "Workflow",
     "WorkflowIR",
     "WorkflowValidationError",

@@ -10,13 +10,9 @@ from typing import cast
 
 from dynamo.workflow.ir import StageIR, WorkflowIR
 from dynamo.workflow.types import (
-    PortSpec,
     StageContract,
-    StreamSpec,
     ValueRef,
-    ValueSpec,
     WorkflowValidationError,
-    compatibility_error,
     validate_name,
 )
 
@@ -30,7 +26,7 @@ class StageHandle:
         self._stage_id = stage_id
         self._outputs = {
             name: ValueRef.for_stage_output(stage_id, name, owner)
-            for name in contract.outputs
+            for name in sorted(contract.outputs)
         }
 
     @property
@@ -72,22 +68,18 @@ class Workflow:
         validate_name(name, "workflow name")
         self._name = name
         self._owner = object()
-        self._inputs: dict[str, PortSpec] = {}
+        self._inputs: set[str] = set()
         self._stages: dict[str, StageIR] = {}
         self._contracts: dict[str, StageContract] = {}
         self._outputs: dict[str, ValueRef] = {}
 
-    def input(self, name: str, spec: PortSpec, /) -> ValueRef:
+    def input(self, name: str, /) -> ValueRef:
         """Declare and reference a workflow input."""
 
         validate_name(name, "workflow input")
         if name in self._inputs:
             raise WorkflowValidationError(f"duplicate workflow input {name!r}")
-        if not isinstance(spec, (ValueSpec, StreamSpec)):
-            raise WorkflowValidationError(
-                "workflow inputs must use ValueSpec or StreamSpec"
-            )
-        self._inputs[name] = spec
+        self._inputs.add(name)
         return ValueRef.for_input(name, self._owner)
 
     def stage(
@@ -117,13 +109,8 @@ class Workflow:
                 f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
             )
 
-        for port_name, reference in inputs.items():
-            producer_spec = self._resolve_owned_reference(reference)
-            error = compatibility_error(producer_spec, contract.inputs[port_name])
-            if error is not None:
-                raise WorkflowValidationError(
-                    f"stage {stage_id!r} input {port_name!r} is incompatible: {error}"
-                )
+        for reference in inputs.values():
+            self._validate_owned_reference(reference)
 
         self._contracts[contract.id] = contract
         self._stages[stage_id] = StageIR(
@@ -137,7 +124,7 @@ class Workflow:
         validate_name(name, "workflow output")
         if name in self._outputs:
             raise WorkflowValidationError(f"duplicate workflow output {name!r}")
-        self._resolve_owned_reference(reference)
+        self._validate_owned_reference(reference)
         self._outputs[name] = reference
 
     def build(self) -> WorkflowIR:
@@ -150,7 +137,7 @@ class Workflow:
             outputs=self._outputs,
         )
 
-    def _resolve_owned_reference(self, reference: ValueRef) -> PortSpec:
+    def _validate_owned_reference(self, reference: ValueRef) -> None:
         if not isinstance(reference, ValueRef) or reference._owner is not self._owner:
             raise WorkflowValidationError(
                 "value reference belongs to a different workflow"
@@ -160,7 +147,7 @@ class Workflow:
                 raise WorkflowValidationError(
                     f"unknown workflow input {reference.input_name!r}"
                 )
-            return self._inputs[reference.input_name]
+            return
         stage_id = cast(str, reference.stage_id)
         output_name = cast(str, reference.output_name)
         if stage_id not in self._stages:
@@ -170,4 +157,3 @@ class Workflow:
             raise WorkflowValidationError(
                 f"unknown output {output_name!r} on stage {stage_id!r}"
             )
-        return stage.contract.outputs[output_name]
