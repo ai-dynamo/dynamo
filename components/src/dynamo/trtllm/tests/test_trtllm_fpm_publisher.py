@@ -312,6 +312,9 @@ def _build_publisher_stub(monkeypatch, *, attention_dp_size: int, fpm_enabled: b
     pub.metrics_collector = None
     pub.kv_state_endpoint = None
     pub.image_token_id = None
+    pub.native_kv_events_config = None
+    pub.native_kv_events_gpus_per_node = None
+    pub.publish_legacy_kv_events = True
     pub.attention_dp_size = attention_dp_size
     pub.fpm_enabled = fpm_enabled
     pub.processing_initial_created_events = True
@@ -353,6 +356,34 @@ def _build_publisher_stub(monkeypatch, *, attention_dp_size: int, fpm_enabled: b
     )
 
     return pub, publisher_mod, fake_fpm_cls
+
+
+def test_native_kv_events_create_direct_subscribers_without_engine_polling(
+    monkeypatch,
+):
+    """Native mode must subscribe to each rank's vLLM wire stream without
+    starting the legacy TRT event-drain thread."""
+    pub, module, _ = _build_publisher_stub(
+        monkeypatch, attention_dp_size=2, fpm_enabled=True
+    )
+    pub.native_kv_events_config = {
+        "endpoint": "tcp://*:5557",
+        "topic": "kv-events",
+    }
+    pub.native_kv_events_gpus_per_node = 1
+    monkeypatch.setenv("SLURM_STEP_NODELIST", "worker[01-02]")
+
+    pub.initialize()
+
+    calls = module.KvEventPublisher.call_args_list
+    assert [call.kwargs["zmq_endpoint"] for call in calls] == [
+        "tcp://worker01:5557",
+        "tcp://worker02:5558",
+    ]
+    assert [call.kwargs["dp_rank"] for call in calls] == [0, 1]
+    assert all(call.kwargs["zmq_topic"] == "kv-events" for call in calls)
+    pub._init_publish_kv_cache_events_thread.assert_not_called()
+    assert pub.publish_kv_cache_events_thread is None
 
 
 def test_publisher_initialize_constructs_fpm_direct_publisher_when_fpm_enabled(
