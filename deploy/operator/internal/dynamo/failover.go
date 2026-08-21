@@ -400,7 +400,12 @@ func gmsResourceSharingEntries(serviceName string, roles []ServiceRole) []grovev
 var intraPodFailoverLockFile = filepath.Join(gmsruntime.SharedMountPath, "failover.lock")
 
 const (
-	failoverEngineCount                    = 2
+	failoverEngineCount = 2
+	// Entrypoint of the CUDA VMM interposer (the LD_PRELOAD snapshot route).
+	// A container launched through it still runs dynamo as a direct python
+	// module; the wrapper only exports DYN_SNAPSHOT_CUDA_VMM_INTERPOSE and
+	// LD_PRELOAD before exec"ing the arguments verbatim.
+	cudaVMMLaunchCommand                   = "/usr/local/bin/snapshot-cuda-vmm-launch"
 	vllmModuleName                         = "dynamo.vllm"
 	sglangModuleName                       = "dynamo.sglang"
 	vllmLoadFormatFlag                     = "--load-format"
@@ -709,6 +714,17 @@ func isDirectDynamoModuleCommand(container *corev1.Container, module string) boo
 		isPythonCommand(container.Command[0]) &&
 		container.Command[1] == "-m" &&
 		container.Command[2] == module:
+		return true
+	// The CUDA VMM interposer route sets the launcher as the entrypoint and
+	// leaves the real command in args. This is the first case with one extra
+	// leading token: the wrapper execs "$@" unchanged, so the arguments the
+	// operator reads and mutates are the same tokens in the same order.
+	case len(container.Command) == 1 &&
+		container.Command[0] == cudaVMMLaunchCommand &&
+		len(args) >= 3 &&
+		isPythonCommand(args[0]) &&
+		args[1] == "-m" &&
+		args[2] == module:
 		return true
 	default:
 		return false
