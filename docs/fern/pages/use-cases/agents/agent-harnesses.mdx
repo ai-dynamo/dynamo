@@ -38,6 +38,38 @@ bash examples/backends/sglang/launch/agg_agent.sh
 
     Dynamo maps Codex's `thread-id` header to `session_id`. A spawned child thread also sends `x-codex-parent-thread-id`, which Dynamo maps to `parent_session_id`.
 
+    To drive a persistent Codex session over ACP, use the repository runner. Stock Dynamo is the safe default:
+
+    ```bash
+    .agents/skills/dynamo-agent-harness/scripts/drive_harness.py \
+      --harness codex \
+      --base-url http://127.0.0.1:8000 \
+      --model zai-org/GLM-4.7-Flash \
+      --cwd /absolute/worktree \
+      --capability verify
+    ```
+
+    The runner pins `@agentclientprotocol/codex-acp`, uses the returned Codex thread ID as its ACP session ID, and closes the ACP process when stdin closes. It passes the child a minimal environment containing runtime, temporary-directory, and locale values; the selected Dynamo credential; and fresh Codex endpoint/model configuration. Other parent credentials and an ambient `CODEX_CONFIG` are not inherited.
+
+    <Warning>
+    Add `--session-final` only when the endpoint is explicitly running ThunderAgent. Stock frontends and KV routers do not have a ThunderAgent program lifecycle, and an implementation that does not recognize the terminal header could treat the envelope as ordinary model work.
+    </Warning>
+
+    For ThunderAgent qualification, use the explicitly lifecycle-enabled command:
+
+    ```bash
+    # ThunderAgent only
+    .agents/skills/dynamo-agent-harness/scripts/drive_harness.py \
+      --harness codex \
+      --base-url http://127.0.0.1:8000 \
+      --model zai-org/GLM-4.7-Flash \
+      --cwd /absolute/worktree \
+      --capability verify \
+      --session-final
+    ```
+
+    After the ACP process closes, the runner attempts exactly one terminal request for the created Codex thread on normal completion, turn failure, or interruption. It skips finalization when no nonempty thread ID was created, and a terminal failure cannot silently pass the run. See the [Codex well-lit path](https://github.com/ai-dynamo/dynamo/blob/main/examples/agent_harnesses/codex/README.md) for the frozen dependency tuple, verification procedure, evidence contract, and cleanup steps.
+
   </Tab>
   <Tab title="Pi">
 
@@ -201,7 +233,7 @@ bash examples/backends/sglang/launch/agg_agent.sh
 
 ## Drive a Harness from Another Agent
 
-Use the repository's `.agents/skills/dynamo-agent-harness` skill when an agent needs to keep a Claude Code, Codex, or OpenCode session open across multiple prompts while Dynamo serves the model. The skill uses Agent Client Protocol (ACP) and injects the provider configuration through the child process environment instead of adding harness configuration files to the delegated worktree.
+Use the repository's `.agents/skills/dynamo-agent-harness` skill when an agent needs to keep a Claude Code, Codex, or OpenCode session open across multiple prompts while Dynamo serves the model. The skill uses Agent Client Protocol (ACP) and injects the provider configuration through a minimal child-process environment instead of adding harness configuration files to the delegated worktree or copying the full parent environment.
 
 The skill pins the Claude Code and Codex ACP adapters. If a harness release changes the model, endpoint, session header, authentication, or mode configuration, update this page and the skill in the same change after running a persistent two-turn tool smoke test.
 

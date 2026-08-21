@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import sys
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,25 @@ MODES = {
     ("codex", "act"): "agent",
     ("opencode", "verify"): "plan",
     ("opencode", "act"): "build",
+}
+
+INHERITED_ENVIRONMENT = (
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "XDG_RUNTIME_DIR",
+    "LANG",
+    "LANGUAGE",
+    "LC_ALL",
+    "LC_CTYPE",
+)
+
+MANAGED_ENVIRONMENT = {
+    "CODEX_CONFIG",
+    "NO_BROWSER",
+    "OPENCODE_CONFIG_CONTENT",
 }
 
 
@@ -132,12 +152,34 @@ def validate_paths(cwd: Path, additional: list[Path]) -> tuple[Path, list[Path]]
     return resolved_cwd, resolved_additional
 
 
+def build_child_environment(api_key_env: str) -> tuple[dict[str, str], str]:
+    """Build the minimal environment inherited by a tool-capable harness."""
+    if not api_key_env or "=" in api_key_env or "\x00" in api_key_env:
+        raise ValueError("--api-key-env must name one environment variable")
+    if api_key_env in INHERITED_ENVIRONMENT or api_key_env in MANAGED_ENVIRONMENT:
+        raise ValueError(
+            "--api-key-env conflicts with a runtime or driver-managed variable"
+        )
+
+    environment = {
+        name: value
+        for name in INHERITED_ENVIRONMENT
+        if (value := os.environ.get(name)) is not None
+    }
+    if not environment.get("HOME"):
+        raise ValueError("HOME must be set to launch an ACP harness")
+    environment.setdefault("PATH", os.defpath)
+
+    api_key = os.environ.get(api_key_env) or "dummy"
+    environment[api_key_env] = api_key
+    return environment, api_key
+
+
 def build_config(args: argparse.Namespace) -> HarnessConfig:
     if not args.model.strip():
         raise ValueError("--model must not be empty")
     root_url, openai_url = normalize_base_url(args.base_url)
-    environment = dict(os.environ)
-    api_key = environment.get(args.api_key_env) or "dummy"
+    environment, api_key = build_child_environment(args.api_key_env)
     gateway_url = None
     session_model = args.model
 
@@ -145,11 +187,7 @@ def build_config(args: argparse.Namespace) -> HarnessConfig:
         gateway_url = root_url
     elif args.harness == "codex":
         gateway_url = openai_url
-        codex_config_raw = environment.get("CODEX_CONFIG", "{}")
-        codex_config = json.loads(codex_config_raw)
-        if not isinstance(codex_config, dict):
-            raise ValueError("CODEX_CONFIG must contain a JSON object")
-        codex_config.update(
+        codex_config = dict(
             model=args.model,
             model_reasoning_effort="medium",
         )
@@ -336,95 +374,119 @@ async def run(args: argparse.Namespace) -> None:
     if args.session_final_timeout <= 0:
         raise ValueError("--session-final-timeout must be greater than zero")
     config = build_config(args)
-    if shutil.which(config.command[0]) is None:
+    if shutil.which(config.command[0], path=config.environment["PATH"]) is None:
         raise FileNotFoundError(f"executable not found: {config.command[0]}")
 
     client = HarnessClient(args.capability)
-    async with spawn_agent_process(
-        client,
-        *config.command,
-        cwd=str(cwd),
-        env=config.environment,
-    ) as (conn, process):
-        stderr_task = asyncio.create_task(relay_stderr(process))
-        try:
-            capabilities = (
-                {"auth": {"_meta": {"gateway": True}}} if config.gateway_url else None
-            )
-            initialized = await conn.initialize(
-                protocol_version=PROTOCOL_VERSION,
-                client_capabilities=capabilities,
-            )
-            if config.gateway_url:
-                api_key = config.environment.get(args.api_key_env) or "dummy"
-                headers = (
-                    {"x-api-key": api_key}
+    session_id: str | None = None
+    primary_error: BaseException | None = None
+    try:
+        async with spawn_agent_process(
+            client,
+            *config.command,
+            cwd=str(cwd),
+            env=config.environment,
+        ) as (conn, process):
+            stderr_task = asyncio.create_task(relay_stderr(process))
+            try:
+                capabilities = (
+                    {"auth": {"_meta": {"gateway": True}}}
+                    if config.gateway_url
+                    else None
+                )
+                initialized = await conn.initialize(
+                    protocol_version=PROTOCOL_VERSION,
+                    client_capabilities=capabilities,
+                )
+                if config.gateway_url:
+                    headers = (
+                        {"x-api-key": config.api_key}
+                        if args.harness == "claude"
+                        else {"Authorization": f"Bearer {config.api_key}"}
+                    )
+                    gateway = {
+                        "baseUrl": config.gateway_url,
+                        "headers": headers,
+                    }
+                    if args.harness == "codex":
+                        gateway["providerName"] = "Dynamo"
+                    await conn.authenticate(
+                        method_id="gateway",
+                        gateway=gateway,
+                    )
+
+                session_metadata = (
+                    {"claudeCode": {"options": {"model": config.model}}}
                     if args.harness == "claude"
-                    else {"Authorization": f"Bearer {api_key}"}
+                    else {}
                 )
-                gateway = {
-                    "baseUrl": config.gateway_url,
-                    "headers": headers,
-                }
-                if args.harness == "codex":
-                    gateway["providerName"] = "Dynamo"
-                await conn.authenticate(
-                    method_id="gateway",
-                    gateway=gateway,
+                session = await conn.new_session(
+                    cwd=str(cwd),
+                    additional_directories=[str(path) for path in additional],
+                    mcp_servers=[],
+                    **session_metadata,
+                )
+                created_session_id = str(session.session_id).strip()
+                if not created_session_id:
+                    raise RuntimeError("ACP agent returned an empty session ID")
+                session_id = created_session_id
+                await configure_mode(conn, session, config.mode)
+                validate_model(args.harness, session, config.session_model)
+                agent_name = (
+                    initialized.agent_info.name
+                    if initialized.agent_info is not None
+                    else args.harness
+                )
+                emit(
+                    {
+                        "type": "ready",
+                        "harness": args.harness,
+                        "agent": agent_name,
+                        "session_id": session_id,
+                        "mode": config.mode,
+                        "model": config.model,
+                    }
                 )
 
-            session_metadata = (
-                {"claudeCode": {"options": {"model": config.model}}}
-                if args.harness == "claude"
-                else {}
+                while line := await asyncio.to_thread(sys.stdin.readline):
+                    try:
+                        request = json.loads(line)
+                        if not isinstance(request, dict):
+                            raise ValueError("expected one JSON object per line")
+                        if request.get("close") is True:
+                            break
+                        prompt_text = request.get("prompt")
+                        if not isinstance(prompt_text, str) or not prompt_text.strip():
+                            raise ValueError(
+                                'expected {"prompt":"..."} or {"close":true}'
+                            )
+                    except (json.JSONDecodeError, ValueError) as error:
+                        emit({"type": "error", "ok": False, "error": str(error)})
+                        continue
+                    await prompt(conn, client, session_id, prompt_text)
+            finally:
+                stderr_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await stderr_task
+    except (Exception, KeyboardInterrupt, asyncio.CancelledError) as error:
+        primary_error = error
+
+    if args.session_final and session_id is not None:
+        try:
+            await send_session_final(
+                config,
+                session_id,
+                args.session_final_timeout,
             )
-            session = await conn.new_session(
-                cwd=str(cwd),
-                additional_directories=[str(path) for path in additional],
-                mcp_servers=[],
-                **session_metadata,
-            )
-            await configure_mode(conn, session, config.mode)
-            validate_model(args.harness, session, config.session_model)
-            agent_name = (
-                initialized.agent_info.name
-                if initialized.agent_info is not None
-                else args.harness
-            )
-            session_id = str(session.session_id)
-            emit(
-                {
-                    "type": "ready",
-                    "harness": args.harness,
-                    "agent": agent_name,
-                    "session_id": session_id,
-                    "mode": config.mode,
-                    "model": config.model,
-                }
+        except Exception as finalization_error:
+            if primary_error is None:
+                raise
+            primary_error.add_note(
+                f"ThunderAgent session finalization also failed: {finalization_error}"
             )
 
-            while line := await asyncio.to_thread(sys.stdin.readline):
-                try:
-                    request = json.loads(line)
-                    if not isinstance(request, dict):
-                        raise ValueError("expected one JSON object per line")
-                    if request.get("close") is True:
-                        break
-                    prompt_text = request.get("prompt")
-                    if not isinstance(prompt_text, str) or not prompt_text.strip():
-                        raise ValueError('expected {"prompt":"..."} or {"close":true}')
-                except (json.JSONDecodeError, ValueError) as error:
-                    emit({"type": "error", "ok": False, "error": str(error)})
-                    continue
-                await prompt(conn, client, session_id, prompt_text)
-            if args.session_final:
-                await send_session_final(
-                    config,
-                    session_id,
-                    args.session_final_timeout,
-                )
-        finally:
-            stderr_task.cancel()
+    if primary_error is not None:
+        raise primary_error
 
 
 def main() -> int:
