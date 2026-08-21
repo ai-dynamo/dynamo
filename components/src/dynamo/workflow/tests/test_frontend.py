@@ -10,7 +10,6 @@ import pytest
 from dynamo.workflow import (
     DeploymentSpec,
     StageContract,
-    ValueSpec,
     Workflow,
     WorkflowOrchestrator,
     WorkflowTokenEngine,
@@ -29,8 +28,8 @@ pytestmark = [
 
 CONTRACT = StageContract(
     id="token-stage",
-    inputs={"request": ValueSpec(type="json")},
-    outputs={"chunk": ValueSpec(type="json")},
+    inputs={"request"},
+    outputs={"chunk"},
 )
 
 
@@ -49,7 +48,7 @@ class _Runner:
 
 async def _orchestrator(runner=None) -> WorkflowOrchestrator:
     workflow = Workflow("frontend-workflow")
-    request = workflow.input("request", ValueSpec(type="json"))
+    request = workflow.input("request")
     stage = workflow.stage("generate", CONTRACT, request=request)
     workflow.output("chunk", stage.chunk)
     return await WorkflowOrchestrator.bind(
@@ -75,8 +74,9 @@ class _FutureContext(_Context):
         return asyncio.get_running_loop().create_future()
 
 
-@pytest.mark.parametrize("context", [_Context(), _FutureContext()])
-async def test_token_engine_runs_fixed_request_and_chunk_abi(context) -> None:
+@pytest.mark.parametrize("context_type", [_Context, _FutureContext])
+async def test_token_engine_runs_fixed_request_and_chunk_abi(context_type) -> None:
+    context = context_type()
     chunks = [
         chunk
         async for chunk in WorkflowTokenEngine(await _orchestrator()).generate(
@@ -108,14 +108,14 @@ async def test_loader_invokes_trusted_provider_with_runtime_only(monkeypatch) ->
 
 async def test_frontend_rejects_noncanonical_workflow_abi() -> None:
     workflow = Workflow("wrong-frontend-abi")
-    request = workflow.input("payload", ValueSpec(type="json"))
+    request = workflow.input("payload")
     stage = workflow.stage("generate", CONTRACT, request=request)
     workflow.output("chunk", stage.chunk)
     orchestrator = await WorkflowOrchestrator.bind(
         compile_workflow(workflow), inline_runners={"generate": _Runner()}
     )
 
-    with pytest.raises(WorkflowValidationError, match="request: json"):
+    with pytest.raises(WorkflowValidationError, match="'request' input"):
         WorkflowTokenEngine(orchestrator)
 
 

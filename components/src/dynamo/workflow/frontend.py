@@ -12,13 +12,11 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from dynamo.workflow.orchestrator import WorkflowOrchestrator
-from dynamo.workflow.types import ValueSpec, WorkflowValidationError
-
-_JSON = ValueSpec(type="json")
+from dynamo.workflow.types import WorkflowValidationError
 
 
 class WorkflowTokenEngine:
-    """Run the fixed token-frontend workflow ABI as a typed token engine."""
+    """Run the fixed token-frontend workflow ABI as a token engine."""
 
     def __init__(self, orchestrator: WorkflowOrchestrator) -> None:
         if not isinstance(orchestrator, WorkflowOrchestrator):
@@ -67,13 +65,13 @@ class WorkflowTokenEngine:
 
 def _validate_frontend_abi(orchestrator: WorkflowOrchestrator) -> None:
     workflow = orchestrator.plan.workflow
-    if dict(workflow.inputs) != {"request": _JSON}:
+    if workflow.inputs != frozenset({"request"}):
         raise WorkflowValidationError(
-            "frontend workflows require exactly one 'request: json' input"
+            "frontend workflows require exactly one 'request' input"
         )
-    if set(workflow.outputs) != {"chunk"} or workflow.output_spec("chunk") != _JSON:
+    if set(workflow.outputs) != {"chunk"}:
         raise WorkflowValidationError(
-            "frontend workflows require exactly one 'chunk: json' output"
+            "frontend workflows require exactly one 'chunk' output"
         )
 
 
