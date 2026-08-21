@@ -52,14 +52,18 @@ impl
             FirstTokenNotifier::for_request(None, Some(&self.source), &request_id, dp_rank);
         let output = self.inner.generate(input).await?;
         let context = output.context();
+        let mut first_output_seen = false;
         let stream = output.map(move |chunk| {
-            if chunk
-                .data
-                .as_ref()
-                .is_some_and(|data| !data.token_ids.is_empty())
-                && let Some(notifier) = &notifier
+            if !first_output_seen
+                && chunk
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| !data.token_ids.is_empty())
             {
-                notifier.notify();
+                first_output_seen = true;
+                if let Some(notifier) = &notifier {
+                    notifier.notify();
+                }
             }
             chunk
         });
