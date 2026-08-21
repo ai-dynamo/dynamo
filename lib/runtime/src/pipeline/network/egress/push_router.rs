@@ -515,6 +515,10 @@ where
     T: Data + Serialize,
     U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
+    pub fn router_mode(&self) -> RouterMode {
+        self.router_mode
+    }
+
     /// Create a new PushRouter without a worker load monitor (no overload detection)
     pub async fn from_client(client: Client, router_mode: RouterMode) -> anyhow::Result<Self> {
         Self::from_client_with_monitor(client, router_mode, None).await
@@ -733,6 +737,36 @@ where
             )
             .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
         Ok((decision.target.worker_id, candidates.len()))
+    }
+
+    /// Select a cache-free builtin worker while preserving empty-pool error semantics.
+    pub fn select_stateless_worker(&self) -> anyhow::Result<u64> {
+        let picker = match self.router_mode {
+            RouterMode::RoundRobin => &self.round_robin_picker,
+            RouterMode::Random => &self.random_picker,
+            _ => anyhow::bail!(
+                "{:?} routing does not use stateless worker selection",
+                self.router_mode
+            ),
+        };
+        self.select_untracked_worker(picker)
+            .map(|(worker_id, _)| worker_id)
+    }
+
+    /// Reject an exact target that local fault detection has removed from routing.
+    pub fn ensure_routable(&self, instance_id: u64) -> anyhow::Result<()> {
+        if self
+            .client
+            .routing_instances()
+            .routable_ids()
+            .contains(&instance_id)
+        {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "instance_id={instance_id} not found for endpoint {}",
+            self.client.endpoint.id()
+        )
     }
 
     /// Issue a request to the next available instance in a round-robin fashion

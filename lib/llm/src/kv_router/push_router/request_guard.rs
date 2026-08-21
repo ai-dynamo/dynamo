@@ -25,7 +25,7 @@ use crate::{
 ///
 /// `worker` is captured at construction so cleanup targets the booking this
 /// guard acquired, even if cleanup is delayed.
-struct RequestCleanup<Sel>
+struct KvRequestCleanup<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
@@ -36,7 +36,7 @@ where
     freed: bool,
 }
 
-impl<Sel> RequestCleanup<Sel>
+impl<Sel> KvRequestCleanup<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
@@ -76,7 +76,7 @@ where
     }
 }
 
-impl<Sel> Drop for RequestCleanup<Sel>
+impl<Sel> Drop for KvRequestCleanup<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
@@ -107,6 +107,33 @@ where
                 );
             }
         });
+    }
+}
+
+/// Policy-specific state released by the host's common request lifecycle.
+enum RequestCleanup<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    Kv(KvRequestCleanup<Sel>),
+    Stateless { worker_id: u64 },
+}
+
+impl<Sel> RequestCleanup<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    fn worker_id(&self) -> u64 {
+        match self {
+            Self::Kv(cleanup) => cleanup.worker.worker_id,
+            Self::Stateless { worker_id } => *worker_id,
+        }
+    }
+
+    async fn finish(&mut self) {
+        if let Self::Kv(cleanup) = self {
+            cleanup.finish().await;
+        }
     }
 }
 
@@ -198,7 +225,7 @@ impl RequestObservability {
         }
     }
 
-    fn record_metrics(&mut self) {
+    fn record_metrics(&mut self, record_itl_at_completion: bool) {
         // A failed dispatch never reached the backend and must not count as a request.
         if self.metrics_recorded || !self.dispatched {
             return;
@@ -208,6 +235,11 @@ impl RequestObservability {
         if let Some(tracker) = &self.tracker {
             tracker.record_finish();
             tracker.record_osl(self.cumulative_osl);
+            if record_itl_at_completion && let Some(avg_itl) = tracker.avg_itl_ms() {
+                self.request_metrics
+                    .inter_token_latency_seconds
+                    .observe(avg_itl / 1000.0);
+            }
             if let Some(latency) = tracker.kv_transfer_estimated_latency_secs() {
                 self.request_metrics
                     .kv_transfer_estimated_latency_seconds
@@ -282,6 +314,7 @@ where
     cleanup: RequestCleanup<Sel>,
     observability: RequestObservability,
     output_blocks: OutputBlockTracker,
+    record_itl_at_completion: bool,
     prefill_marked: bool,
     migration_state: Option<MigrationState>,
 }
@@ -290,7 +323,7 @@ impl<Sel> RequestGuard<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
-    pub(super) fn new(
+    pub(super) fn new_kv(
         chooser: Arc<KvRouter<Sel>>,
         request_metrics: Arc<RouterRequestMetrics>,
         context_id: String,
@@ -313,7 +346,12 @@ where
         }
 
         Self {
-            cleanup: RequestCleanup::new(chooser, context_id, worker, scheduler_tracked),
+            cleanup: RequestCleanup::Kv(KvRequestCleanup::new(
+                chooser,
+                context_id,
+                worker,
+                scheduler_tracked,
+            )),
             observability: RequestObservability::new(request.tracker.clone(), request_metrics),
             output_blocks: OutputBlockTracker::new(
                 track_output_blocks,
@@ -321,6 +359,25 @@ where
                 block_size,
                 expected_output_tokens,
             ),
+            record_itl_at_completion: false,
+            prefill_marked: false,
+            migration_state: request.migration_state.clone(),
+        }
+    }
+
+    pub(super) fn new_stateless(
+        request_metrics: Arc<RouterRequestMetrics>,
+        worker_id: u64,
+        request: &PreprocessedRequest,
+    ) -> Self {
+        request_metrics.requests_started_total().inc();
+        Self {
+            cleanup: RequestCleanup::Stateless { worker_id },
+            observability: RequestObservability::new(request.tracker.clone(), request_metrics),
+            // Stateless policies have no scheduler blocks to update. Emit one final ITL sample
+            // when the request completes rather than observing every streamed token.
+            output_blocks: OutputBlockTracker::new(false, request.token_ids.len(), 1, None),
+            record_itl_at_completion: true,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
         }
@@ -328,7 +385,7 @@ where
 
     pub(super) fn record_migration_failure(&self, error: Option<DynamoError>) {
         if let Some(state) = self.migration_state.as_ref() {
-            state.record_failure(self.cleanup.worker.worker_id, error);
+            state.record_failure(self.cleanup.worker_id(), error);
         }
     }
 
@@ -357,15 +414,15 @@ where
                 .as_ref()
                 .is_some_and(|data| !data.token_ids.is_empty());
             if has_tokens {
-                if self.cleanup.scheduler_tracked
-                    && let Err(error) = self
-                        .cleanup
+                if let RequestCleanup::Kv(cleanup) = &self.cleanup
+                    && cleanup.scheduler_tracked
+                    && let Err(error) = cleanup
                         .chooser
-                        .mark_prefill_completed(&self.cleanup.context_id)
+                        .mark_prefill_completed(&cleanup.context_id)
                         .await
                 {
                     tracing::warn!(
-                        request_id = %self.cleanup.context_id,
+                        request_id = %cleanup.context_id,
                         %error,
                         "Failed to mark prefill completed"
                     );
@@ -381,13 +438,13 @@ where
             return;
         };
 
-        if let Err(error) = self
-            .cleanup
-            .chooser
-            .add_output_block(&self.cleanup.context_id, update.decay_fraction)
+        if let RequestCleanup::Kv(cleanup) = &self.cleanup
+            && let Err(error) = cleanup
+                .chooser
+                .add_output_block(&cleanup.context_id, update.decay_fraction)
         {
             tracing::warn!(
-                request_id = %self.cleanup.context_id,
+                request_id = %cleanup.context_id,
                 %error,
                 "Failed to add output block"
             );
@@ -398,7 +455,8 @@ where
 
     pub(super) async fn finish(&mut self) {
         // Metrics must observe the completed request before cleanup releases its state.
-        self.observability.record_metrics();
+        self.observability
+            .record_metrics(self.record_itl_at_completion);
         self.cleanup.finish().await;
     }
 
@@ -413,6 +471,7 @@ where
 {
     fn drop(&mut self) {
         // RequestCleanup drops immediately afterward and performs resource cleanup.
-        self.observability.record_metrics();
+        self.observability
+            .record_metrics(self.record_itl_at_completion);
     }
 }

@@ -332,7 +332,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
     #[inline]
     fn worker_cost(&self, context: &WorkerSelectionContext<'_>, row: &WorkerCandidate) -> f64 {
         let base_score = self.worker_logit(context, row, "Formula");
-        match row.routing.preferred_taint_multiplier {
+        match row.preferred_taint_multiplier {
             // NOTE: This multiplicative bias assumes a non-negative score. Negative
             // overlap scores expose its pre-existing sign sensitivity; keep it for now.
             Some(multiplier) => base_score * multiplier,
@@ -567,6 +567,10 @@ impl WorkerPicker for DefaultWorkerPicker {
 }
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::CACHE | WorkerInputs::LOAD
+    }
+
     #[inline(always)]
     fn select_worker(
         &self,

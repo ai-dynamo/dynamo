@@ -267,11 +267,9 @@ impl Indexer {
                 ..
             } => dump_local_events(primary.dump_events().await?, lower_tier).await,
             Self::Remote { .. } => Ok(Vec::new()),
-            Self::None => {
-                panic!(
-                    "Cannot dump events: indexer does not exist (is overlap_score_credit set to 0?)"
-                );
-            }
+            Self::None => Err(KvRouterError::Unsupported(
+                "event dumping requires a KV indexer".to_string(),
+            )),
         }
     }
 
