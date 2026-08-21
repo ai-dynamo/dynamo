@@ -3,7 +3,6 @@
 
 """Worker initialization factory for vLLM workers."""
 
-import argparse
 import asyncio
 import copy
 import json
@@ -21,7 +20,6 @@ from vllm.config import VllmConfig
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo import prometheus_names
-from dynamo.common.configuration.utils import parse_bool
 from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.rl import first_endpoint_response, register_rl_routes
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
@@ -68,25 +66,6 @@ BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS = 90
 # have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
 # LLMBackendMetrics registration there.
 EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMetrics]]
-
-
-def _embedding_model_input() -> ModelInput:
-    """Select whether the Dynamo frontend or vLLM tokenizes embedding text."""
-    env_name = "DYN_EMBEDDING_FRONTEND_TOKENIZATION"
-    raw = os.environ.get(env_name)
-    if raw is None:
-        return ModelInput.Text
-
-    invalid_value = (
-        f"Invalid {env_name}={raw!r}; " "expected true/false/on/off/yes/no/1/0"
-    )
-    if not raw.strip():
-        raise ValueError(invalid_value)
-    try:
-        enabled = parse_bool(raw)
-    except argparse.ArgumentTypeError as error:
-        raise ValueError(invalid_value) from error
-    return ModelInput.Tokens if enabled else ModelInput.Text
 
 
 def _benchmark_rank_path(base_path: Path, dp_rank: int) -> Path:
@@ -956,7 +935,11 @@ class WorkerFactory:
                     health_check_payload=embedding_health_check_payload,
                 ),
                 self.register_vllm_model(
-                    _embedding_model_input(),
+                    (
+                        ModelInput.Tokens
+                        if config.embedding_frontend_tokenization
+                        else ModelInput.Text
+                    ),
                     ModelType.Embedding,
                     generate_endpoint,
                     config,

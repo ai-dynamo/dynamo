@@ -14,7 +14,11 @@ from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.groups.frontend_decoding_args import (
     add_frontend_decoding_arg,
 )
-from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+from dynamo.common.configuration.utils import (
+    add_argument,
+    add_negatable_bool_argument,
+    parse_bool,
+)
 
 from . import __version__
 from .benchmark_points import (
@@ -129,7 +133,14 @@ class DynamoVllmArgGroup(ArgGroup):
             flag_name="--use-vllm-tokenizer",
             env_var="DYN_VLLM_USE_TOKENIZER",
             default=False,
-            help="Use vLLM's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend.",
+            help=(
+                "Use vLLM's tokenizer for pre- and post-processing. This "
+                "bypasses Dynamo's preprocessor and only /v1/chat/completions "
+                "will be available through the Dynamo frontend. Dedicated embedding "
+                "workers currently ignore this option and use vLLM tokenization "
+                "by default; set --embedding-frontend-tokenization to enable "
+                "Dynamo frontend tokenization for text embeddings."
+            ),
         )
 
         # Multimodal
@@ -209,6 +220,23 @@ class DynamoVllmArgGroup(ArgGroup):
             help="Run as a text-embedding worker. Engine must be started with "
             "vLLM's --runner pooling. Skips KV-events, KV router registration, "
             "and InstrumentedScheduler injection (none apply to pooling models).",
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--embedding-frontend-tokenization",
+            env_var="DYN_VLLM_EMBEDDING_FRONTEND_TOKENIZATION",
+            default=False,
+            env_value_type=parse_bool,
+            help=(
+                "Use Dynamo frontend tokenization for raw-text inputs to a "
+                "dedicated embedding worker. The default preserves existing "
+                "behavior: vLLM tokenizes embedding text. Requires "
+                "--embedding-worker and cannot be combined with "
+                "--use-vllm-tokenizer. This temporary compatibility gate is "
+                "planned for removal in the next release, when pooling workers "
+                "use --use-vllm-tokenizer consistently."
+            ),
         )
 
         add_argument(
@@ -506,6 +534,7 @@ class DynamoVllmConfig(ConfigBase):
         str, EmbeddingTransferMode
     ]  # resolved to enum in validate()
     embedding_worker: bool = False
+    embedding_frontend_tokenization: bool = False
     embedding_worker_processes: int = 1
     realtime: bool = False
     classify_worker: bool = False
@@ -554,6 +583,7 @@ class DynamoVllmConfig(ConfigBase):
         _reject_removed_multimodal_env_vars()
         self._resolve_disaggregation_mode()
         self._resolve_embedding_transfer_mode()
+        self._validate_embedding_frontend_tokenization()
         self._validate_embedding_worker_exclusivity()
         self._validate_embedding_worker_processes()
         self._validate_realtime_worker_exclusivity()
@@ -742,6 +772,20 @@ class DynamoVllmConfig(ConfigBase):
                 "generation scheduler and not compatible with pooling engines. "
                 "Embedding workers do not run generation, so prefill/decode "
                 "benchmark sweeps are not meaningful."
+            )
+
+    def _validate_embedding_frontend_tokenization(self) -> None:
+        """Validate the temporary embedding tokenization compatibility gate."""
+        if not self.embedding_frontend_tokenization:
+            return
+        if not self.embedding_worker:
+            raise ValueError(
+                "--embedding-frontend-tokenization requires --embedding-worker."
+            )
+        if self.use_vllm_tokenizer:
+            raise ValueError(
+                "--embedding-frontend-tokenization cannot be combined with "
+                "--use-vllm-tokenizer."
             )
 
     def _validate_embedding_worker_processes(self) -> None:

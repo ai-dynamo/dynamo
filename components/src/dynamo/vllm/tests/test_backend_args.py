@@ -45,6 +45,7 @@ def create_config() -> DynamoVllmConfig:
     config.disaggregation_mode = None
     config.enable_multimodal = False
     config.embedding_worker = False
+    config.embedding_frontend_tokenization = False
     config.embedding_worker_processes = 1
     config.headless = False
     config.benchmark_mode = None
@@ -212,6 +213,60 @@ class TestEmbeddingWorkerExclusivity:
         config.embedding_worker = False
         config.benchmark_mode = "agg"
         config._validate_embedding_worker_exclusivity()
+
+
+class TestEmbeddingFrontendTokenization:
+    @pytest.mark.parametrize(
+        ("embedding_worker", "use_vllm_tokenizer", "error"),
+        [
+            (True, False, None),
+            (False, False, "requires --embedding-worker"),
+            (True, True, "cannot be combined with --use-vllm-tokenizer"),
+        ],
+    )
+    def test_validation(self, embedding_worker, use_vllm_tokenizer, error):
+        config = create_config()
+        config.embedding_frontend_tokenization = True
+        config.embedding_worker = embedding_worker
+        config.use_vllm_tokenizer = use_vllm_tokenizer
+
+        if error is None:
+            config._validate_embedding_frontend_tokenization()
+        else:
+            with pytest.raises(ValueError, match=error):
+                config._validate_embedding_frontend_tokenization()
+
+    @pytest.mark.parametrize(
+        ("args", "env_value", "expected"),
+        [
+            ([], None, False),
+            (["--embedding-frontend-tokenization"], None, True),
+            ([], "true", True),
+            (["--no-embedding-frontend-tokenization"], "true", False),
+        ],
+    )
+    def test_argument_and_environment_parsing(
+        self, monkeypatch, args, env_value, expected
+    ):
+        if env_value is None:
+            monkeypatch.delenv(
+                "DYN_VLLM_EMBEDDING_FRONTEND_TOKENIZATION", raising=False
+            )
+        else:
+            monkeypatch.setenv("DYN_VLLM_EMBEDDING_FRONTEND_TOKENIZATION", env_value)
+        parser = argparse.ArgumentParser()
+        DynamoVllmArgGroup().add_arguments(parser)
+
+        parsed = parser.parse_args(args)
+
+        assert parsed.embedding_frontend_tokenization is expected
+
+    def test_environment_rejects_invalid_value(self, monkeypatch):
+        monkeypatch.setenv("DYN_VLLM_EMBEDDING_FRONTEND_TOKENIZATION", "not-a-boolean")
+        parser = argparse.ArgumentParser()
+
+        with pytest.raises(argparse.ArgumentTypeError, match="expected one of"):
+            DynamoVllmArgGroup().add_arguments(parser)
 
 
 class TestRealtimeWorkerExclusivity:

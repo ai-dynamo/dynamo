@@ -17,7 +17,6 @@ from dynamo.vllm.worker_factory import (
     EngineSetupResult,
     WorkerFactory,
     _DecodeWorkerLifecycle,
-    _embedding_model_input,
     _wait_and_load_benchmark,
 )
 
@@ -33,47 +32,6 @@ pytestmark = [
 ]
 
 
-@pytest.mark.parametrize(
-    ("env_value", "expected"),
-    [
-        (None, ModelInput.Text),
-        ("0", ModelInput.Text),
-        ("false", ModelInput.Text),
-        ("off", ModelInput.Text),
-        ("no", ModelInput.Text),
-        (" NO ", ModelInput.Text),
-        ("1", ModelInput.Tokens),
-        ("true", ModelInput.Tokens),
-        ("on", ModelInput.Tokens),
-        ("yes", ModelInput.Tokens),
-        (" TRUE ", ModelInput.Tokens),
-    ],
-)
-def test_embedding_model_input(
-    monkeypatch: pytest.MonkeyPatch,
-    env_value: str | None,
-    expected: ModelInput,
-) -> None:
-    if env_value is None:
-        monkeypatch.delenv("DYN_EMBEDDING_FRONTEND_TOKENIZATION", raising=False)
-    else:
-        monkeypatch.setenv("DYN_EMBEDDING_FRONTEND_TOKENIZATION", env_value)
-    assert _embedding_model_input() == expected
-
-
-@pytest.mark.parametrize("env_value", ["", "yes-please"])
-def test_embedding_model_input_rejects_invalid_values(
-    monkeypatch: pytest.MonkeyPatch,
-    env_value: str,
-) -> None:
-    monkeypatch.setenv("DYN_EMBEDDING_FRONTEND_TOKENIZATION", env_value)
-    with pytest.raises(
-        ValueError,
-        match="expected true/false/on/off/yes/no/1/0",
-    ):
-        _embedding_model_input()
-
-
 def _make_config(**overrides) -> Mock:
     """Create a mock Config with canonical worker settings."""
     defaults = {
@@ -82,6 +40,7 @@ def _make_config(**overrides) -> Mock:
         "route_to_encoder": False,
         "disaggregation_mode": DisaggregationMode.AGGREGATED,
         "embedding_worker": False,
+        "embedding_frontend_tokenization": False,
         # Pin to the real Config default: an auto-created Mock attribute is
         # truthy, which enables the GMS shadow-mode path and imports the
         # optional gpu_memory_service package (absent in some test images).
@@ -1203,7 +1162,14 @@ async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
 
 
 @pytest.mark.asyncio
-async def test_embedding_worker_cleans_up_engine_resources_in_order() -> None:
+@pytest.mark.parametrize(
+    ("embedding_frontend_tokenization", "expected_model_input"),
+    [(False, ModelInput.Text), (True, ModelInput.Tokens)],
+)
+async def test_embedding_worker_registration_and_cleanup(
+    embedding_frontend_tokenization: bool,
+    expected_model_input: ModelInput,
+) -> None:
     cleanup_order: list[str] = []
     endpoint = Mock()
     endpoint.connection_id.return_value = "embedding-worker-id"
@@ -1226,10 +1192,11 @@ async def test_embedding_worker_cleans_up_engine_resources_in_order() -> None:
             Mock(),
         )
     )
+    register_vllm_model = AsyncMock(return_value=None)
     factory = WorkerFactory(
         setup_vllm_engine_fn=setup_vllm_engine,
         setup_kv_event_publisher_fn=Mock(),
-        register_vllm_model_fn=AsyncMock(return_value=None),
+        register_vllm_model_fn=register_vllm_model,
         setup_fpm_relay_fn=Mock(),
         setup_metrics_collection_fn=Mock(),
     )
@@ -1237,6 +1204,7 @@ async def test_embedding_worker_cleans_up_engine_resources_in_order() -> None:
     handler.cleanup.side_effect = lambda: cleanup_order.append("handler")
     config = _make_config(
         embedding_worker=True,
+        embedding_frontend_tokenization=embedding_frontend_tokenization,
         namespace="dynamo",
         component="backend",
         endpoint="generate",
@@ -1256,5 +1224,7 @@ async def test_embedding_worker_cleans_up_engine_resources_in_order() -> None:
             shutdown_endpoints,
         )
 
+    register_vllm_model.assert_awaited_once()
+    assert register_vllm_model.await_args.args[0] == expected_model_input
     assert cleanup_order == ["handler", "client", "resource"]
     assert shutdown_endpoints == [endpoint]
