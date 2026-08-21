@@ -3446,20 +3446,24 @@ async fn responses(
     let parsing_options =
         parsing_options.with_parallel_tool_calls(request.inner.parallel_tool_calls);
 
-    // NOTE: `move_reasoning_to_content_when_empty` is the aggregator flag and is
-    // not set here. A non-streaming Responses request DOES reach the aggregator
-    // (forcing stream=true on the converted request only drives internal
-    // streaming; the client-facing `streaming` flag still selects the aggregating
-    // branch below), so it reaches it with the flag false.
+    // A non-streaming Responses request DOES reach the aggregator (forcing
+    // stream=true on the converted request only drives internal streaming; the
+    // client-facing `streaming` flag still selects the aggregating branch
+    // below), so it needs the same backstop the chat path installs.
     //
-    // That is currently unreachable rather than wrong: the Responses-to-chat
-    // conversion hard-codes `chat_template_args: None`, so
-    // `force_nonempty_content` can never be set on this path in the first place.
-    // If that conversion ever forwards chat_template_args, the streaming stage
-    // would still cover the reasoning-only case — `postprocessor_parsing_stream`
-    // gates on the request's own args via `wants_reasoning_as_content_when_empty`
-    // rather than on this flag — but the aggregator backstop should be wired here
-    // too at that point. Tracked as follow-up.
+    // This used to be left unset, which was safe only because the
+    // Responses-to-chat conversion hard-coded `chat_template_args: None` and
+    // `force_nonempty_content` could never be set on this path. Now that the
+    // conversion forwards those args, the flag has to be wired here: the
+    // streaming stage gates on the request's own args via
+    // `wants_reasoning_as_content_when_empty`, but the aggregating branch reads
+    // this flag instead.
+    let move_reasoning_to_content_when_empty =
+        crate::preprocessor::OpenAIPreprocessor::wants_reasoning_as_content_when_empty(
+            request.chat_template_args.as_ref(),
+        );
+    let parsing_options = parsing_options
+        .with_move_reasoning_to_content_when_empty(move_reasoning_to_content_when_empty);
 
     let mut response_collector = state
         .metrics_clone()
@@ -5083,6 +5087,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         }
     }
 
