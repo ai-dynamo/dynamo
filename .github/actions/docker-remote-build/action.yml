@@ -147,6 +147,15 @@ runs:
           fi
         fi
 
+        if [ -n "${PIP_INDEX_URL:-}" ] \
+          && [ -n "${UV_DEFAULT_INDEX:-}" ] \
+          && [ -n "${NETRC:-}" ] \
+          && [ -f "${NETRC}" ]; then
+          SECRET_ARGS+=" --secret id=pip-index-url,env=PIP_INDEX_URL"
+          SECRET_ARGS+=" --secret id=uv-default-index,env=UV_DEFAULT_INDEX"
+          SECRET_ARGS+=" --secret id=pypi-netrc,src=${NETRC}"
+        fi
+
         TARGET_ARG=""
         if [ -n "${{ inputs.build_target }}" ]; then
           TARGET_ARG="--target ${{ inputs.build_target }}"

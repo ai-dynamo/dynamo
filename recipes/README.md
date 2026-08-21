@@ -7,6 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 
 Production-tested Kubernetes deployment recipes for LLM inference using NVIDIA Dynamo.
 
+No recipe for your model and hardware combination? Point an AI coding agent at this repository
+and ask it to author or adapt one; the repo's agent skills guide the process.
+
 > **Prerequisites:** This guide assumes you have already installed the Dynamo Kubernetes Platform.
 > If not, follow the **[Kubernetes Deployment Guide](../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)** first.
 
@@ -40,10 +43,14 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/agg/blackwell/)** | TensorRT-LLM | Aggregated (Blackwell) | 16x B100/B200 | ✅ | ✅ | MoE model, TP4×EP4, DEEPGEMM backend | ❌ |
 | **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/disagg/hopper/)** | TensorRT-LLM | Disaggregated (Hopper) | 16x H100/H200 | ✅ | ✅ | MoE model, Prefill + Decode | ❌ |
 | **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/)** | TensorRT-LLM | Disaggregated (Blackwell) | 16x B100/B200 | ✅ | ✅ | MoE model, Prefill + Decode, DEEPGEMM backend | ❌ |
-| **[Qwen3.8-2.4T-A95B](qwen3.8-2.4t-a95b/)** | vLLM, SGLang | Aggregated / Disaggregated | 16x GB300 / GB200 | ✅ | ❌ | Hybrid gated-delta-net + 512-expert MoE (262K ctx), FP8 weights + FP8 KV, TP16 over MNNVL, KV-aware routing + prefix caching, reasoning + tool calling | ❌ |
+| **[Qwen3.8-2.4T-A95B-FP8](qwen3.8-2.4t-a95b-fp8/)** | vLLM, SGLang | Aggregated / Disaggregated | 16x GB300 / GB200 | ✅ | ❌ | Hybrid gated-delta-net + 512-expert MoE (262K ctx), FP8 weights + FP8 KV, TP16 over MNNVL, KV-aware routing + prefix caching, reasoning + tool calling | ❌ |
+| **[Qwen3.5-122B-A10B-NVFP4](qwen3.5-122b/nvfp4/vllm/agg-b200-agentic/)** | vLLM | Aggregated | 2x B200 | ✅ | ✅ | Hybrid GDN+MoE, NVFP4 + FP8 KV, TP1 x `replicas: 2`, KV-aware routing; agentic profile | ❌ |
+| **[Qwen3.5-122B-A10B-NVFP4](qwen3.5-122b/nvfp4/vllm/disagg-b200-agentic/)** | vLLM | Disaggregated | 3x B200 | ✅ | ✅ | Hybrid GDN+MoE, NVFP4 + FP8 KV, 1P2D over NIXL, KV-aware routing; agentic profile | ❌ |
 | **[GPT-OSS-120B](gpt-oss-120b/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x GB200 | ✅ | ✅ | Blackwell only, WideEP | ❌ |
 | **[GPT-OSS-120B](gpt-oss-120b/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 5x Blackwell (GB200/B200) | ✅ | ✅ | Prefill/Decode split | ❌ |
 | **[GPT-OSS-120B](gpt-oss-120b/vllm/)** | vLLM | Agg + Disagg | 8x B200 / 8x H200 | ✅ | ✅ | MXFP4 MoE + FP8 KV, 8x TP1 agg / decode-heavy single-node disagg (2P6D B200, 4P4D H200), EAGLE3 spec decode, KV-aware routing, harmony reasoning + tool calling; agentic profile | ❌ |
+| **[Qwen3.5-122B-A10B-FP8](qwen3.5-122b/fp8/vllm/agg-h200-agentic/)** | vLLM | Aggregated | 4x H200 | ✅ | ✅ | Hybrid GDN+MoE, TP2 x `replicas: 2`, MTP spec decode, KV-aware routing; agentic profile | ❌ |
+| **[Qwen3.5-122B-A10B-FP8](qwen3.5-122b/fp8/vllm/disagg-h200-agentic/)** | vLLM | Disaggregated | 3x H200 | ✅ | ✅ | Hybrid GDN+MoE, 1P2D over NIXL, KV-aware routing, no MTP; agentic profile | ❌ |
 | **[GLM-5-NVFP4](glm-5-nvfp4/sglang/disagg/)** | SGLang | Disagg Prefill/Decode | 20x GB200 | ✅ | ✅ | NVFP4, EAGLE speculative decoding, TP16 decode + TP4 prefill, stable SGLang runtime image | ❌ |
 | **[GLM-5.2](glm-5.2/)** | SGLang | Aggregated + Disaggregated | 16x/20x B200 or 24x/16x H200 | ✅ | ✅ | B200 NVFP4 or H200 FP8 with FP8 KV, KV-aware routing, EAGLE, B200 HiCache CPU offload, agentic trace profile | ❌ |
 | **[DeepSeek-R1](deepseek-r1/sglang/disagg-8gpu/)** | SGLang | Disagg WideEP | 16x H200 | ✅ | ❌ | TP=8, single-node. Use `model-download-sglang.yaml` | ❌ |
@@ -106,6 +113,11 @@ Each complete recipe follows this standard structure:
         ├── deploy.yaml           # Complete DynamoGraphDeployment manifest
         └── perf.yaml (optional)  # AIPerf benchmark job
 ```
+
+In addition, [`accuracy/`](accuracy/) is a shared, model-agnostic accuracy
+check (deliberately outside the per-model structure above): point it at any
+deployed recipe to compare the served model's benchmark score against its
+model card. See [`accuracy/README.md`](accuracy/README.md).
 
 ## Quick Start
 

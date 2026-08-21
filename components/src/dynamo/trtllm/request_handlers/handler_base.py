@@ -1130,7 +1130,14 @@ class HandlerBase(BaseGenerativeHandler):
             if default_max_tokens is not None:
                 sampling_params.max_tokens = default_max_tokens
 
-        if is_generation_stage(CommonDisaggregationMode[self.disaggregation_mode.name]):
+        # PREFILL forces max_tokens=1 above but must still apply the rest of
+        # the stop conditions (native TRT-LLM context_only overrides only
+        # max_tokens). Without this, TRT-LLM could stop on EOS at that single
+        # forced token and skip the KV handoff to decode entirely.
+        if (
+            is_generation_stage(CommonDisaggregationMode[self.disaggregation_mode.name])
+            or self.disaggregation_mode == DisaggregationMode.PREFILL
+        ):
             apply_stop_conditions_to_sampling_params(
                 sampling_params, request["stop_conditions"]
             )
@@ -1333,23 +1340,17 @@ class HandlerBase(BaseGenerativeHandler):
                                 len(o.token_ids) for o in res.outputs
                             )
 
-                            prompt_tokens_details = None
                             if prefill_prompt_tokens_details:
                                 prompt_tokens_details = prefill_prompt_tokens_details
                             else:
-                                if output.request_perf_metrics is not None:
-                                    kv_cache_metrics = (
-                                        output.request_perf_metrics.kv_cache_metrics
-                                    )
-                                    cached_tokens = min(
-                                        num_input_tokens,
-                                        kv_cache_metrics.num_reused_blocks
-                                        * self.kv_block_size,
-                                    )
-                                    if cached_tokens > 0:
-                                        prompt_tokens_details = {
-                                            "cached_tokens": int(cached_tokens),
-                                        }
+                                # Clamp to prompt size: image token_ids are unexpanded
+                                # placeholders, so the engine count (measured over the
+                                # expanded prompt) can exceed it.
+                                prompt_tokens_details = {
+                                    "cached_tokens": min(
+                                        num_input_tokens, int(res.cached_tokens or 0)
+                                    ),
+                                }
 
                             out["completion_usage"] = {
                                 "prompt_tokens": int(num_input_tokens),
@@ -1362,6 +1363,10 @@ class HandlerBase(BaseGenerativeHandler):
 
                         # Yield the chunk to the client and update the token
                         # count for this output choice.
+                        #
+                        # Stays a yield under push egress: this hop is
+                        # pure-Python generator delegation on one thread. Only
+                        # the outermost hop into Rust pushes.
                         yield out
                         output_tokens_per_choice[output_idx] = next_total_toks
 

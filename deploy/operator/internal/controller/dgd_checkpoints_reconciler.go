@@ -556,8 +556,9 @@ func (r *dgdCheckpointsReconciler) buildCheckpointJobPodTemplate(
 		r.config,
 		consts.MultinodeDeploymentTypeGrove, // Use Grove (single-node backends return early)
 		componentName,
-		nil, // No checkpoint info for checkpoint creation jobs
-		nil, // Use default deployer
+		nil,                                     // No checkpoint info for checkpoint creation jobs
+		nil,                                     // Use default deployer
+		func() (int64, error) { return 0, nil }, // Checkpoint jobs are single-node
 	)
 	if err != nil {
 		return corev1.PodTemplateSpec{}, fmt.Errorf("failed to generate base pod spec: %w", err)

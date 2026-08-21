@@ -40,6 +40,10 @@ tabs:
   recipes:
     display-name: Recipes
     icon: file-code
+  agent-skills:
+    display-name: Agent Skills
+    icon: robot
+    slug: agent-skills
   developer-guide:
     display-name: Developer Guide
     icon: code
@@ -454,8 +458,8 @@ navigation:
             path: pages/recipes/model-recipes/kimi-k3.mdx
             slug: kimi-k3
           - page: Qwen3.8-2.4T-A95B
-            path: pages/recipes/model-recipes/qwen-3-8-2-4t-a95b.mdx
-            slug: qwen-3-8-2-4t-a95b
+            path: pages/recipes/model-recipes/qwen-3-8-2-4t-a95b-fp8.mdx
+            slug: qwen-3-8-2-4t-a95b-fp8
           - page: GLM-5.2
             path: pages/recipes/model-recipes/glm-5-2.mdx
             slug: glm-5-2
@@ -465,7 +469,7 @@ navigation:
           - page: Kimi-K2.6
             path: pages/recipes/model-recipes/kimi-k2-6.mdx
             slug: kimi-k2-6
-          - page: Nemotron-3.5-Lightning
+          - page: Nemotron 3.5 Lightning
             path: pages/recipes/model-recipes/nemotron-3-5-lightning.mdx
             slug: nemotron-3-5-lightning
           - page: Nemotron 3 Ultra
@@ -492,6 +496,9 @@ navigation:
           - page: Qwen3-32B
             path: pages/recipes/model-recipes/qwen3-32b.mdx
             slug: qwen3-32b
+          - page: Qwen3.5-122B-A10B
+            path: pages/recipes/model-recipes/qwen3-5-122b.mdx
+            slug: qwen3-5-122b
           - page: Qwen3-235B-A22B FP8
             path: pages/recipes/model-recipes/qwen3-235b-a22b-fp8.mdx
             slug: qwen3-235b-a22b-fp8
@@ -587,6 +594,12 @@ navigation:
             slug: kv-router-ab-testing
             hidden: true
 
+  - tab: agent-skills
+    layout:
+      - page: Overview
+        path: pages/agent-skills/overview.mdx
+
+  # ==================== Developer Guide ====================
   - tab: developer-guide
     layout:
       # ==================== Knowledge Base ====================
@@ -882,6 +895,8 @@ navigation:
             path: pages/developer-guide/advanced-customizations/building-from-source.md
           - page: Write Custom Routing Strategies
             path: pages/developer-guide/advanced-customizations/custom-worker-selection.mdx
+          - page: Conditional Disaggregation
+            path: pages/developer-guide/advanced-customizations/conditional-disaggregation.md
           - page: Custom Vision Encoders
             slug: custom-vision-encoders
             path: pages/developer-guide/advanced-customizations/custom-vision-encoders.md
@@ -953,14 +968,19 @@ navigation:
   - tab: reference
     layout:
       - page: Compatibility
+        icon: shield-halved
         path: pages/reference/general/compatibility.mdx
         slug: compatibility
 
       - section: Releases
+        icon: tag
         slug: releases
         path: pages/reference/general/releases/release-history.mdx
         collapsed: true
         contents:
+          - page: Dynamo v1.4.0
+            path: pages/reference/general/releases/dynamo-v1-4-0.mdx
+            slug: v1-4-0
           - page: Dynamo v1.3.0
             path: pages/reference/general/releases/dynamo-v1-3-0.mdx
             slug: v1-3-0
@@ -981,23 +1001,28 @@ navigation:
       # Machine-readable mirror of releases.data.ts for agents; reachable
       # by URL and llms indexes, not the sidebar.
       - page: Releases (machine-readable)
+        icon: database
         path: pages/reference/general/releases-machine-readable.mdx
         slug: releases-data
         hidden: true
 
       - page: Release Artifacts
+        icon: download
         path: pages/reference/general/release-artifacts.mdx
         slug: release-artifacts
 
       - page: Nightly Releases
+        icon: moon
         path: pages/reference/general/nightly-releases.md
         slug: nightly-releases
 
       - page: Model Early Access Builds
+        icon: microchip
         path: pages/reference/general/model-early-access-builds.mdx
         slug: model-early-access-builds
 
       - page: Examples
+        icon: file-code
         path: pages/reference/general/examples.md
         slug: examples
 
@@ -1016,6 +1041,7 @@ navigation:
       # the twenty anchored redirects in docs.yml that carry the retired
       # NIXL Connect class pages -- would otherwise move.
       - page: API Reference
+        icon: code
         path: pages/reference/api/README.mdx
         slug: api
 
@@ -1166,6 +1192,7 @@ navigation:
             path: pages/reference/nixl-connect/overview.mdx
 
       - page: Glossary
+        icon: book-open
         path: pages/reference/general/glossary.md
         slug: glossary
 
@@ -1193,6 +1220,9 @@ navigation:
         contents:
           # Keep this archive in reverse chronological order. Publication dates are
           # rendered in each article header and on the custom landing page.
+          - page: "Dynamo Agent Optimization Skills"
+            path: pages/blog/2026/agent-optimization-skills.mdx
+            slug: agent-optimization-skills
           - page: "DynoSim Pareto Frontier"
             path: pages/blog/2026/dynosim-pareto-frontier.mdx
             slug: dynosim-pareto-frontier
@@ -1215,6 +1245,7 @@ navigation:
   - tab: community
     layout:
       - page: Community
+        icon: users
         path: pages/community/community.mdx
       - section: Contributing
         icon: code-pull-request

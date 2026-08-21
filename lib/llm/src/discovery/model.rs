@@ -355,92 +355,32 @@ impl Model {
     /// the same `needs`). A legacy card (no `worker_type`) bypasses the strict
     /// check: ready iff any worker is live. Empty `wsets` is not ready.
     fn evaluate_namespace(&self, wsets: &[Arc<WorkerSet>]) -> NamespaceReadinessEval {
-        let mut present: std::collections::HashSet<crate::worker_type::WorkerType> =
-            std::collections::HashSet::new();
-        let mut missing: std::collections::HashSet<crate::worker_type::WorkerType> =
-            std::collections::HashSet::new();
-        let mut has_legacy = false;
-        let mut legacy_live_workers = 0usize;
-        let mut has_live_worker = false;
-        let mut live_sets_by_type = std::collections::HashMap::new();
-
-        // First pass: which worker types have a live worker (+ legacy detection).
-        for ws in wsets {
-            let count = ws.worker_count();
-            if count > 0 {
-                has_live_worker = true;
-            }
-            match Self::ws_type_and_needs(ws) {
-                Some((wt, _needs)) => {
-                    if count > 0 {
-                        present.insert(wt);
-                        *live_sets_by_type.entry(wt).or_insert(0usize) += 1;
-                    }
-                }
-                // No declared worker_type → legacy card.
-                None => {
-                    has_legacy = true;
-                    legacy_live_workers += count;
-                }
-            }
-        }
-
-        // COMPAT branch: a legacy card disables strict gating; the disaggregated
-        // worker types can't be reconstructed, so ready iff any worker is live.
-        if has_legacy {
-            warn_legacy_readiness_once(&self.name, wsets[0].namespace());
-            return NamespaceReadinessEval {
-                ready: has_live_worker,
-                has_legacy,
-                legacy_live_workers,
-                present,
-                missing,
-                ambiguous: std::collections::HashSet::new(),
-            };
-        }
-
-        let ambiguous = live_sets_by_type
-            .into_iter()
-            .filter_map(|(worker_type, count)| {
-                (worker_type != crate::worker_type::WorkerType::Aggregated && count > 1)
-                    .then_some(worker_type)
+        let units = wsets
+            .iter()
+            .map(|ws| match Self::ws_type_and_needs(ws) {
+                Some((worker_type, needs)) => super::readiness::ReadinessUnit {
+                    worker_type: Some(worker_type),
+                    live_count: ws.worker_count(),
+                    needs,
+                },
+                None => super::readiness::ReadinessUnit {
+                    worker_type: None,
+                    live_count: ws.worker_count(),
+                    needs: Vec::new(),
+                },
             })
-            .collect::<std::collections::HashSet<_>>();
-
-        // Strict path: a registered worker type with no live worker anywhere is
-        // missing; a *live* WorkerSet whose `needs` DNF is unsatisfied flags its
-        // absent peers.
-        for ws in wsets {
-            let Some((wt, needs)) = Self::ws_type_and_needs(ws) else {
-                continue;
-            };
-            if !present.contains(&wt) {
-                missing.insert(wt);
-            }
-            if ws.worker_count() == 0 || needs.is_empty() {
-                continue;
-            }
-            let satisfied = needs
-                .iter()
-                .any(|alt| alt.iter().all(|t| present.contains(t)));
-            if !satisfied {
-                for alt in &needs {
-                    for t in alt {
-                        if !present.contains(t) {
-                            missing.insert(*t);
-                        }
-                    }
-                }
-            }
+            .collect::<Vec<_>>();
+        let eval = super::readiness::evaluate_readiness(&units);
+        if eval.has_legacy {
+            warn_legacy_readiness_once(&self.name, wsets[0].namespace());
         }
-
         NamespaceReadinessEval {
-            ready: has_live_worker && missing.is_empty() && ambiguous.is_empty(),
-            has_legacy,
-            legacy_live_workers,
-            present,
-            missing,
-            ambiguous,
+            ready: eval.ready,
+            has_legacy: eval.has_legacy,
+            legacy_live_workers: eval.legacy_live_workers,
+            present: eval.present,
+            missing: eval.missing,
+            ambiguous: eval.ambiguous,
         }
     }
 
@@ -461,7 +401,7 @@ impl Model {
     /// Structured per-namespace worker readiness for this model — the data
     /// behind the `GET /v1/models/{model}/ready` observability endpoint.
     ///
-    /// Built on the same [`Self::evaluate_namespace`] facts the serving gate
+    /// Built on the same `Self::evaluate_namespace` facts the serving gate
     /// uses, so the reported `ready`/`missing` can never disagree with routing;
     /// this method only layers display data (per-type counts, reason strings).
     pub fn namespace_readiness(&self) -> ModelReadiness {
@@ -569,7 +509,7 @@ impl Model {
     /// where a `ModelDeploymentCard` is registered before its WorkerSet has
     /// been wired up.
     ///
-    /// Delegates to [`Self::select_worker_set_with`] so readiness reports
+    /// Delegates to `Self::select_worker_set_with` so readiness reports
     /// exactly what request routing would accept — including the namespace
     /// completeness gate. Without that, a live decode-only WorkerSet with a
     /// chat engine but no prefill peer would report ready while every request

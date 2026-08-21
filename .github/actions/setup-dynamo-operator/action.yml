@@ -54,6 +54,13 @@ inputs:
     description: 'Host PriorityClass to set on pods synced from the vCluster. Use auto to set ci-nightly-high-priority only when the active kube context targets aws-dev-01 or aws-dev-02; use an empty value to disable.'
     required: false
     default: 'auto'
+  reset_existing:
+    description: >-
+      Delete an existing vCluster of the same name before creating it. Only safe from a
+      bootstrap path that is the sole writer of this vCluster name; recovery paths that
+      can run concurrently for one name must leave this false.
+    required: false
+    default: 'false'
   checkpoint_enabled:
     description: 'Enable operator checkpoint/restore injection'
     required: false
@@ -137,7 +144,7 @@ runs:
         echo "operator_tag=${{ inputs.operator_tag }}" >> "$GITHUB_OUTPUT"
 
     - name: Install vCluster CLI
-      uses: ./.github/actions/install-vcluster-cli
+      uses: $/.github/actions/install-vcluster-cli
 
     - name: Create host namespace
       shell: bash
@@ -148,7 +155,11 @@ runs:
         echo "::group::Create host namespace $NAMESPACE"
         set -euo pipefail
         set -x
-        kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+        # Client-side apply is a GET followed by a POST, so concurrent callers
+        # both create and the loser fails. Server-side apply is one atomic
+        # create-or-update request.
+        kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml \
+          | kubectl apply --server-side --force-conflicts --field-manager=ci-setup -f -
         LABELS=(
           ngc-api=enabled
           nvcr-imagepull=enabled
@@ -167,6 +178,7 @@ runs:
         echo "::endgroup::"
 
     - name: Delete existing vCluster for this run
+      if: inputs.reset_existing == 'true'
       shell: bash
       env:
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
@@ -174,13 +186,31 @@ runs:
       run: |
         echo "Checking for existing vCluster ${VCLUSTER_NAME} in ${NAMESPACE}"
         # github.run_id is stable across re-runs, so this catches leftovers from
-        # a failed or canceled attempt of the same workflow run.
-        if kubectl get statefulset "${VCLUSTER_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+        # a failed or canceled attempt of the same workflow run. Gated on
+        # reset_existing: a concurrent caller's cluster is indistinguishable from
+        # a leftover here, so only a sole-writer bootstrap may delete.
+        if kubectl get statefulset "${VCLUSTER_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1 \
+           || helm status "${VCLUSTER_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
           echo "Deleting existing vCluster: ${VCLUSTER_NAME}"
           vcluster delete "${VCLUSTER_NAME}" --namespace "${NAMESPACE}" 2>&1 || \
             kubectl delete statefulset "${VCLUSTER_NAME}" -n "${NAMESPACE}" --ignore-not-found 2>&1 || true
+          # A partial install leaves the release record behind with no StatefulSet,
+          # which vcluster delete does not always clear.
+          helm uninstall "${VCLUSTER_NAME}" -n "${NAMESPACE}" 2>/dev/null || true
           kubectl wait "statefulset/${VCLUSTER_NAME}" -n "${NAMESPACE}" \
             --for=delete --timeout=120s 2>/dev/null || true
+          # Cascading deletion drops the StatefulSet before its pod, and the
+          # replacement reuses the same name and labels. Wait the old pod out so
+          # the readiness check cannot select one that is still terminating.
+          DEADLINE=$(( SECONDS + 120 ))
+          while kubectl get pod -l "app=vcluster,release=${VCLUSTER_NAME}" \
+                  -n "${NAMESPACE}" -o name 2>/dev/null | grep -q .; do
+            if [ "${SECONDS}" -ge "${DEADLINE}" ]; then
+              echo "::error::vCluster pod for ${VCLUSTER_NAME} still terminating 120s after delete"
+              exit 1
+            fi
+            sleep 5
+          done
         else
           echo "No existing vCluster named ${VCLUSTER_NAME} found."
         fi
@@ -221,6 +251,7 @@ runs:
         VCLUSTER_NAME: ${{ steps.resolve-names.outputs.vcluster_name }}
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
         VCLUSTER_HOST_PRIORITY_CLASS: ${{ steps.resolve-vcluster-priority.outputs.priority_class }}
+        RESET_EXISTING: ${{ inputs.reset_existing }}
         CHECKPOINT_ENABLED: ${{ inputs.checkpoint_enabled }}
         MODEL_CACHE_SERVER: ${{ inputs.model_cache_server }}
         MODEL_CACHE_PATH: ${{ inputs.model_cache_path }}
@@ -263,13 +294,36 @@ runs:
         # vCluster distro tags use upstream versions, so strip provider suffixes.
         # Guest/host skew can break Pod status sync (loft-sh/vcluster#3578).
         echo "Using host Kubernetes ${HOST_K8S_GIT_VERSION}; pinning vCluster guest to ${VCLUSTER_K8S_VERSION}"
-        vcluster create "${VCLUSTER_NAME}" \
-          --namespace "${NAMESPACE}" \
-          --connect=false \
-          --upgrade \
-          --set controlPlane.distro.k8s.enabled=true \
-          --set controlPlane.distro.k8s.version="${VCLUSTER_K8S_VERSION}" \
-          "${VCLUSTER_HELM_ARGS[@]}"
+        # A recovery caller does not own this vCluster name -- a sibling job may be
+        # provisioning it right now. Adopt what that job produces rather than racing
+        # helm for the same release: `vcluster create` is `helm upgrade --install`, so
+        # a second pass would either collide with the in-flight install or upgrade a
+        # control plane another job is already testing against. A reset_existing
+        # caller has just cleared the name, so there every failure is real.
+        if [ "${RESET_EXISTING}" != "true" ] \
+           && helm status "${VCLUSTER_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+          echo "vCluster ${VCLUSTER_NAME} is already being provisioned elsewhere; adopting it"
+        else
+          CREATE_LOG="$(mktemp)"
+          if ! vcluster create "${VCLUSTER_NAME}" \
+               --namespace "${NAMESPACE}" \
+               --connect=false \
+               --upgrade \
+               --set controlPlane.distro.k8s.enabled=true \
+               --set controlPlane.distro.k8s.version="${VCLUSTER_K8S_VERSION}" \
+               "${VCLUSTER_HELM_ARGS[@]}" 2>&1 | tee "${CREATE_LOG}"; then
+            # A sibling can still commit the release between the check above and this
+            # call. helm names that collision differently depending on whether its
+            # install has finished.
+            if [ "${RESET_EXISTING}" != "true" ] && grep -qE \
+                 'release: already exists|another operation \(install/upgrade/rollback\) is in progress' \
+                 "${CREATE_LOG}"; then
+              echo "vCluster ${VCLUSTER_NAME} was created concurrently; adopting it"
+            else
+              exit 1
+            fi
+          fi
+        fi
         echo "::endgroup::"
 
     - name: Wait for vCluster pod to be ready
@@ -279,8 +333,17 @@ runs:
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
       run: |
         echo "::group::Wait for vCluster pod"
-        # Give the API server a moment to register the new pod
-        sleep 20
+        # kubectl wait fails immediately on a selector matching nothing, and when the
+        # cluster was adopted the owning job may not have applied its pod yet.
+        DEADLINE=$(( SECONDS + 300 ))
+        until kubectl get pod -l app=vcluster,release=${VCLUSTER_NAME} \
+                -n ${NAMESPACE} -o name 2>/dev/null | grep -q .; do
+          if [ "${SECONDS}" -ge "${DEADLINE}" ]; then
+            echo "::error::No vCluster pod for ${VCLUSTER_NAME} appeared within 300s"
+            exit 1
+          fi
+          sleep 5
+        done
         kubectl wait --for=condition=ready pod \
           -l app=vcluster,release=${VCLUSTER_NAME} \
           -n ${NAMESPACE} \
@@ -305,14 +368,25 @@ runs:
           - operator: Exists
         EOF
 
-        helm upgrade --install vcluster-hpm vcluster-hpm \
-          --repo https://charts.loft.sh \
-          --namespace "${NAMESPACE}" \
-          --wait \
-          --timeout 10m \
-          --set VclusterReleaseName="${VCLUSTER_NAME}" \
-          --values "${HPM_VALUES}" \
-          --debug
+        # helm reads release history before writing it, so concurrent callers
+        # both choose install and the loser collides. The rollout wait below
+        # synchronizes on whichever caller won.
+        HPM_LOG="$(mktemp)"
+        if ! helm upgrade --install vcluster-hpm vcluster-hpm \
+             --repo https://charts.loft.sh \
+             --namespace "${NAMESPACE}" \
+             --wait \
+             --timeout 10m \
+             --set VclusterReleaseName="${VCLUSTER_NAME}" \
+             --values "${HPM_VALUES}" \
+             --debug 2>&1 | tee "${HPM_LOG}"; then
+          if grep -qE 'release: already exists|another operation \(install/upgrade/rollback\) is in progress' \
+               "${HPM_LOG}"; then
+            echo "vcluster-hpm was installed concurrently; adopting it"
+          else
+            exit 1
+          fi
+        fi
 
         kubectl rollout status daemonset/vcluster-hpm-hostpath-mapper \
           -n "${NAMESPACE}" \
@@ -321,7 +395,7 @@ runs:
 
     - name: Connect to vCluster
       id: connect-vcluster
-      uses: ./.github/actions/connect-vcluster
+      uses: $/.github/actions/connect-vcluster
       with:
         host_kubeconfig_base64: ${{ inputs.kubeconfig_base64 }}
         vcluster_name: ${{ steps.resolve-names.outputs.vcluster_name }}
@@ -334,10 +408,13 @@ runs:
         HF_TOKEN: ${{ inputs.hf_token }}
       run: |
         echo "::group::Create HF token secret inside vCluster"
+        set -euo pipefail
         kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
           create secret generic hf-token-secret \
-          --from-literal=HF_TOKEN=${HF_TOKEN} \
-          -n default || true
+          --from-literal=HF_TOKEN="${HF_TOKEN}" \
+          -n default --dry-run=client -o yaml \
+          | kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+              apply --server-side --force-conflicts --field-manager=ci-setup -f -
         echo "::endgroup::"
 
     - name: Create shared model cache PV/PVC
@@ -352,7 +429,8 @@ runs:
         set -euo pipefail
         # Static PV + bound PVC in the default namespace; deploy tests reference
         # the PVC by name via --model-cache-pvc. Capacity is nominal (not enforced).
-        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster apply -f - <<EOF
+        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+          apply --server-side --force-conflicts --field-manager=ci-setup -f - <<EOF
         apiVersion: v1
         kind: PersistentVolume
         metadata:
@@ -391,6 +469,29 @@ runs:
         DOCKERHUB_PASS: ${{ inputs.dockerhub_password }}
       run: |
         echo "${DOCKERHUB_PASS}" | helm registry login registry-1.docker.io -u "${DOCKERHUB_USER}" --password-stdin
+
+    # The operator refuses to start when checkpoint is enabled unless the
+    # PodSnapshot API exists. Snapshot-agent (which owns that CRD) is installed
+    # in a later job, so apply the CRDs first and let that later job adopt them.
+    - name: Install snapshot CRDs for checkpoint
+      if: inputs.checkpoint_enabled == 'true'
+      shell: bash
+      env:
+        # Keep in lockstep with .github/actions/setup-snapshot-agent/action.yml.
+        SNAPSHOT_CHART_VERSION: 0.1.0-alpha.1
+      run: |
+        echo "::group::Install snapshot CRDs before operator start"
+        set -euo pipefail
+        VKUBECONFIG="${{ github.workspace }}/.kubeconfig-vcluster"
+        helm show crds oci://ghcr.io/ai-dynamo/snapshot/snapshot \
+          --version "${SNAPSHOT_CHART_VERSION}" \
+          | kubectl --kubeconfig="${VKUBECONFIG}" \
+              apply --server-side --force-conflicts --field-manager=ci-setup -f -
+        kubectl --kubeconfig="${VKUBECONFIG}" wait --for=condition=established \
+          crd/podsnapshots.nvidia.com \
+          crd/podsnapshotcontents.nvidia.com \
+          --timeout=120s
+        echo "::endgroup::"
 
     - name: Install Dynamo platform via Helm
       shell: bash
@@ -446,22 +547,45 @@ runs:
           )
         fi
 
-        KUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster \
-        helm upgrade --install dynamo-platform . --namespace default \
-          "${IMAGE_ARGS[@]}" \
-          --set dynamo-operator.gpuDiscovery.enabled=false \
-          "${CHECKPOINT_HELM_ARGS[@]}" \
-          --set global.grove.install=true \
-          --set global.kai-scheduler.install=false \
-          --set 'nats.container.merge.resources.requests.cpu=100m' \
-          --set 'nats.container.merge.resources.requests.memory=128Mi' \
-          --set 'nats.container.merge.resources.limits.cpu=500m' \
-          --set 'nats.container.merge.resources.limits.memory=512Mi' \
-          --set 'nats.reloader.merge.resources.requests.cpu=10m' \
-          --set 'nats.reloader.merge.resources.requests.memory=32Mi' \
-          --set 'nats.reloader.merge.resources.limits.cpu=100m' \
-          --set 'nats.reloader.merge.resources.limits.memory=64Mi' \
-          --debug
+        # helm reads release history before writing it, so concurrent bootstrap
+        # callers both choose install and the loser collides on the same release.
+        HELM_LOG="$(mktemp)"
+        if ! KUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster \
+             helm upgrade --install dynamo-platform . --namespace default \
+               "${IMAGE_ARGS[@]}" \
+               --set dynamo-operator.gpuDiscovery.enabled=false \
+               "${CHECKPOINT_HELM_ARGS[@]}" \
+               --set global.grove.install=true \
+               --set global.kai-scheduler.install=false \
+               --set 'nats.container.merge.resources.requests.cpu=100m' \
+               --set 'nats.container.merge.resources.requests.memory=128Mi' \
+               --set 'nats.container.merge.resources.limits.cpu=500m' \
+               --set 'nats.container.merge.resources.limits.memory=512Mi' \
+               --set 'nats.reloader.merge.resources.requests.cpu=10m' \
+               --set 'nats.reloader.merge.resources.requests.memory=32Mi' \
+               --set 'nats.reloader.merge.resources.limits.cpu=100m' \
+               --set 'nats.reloader.merge.resources.limits.memory=64Mi' \
+               --debug 2>&1 | tee "${HELM_LOG}"; then
+          if grep -qE 'release: already exists|another operation \(install/upgrade/rollback\) is in progress' \
+               "${HELM_LOG}"; then
+            echo "dynamo-platform was installed concurrently; adopting it"
+          else
+            exit 1
+          fi
+        fi
+
+        # An adopted release can still be mid-install; the CRD and container
+        # waits below assume its manifests are committed.
+        DEADLINE=$(( SECONDS + 600 ))
+        until [ "$(KUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster \
+                   helm status dynamo-platform -n default -o json 2>/dev/null \
+                   | jq -r '.info.status // empty')" = "deployed" ]; do
+          if [ "${SECONDS}" -ge "${DEADLINE}" ]; then
+            echo "::error::dynamo-platform did not reach status=deployed within 600s"
+            exit 1
+          fi
+          sleep 5
+        done
         echo "::endgroup::"
 
     - name: Wait for operator CRDs to be established
