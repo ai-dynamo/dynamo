@@ -30,7 +30,9 @@ use crate::PyAsyncRequestStream;
 use dynamo_runtime::pipeline::ManyIn;
 
 use super::context::{Context, callable_accepts_kwarg};
-use super::errors::{extract_http_like_error, py_exception_to_backend_error};
+use super::errors::{
+    extract_http_like_error, py_exception_to_backend_error, py_exception_to_error_type,
+};
 use crate::python_payload::{PythonPayload, PythonResponseItem};
 
 /// Add bindings from this crate to the provided module
@@ -389,11 +391,18 @@ pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
                 .build();
         }
 
+        if let Some((error_type, message)) = py_exception_to_error_type(py, &error) {
+            return DynamoError::builder()
+                .error_type(error_type)
+                .message(message)
+                .build();
+        }
+
         if let Some((code, message)) = extract_http_like_error(py, &error) {
-            let backend_err = if (400..500).contains(&code) {
-                BackendError::InvalidArgument
+            let error_type = if (400..500).contains(&code) {
+                ErrorType::Backend(BackendError::InvalidArgument)
             } else {
-                BackendError::Unknown
+                ErrorType::Backend(BackendError::Unknown)
             };
             let json_msg = serde_json::json!({
                 "message": message,
@@ -401,7 +410,7 @@ pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
             })
             .to_string();
             return DynamoError::builder()
-                .error_type(ErrorType::Backend(backend_err))
+                .error_type(error_type)
                 .message(json_msg)
                 .build();
         }

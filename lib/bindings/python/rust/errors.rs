@@ -11,7 +11,7 @@
 //! corresponding entry to the macro invocation below to keep Python exceptions
 //! in sync.
 
-use dynamo_runtime::error::BackendError;
+use dynamo_runtime::error::{BackendError, ErrorType};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
@@ -100,6 +100,7 @@ macro_rules! define_dynamo_exceptions {
                 "RouterQueueLimitExceeded",
                 m.py().get_type::<RouterQueueLimitExceeded>(),
             )?;
+            m.add("WorkerOverloaded", m.py().get_type::<WorkerOverloaded>())?;
             m.add(
                 "SelectionServiceError",
                 m.py().get_type::<SelectionServiceError>(),
@@ -157,4 +158,27 @@ pub fn extract_http_like_error(py: Python<'_>, err: &PyErr) -> Option<(u16, Stri
         })?;
     let message = value.getattr("message").ok()?.extract::<String>().ok()?;
     Some((code, message))
+}
+
+// Raised by a Python worker to state that *it* is out of capacity.
+//
+// The category belongs in the error chain, not in an HTTP status inside the
+// message: request_was_rejected (dynamo_llm::http::service::metrics) matches the
+// chain, and the frontend owns the HTTP mapping. A worker that encodes the
+// condition as `code = 503` cannot be told apart from a worker relaying a 503
+// from an upstream service it called, which would take a healthy worker out of
+// rotation for someone else's outage.
+//
+// WorkerOverloaded rather than ResourceExhausted: the worker reports its own
+// limit, not pool exhaustion, so the request stays eligible for migration.
+pyo3::create_exception!(dynamo._core, WorkerOverloaded, DynamoException);
+
+/// Map a Python exception to a top-level [`ErrorType`], for categories that are
+/// not [`BackendError`] variants and so cannot come from
+/// [`py_exception_to_backend_error`].
+pub fn py_exception_to_error_type(py: Python<'_>, err: &PyErr) -> Option<(ErrorType, String)> {
+    if err.is_instance_of::<WorkerOverloaded>(py) {
+        return Some((ErrorType::WorkerOverloaded, err.value(py).to_string()));
+    }
+    None
 }
