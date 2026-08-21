@@ -208,11 +208,10 @@ Expected: `choices[0].message.tool_calls[0].function.name` is `get_weather` and 
 
 Non-obvious knobs, all already set in the manifest:
 
-- **Model resolution.** Both the frontend and worker pods mount the `model-cache` PVC at `/model-cache`
-  with `HF_HOME=/model-cache`. Workers pass the repo id (`Qwen/Qwen3.8-2.4T-A95B-FP8`) to `--model` and
-  resolve the checkpoint from the PVC's Hugging Face cache. `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1`
-  are set so no network token lookup occurs at runtime — the `hf-token-secret` is only needed by the
-  model-download Job.
+- **Model resolution.** Both the frontend and worker pods mount the `model-cache` PVC at `/model-cache`.
+  Workers set `HF_HOME=/model-cache`, `HF_HUB_OFFLINE=1`, and `TRANSFORMERS_OFFLINE=1`, then pass the
+  repo id (`Qwen/Qwen3.8-2.4T-A95B-FP8`) to `--model` and resolve the checkpoint from the PVC's Hugging
+  Face cache with no network lookup. The `hf-token-secret` is only needed by the model-download Job.
 - **Async scheduling off.** `--no-async-scheduling` is required for these fixed serving shapes.
 - **Event-driven KV routing.** Both workers publish KV events (`--kv-events-config` over ZMQ), and the
   frontend uses `--router-mode kv --router-kv-events`. Missing either worker flag can silently route
