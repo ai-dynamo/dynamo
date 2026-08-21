@@ -62,10 +62,10 @@ class ResponseSender:
     def close(self) -> None: ...
     def close_with_error(self, message: str) -> None: ...
 
-class OwnedTokenEgress:
-    """Client-sharded owned token-response processor."""
+class NativeResponseEgress:
+    """Client-sharded native response processor."""
 
-    def __new__(cls, shards: int = 4, queue_depth: int = 2) -> "OwnedTokenEgress": ...
+    def __new__(cls, shards: int = 4, queue_depth: int = 2) -> "NativeResponseEgress": ...
     def register(
         self,
         client_id: int,

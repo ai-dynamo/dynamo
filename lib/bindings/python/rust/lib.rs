@@ -89,7 +89,7 @@ mod planner;
 mod prometheus_metrics;
 mod push_egress;
 mod python_payload;
-mod trtllm_egress;
+mod response_egress;
 
 type PythonServerStreamingIngress = Ingress<
     SingleIn<python_payload::PythonPayload>,
@@ -261,7 +261,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     engine::add_to_module(m)?;
     push_egress::add_to_module(m)?;
     #[cfg(not(test))]
-    trtllm_egress::add_to_module(m)?;
+    response_egress::add_to_module(m)?;
     errors::register_exceptions(m)?;
     parsers::add_to_module(m)?;
     backend::add_to_module(m)?;

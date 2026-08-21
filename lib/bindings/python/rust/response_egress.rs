@@ -22,11 +22,11 @@ use pythonize::depythonize;
 
 #[cfg(not(test))]
 pub fn add_to_module(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_class::<OwnedTokenEgress>()?;
+    module.add_class::<NativeResponseEgress>()?;
     Ok(())
 }
 
-pub(crate) trait OwnedFrameSink: Send + Sync {
+pub(crate) trait ResponseFrameSink: Send + Sync {
     fn send(
         &self,
         frame: Annotated<Value>,
@@ -47,7 +47,7 @@ pub(crate) enum FrameSendError {
 }
 
 #[derive(Debug, Deserialize)]
-struct EngineChoice {
+struct ChoiceDelta {
     index: usize,
     #[serde(default)]
     new_token_ids: Vec<u32>,
@@ -58,10 +58,10 @@ struct EngineChoice {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct EngineResponse {
+pub(crate) struct ResponseEvent {
     client_id: u64,
     #[serde(default)]
-    outputs: Vec<EngineChoice>,
+    outputs: Vec<ChoiceDelta>,
     #[serde(default)]
     is_final: bool,
     #[serde(default)]
@@ -69,14 +69,14 @@ pub(crate) struct EngineResponse {
 }
 
 #[cfg(test)]
-impl EngineResponse {
+impl ResponseEvent {
     fn tokens(client_id: u64, new_token_ids: Vec<Vec<u32>>, is_final: bool) -> Self {
         Self {
             client_id,
             outputs: new_token_ids
                 .into_iter()
                 .enumerate()
-                .map(|(index, new_token_ids)| EngineChoice {
+                .map(|(index, new_token_ids)| ChoiceDelta {
                     index,
                     new_token_ids,
                     finish_reason: None,
@@ -107,12 +107,12 @@ struct ChoiceState {
 }
 
 #[derive(Debug)]
-struct OwnedResponseState {
+struct RequestStreamState {
     prompt_tokens: usize,
     choices: Vec<ChoiceState>,
 }
 
-impl OwnedResponseState {
+impl RequestStreamState {
     fn new(prompt_tokens: usize, num_choices: usize) -> Self {
         Self {
             prompt_tokens,
@@ -120,7 +120,7 @@ impl OwnedResponseState {
         }
     }
 
-    fn apply(&mut self, response: EngineResponse) -> Result<Vec<Value>, String> {
+    fn apply(&mut self, response: ResponseEvent) -> Result<Vec<Value>, String> {
         let mut seen = vec![false; self.choices.len()];
         for output in &response.outputs {
             if output.index >= self.choices.len() {
@@ -196,8 +196,8 @@ impl OwnedResponseState {
 }
 
 struct RegisteredRequest {
-    response_state: Mutex<OwnedResponseState>,
-    sink: Arc<dyn OwnedFrameSink>,
+    response_state: Mutex<RequestStreamState>,
+    sink: Arc<dyn ResponseFrameSink>,
     cancelled: AtomicBool,
     send_gate: Mutex<()>,
 }
@@ -229,7 +229,7 @@ struct ProcessorShared {
 }
 
 impl ProcessorShared {
-    fn process_response(&self, ordinal: usize, response: EngineResponse) -> IndexedOutcome {
+    fn process_response(&self, ordinal: usize, response: ResponseEvent) -> IndexedOutcome {
         let client_id = response.client_id;
         let request = self
             .requests
@@ -315,7 +315,7 @@ impl ProcessorShared {
                         break;
                     }
                     Err(FrameSendError::Failed(error)) => {
-                        tracing::debug!(client_id, %error, "owned response sink stopped");
+                        tracing::debug!(client_id, %error, "native response sink stopped");
                         request.sink.close();
                         sink_failed = true;
                         terminal = true;
@@ -376,7 +376,7 @@ impl ProcessorShared {
 
 struct IndexedResponse {
     ordinal: usize,
-    response: EngineResponse,
+    response: ResponseEvent,
 }
 
 struct ShardCommand {
@@ -384,7 +384,7 @@ struct ShardCommand {
     reply: SyncSender<Vec<IndexedOutcome>>,
 }
 
-pub(crate) struct ShardedProcessor {
+pub(crate) struct ShardedResponseEgress {
     shared: Arc<ProcessorShared>,
     shard_count: usize,
     dispatch: Mutex<()>,
@@ -392,7 +392,7 @@ pub(crate) struct ShardedProcessor {
     workers: Mutex<Vec<JoinHandle<()>>>,
 }
 
-impl ShardedProcessor {
+impl ShardedResponseEgress {
     pub(crate) fn new(shard_count: usize, queue_depth: usize) -> Result<Self, String> {
         if shard_count == 0 {
             return Err("shard_count must be at least 1".to_string());
@@ -429,7 +429,7 @@ impl ShardedProcessor {
         client_id: u64,
         prompt_tokens: usize,
         num_choices: usize,
-        sink: Arc<dyn OwnedFrameSink>,
+        sink: Arc<dyn ResponseFrameSink>,
     ) -> Result<(), String> {
         if num_choices == 0 {
             return Err("num_choices must be at least 1".to_string());
@@ -446,7 +446,7 @@ impl ShardedProcessor {
         requests.insert(
             client_id,
             Arc::new(RegisteredRequest {
-                response_state: Mutex::new(OwnedResponseState::new(prompt_tokens, num_choices)),
+                response_state: Mutex::new(RequestStreamState::new(prompt_tokens, num_choices)),
                 sink,
                 cancelled: AtomicBool::new(false),
                 send_gate: Mutex::new(()),
@@ -457,7 +457,7 @@ impl ShardedProcessor {
 
     pub(crate) fn process_batch(
         &self,
-        responses: Vec<EngineResponse>,
+        responses: Vec<ResponseEvent>,
     ) -> Result<BatchOutcome, String> {
         let _dispatch = self
             .dispatch
@@ -562,7 +562,7 @@ impl ShardedProcessor {
     }
 }
 
-impl Drop for ShardedProcessor {
+impl Drop for ShardedResponseEgress {
     fn drop(&mut self) {
         self.shared.shutting_down.store(true, Ordering::Release);
         self.shared.close_all();
@@ -580,7 +580,7 @@ impl Drop for ShardedProcessor {
             .collect::<Vec<_>>();
         for worker in workers {
             if worker.join().is_err() {
-                tracing::error!("owned response shard panicked during shutdown");
+                tracing::error!("native response shard panicked during shutdown");
             }
         }
     }
@@ -603,7 +603,7 @@ struct PushFrameSink {
 }
 
 #[cfg(not(test))]
-impl OwnedFrameSink for PushFrameSink {
+impl ResponseFrameSink for PushFrameSink {
     fn send(
         &self,
         frame: Annotated<Value>,
@@ -612,10 +612,10 @@ impl OwnedFrameSink for PushFrameSink {
         send_gate: &Mutex<()>,
     ) -> Result<(), FrameSendError> {
         self.sink
-            .send_owned(frame, cancelled, shutting_down, send_gate)
+            .send_annotated(frame, cancelled, shutting_down, send_gate)
             .map_err(|error| match error {
-                crate::push_egress::OwnedSendError::Stopped => FrameSendError::Stopped,
-                crate::push_egress::OwnedSendError::Failed(message) => {
+                crate::push_egress::ResponseSendError::Stopped => FrameSendError::Stopped,
+                crate::push_egress::ResponseSendError::Failed(message) => {
                     FrameSendError::Failed(message)
                 }
             })
@@ -630,7 +630,7 @@ impl OwnedFrameSink for PushFrameSink {
     }
 
     fn close_with_error(&self, message: String) -> bool {
-        self.sink.close_with_owned_error(message)
+        self.sink.try_close_with_error(message)
     }
 
     fn shutdown(&self) {
@@ -640,18 +640,19 @@ impl OwnedFrameSink for PushFrameSink {
 
 #[cfg(not(test))]
 #[pyclass]
-pub struct OwnedTokenEgress {
-    processor: ShardedProcessor,
+pub struct NativeResponseEgress {
+    processor: ShardedResponseEgress,
 }
 
 #[cfg(not(test))]
 #[pymethods]
-impl OwnedTokenEgress {
+impl NativeResponseEgress {
     #[new]
     #[pyo3(signature = (shards=4, queue_depth=2))]
     fn new(shards: usize, queue_depth: usize) -> PyResult<Self> {
         Ok(Self {
-            processor: ShardedProcessor::new(shards, queue_depth).map_err(PyValueError::new_err)?,
+            processor: ShardedResponseEgress::new(shards, queue_depth)
+                .map_err(PyValueError::new_err)?,
         })
     }
 
@@ -676,7 +677,7 @@ impl OwnedTokenEgress {
     }
 
     fn process_batch(&self, py: Python<'_>, responses: &Bound<'_, PyAny>) -> PyResult<Vec<u64>> {
-        let responses = depythonize::<Vec<EngineResponse>>(responses).map_err(|error| {
+        let responses = depythonize::<Vec<ResponseEvent>>(responses).map_err(|error| {
             PyValueError::new_err(format!("invalid engine response batch: {error}"))
         })?;
         let outcome = py
@@ -1046,7 +1047,7 @@ mod tests {
 
     #[test]
     fn clients_on_different_shards_process_concurrently() {
-        let processor = Arc::new(ShardedProcessor::new(2, 1).expect("valid processor"));
+        let processor = Arc::new(ShardedResponseEgress::new(2, 1).expect("valid processor"));
         let (entered_tx, entered_rx) = mpsc::channel();
         let sink_zero = Arc::new(GateSink {
             entered: entered_tx.clone(),
@@ -1069,8 +1070,8 @@ mod tests {
             let processor = processor.clone();
             thread::spawn(move || {
                 processor.process_batch(vec![
-                    EngineResponse::tokens(2, vec![vec![1]], false),
-                    EngineResponse::tokens(3, vec![vec![2]], false),
+                    ResponseEvent::tokens(2, vec![vec![1]], false),
+                    ResponseEvent::tokens(3, vec![vec![2]], false),
                 ])
             })
         };
@@ -1092,7 +1093,7 @@ mod tests {
 
     #[test]
     fn same_client_responses_remain_fifo() {
-        let processor = ShardedProcessor::new(4, 1).expect("valid processor");
+        let processor = ShardedResponseEgress::new(4, 1).expect("valid processor");
         let sink = Arc::new(RecordingSink::default());
         processor
             .register(9, 2, 1, sink.clone())
@@ -1100,8 +1101,8 @@ mod tests {
 
         let outcome = processor
             .process_batch(vec![
-                EngineResponse::tokens(9, vec![vec![10]], false),
-                EngineResponse::tokens(9, vec![vec![11]], true),
+                ResponseEvent::tokens(9, vec![vec![10]], false),
+                ResponseEvent::tokens(9, vec![vec![11]], true),
             ])
             .expect("process ordered batch");
 
@@ -1117,7 +1118,7 @@ mod tests {
 
     #[test]
     fn concurrent_batch_calls_are_serialized() {
-        let processor = Arc::new(ShardedProcessor::new(2, 1).expect("valid processor"));
+        let processor = Arc::new(ShardedResponseEgress::new(2, 1).expect("valid processor"));
         let (entered_tx, entered_rx) = mpsc::channel();
         let blocking_sink = Arc::new(GateSink {
             entered: entered_tx,
@@ -1135,7 +1136,7 @@ mod tests {
         let first = {
             let processor = processor.clone();
             thread::spawn(move || {
-                processor.process_batch(vec![EngineResponse::tokens(2, vec![vec![1]], false)])
+                processor.process_batch(vec![ResponseEvent::tokens(2, vec![vec![1]], false)])
             })
         };
         entered_rx
@@ -1147,7 +1148,7 @@ mod tests {
             let processor = processor.clone();
             thread::spawn(move || {
                 let result =
-                    processor.process_batch(vec![EngineResponse::tokens(3, vec![vec![2]], false)]);
+                    processor.process_batch(vec![ResponseEvent::tokens(3, vec![vec![2]], false)]);
                 done_tx.send(result).expect("test receiver remains open");
             })
         };
@@ -1170,7 +1171,7 @@ mod tests {
 
     #[test]
     fn completion_ids_follow_input_order_across_shards() {
-        let processor = ShardedProcessor::new(4, 1).expect("valid processor");
+        let processor = ShardedResponseEgress::new(4, 1).expect("valid processor");
         let sink_three = Arc::new(RecordingSink::default());
         let sink_zero = Arc::new(RecordingSink::default());
         processor
@@ -1182,8 +1183,8 @@ mod tests {
 
         let outcome = processor
             .process_batch(vec![
-                EngineResponse::tokens(3, vec![vec![3]], true),
-                EngineResponse::tokens(4, vec![vec![4]], true),
+                ResponseEvent::tokens(3, vec![vec![3]], true),
+                ResponseEvent::tokens(4, vec![vec![4]], true),
             ])
             .expect("process cross-shard completions");
 
@@ -1193,17 +1194,17 @@ mod tests {
 
     #[test]
     fn error_closes_request_and_late_response_is_dropped() {
-        let processor = ShardedProcessor::new(2, 1).expect("valid processor");
+        let processor = ShardedResponseEgress::new(2, 1).expect("valid processor");
         let sink = Arc::new(RecordingSink::default());
         processor
             .register(6, 0, 1, sink.clone())
             .expect("register client 6");
 
         let error = processor
-            .process_batch(vec![EngineResponse::error(6, "engine failed")])
+            .process_batch(vec![ResponseEvent::error(6, "engine failed")])
             .expect("process terminal error");
         let late = processor
-            .process_batch(vec![EngineResponse::tokens(6, vec![vec![99]], true)])
+            .process_batch(vec![ResponseEvent::tokens(6, vec![vec![99]], true)])
             .expect("drop late response");
 
         assert_eq!(error.completed_client_ids, vec![6]);
@@ -1220,7 +1221,7 @@ mod tests {
 
     #[test]
     fn cancellation_does_not_wait_for_a_backpressured_shard() {
-        let processor = Arc::new(ShardedProcessor::new(2, 1).expect("valid processor"));
+        let processor = Arc::new(ShardedResponseEgress::new(2, 1).expect("valid processor"));
         let (entered_tx, entered_rx) = mpsc::channel();
         let sink = Arc::new(GateSink {
             entered: entered_tx,
@@ -1234,7 +1235,7 @@ mod tests {
         let processing = {
             let processor = processor.clone();
             thread::spawn(move || {
-                processor.process_batch(vec![EngineResponse::tokens(4, vec![vec![1]], false)])
+                processor.process_batch(vec![ResponseEvent::tokens(4, vec![vec![1]], false)])
             })
         };
         entered_rx
@@ -1265,7 +1266,7 @@ mod tests {
 
     #[test]
     fn cancellation_waits_for_inflight_enqueue_and_prevents_late_frames() {
-        let processor = Arc::new(ShardedProcessor::new(1, 1).expect("valid processor"));
+        let processor = Arc::new(ShardedResponseEgress::new(1, 1).expect("valid processor"));
         let (entered_tx, entered_rx) = mpsc::channel();
         let (resume_tx, resume_rx) = mpsc::channel();
         let sink = Arc::new(PausingSink {
@@ -1280,7 +1281,7 @@ mod tests {
         let processing = {
             let processor = processor.clone();
             thread::spawn(move || {
-                processor.process_batch(vec![EngineResponse::tokens(8, vec![vec![1]], false)])
+                processor.process_batch(vec![ResponseEvent::tokens(8, vec![vec![1]], false)])
             })
         };
         entered_rx
@@ -1305,7 +1306,7 @@ mod tests {
         assert_eq!(cancelled_rx.recv_timeout(Duration::from_secs(1)), Ok(true));
         let frames_at_cancel = sink.frames.load(Ordering::Relaxed);
         processor
-            .process_batch(vec![EngineResponse::tokens(8, vec![vec![2]], false)])
+            .process_batch(vec![ResponseEvent::tokens(8, vec![vec![2]], false)])
             .expect("late response is dropped");
 
         processing

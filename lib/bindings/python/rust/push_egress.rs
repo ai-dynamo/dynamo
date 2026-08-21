@@ -139,13 +139,13 @@ impl PushFrame {
         })
     }
 
-    /// Encode an already-owned response without touching the Python runtime.
-    pub(crate) fn owned(annotated: Annotated<serde_json::Value>) -> Result<Self, String> {
+    /// Encode a native response without touching the Python runtime.
+    pub(crate) fn from_annotated(annotated: Annotated<serde_json::Value>) -> Result<Self, String> {
         let codec = RequestPlanePayloadCodec::configured();
         let (bytes, is_error) = python_payload::encode_annotated_response(codec, annotated)
             .map_err(|error| {
                 format!(
-                    "failed serializing owned response as {}: {error}",
+                    "failed serializing native response as {}: {error}",
                     codec.name()
                 )
             })?;
@@ -222,7 +222,7 @@ impl PushFrame {
 // ── Per-request sink ─────────────────────────────────────────────────────────
 
 /// The send side of one request's push channel. Python handlers use `send`,
-/// while owned Rust response workers use the cancellation-aware methods.
+/// while native response workers use the cancellation-aware methods.
 pub(crate) struct ResponseSink {
     /// `None` once the stream has been closed. Dropping the last `Sender` is
     /// what ends the receiver stream, so closing is "take the sender".
@@ -238,7 +238,7 @@ pub(crate) struct ResponseSink {
 }
 
 #[derive(Debug)]
-pub(crate) enum OwnedSendError {
+pub(crate) enum ResponseSendError {
     Stopped,
     Failed(String),
 }
@@ -311,20 +311,20 @@ impl ResponseSink {
             .map_err(|_| self.consumer_gone())
     }
 
-    /// Encode and enqueue a response whose complete representation is owned by Rust.
-    pub(crate) fn send_owned(
+    /// Encode and enqueue a response represented entirely in Rust.
+    pub(crate) fn send_annotated(
         &self,
         annotated: Annotated<serde_json::Value>,
         cancelled: &AtomicBool,
         shutting_down: &AtomicBool,
         send_gate: &Mutex<()>,
-    ) -> Result<(), OwnedSendError> {
+    ) -> Result<(), ResponseSendError> {
         if cancelled.load(Ordering::Acquire) || shutting_down.load(Ordering::Acquire) {
-            return Err(OwnedSendError::Stopped);
+            return Err(ResponseSendError::Stopped);
         }
-        let mut frame = PushFrame::owned(annotated).map_err(OwnedSendError::Failed)?;
+        let mut frame = PushFrame::from_annotated(annotated).map_err(ResponseSendError::Failed)?;
         let Some(tx) = self.sender() else {
-            return Err(OwnedSendError::Failed(
+            return Err(ResponseSendError::Failed(
                 "response stream is closed; send after close".to_string(),
             ));
         };
@@ -334,7 +334,7 @@ impl ResponseSink {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if cancelled.load(Ordering::Acquire) || shutting_down.load(Ordering::Acquire) {
-                return Err(OwnedSendError::Stopped);
+                return Err(ResponseSendError::Stopped);
             }
             let send_result = tx.try_send(frame);
             drop(send_guard);
@@ -346,7 +346,7 @@ impl ResponseSink {
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     self.ctx.stop_generating();
-                    return Err(OwnedSendError::Failed(
+                    return Err(ResponseSendError::Failed(
                         "response stream consumer has closed".to_string(),
                     ));
                 }
@@ -372,7 +372,7 @@ impl ResponseSink {
         self.close_with_dynamo_error(
             DynamoError::builder()
                 .error_type(ErrorType::Backend(BackendError::EngineShutdown))
-                .message("owned response processor is shutting down")
+                .message("native response processor is shutting down")
                 .build(),
         );
     }
@@ -385,7 +385,7 @@ impl ResponseSink {
         self.send_terminal(tx, PushFrame::error(Annotated::from_error(message)));
     }
 
-    pub(crate) fn close_with_owned_error(&self, message: String) -> bool {
+    pub(crate) fn try_close_with_error(&self, message: String) -> bool {
         let Some(tx) = self.take_sender() else {
             return false;
         };
@@ -736,18 +736,18 @@ mod tests {
     }
 
     #[test]
-    fn owned_data_frame_encodes_without_python() {
-        let frame = PushFrame::owned(Annotated::from_data(serde_json::json!({
+    fn annotated_data_frame_encodes_without_python() {
+        let frame = PushFrame::from_annotated(Annotated::from_data(serde_json::json!({
             "token_ids": [10, 11],
             "index": 0
         })))
-        .expect("owned response must encode");
+        .expect("native response must encode");
 
         assert!(!frame.is_error);
         let wrapper = decode(&frame.bytes, frame.codec);
-        let annotated = wrapper.data.expect("owned frame carries data");
-        let data = annotated.data.expect("owned frame carries response data");
-        let fields = data.as_map().expect("owned response is a map");
+        let annotated = wrapper.data.expect("native frame carries data");
+        let data = annotated.data.expect("native frame carries response data");
+        let fields = data.as_map().expect("native response is a map");
         assert_eq!(
             fields
                 .iter()
