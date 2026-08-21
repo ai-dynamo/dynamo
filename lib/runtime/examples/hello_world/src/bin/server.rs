@@ -14,12 +14,12 @@ use hello_world::DEFAULT_NAMESPACE;
 use std::sync::Arc;
 
 fn main() -> anyhow::Result<()> {
-    logging::init();
     let worker = Worker::from_settings()?;
     worker.execute(app)
 }
 
 async fn app(runtime: Runtime) -> anyhow::Result<()> {
+    logging::init();
     let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
     backend(distributed).await
 }
