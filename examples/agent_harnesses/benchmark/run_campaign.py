@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Any, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
-
 PINNED_LOADGEN_REPOSITORY = "https://github.com/NVIDIA-dev/agent-loadgen"
 PINNED_LOADGEN_COMMIT = "9057201e23663baaaf076820f3772d55468dec25"
 DEFAULT_PROFILE = (

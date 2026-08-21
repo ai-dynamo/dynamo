@@ -22,7 +22,7 @@ The included profile is deliberately small: two top-level sessions, two sequenti
 
 ## Build the Pinned Load Generator
 
-The generic path is pinned to [`NVIDIA-dev/agent-loadgen` commit `9057201e23663baaaf076820f3772d55468dec25`](https://github.com/NVIDIA-dev/agent-loadgen/commit/9057201e23663baaaf076820f3772d55468dec25). The wrapper verifies that the source checkout is clean and exactly at this commit, then records both the source revision and binary SHA-256 digest.
+The generic path is pinned to the internal `NVIDIA-dev/agent-loadgen` repository at commit `9057201e23663baaaf076820f3772d55468dec25`. The wrapper verifies that the source checkout is clean and exactly at this commit, then records both the source revision and binary SHA-256 digest. Access to the internal repository is a prerequisite; the commit URL is intentionally not linked because unauthenticated clients receive HTTP 404.
 
 ```bash
 git clone https://github.com/NVIDIA-dev/agent-loadgen.git

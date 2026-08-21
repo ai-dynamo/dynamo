@@ -11,7 +11,6 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-
 MODULE_PATH = Path(__file__).resolve().parents[1] / "run_campaign.py"
 MODULE_SPEC = importlib.util.spec_from_file_location("agent_load_campaign", MODULE_PATH)
 if MODULE_SPEC is None or MODULE_SPEC.loader is None:
