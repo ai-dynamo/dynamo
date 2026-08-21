@@ -224,14 +224,14 @@ def test_throughput_metrics_source_invalid():
 
 
 def test_prometheus_request_timeout_defaults_to_ten_seconds(monkeypatch):
-    monkeypatch.delenv("PROMETHEUS_REQUEST_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS", raising=False)
     config = PlannerConfig(namespace="test-ns")
 
     assert config.metric_pulling_prometheus_request_timeout_seconds == 10.0
 
 
 def test_prometheus_request_timeout_uses_environment_default(monkeypatch):
-    monkeypatch.setenv("PROMETHEUS_REQUEST_TIMEOUT_SECONDS", "2.5")
+    monkeypatch.setenv("DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS", "2.5")
 
     config = PlannerConfig(namespace="test-ns")
 
@@ -251,7 +251,7 @@ def test_prometheus_request_timeout_rejects_non_positive_values(timeout):
 def test_prometheus_request_timeout_rejects_non_positive_environment_values(
     monkeypatch, timeout
 ):
-    monkeypatch.setenv("PROMETHEUS_REQUEST_TIMEOUT_SECONDS", timeout)
+    monkeypatch.setenv("DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS", timeout)
 
     with pytest.raises(ValidationError):
         PlannerConfig(namespace="test-ns")

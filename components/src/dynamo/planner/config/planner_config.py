@@ -582,7 +582,7 @@ class PlannerConfig(BaseModel):
     metric_pulling_prometheus_request_timeout_seconds: float = Field(
         default_factory=lambda: float(
             os.environ.get(
-                "PROMETHEUS_REQUEST_TIMEOUT_SECONDS",
+                "DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS",
                 SLAPlannerDefaults.metric_pulling_prometheus_request_timeout_seconds,
             )
         ),
