@@ -52,7 +52,7 @@ spec:
             sizeLimit: 10Gi
         initContainers:
         - name: sglang-engine
-          image: lmsysorg/sglang:v0.5.16
+          image: lmsysorg/sglang:v0.5.17
           restartPolicy: Always
           securityContext:
             capabilities:
@@ -140,7 +140,7 @@ spec:
             sizeLimit: 10Gi
         initContainers:
         - name: sglang-engine
-          image: lmsysorg/sglang:v0.5.16
+          image: lmsysorg/sglang:v0.5.17
           restartPolicy: Always
           securityContext:
             capabilities:

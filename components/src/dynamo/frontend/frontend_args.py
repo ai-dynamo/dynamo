@@ -64,6 +64,8 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     tcp_tls_cert_path: Optional[str] = None
     tcp_tls_key_path: Optional[str] = None
     tcp_tls_ca_cert_path: Optional[str] = None
+    nats_tls_ca_cert_path: Optional[str] = None
+    nats_tls_insecure: bool = False
 
     namespace: Optional[str] = None
     namespace_prefix: Optional[str] = None
@@ -313,8 +315,26 @@ class FrontendArgGroup(ArgGroup):
             help="Path to PEM CA certificate used to verify the TCP peer's certificate.",
         )
 
+        add_argument(
+            g,
+            flag_name="--nats-tls-ca-cert-path",
+            env_var="NATS_TLS_CA_CERT_PATH",
+            default=None,
+            help="Path to PEM CA certificate for verifying the NATS server.",
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--nats-tls-insecure",
+            env_var="NATS_TLS_INSECURE",
+            default=False,
+            help="Disable NATS TLS certificate verification. For local development only.",
+        )
+
         # Router options (shared with dynamo.router)
-        RouterArgGroup().add_arguments(parser)
+        RouterArgGroup(
+            default_router_mode="round-robin", include_frontend_only=True
+        ).add_arguments(parser)
 
         # KV router options (shared with dynamo.router)
         KvRouterArgGroup().add_arguments(parser)

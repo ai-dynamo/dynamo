@@ -19,6 +19,7 @@ ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG VLLM_OMNI_REF
+ARG TRANSFORMERS_VERSION
 ARG NIXL_REF
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
@@ -41,12 +42,10 @@ ENV TORCH_LIB_DIR=${SITE_PACKAGES}/torch/lib
 {% if device == "xpu" %}
 ENV NIXL_PREFIX=/opt/intel/intel_nixl
 ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
-# oneAPI env for XPU detection: the base bakes none of it, so device_count() is 0
-# without this. ENV not setvars.sh in ENTRYPOINT, which a k8s `command:` discards.
-ENV ONEAPI_ROOT=/opt/intel/oneapi
-ENV CMPLR_ROOT=/opt/intel/oneapi/compiler/2025.3
-ENV LD_LIBRARY_PATH=/opt/intel/oneapi/umf/1.0/lib:/opt/intel/oneapi/tcm/1.4/lib:/opt/intel/oneapi/tbb/2022.3/lib:/opt/intel/oneapi/mkl/2025.3/lib:/opt/intel/oneapi/dnnl/2025.3/lib:/opt/intel/oneapi/compiler/2025.3/opt/compiler/lib:${LD_LIBRARY_PATH:-}
-ENV PATH=${PATH}:/opt/intel/oneapi/compiler/2025.3/bin:/opt/intel/oneapi/mpi/2021.15/bin
+# vLLM 0.27.1's XPU image installs the oneAPI runtime and SYCL headers in
+# /opt/venv through the intel-sycl-rt wheel. Do not set ONEAPI_ROOT to the
+# removed /opt/intel/oneapi tree: Triton gives that variable priority over its
+# wheel-metadata fallback and would search a nonexistent compiler include path.
 {% elif device == "cpu" %}
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
@@ -176,6 +175,18 @@ COPY --chmod=664 --chown=dynamo:0 LICENSE /workspace/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 {% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
+{% set python_executable = "python3" if device == "cuda" else "/opt/venv/bin/python" %}
+
+# The vLLM 0.27.1 CUDA and CPU release images resolve the unbounded
+# `transformers>=5.5.3` requirement to 5.15.0. That release changed Gemma 4 to
+# heterogeneous per-layer configs, but vLLM's corresponding support missed
+# 0.27.1 and the engine crashes during ModelConfig initialization. Install the
+# compatible version before layering vLLM-Omni so its dependency solve sees the
+# final Transformers invariant instead of resolving against 5.15.0 first.
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip install {{ pip_target }} --no-deps \
+        "transformers==${TRANSFORMERS_VERSION}"
 
 # Install nvtx pinned in container/deps/requirements.common.txt so DYN_NVTX=1
 # profiling works in all targets (runtime, dev, local-dev) — see
@@ -225,6 +236,7 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     export UV_CACHE_DIR=/root/.cache/uv && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl && \
     uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
+    uv pip install {{ pip_target }} --no-deps /opt/dynamo/wheelhouse/aisimulate*.whl && \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
         if [ -n "$KVBM_WHEEL" ]; then uv pip install {{ pip_target }} --no-deps "$KVBM_WHEEL"; fi; \
@@ -264,6 +276,19 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
 # Reinstalling triton-xpu ensures the triton namespace is properly configured
 RUN uv pip uninstall triton && \
     uv pip install --force-reinstall --no-deps triton-xpu
+
+# Resolve the same include directories Triton's XPU driver will use for its
+# first-request JIT, and fail the image build if the SYCL development headers
+# are not discoverable there.
+RUN /opt/venv/bin/python <<'PY'
+from pathlib import Path
+
+from triton.backends.intel.driver import COMPILATION_HELPER
+
+roots = COMPILATION_HELPER.include_dir
+if not any((Path(root) / "sycl/sycl.hpp").is_file() for root in roots):
+    raise RuntimeError(f"SYCL headers not found in Triton include paths: {roots}")
+PY
 {% endif %}
 
 {% if context.vllm.enable_modelexpress == "true" %}
@@ -460,6 +485,22 @@ eps = [ep for ep in entry_points(group='vllm.general_plugins') if ep.name == 'mo
 assert eps, 'modelexpress vllm.general_plugins entry point not found'; \
 [ep.load()() for ep in eps]"
 {% endif %}
+
+# vLLM-Omni is installed with the current Transformers version in its protected
+# constraints file, so an incompatible Omni requirement fails during dependency
+# resolution. Check the completed image as well so a later package layer cannot
+# silently replace the vLLM 0.27.1-compatible Transformers release. A global
+# `uv pip check` is not appropriate here: the upstream runtime and Dynamo's
+# deliberate --no-deps layers contain unrelated package-metadata conflicts.
+RUN {{ python_executable }} - "${TRANSFORMERS_VERSION}" <<'PY'
+import importlib.metadata as md
+import sys
+
+actual = md.version("transformers")
+expected = sys.argv[1]
+if actual != expected:
+    raise RuntimeError(f"expected transformers {expected}, found {actual}")
+PY
 
 USER dynamo
 

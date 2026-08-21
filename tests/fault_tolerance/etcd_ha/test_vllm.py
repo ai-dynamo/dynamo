@@ -103,8 +103,6 @@ class DynamoWorkerProcess(ManagedProcess):
                     json.dumps(build_nixl_kv_transfer_config()),
                 ]
             )
-            self.fpm_port = allocate_port(DynamoPortRange.FPM.value)
-            env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
 
         # KV events config and NIXL side channel port only for prefill worker
         if mode == WorkerMode.PREFILL:
@@ -157,7 +155,6 @@ class DynamoWorkerProcess(ManagedProcess):
         cleanup_errors = []
         for port_attr in (
             "system_port",
-            "fpm_port",
             "kv_event_port",
             "nixl_side_channel_port",
         ):

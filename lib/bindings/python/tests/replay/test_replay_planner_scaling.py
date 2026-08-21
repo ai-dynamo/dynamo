@@ -8,9 +8,14 @@ import pytest
 from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_trace_replay
 
+from .replay_utils import _require_aisimulate_distribution
+
+_require_aisimulate_distribution(allow_module_level=True)
+
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.parallel,
+    pytest.mark.planner,
     pytest.mark.pre_merge,
     pytest.mark.unit,
     pytest.mark.timeout(120),

@@ -601,6 +601,7 @@ def test_router_decisions_vllm_multiple_workers(
     )
 
 
+@pytest.mark.h100
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)

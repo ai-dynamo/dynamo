@@ -18,9 +18,11 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorenv"
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -35,6 +37,22 @@ const (
 	customRuntimeImage         = "registry.example/runtime:custom"
 	legacySeedUsername         = "operatorenv-legacy-seeder"
 )
+
+func groveProviderOverride(target, value string) *nvidiacomv1beta1.ProviderOverride {
+	return &nvidiacomv1beta1.ProviderOverride{
+		APIVersion: provideroverride.GroveAPIVersion,
+		Target:     target,
+		Value:      apiextensionsv1.JSON{Raw: []byte(value)},
+	}
+}
+
+func alphaGroveProviderOverride(target, value string) *nvidiacomv1alpha1.ProviderOverride {
+	return &nvidiacomv1alpha1.ProviderOverride{
+		APIVersion: provideroverride.GroveAPIVersion,
+		Target:     target,
+		Value:      apiextensionsv1.JSON{Raw: []byte(value)},
+	}
+}
 
 var (
 	// Admission cases must remain sequential because they share this gate and a cluster-scoped topology fixture.

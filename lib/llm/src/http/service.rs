@@ -7,7 +7,7 @@
 //! is meant to be a gateway/ingress into the Dynamo LLM Distributed Runtime.
 //!
 //! In order to create a common pattern, the HttpService forwards the incoming OAI Chat Request or OAI Completion Request to the
-//! to a model-specific engines.  The engines can be attached and detached dynamically using the [`ModelManager`].
+//! to a model-specific engines.  The engines can be attached and detached dynamically using the [`ModelManager`](crate::discovery::ModelManager).
 //!
 //! Note: All requests, whether the client requests `stream=true` or `stream=false`, are propagated downstream as `stream=true`.
 //! This enables use to handle only 1 pattern of request-response in the downstream services. Non-streaming user requests are
@@ -40,6 +40,27 @@ pub use frontend_extension::{
     validate_extension_route_path,
 };
 pub use metrics::Metrics;
+
+use crate::{
+    preprocessor::OpenAIPreprocessor,
+    protocols::openai::{
+        ParsingOptions, chat_completions::NvCreateChatCompletionRequest,
+        chat_completions::tool_parser_v2::batch_tool_choice_eligible,
+    },
+};
+
+/// Apply the request-level tool-call gates shared by the HTTP protocol handlers.
+fn apply_request_tool_call_parsing_options(
+    parsing_options: ParsingOptions,
+    request: &NvCreateChatCompletionRequest,
+) -> ParsingOptions {
+    let tool_call_parsing_enabled = OpenAIPreprocessor::tool_call_parsing_enabled(request);
+    parsing_options
+        .with_experimental_v2_batch_eligible(batch_tool_choice_eligible(
+            request.inner.tool_choice.as_ref(),
+        ))
+        .with_tool_call_parsing_enabled(tool_call_parsing_enabled)
+}
 
 /// Documentation for a route
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

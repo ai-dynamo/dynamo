@@ -3,7 +3,7 @@
 
 //! NVTX timeline-annotation helpers for Nsight Systems profiling.
 //!
-//! Backed by the [`nvtx`] crate, which vendors NVIDIA's header-only **NVTX v3** C API
+//! Backed by the `nvtx` crate, which vendors NVIDIA's header-only **NVTX v3** C API
 //! and compiles it in with `cc`. There is no link-time dependency on any NVTX shared
 //! library: the v3 headers compile to inert stubs that lazily `dlopen` the profiler's
 //! injection library named by `NVTX_INJECTION64_PATH` the first time an annotation
