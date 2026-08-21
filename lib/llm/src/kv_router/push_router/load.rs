@@ -417,7 +417,10 @@ mod tests {
     use tokio::sync::watch;
 
     use super::*;
-    use crate::protocols::common::timing::WORKER_TYPE_DECODE;
+    use crate::{
+        discovery::LoadThresholdHandle,
+        kv_router::{RouterLoadSource, TypedRoutingGraph},
+    };
 
     struct NotifyingCacheIndex {
         worker_id: u64,
@@ -458,6 +461,15 @@ mod tests {
             .unwrap()
             .endpoint("generate".to_string());
         let client = endpoint.client().await.unwrap();
+        let graph = TypedRoutingGraph::start(
+            client.clone(),
+            RouterLoadSource::Decode,
+            LoadThresholdHandle::new(Default::default()),
+            &distributed.child_token(),
+            None,
+        )
+        .await
+        .unwrap();
         endpoint.register_endpoint_instance().await.unwrap();
         let worker_id = client.wait_for_instances().await.unwrap()[0].id();
         let (_workers_tx, workers) =
@@ -467,7 +479,8 @@ mod tests {
             16,
             workers,
             KvRouterConfig::default(),
-            WORKER_TYPE_DECODE,
+            graph.scheduler_load_sender(),
+            graph.cancellation_token(),
         )
         .await
         .unwrap();

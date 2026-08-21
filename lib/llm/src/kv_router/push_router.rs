@@ -1412,12 +1412,14 @@ mod tests {
             .unwrap()
             .endpoint("generate".to_string());
         let client = endpoint.client().await.unwrap();
+        let graph = test_graph(&client).await;
         let inner = PushRouter::from_client(client, RouterMode::Direct)
             .await
             .unwrap();
-        let host =
-            RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(inner, None, None)
-                .unwrap();
+        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
+            inner, graph, None, None,
+        )
+        .unwrap();
 
         let error = host.generate(Context::new(request())).await.unwrap_err();
         assert!(match_error_chain(
