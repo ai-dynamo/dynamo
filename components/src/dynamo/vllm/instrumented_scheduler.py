@@ -2262,6 +2262,12 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_cudagraph_capture_sizes,
         )
 
+        # Started last so a config validation error above never leaves the
+        # engine-core process with automatic gen2 collection disabled.
+        from dynamo.vllm import gc_policy as _fpm_gc_policy
+
+        _fpm_gc_policy.start_gc_policy()
+
     # -- Grid generation ------------------------------------------------
 
     def _bench_grid_invariants_digest(self) -> str:
@@ -3605,6 +3611,11 @@ class InstrumentedScheduler(AsyncScheduler):
         self._last_update_time = 0.0
         if resume_publisher:
             self._publisher.resume()
+        # Benchmark over: re-enable automatic gen2 collections and reclaim
+        # the frozen heap before regular serving resumes.
+        from dynamo.vllm import gc_policy as _fpm_gc_policy
+
+        _fpm_gc_policy.stop_gc_policy()
 
     def _bench_abort(self, error: Exception) -> None:
         if self._bench_synchronizer is not None:

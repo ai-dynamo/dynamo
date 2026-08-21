@@ -17,6 +17,7 @@ from dynamo.vllm.worker_factory import (
     EngineSetupResult,
     WorkerFactory,
     _DecodeWorkerLifecycle,
+    _stop_worker_gc_policy,
     _wait_and_load_benchmark,
 )
 
@@ -384,6 +385,42 @@ async def test_wait_and_load_benchmark_rejects_invalid_results(monkeypatch, tmp_
             {"output_path": str(output_path), "timeout": 1}, Mock()
         )
     assert "missing_phases=['decode']" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_stop_worker_gc_policy_rpcs_every_worker(monkeypatch):
+    """After the benchmark wait, the launcher must stop the GC policy in
+    every model worker (workers auto-start it on extension import) and hold
+    serving until the RPC completes."""
+    monkeypatch.setenv("DYN_FPM_GC_POLICY", "freeze")
+    engine_client = SimpleNamespace(collective_rpc=AsyncMock())
+
+    await _stop_worker_gc_policy(engine_client)
+
+    engine_client.collective_rpc.assert_awaited_once_with("fpm_gc_stop")
+
+
+@pytest.mark.asyncio
+async def test_stop_worker_gc_policy_noop_when_policy_disabled(monkeypatch):
+    monkeypatch.delenv("DYN_FPM_GC_POLICY", raising=False)
+    engine_client = SimpleNamespace(collective_rpc=AsyncMock())
+
+    await _stop_worker_gc_policy(engine_client)
+
+    engine_client.collective_rpc.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stop_worker_gc_policy_failure_propagates(monkeypatch):
+    """Serving on workers that are not GC-equivalent to never-benchmarked
+    ones must not silently proceed."""
+    monkeypatch.setenv("DYN_FPM_GC_POLICY", "freeze")
+    engine_client = SimpleNamespace(
+        collective_rpc=AsyncMock(side_effect=RuntimeError("worker died"))
+    )
+
+    with pytest.raises(RuntimeError, match="worker died"):
+        await _stop_worker_gc_policy(engine_client)
 
 
 @pytest.mark.asyncio

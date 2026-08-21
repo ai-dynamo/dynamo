@@ -535,6 +535,28 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
     return merged
 
 
+async def _stop_worker_gc_policy(engine_client: AsyncLLM) -> None:
+    """Restore worker-process GC once the self-benchmark has finished.
+
+    Model workers auto-start the FPM freeze policy when
+    ``worker_extension_cls`` resolves (importing ``dynamo.vllm.gc_policy``
+    starts it), while ``InstrumentedScheduler`` only restores the
+    engine-core process. Without this symmetric stop the workers would keep
+    serving real traffic with automatic gen2 collection disabled and the
+    freeze daemon alive, so cyclic garbage would never be reclaimed.
+    Awaiting the RPC holds serving until every worker has restored its
+    thresholds and collected the previously frozen heap; both normal
+    completion and benchmark abort funnel through the same benchmark-wait
+    call sites. A failure here must propagate: serving on a worker that is
+    not GC-equivalent to a never-benchmarked one is worse than failing
+    startup.
+    """
+    if os.environ.get("DYN_FPM_GC_POLICY", "").strip().lower() != "freeze":
+        return
+    await engine_client.collective_rpc("fpm_gc_stop")
+    logger.info("FPM GC policy stopped in all model workers")
+
+
 SetupVllmEngineFn = Callable[..., EngineSetupResult]
 SetupKvEventPublisherFn = Callable[..., Optional[Any]]
 SetupKvStateAttachmentOwnerFn = Callable[..., Awaitable[Optional[Any]]]
@@ -1311,6 +1333,7 @@ class WorkerFactory:
             handler._benchmark_results = await _wait_and_load_benchmark(
                 bench_cfg, vllm_config
             )
+            await _stop_worker_gc_policy(handler.engine_client)
 
         # Model-serving-readiness role.
         # _create_decode_worker handles both DECODE and AGGREGATED disaggregation modes.
@@ -1583,6 +1606,7 @@ class WorkerFactory:
             handler._benchmark_results = await _wait_and_load_benchmark(
                 bench_cfg, vllm_config
             )
+            await _stop_worker_gc_policy(handler.engine_client)
 
         perf_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.get_perf_metrics"
