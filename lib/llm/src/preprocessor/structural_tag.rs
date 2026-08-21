@@ -35,6 +35,88 @@ fn should_skip_tool_call_ban(exclude_tools_when_none: bool, tool_choice: &ToolCh
     exclude_tools_when_none && matches!(tool_choice, ToolChoice::None)
 }
 
+/// Whether a request is entitled to use a structural tag, bundled with proof the
+/// parser registry can actually build one.
+///
+/// This is the single owner of "is a structural tag applicable and available" —
+/// covering model-family/tool-choice intrinsic eligibility, the operator's global
+/// `structural_tag_mode`/`structural_tag_scope`, the `tool_choice=None` ban-tag
+/// exclusion, and real parser-registry builder availability. A caller can only
+/// reach `Required` by way of a real, registered
+/// [`dynamo_parsers::tool_calling::StructuralTagBuilder`] — it cannot ask for the
+/// eligibility half of this decision without also getting the registry-availability
+/// proof in the same value. Both the real preprocessing path
+/// (`apply_tool_choice_structural_tag`) and the HTTP-layer reconstruction
+/// (`http::service::apply_request_tool_call_parsing_options`) must consult this
+/// function; neither may re-derive eligibility, mode, scope, or registry
+/// availability independently.
+pub(crate) enum StructuralTagDecision {
+    Required(&'static dynamo_parsers::tool_calling::StructuralTagBuilder),
+    NotApplicable,
+}
+
+impl StructuralTagDecision {
+    pub(crate) fn is_required(&self) -> bool {
+        matches!(self, Self::Required(_))
+    }
+}
+
+/// Decide whether a structural tag applies to this request. See
+/// [`StructuralTagDecision`] for why this is the single shared owner.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn structural_tag_decision(
+    parser_name: Option<&str>,
+    tool_choice: &ToolChoice,
+    tools: &[ToolDefinition],
+    parallel_tool_calls: Option<bool>,
+    mode: StructuralTagMode,
+    scope: StructuralTagScope,
+    exclude_tools_when_tool_choice_none: bool,
+) -> StructuralTagDecision {
+    if mode == StructuralTagMode::Off
+        && !requires_intrinsic_structural_tag(parser_name, tool_choice)
+    {
+        return StructuralTagDecision::NotApplicable;
+    }
+
+    if should_skip_tool_call_ban(exclude_tools_when_tool_choice_none, tool_choice) {
+        // The prompt formatter already omits tools for this request. Avoid
+        // sending a redundant AnyTokens structural tag: vLLM cannot
+        // validate token-string exclusions without tokenizer metadata.
+        return StructuralTagDecision::NotApplicable;
+    }
+
+    let Some(parser_name) = parser_name else {
+        tracing::warn!(
+            "Structural tag is enabled but --dyn-tool-call-parser is not set; \
+             structural tags will not be applied"
+        );
+        return StructuralTagDecision::NotApplicable;
+    };
+
+    let Some(builder) = OpenAIPreprocessor::structural_tag_builder_for_parser(parser_name) else {
+        return StructuralTagDecision::NotApplicable;
+    };
+
+    if matches!(tool_choice, ToolChoice::None) {
+        if tools.is_empty() {
+            return StructuralTagDecision::NotApplicable;
+        }
+        return StructuralTagDecision::Required(builder);
+    }
+
+    if !OpenAIPreprocessor::should_apply_tool_call_format(
+        scope,
+        tool_choice,
+        tools,
+        parallel_tool_calls,
+    ) {
+        return StructuralTagDecision::NotApplicable;
+    }
+
+    StructuralTagDecision::Required(builder)
+}
+
 impl OpenAIPreprocessor {
     /// Apply structural tag guided decoding when enabled for this request.
     pub(super) fn apply_tool_choice_structural_tag(
@@ -46,50 +128,28 @@ impl OpenAIPreprocessor {
         preprocessed_request: &mut PreprocessedRequest,
     ) -> Result<bool, DynamoError> {
         let parser_name = self.tool_call_parser.as_deref();
-        if self.runtime_config.structural_tag_mode == StructuralTagMode::Off
-            && !requires_intrinsic_structural_tag(parser_name, tool_choice)
-        {
-            return Ok(false);
-        }
-
-        if should_skip_tool_call_ban(
-            self.runtime_config.exclude_tools_when_tool_choice_none,
-            tool_choice,
-        ) {
-            // The prompt formatter already omits tools for this request. Avoid
-            // sending a redundant AnyTokens structural tag: vLLM cannot
-            // validate token-string exclusions without tokenizer metadata.
-            return Ok(false);
-        }
-
-        let Some(parser_name) = parser_name else {
-            tracing::warn!(
-                "Structural tag is enabled but --dyn-tool-call-parser is not set; \
-                 structural tags will not be applied"
-            );
-            return Ok(false);
-        };
-
-        let Some(builder) = Self::structural_tag_builder_for_parser(parser_name) else {
-            return Ok(false);
-        };
-
-        if matches!(tool_choice, ToolChoice::None) {
-            if tools.is_empty() {
-                return Ok(false);
-            }
-            return Self::apply_tool_call_ban(builder, preprocessed_request);
-        }
-
-        if !Self::should_apply_tool_call_format(
-            self.runtime_config.structural_tag_scope,
+        let StructuralTagDecision::Required(builder) = structural_tag_decision(
+            parser_name,
             tool_choice,
             tools,
             parallel_tool_calls,
-        ) {
+            self.runtime_config.structural_tag_mode,
+            self.runtime_config.structural_tag_scope,
+            self.runtime_config.exclude_tools_when_tool_choice_none,
+        ) else {
             return Ok(false);
+        };
+        // `structural_tag_decision` only returns `Required` once `parser_name` is
+        // confirmed `Some` (it is the source of the registry lookup that produced
+        // `builder`), so this is a real value, not a placeholder.
+        let parser_name = parser_name.expect("Required decision implies a parser name");
+
+        if matches!(tool_choice, ToolChoice::None) {
+            return Self::apply_tool_call_ban(builder, preprocessed_request);
         }
 
+        // `structural_tag_decision` already confirmed `should_apply_tool_call_format`
+        // for this non-None tool_choice before returning `Required`.
         let ctx = dynamo_parsers::tool_calling::ToolCallFormatBuildContext {
             tool_choice,
             tools,
@@ -334,6 +394,36 @@ mod tests {
             Some("kimi_k2"),
             &ToolChoice::Named("get_weather".to_string())
         ));
+    }
+
+    // Durable registry-parity property: every parser/tool_choice combination the
+    // intrinsic predicate recognizes must have a real, registered
+    // `StructuralTagBuilder` in the parser registry. If a future edit registers a
+    // new intrinsic-family alias, or de-registers an existing one, without keeping
+    // both in lockstep, `structural_tag_decision` would otherwise report `Required`
+    // with no way to actually build the tag — this is the exact gap the shared
+    // decision owner exists to close. No global-state mutation, no scratch worktree,
+    // runs against the real production registry.
+    #[test]
+    fn every_intrinsic_parser_choice_has_a_registered_structural_tag_builder() {
+        let cases: &[(&str, ToolChoice)] = &[
+            ("kimi_k2", ToolChoice::Required),
+            ("kimi_k2", ToolChoice::Named("get_weather".to_string())),
+            ("kimi_k3", ToolChoice::Named("get_weather".to_string())),
+            ("kimi-k3", ToolChoice::Named("get_weather".to_string())),
+        ];
+        for (parser, choice) in cases {
+            assert!(
+                requires_intrinsic_structural_tag(Some(parser), choice),
+                "test fixture drifted: '{parser}' + {choice:?} is no longer intrinsic"
+            );
+            assert!(
+                OpenAIPreprocessor::structural_tag_builder_for_parser(parser).is_some(),
+                "'{parser}' is intrinsic per the predicate but the parser registry has \
+                 no structural-tag builder for it — the predicate and the registry have \
+                 drifted apart"
+            );
+        }
     }
 
     #[test]

@@ -336,7 +336,7 @@ const fn default_local_indexer() -> bool {
     true
 }
 
-const fn default_exclude_tools_when_tool_choice_none() -> bool {
+pub(crate) const fn default_exclude_tools_when_tool_choice_none() -> bool {
     true
 }
 

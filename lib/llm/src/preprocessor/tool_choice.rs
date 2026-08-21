@@ -4,6 +4,7 @@
 //! Tool-choice guided decoding policy for OpenAI chat requests.
 
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
+use crate::protocols::openai::GuidedToolConstraint;
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use crate::protocols::openai::tools::get_json_schema_from_tools;
 
@@ -58,7 +59,7 @@ impl OpenAIPreprocessor {
         request: &NvCreateChatCompletionRequest,
         common_request: &mut PreprocessedRequest,
         prompt_injected_reasoning: bool,
-    ) -> Result<bool, DynamoError> {
+    ) -> Result<GuidedToolConstraint, DynamoError> {
         let tool_choice = request
             .inner
             .tool_choice
@@ -84,7 +85,7 @@ impl OpenAIPreprocessor {
         let has_assistant_constraint =
             has_explicit_guided_decoding || has_response_format_constraint;
         if !is_forced_tool_choice && has_assistant_constraint {
-            return Ok(false);
+            return Ok(GuidedToolConstraint::None);
         }
 
         if is_forced_tool_choice
@@ -102,18 +103,13 @@ impl OpenAIPreprocessor {
             prompt_injected_reasoning,
             common_request,
         )? {
-            return Ok(true);
+            return Ok(GuidedToolConstraint::StructuralTag);
         }
 
-        let uses_kimi_k3_parser = self
-            .tool_call_parser
-            .as_deref()
-            .is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3"))
-            || self
-                .runtime_config
-                .reasoning_parser
-                .as_deref()
-                .is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3"));
+        let uses_kimi_k3_parser = uses_kimi_k3_parser(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        );
         if is_forced_tool_choice && uses_kimi_k3_parser {
             if matches!(tool_choice, ChatCompletionToolChoiceOption::Named(_)) {
                 return Err(invalid_argument(
@@ -124,17 +120,27 @@ impl OpenAIPreprocessor {
 
             // K3's prompt-level required instruction produces an XTML `tools`
             // channel. Generic JSON guided decoding would constrain the wrong
-            // wire format and prevent the Rust K3 parser from seeing it.
-            return Ok(false);
+            // wire format and prevent the Rust K3 parser from seeing it. No JSON
+            // schema is installed, so this is NOT a guided-JSON request.
+            return Ok(GuidedToolConstraint::None);
         }
 
-        match get_json_schema_from_tools(Some(tool_choice), Some(tools)) {
+        match get_json_schema_from_tools(
+            Some(tool_choice),
+            Some(tools),
+            request.inner.parallel_tool_calls,
+        ) {
             Ok(Some(schema)) => {
                 let gd = common_request
                     .sampling_options
                     .guided_decoding
                     .get_or_insert_default();
                 gd.json = Some(schema);
+
+                // Report the shape that was installed, not the tool_choice that
+                // asked for it. Only these two arms produce a JSON schema, so only
+                // they may be streamed as guided JSON.
+                return Ok(installed_json_constraint(tool_choice));
             }
             Ok(None) => {}
             Err(err) => {
@@ -144,7 +150,7 @@ impl OpenAIPreprocessor {
 
         // Auto/None requests can reach here when neither structural tags nor a
         // tool-choice JSON fallback were needed.
-        Ok(false)
+        Ok(GuidedToolConstraint::None)
     }
 }
 
@@ -167,7 +173,7 @@ fn has_response_format_constraint(request: &NvCreateChatCompletionRequest) -> bo
         .is_some_and(|format| !matches!(format, ResponseFormat::Text))
 }
 
-fn convert_tool_choice(tool_choice: &ChatCompletionToolChoiceOption) -> ToolChoice {
+pub(crate) fn convert_tool_choice(tool_choice: &ChatCompletionToolChoiceOption) -> ToolChoice {
     match tool_choice {
         ChatCompletionToolChoiceOption::None => ToolChoice::None,
         ChatCompletionToolChoiceOption::Auto => ToolChoice::Auto,
@@ -178,7 +184,7 @@ fn convert_tool_choice(tool_choice: &ChatCompletionToolChoiceOption) -> ToolChoi
     }
 }
 
-fn convert_tools(tools: &[ChatCompletionTool]) -> Vec<ToolDefinition> {
+pub(crate) fn convert_tools(tools: &[ChatCompletionTool]) -> Vec<ToolDefinition> {
     tools
         .iter()
         .map(|tool| ToolDefinition {
@@ -189,9 +195,92 @@ fn convert_tools(tools: &[ChatCompletionTool]) -> Vec<ToolDefinition> {
         .collect()
 }
 
+/// The guided-tool constraint a request implies, given what the structural-tag stage
+/// already decided.
+///
+/// Direct postprocessor callers and remote frontends use this compatibility helper
+/// when they did not run request preprocessing. The worker streaming path carries the
+/// enum returned by `apply_tool_choice_guided_decoding`; topology-B aggregation may
+/// reconstruct a structural-tag request as guided JSON, so its complete-output parser
+/// also checks the generated wire shape.
+pub(crate) fn guided_tool_constraint(
+    request: &NvCreateChatCompletionRequest,
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+    uses_structural_tag: bool,
+) -> Result<GuidedToolConstraint, DynamoError> {
+    if uses_structural_tag {
+        return Ok(GuidedToolConstraint::StructuralTag);
+    }
+    let tool_choice = request
+        .inner
+        .tool_choice
+        .as_ref()
+        .unwrap_or(&ChatCompletionToolChoiceOption::Auto);
+    let is_forced_tool_choice = matches!(
+        tool_choice,
+        ChatCompletionToolChoiceOption::Required | ChatCompletionToolChoiceOption::Named(_)
+    );
+    // Only a forced choice installs a tool-level JSON schema. Auto/None leave any
+    // JSON constraint to `response_format`, which governs assistant CONTENT.
+    if !is_forced_tool_choice {
+        return Ok(GuidedToolConstraint::None);
+    }
+    // Forced + explicit guided decoding is rejected at request time, so reaching here
+    // with both means the request never ran.
+    if has_explicit_guided_decoding(request) {
+        return Ok(GuidedToolConstraint::None);
+    }
+    // K3 forced requests are served by a prompt-level XTML instruction; no JSON schema.
+    if uses_kimi_k3_parser(tool_call_parser, reasoning_parser) {
+        return Ok(GuidedToolConstraint::None);
+    }
+    // Validate the forced choice against the actual tools the same way
+    // `apply_tool_choice_guided_decoding` does, instead of blindly installing a
+    // constraint for a `tool_choice` that names a tool absent from `tools` (or an
+    // empty `tools` list under `tool_choice: "required"`).
+    let tools = request.inner.tools.as_deref().unwrap_or(&[]);
+    match get_json_schema_from_tools(
+        Some(tool_choice),
+        Some(tools),
+        request.inner.parallel_tool_calls,
+    ) {
+        Ok(Some(_)) => Ok(installed_json_constraint(tool_choice)),
+        Ok(None) => Ok(GuidedToolConstraint::None),
+        Err(e) => Err(invalid_argument(e.to_string())),
+    }
+}
+
+/// True when either configured parser is Kimi K3.
+///
+/// K3 forced requests are served by a prompt-level XTML instruction, so they must
+/// NOT be reported as guided JSON even though their `tool_choice` is forced.
+fn uses_kimi_k3_parser(tool_call_parser: Option<&str>, reasoning_parser: Option<&str>) -> bool {
+    let is_k3 = |parser: &str| matches!(parser, "kimi_k3" | "kimi-k3");
+    tool_call_parser.is_some_and(is_k3) || reasoning_parser.is_some_and(is_k3)
+}
+
+/// Map a forced `tool_choice` onto the JSON shape its schema constrains output to.
+///
+/// Only reachable once `get_json_schema_from_tools` actually produced a schema, and
+/// that function returns `None` for `Auto`/`None`, so those arms are unreachable in
+/// practice and report [`GuidedToolConstraint::None`] rather than guessing.
+fn installed_json_constraint(tool_choice: &ChatCompletionToolChoiceOption) -> GuidedToolConstraint {
+    match tool_choice {
+        ChatCompletionToolChoiceOption::Named(named) => GuidedToolConstraint::GuidedJsonNamed {
+            tool_name: named.function.name.clone(),
+        },
+        ChatCompletionToolChoiceOption::Required => GuidedToolConstraint::GuidedJsonRequired,
+        ChatCompletionToolChoiceOption::Auto | ChatCompletionToolChoiceOption::None => {
+            GuidedToolConstraint::None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_protocols::types::{ChatCompletionNamedToolChoice, FunctionName};
     use serde_json::{Value, json};
 
     fn request(extra: Value) -> NvCreateChatCompletionRequest {
@@ -301,5 +390,72 @@ mod tests {
                 "response_format": {"type": "text"}
             })
         )));
+    }
+
+    fn named(name: &str) -> ChatCompletionToolChoiceOption {
+        ChatCompletionToolChoiceOption::Named(ChatCompletionNamedToolChoice {
+            r#type: dynamo_protocols::types::ChatCompletionToolType::Function,
+            function: FunctionName {
+                name: name.to_string(),
+            },
+        })
+    }
+
+    #[test]
+    fn only_structural_tag_reports_a_structural_tag() {
+        assert!(GuidedToolConstraint::StructuralTag.uses_structural_tag());
+        assert!(!GuidedToolConstraint::None.uses_structural_tag());
+        assert!(!GuidedToolConstraint::GuidedJsonRequired.uses_structural_tag());
+        assert!(
+            !GuidedToolConstraint::GuidedJsonNamed {
+                tool_name: "get_weather".to_string(),
+            }
+            .uses_structural_tag()
+        );
+    }
+
+    #[test]
+    fn required_reports_the_array_shape() {
+        assert_eq!(
+            installed_json_constraint(&ChatCompletionToolChoiceOption::Required),
+            GuidedToolConstraint::GuidedJsonRequired
+        );
+    }
+
+    #[test]
+    fn named_carries_the_tool_name_from_the_request() {
+        assert_eq!(
+            installed_json_constraint(&named("get_weather")),
+            GuidedToolConstraint::GuidedJsonNamed {
+                tool_name: "get_weather".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn unforced_choices_install_no_tool_constraint() {
+        assert_eq!(
+            installed_json_constraint(&ChatCompletionToolChoiceOption::Auto),
+            GuidedToolConstraint::None
+        );
+        assert_eq!(
+            installed_json_constraint(&ChatCompletionToolChoiceOption::None),
+            GuidedToolConstraint::None
+        );
+    }
+
+    #[test]
+    fn kimi_k3_is_detected_from_either_parser_slot() {
+        assert!(uses_kimi_k3_parser(Some("kimi_k3"), None));
+        assert!(uses_kimi_k3_parser(Some("kimi-k3"), None));
+        assert!(uses_kimi_k3_parser(None, Some("kimi_k3")));
+        assert!(uses_kimi_k3_parser(None, Some("kimi-k3")));
+    }
+
+    #[test]
+    fn non_k3_parsers_are_not_mistaken_for_k3() {
+        assert!(!uses_kimi_k3_parser(None, None));
+        assert!(!uses_kimi_k3_parser(Some("kimi_k2"), Some("qwen3")));
+        assert!(!uses_kimi_k3_parser(Some("qwen3_coder"), None));
     }
 }

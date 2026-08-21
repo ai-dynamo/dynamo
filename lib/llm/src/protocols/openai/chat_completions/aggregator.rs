@@ -31,6 +31,62 @@ fn contains_harmony_protocol(text: &str) -> bool {
     text.contains("<|channel|>")
 }
 
+/// Quote/escape-aware replacement for `dynamo_parsers::tool_calling::detect_tool_call_start`,
+/// which does a naive substring search and false-positives on a marker token that only
+/// appears as a quoted JSON string value (e.g. a tool argument literally containing the
+/// text `<tool_call>`). Looks up the real per-family marker tokens for `parser` from
+/// `dynamo_parsers`' own parser map (falling back to its "default" key exactly as
+/// `detect_tool_call_start` does for `None`/empty), then checks each with
+/// `unified_parser::contains_unquoted_marker` so a marker embedded inside a quoted string
+/// is not misread as native tool-call markup.
+fn contains_native_tool_call_marker(content: &str, parser: &str) -> bool {
+    let parser_key = if parser.is_empty() { "default" } else { parser };
+    let Some(config) = dynamo_parsers::tool_calling::parsers::get_tool_parser_map().get(parser_key)
+    else {
+        return false;
+    };
+    config
+        .parser_config
+        .tool_call_start_tokens()
+        .iter()
+        .any(|marker| {
+            !marker.is_empty() && super::unified_parser::contains_unquoted_marker(content, marker)
+        })
+}
+
+async fn parse_complete_tool_output(
+    content: &str,
+    parser: &str,
+    constraint: &crate::protocols::openai::GuidedToolConstraint,
+) -> anyhow::Result<(
+    Vec<dynamo_parsers::tool_calling::ToolCallResponse>,
+    Option<String>,
+)> {
+    if constraint.installs_guided_json() {
+        match super::tool_parser_v2::parse_complete_guided_json(content, constraint) {
+            Ok(calls) => return Ok((calls, Some(String::new()))),
+            Err(guided_error) => {
+                if !contains_native_tool_call_marker(content, parser) {
+                    return Err(guided_error);
+                }
+                tracing::warn!(
+                    parser,
+                    why = "guided_json_reconstructed_but_native_markup_observed",
+                    recovered_bytes = content.len(),
+                    "falling back to the configured native tool parser"
+                );
+            }
+        }
+    }
+
+    if super::tool_parser_v2::enabled() && super::tool_parser_v2::supports_family(parser) {
+        super::tool_parser_v2::parse_complete(content, None, parser)
+            .map(|(calls, normal)| (calls, Some(normal)))
+    } else {
+        try_tool_call_parse_aggregate_finalize(content, Some(parser), None).await
+    }
+}
+
 /// Aggregates a stream of [`NvCreateChatCompletionStreamResponse`]s into a single
 /// [`NvCreateChatCompletionResponse`]. This struct accumulates incremental responses
 /// from a streaming OpenAI API call into a complete final response.
@@ -377,18 +433,82 @@ impl DeltaAggregator {
             }
         }
 
+        // Two independent families each own ONE unified parser (topology B: raw
+        // model text reaches the frontend un-split) that replaces the split
+        // reasoning/tool-call finalize below outright: Qwen3 (`unified_parser`,
+        // gated on DYN_ENABLE_EXPERIMENTAL_PARSERS_V2) and muse (`tool_parser_v2`,
+        // default-on). This is the safety net for output that reached the
+        // aggregator unparsed; a request the worker already streamed through the
+        // matching `apply_stream`/`apply_unified_stream` arrives with `tool_calls`
+        // populated and is skipped by each guard below.
+        let qwen3_unified_family = super::unified_parser::selected_batch_family(
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+        );
+        if let Some(family) = qwen3_unified_family {
+            for choice in aggregator.choices.values_mut() {
+                if choice.text.is_empty()
+                    || choice
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|calls| !calls.is_empty())
+                {
+                    continue;
+                }
+                match super::unified_parser::parse_complete(
+                    family,
+                    &choice.text,
+                    &parsing_options.guided_tool_constraint,
+                ) {
+                    Ok(parsed) => {
+                        choice.text = parsed.text;
+                        if !parsed.reasoning.is_empty() {
+                            choice
+                                .reasoning_content
+                                .get_or_insert_with(String::new)
+                                .push_str(&parsed.reasoning);
+                        }
+                        if !parsed.tool_calls.is_empty() && !parsing_options.suppress_tool_calls {
+                            choice.tool_calls = Some(parsed.tool_calls);
+                            // OpenAI contract: a message carrying tool calls finishes
+                            // with `ToolCalls`, not `Stop`.
+                            if choice.finish_reason
+                                == Some(dynamo_protocols::types::FinishReason::Stop)
+                            {
+                                choice.finish_reason =
+                                    Some(dynamo_protocols::types::FinishReason::ToolCalls);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        // Best-effort: the aggregated text is served as-is rather than
+                        // failing a request the model already answered.
+                        tracing::warn!(
+                            error = %error,
+                            family,
+                            "failed to parse aggregated unified output; serving it unparsed"
+                        );
+                    }
+                }
+            }
+        }
+
         // Muse finalizes through the UNIFIED parser (topology B: raw model text
         // reaches the frontend un-split). Keyed on EITHER parser name to match the
         // streaming guard, so a reasoning-only card (`--dyn-reasoning-parser
         // muse_glimmer`, no tool-call parser) splits its markup here too. Default-on,
         // so muse never falls into the v1 aggregate-finalize below. The gate is wider
         // than main's `tool_call_parser.is_some()` for that reason; `parser` is bound
-        // inside the loop, after the muse branch has taken its `continue`.
+        // inside the loop, after the muse branch has taken its `continue`. Excluded
+        // when Qwen3 already claimed the request above, since Qwen3 also configures a
+        // `tool_call_parser` and would otherwise fall through into this block too.
         let unified_family = super::tool_parser_v2::unified_family(
             parsing_options.tool_call_parser.as_deref(),
             parsing_options.reasoning_parser.as_deref(),
         );
-        if unified_family.is_some() || parsing_options.tool_call_parser.is_some() {
+        if qwen3_unified_family.is_none()
+            && (unified_family.is_some() || parsing_options.tool_call_parser.is_some())
+        {
             for choice in aggregator.choices.values_mut() {
                 if choice
                     .tool_calls
@@ -400,16 +520,51 @@ impl DeltaAggregator {
                 }
 
                 if let Some(family) = unified_family.as_deref() {
-                    match super::tool_parser_v2::parse_complete_unified(&choice.text, None, family)
+                    let parse_result = if parsing_options
+                        .guided_tool_constraint
+                        .installs_guided_json()
                     {
+                        match super::tool_parser_v2::parse_complete_guided_json(
+                            &choice.text,
+                            &parsing_options.guided_tool_constraint,
+                        ) {
+                            Ok(calls) => Ok((calls, String::new(), String::new())),
+                            Err(guided_error) => {
+                                match super::tool_parser_v2::parse_complete_unified(
+                                    &choice.text,
+                                    None,
+                                    family,
+                                ) {
+                                    Ok((calls, reasoning, content))
+                                        if !calls.is_empty()
+                                            || !reasoning.is_empty()
+                                            || content != choice.text =>
+                                    {
+                                        tracing::warn!(
+                                            family,
+                                            why = "guided_json_reconstructed_but_native_markup_observed",
+                                            recovered_bytes = choice.text.len(),
+                                            "falling back to the configured unified parser"
+                                        );
+                                        Ok((calls, reasoning, content))
+                                    }
+                                    Ok(_) => Err(guided_error),
+                                    Err(native_error) => Err(native_error.context(format!(
+                                        "guided JSON parse also failed: {guided_error:#}"
+                                    ))),
+                                }
+                            }
+                        }
+                    } else {
+                        super::tool_parser_v2::parse_complete_unified(&choice.text, None, family)
+                    };
+                    match parse_result {
                         Ok((calls, reasoning, content)) => {
+                            let calls_is_empty = calls.is_empty();
                             // Same rule the streaming path applies: `none` still gets the
                             // reasoning/content split and the marker stripping, but a
                             // caller that disabled tools must not receive `tool_calls`.
-                            // `experimental_v2_batch_eligible` is set from the request's
-                            // tool_choice by `batch_tool_choice_eligible`, which admits
-                            // unset/auto only, so it is exactly that gate.
-                            if !calls.is_empty() && parsing_options.experimental_v2_batch_eligible {
+                            if !calls_is_empty && !parsing_options.suppress_tool_calls {
                                 choice.tool_calls = Some(
                                     calls
                                         .into_iter()
@@ -417,10 +572,22 @@ impl DeltaAggregator {
                                         .collect(),
                                 );
                             }
-                            if choice.reasoning_content.is_none() && !reasoning.is_empty() {
-                                choice.reasoning_content = Some(reasoning);
+                            if !reasoning.is_empty() {
+                                choice
+                                    .reasoning_content
+                                    .get_or_insert_with(String::new)
+                                    .push_str(&reasoning);
                             }
-                            choice.text = content;
+                            if !calls_is_empty {
+                                choice.text = content;
+                            } else {
+                                tracing::warn!(
+                                    family,
+                                    why = "guided_json_produced_zero_calls_under_tool_choice_required",
+                                    original_bytes = choice.text.len(),
+                                    "guided-JSON parse returned zero tool calls; preserving original text"
+                                );
+                            }
                         }
                         Err(error) => {
                             tracing::debug!(error = %error, family, "muse unified batch parse failed");
@@ -437,10 +604,8 @@ impl DeltaAggregator {
                 // With DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, supported families use the
                 // v2 parser for batch too (no jail / no aggregate-finalize):
                 // parse_complete drops a value truncated at EOF instead of guessing it.
-                // Other families, the flag off, and guided-decoded requests
-                // (tool_choice=required/named or structural-tag, gated by
-                // experimental_v2_batch_eligible — see tool_parser_v2::batch_tool_choice_eligible)
-                // keep the v1 finalize path.
+                // Other families and the flag-off path keep the v1 finalize path.
+                // Guided JSON is handled above from the exact carried constraint.
                 // Extract the truncated tail BEFORE parsing so a second <tool_call>
                 // truncated after a complete first one is not silently dropped.
                 // Token strings come from the parser config so this stays in sync
@@ -466,15 +631,12 @@ impl DeltaAggregator {
                     None
                 };
 
-                let parse_result = if super::tool_parser_v2::enabled()
-                    && super::tool_parser_v2::supports_family(parser)
-                    && parsing_options.experimental_v2_batch_eligible
-                {
-                    super::tool_parser_v2::parse_complete(&choice.text, None, parser)
-                        .map(|(calls, normal)| (calls, Some(normal)))
-                } else {
-                    try_tool_call_parse_aggregate_finalize(&choice.text, Some(parser), None).await
-                };
+                let parse_result = parse_complete_tool_output(
+                    &choice.text,
+                    parser,
+                    &parsing_options.guided_tool_constraint,
+                )
+                .await;
                 let (tool_calls, content) = match parse_result {
                     Ok(result) => result,
                     Err(error) => {

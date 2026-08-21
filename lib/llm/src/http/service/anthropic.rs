@@ -510,7 +510,15 @@ async fn anthropic_messages(
     // Anthropic requests are converted to the same chat request contract. Keep
     // parser activation identical to the OpenAI Chat Completions and Responses
     // entry points so content-only turns cannot be reclassified as tool calls.
-    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request);
+    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request)
+        .map_err(|e| {
+            inflight_guard.mark_error(ErrorType::Validation);
+            anthropic_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                &format!("Invalid tool_choice: {}", e.message()),
+            )
+        })?;
 
     // Same backstop as the chat handler, so the two aggregation entry points
     // cannot drift. See `wants_reasoning_as_content_when_empty`.
@@ -525,6 +533,7 @@ async fn anthropic_messages(
     // withhold every data frame needs forced keep-alive frames.
     let stream_can_defer_all_output =
         crate::preprocessor::OpenAIPreprocessor::stream_can_defer_all_output(
+            parsing_options.tool_call_parser.as_deref(),
             parsing_options.reasoning_parser.as_deref(),
             request.chat_template_args.as_ref(),
         );
