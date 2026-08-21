@@ -25,11 +25,12 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::{
     EventPublisher, EventSubscriber, EventTransportKind, TypedEventSubscriber,
 };
+use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, Notify};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
@@ -112,26 +113,26 @@ fn active_sequence_event_channel(
 
 struct WorkerLoadEventSender {
     pending: Arc<Mutex<HashMap<WorkerWithDpRank, ActiveLoad>>>,
-    updated_tx: watch::Sender<()>,
+    updated: Arc<Notify>,
 }
 
 struct WorkerLoadEventReceiver {
     pending: Arc<Mutex<HashMap<WorkerWithDpRank, ActiveLoad>>>,
-    updated_rx: watch::Receiver<()>,
+    updated: Arc<Notify>,
 }
 
 impl WorkerLoadEventSender {
     fn channel() -> (Self, WorkerLoadEventReceiver) {
         let pending = Arc::new(Mutex::new(HashMap::new()));
-        let (updated_tx, updated_rx) = watch::channel(());
+        let updated = Arc::new(Notify::new());
         (
             Self {
                 pending: Arc::clone(&pending),
-                updated_tx,
+                updated: Arc::clone(&updated),
             },
             WorkerLoadEventReceiver {
                 pending,
-                updated_rx,
+                updated,
             },
         )
     }
@@ -141,41 +142,35 @@ impl WorkerLoadEventSender {
     }
 
     fn enqueue_batch(&self, loads: impl IntoIterator<Item = ActiveLoad>) {
-        // One RuntimeSequencePublisher serves every worker. Keep the watched value as a
-        // notification and coalesce in a keyed map so one worker cannot overwrite another.
-        let mut pending = self
-            .pending
-            .lock()
-            .expect("worker-load pending map mutex poisoned");
-        let mut updated = false;
+        let mut pending = self.pending.lock();
+        let was_empty = pending.is_empty();
+        let mut inserted = false;
         for load in loads {
             let worker = WorkerWithDpRank::new(load.worker_id, load.dp_rank);
             pending.insert(worker, load);
-            updated = true;
+            inserted = true;
         }
+        let should_notify = was_empty && inserted;
         drop(pending);
 
-        if !updated {
-            return;
+        if should_notify {
+            self.updated.notify_one();
         }
-
-        self.updated_tx.send_replace(());
     }
 }
 
 impl WorkerLoadEventReceiver {
-    async fn recv(&mut self) -> Option<Vec<ActiveLoad>> {
+    async fn recv(&self) -> Vec<ActiveLoad> {
         loop {
-            self.updated_rx.changed().await.ok()?;
+            self.updated.notified().await;
             let loads = self
                 .pending
                 .lock()
-                .expect("worker-load pending map mutex poisoned")
                 .drain()
                 .map(|(_, load)| load)
                 .collect::<Vec<_>>();
             if !loads.is_empty() {
-                return Some(loads);
+                return loads;
             }
         }
     }
@@ -290,17 +285,14 @@ impl LoadEventPublisher for EventPublisher {
 
 async fn run_worker_load_publisher<P: LoadEventPublisher>(
     publisher: P,
-    mut load_rx: WorkerLoadEventReceiver,
+    load_rx: WorkerLoadEventReceiver,
     cancellation_token: CancellationToken,
 ) {
     'publish: loop {
         let loads = tokio::select! {
             biased;
             _ = cancellation_token.cancelled() => break,
-            load = load_rx.recv() => match load {
-                Some(loads) => loads,
-                None => break,
-            },
+            loads = load_rx.recv() => loads,
         };
         for load in loads {
             let publish_result = tokio::select! {
@@ -840,7 +832,7 @@ mod tests {
 
     #[tokio::test]
     async fn worker_load_sender_retains_latest_snapshot_per_worker() {
-        let (sender, mut load_rx) = WorkerLoadEventSender::channel();
+        let (sender, load_rx) = WorkerLoadEventSender::channel();
 
         sender.enqueue_batch(vec![
             active_load(1, 10, false),
@@ -848,10 +840,9 @@ mod tests {
             active_load(1, 0, false),
         ]);
 
-        let mut loads = load_rx.recv().await.unwrap();
+        let mut loads = load_rx.recv().await;
         loads.sort_by_key(|load| load.worker_id);
         assert_eq!(loads, [active_load(1, 0, false), active_load(2, 20, false)]);
-        assert!(!load_rx.updated_rx.has_changed().unwrap());
     }
 
     #[tokio::test]
