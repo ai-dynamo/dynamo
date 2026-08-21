@@ -45,7 +45,9 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.vllm,
     pytest.mark.core,
-    pytest.mark.nightly,
+    # TODO: revert to pytest.mark.nightly after pre_merge validation
+    # on this PR (see .ai/ci-guidelines.md).
+    pytest.mark.pre_merge,
     pytest.mark.gpu_1,
     pytest.mark.xpu_1,
     pytest.mark.model(TEST_MODEL),
