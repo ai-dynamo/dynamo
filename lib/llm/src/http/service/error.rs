@@ -57,6 +57,14 @@ pub(crate) fn invalid_argument(message: impl Into<String>) -> DynamoError {
 /// chain, file path, or panic stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SanitizedError {
+    /// 400 Bad Request, body sanitized.
+    ///
+    /// For paths that must report *that* a request was rejected without
+    /// repeating why. The unary path forwards a backend rejection's message
+    /// verbatim; a streamed frame cannot, because `Backend(InvalidArgument)`
+    /// also covers any Python `ValueError`/`TypeError` an engine raises, whose
+    /// text may be internal.
+    InvalidRequest,
     /// 499 Client Closed Request.
     Cancelled,
     /// 529 Site Is Overloaded.
@@ -100,6 +108,7 @@ impl SanitizedError {
 
     pub fn status(self) -> StatusCode {
         match self {
+            SanitizedError::InvalidRequest => StatusCode::BAD_REQUEST,
             // 499 is not IANA-registered but is widely used (nginx).
             SanitizedError::Cancelled => StatusCode::from_u16(499).unwrap(),
             SanitizedError::Overloaded => overload_status_code(),
@@ -121,6 +130,7 @@ impl SanitizedError {
     /// generic `api_error`.
     pub fn anthropic_type(self) -> &'static str {
         match self {
+            SanitizedError::InvalidRequest => "invalid_request_error",
             SanitizedError::Cancelled => "request_cancelled",
             SanitizedError::Overloaded => "overloaded_error",
             SanitizedError::Unavailable => "overloaded_error",
@@ -135,6 +145,7 @@ impl SanitizedError {
     /// OpenAI-style snake_case `type` field used in inline error frames.
     pub fn openai_type_slug(self) -> &'static str {
         match self {
+            SanitizedError::InvalidRequest => "invalid_request_error",
             SanitizedError::Cancelled => "request_cancelled",
             SanitizedError::Overloaded => "service_unavailable",
             SanitizedError::Unavailable => "service_unavailable",
@@ -211,6 +222,7 @@ impl BackendStatusAction {
 impl std::fmt::Display for SanitizedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            SanitizedError::InvalidRequest => f.write_str("Invalid request"),
             SanitizedError::Cancelled => f.write_str("Request cancelled"),
             SanitizedError::Overloaded => f.write_str("Service temporarily overloaded"),
             SanitizedError::Unavailable => f.write_str("Service temporarily unavailable"),
