@@ -976,7 +976,9 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(17.6),
             pytest.mark.requested_sglang_vram_gib(17.6),
-            pytest.mark.timeout(180),
+            # 420s is ~3x the measured 127s H100 runtime and covers deployment
+            # readiness, request execution, and teardown.
+            pytest.mark.timeout(420),
             pytest.mark.nightly,
         ],
         model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
