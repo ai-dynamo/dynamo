@@ -1,12 +1,12 @@
 # lib/kv-router
 
 KV-router contains hot-path routing, indexing, scheduling, and active-sequence
-state. Keep edits scoped and read the more specific `CLAUDE.md` in subdirectories
+state. Keep edits scoped and read the more specific `AGENTS.md` in subdirectories
 when one exists.
 
 When router configuration is serialized inside a model deployment card, it is
 part of the N-2 worker/frontend wire contract described in
-[`lib/llm/CLAUDE.md`](../llm/CLAUDE.md). Keep compatibility handling narrow and
+[`lib/llm/AGENTS.md`](../llm/AGENTS.md). Keep compatibility handling narrow and
 give deprecated wire fields a versioned removal TODO.
 
 ## Dependencies

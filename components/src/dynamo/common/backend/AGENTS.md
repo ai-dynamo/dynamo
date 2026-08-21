@@ -10,7 +10,7 @@ out; `DiffusionEngine` is a domain subclass). See `README.md` for full docs.
 
 ## Engine Lifecycle
 
-```
+```text
 from_args -> start -> register_prometheus -> component_metrics_dp_ranks -> attach_snapshot_publisher -> generate/abort -> is_quiescent -> cleanup
      |          |              |                       |                              |                          |             |        |
   parse args, start engine, vendor registry      declare dp_ranks            engine stashes publisher,   serve requests  drain in-flight,

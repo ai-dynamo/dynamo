@@ -1,6 +1,4 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+# KVBM Logical
 
 ## Build Commands
 
@@ -32,7 +30,7 @@ cargo build -p kvbm-logical --features testing
 
 Blocks use compile-time type states to enforce valid transitions:
 
-```
+```text
 MutableBlock<T>  →  CompleteBlock<T>  →  ImmutableBlock<T>  →  WeakBlock<T>
    (Reset)             (Staged)            (Registered)        (Non-owning)
 ```

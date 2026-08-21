@@ -22,7 +22,7 @@ the raw path alongside the LLM `chat`/`completions`/`embedding`/etc.
 
 ## Engine Lifecycle
 
-```
+```text
 construct -> start(worker_id) -> setup_metrics -> generate/abort -> is_quiescent -> cleanup
     |               |                  |                |             |         |
 parse args,    start engine,    wire Prometheus    serve requests drain-poll  shutdown,
