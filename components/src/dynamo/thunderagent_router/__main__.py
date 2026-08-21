@@ -44,6 +44,15 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
+def _publish_sglang_generate_capability(
+    runtime_config: ModelRuntimeConfig,
+) -> None:
+    """Advertise native SGLang generate without importing SGLang by default."""
+    from dynamo.sglang.engine_generate import SGLANG_GENERATE_CAPABILITY
+
+    runtime_config.set_engine_specific(SGLANG_GENERATE_CAPABILITY, "true")
+
+
 def _extract_program_id(request: dict[str, Any]) -> Optional[str]:
     ctx = request.get("agent_context")
     if not isinstance(ctx, dict):
@@ -451,6 +460,9 @@ async def worker(runtime: DistributedRuntime) -> None:
             runtime_cfg.tool_call_parser = config.tool_call_parser
         if config.reasoning_parser:
             runtime_cfg.reasoning_parser = config.reasoning_parser
+        if config.publish_sglang_generate:
+            _publish_sglang_generate_capability(runtime_cfg)
+            logger.info("Published SGLang engine-native generate capability")
         await register_model(
             model_input=ModelInput.Tokens,
             model_type=ModelType.Chat | ModelType.Completions,

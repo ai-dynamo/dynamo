@@ -58,6 +58,11 @@ chat/completions surface; if the wrapped backend also advertises that surface
 for the same model, the frontend may route requests directly to the backend and
 bypass ThunderAgent lifecycle handling such as `x-dynamo-session-final`.
 
+For clients that require SGLang's native `/generate` API, add
+`--publish-sglang-generate` to ThunderAgent. This advertises the existing
+SGLang-native frontend route through ThunderAgent while the wrapped worker
+continues to use `--endpoint-types none`.
+
 The control-loop knobs (`--pause-threshold`, `--pause-target`,
 `--resume-hysteresis`, `--scheduler-interval-seconds`, …) and their defaults are
 documented in [docs/agents/thunderagent-router.md](../../../../docs/fern/pages/use-cases/agents/thunderagent-program-scheduler.md#utilization-driven-control-loop).
