@@ -1142,11 +1142,7 @@ impl OwnerRecoveryResult {
             source: plan.source.clone(),
             attachment: plan.attachment.clone(),
             observation_revision: plan.observation_revision,
-            activation_expected: plan
-                .attachment
-                .as_ref()
-                .is_some_and(|attachment| attachment.cache_readable)
-                && plan.recognized_worker.is_some(),
+            activation_expected: plan.attachment.is_some() && plan.recognized_worker.is_some(),
         }
     }
 }
@@ -1494,13 +1490,11 @@ fn finish_owner_readiness(
     let membership = membership.borrow();
     let live_workers = &membership.sources;
     let ready = plan.attachment.as_ref().is_some_and(|attachment| {
-        attachment.cache_readable
-            && live_workers.contains_key(&attachment.worker)
+        live_workers.contains_key(&attachment.worker)
             && status.cache_owner_ready
             && status.identity.publisher_id == plan.source.publisher_id
             && status.attachment.as_ref().is_some_and(|status_attachment| {
                 status_attachment.ready
-                    && status_attachment.cache_readable
                     && status_attachment.generation == attachment.attachment_generation
                     && status_attachment.worker == attachment.worker
                     && status_attachment.ready_at_outbound_cursor
@@ -1776,7 +1770,8 @@ mod tests {
         StableDpSlotId,
     };
     use dynamo_kv_router::indexer::{
-        KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvStateRecoveryReceipt, LowerTierIndexers,
+        KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvStateAttachmentStatus,
+        KvStateRecoveryReceipt, LowerTierIndexers,
     };
     use dynamo_kv_router::protocols::{
         ExternalSequenceBlockHash, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
@@ -1788,7 +1783,10 @@ mod tests {
     use super::*;
     use crate::discovery::{
         KvEventSource, KvSourceMembershipView, KvStateEndpointResolution,
-        kv_state_agent::KvStateIngressProtocol,
+        kv_state_agent::{
+            KvStateIngressProtocol, KvStateProjectionResolution, KvStateUnknownReason,
+            resolve_kv_state_projection,
+        },
     };
 
     fn owner(slot: u8) -> CacheOwnerId {
@@ -1864,7 +1862,6 @@ mod tests {
             ingress_protocol: KvStateIngressProtocol::VllmResidencyV1,
             raw_zmq_endpoint: "tcp://worker:5557".to_string(),
             raw_topic: String::new(),
-            cache_readable: true,
             ready_at_outbound_cursor: 9,
         }
     }
@@ -1912,6 +1909,125 @@ mod tests {
             &sources,
             &attachments,
             &revision,
+        ));
+    }
+
+    #[tokio::test]
+    async fn attachment_recovers_pre_advertisement_tail_without_readability_toggle() {
+        let owner = owner(4);
+        let worker = WorkerWithDpRank::new(17, 3);
+        let source = source_advertisement(owner);
+        let attachment = attachment_advertisement(owner, 7);
+        let identity = KvStateAgentIdentity {
+            cache_owner_id: owner,
+            publisher_id: source.publisher_id,
+            protocol_version: source.protocol_version,
+        };
+        let plan = OwnerRecoveryPlan {
+            owner,
+            source,
+            attachment: Some(attachment),
+            expected: identity.clone(),
+            recognized_worker: Some(worker),
+            previous_publisher_id: None,
+            previous_cursor: 0,
+            recovery_required: true,
+            observation_revision: 1,
+            schedule_generation: 1,
+        };
+        let mut rank = RankState::default();
+        rank.buffer_recovery_tail(RouterEvent::with_cache_owner(
+            worker.worker_id,
+            KvCacheEvent {
+                event_id: 10,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(10),
+                        tokens_hash: LocalBlockHash(10),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: worker.dp_rank,
+            },
+            StorageTier::HostPinned,
+            owner,
+        ));
+        let mut tails = HashMap::from([(
+            owner,
+            OwnerRecoveryTail {
+                publisher_id: 41,
+                attachment_generation: Some(7),
+                schedule_generation: 1,
+                rank,
+            },
+        )]);
+        let mut runtime = HashMap::from([(
+            owner,
+            OwnerRuntime {
+                publisher_id: Some(41),
+                recovered_cursor: 0,
+                attachment_generation: Some(7),
+                last_worker: Some(worker),
+                ready: false,
+                recovery_required: true,
+            },
+        )]);
+
+        let status = KvStateAgentStatus {
+            identity: identity.clone(),
+            attachment: Some(KvStateAttachmentStatus {
+                generation: 7,
+                worker,
+                ready: true,
+                ready_at_outbound_cursor: 9,
+            }),
+            cache_owner_ready: true,
+            outbound_cursor: 10,
+        };
+        let live_workers = HashSet::from([worker]);
+        let receipt_before_tail = KvStateRecoveryReceipt {
+            identity: identity.clone(),
+            attachment_generation: Some(7),
+            recovered_through_cursor: 8,
+        };
+        assert_eq!(
+            resolve_kv_state_projection(
+                true,
+                owner,
+                std::slice::from_ref(&plan.source),
+                std::slice::from_ref(plan.attachment.as_ref().unwrap()),
+                &live_workers,
+                Some(&status),
+                Some(&receipt_before_tail),
+            ),
+            KvStateProjectionResolution::Unknown(KvStateUnknownReason::RecoveryBehindBarrier)
+        );
+
+        let recovered_cursor =
+            apply_recovery_tail(&Indexer::None, &plan, 9, &mut runtime, &mut tails)
+                .await
+                .unwrap();
+        assert_eq!(recovered_cursor, 10);
+        assert_eq!(runtime[&owner].recovered_cursor, 10);
+
+        let receipt_after_tail = KvStateRecoveryReceipt {
+            identity,
+            attachment_generation: Some(7),
+            recovered_through_cursor: recovered_cursor,
+        };
+        assert!(matches!(
+            resolve_kv_state_projection(
+                true,
+                owner,
+                std::slice::from_ref(&plan.source),
+                std::slice::from_ref(plan.attachment.as_ref().unwrap()),
+                &live_workers,
+                Some(&status),
+                Some(&receipt_after_tail),
+            ),
+            KvStateProjectionResolution::Ready { worker: ready, .. } if ready == worker
         ));
     }
 
