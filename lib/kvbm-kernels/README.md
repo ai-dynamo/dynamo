@@ -1,6 +1,13 @@
 ## Dynamo KV Block Manager Kernels
 
-GPU kernels for converting KV cache blocks between three memory layouts used by LLM inference frameworks. All conversions run entirely on-device via fused CUDA kernels.
+GPU kernels for KV cache transfer and compression in the Dynamo serving system.
+
+- **Transfer** — Batched vectorized copy and fused layout conversion between Block Stack (vLLM) and Universal (Dynamo storage) formats. Always available.
+- **KVTC compression** (`kvtc_kernels` feature) — GPU-accelerated [KV Cache Transform Coding](https://arxiv.org/abs/2511.01815) achieving ~15x compression via PCA projection and mixed-precision quantization (FP8 + IntX), with direct-to-host writes that fuse compression with D2H transfer. See [`docs/kvtc-design.md`](docs/kvtc-design.md) for architecture, configuration, and usage.
+
+### Transfer Layouts
+
+All layout conversions run entirely on-device via fused CUDA kernels.
 
 ### Dimensions
 
@@ -87,6 +94,9 @@ cargo build --features static-kernels
 # Run CUDA integration tests (requires GPU + nvcc)
 cargo test --features testing-cuda,permute_kernels
 
+# Run KVTC compression tests
+cargo test --features testing-cuda,kvtc_kernels
+
 # Specific test with output
 cargo test --features testing-cuda,permute_kernels fused_copy_roundtrip -- --nocapture
 
@@ -100,9 +110,19 @@ pytest tests/
 
 ### Benchmarking
 
+```bash
+# Transfer benchmarks
+cargo run --release --example kvbench --features kvbench -- --num-blocks=1,128 --tokens-per-block=16,64
+
+# KVTC compression benchmarks
+cargo run --release --example kvbench --features kvbench -- --kvtc
+```
+
+<details>
+<summary>Example transfer benchmark output</summary>
+
 ```text
-root@9eb240f7ded8:/workspace/lib/kvbm-kernels# cargo run --release --example kvbench --features testing-cuda,kvbench -- --num-blocks=1,128 --tokens-per-block=16,64 --
-backend vectorized,batched --direction h2d
+root@9eb240f7ded8:/workspace/lib/kvbm-kernels# cargo run --release --example kvbench --features kvbench -- --num-blocks=1,128 --tokens-per-block=16,64 --backend vectorized,batched --direction h2d
 ...
      Running `/workspace/target/release/examples/kvbench --num-blocks=1,128 --tokens-per-block=16,64 --backend vectorized,batched --direction h2d`
 KV Cache Transfer Benchmark
@@ -155,6 +175,8 @@ tokens_per_block,num_blocks,pattern,direction,backend,total_bytes,inner_bytes,co
 
 Done.
 ```
+
+</details>
 
 ### Troubleshooting
 
