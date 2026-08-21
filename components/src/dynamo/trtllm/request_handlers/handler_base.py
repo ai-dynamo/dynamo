@@ -78,6 +78,53 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
+POSTPROCESS_OFFLOAD = os.environ.get("DYN_TRTLLM_POSTPROCESS_OFFLOAD", "0") == "1"
+
+
+@dataclass(kw_only=True)
+class _DynamoPostprocArgs:
+    """Pickle-safe state for experimental process-side result conversion."""
+
+    num_prompt_tokens: int | None = None
+    tokenizer: Any = None
+    prefill_prompt_tokens_details: dict | None = None
+
+
+def _dynamo_stream_post_processor(rsp: Any, args: _DynamoPostprocArgs) -> list[dict]:
+    """Build Dynamo token deltas inside a TensorRT-LLM postprocess process."""
+    results: list[dict] = []
+    outputs = rsp.outputs
+    completion_tokens = sum(len(output.token_ids) for output in outputs)
+
+    for output in outputs:
+        out = {
+            "token_ids": output.token_ids_diff,
+            "index": output.index,
+        }
+
+        if output.finish_reason:
+            out["finish_reason"] = output.finish_reason
+        if output.stop_reason:
+            out["stop_reason"] = output.stop_reason
+
+        if out.get("finish_reason") or rsp._done:
+            if not out.get("finish_reason"):
+                out["finish_reason"] = "unknown"
+
+            prompt_tokens = int(args.num_prompt_tokens or 0)
+            prompt_tokens_details = args.prefill_prompt_tokens_details
+            if prompt_tokens_details is None and getattr(rsp, "cached_tokens", 0) > 0:
+                prompt_tokens_details = {"cached_tokens": int(rsp.cached_tokens)}
+            out["completion_usage"] = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": int(completion_tokens),
+                "total_tokens": int(prompt_tokens + completion_tokens),
+                "prompt_tokens_details": prompt_tokens_details,
+            }
+
+        results.append(out)
+
+    return results
 
 
 class TRTLLMEnginePauseController:
@@ -1161,6 +1208,34 @@ class HandlerBase(BaseGenerativeHandler):
             prefill_result.get("prompt_tokens_details") if prefill_result else None
         )
 
+        postproc_params = None
+        if POSTPROCESS_OFFLOAD:
+            if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
+                raise RuntimeError(
+                    "DYN_TRTLLM_POSTPROCESS_OFFLOAD currently supports aggregated "
+                    "workers only"
+                )
+            if (
+                getattr(sampling_params, "n", 1) != 1
+                or getattr(sampling_params, "best_of", 1) != 1
+                or bool(getattr(sampling_params, "use_beam_search", False))
+                or getattr(sampling_params, "logprobs", None) is not None
+                or getattr(sampling_params, "prompt_logprobs", None) is not None
+                or self._request_has_images(processed_input)
+            ):
+                raise RuntimeError(
+                    "DYN_TRTLLM_POSTPROCESS_OFFLOAD currently supports only "
+                    "aggregated, text-only, single-choice requests without logprobs"
+                )
+            from tensorrt_llm.executor.postproc_worker import PostprocParams
+
+            postproc_params = PostprocParams(
+                post_processor=_dynamo_stream_post_processor,
+                postproc_args=_DynamoPostprocArgs(
+                    prefill_prompt_tokens_details=prefill_prompt_tokens_details
+                ),
+            )
+
         # Build trace headers for distributed tracing
         trace_headers = context.trace_headers()
 
@@ -1241,6 +1316,7 @@ class HandlerBase(BaseGenerativeHandler):
                 streaming=streaming,
                 trace_headers=trace_headers,
                 scheduling_params=scheduling_params,
+                _postproc_params=postproc_params,
                 **conv_kwargs,
                 priority=priority,
                 cache_salt=cache_salt,
@@ -1271,12 +1347,36 @@ class HandlerBase(BaseGenerativeHandler):
                         self.publisher.start()
                         self.first_generation = False
 
+                    if POSTPROCESS_OFFLOAD and res.error:
+                        raise RequestError(res.error)
+
+                    outputs = res.outputs
+                    if POSTPROCESS_OFFLOAD:
+                        if not outputs:
+                            raise RuntimeError(
+                                "TensorRT-LLM postprocess offload returned no output"
+                            )
+                        postprocessed = getattr(outputs[0], "_postprocess_result", None)
+                        if postprocessed is None:
+                            raise RuntimeError(
+                                "TensorRT-LLM postprocess offload returned no result"
+                            )
+                    else:
+                        postprocessed = None
+
+                    if postprocessed is not None:
+                        for out in postprocessed:
+                            yield out
+                        raw_outputs = []
+                    else:
+                        raw_outputs = outputs
+
                     # If we are not done generating, but there are no outputs, return an error
-                    if not res.outputs and not res.finished:
+                    if postprocessed is None and not raw_outputs and not res.finished:
                         yield {"finish_reason": "error", "token_ids": []}
                         break
 
-                    for output in res.outputs:
+                    for output in raw_outputs:
                         output_idx = getattr(output, "index", 0) or 0
                         tokens_so_far = output_tokens_per_choice.get(output_idx, 0)
                         next_total_toks = len(output.token_ids)
@@ -1337,7 +1437,7 @@ class HandlerBase(BaseGenerativeHandler):
 
                             num_input_tokens = len(request.get("token_ids", []))
                             total_completion_tokens = sum(
-                                len(o.token_ids) for o in res.outputs
+                                len(o.token_ids) for o in outputs
                             )
 
                             prompt_tokens_details = None

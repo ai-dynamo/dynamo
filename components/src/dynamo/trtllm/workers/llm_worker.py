@@ -180,6 +180,28 @@ def _strip_postprocess_workers(engine_args: dict) -> None:
     Dynamo manages its own post-processing pipeline; TRT-LLM's
     num_postprocess_workers is not effective in this context.
     """
+    if os.environ.get("DYN_TRTLLM_POSTPROCESS_OFFLOAD") == "1":
+        value = engine_args.get("num_postprocess_workers", 0)
+        try:
+            workers = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "DYN_TRTLLM_POSTPROCESS_OFFLOAD=1 requires an integer "
+                "num_postprocess_workers"
+            ) from exc
+        if workers <= 0:
+            raise ValueError(
+                "DYN_TRTLLM_POSTPROCESS_OFFLOAD=1 requires num_postprocess_workers > 0"
+            )
+        engine_args["num_postprocess_workers"] = workers
+        engine_args.setdefault("postprocess_tokenizer_dir", engine_args["model"])
+        logging.warning(
+            "Experimental Dynamo result offload enabled with %d TensorRT-LLM "
+            "postprocess workers",
+            workers,
+        )
+        return
+
     value = engine_args.pop("num_postprocess_workers", None)
     if value is None:
         return

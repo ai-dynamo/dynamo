@@ -623,8 +623,9 @@ async def test_init_llm_worker_creates_multimodal_processor():
 
 
 @pytest.mark.core
-def test_strip_postprocess_workers_handles_quoted_string_value(caplog):
+def test_strip_postprocess_workers_handles_quoted_string_value(monkeypatch, caplog):
     """Quoted YAML/JSON string values (e.g. "8") warn and are removed without TypeError."""
+    monkeypatch.delenv("DYN_TRTLLM_POSTPROCESS_OFFLOAD", raising=False)
     engine_args = {"num_postprocess_workers": "8", "max_batch_size": 128}
     with caplog.at_level("WARNING"):
         _strip_postprocess_workers(engine_args)
@@ -633,11 +634,34 @@ def test_strip_postprocess_workers_handles_quoted_string_value(caplog):
 
 
 @pytest.mark.core
+def test_strip_postprocess_workers_retains_enabled_offload(monkeypatch, caplog):
+    monkeypatch.setenv("DYN_TRTLLM_POSTPROCESS_OFFLOAD", "1")
+    engine_args = {"model": "fake-model", "num_postprocess_workers": "4"}
+
+    with caplog.at_level("WARNING"):
+        _strip_postprocess_workers(engine_args)
+
+    assert engine_args["num_postprocess_workers"] == 4
+    assert engine_args["postprocess_tokenizer_dir"] == "fake-model"
+    assert any("result offload enabled" in r.message for r in caplog.records)
+
+
+@pytest.mark.core
+def test_strip_postprocess_workers_requires_positive_count(monkeypatch):
+    monkeypatch.setenv("DYN_TRTLLM_POSTPROCESS_OFFLOAD", "1")
+    engine_args = {"model": "fake-model", "num_postprocess_workers": 0}
+
+    with pytest.raises(ValueError, match="num_postprocess_workers > 0"):
+        _strip_postprocess_workers(engine_args)
+
+
+@pytest.mark.core
 @pytest.mark.asyncio
 async def test_init_llm_worker_strips_num_postprocess_workers_from_extra_engine_args(
     tmp_path, monkeypatch, caplog
 ):
     """num_postprocess_workers in an extra-engine-args YAML is stripped with a warning."""
+    monkeypatch.delenv("DYN_TRTLLM_POSTPROCESS_OFFLOAD", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_MAX_SEQ_LEN", raising=False)

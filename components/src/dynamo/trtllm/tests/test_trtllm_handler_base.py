@@ -5,6 +5,7 @@ import asyncio
 import re as re_mod
 from copy import deepcopy
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 from unittest.mock import MagicMock
@@ -29,6 +30,8 @@ from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.request_handlers.handler_base import (
     BYPASS_REMOTE_PREFILL_ANNOTATION,
     HandlerBase,
+    _DynamoPostprocArgs,
+    _dynamo_stream_post_processor,
 )
 
 pytestmark = [
@@ -37,6 +40,54 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_1,
 ]
+
+
+def test_dynamo_stream_post_processor_emits_delta_and_terminal_usage():
+    args = _DynamoPostprocArgs(num_prompt_tokens=32)
+    partial = SimpleNamespace(
+        outputs=[
+            SimpleNamespace(
+                index=0,
+                token_ids=[10, 11],
+                token_ids_diff=[10, 11],
+                finish_reason=None,
+                stop_reason=None,
+            )
+        ],
+        cached_tokens=31,
+        _done=False,
+    )
+    final = SimpleNamespace(
+        outputs=[
+            SimpleNamespace(
+                index=0,
+                token_ids=[10, 11, 12],
+                token_ids_diff=[12],
+                finish_reason="length",
+                stop_reason=None,
+            )
+        ],
+        cached_tokens=31,
+        _done=True,
+    )
+
+    assert _dynamo_stream_post_processor(partial, args) == [
+        {"token_ids": [10, 11], "index": 0}
+    ]
+    assert _dynamo_stream_post_processor(final, args) == [
+        {
+            "token_ids": [12],
+            "index": 0,
+            "finish_reason": "length",
+            "completion_usage": {
+                "prompt_tokens": 32,
+                "completion_tokens": 3,
+                "total_tokens": 35,
+                "prompt_tokens_details": {"cached_tokens": 31},
+            },
+        }
+    ]
+
 
 # Intentionally omit profiled_vram_gib so this import-heavy module runs in the
 # sequential GPU stage instead of starting one TRT-LLM subprocess per test node.
