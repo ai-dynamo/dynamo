@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
+use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -25,131 +26,76 @@ pub const REPLICA_AGG_PORT_NAME: &str = "replica-agg";
 
 type Store = kube::runtime::reflector::Store<EndpointSlice>;
 
-/// How many times to retry the EndpointSlice LIST when the observed slice is
-/// transiently incomplete (e.g. every pod restarting at once). The window is
-/// short (hundreds of ms), so a few bounded retries smooth it out without
-/// masking a genuine misconfiguration, which still fails after retries
-/// exhaust.
-const PORT_RESOLUTION_RETRIES: usize = 5;
-const PORT_RESOLUTION_INITIAL_BACKOFF_MS: u64 = 100;
-
 /// Resolve the required aggregated replica-sync port from the peer Service's
-/// EndpointSlices. Every slice must expose the same named `replica-agg` port;
-/// missing or inconsistent ports fail EPP startup before replica sync is
-/// built. Retries across transient mid-update slices before giving up.
+/// stable `spec.ports` contract.
+///
+/// The Service object — not its EndpointSlices — is the source of truth for the
+/// port list: pod restarts rewrite EndpointSlices while the Service spec never
+/// changes, so a momentarily-incomplete slice can never fail EPP startup here.
+/// EndpointSlices remain the discovery source for *which peers exist* (see
+/// [`spawn`]); they are only consulted for endpoint membership, never for the
+/// port number.
 pub async fn resolve_replica_sync_port(namespace: &str, service_name: &str) -> Result<u16> {
-    use kube::{Api, Client, api::ListParams};
+    use kube::{Api, Client};
 
     let client = Client::try_default()
         .await
         .context("building Kubernetes client for EPP peer port resolution")?;
-    let slices: Api<EndpointSlice> = Api::namespaced(client, namespace);
+    let service: Service = Api::<Service>::namespaced(client, namespace)
+        .get(service_name)
+        .await
+        .with_context(|| format!("reading EPP peer Service {namespace}/{service_name}"))?;
 
-    let mut backoff = std::time::Duration::from_millis(PORT_RESOLUTION_INITIAL_BACKOFF_MS);
-    for attempt in 0..PORT_RESOLUTION_RETRIES {
-        let list = slices
-            .list(&ListParams::default().labels(&format!("{SERVICE_NAME_LABEL}={service_name}")))
-            .await
-            .with_context(|| {
-                format!("listing EndpointSlices for EPP peer Service {namespace}/{service_name}")
-            })?;
-        match replica_sync_port(list.items.iter()) {
-            Ok(port) => return Ok(port),
-            Err(error) if attempt + 1 < PORT_RESOLUTION_RETRIES => {
-                tracing::warn!(
-                    %error,
-                    attempt,
-                    backoff_ms = backoff.as_millis(),
-                    "EPP peer port resolution saw transient EndpointSlice state; retrying"
-                );
-                tokio::time::sleep(backoff).await;
-                backoff = backoff.saturating_mul(2);
-            }
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "resolving named port {REPLICA_AGG_PORT_NAME:?} for EPP peer Service \
-                         {namespace}/{service_name}"
-                    )
-                });
-            }
-        }
-    }
-    unreachable!("retry loop always returns or exhausts")
+    replica_sync_port(&service).with_context(|| {
+        format!(
+            "resolving named port {REPLICA_AGG_PORT_NAME:?} for EPP peer Service \
+             {namespace}/{service_name}"
+        )
+    })
 }
 
-/// Resolve a single consistent `replica-agg` TCP port from the given
-/// EndpointSlices, skipping slices that transiently omit the named port.
-fn replica_sync_port<'a>(slices: impl Iterator<Item = &'a EndpointSlice>) -> Result<u16> {
-    let mut resolved = BTreeSet::new();
-    let mut slice_count = 0usize;
+/// Resolve the single TCP `replica-agg` port from the Service's `spec.ports`.
+///
+/// The contract requires exactly one port named `replica-agg`, TCP (Kubernetes
+/// defaults `protocol` to TCP when absent, so `None` is accepted), with a
+/// positive port number. Missing, duplicated, non-TCP, or invalid ports fail
+/// EPP startup before replica sync is built — a genuine misconfiguration is
+/// still a hard error; only the transient EndpointSlice race is gone.
+fn replica_sync_port(service: &Service) -> Result<u16> {
+    let mut matches = service
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.ports.as_ref())
+        .into_iter()
+        .flatten()
+        .filter(|port| port.name.as_deref() == Some(REPLICA_AGG_PORT_NAME));
 
-    for slice in slices {
-        slice_count += 1;
-        let slice_name = slice.metadata.name.as_deref().unwrap_or("<unnamed>");
-        let mut matches = slice
-            .ports
+    let port = matches.next().with_context(|| {
+        format!("peer Service declares no named port {REPLICA_AGG_PORT_NAME:?}")
+    })?;
+    anyhow::ensure!(
+        matches.next().is_none(),
+        "peer Service declares named port {REPLICA_AGG_PORT_NAME:?} more than once"
+    );
+    // Only a TCP `replica-agg` port satisfies the contract: the replica plane
+    // binds and dials `tcp://`. Kubernetes defaults `protocol` to TCP when
+    // absent, so treat `None` as TCP and reject explicit UDP/SCTP rather than
+    // let a mismatched port through.
+    anyhow::ensure!(
+        port.protocol
             .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .filter(|port| port.name.as_deref() == Some(REPLICA_AGG_PORT_NAME));
-        // Skip a slice that does not expose the named port at all. The
-        // EndpointSlice controller rewrites slices while pods churn, so a LIST
-        // can observe a slice mid-update without its ports; the Service is the
-        // single source of truth for ports, so this is a transient race, not a
-        // misconfiguration. Erroring on it made replica startup crash (and
-        // restart) whenever every pod is restarted at once. Genuine
-        // misconfiguration is still caught below: no slice exposing the port,
-        // or conflicting values across slices.
-        let Some(endpoint_port) = matches.next() else {
-            tracing::debug!(
-                slice_name,
-                "EndpointSlice does not expose replica-agg port; skipping transient slice"
-            );
-            continue;
-        };
-        anyhow::ensure!(
-            matches.next().is_none(),
-            "EndpointSlice {slice_name} exposes named port {REPLICA_AGG_PORT_NAME:?} more than once"
-        );
-        // Only a TCP `replica-agg` port satisfies the contract: the replica
-        // plane binds and dials `tcp://`. Kubernetes defaults `protocol` to
-        // TCP when absent, so treat `None` as TCP and reject explicit
-        // UDP/SCTP rather than let a mismatched port through.
-        anyhow::ensure!(
-            endpoint_port
-                .protocol
-                .as_deref()
-                .is_none_or(|protocol| protocol.eq_ignore_ascii_case("TCP")),
-            "EndpointSlice {slice_name} named port {REPLICA_AGG_PORT_NAME:?} must use TCP"
-        );
-        let raw_port = endpoint_port.port.with_context(|| {
-            format!(
-                "EndpointSlice {slice_name} named port {REPLICA_AGG_PORT_NAME:?} has no port number"
-            )
-        })?;
-        let port = u16::try_from(raw_port).with_context(|| {
-            format!(
-                "EndpointSlice {slice_name} named port {REPLICA_AGG_PORT_NAME:?} has invalid port {raw_port}"
-            )
-        })?;
-        anyhow::ensure!(
-            port > 0,
-            "named port {REPLICA_AGG_PORT_NAME:?} must be greater than zero"
-        );
-        resolved.insert(port);
-    }
-
-    anyhow::ensure!(slice_count > 0, "peer Service has no EndpointSlices");
-    anyhow::ensure!(
-        !resolved.is_empty(),
-        "no EndpointSlice exposes named port {REPLICA_AGG_PORT_NAME:?}"
+            .is_none_or(|protocol| protocol.eq_ignore_ascii_case("TCP")),
+        "peer Service named port {REPLICA_AGG_PORT_NAME:?} must use TCP"
     );
+    let raw_port = port.port;
+    let port = u16::try_from(raw_port).with_context(|| {
+        format!("peer Service named port {REPLICA_AGG_PORT_NAME:?} has invalid port {raw_port}")
+    })?;
     anyhow::ensure!(
-        resolved.len() == 1,
-        "named port {REPLICA_AGG_PORT_NAME:?} resolves to inconsistent ports {resolved:?}"
+        port > 0,
+        "named port {REPLICA_AGG_PORT_NAME:?} must be greater than zero"
     );
-    Ok(*resolved.first().expect("validated one resolved port"))
+    Ok(port)
 }
 
 /// Starts peer discovery for the EPP's own Kubernetes Service, keeping
@@ -365,7 +311,8 @@ fn peer_ips<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions, EndpointPort};
+    use k8s_openapi::api::core::v1::{ServicePort, ServiceSpec};
+    use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions};
 
     fn slice_with(ips: &[&str], terminating: bool, address_type: &str) -> EndpointSlice {
         EndpointSlice {
@@ -385,15 +332,23 @@ mod tests {
         }
     }
 
-    fn slice_with_replica_port(port: Option<i32>) -> EndpointSlice {
-        let mut slice = slice_with(&["10.0.0.1"], false, "IPv4");
-        slice.metadata.name = Some("epp-peers-abc".to_string());
-        slice.ports = Some(vec![EndpointPort {
-            name: Some(REPLICA_AGG_PORT_NAME.to_string()),
-            port,
+    fn service_with_replica_port(port: Option<i32>, protocol: Option<&str>) -> Service {
+        Service {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some("dynamo-epp".to_string()),
+                ..Default::default()
+            },
+            spec: Some(ServiceSpec {
+                ports: Some(vec![ServicePort {
+                    name: Some(REPLICA_AGG_PORT_NAME.to_string()),
+                    port: port.unwrap_or(0),
+                    protocol: protocol.map(str::to_string),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
             ..Default::default()
-        }]);
-        slice
+        }
     }
 
     #[test]
@@ -467,63 +422,78 @@ mod tests {
 
     #[test]
     fn resolves_replica_agg_named_port() {
-        let slices = [
-            slice_with_replica_port(Some(9092)),
-            slice_with_replica_port(Some(9092)),
-        ];
-        assert_eq!(replica_sync_port(slices.iter()).unwrap(), 9092);
+        let service = service_with_replica_port(Some(9092), Some("TCP"));
+        assert_eq!(replica_sync_port(&service).unwrap(), 9092);
     }
 
     #[test]
     fn rejects_missing_replica_agg_named_port() {
-        let slices = [slice_with(&["10.0.0.1"], false, "IPv4")];
-        let error = replica_sync_port(slices.iter()).unwrap_err().to_string();
+        let service = Service {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some("dynamo-epp".to_string()),
+                ..Default::default()
+            },
+            spec: Some(ServiceSpec {
+                ports: Some(vec![ServicePort {
+                    name: Some("grpc".to_string()),
+                    port: 9002,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let error = replica_sync_port(&service).unwrap_err().to_string();
         assert!(error.contains(REPLICA_AGG_PORT_NAME));
     }
 
     #[test]
-    fn skips_slice_missing_named_port_alongside_one_that_exposes_it() {
-        // A slice being rewritten during pod churn can momentarily lack the
-        // named port; the Service is the source of truth for ports, so
-        // resolution must succeed as long as another slice exposes it.
-        let slices = [
-            slice_with(&["10.0.0.1"], false, "IPv4"),
-            slice_with_replica_port(Some(9092)),
-        ];
-        assert_eq!(replica_sync_port(slices.iter()).unwrap(), 9092);
+    fn resolves_from_service_contract_regardless_of_slice_state() {
+        // The port contract lives on the Service spec, which never churns with
+        // pod restarts. A mid-update EndpointSlice that momentarily lacks the
+        // named port can therefore never fail startup: resolution consults only
+        // the stable Service object, so transient slice state is irrelevant.
+        let service = service_with_replica_port(Some(9092), Some("TCP"));
+        assert_eq!(replica_sync_port(&service).unwrap(), 9092);
     }
 
     #[test]
-    fn rejects_inconsistent_replica_agg_named_ports() {
-        let slices = [
-            slice_with_replica_port(Some(9092)),
-            slice_with_replica_port(Some(9093)),
-        ];
-        let error = replica_sync_port(slices.iter()).unwrap_err().to_string();
-        assert!(error.contains("inconsistent ports"));
-    }
-
-    fn slice_with_replica_port_protocol(protocol: Option<&str>) -> EndpointSlice {
-        let mut slice = slice_with(&["10.0.0.1"], false, "IPv4");
-        slice.metadata.name = Some("epp-peers-proto".to_string());
-        slice.ports = Some(vec![EndpointPort {
-            name: Some(REPLICA_AGG_PORT_NAME.to_string()),
-            port: Some(9092),
-            protocol: protocol.map(str::to_string),
+    fn rejects_duplicate_replica_agg_ports() {
+        let service = Service {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some("dynamo-epp".to_string()),
+                ..Default::default()
+            },
+            spec: Some(ServiceSpec {
+                ports: Some(vec![
+                    ServicePort {
+                        name: Some(REPLICA_AGG_PORT_NAME.to_string()),
+                        port: 9092,
+                        ..Default::default()
+                    },
+                    ServicePort {
+                        name: Some(REPLICA_AGG_PORT_NAME.to_string()),
+                        port: 9093,
+                        ..Default::default()
+                    },
+                ]),
+                ..Default::default()
+            }),
             ..Default::default()
-        }]);
-        slice
+        };
+        let error = replica_sync_port(&service).unwrap_err().to_string();
+        assert!(error.contains("more than once"));
     }
 
     #[test]
     fn accepts_absent_or_tcp_replica_agg_protocol() {
         // Absent protocol defaults to TCP in Kubernetes; explicit TCP is fine.
         assert_eq!(
-            replica_sync_port([slice_with_replica_port_protocol(None)].iter()).unwrap(),
+            replica_sync_port(&service_with_replica_port(Some(9092), None)).unwrap(),
             9092
         );
         assert_eq!(
-            replica_sync_port([slice_with_replica_port_protocol(Some("TCP"))].iter()).unwrap(),
+            replica_sync_port(&service_with_replica_port(Some(9092), Some("TCP"))).unwrap(),
             9092
         );
     }
@@ -532,12 +502,18 @@ mod tests {
     fn rejects_non_tcp_replica_agg_port() {
         // A UDP `replica-agg` port must not resolve: the replica plane dials
         // tcp://, so treating it as valid would be a silent transport mismatch.
-        // With no TCP match left, resolution fails with the "does not expose"
-        // error naming the port.
-        let error = replica_sync_port([slice_with_replica_port_protocol(Some("UDP"))].iter())
+        let error = replica_sync_port(&service_with_replica_port(Some(9092), Some("UDP")))
             .unwrap_err()
             .to_string();
         assert!(error.contains(REPLICA_AGG_PORT_NAME));
+    }
+
+    #[test]
+    fn rejects_non_positive_replica_agg_port() {
+        let error = replica_sync_port(&service_with_replica_port(Some(0), Some("TCP")))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("greater than zero"));
     }
 
     fn free_tcp_port() -> u16 {
