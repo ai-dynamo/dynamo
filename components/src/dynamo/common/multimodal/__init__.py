@@ -36,6 +36,16 @@ if TYPE_CHECKING:
         TransferRequest,
     )
 
+    # Declared, not assigned: the runtime values come from `__getattr__` below.
+    # Without these mypy widens both to `Any` and callers lose the key and value
+    # types.
+    EMBEDDING_SENDER_FACTORIES: dict[
+        EmbeddingTransferMode, Callable[[], AbstractEmbeddingSender]
+    ]
+    EMBEDDING_RECEIVER_FACTORIES: dict[
+        EmbeddingTransferMode, Callable[[], AbstractEmbeddingReceiver]
+    ]
+
 _EMBEDDING_TRANSFER_EXPORTS = frozenset(
     {
         "AbstractEmbeddingReceiver",
@@ -87,25 +97,32 @@ def _build_receiver_factories() -> (
     }
 
 
-def __getattr__(name: str) -> Any:
-    if name == "AsyncEncoderCache":
-        from dynamo.common.multimodal.async_encoder_cache import AsyncEncoderCache
+# Hidden from the type checker on purpose. A module-level `__getattr__` tells
+# mypy the package may have any attribute, which would silently accept a typo
+# like `from dynamo.common.multimodal import DoesNotExistAtAll` in every module
+# that imports from here. The `TYPE_CHECKING` block above already declares the
+# real names, so the checker has what it needs without the widening.
+if not TYPE_CHECKING:
 
-        value: Any = AsyncEncoderCache
-    elif name in _EMBEDDING_TRANSFER_EXPORTS:
-        from dynamo.common.multimodal import embedding_transfer
+    def __getattr__(name: str) -> Any:
+        if name == "AsyncEncoderCache":
+            from dynamo.common.multimodal.async_encoder_cache import AsyncEncoderCache
 
-        value = getattr(embedding_transfer, name)
-    elif name == "EMBEDDING_SENDER_FACTORIES":
-        value = _build_sender_factories()
-    elif name == "EMBEDDING_RECEIVER_FACTORIES":
-        value = _build_receiver_factories()
-    else:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+            value: Any = AsyncEncoderCache
+        elif name in _EMBEDDING_TRANSFER_EXPORTS:
+            from dynamo.common.multimodal import embedding_transfer
 
-    # Cache on the module so repeat access skips this function entirely.
-    globals()[name] = value
-    return value
+            value = getattr(embedding_transfer, name)
+        elif name == "EMBEDDING_SENDER_FACTORIES":
+            value = _build_sender_factories()
+        elif name == "EMBEDDING_RECEIVER_FACTORIES":
+            value = _build_receiver_factories()
+        else:
+            raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+        # Cache on the module so repeat access skips this function entirely.
+        globals()[name] = value
+        return value
 
 
 def __dir__() -> list[str]:
