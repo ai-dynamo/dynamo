@@ -22,11 +22,45 @@ on:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      gpu_self_repo_canary:
+        description: 'Validate self-repository actions on a no-volume GPU runner'
+        type: choice
+        options: [none, h100, gb200]
+        default: none
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
+
+  gpu-self-repo-canary:
+    if: inputs.gpu_self_repo_canary != 'none'
+    name: Self-repository canary (${{ inputs.gpu_self_repo_canary }})
+    runs-on: ${{ inputs.gpu_self_repo_canary == 'h100' && 'aws-dev-02-tester-amd-gpu-v2' || 'aws-dev-01-tester-arm-gpu-v2' }}
+    container:
+      image: 210086341041.dkr.ecr.us-west-2.amazonaws.com/ai-dynamo/dynamo:10d71514e9c9c1c6a1b902be4b692378e78bff8a-vllm-runtime-nightly-test
+    services:
+      minio:
+        image: 210086341041.dkr.ecr.us-west-2.amazonaws.com/quay/minio/minio:latest
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+          MINIO_VOLUMES: /tmp/minio-data
+          MINIO_CONSOLE_ADDRESS: ':9001'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Collect GPU tests through self-repository action
+        uses: $/.github/actions/pytest-local
+        with:
+          container_workspace: /workspace
+          pytest_marks: vllm and gpu_1
+          test_suite_name: self-repo-canary
+          test_type: ${{ inputs.gpu_self_repo_canary }}
+          platform_arch: ${{ inputs.gpu_self_repo_canary == 'h100' && 'amd64' || 'arm64' }}
+          dry_run: 'true'
+          gpu_tests: 'true'
+          parallel_mode: none
 
   init:
     runs-on: ubuntu-slim
