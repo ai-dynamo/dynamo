@@ -657,7 +657,13 @@ mod tests {
 
     #[test]
     fn parse_worker_routes_rejects_invalid_admin_base_url() {
-        for value in [json!("   "), json!(42)] {
+        for value in [
+            json!("   "),
+            json!(42),
+            json!("https://user:token@worker.example.com/admin"),
+            json!("https://worker.example.com/admin?token=secret"),
+            json!("https://worker.example.com/admin#fragment"),
+        ] {
             let err = parse_worker_routes(json!({
                 "routes": [],
                 "admin_base_url": value,

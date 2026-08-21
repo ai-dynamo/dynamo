@@ -221,6 +221,16 @@ mod tests {
     #[test]
     fn rl_worker_metadata_rejects_invalid_values() {
         assert!(RlWorkerMetadata::new(0, None).is_err());
-        assert!(RlWorkerMetadata::new(1, Some("   ".to_string())).is_err());
+        for admin_base_url in [
+            "   ",
+            "https://user:token@worker.example.com/admin",
+            "https://worker.example.com/admin?token=secret",
+            "https://worker.example.com/admin#fragment",
+        ] {
+            assert!(
+                RlWorkerMetadata::new(1, Some(admin_base_url.to_string())).is_err(),
+                "accepted invalid admin base URL: {admin_base_url}"
+            );
+        }
     }
 }
