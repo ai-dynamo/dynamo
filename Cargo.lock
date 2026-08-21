@@ -5487,7 +5487,6 @@ dependencies = [
  "dynamo-runtime",
  "libc",
  "once_cell",
- "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
