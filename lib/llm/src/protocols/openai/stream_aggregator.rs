@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_runtime::error::DynamoError;
 use futures::{Stream, StreamExt};
 
 use crate::types::Annotated;
-use dynamo_runtime::error::DynamoError;
 
 /// Response types whose `Annotated<T>` streams can be folded into a single `T`
 /// using shared aggregation infrastructure.
@@ -37,6 +37,31 @@ where
     }
 
     Ok(response.unwrap_or_else(T::empty))
+}
+
+/// Collect exactly one data item while preserving typed backend errors.
+///
+/// Unary APIs use Dynamo's streaming request plane internally even though
+/// their HTTP response is singular. Empty and multi-item streams violate that
+/// worker contract and are rejected.
+pub async fn collect_unary_stream<T, S>(stream: S) -> Result<T, DynamoError>
+where
+    S: Stream<Item = Annotated<T>>,
+{
+    let mut stream = std::pin::pin!(stream);
+    let mut response = None;
+
+    while let Some(item) = stream.next().await {
+        if let Some(data) = item.into_data()? {
+            if response.replace(data).is_some() {
+                return Err(DynamoError::msg(
+                    "unary response stream produced more than one data item",
+                ));
+            }
+        }
+    }
+
+    response.ok_or_else(|| DynamoError::msg("unary response stream produced no data"))
 }
 
 #[cfg(test)]
@@ -93,5 +118,46 @@ mod tests {
             ErrorType::Backend(BackendError::InvalidArgument)
         );
         assert_eq!(error.message(), "invalid argument");
+    }
+
+    #[tokio::test]
+    async fn unary_collector_preserves_backend_error_type() {
+        let stream = stream::iter(vec![Annotated::<usize>::from_err(
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("invalid language")
+                .build(),
+        )]);
+
+        let error = collect_unary_stream(stream).await.unwrap_err();
+
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+    }
+
+    #[tokio::test]
+    async fn unary_collector_rejects_empty_and_multi_item_streams() {
+        let empty = stream::empty::<Annotated<usize>>();
+        assert!(
+            collect_unary_stream(empty)
+                .await
+                .unwrap_err()
+                .message()
+                .contains("produced no data")
+        );
+
+        let multiple = stream::iter(vec![
+            Annotated::from_data(1_usize),
+            Annotated::from_data(2_usize),
+        ]);
+        assert!(
+            collect_unary_stream(multiple)
+                .await
+                .unwrap_err()
+                .message()
+                .contains("more than one")
+        );
     }
 }

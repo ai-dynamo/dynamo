@@ -409,6 +409,7 @@ fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Statu
         Endpoint::Images => todo!(),
         Endpoint::Videos => todo!(),
         Endpoint::Audios => todo!(),
+        Endpoint::Transcriptions => todo!(),
         Endpoint::Generate => todo!(),
     };
 

@@ -45,6 +45,13 @@ def create_config() -> DynamoVllmConfig:
     config.disaggregation_mode = None
     config.enable_multimodal = False
     config.embedding_worker = False
+    config.transcription_worker = False
+    config.realtime = False
+    config.classify_worker = False
+    config.custom_encoder_class = None
+    config.gms_shadow_mode = False
+    config.enable_rl = False
+    config.headless = False
     config.benchmark_mode = None
     config.use_vllm_tokenizer = False
     config.frontend_decoding = False
@@ -220,6 +227,38 @@ class TestEmbeddingWorkerExclusivity:
         config.embedding_worker = False
         config.benchmark_mode = "agg"
         config._validate_embedding_worker_exclusivity()
+
+
+class TestTranscriptionWorkerExclusivity:
+    def test_baseline_aggregated_is_accepted(self):
+        config = create_config()
+        config.transcription_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config._validate_transcription_worker_exclusivity()
+
+    def test_non_aggregated_mode_is_rejected(self):
+        config = create_config()
+        config.transcription_worker = True
+        config.disaggregation_mode = DisaggregationMode.DECODE
+        with pytest.raises(ValueError, match="disaggregation-mode=agg"):
+            config._validate_transcription_worker_exclusivity()
+
+    @pytest.mark.parametrize(
+        ("option", "value"),
+        [
+            ("embedding_worker", True),
+            ("classify_worker", True),
+            ("realtime", True),
+            ("headless", True),
+        ],
+    )
+    def test_standalone_role_combinations_are_rejected(self, option, value):
+        config = create_config()
+        config.transcription_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        setattr(config, option, value)
+        with pytest.raises(ValueError, match=option.replace("_", "-")):
+            config._validate_transcription_worker_exclusivity()
 
 
 class TestRealtimeWorkerExclusivity:

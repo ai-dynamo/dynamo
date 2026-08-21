@@ -1526,6 +1526,7 @@ def _make_dynamo_config(**overrides):
         "enable_local_indexer": True,
         "embedding_worker": False,
         "classify_worker": False,
+        "transcription_worker": False,
         "headless": False,
         "enable_multimodal": False,
         "fpm_trace": False,
@@ -1593,6 +1594,24 @@ class TestPoolingWorkerPrefixCachingDefault:
     def test_generative_worker_still_defaults_to_enabled(self):
         dynamo_cfg = _make_dynamo_config()
         engine_cfg = _make_engine_config_with_runner(enable_prefix_caching=None)
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.enable_prefix_caching is True
+
+
+class TestTranscriptionWorkerPrefixCachingDefault:
+    def test_transcription_defaults_to_disabled(self):
+        dynamo_cfg = _make_dynamo_config(transcription_worker=True)
+        engine_cfg = _make_engine_config_with_runner(enable_prefix_caching=None)
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert engine_cfg.enable_prefix_caching is False
+
+    def test_explicit_enable_is_preserved(self):
+        dynamo_cfg = _make_dynamo_config(transcription_worker=True)
+        engine_cfg = _make_engine_config_with_runner(enable_prefix_caching=True)
 
         update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
 
@@ -1765,6 +1784,7 @@ class TestForwardPassMetricsActivation:
         [
             ({"embedding_worker": True}, "embedding"),
             ({"classify_worker": True}, "classify"),
+            ({"transcription_worker": True}, "transcription"),
             ({"headless": True}, "headless"),
             (
                 {"disaggregation_mode": DisaggregationMode.ENCODE},

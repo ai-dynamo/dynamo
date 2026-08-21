@@ -179,6 +179,15 @@ class DynamoVllmArgGroup(ArgGroup):
 
         add_negatable_bool_argument(
             g,
+            flag_name="--transcription-worker",
+            env_var="DYN_VLLM_TRANSCRIPTION_WORKER",
+            default=False,
+            help="Run as an aggregated speech-to-text worker using vLLM's native "
+            "OpenAI transcription serving layer.",
+        )
+
+        add_negatable_bool_argument(
+            g,
             flag_name="--realtime",
             env_var="DYN_VLLM_REALTIME",
             default=False,
@@ -464,6 +473,7 @@ class DynamoVllmConfig(ConfigBase):
         str, EmbeddingTransferMode
     ]  # resolved to enum in validate()
     embedding_worker: bool = False
+    transcription_worker: bool = False
     realtime: bool = False
     classify_worker: bool = False
 
@@ -521,6 +531,7 @@ class DynamoVllmConfig(ConfigBase):
         self._resolve_disaggregation_mode()
         self._resolve_embedding_transfer_mode()
         self._validate_embedding_worker_exclusivity()
+        self._validate_transcription_worker_exclusivity()
         self._validate_realtime_worker_exclusivity()
         self._validate_classify_worker_exclusivity()
         self._validate_custom_encoder()
@@ -745,6 +756,46 @@ class DynamoVllmConfig(ConfigBase):
             raise ValueError("--realtime cannot be combined with --benchmark-mode.")
         if getattr(getattr(self, "engine_args", None), "enable_lora", False):
             raise ValueError("--realtime cannot be combined with --enable-lora.")
+
+    def _validate_transcription_worker_exclusivity(self) -> None:
+        """Transcription serving uses a dedicated aggregated ASR worker."""
+        if not self.transcription_worker:
+            return
+        if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
+            mode = (
+                self.disaggregation_mode.value
+                if isinstance(self.disaggregation_mode, DisaggregationMode)
+                else self.disaggregation_mode
+            )
+            raise ValueError(
+                "--transcription-worker is only valid with "
+                f"--disaggregation-mode=agg (got {mode})."
+            )
+        for enabled, option in (
+            (self.embedding_worker, "--embedding-worker"),
+            (self.classify_worker, "--classify-worker"),
+            (self.realtime, "--realtime"),
+            (bool(self.custom_encoder_class), "--custom-encoder-class"),
+            (self.gms_shadow_mode, "--gms-shadow-mode"),
+            (self.enable_rl, "--enable-rl"),
+            (self.headless, "--headless"),
+        ):
+            if enabled:
+                raise ValueError(
+                    f"--transcription-worker cannot be combined with {option}."
+                )
+        if self.enable_multimodal:
+            raise ValueError(
+                "--transcription-worker cannot be combined with multimodal worker flags."
+            )
+        if self.benchmark_mode is not None:
+            raise ValueError(
+                "--transcription-worker cannot be combined with --benchmark-mode."
+            )
+        if getattr(getattr(self, "engine_args", None), "enable_lora", False):
+            raise ValueError(
+                "--transcription-worker cannot be combined with --enable-lora."
+            )
 
     def _validate_classify_worker_exclusivity(self) -> None:
         """Classify worker is aggregated-only and exclusive of multimodal /
