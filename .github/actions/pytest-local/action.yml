@@ -62,6 +62,10 @@ inputs:
     description: 'Is this a GPU test job?'
     required: false
     default: 'false'
+  dd_flaky_retry_enabled:
+    description: 'Override Datadog automatic test retries for this pytest invocation; empty inherits the job environment'
+    required: false
+    default: ''
 
 runs:
   using: "composite"
@@ -118,9 +122,15 @@ runs:
         DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
         DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
         HF_XET_HIGH_PERFORMANCE: 1
+        PYTEST_DD_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
       run: |
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
+
+        if [[ -n "${PYTEST_DD_FLAKY_RETRY_ENABLED}" ]]; then
+          export DD_CIVISIBILITY_FLAKY_RETRY_ENABLED="${PYTEST_DD_FLAKY_RETRY_ENABLED}"
+        fi
+        echo "Datadog flaky retries enabled: ${DD_CIVISIBILITY_FLAKY_RETRY_ENABLED:-unset}"
 
         # Get absolute path for test-results directory and ensure it has proper permissions.
         # Artifacts go to the GitHub Actions checkout so upload-artifact can find them.

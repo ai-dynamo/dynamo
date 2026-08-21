@@ -765,7 +765,14 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      cpu_only_test_markers: pre_merge and vllm and gpu_0
+      # Keep the fast CPU pool parallel and isolate deployment-level tests so a
+      # slow startup cannot consume the whole pool's retry budget.
+      cpu_only_test_markers: pre_merge and vllm and gpu_0 and not e2e
+      run_cpu_e2e_tests: true
+      cpu_e2e_test_markers: pre_merge and vllm and gpu_0 and e2e
+      # Keep the outer step budget above the test's 450s timeout so pytest can
+      # finish teardown and upload diagnostics instead of being killed first.
+      cpu_e2e_test_timeout_minutes: 15
       gpu_test_markers: pre_merge and vllm and gpu_1
       gpu_test_timeout_minutes: 45
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.

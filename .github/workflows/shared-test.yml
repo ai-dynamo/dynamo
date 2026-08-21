@@ -69,6 +69,20 @@ on:
         required: false
         type: string
         default: 'auto'
+      run_cpu_e2e_tests:
+        description: 'Whether to run CPU end-to-end tests in a separate, non-retrying stage'
+        required: false
+        type: boolean
+        default: false
+      cpu_e2e_test_markers:
+        description: 'CPU end-to-end pytest markers'
+        required: false
+        type: string
+      cpu_e2e_test_timeout_minutes:
+        description: 'Timeout in minutes for the isolated CPU end-to-end test stage'
+        required: false
+        type: number
+        default: 10
       run_gpu_tests:
         description: 'Whether to run GPU tests'
         required: false
@@ -220,6 +234,23 @@ jobs:
           parallel_mode: ${{ inputs.cpu_parallel_mode }}
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'false'
+      - name: Run CPU end-to-end tests (isolated)
+        # Long-lived deployment tests should not compete with the xdist unit
+        # pool or retry until the parent step kills the runner container.
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && inputs.run_cpu_e2e_tests }}
+        timeout-minutes: ${{ inputs.cpu_e2e_test_timeout_minutes }}
+        uses: ./.github/actions/pytest-local
+        with:
+          container_workspace: ${{ inputs.container_workspace }}
+          pytest_marks: ${{ inputs.cpu_e2e_test_markers }}
+          test_suite_name: ${{ inputs.test_suite_name }}
+          test_type: "pre_merge_cpu_e2e"
+          platform_arch: ${{ matrix.platform }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          parallel_mode: 'none'
+          enable_coverage: ${{ inputs.enable_coverage }}
+          gpu_tests: 'false'
+          dd_flaky_retry_enabled: 'false'
       - name: Run GPU tests (parallel)
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
         if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests && inputs.run_gpu_parallel_tests }}
