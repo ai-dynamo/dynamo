@@ -95,6 +95,7 @@ def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
         late_resolution(source, **fields)
         return
 
+    # Fallback for SGLang 0.5.17. Remove when minimum supported SGLang is 0.5.18+.
     override = getattr(server_args, "override", None)
     if callable(override):
         override(source, **fields)
