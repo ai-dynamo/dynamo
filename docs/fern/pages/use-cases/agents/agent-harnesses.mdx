@@ -39,6 +39,24 @@ bash examples/backends/sglang/launch/agg_agent.sh
     Dynamo maps Codex's `thread-id` header to `session_id`. A spawned child thread also sends `x-codex-parent-thread-id`, which Dynamo maps to `parent_session_id`.
 
   </Tab>
+  <Tab title="Omnigent">
+
+    Omnigent is an open-source meta-harness from the Databricks AI team and Neon. The experimental pinned path wraps Codex, configures a generic gateway provider with Dynamo's `/v1` Responses endpoint, and isolates Omnigent, Codex, and uv state from the user's normal configuration:
+
+    ```bash
+    .agents/skills/dynamo-agent-harness/scripts/drive_omnigent.py run \
+      --omnigent-repo /absolute/path/to/omnigent \
+      --base-url http://localhost:8000 \
+      --model Qwen/Qwen3-0.6B \
+      --cwd /absolute/worktree \
+      --prompt 'Inspect one file and report one verified fact.'
+    ```
+
+    The helper requires Omnigent commit `733234c303af7254597f99b14bda058878d3e8ca` and a clean checkout. Codex sends streaming `/v1/responses` requests with `thread-id`; Dynamo maps each value to normalized `agent_context.session_id`. Omnigent can also launch a background title turn with its own thread, which is an independent routable session.
+
+    This path is compatible with stock Dynamo routing but is not ThunderAgent lifecycle-qualified. The audited Omnigent shutdown stops its local host, runner, tmux, and Codex processes but does not send `x-dynamo-session-final`. See the repository skill's `OMNIGENT_COMPATIBILITY.md` for the evidence and ownership boundary.
+
+  </Tab>
   <Tab title="Pi">
 
     Pi uses the Dynamo provider plugin. Build and install it from the [agent-plugins](https://github.com/ai-dynamo/agent-plugins/tree/main/pi-plugin) checkout:

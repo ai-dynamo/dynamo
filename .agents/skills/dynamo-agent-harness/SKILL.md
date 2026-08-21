@@ -1,6 +1,6 @@
 ---
 name: dynamo-agent-harness
-description: Drives persistent Claude Code, Codex, or OpenCode agent sessions through a Dynamo OpenAI/Anthropic-compatible endpoint over Agent Client Protocol (ACP). Use when an agent must delegate a bounded task to another coding-agent harness running a model served by Dynamo, continue that harness across multiple turns, exercise tool calls, or validate agent request traces.
+description: Drives persistent Claude Code, Codex, or OpenCode ACP sessions and a pinned experimental Omnigent/Codex headless path through a Dynamo OpenAI/Anthropic-compatible endpoint. Use when an agent must delegate a bounded task to another coding-agent harness running a model served by Dynamo, exercise tool calls, or validate agent request traces.
 license: Apache-2.0
 metadata:
   author: Ishan Dhanani <ishandhanani@gmail.com>

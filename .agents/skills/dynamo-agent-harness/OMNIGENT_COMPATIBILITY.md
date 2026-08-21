@@ -12,7 +12,7 @@ This assessment is pinned to Omnigent commit `733234c303af7254597f99b14bda058878
 - Headless entry point: `omnigent run --harness codex --model <model> -p <prompt> --no-log`. The no-agent harness form already generates a temporary agent spec and rejects `--no-session`.
 - Provider path: a `kind: gateway` provider with an `openai` family, `base_url: <Dynamo>/v1`, `wire_api: responses`, an external `api_key_ref`, and a pinned default model.
 - Wire protocol: Codex sends streaming `POST /v1/responses` requests with bearer authentication.
-- Session affinity: Codex sends its app-server thread identifier in the `thread-id` header. Dynamo normalizes that header into `x-dynamo-session-id` and uses the resulting agent context for routing. A headless run may issue independent main-turn and background requests with different thread IDs; each remains an independently routable Dynamo program. The one-shot capture checks that every Responses request has a non-empty thread ID but does not prove reuse of the main thread across multiple user turns.
+- Session affinity: Codex sends its app-server thread identifier in the `thread-id` header. Dynamo maps that value to normalized `agent_context.session_id` and uses the resulting context for routing; it does not rewrite the HTTP request into an `x-dynamo-session-id` header. A headless run may issue independent main-turn and background requests with different thread IDs; each remains an independently routable Dynamo program. The one-shot capture checks that every Responses request has a non-empty thread ID but does not prove reuse of the main thread across multiple user turns.
 - Isolation: the helper gives Omnigent temporary config, data, home, Codex, and uv-cache directories, explicitly runs `omnigent stop` after the turn, verifies the run-owned `.codex-tmp` directory is gone, and only then removes the disposable runtime. It also disables browser launch, telemetry, and update checks. The named API-key variable is mirrored to Omnigent's `OMNIGENT_`-prefixed runner environment so the local host/runner process boundary preserves the external secret reference.
 
 ## Lifecycle assessment
@@ -20,6 +20,23 @@ This assessment is pinned to Omnigent commit `733234c303af7254597f99b14bda058878
 Omnigent keeps one Codex app-server thread alive for the wrapped executor session and closes the app-server plus its private `CODEX_HOME` during shutdown. At the audited commit, that shutdown does not send an HTTP request with `x-dynamo-session-final: true` to the model gateway. A successful local capture therefore proves request compatibility and session affinity, but it intentionally reports `lifecycle_qualified: false`.
 
 Use this path for stock Dynamo KV routing and compatibility smoke tests. Do not treat it as ThunderAgent lifecycle-qualified until Omnigent or a narrowly scoped forwarding helper emits a terminal request for the observed Codex thread ID. Process exit alone is not equivalent to Dynamo session finalization.
+
+## Ownership and dependency boundary
+
+| Layer | Owner and responsibility |
+| --- | --- |
+| Omnigent OSS | Databricks AI and Neon project; owns the local host/runner, temporary agent spec, session/tmux lifecycle, configuration, and wrapped-harness orchestration. |
+| Codex CLI | OpenAI project; owns the Responses wire, `thread-id`, turn metadata, tools, and app-server process used by this path. |
+| Dynamo | NVIDIA project; owns the OpenAI-compatible endpoint, Codex-header normalization, request tracing, routing, inference, and optional ThunderAgent program state. |
+| Integration helper | This experimental branch; owns pin validation, disposable local state, provider projection, credential reference, capture assertions, and explicit `omnigent stop`. |
+
+The audited local path does not require a Databricks workspace, model-serving endpoint, Unity Catalog, or other Databricks-managed runtime. Those may be separate Omnigent deployment options, but they were not needed or qualified here.
+
+## Local evidence — 2026-08-20
+
+A clean capture against the pinned checkout completed with exit code 0. It observed two authenticated, streaming `POST /v1/responses` requests using the expected model: one main turn and one background title turn. Both had non-empty, distinct Codex `thread-id` values and turn metadata. The assistant reply was consumed, `omnigent stop` exited 0, and the run left no `.codex-tmp` or disposable runtime behind. No `x-dynamo-session-final` request was observed.
+
+Classification: experimental stock-Dynamo compatibility path; continue for Kubernetes/basic tool smoke, but defer ThunderAgent qualification until terminal delivery and persistent main-thread reuse are proven. No Kubernetes resource or GPU was used for this local evidence.
 
 ## Verification
 
