@@ -702,10 +702,7 @@ impl DistributedConfig {
             std::env::var("DYN_DISCOVERY_BACKEND").unwrap_or_else(|_| "etcd".to_string());
 
         let discovery_backend = match backend_str.as_str() {
-            "kubernetes" => {
-                tracing::info!("Using Kubernetes discovery backend");
-                DiscoveryBackend::Kubernetes
-            }
+            "kubernetes" => DiscoveryBackend::Kubernetes,
             other => {
                 let selector: kv::Selector = other.parse().unwrap_or_else(|_| {
                     panic!(
@@ -736,6 +733,19 @@ impl DistributedConfig {
                 event_transport_kind,
                 crate::discovery::EventTransportKind::Nats
             );
+
+        // Emit the effective transport/discovery configuration exactly once, at the point
+        // where every value has been resolved. Operators debugging a rollout otherwise have
+        // to reconstruct these from environment variables and defaults spread across
+        // several crates. Field names are stable so the line stays greppable during an
+        // incident; values are configuration only — no endpoints, credentials or payloads.
+        tracing::info!(
+            discovery_backend = %backend_str,
+            request_plane = %request_plane,
+            event_plane = %event_transport_kind,
+            nats_enabled,
+            "dynamo runtime configuration"
+        );
 
         DistributedConfig {
             discovery_backend,
@@ -886,6 +896,85 @@ pub mod distributed_test_utils {
             event_transport_kind: crate::discovery::EventTransportKind::Nats,
         };
         super::DistributedRuntime::new(rt, config).await.unwrap()
+    }
+}
+
+#[cfg(test)]
+mod effective_config_tests {
+    use super::{DiscoveryBackend, DistributedConfig, RequestPlaneMode};
+    use crate::discovery::EventTransportKind;
+
+    /// The startup log reports `discovery_backend`, `request_plane` and `event_plane`.
+    /// Pin what `from_settings` actually resolves for each, so the logged values cannot
+    /// drift away from the configuration they claim to describe.
+    ///
+    /// Deliberately does not touch `NATS_SERVER`. `from_settings` reads it to compute
+    /// `nats_enabled`, but so does `transports::nats::test_client_options_builder`, and
+    /// that test sets it through figment's `Jail`. `Jail` serialises against other
+    /// `Jail` users and `temp_env` against other `temp_env` users, so the two do not
+    /// serialise against each other and could interleave in this binary. The three
+    /// variables below are read only on the paths these cases drive, so leaving
+    /// `NATS_SERVER` alone removes the overlap without reaching into an unrelated test.
+    /// The cost is that the default case no longer asserts NATS stays off, since that
+    /// is the one assertion which needs the variable absent.
+    #[test]
+    fn from_settings_resolves_the_values_the_startup_log_reports() {
+        // Default: no env set at all.
+        temp_env::with_vars(
+            [
+                ("DYN_DISCOVERY_BACKEND", None::<&str>),
+                ("DYN_REQUEST_PLANE", None),
+                ("DYN_EVENT_PLANE", None),
+            ],
+            || {
+                let cfg = DistributedConfig::from_settings();
+                assert!(matches!(
+                    cfg.discovery_backend,
+                    DiscoveryBackend::KvStore(_)
+                ));
+                assert_eq!(cfg.request_plane, RequestPlaneMode::Tcp);
+                assert_eq!(cfg.event_transport_kind, EventTransportKind::Zmq);
+                // The startup line logs this via Display, so pin the rendered
+                // text too: it must match the value DYN_EVENT_PLANE accepts,
+                // not the derived Debug name.
+                assert_eq!(cfg.event_transport_kind.to_string(), "zmq");
+                assert_eq!(cfg.request_plane.to_string(), "tcp");
+            },
+        );
+
+        // Kubernetes discovery: previously the ONLY backend that logged anything.
+        temp_env::with_vars(
+            [
+                ("DYN_DISCOVERY_BACKEND", Some("kubernetes")),
+                ("DYN_REQUEST_PLANE", None),
+                ("DYN_EVENT_PLANE", None),
+            ],
+            || {
+                let cfg = DistributedConfig::from_settings();
+                assert!(matches!(
+                    cfg.discovery_backend,
+                    DiscoveryBackend::Kubernetes
+                ));
+            },
+        );
+
+        // Explicit NATS event plane must turn the NATS client on.
+        temp_env::with_vars(
+            [
+                ("DYN_DISCOVERY_BACKEND", None::<&str>),
+                ("DYN_REQUEST_PLANE", None),
+                ("DYN_EVENT_PLANE", Some("nats")),
+            ],
+            || {
+                let cfg = DistributedConfig::from_settings();
+                assert_eq!(cfg.event_transport_kind, EventTransportKind::Nats);
+                assert_eq!(cfg.event_transport_kind.to_string(), "nats");
+                // Holds whatever NATS_SERVER is doing: a NATS event plane turns
+                // `nats_enabled` on by itself, so this case is unaffected by the
+                // interleaving described above.
+                assert!(cfg.nats_config.is_some());
+            },
+        );
     }
 }
 
