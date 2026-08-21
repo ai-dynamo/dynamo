@@ -37,6 +37,8 @@ except ImportError:
 
     cuda_runtime = _MissingCudaRuntime()
 
+_cuda_initialized_pid: int | None = None
+
 
 def list_cuda_devices() -> list[int]:
     """Return list of CUDA device indices visible to this process via NVML."""
@@ -76,8 +78,14 @@ def cuda_check_result(result: cuda.CUresult, name: str) -> None:
 
 
 def cuda_ensure_initialized() -> None:
+    """Run ``cuInit`` once per process."""
+    global _cuda_initialized_pid
+    pid = os.getpid()
+    if _cuda_initialized_pid == pid:
+        return
     (result,) = cuda.cuInit(0)
     cuda_check_result(result, "cuInit")
+    _cuda_initialized_pid = pid
 
 
 def cumem_get_allocation_granularity(device: int) -> int:

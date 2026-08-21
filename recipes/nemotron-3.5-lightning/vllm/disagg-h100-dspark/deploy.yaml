@@ -130,8 +130,6 @@ spec:
           - --max-num-batched-tokens
           - '32768'
           - --async-scheduling
-          - --quantization
-          - modelopt_fp4
           - --enable-prefix-caching
           - --mamba-cache-mode
           - align
@@ -281,8 +279,6 @@ spec:
           - --max-num-batched-tokens
           - '32768'
           - --async-scheduling
-          - --quantization
-          - modelopt_fp4
           - --enable-prefix-caching
           - --mamba-cache-mode
           - align

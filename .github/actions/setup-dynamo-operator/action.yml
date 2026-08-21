@@ -470,6 +470,29 @@ runs:
       run: |
         echo "${DOCKERHUB_PASS}" | helm registry login registry-1.docker.io -u "${DOCKERHUB_USER}" --password-stdin
 
+    # The operator refuses to start when checkpoint is enabled unless the
+    # PodSnapshot API exists. Snapshot-agent (which owns that CRD) is installed
+    # in a later job, so apply the CRDs first and let that later job adopt them.
+    - name: Install snapshot CRDs for checkpoint
+      if: inputs.checkpoint_enabled == 'true'
+      shell: bash
+      env:
+        # Keep in lockstep with .github/actions/setup-snapshot-agent/action.yml.
+        SNAPSHOT_CHART_VERSION: 0.1.0-alpha.1
+      run: |
+        echo "::group::Install snapshot CRDs before operator start"
+        set -euo pipefail
+        VKUBECONFIG="${{ github.workspace }}/.kubeconfig-vcluster"
+        helm show crds oci://ghcr.io/ai-dynamo/snapshot/snapshot \
+          --version "${SNAPSHOT_CHART_VERSION}" \
+          | kubectl --kubeconfig="${VKUBECONFIG}" \
+              apply --server-side --force-conflicts --field-manager=ci-setup -f -
+        kubectl --kubeconfig="${VKUBECONFIG}" wait --for=condition=established \
+          crd/podsnapshots.nvidia.com \
+          crd/podsnapshotcontents.nvidia.com \
+          --timeout=120s
+        echo "::endgroup::"
+
     - name: Install Dynamo platform via Helm
       shell: bash
       env:
