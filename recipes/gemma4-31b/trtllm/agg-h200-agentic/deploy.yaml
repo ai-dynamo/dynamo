@@ -85,7 +85,10 @@ spec:
               image: nvcr.io/nvstaging/avisva/trtllm-dynamo-x86:rc25-gemma4-h200-fa2
               imagePullPolicy: IfNotPresent
               command:
-                - python3
+                - /bin/bash
+                - -lc
+                - exec python3 "$@"
+                - --
               args:
                 - -m
                 - dynamo.frontend
@@ -153,7 +156,10 @@ spec:
               imagePullPolicy: IfNotPresent
               workingDir: /workspace/
               command:
-                - python3
+                - /bin/bash
+                - -lc
+                - exec python3 "$@"
+                - --
               args:
                 - -m
                 - dynamo.trtllm
