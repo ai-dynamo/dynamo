@@ -233,6 +233,8 @@ Synthesize into a concise report:
 
 If any checks are still pending or in-progress, offer to monitor them.
 
+<!-- Temporary CODEOWNERS routing test; remove before merging. -->
+
 **List remaining checks:**
 
 ```bash
