@@ -2279,9 +2279,9 @@ def lora_name_to_id(lora_name: str) -> int:
     ...
 
 def resolve_routing_image_token_id(model_id: str, model_dir: str) -> Optional[int]:
-    """Routing-side image-placeholder token id for a model, resolved with the
-    same readiness checks the frontend's MM-aware KV routing uses. Returns None when
-    the placeholder, prompt layout, counter, or model config is unavailable. Only
+    """Routing-side image-placeholder token id resolved with the frontend's static
+    checks. Returns None when its model prerequisites are unavailable. Request-time
+    gates require a frontend-issued canonical MM UUID in worker KV events. Only
     present when the bindings are built with the ``mm-routing`` feature.
     """
     ...

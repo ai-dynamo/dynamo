@@ -4411,7 +4411,7 @@ weight files and downloads only the metadata needed for registration.
 </Accordion>
 
 <Accordion id="api-dynamo-core-resolve-routing-image-token-id" title="resolve_routing_image_token_id (function)">
-Routing-side image-placeholder token id for a model, resolved with the same readiness checks the frontend's MM-aware KV routing uses. Returns None when the placeholder, prompt layout, counter, or model config is unavailable. Only present when the bindings are built with the ``mm-routing`` feature.
+Routing-side image-placeholder token id resolved with the frontend's static checks. Returns None when its model prerequisites are unavailable. Request-time gates require a frontend-issued canonical MM UUID in worker KV events. Only present when the bindings are built with the ``mm-routing`` feature.
 
 ```python
 from dynamo._core import resolve_routing_image_token_id

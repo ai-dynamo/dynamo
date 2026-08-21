@@ -132,8 +132,8 @@ impl LightseekMmCounter {
 }
 
 /// Resolve the image-placeholder token id by delegating to a per-model
-/// `ModelProcessorSpec` from the registry. Each registered model (Qwen3-VL,
-/// Qwen2.5-VL, Qwen2-VL, LLaVA-NeXT, LLaVA-1.5, Llama-4,
+/// `ModelProcessorSpec` from the registry. Each registered model (Qwen3-Omni,
+/// Qwen3-VL, Qwen2.5-VL, Qwen2-VL, LLaVA-NeXT, LLaVA-1.5, Llama-4,
 /// Kimi-K2.5, Kimi-K3) reads the right field of `config.json` (`image_token_id`,
 /// `image_token_index`, `media_placeholder_token_id`) and falls back to the
 /// tokenizer's vocab when only the placeholder string is known.
@@ -175,7 +175,7 @@ impl LightseekMmCounter {
         match self.processor.model_name() {
             "kimi-k3" => Some(ImagePromptKind::KimiK3),
             "kimi-k2.5" | "llama4-vision" | "llava" | "llava-next" | "phi3-vision" | "qwen2-vl"
-            | "qwen3-vl" => Some(ImagePromptKind::RepeatedPad),
+            | "qwen3-omni" | "qwen3-vl" => Some(ImagePromptKind::RepeatedPad),
             _ => None,
         }
     }
@@ -274,10 +274,9 @@ pub struct RoutingTokens {
 }
 
 impl RoutingTokens {
-    /// Return the placeholder id only when every startup-time prerequisite for
-    /// exact MM routing is available. Keeping this gate next to the resolved
-    /// token bundle lets the Rust frontend and Python worker binding make the
-    /// same enablement decision.
+    /// Return the placeholder id when the static model prerequisites for exact
+    /// MM routing are available. The frontend applies runtime tokenizer and
+    /// prompt-validation gates separately.
     pub fn exact_routing_image_token_id(
         &self,
         image_token_counter_available: bool,
@@ -329,9 +328,10 @@ pub fn resolve_routing_tokens(
     }
 }
 
-/// Resolve the worker-side placeholder id using the same startup readiness
-/// requirements as the frontend. In particular, an explicit config token is
-/// not enough when the image-token counter or prompt layout is unavailable.
+/// Resolve the worker-side placeholder id from static model prerequisites.
+/// An explicit config token is not enough when the image-token counter or
+/// prompt layout is unavailable. Request-time frontend readiness is carried
+/// separately by frontend-issued canonical MM UUIDs in worker KV events.
 pub fn resolve_exact_routing_image_token_id(
     model_id: &str,
     model_dir: &Path,
@@ -559,6 +559,42 @@ mod tests {
     }
 
     #[test]
+    fn routing_tokens_keep_qwen3_omni_on_repeated_pad_prompt_shape() {
+        let model_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            model_dir.path().join("config.json"),
+            serde_json::json!({
+                "model_type": "qwen3_omni_moe",
+                "thinker_config": {
+                    "image_token_id": 151655
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}").unwrap();
+        let model_id = "Qwen/Qwen3-Omni-30B-A3B-Instruct";
+        let counter =
+            LightseekMmCounter::try_new(model_id, Some("qwen3_omni_moe"), model_dir.path())
+                .unwrap();
+
+        assert_eq!(
+            counter.routing_prompt_kind(),
+            Some(ImagePromptKind::RepeatedPad)
+        );
+        let resolved = resolve_routing_tokens(model_id, model_dir.path(), Some(&counter));
+        assert_eq!(resolved.chat_placeholder_token_id, Some(151655));
+        assert_eq!(
+            resolved.image_prompt_kind,
+            Some(ImagePromptKind::RepeatedPad)
+        );
+        assert_eq!(
+            resolve_exact_routing_image_token_id(model_id, model_dir.path()),
+            Some(151655)
+        );
+    }
+
+    #[test]
     fn explicit_placeholder_keeps_repeated_pad_for_generic_qwen_aliases() {
         for model_type in ["qwen2_5_vl", "qwen3_6"] {
             let model_dir = tempfile::tempdir().unwrap();
@@ -637,6 +673,11 @@ mod tests {
     fn image_processor_registry_covers_documented_families() {
         // (family, hf_id, model_type)
         const FAMILIES: &[(&str, &str, &str)] = &[
+            (
+                "Qwen3-Omni",
+                "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+                "qwen3_omni_moe",
+            ),
             ("Qwen3-VL", "Qwen/Qwen3-VL-2B-Instruct", "qwen3_vl"),
             ("Qwen2-VL", "Qwen/Qwen2-VL-7B-Instruct", "qwen2_vl"),
             ("Qwen2.5-VL", "Qwen/Qwen2.5-VL-7B-Instruct", "qwen2_5_vl"),

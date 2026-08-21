@@ -53,7 +53,7 @@ URL_VARIANT_KEY = "Url"
 def pad_mm_hashes_to_64(
     mm_hashes: Sequence[str | None],
 ) -> list[str | None]:
-    """Pad frontend hashes to vLLM's 64-character UUID representation."""
+    """Pad frontend hashes to vLLM UUIDs, marking exact-routing readiness."""
     return [
         value.ljust(64, "0") if isinstance(value, str) and len(value) < 64 else value
         for value in mm_hashes

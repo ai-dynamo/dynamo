@@ -524,6 +524,36 @@ enum RoutingImagePromptLayout {
 }
 
 #[cfg(feature = "mm-routing")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum RoutingImageDimensionPolicy {
+    Encoded,
+    ExifTransposed,
+}
+
+#[cfg(feature = "mm-routing")]
+fn routing_image_dimension_policy(
+    runtime_config: &crate::local_model::runtime_config::ModelRuntimeConfig,
+    frontend_decoding: bool,
+    prompt_layout: Option<RoutingImagePromptLayout>,
+) -> RoutingImageDimensionPolicy {
+    use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
+
+    let is_vllm = runtime_config
+        .get_engine_specific::<bool>(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+    if is_vllm
+        && !frontend_decoding
+        && matches!(prompt_layout, Some(RoutingImagePromptLayout::KimiK3 { .. }))
+    {
+        RoutingImageDimensionPolicy::ExifTransposed
+    } else {
+        RoutingImageDimensionPolicy::Encoded
+    }
+}
+
+#[cfg(feature = "mm-routing")]
 fn encode_routing_segment(
     tokenizer: &dyn Tokenizer,
     text: &str,
@@ -921,6 +951,10 @@ pub struct OpenAIPreprocessor {
     /// and pre-resize dimensions. `None` disables exact MM routing.
     #[cfg(feature = "mm-routing")]
     routing_image_prompt_layout: Option<RoutingImagePromptLayout>,
+    /// Dimension semantics used by URL-passthrough routing. Kimi-K3's vLLM
+    /// processor applies EXIF transpose before rendering its dimension block.
+    #[cfg(feature = "mm-routing")]
+    routing_image_dimension_policy: RoutingImageDimensionPolicy,
     /// BOS token id to prepend to the routing-side sequence so per-block
     /// hashes match the backend's HF processor output on models with
     /// `add_bos_token: true` (LLaVA-1.5 and other `LlamaTokenizer`
@@ -1677,9 +1711,8 @@ impl OpenAIPreprocessor {
                             });
                     // Exact routing is enabled only as an all-or-nothing
                     // bundle: counter, placeholder id, and prompt layout.
-                    // This same readiness gate is used by the worker-side
-                    // Python binding so neither side can publish image-keyed
-                    // blocks while the other side routes by text only.
+                    // The worker resolves the same static prerequisites; the
+                    // frontend-issued MM UUID marks request-time readiness.
                     let exact_mm_routing_ready = counter.is_some() && prompt_layout.is_some();
                     (
                         routing_tokens.exact_routing_image_token_id(exact_mm_routing_ready),
@@ -1736,6 +1769,13 @@ impl OpenAIPreprocessor {
                 (None, None, None, None)
             }
         };
+
+        #[cfg(feature = "mm-routing")]
+        let routing_image_dimension_policy = routing_image_dimension_policy(
+            &runtime_config,
+            media_loader.is_some(),
+            routing_image_prompt_layout,
+        );
 
         // Force the dim-fetch HTTP client to build at startup for any
         // MM-countable or routable preprocessor, so TLS / env-var / reqwest-init
@@ -1807,6 +1847,8 @@ impl OpenAIPreprocessor {
             routing_image_token_id,
             #[cfg(feature = "mm-routing")]
             routing_image_prompt_layout,
+            #[cfg(feature = "mm-routing")]
+            routing_image_dimension_policy,
             #[cfg(feature = "mm-routing")]
             routing_prepend_bos,
         }))
@@ -2559,12 +2601,11 @@ impl OpenAIPreprocessor {
         // `media_decoder: null` and decode images on the worker.
         #[cfg(feature = "mm-routing")]
         if !has_user_uuid && !url_passthrough_images.is_empty() {
-            let dim_results = futures::future::join_all(
-                url_passthrough_images
-                    .iter()
-                    .map(|(mm_hash, url)| Self::fetch_image_dims(*mm_hash, url)),
-            )
-            .await;
+            let dim_results =
+                futures::future::join_all(url_passthrough_images.iter().map(|(mm_hash, url)| {
+                    Self::fetch_image_dims(*mm_hash, url, self.routing_image_dimension_policy)
+                }))
+                .await;
             for ((mm_hash, url), dim_res) in url_passthrough_images.into_iter().zip(dim_results) {
                 match dim_res {
                     Ok((w, h)) => {
@@ -2871,12 +2912,17 @@ impl OpenAIPreprocessor {
     /// the header. Caller treats Err as "MM routing entry unavailable for
     /// this image" — request still proceeds with text-prefix routing.
     ///
-    /// Results are cached by `mm_hash` so repeated requests for the same image
-    /// (typical of multi-turn / session workloads) hit the cache and skip the
-    /// HTTP fetch entirely. Without this cache, sticky-routing workloads pay
-    /// 4–5× HTTP Range fetches per request just to compute routing tokens.
+    /// Results are cached by `(mm_hash, dimension_policy)` so repeated
+    /// requests for the same image (typical of multi-turn / session workloads)
+    /// hit the cache and skip the HTTP fetch entirely. Without this cache,
+    /// sticky-routing workloads pay 4–5× HTTP Range fetches per request just
+    /// to compute routing tokens.
     #[cfg(feature = "mm-routing")]
-    async fn fetch_image_dims(mm_hash: u64, url: &str) -> Result<(u32, u32)> {
+    async fn fetch_image_dims(
+        mm_hash: u64,
+        url: &str,
+        dimension_policy: RoutingImageDimensionPolicy,
+    ) -> Result<(u32, u32)> {
         use moka::future::Cache;
         use std::sync::LazyLock;
 
@@ -2891,17 +2937,19 @@ impl OpenAIPreprocessor {
         //   time_to_live:  24h. Bounds staleness if a URL is re-uploaded
         //                  with new content. Independent of capacity-based
         //                  eviction, which kicks in earlier under load.
-        static DIM_CACHE: LazyLock<Cache<u64, (u32, u32)>> = LazyLock::new(|| {
-            Cache::builder()
-                .max_capacity(100_000)
-                .time_to_live(std::time::Duration::from_secs(24 * 60 * 60))
-                .build()
-        });
+        static DIM_CACHE: LazyLock<Cache<(u64, RoutingImageDimensionPolicy), (u32, u32)>> =
+            LazyLock::new(|| {
+                Cache::builder()
+                    .max_capacity(100_000)
+                    .time_to_live(std::time::Duration::from_secs(24 * 60 * 60))
+                    .build()
+            });
 
         // Hot path: avoid allocating an owned URL on cache hit. moka's
         // `get` is async because it may do a small amount of bookkeeping
         // for the LRU/TinyLFU policy.
-        if let Some(dims) = DIM_CACHE.get(&mm_hash).await {
+        let cache_key = (mm_hash, dimension_policy);
+        if let Some(dims) = DIM_CACHE.get(&cache_key).await {
             return Ok(dims);
         }
 
@@ -2911,8 +2959,8 @@ impl OpenAIPreprocessor {
         // the same `mm_hash` collapse into a single fetch.
         let url_owned = url.to_string();
         DIM_CACHE
-            .try_get_with(mm_hash, async move {
-                Self::fetch_image_dims_uncached(&url_owned)
+            .try_get_with(cache_key, async move {
+                Self::fetch_image_dims_uncached(&url_owned, dimension_policy)
                     .await
                     .map_err(|e| e.to_string())
             })
@@ -2921,10 +2969,10 @@ impl OpenAIPreprocessor {
     }
 
     #[cfg(feature = "mm-routing")]
-    async fn fetch_image_dims_uncached(url: &str) -> Result<(u32, u32)> {
-        use image::ImageReader;
-        use std::io::Cursor;
-
+    async fn fetch_image_dims_uncached(
+        url: &str,
+        dimension_policy: RoutingImageDimensionPolicy,
+    ) -> Result<(u32, u32)> {
         // Most JPEG SOF markers and PNG/WebP headers fit in the first 4 KB.
         // Start small and only escalate to 64 KB if the parser fails on the
         // truncated header.
@@ -2949,10 +2997,7 @@ impl OpenAIPreprocessor {
             } else {
                 payload.as_bytes().to_vec()
             };
-            let (w, h) = ImageReader::new(Cursor::new(&bytes))
-                .with_guessed_format()?
-                .into_dimensions()?;
-            return Ok((w, h));
+            return Self::dimensions_from_image_bytes(&bytes, dimension_policy);
         }
 
         if !(url.starts_with("http://") || url.starts_with("https://")) {
@@ -2995,10 +3040,7 @@ impl OpenAIPreprocessor {
                 );
             }
             let bytes = resp.bytes().await?;
-            match ImageReader::new(Cursor::new(&bytes))
-                .with_guessed_format()
-                .and_then(|r| r.into_dimensions().map_err(std::io::Error::other))
-            {
+            match Self::dimensions_from_image_bytes(&bytes, dimension_policy) {
                 Ok((w, h)) => return Ok((w, h)),
                 Err(_) if range_end < LARGE_RANGE => {
                     range_end = LARGE_RANGE;
@@ -3007,6 +3049,35 @@ impl OpenAIPreprocessor {
                 Err(e) => anyhow::bail!("image header parse failed after 64KB: {}", e),
             }
         }
+    }
+
+    #[cfg(feature = "mm-routing")]
+    fn dimensions_from_image_bytes(
+        bytes: &[u8],
+        dimension_policy: RoutingImageDimensionPolicy,
+    ) -> Result<(u32, u32)> {
+        use image::{ImageDecoder, ImageReader, metadata::Orientation};
+        use std::io::Cursor;
+
+        let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+        if dimension_policy == RoutingImageDimensionPolicy::Encoded {
+            return Ok(reader.into_dimensions()?);
+        }
+
+        let mut decoder = reader.into_decoder()?;
+        let (width, height) = decoder.dimensions();
+        let swaps_axes = matches!(
+            decoder.orientation()?,
+            Orientation::Rotate90
+                | Orientation::Rotate270
+                | Orientation::Rotate90FlipH
+                | Orientation::Rotate270FlipH
+        );
+        Ok(if swaps_axes {
+            (height, width)
+        } else {
+            (width, height)
+        })
     }
 
     /// Tokenize the request and return the token ids alongside any annotations
@@ -8436,6 +8507,89 @@ mod tests {
         let no_q = OpenAIPreprocessor::hash_image_url(base);
         assert_ne!(v1, v2, "different query values must hash differently");
         assert_ne!(v1, no_q, "presence of a query string must change the hash");
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn exif_dimension_policy_is_limited_to_kimi_k3_vllm_url_passthrough() {
+        use crate::local_model::runtime_config::{
+            ModelRuntimeConfig, SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        };
+
+        let kimi_k3 = Some(RoutingImagePromptLayout::KimiK3 {
+            media_begin: 1,
+            media_content: 2,
+            media_end: 3,
+        });
+        let mut runtime_config = ModelRuntimeConfig::default();
+        assert_eq!(
+            routing_image_dimension_policy(&runtime_config, false, kimi_k3),
+            RoutingImageDimensionPolicy::Encoded
+        );
+
+        let mut sglang_config = ModelRuntimeConfig::default();
+        sglang_config
+            .set_engine_specific(SGLANG_GENERATE_CAPABILITY, true)
+            .unwrap();
+        assert_eq!(
+            routing_image_dimension_policy(&sglang_config, false, kimi_k3),
+            RoutingImageDimensionPolicy::Encoded
+        );
+
+        runtime_config
+            .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, true)
+            .unwrap();
+        assert_eq!(
+            routing_image_dimension_policy(&runtime_config, false, kimi_k3),
+            RoutingImageDimensionPolicy::ExifTransposed
+        );
+        assert_eq!(
+            routing_image_dimension_policy(&runtime_config, true, kimi_k3),
+            RoutingImageDimensionPolicy::Encoded
+        );
+        assert_eq!(
+            routing_image_dimension_policy(
+                &runtime_config,
+                false,
+                Some(RoutingImagePromptLayout::RepeatedPad),
+            ),
+            RoutingImageDimensionPolicy::Encoded
+        );
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn exif_transposed_dimensions_match_vllm_image_loading() {
+        use image::{ExtendedColorType, ImageEncoder, codecs::jpeg::JpegEncoder};
+
+        // Little-endian TIFF with one orientation entry set to 6 (rotate 90°).
+        let exif = vec![
+            b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0,
+            0,
+        ];
+        let mut jpeg = Vec::new();
+        let mut encoder = JpegEncoder::new(&mut jpeg);
+        encoder.set_exif_metadata(exif).unwrap();
+        encoder
+            .encode(&[255, 0, 0, 0, 255, 0], 2, 1, ExtendedColorType::Rgb8)
+            .unwrap();
+
+        assert_eq!(
+            OpenAIPreprocessor::dimensions_from_image_bytes(
+                &jpeg,
+                RoutingImageDimensionPolicy::Encoded,
+            )
+            .unwrap(),
+            (2, 1)
+        );
+        assert_eq!(
+            OpenAIPreprocessor::dimensions_from_image_bytes(
+                &jpeg,
+                RoutingImageDimensionPolicy::ExifTransposed,
+            )
+            .unwrap(),
+            (1, 2)
+        );
     }
 
     /// Rotating S3 / GCS / Azure SAS signatures change the URL and
