@@ -40,6 +40,7 @@ A frontend can serve one model name from several namespaces at once, so some `dy
 - Per-response families, labeled by the namespace that served the request: `output_tokens_total`, `time_to_first_token_seconds`, `inter_token_latency_seconds`, `input_sequence_tokens`, `output_sequence_tokens`, `cached_tokens`, `images_per_request`, `videos_per_request`, `audio_per_request`, `image_tokens_per_request`.
 - Per-deployment gauges, which also carry `worker_type` because a disaggregated deployment's prefill and decode cards advertise different limits. Capacity: `model_total_kv_blocks`, `model_max_num_seqs`, `model_max_num_batched_tokens`. Configuration facts: `model_context_length`, `model_kv_cache_block_size`, `model_migration_limit`. See the aggregation note below — the two kinds do not combine the same way.
 - Router scheduler queue metrics, labeled by the namespace whose scheduler owns the queue: `router_queue_pending_requests`, `router_queue_pending_isl_tokens`, `router_queue_pending_cached_tokens`, `router_queue_backpressure_total`.
+- Routing-overhead histograms, labeled by the namespace of the router that did the work: `dynamo_router_overhead_block_hashing_ms`, `_indexer_find_matches_ms`, `_seq_hashing_ms`, `_scheduling_ms`, `_shared_cache_query_ms`, `_total_ms`. See the note below for the one counter in that family that is not.
 
 **Namespace-free**, in three categories:
 
@@ -47,9 +48,11 @@ A frontend can serve one model name from several namespaces at once, so some `dy
 2. *Frontend-internal work that is not per-deployment.* Tokenization, templating, and event-loop health belong to the frontend process itself: `tokenize_seconds`, `template_seconds`, `detokenize_token_count`, `detokenize_total_us`, `tokenizer_latency_ms`, `tokenizer_cache_*`, `event_loop_delay_seconds`, `event_loop_stall_total`.
 3. *Already keyed by worker identity.* The `worker_last_*` gauges carry `worker_id`, `dp_rank`, and `worker_type`, which identify a single worker unambiguously.
 
-<Warning>
-`dynamo_router_overhead_*` is a fourth case and a known gap: it is registered on the frontend's own registry with only a `router_id` label, so in a multi-namespace frontend the per-phase routing latencies of every deployment merge into one histogram. A slow namespace is not separable there the way it is on `dynamo_component_router_*`.
-</Warning>
+<Note>
+`dynamo_router_overhead_*` also carries `dynamo_namespace`, alongside its `router_id` const label. It is registered once for the process on the frontend's own registry, but a frontend serving one model from several namespaces runs one router per namespace, so the label is what keeps a slow deployment's routing latency out of the other deployments' quantiles.
+
+One exception within that family: `dynamo_router_overhead_shared_cache_errors_total` is namespace-free. One of its two increment sites is the shared-cache subscriber background task, which is process-wide and has no router namespace, so splitting the counter would leave half its increments in a sentinel bucket.
+</Note>
 
 <Note>
 The per-deployment gauges do not all aggregate the same way, because they are not all the same kind of value:

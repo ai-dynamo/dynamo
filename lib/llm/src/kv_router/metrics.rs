@@ -736,14 +736,39 @@ pub fn register_router_queue_metrics(
 // ---------------------------------------------------------------------------
 
 /// Per-request routing phase latency histograms (milliseconds).
+///
+/// The latency families are labeled by `dynamo_namespace`. A frontend serving
+/// one model from several namespaces runs one router per namespace but registers
+/// these once for the process, so without the label every deployment's routing
+/// latency lands in one histogram and a slow namespace disappears into the
+/// merged quantiles.
+///
+/// `shared_cache_errors_total` stays unlabeled: one of its two increment sites
+/// is the Mooncake subscriber background task (`SharedKvCache::record_subscriber_error`),
+/// which is process-wide and has no router namespace in scope. Splitting the
+/// counter would leave half its increments in a sentinel bucket.
 pub struct RoutingOverheadMetrics {
-    pub block_hashing: prometheus::Histogram,
-    pub indexer_find_matches: prometheus::Histogram,
-    pub seq_hashing: prometheus::Histogram,
-    pub scheduling: prometheus::Histogram,
-    pub total: prometheus::Histogram,
-    pub shared_cache_query: prometheus::Histogram,
+    pub block_hashing: HistogramVec,
+    pub indexer_find_matches: HistogramVec,
+    pub seq_hashing: HistogramVec,
+    pub scheduling: HistogramVec,
+    pub total: HistogramVec,
+    pub shared_cache_query: HistogramVec,
     pub shared_cache_errors_total: prometheus::IntCounter,
+}
+
+/// The routing-overhead histogram children for one namespace.
+///
+/// Resolved once per router rather than per request: `with_label_values` is a
+/// map lookup on every call, and this sits on the routing hot path.
+#[derive(Clone)]
+pub struct RoutingOverheadHandles {
+    block_hashing: prometheus::Histogram,
+    indexer_find_matches: prometheus::Histogram,
+    seq_hashing: prometheus::Histogram,
+    scheduling: prometheus::Histogram,
+    total: prometheus::Histogram,
+    shared_cache_query: prometheus::Histogram,
 }
 
 static ROUTING_OVERHEAD_METRICS: OnceLock<Arc<RoutingOverheadMetrics>> = OnceLock::new();
@@ -764,10 +789,11 @@ impl RoutingOverheadMetrics {
             let router_id = instance_id.to_string();
             let make = |suffix: &str, help: &str, buckets: Vec<f64>| {
                 let name = format!("{}_{}", name_prefix::ROUTER, suffix);
-                prometheus::Histogram::with_opts(
+                HistogramVec::new(
                     HistogramOpts::new(name, help)
                         .const_label(labels::ROUTER_ID, &router_id)
                         .buckets(buckets),
+                    &[labels::NAMESPACE],
                 )
             };
             let block_hashing = make(
@@ -843,6 +869,27 @@ impl RoutingOverheadMetrics {
         ROUTING_OVERHEAD_METRICS.get().cloned()
     }
 
+    /// Resolve the histogram children for `namespace`. Call once per router;
+    /// see [`RoutingOverheadHandles`].
+    pub fn handles_for(&self, namespace: &str) -> RoutingOverheadHandles {
+        let lv = [namespace];
+        RoutingOverheadHandles {
+            block_hashing: self.block_hashing.with_label_values(&lv),
+            indexer_find_matches: self.indexer_find_matches.with_label_values(&lv),
+            seq_hashing: self.seq_hashing.with_label_values(&lv),
+            scheduling: self.scheduling.with_label_values(&lv),
+            total: self.total.with_label_values(&lv),
+            shared_cache_query: self.shared_cache_query.with_label_values(&lv),
+        }
+    }
+
+    /// Increment the shared cache error counter.
+    pub fn inc_shared_cache_errors(&self) {
+        self.shared_cache_errors_total.inc();
+    }
+}
+
+impl RoutingOverheadHandles {
     /// Observe routing overhead timings in milliseconds.
     ///
     /// `indexer_duration` and `shared_cache_duration` are independent wall-clock times
@@ -874,11 +921,6 @@ impl RoutingOverheadMetrics {
                 * 1000.0,
         );
         self.total.observe(total_elapsed.as_secs_f64() * 1000.0);
-    }
-
-    /// Increment the shared cache error counter.
-    pub fn inc_shared_cache_errors(&self) {
-        self.shared_cache_errors_total.inc();
     }
 }
 
@@ -1537,6 +1579,113 @@ dynamo_frontend_router_queue_pending_requests{dynamo_namespace=\"ns\",model=\"mo
         );
     }
 
+    /// A frontend serving several namespaces registers the routing-overhead
+    /// histograms once for the process. Without the `dynamo_namespace` label
+    /// every deployment's routing latency merges into one histogram and a slow
+    /// namespace disappears into the combined quantiles.
+    #[test]
+    fn routing_overhead_histograms_split_by_namespace() {
+        let registry = prometheus::Registry::new();
+        let metrics = RoutingOverheadMetrics {
+            block_hashing: overhead_vec("t_block_hashing_ms"),
+            indexer_find_matches: overhead_vec("t_find_matches_ms"),
+            seq_hashing: overhead_vec("t_seq_hashing_ms"),
+            scheduling: overhead_vec("t_scheduling_ms"),
+            total: overhead_vec("t_total_ms"),
+            shared_cache_query: overhead_vec("t_shared_cache_query_ms"),
+            shared_cache_errors_total: prometheus::IntCounter::new("t_sc_errors_total", "test")
+                .unwrap(),
+        };
+        registry.register(Box::new(metrics.total.clone())).unwrap();
+
+        let observe = |ns: &str, total_ms: u64| {
+            metrics.handles_for(ns).observe(
+                Duration::from_millis(1),
+                Duration::from_millis(1),
+                Duration::from_millis(1),
+                None,
+                Duration::from_millis(1),
+                Duration::from_millis(total_ms),
+            );
+        };
+        observe("pair_a", 5);
+        observe("pair_a", 5);
+        observe("pair_d", 500);
+
+        let families = registry.gather();
+        let total = families
+            .iter()
+            .find(|mf| mf.name() == "t_total_ms")
+            .expect("total histogram registered");
+        let by_ns: HashMap<String, (u64, f64)> = total
+            .get_metric()
+            .iter()
+            .map(|m| {
+                let ns = m
+                    .get_label()
+                    .iter()
+                    .find(|l| l.name() == labels::NAMESPACE)
+                    .map(|l| l.value().to_string())
+                    .unwrap_or_default();
+                let h = m.get_histogram();
+                (ns, (h.get_sample_count(), h.get_sample_sum()))
+            })
+            .collect();
+
+        assert_eq!(by_ns.len(), 2, "one series per namespace; got {by_ns:?}");
+        assert_eq!(by_ns["pair_a"].0, 2);
+        assert_eq!(by_ns["pair_d"].0, 1);
+        assert!(
+            by_ns["pair_d"].1 > by_ns["pair_a"].1,
+            "the slow namespace must be separable, not merged: {by_ns:?}"
+        );
+    }
+
+    /// The handles are resolved once per router, so two lookups for the same
+    /// namespace must accumulate into one series rather than two.
+    #[test]
+    fn routing_overhead_handles_are_stable_per_namespace() {
+        let metrics = RoutingOverheadMetrics {
+            block_hashing: overhead_vec("t2_block_hashing_ms"),
+            indexer_find_matches: overhead_vec("t2_find_matches_ms"),
+            seq_hashing: overhead_vec("t2_seq_hashing_ms"),
+            scheduling: overhead_vec("t2_scheduling_ms"),
+            total: overhead_vec("t2_total_ms"),
+            shared_cache_query: overhead_vec("t2_shared_cache_query_ms"),
+            shared_cache_errors_total: prometheus::IntCounter::new("t2_sc_errors_total", "test")
+                .unwrap(),
+        };
+
+        for _ in 0..2 {
+            metrics.handles_for("ns-a").observe(
+                Duration::from_millis(1),
+                Duration::from_millis(1),
+                Duration::from_millis(1),
+                None,
+                Duration::from_millis(1),
+                Duration::from_millis(2),
+            );
+        }
+
+        assert_eq!(
+            metrics
+                .total
+                .with_label_values(&["ns-a"])
+                .get_sample_count(),
+            2,
+            "repeated handle lookups must address the same child"
+        );
+    }
+
+    fn overhead_vec(name: &str) -> HistogramVec {
+        HistogramVec::new(
+            prometheus::HistogramOpts::new(name, "test")
+                .buckets(prometheus::exponential_buckets(0.0001, 2.0, 18).unwrap()),
+            &[labels::NAMESPACE],
+        )
+        .unwrap()
+    }
+
     #[test]
     fn test_routing_overhead_saturating_sub() {
         let buckets = prometheus::exponential_buckets(0.0001, 2.0, 18).unwrap();
@@ -1546,22 +1695,17 @@ dynamo_frontend_router_queue_pending_requests{dynamo_namespace=\"ns\",model=\"mo
             )
             .unwrap()
         };
-        let metrics = RoutingOverheadMetrics {
+        let handles = RoutingOverheadHandles {
             block_hashing: make("test_block_hashing_ms"),
             indexer_find_matches: make("test_find_matches_ms"),
             seq_hashing: make("test_seq_hashing_ms"),
             scheduling: make("test_scheduling_ms"),
             total: make("test_total_ms"),
             shared_cache_query: make("test_shared_cache_query_ms"),
-            shared_cache_errors_total: prometheus::IntCounter::new(
-                "test_shared_cache_errors_total",
-                "test",
-            )
-            .unwrap(),
         };
 
         // Out-of-order cumulative durations: each phase < previous (would panic without saturating_sub)
-        metrics.observe(
+        handles.observe(
             Duration::from_millis(10),
             Duration::from_millis(5),
             Duration::from_millis(4),
