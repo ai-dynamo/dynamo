@@ -38,6 +38,7 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `dynamo-docs` — Fern docs-site content per the style guide
 - `dynamo-frontend-benchmark` — benchmark/profile the frontend against mock workers
 - `fern-components` — Fern MDX component library and usage guidance
+- `fern-recipe-page` — publish a released recipe's Fern page, landing card and picker
 - `fern-navigation` — Fern navigation and site-structure configuration guidance
 - `dynamo-kv-replay-parity` — validate offline KV replay parity and performance
 - `dynamo-agent-harness` — drive persistent Claude Code, Codex, or OpenCode sessions through Dynamo over ACP
