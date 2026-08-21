@@ -28,7 +28,7 @@ use dynamo_kv_router::indexer::cuckoo::CkfFailureAction;
 use dynamo_kv_router::protocols::ActiveLoad;
 use dynamo_kv_router::protocols::{DpRank, KvCacheEventError, WorkerId};
 use dynamo_runtime::component::Component;
-use dynamo_runtime::component::Instance;
+use dynamo_runtime::component::{Client, Instance};
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use parking_lot::Mutex;
@@ -370,6 +370,7 @@ struct EndpointWanRuntime {
 struct EndpointAvailabilityWatch {
     routable: watch::Receiver<Vec<WorkerId>>,
     discovered: watch::Receiver<Vec<Instance>>,
+    client: Client,
     /// Owns the client's background instance-reconciliation task; the process-wide
     /// token would keep one task alive per watch attempt until process shutdown.
     cancel: CancellationToken,
@@ -389,19 +390,25 @@ impl EndpointAvailabilityWatch {
         }
     }
 
-    fn live_workers(&self) -> HashSet<WorkerId> {
+    /// `None` until the client's first discovery listing lands: a fresh client's
+    /// watch channels start empty, so an early empty set is startup absence of
+    /// information, not an authoritative zero-worker observation.
+    fn availability(&self) -> Option<HashSet<WorkerId>> {
+        self.client.available_instance_ids()?;
         let discovered = self
             .discovered
             .borrow()
             .iter()
             .map(Instance::id)
             .collect::<HashSet<_>>();
-        self.routable
-            .borrow()
-            .iter()
-            .copied()
-            .filter(|worker_id| discovered.contains(worker_id))
-            .collect()
+        Some(
+            self.routable
+                .borrow()
+                .iter()
+                .copied()
+                .filter(|worker_id| discovered.contains(worker_id))
+                .collect(),
+        )
     }
 }
 
@@ -1280,12 +1287,10 @@ async fn run_endpoint_slot(
         if membership.is_some() && instance_rx.is_none() {
             match instance_availability_watch(&component, &endpoint, &cancel).await {
                 Ok(receiver) => {
-                    // Both runtime watchers carry an initial snapshot. An empty snapshot is an
-                    // authoritative observation that the endpoint currently has no live workers.
                     topology.replace_availability(
                         endpoint.clone(),
                         slot_incarnation,
-                        Some(receiver.live_workers()),
+                        receiver.availability(),
                     );
                     instance_rx = Some(receiver);
                     availability_retry_delay = Duration::from_millis(100);
@@ -1621,7 +1626,7 @@ async fn run_endpoint_slot(
                     slot_incarnation,
                     instance_rx
                         .as_ref()
-                        .map(EndpointAvailabilityWatch::live_workers),
+                        .and_then(EndpointAvailabilityWatch::availability),
                 );
             }
             SlotInput::AvailabilityRetry => {
@@ -1766,6 +1771,7 @@ async fn instance_availability_watch(
     Ok(EndpointAvailabilityWatch {
         routable: client.instance_avail_watcher(),
         discovered: client.instance_source.as_ref().clone(),
+        client,
         cancel,
     })
 }
@@ -2357,19 +2363,65 @@ mod tests {
         ))
     }
 
-    #[test]
-    fn dropping_an_availability_watch_stops_its_client_task() {
+    #[tokio::test]
+    async fn dropping_an_availability_watch_stops_its_client_task() {
+        let component = test_component("avail-drop").await;
+        let endpoint = EndpointId::from(
+            format!("{}.{}.generate", component.namespace(), component.name()).as_str(),
+        );
         let slot_cancel = CancellationToken::new();
-        let cancel = slot_cancel.child_token();
-        let watch = EndpointAvailabilityWatch {
-            routable: tokio::sync::watch::channel(Vec::new()).1,
-            discovered: tokio::sync::watch::channel(Vec::new()).1,
-            cancel: cancel.clone(),
-        };
+        let watch = instance_availability_watch(&component, &endpoint, &slot_cancel)
+            .await
+            .unwrap();
+        let cancel = watch.cancel.clone();
+        assert!(!cancel.is_cancelled());
 
         drop(watch);
         assert!(cancel.is_cancelled());
         assert!(!slot_cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn fresh_availability_watch_is_unknown_until_the_first_listing_lands() {
+        let component = test_component("avail-fresh").await;
+        let endpoint = EndpointId::from(
+            format!("{}.{}.generate", component.namespace(), component.name()).as_str(),
+        );
+        let slot_cancel = CancellationToken::new();
+        let mut watch = instance_availability_watch(&component, &endpoint, &slot_cancel)
+            .await
+            .unwrap();
+        // Startup absence of information must not read as an authoritative
+        // zero-worker observation.
+        assert_eq!(watch.availability(), None);
+
+        let _instance = component
+            .drt()
+            .discovery()
+            .register(dynamo_runtime::discovery::DiscoverySpec::Endpoint {
+                namespace: endpoint.namespace.clone(),
+                component: endpoint.component.clone(),
+                endpoint: endpoint.name.clone(),
+                transport: dynamo_runtime::component::TransportType::Tcp("127.0.0.1:0".to_string()),
+                device_type: None,
+                request_plane_codec: None,
+            })
+            .await
+            .unwrap();
+
+        let workers = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(workers) = watch.availability()
+                    && !workers.is_empty()
+                {
+                    return workers;
+                }
+                watch.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("registered instance must initialize the availability view");
+        assert_eq!(workers.len(), 1);
     }
 
     use dynamo_kv_router::{
