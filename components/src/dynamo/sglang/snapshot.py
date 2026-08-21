@@ -6,6 +6,7 @@
 import asyncio
 import gc
 import logging
+import os
 import time
 from typing import Any
 
@@ -136,19 +137,20 @@ async def prepare_snapshot_engine(
     configure_snapshot_capture_env()
     logger.info("Snapshot mode enabled (watcher-driven signals)")
 
-    # Enable memory_saver so GPU memory can be released for CRIU.
-    # When using GMS, weights use VA-stable unmap/remap (no CPU backup); GMS
-    # forbids enable_weights_cpu_backup. Otherwise use CPU backup for weights.
-    snapshot_overrides = {"enable_memory_saver": True}
-    try:
-        from gpu_memory_service.integrations.sglang import is_gms_active
+    if os.environ.get("DYN_GMS_USE_V1") != "true":
+        # Enable memory_saver so GPU memory can be released for CRIU.
+        # When using GMS, weights use VA-stable unmap/remap (no CPU backup); GMS
+        # forbids enable_weights_cpu_backup. Otherwise use CPU backup for weights.
+        snapshot_overrides = {"enable_memory_saver": True}
+        try:
+            from gpu_memory_service.integrations.sglang import is_gms_active
 
-        _using_gms = is_gms_active()
-    except ImportError:
-        _using_gms = False
-    if not _using_gms:
-        snapshot_overrides["enable_weights_cpu_backup"] = True
-    override_server_args(server_args, "dynamo.snapshot", **snapshot_overrides)
+            _using_gms = is_gms_active()
+        except ImportError:
+            _using_gms = False
+        if not _using_gms:
+            snapshot_overrides["enable_weights_cpu_backup"] = True
+        override_server_args(server_args, "dynamo.snapshot", **snapshot_overrides)
 
     start_time = time.time()
     engine = sgl.Engine(server_args=server_args)
