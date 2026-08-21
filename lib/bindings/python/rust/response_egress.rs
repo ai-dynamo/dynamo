@@ -1317,4 +1317,100 @@ mod tests {
         assert_eq!(frames_at_cancel, 1);
         assert_eq!(sink.frames.load(Ordering::Relaxed), frames_at_cancel);
     }
+
+    #[test]
+    fn reused_client_id_gets_a_new_generation_and_rejects_stale_events() {
+        let egress = ShardedResponseEgress::new(1, 1).expect("valid egress");
+        let first_sink = Arc::new(RecordingSink::default());
+        let first_key = egress
+            .register(7, 0, 1, first_sink)
+            .expect("register first request");
+        assert!(egress.cancel(first_key));
+
+        let second_sink = Arc::new(RecordingSink::default());
+        let second_key = egress
+            .register(7, 0, 1, second_sink.clone())
+            .expect("reuse client ID");
+        assert_eq!(first_key.client_id(), second_key.client_id());
+        assert_ne!(first_key.generation(), second_key.generation());
+
+        let stale = egress
+            .process_batch(vec![ResponseEvent::tokens_for(
+                first_key,
+                0,
+                vec![vec![10]],
+                false,
+            )])
+            .expect("stale event is dropped");
+        let current = egress
+            .process_batch(vec![ResponseEvent::tokens_for(
+                second_key,
+                0,
+                vec![vec![20]],
+                true,
+            )])
+            .expect("current event is processed");
+
+        assert_eq!(stale.responses_dropped, 1);
+        assert_eq!(current.completed_client_ids, vec![7]);
+        assert_eq!(second_sink.frames.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn stale_cancel_does_not_cancel_replacement_registration() {
+        let egress = ShardedResponseEgress::new(1, 1).expect("valid egress");
+        let first_key = egress
+            .register(11, 0, 1, Arc::new(RecordingSink::default()))
+            .expect("register first request");
+        assert!(egress.cancel(first_key));
+        let replacement_key = egress
+            .register(11, 0, 1, Arc::new(RecordingSink::default()))
+            .expect("register replacement");
+
+        assert!(!egress.cancel(first_key));
+        assert_eq!(egress.active_requests(), 1);
+        assert!(egress.cancel(replacement_key));
+    }
+
+    #[test]
+    fn duplicate_sequence_is_dropped_without_mutating_stream_state() {
+        let egress = ShardedResponseEgress::new(1, 1).expect("valid egress");
+        let sink = Arc::new(RecordingSink::default());
+        let key = egress
+            .register(13, 0, 1, sink.clone())
+            .expect("register request");
+
+        let first = egress
+            .process_batch(vec![ResponseEvent::tokens_for(
+                key,
+                0,
+                vec![vec![10]],
+                false,
+            )])
+            .expect("first event is processed");
+        let duplicate = egress
+            .process_batch(vec![ResponseEvent::tokens_for(
+                key,
+                0,
+                vec![vec![99]],
+                false,
+            )])
+            .expect("duplicate event is dropped");
+        let next = egress
+            .process_batch(vec![ResponseEvent::tokens_for(
+                key,
+                1,
+                vec![vec![11]],
+                true,
+            )])
+            .expect("next event is processed");
+
+        assert_eq!(first.responses_processed, 1);
+        assert_eq!(duplicate.responses_dropped, 1);
+        assert_eq!(next.responses_processed, 1);
+        let frames = sink.frames.lock().unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].data.as_ref().unwrap()["token_ids"], json!([10]));
+        assert_eq!(frames[1].data.as_ref().unwrap()["token_ids"], json!([11]));
+    }
 }
