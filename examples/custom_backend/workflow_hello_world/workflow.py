@@ -3,13 +3,7 @@
 
 """Author and compile the declarative Hello World workflow."""
 
-from dynamo.workflow import (
-    DeploymentSpec,
-    ExecutionPlan,
-    ValueSpec,
-    Workflow,
-    compile_workflow,
-)
+from dynamo.workflow import DeploymentSpec, ExecutionPlan, Workflow, compile_workflow
 from examples.custom_backend.workflow_hello_world.stages import (
     HelloStage,
     MergeStage,
@@ -25,7 +19,7 @@ ENDPOINTS = {
 
 def define_workflow() -> Workflow:
     workflow = Workflow("hello-world")
-    request = workflow.input("request", ValueSpec(type="json"))
+    request = workflow.input("request")
     hello = workflow.stage("hello", HelloStage.contract, request=request)
     world = workflow.stage("world", WorldStage.contract, request=request)
     merge = workflow.stage(

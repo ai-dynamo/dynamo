@@ -6,17 +6,14 @@
 from collections.abc import Mapping
 from typing import Any
 
-from dynamo.workflow import StageContext, StageContract, ValueSpec
-
-REQUEST = ValueSpec(type="json")
-TEXT = ValueSpec(type="text")
+from dynamo.workflow import StageContext, StageContract
 
 
 class HelloStage:
     contract = StageContract(
         id="hello",
-        inputs={"request": REQUEST},
-        outputs={"text": TEXT},
+        inputs={"request"},
+        outputs={"text"},
     )
 
     async def run(
@@ -29,8 +26,8 @@ class HelloStage:
 class WorldStage:
     contract = StageContract(
         id="world",
-        inputs={"request": REQUEST},
-        outputs={"text": TEXT},
+        inputs={"request"},
+        outputs={"text"},
     )
 
     async def run(
@@ -43,8 +40,8 @@ class WorldStage:
 class MergeStage:
     contract = StageContract(
         id="merge",
-        inputs={"hello": TEXT, "world": TEXT},
-        outputs={"chunk": ValueSpec(type="json")},
+        inputs={"hello", "world"},
+        outputs={"chunk"},
     )
 
     async def run(
