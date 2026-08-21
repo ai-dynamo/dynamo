@@ -210,6 +210,8 @@ fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Statu
         Endpoint::Completions => 0,
         Endpoint::ChatCompletions => 1,
         Endpoint::Embeddings => todo!(),
+        Endpoint::Classify => todo!(),
+        Endpoint::Pooling => todo!(),
         Endpoint::Responses => todo!(),
         Endpoint::AnthropicMessages => todo!(),
         Endpoint::Tensor => todo!(),
@@ -1502,6 +1504,145 @@ async fn test_audio_speech_failed_status_meters_as_client_error() {
         &Status::Error,
         &ErrorType::Validation,
         1,
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+/// Engine registered only so the classify/pooling routes resolve a model; the
+/// validation errors under test are rejected before the engine is reached.
+struct UncalledPoolingFamilyEngine {}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<dynamo_llm::protocols::openai::classify::NvCreateClassifyRequest>,
+        ManyOut<Annotated<dynamo_llm::protocols::openai::classify::NvCreateClassifyResponse>>,
+        Error,
+    > for UncalledPoolingFamilyEngine
+{
+    async fn generate(
+        &self,
+        _request: SingleIn<dynamo_llm::protocols::openai::classify::NvCreateClassifyRequest>,
+    ) -> Result<
+        ManyOut<Annotated<dynamo_llm::protocols::openai::classify::NvCreateClassifyResponse>>,
+        Error,
+    > {
+        anyhow::bail!("engine must not be reached by a rejected request")
+    }
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<dynamo_llm::protocols::openai::pooling::NvCreatePoolingRequest>,
+        ManyOut<Annotated<dynamo_llm::protocols::openai::pooling::NvCreatePoolingResponse>>,
+        Error,
+    > for UncalledPoolingFamilyEngine
+{
+    async fn generate(
+        &self,
+        _request: SingleIn<dynamo_llm::protocols::openai::pooling::NvCreatePoolingRequest>,
+    ) -> Result<
+        ManyOut<Annotated<dynamo_llm::protocols::openai::pooling::NvCreatePoolingResponse>>,
+        Error,
+    > {
+        anyhow::bail!("engine must not be reached by a rejected request")
+    }
+}
+
+/// A request rejected by handler-local validation must still be counted in
+/// `requests_total` with `error_type=validation`, like `chat_completions`.
+/// Validating before the inflight guard would drop these 400s from metrics
+/// (and from the "request completed" log the guard emits on drop).
+#[tokio::test]
+async fn test_classify_and_pooling_validation_errors_are_metered() {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    service
+        .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Classify, true)
+        .unwrap();
+    service
+        .enable_model_endpoint(dynamo_llm::endpoint_type::EndpointType::Pooling, true)
+        .unwrap();
+
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task =
+        tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+    wait_for_service_ready(port).await;
+
+    let registry = Registry::new();
+    let card = ModelDeploymentCard::with_name_only("foo");
+    let engine = Arc::new(UncalledPoolingFamilyEngine {});
+    manager
+        .add_classify_model("foo", card.mdcsum(), engine.clone())
+        .unwrap();
+    manager
+        .add_pooling_model("foo", card.mdcsum(), engine)
+        .unwrap();
+
+    let metrics = state.metrics_clone();
+    metrics.register(&registry).unwrap();
+
+    let client = reqwest::Client::new();
+
+    // ==== /v1/classify: empty cache_salt ====
+    let response = client
+        .post(format!("http://localhost:{port}/v1/classify"))
+        .json(&serde_json::json!({"model": "foo", "input": "hi", "cache_salt": ""}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    compare_counter(
+        &metrics,
+        "foo",
+        &Endpoint::Classify,
+        &RequestType::Unary,
+        &Status::Error,
+        &ErrorType::Validation,
+        1,
+    );
+
+    // ==== /v1/pooling: empty cache_salt ====
+    let response = client
+        .post(format!("http://localhost:{port}/v1/pooling"))
+        .json(&serde_json::json!({"model": "foo", "input": "hi", "cache_salt": ""}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    compare_counter(
+        &metrics,
+        "foo",
+        &Endpoint::Pooling,
+        &RequestType::Unary,
+        &Status::Error,
+        &ErrorType::Validation,
+        1,
+    );
+
+    // ==== /v1/pooling: unsupported dimensions ====
+    let response = client
+        .post(format!("http://localhost:{port}/v1/pooling"))
+        .json(&serde_json::json!({"model": "foo", "input": "hi", "dimensions": 8}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    compare_counter(
+        &metrics,
+        "foo",
+        &Endpoint::Pooling,
+        &RequestType::Unary,
+        &Status::Error,
+        &ErrorType::Validation,
+        2,
     );
 
     cancel_token.cancel();

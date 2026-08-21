@@ -58,10 +58,15 @@ use crate::protocols::openai::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
         NvCreateChatCompletionStreamResponse,
     },
+    classify::{NvCreateClassifyRequest, NvCreateClassifyResponse},
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     delta_common,
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     images::{NvCreateImageRequest, NvImagesResponse},
+    pooling::{
+        NvCreatePoolingRequest, NvCreatePoolingResponse, PoolingEmbedDType, PoolingEncodingFormat,
+        PoolingEndianness, PoolingOutput,
+    },
     responses::{
         NvCreateResponse, NvResponse, ResponseParams, ResponsesConversionError,
         chat_completion_to_response,
@@ -1361,6 +1366,410 @@ fn decode_base64_embedding_to_floats(s: &str) -> Result<Vec<f32>, anyhow::Error>
         floats.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
     Ok(floats)
+}
+
+#[tracing::instrument(skip_all)]
+async fn classify(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(mut request): Json<NvCreateClassifyRequest>,
+) -> Result<Response, ErrorResponse> {
+    // return a 503 if the service or model is not ready
+    check_ready(&state)?;
+    check_model_serving_ready(&state, &request.model)?;
+
+    if !state.nvext_enabled() {
+        warn_nvext_disabled("classify", request.nvext.is_some(), &headers);
+        request.nvext = None;
+    }
+
+    // Resolve alias → primary served name before wrapping the request, so
+    // engine routing, metrics, and the response model all use the canonical
+    // primary (mirrors `embeddings` / `completions_single`).
+    let canonical = state.manager().resolve_canonical_name(&request.model);
+    if canonical != request.model {
+        request.model = canonical;
+    }
+    let request_id = get_or_create_request_id(&headers);
+    let request = context_from_headers(request, request_id, &headers)?;
+    let request_id = request.id().to_string();
+
+    // Classification, like embeddings, is a pooling task returned as a single
+    // (non-streaming) response.
+    let streaming = false;
+
+    let model = &request.model;
+    let metric_model = state.manager().metric_model_for(model).to_string();
+
+    // Create inflight_guard early to ensure all errors (including validation)
+    // are counted. Request validation runs after this point so a rejected
+    // request still lands in `requests_total` with error_type=validation
+    // (mirrors `chat_completions`).
+    let mut inflight = state.metrics_clone().create_inflight_guard(
+        &metric_model,
+        Endpoint::Classify,
+        streaming,
+        &request_id,
+    );
+
+    // Marked as `Validation` explicitly rather than through
+    // `extract_error_type_from_response`: that helper infers the type from the
+    // message, and only a `VALIDATION_PREFIX`-prefixed 400 maps to
+    // `Validation` (anything else falls back to `Internal`). These messages
+    // stay verbatim vLLM-compatible, so the prefix is not an option here.
+    if let Err(err_response) = validate_pooling_cache_salt(request.cache_salt.as_deref()) {
+        inflight.mark_error(ErrorType::Validation);
+        return Err(err_response);
+    }
+
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
+
+    let engine = state.manager().get_classify_engine(model).map_err(|e| {
+        let err_response = ErrorMessage::from_model_error(&e);
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
+    let model_name = model.to_string();
+
+    // issue the generate call on the engine
+    let stream = engine.generate(request).await.map_err(|e| {
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model_name, super::metrics::Endpoint::Classify);
+        }
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate classification");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
+    // Process stream to collect metrics and drop http_queue_guard on first token
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
+    });
+
+    // Fold the (single-response) stream into one classification response.
+    let response = NvCreateClassifyResponse::from_annotated_stream(stream)
+        .await
+        .map_err(|e| {
+            let err_response = ErrorMessage::from_anyhow(
+                anyhow::Error::new(e),
+                "Failed to fold classification stream",
+            );
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+
+    inflight.mark_ok();
+    Ok(Json(response).into_response())
+}
+
+fn pooling_or_classify_bad_request(message: String) -> ErrorResponse {
+    let code = StatusCode::BAD_REQUEST;
+    (
+        code,
+        Json(ErrorMessage {
+            message,
+            error_type: map_error_code_to_error_type(code),
+            code: code.as_u16(),
+            details: None,
+        }),
+    )
+}
+
+fn validate_pooling_cache_salt(cache_salt: Option<&str>) -> Result<(), ErrorResponse> {
+    if cache_salt == Some("") {
+        return Err(pooling_or_classify_bad_request(
+            "Parameter 'cache_salt' must be a non-empty string if provided.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct PoolingBinaryMetadataItem {
+    index: u32,
+    embed_dtype: &'static str,
+    endianness: &'static str,
+    start: usize,
+    end: usize,
+    shape: Vec<u64>,
+}
+
+#[derive(Serialize)]
+struct PoolingBinaryUsage {
+    prompt_tokens: u32,
+    total_tokens: u32,
+}
+
+#[derive(Serialize)]
+struct PoolingBinaryMetadata {
+    id: String,
+    created: u64,
+    model: String,
+    data: Vec<PoolingBinaryMetadataItem>,
+    usage: PoolingBinaryUsage,
+}
+
+fn build_pooling_binary_response(
+    response: NvCreatePoolingResponse,
+    include_metadata: bool,
+    embed_dtype: PoolingEmbedDType,
+    endianness: PoolingEndianness,
+) -> anyhow::Result<Response> {
+    let NvCreatePoolingResponse {
+        id,
+        created,
+        model,
+        data,
+        usage,
+        ..
+    } = response;
+
+    let mut chunks = Vec::with_capacity(data.len());
+    let mut metadata_items = Vec::with_capacity(if include_metadata { data.len() } else { 0 });
+    let mut offset = 0usize;
+
+    for item in data {
+        let encoded = match item.data {
+            PoolingOutput::Base64(encoded) => encoded,
+            _ => anyhow::bail!(
+                "binary pooling output at index {} was not base64 encoded",
+                item.index
+            ),
+        };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "invalid base64 in binary pooling output at index {}: {e}",
+                    item.index
+                )
+            })?;
+        let end = offset.checked_add(bytes.len()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "binary pooling response size overflow at index {}",
+                item.index
+            )
+        })?;
+
+        if include_metadata {
+            let shape = item.shape.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "binary pooling output at index {} is missing its tensor shape",
+                    item.index
+                )
+            })?;
+            let expected_len =
+                shape
+                    .iter()
+                    .try_fold(embed_dtype.byte_width(), |size, &dimension| {
+                        let dimension = usize::try_from(dimension).map_err(|_| {
+                            anyhow::anyhow!(
+                                "binary pooling tensor dimension overflow at index {}",
+                                item.index
+                            )
+                        })?;
+                        size.checked_mul(dimension).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "binary pooling tensor size overflow at index {}",
+                                item.index
+                            )
+                        })
+                    })?;
+            anyhow::ensure!(
+                bytes.len() == expected_len,
+                "binary pooling output at index {} has {} bytes, but shape {:?} with dtype {} requires {}",
+                item.index,
+                bytes.len(),
+                shape,
+                embed_dtype.as_str(),
+                expected_len
+            );
+            metadata_items.push(PoolingBinaryMetadataItem {
+                index: item.index,
+                embed_dtype: embed_dtype.as_str(),
+                endianness: endianness.as_str(),
+                start: offset,
+                end,
+                shape,
+            });
+        }
+
+        chunks.push(Bytes::from(bytes));
+        offset = end;
+    }
+
+    let metadata = if include_metadata {
+        Some(serde_json::to_string(&PoolingBinaryMetadata {
+            id,
+            created,
+            model,
+            data: metadata_items,
+            usage: PoolingBinaryUsage {
+                prompt_tokens: usage.prompt_tokens,
+                total_tokens: usage.total_tokens,
+            },
+        })?)
+    } else {
+        None
+    };
+
+    let body = Body::from_stream(stream::iter(
+        chunks
+            .into_iter()
+            .map(Ok::<Bytes, std::convert::Infallible>),
+    ));
+    let mut builder =
+        Response::builder().header(axum::http::header::CONTENT_TYPE, "application/octet-stream");
+    if let Some(metadata) = metadata {
+        builder = builder.header("metadata", metadata);
+    }
+    Ok(builder.body(body)?)
+}
+
+#[tracing::instrument(skip_all)]
+async fn pooling(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(mut request): Json<NvCreatePoolingRequest>,
+) -> Result<Response, ErrorResponse> {
+    // return a 503 if the service or model is not ready
+    check_ready(&state)?;
+    check_model_serving_ready(&state, &request.model)?;
+
+    if !state.nvext_enabled() {
+        warn_nvext_disabled("pooling", request.nvext.is_some(), &headers);
+        request.nvext = None;
+    }
+    let response_encoding = request.encoding_format;
+    let response_dtype = request.embed_dtype.unwrap_or_default();
+    let response_endianness = request.endianness.unwrap_or_default();
+
+    // Resolve alias → primary served name before wrapping the request, so
+    // engine routing, metrics, and the response model all use the canonical
+    // primary (mirrors `embeddings` / `completions_single`).
+    let canonical = state.manager().resolve_canonical_name(&request.model);
+    if canonical != request.model {
+        request.model = canonical;
+    }
+    let request_id = get_or_create_request_id(&headers);
+    let request = context_from_headers(request, request_id, &headers)?;
+    let request_id = request.id().to_string();
+
+    // Pooling, like embeddings, is a single (non-streaming) response.
+    let streaming = false;
+
+    let model = &request.model;
+    let metric_model = state.manager().metric_model_for(model).to_string();
+
+    // Create inflight_guard early to ensure all errors (including validation)
+    // are counted. Request validation runs after this point so a rejected
+    // request still lands in `requests_total` with error_type=validation
+    // (mirrors `chat_completions`).
+    let mut inflight = state.metrics_clone().create_inflight_guard(
+        &metric_model,
+        Endpoint::Pooling,
+        streaming,
+        &request_id,
+    );
+
+    // Marked as `Validation` explicitly rather than through
+    // `extract_error_type_from_response`: that helper infers the type from the
+    // message, and only a `VALIDATION_PREFIX`-prefixed 400 maps to
+    // `Validation` (anything else falls back to `Internal`). These messages
+    // stay verbatim vLLM-compatible, so the prefix is not an option here.
+    if let Err(err_response) = validate_pooling_cache_salt(request.cache_salt.as_deref()) {
+        inflight.mark_error(ErrorType::Validation);
+        return Err(err_response);
+    }
+
+    // vLLM currently rejects dimensionality reduction on `/pooling`.
+    if request.dimensions.is_some() {
+        inflight.mark_error(ErrorType::Validation);
+        return Err(pooling_or_classify_bad_request(
+            "dimensions is currently not supported".to_string(),
+        ));
+    }
+
+    // Create http_queue_guard early - tracks time waiting to be processed
+    let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
+
+    let engine = state.manager().get_pooling_engine(model).map_err(|e| {
+        let err_response = ErrorMessage::from_model_error(&e);
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(&metric_model);
+    let model_name = model.to_string();
+
+    // issue the generate call on the engine
+    let stream = engine.generate(request).await.map_err(|e| {
+        if super::metrics::request_was_rejected(e.as_ref()) {
+            state
+                .metrics_clone()
+                .inc_rejection(&model_name, super::metrics::Endpoint::Pooling);
+        }
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate pooling output");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
+    // Process stream to collect metrics and drop http_queue_guard on first token
+    let mut http_queue_guard = Some(http_queue_guard);
+    let stream = stream.inspect(move |response| {
+        process_response_and_observe_metrics(
+            response,
+            &mut response_collector,
+            &mut http_queue_guard,
+        );
+    });
+
+    // Fold the (single-response) stream into one pooling response.
+    let response = NvCreatePoolingResponse::from_annotated_stream(stream)
+        .await
+        .map_err(|e| {
+            let err_response =
+                ErrorMessage::from_anyhow(anyhow::Error::new(e), "Failed to fold pooling stream");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+
+    let response = match response_encoding {
+        PoolingEncodingFormat::Float | PoolingEncodingFormat::Base64 => {
+            Json(response).into_response()
+        }
+        PoolingEncodingFormat::Bytes | PoolingEncodingFormat::BytesOnly => {
+            build_pooling_binary_response(
+                response,
+                response_encoding == PoolingEncodingFormat::Bytes,
+                response_dtype,
+                response_endianness,
+            )
+            .map_err(|e| {
+                let err_response =
+                    ErrorMessage::from_anyhow(e, "Failed to build pooling binary response");
+                inflight.mark_error(extract_error_type_from_response(&err_response));
+                err_response
+            })?
+        }
+    };
+
+    inflight.mark_ok();
+    Ok(response)
 }
 
 async fn handler_chat_completions(
@@ -2965,6 +3374,44 @@ pub fn embeddings_router(
     (vec![doc], router)
 }
 
+/// Create an Axum [`Router`] for the `/v1/classify` endpoint (sequence
+/// classification / cross-encoder pooling). If no path is provided, the
+/// default path is `/v1/classify`. Deployments migrating clients from native
+/// `vllm-serve` (which mounts a bare `/classify`) can set the path via
+/// `DYN_HTTP_SVC_CLASSIFY_PATH`.
+pub fn classify_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let path = path.unwrap_or("/v1/classify".to_string());
+    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let router = Router::new()
+        .route(&path, post(classify))
+        .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state(state);
+    (vec![doc], router)
+}
+
+/// Create an Axum [`Router`] for the `/v1/pooling` endpoint (raw pooler output
+/// from pooling-runner models). If no path is provided, the default path is
+/// `/v1/pooling`. Deployments migrating clients from native `vllm-serve`
+/// (which mounts a bare `/pooling`) can set the path via
+/// `DYN_HTTP_SVC_POOLING_PATH`.
+pub fn pooling_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let path = path.unwrap_or("/v1/pooling".to_string());
+    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let router = Router::new()
+        .route(&path, post(pooling))
+        .layer(middleware::from_fn(smart_json_error_middleware))
+        .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
+        .with_state(state);
+    (vec![doc], router)
+}
+
 /// Create an Axum [`Router`] for the OpenAI Batch API skeleton.
 ///
 /// The first slice exposes the route and protocol shape. Durable file storage,
@@ -3738,6 +4185,7 @@ mod tests {
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
+    use crate::protocols::openai::pooling::{PoolingData, PoolingUsage};
     use crate::protocols::openai::responses::NvCreateResponse;
     use dynamo_protocols::types::responses::{CreateResponse, Input, PromptConfig};
     use dynamo_protocols::types::{
@@ -3747,6 +4195,139 @@ mod tests {
     };
 
     const BACKUP_ERROR_MESSAGE: &str = "Failed to generate completions";
+
+    fn binary_pooling_response() -> NvCreatePoolingResponse {
+        NvCreatePoolingResponse {
+            id: "pool-request".to_string(),
+            object: "list".to_string(),
+            created: 123,
+            model: "test-model".to_string(),
+            data: vec![
+                PoolingData {
+                    index: 0,
+                    object: "pooling".to_string(),
+                    data: PoolingOutput::Base64(
+                        base64::engine::general_purpose::STANDARD.encode([1, 2, 3, 4]),
+                    ),
+                    shape: Some(vec![2]),
+                },
+                PoolingData {
+                    index: 1,
+                    object: "pooling".to_string(),
+                    data: PoolingOutput::Base64(
+                        base64::engine::general_purpose::STANDARD.encode([5, 6, 7, 8]),
+                    ),
+                    shape: Some(vec![1, 2]),
+                },
+            ],
+            usage: PoolingUsage {
+                prompt_tokens: 7,
+                total_tokens: 7,
+                completion_tokens: 0,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn pooling_bytes_response_has_vllm_metadata_and_chunked_body() {
+        let response = build_pooling_binary_response(
+            binary_pooling_response(),
+            true,
+            PoolingEmbedDType::Float16,
+            PoolingEndianness::Big,
+        )
+        .unwrap();
+
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "application/octet-stream"
+        );
+        let metadata: serde_json::Value =
+            serde_json::from_str(response.headers()["metadata"].to_str().unwrap()).unwrap();
+        assert_eq!(
+            metadata,
+            serde_json::json!({
+                "id": "pool-request",
+                "created": 123,
+                "model": "test-model",
+                "data": [
+                    {
+                        "index": 0,
+                        "embed_dtype": "float16",
+                        "endianness": "big",
+                        "start": 0,
+                        "end": 4,
+                        "shape": [2]
+                    },
+                    {
+                        "index": 1,
+                        "embed_dtype": "float16",
+                        "endianness": "big",
+                        "start": 4,
+                        "end": 8,
+                        "shape": [1, 2]
+                    }
+                ],
+                "usage": {"prompt_tokens": 7, "total_tokens": 7}
+            })
+        );
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[tokio::test]
+    async fn pooling_bytes_only_response_omits_metadata() {
+        let mut source = binary_pooling_response();
+        for item in &mut source.data {
+            item.shape = None;
+        }
+        let response = build_pooling_binary_response(
+            source,
+            false,
+            PoolingEmbedDType::Float32,
+            PoolingEndianness::Native,
+        )
+        .unwrap();
+
+        assert!(response.headers().get("metadata").is_none());
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn pooling_bytes_metadata_requires_tensor_shape() {
+        let mut response = binary_pooling_response();
+        response.data[0].shape = None;
+
+        let error = build_pooling_binary_response(
+            response,
+            true,
+            PoolingEmbedDType::Float32,
+            PoolingEndianness::Native,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("missing its tensor shape"));
+    }
+
+    #[test]
+    fn pooling_bytes_metadata_validates_tensor_size() {
+        let mut response = binary_pooling_response();
+        response.data[0].shape = Some(vec![3]);
+
+        let error = build_pooling_binary_response(
+            response,
+            true,
+            PoolingEmbedDType::Float16,
+            PoolingEndianness::Native,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("requires 6"));
+    }
 
     #[test]
     fn test_is_json_content_type() {
@@ -4002,6 +4583,19 @@ mod tests {
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1.message, "custom error message");
+    }
+
+    #[test]
+    fn empty_pooling_cache_salt_is_rejected() {
+        assert!(validate_pooling_cache_salt(None).is_ok());
+        assert!(validate_pooling_cache_salt(Some("salt")).is_ok());
+
+        let response = validate_pooling_cache_salt(Some("")).unwrap_err();
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.1.message,
+            "Parameter 'cache_salt' must be a non-empty string if provided."
+        );
     }
 
     #[test]

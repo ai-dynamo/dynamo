@@ -39,7 +39,7 @@ spec:
       extraPodSpec:
         mainContainer:
           # NOTE: Frontend doesn't need XPU
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1
           env:
             - name: OTEL_SERVICE_NAME
               value: "dynamo-frontend"
