@@ -529,7 +529,7 @@ async fn anthropic_messages(
             request.chat_template_args.as_ref(),
         );
 
-    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+    let mut response_collector = state.create_response_collector(&model, &request);
 
     tracing::trace!("Issuing generate call for Anthropic messages");
 

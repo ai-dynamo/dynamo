@@ -1279,7 +1279,7 @@ class HandlerBase(BaseGenerativeHandler):
                     for output in res.outputs:
                         output_idx = getattr(output, "index", 0) or 0
                         tokens_so_far = output_tokens_per_choice.get(output_idx, 0)
-                        next_total_toks = len(output.token_ids)
+                        next_total_toks = max(tokens_so_far, len(output.token_ids))
 
                         # The engine returns all tokens generated so far for
                         # this choice. Calculate only the new tokens generated

@@ -683,8 +683,10 @@ class Publisher:
             return False
 
         def handle_stat(stat):
-            kv_active_blocks = stat["kvCacheStats"]["usedNumBlocks"]
-            kv_total_blocks = stat["kvCacheStats"]["maxNumBlocks"]
+            kv_cache_stats = stat["kvCacheStats"]
+            kv_active_blocks = int(kv_cache_stats["usedNumBlocks"])
+            kv_total_observed = kv_cache_stats.get("maxNumBlocks")
+            kv_total_blocks = int(kv_total_observed or 0)
             dp_rank = int(stat.get("attentionDpRank", 0))
             logging.debug(f"Publishing stats: kv_active_blocks: {kv_active_blocks}")
             assert self.metrics_publisher is not None

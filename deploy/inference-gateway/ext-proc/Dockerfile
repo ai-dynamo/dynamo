@@ -65,6 +65,7 @@ COPY --from=dynamo Cargo.toml Cargo.lock README.md ./
 # crates.io.
 COPY --from=dynamo lib/ lib/
 COPY --from=dynamo examples/router/custom-policy-example/ examples/router/custom-policy-example/
+COPY --from=dynamo tests/integration/engine_stats/ tests/integration/engine_stats/
 
 # Copy the ext-proc crate itself
 COPY --from=dynamo deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/

@@ -30,7 +30,7 @@ use futures::stream::{self, StreamExt};
 
 use crate::{
     discovery::ModelManager,
-    kv_router::WorkerSelectorFactory,
+    kv_router::{WorkerSelectorFactory, indexer::PlacementFeed},
     local_model::runtime_config::ModelRuntimeConfig,
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
@@ -237,6 +237,7 @@ where
 
 pub(crate) trait PrefillRouterLifecycle: Send + Sync {
     fn set_target(&self, target: Option<dynamo_runtime::component::Endpoint>);
+    fn placement_feed(&self) -> Option<(EndpointId, PlacementFeed)>;
 }
 
 impl<Sel> PrefillRouterLifecycle for PrefillRouter<Sel>
@@ -245,6 +246,18 @@ where
 {
     fn set_target(&self, target: Option<dynamo_runtime::component::Endpoint>) {
         self.set_target(target);
+    }
+
+    fn placement_feed(&self) -> Option<(EndpointId, PlacementFeed)> {
+        let binding = self.binding.load_full()?;
+        let InnerPrefillRouter::KvRouter(router) = &binding.router else {
+            return None;
+        };
+        router
+            .chooser
+            .indexer()
+            .placement_feed()
+            .map(|feed| (binding.endpoint_id.clone(), feed))
     }
 }
 

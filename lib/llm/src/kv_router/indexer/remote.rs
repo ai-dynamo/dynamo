@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
+use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 
 use anyhow::Result;
@@ -18,16 +19,44 @@ use dynamo_runtime::pipeline::{
     AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, RouterMode, SingleIn,
     async_trait, network::Ingress, network::egress::push_router::PushRouter,
 };
+use dynamo_runtime::protocols::maybe_error::MaybeError;
 use dynamo_runtime::stream;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_tokens::SequenceHash;
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::kv_router::metrics::RemoteIndexerMetrics;
 
-use super::{Indexer, TieredMatchDetails};
+use super::{Indexer, PlacementStream, PlacementUpdate, TieredMatchDetails};
+
+const KV_INDEXER_PLACEMENT_ENDPOINT: &str = "kv_indexer_placements";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IndexerPlacementRequest {
+    model_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum IndexerPlacementResponse {
+    Update(PlacementUpdate),
+    Error(String),
+}
+
+impl MaybeError for IndexerPlacementResponse {
+    fn from_err(error: impl std::error::Error + 'static) -> Self {
+        Self::Error(error.to_string())
+    }
+
+    fn err(&self) -> Option<dynamo_runtime::error::DynamoError> {
+        match self {
+            Self::Error(message) => Some(dynamo_runtime::error::DynamoError::msg(message.clone())),
+            Self::Update(_) => None,
+        }
+    }
+}
 
 pub struct RemoteIndexer {
     query_router: PushRouter<IndexerQueryRequest, IndexerQueryResponse>,
@@ -36,6 +65,7 @@ pub struct RemoteIndexer {
         PushRouter<IndexerRecordRoutingDecisionRequest, IndexerRecordRoutingDecisionResponse>,
     >,
     record_client: Client,
+    placement_router: Option<PushRouter<IndexerPlacementRequest, IndexerPlacementResponse>>,
     component: Component,
     model_name: String,
     metrics: Arc<RemoteIndexerMetrics>,
@@ -72,12 +102,22 @@ impl RemoteIndexer {
                 .await?,
             )
         };
+        let placement_router = if use_kv_events {
+            let client = component
+                .endpoint(KV_INDEXER_PLACEMENT_ENDPOINT)
+                .client()
+                .await?;
+            Some(PushRouter::from_client_no_fault_detection(client, RouterMode::RoundRobin).await?)
+        } else {
+            None
+        };
         let metrics = RemoteIndexerMetrics::from_component(component);
         Ok(Self {
             query_router,
             query_client,
             record_router,
             record_client,
+            placement_router,
             component: component.clone(),
             model_name,
             metrics,
@@ -202,6 +242,29 @@ impl RemoteIndexer {
     pub(super) fn use_kv_events(&self) -> bool {
         self.use_kv_events
     }
+
+    pub(super) async fn placement_stream(&self) -> Result<PlacementStream> {
+        let router = self
+            .placement_router
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("remote KV placement feed is not configured"))?;
+        let mut responses: ManyOut<IndexerPlacementResponse> = router
+            .round_robin(SingleIn::new(IndexerPlacementRequest {
+                model_name: self.model_name.clone(),
+            }))
+            .await?;
+
+        Ok(Box::pin(async_stream::try_stream! {
+            while let Some(response) = responses.next().await {
+                match response {
+                    IndexerPlacementResponse::Update(update) => yield update,
+                    IndexerPlacementResponse::Error(message) => {
+                        Err(anyhow::anyhow!(message))?;
+                    }
+                }
+            }
+        }))
+    }
 }
 
 fn cached_instance_ids(client: &Client) -> HashSet<u64> {
@@ -248,8 +311,13 @@ impl ServedIndexerService {
 
         let bindings = Arc::new(RwLock::new(HashMap::new()));
         start_query_endpoint(component.clone(), bindings.clone())?;
-        if mode == ServedIndexerMode::Approximate {
-            start_record_endpoint(component.clone(), bindings.clone())?;
+        match mode {
+            ServedIndexerMode::EventDriven => {
+                start_placement_endpoint(component.clone(), bindings.clone())?;
+            }
+            ServedIndexerMode::Approximate => {
+                start_record_endpoint(component.clone(), bindings.clone())?;
+            }
         }
 
         Ok(Arc::new(Self { mode, bindings }))
@@ -423,6 +491,30 @@ fn start_record_endpoint(
     Ok(())
 }
 
+fn start_placement_endpoint(
+    component: Component,
+    bindings: Arc<RwLock<HashMap<String, Indexer>>>,
+) -> Result<()> {
+    let engine = Arc::new(ServedIndexerPlacementEngine { bindings });
+    let ingress = Ingress::<
+        SingleIn<IndexerPlacementRequest>,
+        ManyOut<IndexerPlacementResponse>,
+    >::for_engine(engine)?;
+    tokio::spawn(async move {
+        if let Err(error) = component
+            .endpoint(KV_INDEXER_PLACEMENT_ENDPOINT)
+            .endpoint_builder()
+            .handler(ingress)
+            .graceful_shutdown(true)
+            .start()
+            .await
+        {
+            tracing::error!(error = %error, "served indexer placement endpoint failed");
+        }
+    });
+    Ok(())
+}
+
 struct ServedIndexerQueryEngine {
     bindings: Arc<RwLock<HashMap<String, Indexer>>>,
 }
@@ -475,6 +567,52 @@ impl AsyncEngine<SingleIn<IndexerQueryRequest>, ManyOut<IndexerQueryResponse>, a
 
 struct ServedIndexerRecordEngine {
     bindings: Arc<RwLock<HashMap<String, Indexer>>>,
+}
+
+struct ServedIndexerPlacementEngine {
+    bindings: Arc<RwLock<HashMap<String, Indexer>>>,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<SingleIn<IndexerPlacementRequest>, ManyOut<IndexerPlacementResponse>, anyhow::Error>
+    for ServedIndexerPlacementEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<IndexerPlacementRequest>,
+    ) -> Result<ManyOut<IndexerPlacementResponse>> {
+        let (request, ctx) = request.into_parts();
+        let indexer = self.bindings.read().get(&request.model_name).cloned();
+
+        let output: Pin<Box<dyn Stream<Item = IndexerPlacementResponse> + Send>> = match indexer {
+            Some(indexer) => match indexer.placement_feed() {
+                Some(feed) => match feed.stream().await {
+                    Ok(stream) => Box::pin(stream.map(|result| match result {
+                        Ok(update) => IndexerPlacementResponse::Update(update),
+                        Err(error) => IndexerPlacementResponse::Error(error.to_string()),
+                    })),
+                    Err(error) => Box::pin(stream::iter(vec![IndexerPlacementResponse::Error(
+                        error.to_string(),
+                    )])),
+                },
+                None => Box::pin(stream::iter(vec![IndexerPlacementResponse::Error(
+                    format!(
+                        "served indexer model {} has no placement feed",
+                        request.model_name
+                    ),
+                )])),
+            },
+            None => Box::pin(stream::iter(vec![IndexerPlacementResponse::Error(
+                format!(
+                    "served indexer model {} is not registered",
+                    request.model_name
+                ),
+            )])),
+        };
+
+        Ok(ResponseStream::new(output, ctx.context()))
+    }
 }
 
 #[async_trait]
@@ -560,6 +698,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn placement_engine_relays_snapshot_and_live_index_updates() {
+        let indexer = Indexer::KvIndexer {
+            primary: KvIndexer::new(
+                CancellationToken::new(),
+                4,
+                Arc::new(KvIndexerMetrics::new_unregistered()),
+            ),
+            lower_tier: LowerTierIndexers::new(1, 4),
+            approx: None,
+            primary_records_routing_decisions: false,
+            placement: Some(super::super::placement::PlacementJournal::new(
+                CancellationToken::new(),
+            )),
+        };
+        let bindings = Arc::new(RwLock::new(HashMap::from([(
+            "model".to_string(),
+            indexer.clone(),
+        )])));
+        let engine = ServedIndexerPlacementEngine { bindings };
+        let mut stream = engine
+            .generate(SingleIn::new(IndexerPlacementRequest {
+                model_name: "model".to_string(),
+            }))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            stream.next().await,
+            Some(IndexerPlacementResponse::Update(
+                PlacementUpdate::Snapshot { cursor: 0, .. }
+            ))
+        ));
+
+        indexer
+            .try_apply_event(store_event(7, 0, 1, &[], &[11], StorageTier::Device))
+            .await
+            .unwrap();
+        assert!(matches!(
+            stream.next().await,
+            Some(IndexerPlacementResponse::Update(PlacementUpdate::Events {
+                cursor: 1,
+                ..
+            }))
+        ));
+    }
+
+    #[tokio::test]
     async fn query_engine_does_not_serve_side_indexer_matches() {
         let worker = WorkerWithDpRank::new(7, 0);
         let block_hashes = vec![LocalBlockHash(11), LocalBlockHash(12)];
@@ -586,6 +771,7 @@ mod tests {
             lower_tier: LowerTierIndexers::new(1, 4),
             approx: Some(SideIndexer::KvIndexer(side)),
             primary_records_routing_decisions: false,
+            placement: None,
         };
 
         assert_eq!(
@@ -638,6 +824,7 @@ mod tests {
             lower_tier: LowerTierIndexers::new(1, 4),
             approx: None,
             primary_records_routing_decisions: false,
+            placement: None,
         };
 
         // Worker owns [11, 12] on device and [11, 12, 13] on host-pinned.
@@ -737,6 +924,7 @@ mod tests {
             lower_tier: LowerTierIndexers::new(1, 4),
             approx: None,
             primary_records_routing_decisions: false,
+            placement: None,
         };
 
         indexer

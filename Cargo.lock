@@ -3264,6 +3264,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine-stats-e2e"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "futures",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "socket2 0.6.4",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "enum-ordinalize"
 version = "4.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

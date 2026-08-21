@@ -687,6 +687,9 @@ where
             // The prefill router is stored so the watcher can deactivate/reactivate it
             // when prefill workers die or rejoin.
             worker_set.worker_monitor = worker_monitor.clone();
+            worker_set.kv_placement_feed = kv_chooser
+                .as_ref()
+                .and_then(|chooser| chooser.indexer().placement_feed());
             worker_set.prefill_router = prefill_chooser.clone().map(|router| {
                 router as Arc<dyn crate::kv_router::prefill_router::PrefillRouterLifecycle>
             });

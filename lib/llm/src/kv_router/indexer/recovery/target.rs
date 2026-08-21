@@ -78,22 +78,15 @@ impl RecoveryTarget for IndexerRecoveryTarget {
 
     async fn replace_rank(
         &self,
-        publisher_id: PublisherId,
+        _publisher_id: PublisherId,
         worker_id: WorkerId,
         dp_rank: DpRank,
         events: Vec<RouterEvent>,
     ) -> anyhow::Result<()> {
-        self.reset_rank(
-            publisher_id,
-            worker_id,
-            dp_rank,
-            RecoveryResetReason::Lifecycle,
-        )
-        .await?;
-        for event in events {
-            self.admit_event(publisher_id, event).await?;
-        }
-        Ok(())
+        self.indexer
+            .replace_worker_dp_rank_and_wait(worker_id, dp_rank, events)
+            .await
+            .map_err(Into::into)
     }
 
     async fn reset_rank(

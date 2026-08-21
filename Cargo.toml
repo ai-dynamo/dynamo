@@ -38,6 +38,7 @@ members = [
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "deploy/inference-gateway/ext-proc",
+    "tests/integration/engine_stats",
 ]
 resolver = "3"
 
