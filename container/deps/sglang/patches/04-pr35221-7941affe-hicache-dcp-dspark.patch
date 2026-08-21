@@ -1,18 +1,26 @@
+Dynamo-local deviation from upstream SGLang PR #35221 (7941affe):
+the replicated DSpark draft host pool must use the controller's undivided page
+size. The legacy caller provides a per-rank size (64 at DCP8) while the
+controller uses the logical size (512). Preserve this delta when refreshing.
+
 diff --git a/python/sglang/srt/mem_cache/kv_cache_builder.py b/python/sglang/srt/mem_cache/kv_cache_builder.py
-index 50f797101..df7c835b7 100644
+index 50f797101..f2239477e 100644
 --- a/python/sglang/srt/mem_cache/kv_cache_builder.py
 +++ b/python/sglang/srt/mem_cache/kv_cache_builder.py
-@@ -106,8 +106,10 @@ def maybe_register_hicache_draft(
+@@ -106,8 +106,12 @@ def maybe_register_hicache_draft(
      # Create host pool for draft with the same slot count as the target host pool,
      # so that host indices stay 1-to-1 between target and draft KV caches.
      primary = tree_cache.cache_controller.mem_pool_host
-+    # Note(kpham-sgl): DCP x DSpark draft KV is replicated and spans the virtual
-+    # loc space, so match the target host's logical_size instead of physical size.
++    # DCP x DSpark draft KV is replicated and spans the virtual location space.
++    # Match the target host's logical size and pass the controller's undivided
++    # page size: the draft host uses dcp_size=1, while primary.page_size is
++    # already divided by DCP.
      kw = dict(
 -        host_to_device_ratio=primary.size / pool.size,
 +        host_to_device_ratio=primary.logical_size / pool.size,
          host_size=0,
-         page_size=page_size,
+-        page_size=page_size,
++        page_size=tree_cache.cache_controller.page_size,
          layout=server_args.hicache_mem_layout,
 diff --git a/python/sglang/srt/server_args.py b/python/sglang/srt/server_args.py
 index 18664959e..8def354d3 100644
