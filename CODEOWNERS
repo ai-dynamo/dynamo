@@ -164,7 +164,6 @@
 /examples/diffusers/                                                         @ai-dynamo/dynamo-diffusion-codeowners
 
 # === planner  (@ai-dynamo/dynamo-planner-codeowners) ===
-/aisimulate/                                                                 @ai-dynamo/dynamo-planner-codeowners
 /examples/global_planner/                                                    @ai-dynamo/dynamo-planner-codeowners
 /examples/power-aware-budget/                                                @ai-dynamo/dynamo-planner-codeowners
 /components/src/dynamo/planner/                                              @ai-dynamo/dynamo-planner-codeowners
@@ -564,7 +563,6 @@
 /deploy/operator/internal/checkpointjob/                                     @ai-dynamo/dynamo-gms-codeowners
 /deploy/operator/internal/observability/                                     @ai-dynamo/dynamo-observability-codeowners
 /lib/llm/src/block_manager/controller.rs                                     @ai-dynamo/dynamo-kv-memory-codeowners
-/aisimulate/crates/core/src/engine/cache/                                    @ai-dynamo/dynamo-performance-codeowners
 /components/src/dynamo/common/multimodal/                                    @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/trtllm/multimodal/                                    @ai-dynamo/dynamo-multimodal-codeowners
 /lib/llm/src/block_manager/distributed.rs                                    @ai-dynamo/dynamo-kv-memory-codeowners
@@ -574,7 +572,6 @@
 /components/src/dynamo/vllm/multimodal_utils/                                @ai-dynamo/dynamo-multimodal-codeowners
 /lib/bindings/python/src/dynamo/nixl_connect/                                @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/tests/test_streaming_tool_parsers.rs                                @ai-dynamo/dynamo-frontend-codeowners
-/aisimulate/crates/core/src/engine/kv_manager/                               @ai-dynamo/dynamo-performance-codeowners
 /tests/router/test_router_e2e_with_vllm_xpu.py                               @ai-dynamo/dynamo-xpu-codeowners
 /components/src/dynamo/vllm/multimodal_handlers/                             @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/common/tests/test_snapshot*                           @ai-dynamo/dynamo-gms-codeowners
@@ -584,7 +581,10 @@
 /components/src/dynamo/sglang/request_handlers/image_diffusion/              @ai-dynamo/dynamo-diffusion-codeowners
 
 # --- Shared ownership: multi-team (any one approves; wins via last-match) ---
+/.codex/                                                                     @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
+/agents/                                                                     @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
 /.agents/                                                                    @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
+/agent-docs/                                                                 @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
 /.lycheeignore                                                               @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-docs-codeowners
 /tests/deploy/                                                               @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
 /docs/fern/agents/                                                           @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
@@ -661,7 +661,6 @@
 /components/src/dynamo/vllm/engine_monitor.py                                @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/vllm/multimodal_utils/                                @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /deploy/operator/config/**/*dynamocheckpoint*                                @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-gms-codeowners
-/aisimulate/crates/core/src/engine/kv_manager/                               @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /components/src/dynamo/trtllm/encode_helper.py                               @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/sglang/init_diffusion.py                              @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /components/src/dynamo/trtllm/engine_monitor.py                              @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-observability-codeowners

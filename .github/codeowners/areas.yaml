@@ -217,7 +217,6 @@ areas:
   - components/src/dynamo/profiler/tests/
   - components/src/dynamo/profiler/utils/
   - examples/global_planner/
-  - aisimulate/
   - examples/power-aware-budget/
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
@@ -475,8 +474,6 @@ areas:
 - label: performance
   github_team: '@ai-dynamo/dynamo-performance-codeowners'
   path_globs:
-  - aisimulate/crates/core/src/engine/cache/
-  - aisimulate/crates/core/src/engine/kv_manager/
   - benchmarks/README.md
   - benchmarks/__init__.py
   - benchmarks/burstgpt_loadgen/
@@ -552,6 +549,18 @@ shared:
   - router
   - agents
 - glob: .agents/
+  owners:
+  - process
+  - agents
+- glob: .codex/
+  owners:
+  - process
+  - agents
+- glob: agents/
+  owners:
+  - process
+  - agents
+- glob: agent-docs/
   owners:
   - process
   - agents
@@ -1050,10 +1059,6 @@ shared:
   owners:
   - frontend
   - diffusion
-- glob: aisimulate/crates/core/src/engine/kv_manager/
-  owners:
-  - performance
-  - kv-memory
 - glob: lib/mocker/servers/sglang/
   owners:
   - performance

@@ -7,6 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 
 Production-tested Kubernetes deployment recipes for LLM inference using NVIDIA Dynamo.
 
+No recipe for your model and hardware combination? Point an AI coding agent at this repository
+and ask it to author or adapt one; the repo's agent skills guide the process.
+
 > **Prerequisites:** This guide assumes you have already installed the Dynamo Kubernetes Platform.
 > If not, follow the **[Kubernetes Deployment Guide](../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)** first.
 
