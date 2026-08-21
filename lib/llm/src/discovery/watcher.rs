@@ -186,7 +186,10 @@ fn normalize_legacy_prefill_topology(card: &mut ModelDeploymentCard) {
 /// from old *aggregated* workers on the wire, so they resolve to `Aggregated`;
 /// the readiness path handles that by not topology-gating namespaces that
 /// still contain legacy cards — see `Model::is_workers_ready`.)
-fn effective_worker_type(worker_type: Option<WorkerType>, model_type: ModelType) -> WorkerType {
+pub(crate) fn effective_worker_type(
+    worker_type: Option<WorkerType>,
+    model_type: ModelType,
+) -> WorkerType {
     worker_type.unwrap_or_else(|| {
         if model_type.supports_prefill() {
             WorkerType::Prefill
@@ -215,6 +218,21 @@ pub enum ModelUpdate {
         worker_type: String,
     },
     Removed(ModelDeploymentCard),
+    /// Every WorkerSet backing the `(model, namespace, worker_type)` deployment
+    /// is gone, so its per-deployment metric series are now stale.
+    ///
+    /// Distinct from `Removed`, which is an *availability* signal: it fires when
+    /// a model stops being servable at all, and one namespace losing its workers
+    /// does not make a model unavailable while another namespace still serves
+    /// it. The per-deployment gauges are keyed finer than that, so they need
+    /// their own lifecycle signal. Consumers that act on model availability
+    /// (endpoint enablement) ignore this variant; consumers that own
+    /// `(model, namespace, worker_type)` series act on it.
+    DeploymentRemoved {
+        model: String,
+        namespace: String,
+        worker_type: String,
+    },
 }
 
 pub struct ModelWatcher<Sel = DefaultWorkerSelector>
@@ -1021,6 +1039,43 @@ where
         Ok(PreparedWorkerSet::new(worker_set, card.clone()))
     }
 
+    /// Emit `DeploymentRemoved` for each `(model, worker_type)` in `cards` whose
+    /// last WorkerSet in `namespace` has just gone away.
+    ///
+    /// Called after the manager has been mutated, so `model_has_deployment`
+    /// reflects what survives: a group teardown that leaves a sibling group
+    /// backing the same `(model, namespace, worker_type)` retires nothing. The
+    /// worker type is taken per card, matching what `commit_group` stamped on
+    /// the corresponding `Added`.
+    fn emit_deployment_removals<'a>(
+        &self,
+        namespace: &str,
+        cards: impl Iterator<Item = &'a ModelDeploymentCard>,
+    ) {
+        let mut seen = HashSet::new();
+        for card in cards {
+            let worker_type = effective_worker_type(card.worker_type, card.model_type)
+                .as_str()
+                .to_string();
+            let deployment = (card.name().to_string(), worker_type);
+            if !seen.insert(deployment.clone()) {
+                continue;
+            }
+            let (model, worker_type) = deployment;
+            if self
+                .manager
+                .model_has_deployment(&model, namespace, &worker_type)
+            {
+                continue;
+            }
+            self.emit_update(ModelUpdate::DeploymentRemoved {
+                model,
+                namespace: namespace.to_string(),
+                worker_type,
+            });
+        }
+    }
+
     fn emit_update(&self, update: ModelUpdate) {
         if let Some(dispatch) = self.model_update_dispatch.lock().as_ref() {
             let _ = dispatch.send(update);
@@ -1182,6 +1237,10 @@ where
         adapters: &[DesiredInstance],
     ) -> anyhow::Result<()> {
         let group_id = key.id();
+        // Read before the replace: the namespace is a property of the group's
+        // WorkerSet and does not change across a replace, but the lookup goes
+        // away once the group has been rewritten.
+        let group_namespace = self.manager.discovery_group_namespace(&group_id);
         let previous = self
             .manager
             .discovery_group_adapter_cards(&group_id)
@@ -1231,6 +1290,18 @@ where
                 });
             }
         }
+        // An adapter dropped from this group loses its per-deployment series in
+        // this namespace even when the model as a whole stays available -- it
+        // may still be served from another namespace, or by another group here.
+        if let Some(namespace) = group_namespace.as_deref() {
+            self.emit_deployment_removals(
+                namespace,
+                previous
+                    .iter()
+                    .filter(|(name, _)| !desired.contains_key(*name))
+                    .map(|(_, card)| card),
+            );
+        }
         for (name, card) in previous {
             if was_available.get(&name).copied().unwrap_or(false)
                 && self.manager.get_committed_model(&name).is_none()
@@ -1246,6 +1317,10 @@ where
             return;
         };
         let removed_members = removed.cards.len();
+        self.emit_deployment_removals(
+            &removed.namespace,
+            std::iter::once(&removed.representative).chain(removed.cards.iter()),
+        );
         let mut removed_adapter_names = HashSet::new();
         for removed_card in &removed.cards {
             if removed_card.lora.is_some()

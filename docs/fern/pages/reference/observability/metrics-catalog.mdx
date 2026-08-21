@@ -173,7 +173,7 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
 
 ### Model configuration metrics
 
-`dynamo_frontend_model_*` gauges are populated from worker backend registration and all carry a `model` label. When multiple workers register the same model name, only the first instance's configuration is recorded.
+`dynamo_frontend_model_*` gauges are populated from worker backend registration and carry `model`, `dynamo_namespace`, and `worker_type`. One series exists per deployment role, so a frontend serving one model name from several namespaces — or a disaggregated deployment whose prefill and decode cards advertise different limits — keeps them separate rather than letting the last registration win. A series is dropped once the last worker set backing that `(model, dynamo_namespace, worker_type)` deployment goes away, so a torn-down deployment stops being reported as current. See [Frontend metrics and the namespace label](metric-labels.mdx#frontend-metrics-and-the-namespace-label) for how to aggregate each kind.
 
 <ParamField path="dynamo_frontend_model_total_kv_blocks" type="gauge">
   Total KV blocks available for a worker serving the model.

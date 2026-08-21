@@ -395,6 +395,10 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) -> 
                 service.enable_model_endpoint(endpoint_type, false)?;
             }
         }
+        // Endpoint enablement is a process-wide availability question. One
+        // deployment retiring says nothing about it -- another namespace may
+        // still serve the model -- so `Removed` remains the only signal here.
+        ModelUpdate::DeploymentRemoved { .. } => {}
     }
     Ok(())
 }
@@ -417,8 +421,24 @@ fn update_model_metrics(
         }
         ModelUpdate::Removed(card) => {
             tracing::debug!(model_name = card.display_name, "Model removed");
-            // Note: Metrics are typically not removed to preserve historical data
-            // This matches the behavior in the polling task
+            // Counters and histograms are deliberately retained: their value is
+            // the history, and dropping them would rewrite it. The
+            // point-in-time per-deployment gauges are handled by
+            // `DeploymentRemoved` below, which fires at the finer granularity
+            // those gauges are keyed by.
+        }
+        ModelUpdate::DeploymentRemoved {
+            model,
+            namespace,
+            worker_type,
+        } => {
+            tracing::debug!(
+                %model,
+                %namespace,
+                %worker_type,
+                "Deployment removed; dropping its per-deployment gauges"
+            );
+            metrics.remove_deployment_metrics(&model, &namespace, &worker_type);
         }
     }
 }

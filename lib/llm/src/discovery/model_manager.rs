@@ -146,6 +146,9 @@ type EndpointLoraProjection = HashMap<EndpointId, HashMap<WorkerWithDpRank, Lora
 pub(crate) struct RemovedDiscoveryGroup {
     pub(crate) representative: ModelDeploymentCard,
     pub(crate) cards: Vec<ModelDeploymentCard>,
+    /// The group's Dynamo namespace, needed to identify which per-deployment
+    /// metric series this removal retires.
+    pub(crate) namespace: String,
 }
 
 /// Central manager for model engines, routing, and configuration.
@@ -920,6 +923,7 @@ impl ModelManager {
         let removed = RemovedDiscoveryGroup {
             representative,
             cards,
+            namespace: topology_namespace.clone(),
         };
         let lora_after = self.lora_projection_locked();
         self.publish_lora_projection_locked(Self::union_lora_projection(&lora_before, &lora_after));
@@ -1033,6 +1037,27 @@ impl ModelManager {
                 .iter()
                 .any(|ns| ns == namespace)
         })
+    }
+
+    /// Whether `model` still has a WorkerSet in the `(namespace, worker_type)`
+    /// deployment that the frontend's per-deployment gauges are keyed by.
+    ///
+    /// Removing one discovery group does not necessarily retire a deployment:
+    /// two components in the same namespace can back the same `(model,
+    /// worker_type)`, so the series must survive until the last one leaves.
+    pub fn model_has_deployment(&self, model: &str, namespace: &str, worker_type: &str) -> bool {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .is_some_and(|m| m.has_deployment(namespace, worker_type))
+    }
+
+    /// The Dynamo namespace of a committed discovery group, if it exists.
+    pub(crate) fn discovery_group_namespace(&self, group_id: &str) -> Option<String> {
+        self.discovery_groups
+            .get(group_id)
+            .map(|group| group.namespace.clone())
     }
 
     /// Whether `model` has at least one WorkerSet that can serve an inference
@@ -2481,6 +2506,78 @@ mod tests {
             mdcsum.to_string(),
             ModelDeploymentCard::default(),
         )
+    }
+
+    /// The predicate that gates `ModelUpdate::DeploymentRemoved`. A group
+    /// teardown must only retire the per-deployment gauge series when the last
+    /// WorkerSet for that `(namespace, worker_type)` is gone -- two components
+    /// in one namespace can back the same deployment identity.
+    #[test]
+    fn model_has_deployment_is_keyed_by_namespace_and_worker_type() {
+        let mm = ModelManager::new();
+
+        let worker_set = |namespace: &str, worker_type: WorkerType| {
+            let mut card = ModelDeploymentCard::default();
+            card.worker_type = Some(worker_type);
+            WorkerSet::new(namespace.to_string(), "ck".to_string(), card)
+        };
+
+        // Two components in ns-a both serving decode, plus a prefill role.
+        assert!(mm.add_worker_set("m", "ns-a::c1", worker_set("ns-a", WorkerType::Decode)));
+        assert!(mm.add_worker_set("m", "ns-a::c2", worker_set("ns-a", WorkerType::Decode)));
+        assert!(mm.add_worker_set("m", "ns-a::p", worker_set("ns-a", WorkerType::Prefill)));
+        assert!(mm.add_worker_set("m", "ns-b::c1", worker_set("ns-b", WorkerType::Decode)));
+
+        assert!(mm.model_has_deployment("m", "ns-a", "decode"));
+        assert!(mm.model_has_deployment("m", "ns-a", "prefill"));
+        assert!(mm.model_has_deployment("m", "ns-b", "decode"));
+        assert!(
+            !mm.model_has_deployment("m", "ns-b", "prefill"),
+            "worker_type is part of the deployment identity"
+        );
+        assert!(
+            !mm.model_has_deployment("m", "ns-c", "decode"),
+            "namespace is part of the deployment identity"
+        );
+        assert!(!mm.model_has_deployment("other-model", "ns-a", "decode"));
+
+        // One of the two ns-a decode components goes away: the deployment
+        // survives, so its series must be kept.
+        mm.remove_worker_set("m", "ns-a::c1");
+        assert!(
+            mm.model_has_deployment("m", "ns-a", "decode"),
+            "a sibling component still backs this deployment"
+        );
+
+        // The last one goes away: now the series is stale.
+        mm.remove_worker_set("m", "ns-a::c2");
+        assert!(!mm.model_has_deployment("m", "ns-a", "decode"));
+        assert!(
+            mm.model_has_deployment("m", "ns-a", "prefill"),
+            "retiring decode must not retire the other role in the same namespace"
+        );
+        assert!(
+            mm.model_has_deployment("m", "ns-b", "decode"),
+            "retiring ns-a must not retire the same role in another namespace"
+        );
+    }
+
+    /// A legacy card leaves `worker_type` unset. The add side stamps the label
+    /// via `effective_worker_type`, so the remove side must resolve it the same
+    /// way or the series would never be retired.
+    #[test]
+    fn model_has_deployment_resolves_legacy_cards_like_the_add_side() {
+        let mm = ModelManager::new();
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = None;
+        card.model_type = crate::model_type::ModelType::Chat;
+        let ws = WorkerSet::new("ns-a".to_string(), "ck".to_string(), card);
+        assert!(mm.add_worker_set("m", "ns-a::c1", ws));
+
+        assert!(
+            mm.model_has_deployment("m", "ns-a", "aggregated"),
+            "an unset worker_type on a non-prefill card resolves to aggregated"
+        );
     }
 
     fn insert_runtime_configs(

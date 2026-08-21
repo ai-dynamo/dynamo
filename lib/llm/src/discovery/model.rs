@@ -13,6 +13,7 @@ use rand::Rng;
 use serde::Serialize;
 
 use super::ModelManagerError;
+use super::watcher::effective_worker_type;
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
 use crate::protocols::openai::ParsingOptions;
@@ -321,6 +322,22 @@ impl Model {
 
     /// Distinct namespaces represented by this model's WorkerSets, sorted.
     /// Each namespace identifies one deployment of the model.
+    /// Whether any WorkerSet places this model in the `(namespace, worker_type)`
+    /// deployment that the frontend's per-deployment gauges are keyed by.
+    ///
+    /// `worker_type` is compared against the same [`effective_worker_type`]
+    /// rendering the watcher used when it emitted `ModelUpdate::Added`, so the
+    /// add and remove sides cannot disagree on a legacy card whose `worker_type`
+    /// is unset.
+    pub fn has_deployment(&self, namespace: &str, worker_type: &str) -> bool {
+        self.worker_sets.iter().any(|entry| {
+            let ws = entry.value();
+            ws.namespace() == namespace
+                && effective_worker_type(ws.card().worker_type, ws.card().model_type).as_str()
+                    == worker_type
+        })
+    }
+
     pub fn distinct_namespaces_sorted(&self) -> Vec<String> {
         let mut ns: Vec<String> = self
             .worker_sets

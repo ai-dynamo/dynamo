@@ -69,6 +69,41 @@ pub use crate::discovery::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 const UNSET_DP_RANK_LABEL: &str = "none";
 const ITL_LOCAL_FLUSH_TOKENS: u64 = 64;
 
+/// `dynamo_namespace` value for a model served by an in-process engine rather
+/// than by a discovered deployment.
+///
+/// In-process models (`--engine-type echo`, single-process serving) have no
+/// Dynamo namespace: nothing registers in etcd and no worker is addressed over
+/// the network. They still need a `WorkerSet` map key, so
+/// `ModelManager::add_*_model` fabricates one per endpoint family
+/// (`__local_chat_{model}`, `__local_completions_{model}`, ...) because
+/// `Model::add_worker_set` replaces rather than merges, and the matching
+/// `remove_*_model` calls -- public through the Python bindings -- delete
+/// exactly their own family's set.
+///
+/// That key is an implementation detail, so it is collapsed here instead of
+/// being published as a label: one local model is one series, the redundant
+/// copy of the model name is dropped, and the per-family split stays invisible.
+/// The leading underscores keep it distinguishable from an operator-chosen
+/// namespace.
+pub const LOCAL_METRIC_NAMESPACE: &str = "__local__";
+
+/// Prefix of the synthetic `WorkerSet` keys minted by the in-process
+/// `ModelManager::add_*_model` helpers.
+const LOCAL_NAMESPACE_PREFIX: &str = "__local_";
+
+/// Map a `WorkerSet` namespace onto the value published as `dynamo_namespace`.
+///
+/// Discovery-backed namespaces pass through untouched; synthetic in-process
+/// keys collapse to [`LOCAL_METRIC_NAMESPACE`]. See that constant for why.
+pub(crate) fn metrics_namespace(namespace: &str) -> &str {
+    if namespace.starts_with(LOCAL_NAMESPACE_PREFIX) {
+        LOCAL_METRIC_NAMESPACE
+    } else {
+        namespace
+    }
+}
+
 /// Global Prometheus gauge for last observed TTFT per worker (in seconds)
 /// Labels: worker_id, dp_rank, worker_type
 pub static WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE: LazyLock<GaugeVec> = LazyLock::new(|| {
@@ -1243,6 +1278,7 @@ impl Metrics {
         namespace: &str,
         worker_type: &str,
     ) -> anyhow::Result<()> {
+        let namespace = metrics_namespace(namespace);
         self.update_runtime_config_metrics(
             &card.display_name,
             namespace,
@@ -1271,6 +1307,36 @@ impl Metrics {
         );
 
         Ok(())
+    }
+
+    /// Drop the six per-deployment gauge series for a `(model, namespace,
+    /// worker_type)` deployment that no longer exists.
+    ///
+    /// These gauges publish a point-in-time configuration, not a cumulative
+    /// count, so a retained child keeps advertising a torn-down deployment's
+    /// settings as if they were current: a removed deployment with a larger
+    /// `model_context_length` keeps winning `max by (model)`, and a removed
+    /// deployment's capacity keeps inflating `sum by (model)`. Counters and
+    /// histograms are deliberately *not* removed -- their history is the point.
+    ///
+    /// This does not erase samples already scraped into Prometheus; it stops
+    /// the frontend from continuing to export a stale one.
+    pub fn remove_deployment_metrics(&self, model: &str, namespace: &str, worker_type: &str) {
+        let lv: [&str; 3] = [model, metrics_namespace(namespace), worker_type];
+        for gauge in [
+            &self.model_total_kv_blocks,
+            &self.model_max_num_seqs,
+            &self.model_max_num_batched_tokens,
+            &self.model_context_length,
+            &self.model_kv_cache_block_size,
+            &self.model_migration_limit,
+        ] {
+            // Errors when the child was never created -- the runtime-config
+            // gauges are only set for fields the card actually reported, so a
+            // deployment that never advertised `max_num_seqs` has no series to
+            // drop. Nothing to do either way.
+            let _ = gauge.remove_label_values(&lv);
+        }
     }
 
     /// Increment the migration counter for a new request migration
@@ -1383,7 +1449,11 @@ impl Metrics {
         model: &str,
         namespace: &str,
     ) -> ResponseMetricCollector {
-        ResponseMetricCollector::new(self, model.to_string(), namespace.to_string())
+        ResponseMetricCollector::new(
+            self,
+            model.to_string(),
+            metrics_namespace(namespace).to_string(),
+        )
     }
 
     /// Create a new [`HttpQueueGuard`] for tracking HTTP processing queue
@@ -4408,21 +4478,18 @@ mod tests {
         }
     }
 
-    /// In-process models register under synthetic namespaces (`__local_chat_*`)
-    /// and a namespace can in principle be empty. Neither may panic nor emit an
-    /// invalid label.
+    /// A namespace can in principle be empty or contain characters that need
+    /// escaping. Neither may panic nor emit an invalid label. Synthetic
+    /// in-process namespaces are covered separately -- they are collapsed
+    /// before they reach a label, see
+    /// [`synthetic_local_namespaces_collapse_but_real_ones_pass_through`].
     #[test]
-    fn synthetic_and_empty_namespaces_are_valid_labels() {
+    fn awkward_namespaces_are_valid_labels() {
         let metrics = Arc::new(Metrics::new());
         let registry = prometheus::Registry::new();
         metrics.register(&registry).unwrap();
 
-        for ns in [
-            "__local_chat_my-model",
-            "",
-            "ns/with-slash",
-            "ns with space",
-        ] {
+        for ns in ["", "ns/with-slash", "ns with space"] {
             let mut c = metrics.clone().create_response_collector("weird", ns);
             c.observe_response(1, 1);
             c.observe_response(1, 1);
@@ -4444,8 +4511,8 @@ mod tests {
             "empty namespace series must be exposed; got:\n{text}"
         );
         assert!(
-            text.contains("dynamo_namespace=\"__local_chat_my-model\""),
-            "synthetic namespace must be exposed verbatim"
+            text.contains("dynamo_namespace=\"ns with space\""),
+            "a namespace needing escaping must round-trip; got:\n{text}"
         );
     }
 
@@ -4541,12 +4608,11 @@ mod tests {
         );
     }
 
-    /// Removal deliberately retains metrics, so a namespace that goes away
-    /// leaves its series behind. Pin the consequence: `sum()` over an additive
-    /// model gauge now counts a dead deployment. Behaviour is documented on
-    /// `ModelUpdate`; this test makes the aggregation trap visible.
+    /// A retired deployment must stop exporting its per-deployment gauges, or
+    /// `sum by (model)` keeps counting a dead deployment's capacity and
+    /// `max by (model)` keeps returning a dead deployment's configuration.
     #[test]
-    fn removed_namespace_series_persist_and_inflate_sums() {
+    fn removed_deployment_drops_its_per_deployment_gauges() {
         let metrics = Arc::new(Metrics::new());
         let registry = prometheus::Registry::new();
         metrics.register(&registry).unwrap();
@@ -4558,17 +4624,155 @@ mod tests {
         metrics.update_runtime_config_metrics("m", "ns-gone", "decode", &cfg(100));
         metrics.update_runtime_config_metrics("m", "ns-live", "decode", &cfg(200));
 
-        // ns-gone is torn down; nothing clears its series.
-        let total: i64 = registry
+        let total = |registry: &prometheus::Registry| -> i64 {
+            registry
+                .gather()
+                .iter()
+                .filter(|mf| mf.name() == "dynamo_frontend_model_total_kv_blocks")
+                .flat_map(|mf| mf.get_metric().iter().map(|m| m.get_gauge().value() as i64))
+                .sum()
+        };
+        assert_eq!(total(&registry), 300, "both deployments are live");
+
+        metrics.remove_deployment_metrics("m", "ns-gone", "decode");
+        assert_eq!(
+            total(&registry),
+            200,
+            "the retired deployment's series must be gone, leaving the live one"
+        );
+    }
+
+    /// Removal is keyed by the full `(model, namespace, worker_type)` triple.
+    /// A disaggregated deployment retiring its prefill role must not take the
+    /// decode role's series with it.
+    #[test]
+    fn removed_deployment_leaves_sibling_roles_and_namespaces_intact() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let cfg = |blocks: u64| ModelRuntimeConfig {
+            total_kv_blocks: Some(blocks),
+            ..Default::default()
+        };
+        metrics.update_runtime_config_metrics("m", "ns-a", "prefill", &cfg(10));
+        metrics.update_runtime_config_metrics("m", "ns-a", "decode", &cfg(20));
+        metrics.update_runtime_config_metrics("m", "ns-b", "prefill", &cfg(40));
+
+        metrics.remove_deployment_metrics("m", "ns-a", "prefill");
+
+        let blocks = |ns: &str, role: &str| {
+            metrics
+                .model_total_kv_blocks
+                .get_metric_with_label_values(&["m", ns, role])
+                .expect("label cardinality matches the gauge")
+                .get()
+        };
+        assert_eq!(
+            blocks("ns-a", "decode"),
+            20,
+            "the same namespace's other role is a different deployment"
+        );
+        assert_eq!(
+            blocks("ns-b", "prefill"),
+            40,
+            "another namespace's same role is a different deployment"
+        );
+    }
+
+    /// Removing a deployment that never reported a runtime-config field, or
+    /// that was never registered at all, is a no-op rather than a panic. The
+    /// watcher calls this on every group teardown, including groups whose cards
+    /// carried no runtime config.
+    #[test]
+    fn removing_an_unregistered_deployment_is_a_no_op() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        metrics.remove_deployment_metrics("never-registered", "ns", "decode");
+
+        let card = ModelDeploymentCard::default();
+        metrics
+            .update_metrics_from_mdc(&card, "ns", "decode")
+            .unwrap();
+        // context_length is always written; total_kv_blocks is not, because the
+        // default card reports no runtime config. Removing must tolerate both.
+        metrics.remove_deployment_metrics(&card.display_name, "ns", "decode");
+        let reborn = metrics
+            .model_context_length
+            .get_metric_with_label_values(&[&card.display_name, "ns", "decode"])
+            .expect("label cardinality matches the gauge")
+            .get();
+        assert_eq!(
+            reborn, 0,
+            "the child should have been dropped, so a fresh lookup starts at zero"
+        );
+    }
+
+    /// In-process models have no Dynamo namespace. Their synthetic WorkerSet
+    /// keys are an implementation detail of `ModelManager::add_*_model` and must
+    /// not reach the exposition; a discovery namespace must pass through
+    /// untouched.
+    #[test]
+    fn synthetic_local_namespaces_collapse_but_real_ones_pass_through() {
+        assert_eq!(
+            metrics_namespace("__local_chat_mymodel"),
+            LOCAL_METRIC_NAMESPACE
+        );
+        assert_eq!(
+            metrics_namespace("__local_completions_mymodel"),
+            LOCAL_METRIC_NAMESPACE,
+            "one local model is one series, not one per endpoint family"
+        );
+        assert_eq!(
+            metrics_namespace("__local_prefill_mymodel"),
+            LOCAL_METRIC_NAMESPACE
+        );
+        assert_eq!(
+            metrics_namespace("dynamo_cloud_vllm_v1_disagg_router_071de157"),
+            "dynamo_cloud_vllm_v1_disagg_router_071de157"
+        );
+        assert_eq!(
+            metrics_namespace("local"),
+            "local",
+            "a namespace an operator could plausibly choose must not be captured"
+        );
+        assert_eq!(metrics_namespace(""), "");
+    }
+
+    /// The collapse has to happen at the label, not at the WorkerSet key: two
+    /// endpoint families of one local model must land on a single series.
+    #[test]
+    fn local_response_metrics_share_one_namespace_series() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        for ns in ["__local_chat_m", "__local_completions_m"] {
+            let mut collector = metrics.clone().create_response_collector("m", ns);
+            collector.observe_current_osl(3);
+            drop(collector);
+        }
+
+        let series: Vec<String> = registry
             .gather()
             .iter()
-            .filter(|mf| mf.name() == "dynamo_frontend_model_total_kv_blocks")
-            .flat_map(|mf| mf.get_metric().iter().map(|m| m.get_gauge().value() as i64))
-            .sum();
+            .filter(|mf| mf.name() == "dynamo_frontend_output_sequence_tokens")
+            .flat_map(|mf| {
+                mf.get_metric().iter().map(|m| {
+                    m.get_label()
+                        .iter()
+                        .find(|l| l.name() == "dynamo_namespace")
+                        .map(|l| l.value().to_string())
+                        .unwrap_or_default()
+                })
+            })
+            .collect();
         assert_eq!(
-            total, 300,
-            "stale namespace series are retained by design; sum() over-counts \
-             after a deployment is removed"
+            series,
+            vec![LOCAL_METRIC_NAMESPACE.to_string()],
+            "both endpoint families must collapse onto one local series"
         );
     }
 }

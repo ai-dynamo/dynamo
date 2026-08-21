@@ -60,6 +60,18 @@ The per-deployment gauges do not all aggregate the same way, because they are no
 Counters and additive gauges elsewhere aggregate with `sum by (model)`; histograms with `histogram_quantile(..., sum by (model, le) (rate(..._bucket[5m])))`.
 </Note>
 
+#### Series lifecycle
+
+The per-deployment gauges publish a point-in-time configuration rather than a running total, so the frontend stops exporting a series once the last worker set backing that `(model, dynamo_namespace, worker_type)` deployment disappears. Without that, a torn-down deployment would keep winning `max by (model)` with a stale `model_context_length` and keep inflating `sum by (model)` with capacity that no longer exists.
+
+Removal is keyed on the deployment, not on model availability: a namespace losing its workers retires only its own series, and the model's remaining namespaces are untouched. Two components in one namespace serving the same role count as one deployment — the series survives until both are gone.
+
+Counters and histograms are **not** removed. Their value is the history they carry, so a rate over a torn-down deployment's traffic stays correct. Samples already scraped into Prometheus are also unaffected: dropping a series only stops the frontend from continuing to present an old configuration as current.
+
+#### Models served in-process
+
+A model registered by an in-process engine (`--engine-type echo`, single-process serving) has no Dynamo namespace — nothing registers in etcd and no worker is addressed over the network. These report `dynamo_namespace="__local__"`, one series per model regardless of how many endpoint families it serves. The value is reserved; an operator-chosen namespace never collides with it.
+
 ## Registration-time labels
 
 Passed via `metrics_labels=` when the worker calls `serve_endpoint()`. Not auto-injected, so presence depends on the backend.
