@@ -21,7 +21,7 @@ spec:
         # aiperf, with the prebuilt arm64 crick wheel). Backend runtime images
         # deliberately do not carry benchmark tooling.
         # TODO: update to latest public image in next release
-        image: nvcr.io/nvidia/ai-dynamo/frontend:1.4.0
+        image: nvcr.io/nvidia/ai-dynamo/frontend:1.4.1
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:

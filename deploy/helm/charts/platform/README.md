@@ -19,7 +19,7 @@ limitations under the License.
 
 A Helm chart for NVIDIA Dynamo Platform.
 
-![Version: 1.4.0](https://img.shields.io/badge/Version-1.4.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
+![Version: 1.4.1](https://img.shields.io/badge/Version-1.4.1-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 
 ## 🚀 Overview
 
@@ -146,7 +146,7 @@ Kubernetes: `>=1.30.0-0`
 
 | Repository | Name | Version |
 |------------|------|---------|
-| file://components/operator | dynamo-operator | 1.4.0 |
+| file://components/operator | dynamo-operator | 1.4.1 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
 | oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.12-rc1 |
@@ -181,7 +181,7 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.controllerManager.leaderElection.id | string | `""` | Leader election ID for cluster-wide coordination. WARNING: All cluster-wide operators must use the SAME ID to prevent split-brain. Different IDs would allow multiple leaders simultaneously. |
 | dynamo-operator.controllerManager.leaderElection.namespace | string | `""` | Namespace for leader election leases (only used in cluster-wide mode). If empty, defaults to kube-system for cluster-wide coordination. All cluster-wide operators should use the SAME namespace for proper leader election. |
 | dynamo-operator.controllerManager.manager.image.repository | string | `"nvcr.io/nvidia/ai-dynamo/kubernetes-operator"` | Official NVIDIA Dynamo operator image repository |
-| dynamo-operator.controllerManager.manager.image.tag | string | `"1.4.0"` | Image tag (leave empty to use chart default) |
+| dynamo-operator.controllerManager.manager.image.tag | string | `"1.4.1"` | Image tag (leave empty to use chart default) |
 | dynamo-operator.controllerManager.manager.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy - when to pull the image |
 | dynamo-operator.controllerManager.manager.args[0] | string | `"--health-probe-bind-address=:8081"` | Health probe endpoint for Kubernetes health checks |
 | dynamo-operator.controllerManager.manager.args[1] | string | `"--metrics-bind-address=127.0.0.1:8080"` | Metrics endpoint for Prometheus scraping (localhost only for security) |
