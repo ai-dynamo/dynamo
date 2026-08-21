@@ -15,6 +15,16 @@ on:
         required: false
         type: string
         default: 'runtime'
+      dockerfile:
+        description: 'Existing Dockerfile to build instead of rendering one. Empty uses container/render.py.'
+        required: false
+        type: string
+        default: ''
+      build_target:
+        description: 'Docker build target override. Empty uses the target input.'
+        required: false
+        type: string
+        default: ''
       cuda_version:
         description: 'CUDA versions to build as a JSON array'
         required: true
@@ -27,6 +37,11 @@ on:
         description: 'Buildkit builder name'
         required: true
         type: string
+      builder_flavor:
+        description: 'BuildKit worker flavor override. Empty derives the flavor from framework.'
+        required: false
+        type: string
+        default: ''
       build_timeout_minutes:
         description: 'Timeout in minutes for the build step'
         required: false
@@ -73,7 +88,7 @@ on:
         type: string
         default: ''
       build_only:
-        description: 'Build and push only — skip tests and prepare branch tags'
+        description: 'Build and push only — skip the test image build'
         required: false
         type: boolean
         default: false
@@ -294,11 +309,16 @@ jobs:
       - name: Calculate Builder Flavor
         id: calculate-builder-flavor
         shell: bash
+        env:
+          BUILDER_FLAVOR: ${{ inputs.builder_flavor }}
+          FRAMEWORK: ${{ inputs.framework }}
         run: |
-          if [[ ${{ inputs.framework }} != @(vllm|sglang|trtllm) ]]; then
+          if [ -n "${BUILDER_FLAVOR}" ]; then
+            echo "builder_flavor=${BUILDER_FLAVOR}" >> "$GITHUB_OUTPUT"
+          elif [[ "${FRAMEWORK}" != @(vllm|sglang|trtllm) ]]; then
             echo "builder_flavor=general" >> $GITHUB_OUTPUT
           else
-            echo "builder_flavor=${{ inputs.framework }}" >> $GITHUB_OUTPUT
+            echo "builder_flavor=${FRAMEWORK}" >> $GITHUB_OUTPUT
           fi
       - name: Initialize Dynamo Builder
         uses: ./.github/actions/init-dynamo-builder
@@ -451,6 +471,7 @@ jobs:
           namespace: ${{ vars.BUILDKIT_NAMESPACE }}
       - name: Generate Dockerfile
         id: gen-dockerfile
+        if: inputs.dockerfile == ''
         shell: bash
         run: |
           echo "Generating Dockerfile for target: ${{ inputs.target }} and framework: ${{ inputs.framework }}"
@@ -483,6 +504,17 @@ jobs:
           STEM=$(grep -E '^ARG BASELINE_SBOM_FILE=' container/rendered.Dockerfile | head -1 \
                  | sed -E 's/^ARG BASELINE_SBOM_FILE="?([^"]*)"?$/\1/' || true)
           echo "baseline_stem=${STEM}" >> "$GITHUB_OUTPUT"
+      - name: Use supplied Dockerfile
+        if: inputs.dockerfile != ''
+        shell: bash
+        env:
+          DOCKERFILE: ${{ inputs.dockerfile }}
+        run: |
+          if [ ! -f "${DOCKERFILE}" ]; then
+            echo "::error::Dockerfile not found: ${DOCKERFILE}"
+            exit 1
+          fi
+          cp -- "${DOCKERFILE}" container/rendered.Dockerfile
       - name: Apply nightly dev version
         if: inputs.dev_version_suffix != ''
         shell: bash
@@ -495,7 +527,7 @@ jobs:
           image_tag: ${{ steps.calculate-target-tag.outputs.image_uri }}
           framework: ${{ inputs.framework }}
           target: ${{ inputs.target }}
-          build_target: ${{ (inputs.make_efa && (inputs.target == 'runtime' || inputs.target == 'dev')) && 'aws' || inputs.target }}
+          build_target: ${{ inputs.build_target != '' && inputs.build_target || ((inputs.make_efa && (inputs.target == 'runtime' || inputs.target == 'dev')) && 'aws' || inputs.target) }}
           platform: ${{ inputs.platform }}
           cuda_version: ${{ matrix.cuda_version }}
           aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
@@ -616,7 +648,7 @@ jobs:
           # RC promotions inherit the source archive.
           archive_sources: ${{ inputs.archive_sources }}
       - name: Refresh BuildKit builder
-        if: ${{ inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.target != 'frontend' }}
+        if: ${{ !inputs.build_only && inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.target != 'frontend' }}
         uses: ./.github/actions/builder-refresher
         with:
           builder_name: ${{ inputs.builder_name }}
@@ -625,7 +657,7 @@ jobs:
           cuda_version: ${{ matrix.cuda_version }}
           namespace: ${{ vars.BUILDKIT_NAMESPACE }}
       - name: Build and Push Test Image
-        if: ${{ !inputs.compliance_only && inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.target != 'frontend' }}
+        if: ${{ !inputs.build_only && !inputs.compliance_only && inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.target != 'frontend' }}
         shell: bash
         run: |
           PUSH_ARGS=""

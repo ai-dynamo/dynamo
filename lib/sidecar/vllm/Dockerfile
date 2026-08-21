@@ -11,9 +11,13 @@
 # Build from the repository root (the workspace is needed to compile the crate):
 #   docker build -f lib/sidecar/vllm/Dockerfile -t dynamo-vllm-sidecar:1.3.0 .
 
+# CI sets DOCKER_PROXY to the authenticated Docker Hub mirror. It remains empty
+# for the documented local build command.
+ARG DOCKER_PROXY=
+
 # ---- builder ----------------------------------------------------------------
 # Pinned to the workspace toolchain (rust-toolchain.toml: 1.96.1).
-FROM rust:1.96.1-bookworm AS builder
+FROM ${DOCKER_PROXY}library/rust:1.96.1-bookworm AS builder
 
 # aws-lc-sys/ring need cmake + a C toolchain (+perl); bindgen needs libclang;
 # tonic-build (build.rs) needs protoc. libprotobuf-dev supplies the well-known
@@ -39,7 +43,7 @@ RUN cargo build --release --locked -p dynamo-vllm-sidecar \
     && strip target/release/dynamo-vllm-sidecar
 
 # ---- runtime (minimal) ------------------------------------------------------
-FROM debian:bookworm-slim AS runtime
+FROM ${DOCKER_PROXY}library/debian:bookworm-slim AS runtime
 
 # ca-certificates: HTTPS to Hugging Face for the tokenizer, and rustls TLS to
 # etcd/NATS. TLS crypto (aws-lc-rs) is statically linked, so no libssl needed.

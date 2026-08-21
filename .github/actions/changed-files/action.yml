@@ -58,6 +58,15 @@ outputs:
   sidecar:
     description: 'Whether sidecar files changed'
     value: ${{ steps.filter.outputs.sidecar_any_modified }}
+  vllm_sidecar:
+    description: 'Whether vLLM sidecar image inputs changed'
+    value: ${{ steps.filter.outputs.vllm_sidecar_any_modified }}
+  sglang_sidecar:
+    description: 'Whether SGLang sidecar image inputs changed'
+    value: ${{ steps.filter.outputs.sglang_sidecar_any_modified }}
+  trtllm_sidecar:
+    description: 'Whether TensorRT-LLM sidecar image inputs changed'
+    value: ${{ steps.filter.outputs.trtllm_sidecar_any_modified }}
   frontend:
     description: 'Whether frontend files changed'
     value: ${{ steps.filter.outputs.frontend_any_modified }}
@@ -173,6 +182,9 @@ runs:
         echo "dgdr: ${{ steps.filter.outputs.dgdr_any_modified }}"
         echo "planner: ${{ steps.filter.outputs.planner_any_modified }}"
         echo "sidecar: ${{ steps.filter.outputs.sidecar_any_modified }}"
+        echo "vllm_sidecar: ${{ steps.filter.outputs.vllm_sidecar_any_modified }}"
+        echo "sglang_sidecar: ${{ steps.filter.outputs.sglang_sidecar_any_modified }}"
+        echo "trtllm_sidecar: ${{ steps.filter.outputs.trtllm_sidecar_any_modified }}"
         echo "vllm: ${{ steps.filter.outputs.vllm_any_modified }}"
         echo "sglang: ${{ steps.filter.outputs.sglang_any_modified }}"
         echo "trtllm: ${{ steps.filter.outputs.trtllm_any_modified }}"
@@ -199,6 +211,9 @@ runs:
         echo "dgdr: ${{ steps.filter.outputs.dgdr_all_modified_files }}"
         echo "planner: ${{ steps.filter.outputs.planner_all_modified_files }}"
         echo "sidecar: ${{ steps.filter.outputs.sidecar_all_modified_files }}"
+        echo "vllm_sidecar: ${{ steps.filter.outputs.vllm_sidecar_all_modified_files }}"
+        echo "sglang_sidecar: ${{ steps.filter.outputs.sglang_sidecar_all_modified_files }}"
+        echo "trtllm_sidecar: ${{ steps.filter.outputs.trtllm_sidecar_all_modified_files }}"
         echo "vllm: ${{ steps.filter.outputs.vllm_all_modified_files }}"
         echo "sglang: ${{ steps.filter.outputs.sglang_all_modified_files }}"
         echo "trtllm: ${{ steps.filter.outputs.trtllm_all_modified_files }}"

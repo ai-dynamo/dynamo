@@ -3,6 +3,10 @@
 
 name: PR
 
+permissions:
+  contents: read
+  packages: read
+
 on:
   push:
     branches:
@@ -40,6 +44,9 @@ jobs:
       frontend: ${{ steps.changes.outputs.frontend }}
       benchmarks: ${{ steps.changes.outputs.benchmarks }}
       sample: ${{ steps.changes.outputs.sample }}
+      vllm_sidecar: ${{ steps.changes.outputs.vllm_sidecar }}
+      sglang_sidecar: ${{ steps.changes.outputs.sglang_sidecar }}
+      trtllm_sidecar: ${{ steps.changes.outputs.trtllm_sidecar }}
       efa: ${{ steps.changes.outputs.efa }}
       base_ref: ${{ steps.changes.outputs.base_ref }}
       merge_base_sha: ${{ steps.changes.outputs.merge_base_sha }}
@@ -158,6 +165,9 @@ jobs:
       - frontend-build
       - frontend-test
       - frontend-copy-to-acr
+      - vllm-sidecar-build
+      - sglang-sidecar-build
+      - trtllm-sidecar-build
     if: always()
     steps:
       - name: Check all dependent jobs
@@ -335,6 +345,64 @@ jobs:
           version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
       - name: Lint and test Helm chart
         run: make -C deploy/helm/charts/power-agent lint test
+
+# ============================================================================
+# SIDECAR CONTAINERS
+# ============================================================================
+
+  vllm-sidecar-build:
+    name: vllm-sidecar
+    needs: [changed-files]
+    if: needs.changed-files.outputs.vllm_sidecar == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: vllm
+      target: sidecar
+      dockerfile: lib/sidecar/vllm/Dockerfile
+      build_target: runtime
+      cuda_version: '[""]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      builder_flavor: general
+      build_only: true
+      extra_build_args: 'DOCKER_PROXY=${{ vars.ECR_REGISTRY }}/dockerhub/'
+    secrets: inherit
+
+  sglang-sidecar-build:
+    name: sglang-sidecar
+    needs: [changed-files]
+    if: needs.changed-files.outputs.sglang_sidecar == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: sglang
+      target: sidecar
+      dockerfile: lib/sidecar/sglang/Dockerfile
+      build_target: runtime
+      cuda_version: '[""]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      builder_flavor: general
+      build_only: true
+      extra_build_args: 'DOCKER_PROXY=${{ vars.ECR_REGISTRY }}/dockerhub/'
+    secrets: inherit
+
+  trtllm-sidecar-build:
+    name: trtllm-sidecar
+    needs: [changed-files]
+    if: needs.changed-files.outputs.trtllm_sidecar == 'true'
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: trtllm
+      target: sidecar
+      dockerfile: lib/sidecar/trtllm/Dockerfile
+      build_target: runtime
+      cuda_version: '[""]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      builder_flavor: general
+      build_only: true
+      extra_build_args: 'DOCKER_PROXY=${{ vars.ECR_REGISTRY }}/dockerhub/'
+    secrets: inherit
 
 # ============================================================================
 # FRAMEWORK PIPELINES (Build → Test → Copy)
@@ -1945,6 +2013,9 @@ jobs:
       - trtllm-multi-gpu-test
       - trtllm-efa-build
       - dynamo-pipeline
+      - vllm-sidecar-build
+      - sglang-sidecar-build
+      - trtllm-sidecar-build
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

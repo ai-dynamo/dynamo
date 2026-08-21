@@ -329,6 +329,63 @@ jobs:
       dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
     secrets: inherit
 
+  vllm-sidecar-build:
+    name: vllm-sidecar
+    needs: [create-fresh-builder, resolve-source-sha]
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: vllm
+      target: sidecar
+      dockerfile: lib/sidecar/vllm/Dockerfile
+      build_target: runtime
+      cuda_version: '[""]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      builder_flavor: general
+      build_only: true
+      extra_build_args: 'DOCKER_PROXY=${{ vars.ECR_REGISTRY }}/dockerhub/'
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+    secrets: inherit
+
+  sglang-sidecar-build:
+    name: sglang-sidecar
+    needs: [create-fresh-builder, resolve-source-sha]
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: sglang
+      target: sidecar
+      dockerfile: lib/sidecar/sglang/Dockerfile
+      build_target: runtime
+      cuda_version: '[""]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      builder_flavor: general
+      build_only: true
+      extra_build_args: 'DOCKER_PROXY=${{ vars.ECR_REGISTRY }}/dockerhub/'
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+    secrets: inherit
+
+  trtllm-sidecar-build:
+    name: trtllm-sidecar
+    needs: [create-fresh-builder, resolve-source-sha]
+    uses: ./.github/workflows/shared-build-image.yml
+    with:
+      framework: trtllm
+      target: sidecar
+      dockerfile: lib/sidecar/trtllm/Dockerfile
+      build_target: runtime
+      cuda_version: '[""]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
+      builder_flavor: general
+      build_only: true
+      extra_build_args: 'DOCKER_PROXY=${{ vars.ECR_REGISTRY }}/dockerhub/'
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+    secrets: inherit
+
   # ============================================================================
   # OPTIONAL NIGHTLY IMAGES (operator, planner, frontend, runtime EFA
   # variants)
@@ -1272,7 +1329,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, dynamo-pipeline, operator-build, planner-build, frontend-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, create-fresh-builder]
+    needs: [vllm-build, sglang-build, trtllm-build, vllm-sidecar-build, sglang-sidecar-build, trtllm-sidecar-build, dynamo-pipeline, operator-build, planner-build, frontend-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, create-fresh-builder]
     permissions:
       contents: read
     steps:
@@ -1294,7 +1351,7 @@ jobs:
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     if: always()
-    needs: [vllm-test, vllm-multi-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, deploy-cleanup, rust-tests]
+    needs: [vllm-test, vllm-multi-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, vllm-sidecar-build, sglang-sidecar-build, trtllm-sidecar-build, deploy-cleanup, rust-tests]
     permissions:
       contents: read
       actions: read   # grant the reusable notifier read access to list this run's jobs

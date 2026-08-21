@@ -16,11 +16,11 @@
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
 #   examples -> recipe-check (Kustomize recipe generation and unit tests)
-#   sidecar  -> classification only; source and proto files also match rust
+#   vllm_sidecar / sglang_sidecar / trtllm_sidecar -> engine-specific sidecar image build
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
 # Filters for coverage only (no CI triggered):
-#   examples, ignore, sidecar
+#   ignore, sidecar
 
 all:
   - '**'
@@ -131,6 +131,10 @@ ignore:
   # CODEOWNERS generation tooling (data + scripts). Validated by its own
   # codeowners.yml workflow (triggers on '**'); no backend CI needed here.
   - '.github/codeowners/**'
+  # Sidecar docs are intentionally excluded from the Fern docs filter and do
+  # not affect the built sidecar images.
+  - 'lib/sidecar/**/*.md'
+  - 'lib/sidecar/**/*.rst'
 
 ci: &ci
   - '.github/workflows/**'
@@ -282,6 +286,28 @@ planner:
 
 sidecar:
   - 'lib/sidecar/**'
+  - '!**/*.md'
+  - '!**/*.rst'
+
+# Engine-specific sidecar builds. Changes to common sidecar code exercise all
+# three images; engine-local changes exercise only that engine's image.
+vllm_sidecar:
+  - 'lib/sidecar/common/**'
+  - 'lib/sidecar/vllm/**'
+  - '!**/*.md'
+  - '!**/*.rst'
+
+sglang_sidecar:
+  - 'lib/sidecar/common/**'
+  - 'lib/sidecar/sglang/**'
+  - '!**/*.md'
+  - '!**/*.rst'
+
+trtllm_sidecar:
+  - 'lib/sidecar/common/**'
+  - 'lib/sidecar/trtllm/**'
+  - '!**/*.md'
+  - '!**/*.rst'
 
 vllm:
   - 'container/deps/requirements.vllm.txt'
