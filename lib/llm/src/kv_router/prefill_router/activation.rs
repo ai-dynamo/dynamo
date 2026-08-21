@@ -11,7 +11,7 @@ use dynamo_kv_router::{
     DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, RoutingPartitionRef,
     conditional_disagg::make_conditional_disagg_policy,
     config::KvRouterConfig,
-    selector::{DefaultWorkerSelector, WorkerInputs, WorkerSelector},
+    selector::{DefaultWorkerSelector, WorkerSelector},
 };
 use dynamo_runtime::{
     component::{Client, Endpoint},
@@ -26,10 +26,7 @@ use super::{
 };
 use crate::{
     discovery::ModelManager,
-    kv_router::{
-        BuiltinRoutingPolicy, KvRouter, RoutingHost, WorkerSelectorFactory,
-        push_router::RoutingLoadState,
-    },
+    kv_router::{BuiltinRoutingPolicy, KvRouter, RoutingHost, WorkerSelectorFactory},
     local_model::runtime_config::ModelRuntimeConfig,
     model_card::ModelDeploymentCard,
     protocols::common::{
@@ -296,7 +293,7 @@ where
 
         // Start runtime config watcher for this endpoint (needed for get_disaggregated_endpoint)
         // This must be done before creating the router so bootstrap info is available
-        let workers = context
+        context
             .model_manager
             .get_or_create_runtime_config_watcher(&endpoint)
             .await?;
@@ -407,27 +404,12 @@ where
             )
             .await?;
 
-            let builtin_policy = BuiltinRoutingPolicy::from_router_mode(prefill_router_mode);
-            let router = if affinity.is_none() && builtin_policy.is_some() {
-                let load_state = if builtin_policy.is_some_and(|policy| {
-                    policy.required_worker_inputs().contains(WorkerInputs::LOAD)
-                }) {
-                    Some(
-                        RoutingLoadState::start(
-                            endpoint,
-                            kv_cache_block_size,
-                            workers,
-                            kv_router_config.unwrap_or_default(),
-                            WORKER_TYPE_PREFILL,
-                        )
-                        .await?,
-                    )
-                } else {
-                    None
-                };
-                InnerPrefillRouter::RoutingHost(Arc::new(
-                    RoutingHost::<Sel>::new_builtin_with_load(push_router, load_state)?,
-                ))
+            let router = if affinity.is_none()
+                && BuiltinRoutingPolicy::from_router_mode(prefill_router_mode).is_some()
+            {
+                InnerPrefillRouter::RoutingHost(Arc::new(RoutingHost::<Sel>::new_builtin(
+                    push_router,
+                )?))
             } else {
                 InnerPrefillRouter::SimpleRouter(Arc::new(
                     crate::session_affinity::SessionAffinityPushRouter::new_with_coordinator(

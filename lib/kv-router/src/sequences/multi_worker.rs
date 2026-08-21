@@ -855,7 +855,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ///
     /// This is safe for delayed cleanup that captured a worker when it acquired
     /// the booking. An ownership mismatch or already-freed request is a no-op.
-    pub fn free_if_worker(
+    pub(crate) fn free_if_worker(
         &self,
         request_id: &RequestId,
         worker: WorkerWithDpRank,
@@ -1114,22 +1114,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
     pub fn active_request_counts(&self) -> HashMap<WorkerWithDpRank, usize> {
         self.prompt_registry.active_request_counts()
-    }
-
-    /// Return the active-request count for one worker rank in constant point-lookup time.
-    pub fn active_request_count(&self, worker: WorkerWithDpRank) -> usize {
-        self.prompt_registry.active_request_count(worker)
-    }
-
-    /// Return the sum of active requests across one worker endpoint's DP ranks.
-    pub fn active_request_count_for_worker(
-        &self,
-        worker_id: WorkerId,
-        start_rank: u32,
-        dp_size: u32,
-    ) -> usize {
-        self.prompt_registry
-            .active_request_count_for_worker(worker_id, start_rank, dp_size)
     }
 
     /// Force expire stale requests across all workers (one-shot).
