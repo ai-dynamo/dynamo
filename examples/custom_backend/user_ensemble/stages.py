@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from dynamo.workflow import StageContext, StageContract, ValueSpec
+from dynamo.workflow import StageContext, StageContract
 
 
 class DummyClassifier:
@@ -16,8 +16,8 @@ class DummyClassifier:
 
     contract = StageContract(
         id="request-classifier",
-        inputs={"request": ValueSpec(type="json")},
-        outputs={"scores": ValueSpec(type="json")},
+        inputs={"request"},
+        outputs={"scores"},
     )
 
     async def run(
@@ -40,11 +40,8 @@ class EnsembleResponseStage:
 
     contract = StageContract(
         id="ensemble-response",
-        inputs={
-            "completion": ValueSpec(type="json"),
-            "scores": ValueSpec(type="json"),
-        },
-        outputs={"chunk": ValueSpec(type="json")},
+        inputs={"completion", "scores"},
+        outputs={"chunk"},
     )
 
     async def run(

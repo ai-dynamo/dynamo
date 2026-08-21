@@ -4,7 +4,7 @@
 """Static request fan-out workflow, independent of physical placement."""
 
 from dynamo.vllm.workflow.components import DynamoVllmStage
-from dynamo.workflow import ValueSpec, Workflow
+from dynamo.workflow import Workflow
 from examples.custom_backend.user_ensemble.stages import (
     DummyClassifier,
     EnsembleResponseStage,
@@ -13,7 +13,7 @@ from examples.custom_backend.user_ensemble.stages import (
 
 def define_workflow() -> Workflow:
     workflow = Workflow("integrated-encoder-ensemble")
-    request = workflow.input("request", ValueSpec(type="json"))
+    request = workflow.input("request")
     classifier = workflow.stage(
         "classifier",
         DummyClassifier.contract,
