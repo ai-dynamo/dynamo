@@ -18,7 +18,7 @@ use crate::protocols::{
     WorkerWithDpRank,
 };
 use crate::router_hint::RouterHintRootCandidates;
-use crate::scheduling::policy_queue::QueueRejection;
+use crate::scheduling::queue_admission::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
 
 pub type OverloadedWorkerProvider =
