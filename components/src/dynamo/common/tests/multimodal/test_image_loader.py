@@ -17,6 +17,7 @@
 
 import asyncio
 import base64
+import importlib
 from io import BytesIO
 from unittest.mock import AsyncMock, patch
 
@@ -25,7 +26,11 @@ from PIL import Image
 
 from dynamo.common.http import HttpStatusError, HttpTimeoutError
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
-from dynamo.common.multimodal.image_loader import URL_VARIANT_KEY, ImageLoader
+from dynamo.common.multimodal import image_loader as image_loader_module
+from dynamo.common.multimodal.image_loader import (
+    URL_VARIANT_KEY,
+    ImageLoader,
+)
 
 pytestmark = [
     pytest.mark.asyncio,
@@ -363,3 +368,123 @@ async def test_cache_is_lru_not_fifo(loader: ImageLoader) -> None:
     assert "https://example.com/b.png" not in loader._image_cache
     assert "https://example.com/c.png" in loader._image_cache
     assert "https://example.com/d.png" in loader._image_cache
+
+
+# --- Decoded-size bound ---
+
+
+def _make_oversized_png_bytes(side: int) -> bytes:
+    """A solid-colour PNG that is tiny encoded but huge decoded.
+
+    This is the decompression-bomb shape: the encoded payload compresses to a
+    few hundred KB while decoding allocates side * side * 3 bytes.
+    """
+    img = Image.new("RGB", (side, side), color="red")
+    buf = BytesIO()
+    img.save(buf, format="PNG", compress_level=9)
+    return buf.getvalue()
+
+
+async def test_oversized_image_raises_413(
+    loader: ImageLoader, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An image whose decoded size exceeds the limit is a client error, not a 500."""
+    monkeypatch.setattr(image_loader_module, "MAX_IMAGE_PIXELS", 1_024)
+    side = 33  # 33 * 33 = 1089 > 1024
+    mock_fetch = _mock_fetch_bytes(content=_make_oversized_png_bytes(side))
+
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        with pytest.raises(HttpStatusError) as exc_info:
+            await loader.load_image("https://example.com/bomb.png")
+
+    assert exc_info.value.status == 413
+    assert "exceed" in exc_info.value.message
+
+
+async def test_pillow_bomb_error_mapped_to_413(
+    loader: ImageLoader, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pillow's own bomb check fires inside Image.open(), before the explicit
+    size check, whenever the limit is at or above Pillow's threshold. That path
+    must still surface as a client error rather than a generic failure."""
+    monkeypatch.setattr(image_loader_module, "MAX_IMAGE_PIXELS", 1_000_000)
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1_024)
+    side = 46  # 46 * 46 = 2116 > 1024, triggers Pillow; 2116 < 1_000_000, skips our check
+    mock_fetch = _mock_fetch_bytes(content=_make_oversized_png_bytes(side))
+
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        with pytest.raises(HttpStatusError) as exc_info:
+            await loader.load_image("https://example.com/bomb2.png")
+
+    assert exc_info.value.status == 413
+
+
+async def test_image_within_limit_still_decodes(loader: ImageLoader) -> None:
+    """The bound must not reject ordinary images."""
+    mock_fetch = _mock_fetch_bytes()
+
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        result = await loader.load_image("https://example.com/img.png")
+
+    assert result.size == (2, 2)
+    assert result.mode == "RGB"
+
+
+@pytest.mark.parametrize("limit", [0, -1])
+async def test_limit_disabled_when_not_positive(
+    monkeypatch: pytest.MonkeyPatch,
+    limit: int,
+) -> None:
+    """A zero or negative limit disables the check, matching vLLM's semantics."""
+    monkeypatch.setattr(image_loader_module, "MAX_IMAGE_PIXELS", limit)
+    side = 64
+    image = ImageLoader._open_image_sync(BytesIO(_make_oversized_png_bytes(side)))
+    assert image.size == (side, side)
+
+
+@pytest.mark.parametrize(
+    "env_vars,expected",
+    [
+        ({"DYN_MAX_IMAGE_PIXELS": "1000", "VLLM_MAX_IMAGE_PIXELS": "2000"}, 1000),
+        ({"VLLM_MAX_IMAGE_PIXELS": "2000"}, 2000),
+        ({}, 178956970),
+    ],
+)
+def test_max_image_pixels_env_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+    env_vars: dict,
+    expected: int,
+) -> None:
+    """DYN_MAX_IMAGE_PIXELS > VLLM_MAX_IMAGE_PIXELS > 178956970 default."""
+    monkeypatch.delenv("DYN_MAX_IMAGE_PIXELS", raising=False)
+    monkeypatch.delenv("VLLM_MAX_IMAGE_PIXELS", raising=False)
+    for k, v in env_vars.items():
+        monkeypatch.setenv(k, v)
+    reloaded = importlib.reload(image_loader_module)
+    assert reloaded.MAX_IMAGE_PIXELS == expected
+
+
+async def test_oversized_data_url_raises_413(
+    loader: ImageLoader, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An oversized image sent as a data: URL must return 413, not 500."""
+    monkeypatch.setattr(image_loader_module, "MAX_IMAGE_PIXELS", 1_024)
+    side = 33  # 33 * 33 = 1089 > 1024
+    oversized_bytes = _make_oversized_png_bytes(side)
+    data_url = f"data:image/png;base64,{base64.b64encode(oversized_bytes).decode()}"
+    with pytest.raises(HttpStatusError) as exc_info:
+        await loader.load_image(data_url)
+    assert exc_info.value.status == 413
+
+
+async def test_oversized_data_url_batch_raises_413(
+    loader: ImageLoader, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The batch path must preserve 413 for oversized data: URL images."""
+    monkeypatch.setattr(image_loader_module, "MAX_IMAGE_PIXELS", 1_024)
+    side = 33
+    oversized_bytes = _make_oversized_png_bytes(side)
+    data_url = f"data:image/png;base64,{base64.b64encode(oversized_bytes).decode()}"
+    with pytest.raises(HttpStatusError) as exc_info:
+        await loader.load_image_batch([{URL_VARIANT_KEY: data_url}])
+    assert exc_info.value.status == 413
