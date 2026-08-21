@@ -58,7 +58,7 @@ that determines whether you should open an issue first, see [Contribution Flow](
     Use `pre-commit run --all-files` when you need to validate the entire repository.
   </Step>
 
-  <Step title="Configure DCO sign-off">
+  <Step title="Configure DCO sign-off and commit signing">
     Configure the name and email that should appear in your commits:
 
     ```bash
@@ -71,6 +71,13 @@ that determines whether you should open an issue first, see [Contribution Flow](
     ```bash
     git commit -s -m "fix(component): describe the change"
     ```
+
+    For automatic trusted-CI approval of a fork pull request, configure
+    [GitHub-supported commit signing](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits)
+    too. GitHub must show every commit in the pull request as `Verified`; `git commit -s` adds a
+    DCO sign-off but does not add a cryptographic signature. Signing does not itself qualify a
+    pull request for automatic approval. A maintainer can instead review the current head and
+    comment `/ok to test <sha>` to start CI.
 
     For the full requirement and repair instructions, see
     [DCO and Licensing](dco-and-licensing.md).
