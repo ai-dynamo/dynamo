@@ -667,7 +667,6 @@ def test_router_decisions_vllm_dp(
 # The parallel lane reserves one GPU per test; this case requires GPUs 0 and 1.
 @pytest.mark.gpu_2
 @pytest.mark.nightly
-@pytest.mark.requested_vllm_kv_cache_bytes(DISAGG_KV_CACHE_MEMORY_BYTES)
 @pytest.mark.timeout(600)
 @pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
 def test_router_decisions_vllm_disagg(
