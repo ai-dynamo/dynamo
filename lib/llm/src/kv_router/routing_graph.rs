@@ -259,10 +259,19 @@ mod tests {
         sender.publish(snapshot(1, 90));
         sender.publish_batch(vec![snapshot(1, 80), snapshot(2, 70)]);
 
-        let first = receiver.recv().await.unwrap();
-        assert!(first.contains(&snapshot(1, 90)));
-        assert!(first.contains(&snapshot(1, 80)));
-        assert!(first.contains(&snapshot(2, 70)));
+        let expected = vec![snapshot(1, 90), snapshot(1, 80), snapshot(2, 70)];
+        let received = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let mut received = Vec::new();
+            while !expected.iter().all(|snapshot| received.contains(snapshot)) {
+                received.extend(receiver.recv().await.unwrap());
+            }
+            received
+        })
+        .await
+        .expect("queued and coalesced scheduler snapshots were not received");
+        for snapshot in expected {
+            assert!(received.contains(&snapshot));
+        }
 
         sender.publish(snapshot(1, 0));
         assert_eq!(receiver.recv().await.unwrap(), vec![snapshot(1, 0)]);
