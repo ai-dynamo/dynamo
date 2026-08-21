@@ -8,14 +8,14 @@ use dynamo_renderer::PromptFormatter;
 
 use crate::{
     backend::{Backend, ExecutionContext},
-    discovery::{KvWorkerMonitor, ModelManager, ModelWatcher},
+    discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::EngineConfig,
     http::service::metrics::Metrics,
     kv_router::indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer},
     kv_router::{
         BuiltinRoutingPolicy, EncoderRouter, KvRouter, PrefillRouter, RoutingHost,
-        metrics::RouterRequestMetrics, push_router::RoutingLoadState,
+        TypedRoutingGraph, metrics::RouterRequestMetrics, push_router::RoutingLoadState,
     },
     migration::Migration,
     model_card::ModelDeploymentCard,
@@ -164,8 +164,8 @@ fn preprocessed_backend_engine<Sel>(
     router_mode: RouterMode,
     chooser: Option<Arc<KvRouter<Sel>>>,
     model_manager: &Arc<crate::discovery::ModelManager>,
-    endpoint_id: &dynamo_runtime::protocols::EndpointId,
     affinity: Option<AffinityCoordinator>,
+    graph: Arc<TypedRoutingGraph>,
     load_state: Option<Arc<RoutingLoadState>>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
 where
@@ -185,14 +185,17 @@ where
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            Arc::new(RoutingHost::new_with_coordinator(router, chooser, affinity))
+            Arc::new(RoutingHost::new_with_coordinator(
+                router, chooser, graph, affinity,
+            ))
         }
         _ => {
+            let endpoint_id = graph.client().endpoint.id();
             let lora = model_manager
-                .lora_filter_for(endpoint_id)
-                .map(|filter| (filter, model_manager.lora_load_estimator_for(endpoint_id)));
+                .lora_filter_for(&endpoint_id)
+                .map(|filter| (filter, model_manager.lora_load_estimator_for(&endpoint_id)));
             Arc::new(RoutingHost::<Sel>::new_builtin_with_capabilities(
-                router, load_state, affinity, lora,
+                router, graph, load_state, affinity, lora,
             )?)
         }
     };
@@ -205,7 +208,7 @@ pub async fn build_preprocessed_routing(
     client: &Client,
     model_manager: Arc<crate::discovery::ModelManager>,
     router_mode: RouterMode,
-    worker_monitor: Option<KvWorkerMonitor>,
+    graph: Arc<TypedRoutingGraph>,
     chooser: Option<Arc<KvRouter>>,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     encoder_chooser: Option<Arc<EncoderRouter>>,
@@ -224,7 +227,7 @@ pub async fn build_preprocessed_routing(
         client,
         model_manager,
         router_mode,
-        worker_monitor,
+        graph,
         chooser,
         prefill_chooser,
         encoder_chooser,
@@ -241,7 +244,7 @@ pub(crate) async fn build_preprocessed_routing_with_selector<Sel>(
     client: &Client,
     model_manager: Arc<crate::discovery::ModelManager>,
     router_mode: RouterMode,
-    worker_monitor: Option<KvWorkerMonitor>,
+    graph: Arc<TypedRoutingGraph>,
     chooser: Option<Arc<KvRouter<Sel>>>,
     prefill_chooser: Option<Arc<PrefillRouter<Sel>>>,
     encoder_chooser: Option<Arc<EncoderRouter>>,
@@ -265,8 +268,6 @@ where
     let router_client = router_client(client, router_mode, chooser.as_ref())?;
 
     wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
-    let endpoint_id = router_client.endpoint.id();
-
     let affinity = create_affinity_coordinator(
         session_affinity_ttl_secs.map(Duration::from_secs),
         router_client.clone(),
@@ -285,7 +286,8 @@ where
                 kv_cache_block_size,
                 workers,
                 kv_router_config,
-                crate::protocols::common::timing::WORKER_TYPE_DECODE,
+                graph.scheduler_load_sender(),
+                graph.cancellation_token(),
             )
             .await?,
         )
@@ -305,13 +307,10 @@ where
             as MultimodalCacheKeyExtractor<PreprocessedRequest>
     });
 
-    let monitor_arc =
-        worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
-
     let router = LlmPushRouter::from_client_with_state(
         router_client,
         router_mode,
-        monitor_arc,
+        None,
         embedding_cache_indexer,
         cache_key_extractor,
     )
@@ -339,8 +338,8 @@ where
         router_mode,
         chooser,
         &model_manager,
-        &endpoint_id,
         affinity,
+        graph,
         load_state,
     )?;
     Ok(PreprocessedRouting {

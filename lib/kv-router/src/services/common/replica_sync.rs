@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::identity::{RoutingPartitionId, RoutingPartitionRef};
-use crate::protocols::{ActiveLoad, ActiveSequenceEvent, WorkerWithDpRank};
+use crate::protocols::{ActiveSequenceEvent, WorkerWithDpRank};
 use crate::sequences::{SequencePublishQueueError, SequencePublisher, SequenceSubscriber};
 use crate::services::common::zmq::{create_bound_pub_socket, create_sub_socket, validate_endpoint};
 
@@ -186,7 +186,7 @@ impl SequencePublisher for ScopedSequencePublisher {
         }
     }
 
-    fn publish_load(&self, _load: ActiveLoad) {}
+    fn publish_scheduler_load(&self, _load: crate::sequences::SchedulerLoadSnapshot) {}
 
     fn observe_load(
         &self,

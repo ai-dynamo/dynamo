@@ -18,6 +18,7 @@ use tokio::time::Instant;
 
 use crate::{
     discovery::RuntimeConfigWatch,
+    kv_router::SchedulerLoadSender,
     kv_router::sequence::{ActiveSequencesMulti, SequenceRequest, create_multi_worker_sequences},
     local_model::runtime_config::ModelRuntimeConfig,
     preprocessor::PreprocessedRequest,
@@ -50,18 +51,19 @@ impl RoutingLoadState {
         block_size: u32,
         workers: RuntimeConfigWatch,
         config: KvRouterConfig,
-        worker_type: &'static str,
+        scheduler_load: SchedulerLoadSender,
+        parent_token: CancellationToken,
     ) -> Result<Arc<Self>> {
         let initial_workers: HashMap<u64, ModelRuntimeConfig> = workers.borrow().clone();
         let router_id = endpoint.drt().discovery().instance_id();
-        let cancellation_token = endpoint.drt().primary_token().child_token();
+        let cancellation_token = parent_token.child_token();
         let slots = create_multi_worker_sequences(
             endpoint,
             block_size as usize,
             initial_workers.clone(),
             config.router_replica_sync,
             router_id,
-            worker_type,
+            scheduler_load,
             cancellation_token.child_token(),
         )
         .await
@@ -415,7 +417,10 @@ mod tests {
     use tokio::sync::watch;
 
     use super::*;
-    use crate::protocols::common::timing::WORKER_TYPE_DECODE;
+    use crate::{
+        discovery::LoadThresholdHandle,
+        kv_router::{RouterLoadSource, TypedRoutingGraph},
+    };
 
     struct NotifyingCacheIndex {
         worker_id: u64,
@@ -456,6 +461,15 @@ mod tests {
             .unwrap()
             .endpoint("generate".to_string());
         let client = endpoint.client().await.unwrap();
+        let graph = TypedRoutingGraph::start(
+            client.clone(),
+            RouterLoadSource::Decode,
+            LoadThresholdHandle::new(Default::default()),
+            &distributed.child_token(),
+            None,
+        )
+        .await
+        .unwrap();
         endpoint.register_endpoint_instance().await.unwrap();
         let worker_id = client.wait_for_instances().await.unwrap()[0].id();
         let (_workers_tx, workers) =
@@ -465,7 +479,8 @@ mod tests {
             16,
             workers,
             KvRouterConfig::default(),
-            WORKER_TYPE_DECODE,
+            graph.scheduler_load_sender(),
+            graph.cancellation_token(),
         )
         .await
         .unwrap();

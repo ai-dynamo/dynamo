@@ -226,6 +226,12 @@ enum TransportFallback<'a> {
     Matching(&'a (dyn Fn(u64) -> bool + Sync)),
 }
 
+#[derive(Clone, Copy)]
+enum OverloadCheck {
+    Required,
+    AlreadyAdmitted,
+}
+
 struct DeviceAwareCandidates {
     candidates: Vec<RouteCandidate>,
     context: RouteContext,
@@ -1026,6 +1032,29 @@ where
             .await
     }
 
+    /// Dispatch exactly to a worker whose KV selection step already performed
+    /// overload admission.
+    ///
+    /// Discovery and fault detection are still enforced. The shared client
+    /// overload state is not rechecked because admission may synchronously
+    /// publish this request's own load before dispatch begins.
+    pub async fn dispatch_kv_admitted(
+        &self,
+        request: SingleIn<T>,
+        instance_id: u64,
+    ) -> anyhow::Result<ManyOut<U>> {
+        if !self.router_mode.is_kv_routing() {
+            anyhow::bail!("admitted dispatch is only valid in KV routing mode");
+        }
+        self.generate_with_fault_detection_inner(
+            instance_id,
+            request,
+            TransportFallback::Deny,
+            OverloadCheck::AlreadyAdmitted,
+        )
+        .await
+    }
+
     /// Select and book one worker, prepare the request for that exact worker,
     /// then dispatch without reselection or transport fallback.
     pub async fn select_and_dispatch_exact<M, F>(
@@ -1666,16 +1695,59 @@ where
         request: SingleIn<T>,
         fallback: TransportFallback<'_>,
     ) -> anyhow::Result<ManyOut<U>> {
-        self.generate_with_fault_detection_prepared(instance_id, request, fallback, |_, _| Ok(()))
-            .await
-            .map(|(_, stream)| stream)
+        self.generate_with_fault_detection_inner(
+            instance_id,
+            request,
+            fallback,
+            OverloadCheck::Required,
+        )
+        .await
+    }
+
+    async fn generate_with_fault_detection_inner(
+        &self,
+        instance_id: u64,
+        request: SingleIn<T>,
+        fallback: TransportFallback<'_>,
+        overload_check: OverloadCheck,
+    ) -> anyhow::Result<ManyOut<U>> {
+        self.generate_with_fault_detection_prepared_inner(
+            instance_id,
+            request,
+            fallback,
+            overload_check,
+            |_, _| Ok(()),
+        )
+        .await
+        .map(|(_, stream)| stream)
     }
 
     async fn generate_with_fault_detection_prepared<M, F>(
         &self,
         instance_id: u64,
+        request: SingleIn<T>,
+        fallback: TransportFallback<'_>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        self.generate_with_fault_detection_prepared_inner(
+            instance_id,
+            request,
+            fallback,
+            OverloadCheck::Required,
+            prepare,
+        )
+        .await
+    }
+
+    async fn generate_with_fault_detection_prepared_inner<M, F>(
+        &self,
+        instance_id: u64,
         mut request: SingleIn<T>,
         fallback: TransportFallback<'_>,
+        overload_check: OverloadCheck,
         prepare: F,
     ) -> anyhow::Result<(M, ManyOut<U>)>
     where
@@ -1696,7 +1768,9 @@ where
 
         let (instance_id, address, transport_kind, instance) =
             self.resolve_transport(instance_id, fallback)?;
-        self.check_workers_available(instance_id, &request_id)?;
+        if matches!(overload_check, OverloadCheck::Required) {
+            self.check_workers_available(instance_id, &request_id)?;
+        }
 
         let metadata = prepare(&mut request, instance_id)?;
         let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
@@ -3524,6 +3598,69 @@ mod tests {
             poll_until(|| dispatch.added.lock().unwrap().len() > adds_before).await,
             "on_instance_added (re-registration) not delivered to the supplied dispatch"
         );
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn admitted_dispatch_does_not_reject_the_load_it_just_booked() {
+        const TEST_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_admitted_dispatch".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
+        for _ in 0..50 {
+            if client.instance_ids_avail().contains(&instance_id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(client.instance_ids_avail().contains(&instance_id));
+        let dispatch = Arc::new(RecordingDispatch::default());
+        let router = PushRouter::<u64, TestResponse>::from_client_with_dispatch(
+            client.clone(),
+            RouterMode::KV,
+            dispatch.clone(),
+        )
+        .await
+        .unwrap();
+
+        client.set_overloaded_instances(&[instance_id]);
+        let error = router
+            .dispatch_exact(SingleIn::new(41), instance_id)
+            .await
+            .unwrap_err();
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::WorkerOverloaded],
+            &[]
+        ));
+        assert!(dispatch.unary.lock().unwrap().is_empty());
+
+        let mut stream = router
+            .dispatch_kv_admitted(SingleIn::new(42), instance_id)
+            .await
+            .unwrap();
+        while stream.next().await.is_some() {}
+        let unary = dispatch.unary.lock().unwrap();
+        assert_eq!(unary.len(), 1);
+        assert_eq!(unary[0].0, 42);
+        assert!(!unary[0].1.is_empty());
+        assert_eq!(unary[0].2, Some(instance_id));
+        drop(unary);
 
         rt.shutdown();
     }
