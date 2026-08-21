@@ -17,7 +17,7 @@ goal is to characterize the full latency/throughput frontier, but do not add it 
 complete a curve. Additionally, after selecting a particular concurrency value, size the request count to AT MOST 4x the
 concurrency (for example, at most 16 requests for `c=4`), and never below the concurrency itself - fewer requests
 than slots cannot even fill the batch, and tiny counts cannot support the noise-floor and comparison rules in
-`comparison-uncertainty.md`. Larger counts require the measurement to still fit the 30-minute window.
+`comparison-uncertainty.md`. Within that cap, the count must also keep the measurement inside the standard 30-minute window per `comparison-uncertainty.md`.
 
 Use a non-power-of-two point only when it is required by the user workload, needed to reproduce a baseline, selected
 by an AIPerf search method, or chosen as a bounded refinement around an SLO boundary or observed knee. Record the
