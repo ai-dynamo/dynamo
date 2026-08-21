@@ -478,6 +478,10 @@ impl RoutingInstancesState {
         self.snapshot().overloaded_ids()
     }
 
+    fn is_overloaded(&self, instance_id: u64) -> bool {
+        self.snapshot().is_overloaded(instance_id)
+    }
+
     fn report_instance_down(&self, instance_id: u64) {
         self.update(|current| current.report_instance_down(instance_id), true);
     }
@@ -836,6 +840,13 @@ impl Client {
 
     pub fn overloaded_instance_ids(&self) -> Option<HashSet<u64>> {
         self.routing_instances.overloaded_ids()
+    }
+
+    /// Whether a single instance is currently reported overloaded. Prefer this
+    /// over `overloaded_instance_ids()` when testing membership for a small set
+    /// of candidate ids — it avoids cloning the full overloaded set.
+    pub fn is_overloaded(&self, instance_id: u64) -> bool {
+        self.routing_instances.is_overloaded(instance_id)
     }
 
     /// Workers currently eligible for selection: discovered and not locally
