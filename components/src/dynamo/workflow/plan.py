@@ -10,14 +10,7 @@ from types import MappingProxyType
 from typing import Mapping, Union
 
 from dynamo.workflow.ir import WorkflowIR
-from dynamo.workflow.types import (
-    StageContract,
-    WorkflowValidationError,
-    _require_value_spec,
-    validate_name,
-)
-
-REMOTE_VALUE_TYPES = frozenset({"bytes", "json", "text"})
+from dynamo.workflow.types import StageContract, WorkflowValidationError, validate_name
 
 
 @dataclass(frozen=True)
@@ -60,47 +53,6 @@ class RemoteBinding:
 Binding = Union[InlineBinding, RemoteBinding]
 
 
-def _validate_process_boundaries(
-    workflow: WorkflowIR, bindings: Mapping[str, Binding]
-) -> None:
-    stages_by_id = {stage.id: stage for stage in workflow.stages}
-    for stage in workflow.stages:
-        target_binding = bindings[stage.id]
-        for port, source in stage.inputs.items():
-            source_binding = (
-                None if source.stage_id is None else bindings[source.stage_id]
-            )
-            crosses_process = isinstance(source_binding, RemoteBinding) or isinstance(
-                target_binding, RemoteBinding
-            )
-            value_spec = _require_value_spec(
-                stage.contract.inputs[port],
-                f"stage {stage.id!r} input {port!r}",
-            )
-            if crosses_process and value_spec.type not in REMOTE_VALUE_TYPES:
-                raise WorkflowValidationError(
-                    f"value type {value_spec.type!r} cannot cross a process boundary "
-                    f"to stage {stage.id!r} port {port!r}"
-                )
-
-    for output_name, source in workflow.outputs.items():
-        if source.stage_id is None or not isinstance(
-            bindings[source.stage_id], RemoteBinding
-        ):
-            continue
-        source_port = source.output_name
-        assert source_port is not None
-        value_spec = _require_value_spec(
-            stages_by_id[source.stage_id].contract.outputs[source_port],
-            f"workflow output {output_name!r}",
-        )
-        if value_spec.type not in REMOTE_VALUE_TYPES:
-            raise WorkflowValidationError(
-                f"workflow output {output_name!r} with value type "
-                f"{value_spec.type!r} cannot cross a process boundary"
-            )
-
-
 @dataclass(frozen=True)
 class ExecutionPlan:
     """A workflow plus immutable in-memory stage bindings."""
@@ -132,7 +84,6 @@ class ExecutionPlan:
                 f"extra={sorted(actual_stages - expected_stages)}"
             )
 
-        _validate_process_boundaries(self.workflow, bindings)
         object.__setattr__(self, "bindings", MappingProxyType(bindings))
 
     @property
