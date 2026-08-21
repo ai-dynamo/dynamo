@@ -329,7 +329,7 @@ async fn recover_initial_index(
         cancel,
         initial_backoff,
         max_backoff,
-        |service, peers| Box::pin(service.recover_indexer_from_peers_streaming(peers)),
+        |service, peers| Box::pin(service.recover_indexer_from_peers(peers)),
     )
     .await
 }
@@ -353,10 +353,14 @@ where
 {
     let mut backoff = initial_backoff;
 
-    'attempt: loop {
+    loop {
         reconcile_once(service, store, sync_port, self_ip, known).await;
-        let peers = recovery_peer_urls(store, self_ip, selection_http_port);
-        if peers.is_empty() {
+
+        // Deterministic eligible set for change detection; the shuffled order is
+        // derived once per cycle (attempt-scoped priority), never compared, so
+        // an unrelated EndpointSlice update cannot look like a membership change.
+        let eligible = recovery_peer_set(store, self_ip, selection_http_port);
+        if eligible.is_empty() {
             crate::metrics::set_kv_recovery_state(crate::metrics::KV_RECOVERY_EMPTY_BOOTSTRAP);
             tracing::warn!(
                 "No serving sibling EPP peer found; bootstrapping an EMPTY KV index \
@@ -366,49 +370,65 @@ where
             return Ok(());
         }
 
-        let attempt = recover(service, &peers);
-        tokio::pin!(attempt);
+        let mut priority = shuffled_peer_urls(&eligible);
+        let mut tried: BTreeSet<String> = BTreeSet::new();
 
-        // Await the attempt, restarting only when the candidate set actually
-        // changes (or becomes empty). Unrelated EndpointSlice churn (readiness
-        // flips, metadata/zone updates) must not discard in-flight progress: a
-        // large dump under churn would otherwise be dropped repeatedly, leaving
-        // a partially applied snapshot that the next attempt re-applies.
-        let result = loop {
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => {
-                    anyhow::bail!("EPP peer discovery cancelled during KV-index recovery")
-                }
-                changed = changes_rx.changed() => {
-                    changed.context("EPP peer EndpointSlice watch ended during KV-index recovery")?;
-                    if recovery_peer_urls(store, self_ip, selection_http_port) != peers {
-                        // Candidate set changed: restart with the new set.
-                        backoff = initial_backoff;
-                        continue 'attempt;
+        // Try one peer per attempt. EndpointSlice churn never cancels an
+        // in-flight request — the dump may still complete after its source
+        // leaves the slice — so churn only reconciles the *pending* candidates:
+        // drop unattempted peers that are no longer eligible, add newly eligible
+        // ones. Peers that failed stay in `tried` until the cycle is exhausted.
+        'attempt: loop {
+            let Some(peer) = priority.iter().find(|p| !tried.contains(*p)).cloned() else {
+                break 'attempt;
+            };
+
+            let peers = [peer.clone()];
+            let attempt = recover(service, &peers);
+            tokio::pin!(attempt);
+
+            let result = loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        anyhow::bail!("EPP peer discovery cancelled during KV-index recovery")
                     }
-                    // Unrelated churn: keep awaiting the same attempt.
+                    changed = changes_rx.changed() => {
+                        changed.context("EPP peer EndpointSlice watch ended during KV-index recovery")?;
+                        let current = recovery_peer_set(store, self_ip, selection_http_port);
+                        // Keep the active request (even if its own source left
+                        // the slice); reconcile only the unattempted pending set.
+                        priority.retain(|p| tried.contains(p) || current.contains(p));
+                        for newly in current.difference(&tried) {
+                            if !priority.contains(newly) {
+                                priority.push(newly.clone());
+                            }
+                        }
+                    }
+                    result = &mut attempt => break result,
                 }
-                result = &mut attempt => break result,
-            }
-        };
+            };
 
-        match result {
-            Ok(true) => {
-                crate::metrics::set_kv_recovery_state(crate::metrics::KV_RECOVERY_RECOVERED);
-                return Ok(());
+            match result {
+                Ok(true) => {
+                    crate::metrics::set_kv_recovery_state(crate::metrics::KV_RECOVERY_RECOVERED);
+                    return Ok(());
+                }
+                Ok(false) => tracing::warn!(
+                    peer = %peer,
+                    "No reachable EPP peer dump; trying next recovery candidate"
+                ),
+                Err(error) => tracing::warn!(
+                    peer = %peer,
+                    %error,
+                    "EPP peer KV-index recovery failed; trying next recovery candidate"
+                ),
             }
-            Ok(false) => tracing::warn!(
-                retry_ms = backoff.as_millis(),
-                "No reachable EPP peer dump; retrying KV-index recovery"
-            ),
-            Err(error) => tracing::warn!(
-                %error,
-                retry_ms = backoff.as_millis(),
-                "EPP peer KV-index recovery failed; retrying"
-            ),
+            tried.insert(peer);
         }
 
+        // The current eligible set is exhausted (or emptied by churn): back off,
+        // then start a fresh cycle with a fresh shuffle.
         tokio::select! {
             _ = cancel.cancelled() => {
                 anyhow::bail!("EPP peer discovery cancelled during KV-index recovery")
@@ -420,7 +440,7 @@ where
                 // metadata/zone updates) must not reset the backoff either:
                 // under a rolling update it would keep the retry loop hot at
                 // the initial backoff instead of letting it grow.
-                if recovery_peer_urls(store, self_ip, selection_http_port) != peers {
+                if recovery_peer_set(store, self_ip, selection_http_port) != eligible {
                     backoff = initial_backoff;
                 }
             }
@@ -476,7 +496,11 @@ fn live_peer_ips(store: &Store, self_ip: &str) -> BTreeSet<String> {
 /// recovery candidates turns a cold start (all replicas empty, none serving)
 /// into a mutual-recovery deadlock. An empty candidate set means "no eligible
 /// peer" and bootstraps an empty index immediately.
-fn recovery_peer_urls(store: &Store, self_ip: &str, port: u16) -> Vec<String> {
+/// Deterministic eligible peer URL set. Used for change detection and as the
+/// input to an attempt-scoped shuffle. Unlike a shuffled vector, the BTreeSet
+/// order is stable, so equality across calls detects only real membership
+/// changes — never a re-randomization.
+fn recovery_peer_set(store: &Store, self_ip: &str, port: u16) -> BTreeSet<String> {
     let want_ipv6 = is_ipv6(self_ip);
     let mut peers = BTreeSet::new();
 
@@ -490,21 +514,23 @@ fn recovery_peer_urls(store: &Store, self_ip: &str, port: u16) -> Vec<String> {
             }
             for address in &endpoint.addresses {
                 if !address.is_empty() && address != self_ip {
-                    peers.insert(address.clone());
+                    peers.insert(format!("http://{}", authority(address, port)));
                 }
             }
         }
     }
+    peers
+}
 
-    // Shuffle so N simultaneously-joining replicas do not all deterministically
-    // pick the lowest-IP peer (BTreeSet order), concentrating dump work on one
-    // serving EPP. RandomState is seeded per process, so each bootstrap gets a
-    // different order; serial fallback through the shuffled list is retained.
+/// One attempt-scoped random priority order over the eligible set. Shuffling
+/// happens only when a new recovery cycle starts, never inside a comparison:
+/// N simultaneously-joining replicas must not all deterministically pick the
+/// lowest-IP peer (BTreeSet order), concentrating dump work on one serving EPP.
+/// `RandomState` is seeded per process, so each bootstrap gets a different
+/// order; serial fallback through the shuffled order is retained.
+fn shuffled_peer_urls(eligible: &BTreeSet<String>) -> Vec<String> {
     let hasher = RandomState::new();
-    let mut urls: Vec<String> = peers
-        .into_iter()
-        .map(|ip| format!("http://{}", authority(&ip, port)))
-        .collect();
+    let mut urls: Vec<String> = eligible.iter().cloned().collect();
     urls.sort_by_cached_key(|url| hasher.hash_one(url));
     urls
 }
@@ -708,7 +734,7 @@ mod tests {
         let slices = [slice_with(&["epp.example.test"], false, "FQDN")];
         assert!(peer_ips(slices.iter(), false).is_empty());
         assert!(
-            recovery_peer_urls(&store_from_slices(slices.to_vec()), "10.0.0.9", 9093).is_empty()
+            recovery_peer_set(&store_from_slices(slices.to_vec()), "10.0.0.9", 9093).is_empty()
         );
     }
 
@@ -1011,8 +1037,8 @@ mod tests {
     async fn gated_dump(State(gate): State<DumpGate>) -> axum::response::Response {
         gate.requested.notify_one();
         gate.release.notified().await;
-        // Empty body = an empty streaming (NDJSON) dump, a valid recovery.
-        axum::response::Response::new(axum::body::Body::empty())
+        // An empty JSON object = an empty snapshot, a valid recovery.
+        axum::response::Response::new(axum::body::Body::from("{}"))
     }
 
     #[derive(Clone)]
@@ -1026,8 +1052,8 @@ mod tests {
             state.first_failed.notify_one();
             (StatusCode::SERVICE_UNAVAILABLE, "not ready").into_response()
         } else {
-            // Empty body = an empty streaming (NDJSON) dump, a valid recovery.
-            axum::response::Response::new(axum::body::Body::empty()).into_response()
+            // An empty JSON object = an empty snapshot, a valid recovery.
+            axum::response::Response::new(axum::body::Body::from("{}")).into_response()
         }
     }
 
@@ -1067,7 +1093,7 @@ mod tests {
                 listener,
                 Router::new().route(
                     "/dump",
-                    get(|| async { axum::response::Response::new(axum::body::Body::empty()) }),
+                    get(|| async { axum::response::Response::new(axum::body::Body::from("{}")) }),
                 ),
             )
             .await
@@ -1138,102 +1164,271 @@ mod tests {
         service.shutdown().await;
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn peer_change_cancels_inflight_recovery_and_uses_new_peer() {
-        use kube::runtime::watcher;
+    /// Shared driver for the churn-behavior tests: drives
+    /// `recover_initial_index_with_attempt` with a scripted recover closure.
+    struct ChurnHarness {
+        task: tokio::task::JoinHandle<anyhow::Result<()>>,
+        cancel: CancellationToken,
+        service: Arc<SelectionService>,
+        changes_tx: watch::Sender<u64>,
+        writer: kube::runtime::reflector::store::Writer<EndpointSlice>,
+        attempts: Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+        first_started: Arc<Notify>,
+        release: Arc<Notify>,
+        first_dropped: Arc<Notify>,
+    }
 
-        struct DropSignal(Arc<Notify>);
-        impl Drop for DropSignal {
-            fn drop(&mut self) {
-                self.0.notify_one();
+    impl ChurnHarness {
+        /// Start recovery with one slice containing `initial_ips`, all
+        /// eligible. The first attempt is held until `release`.
+        async fn start(initial_ips: &[&str], port: u16, first_attempt_outcome: bool) -> Self {
+            use kube::runtime::watcher;
+
+            let mut slices: Vec<EndpointSlice> = initial_ips
+                .iter()
+                .map(|ip| recovery_slice(ip, Some(true), Some(true)))
+                .collect();
+            // The reflector keys slices by name; name them by IP so later
+            // Apply/Delete events for the same peer hit the same object.
+            for (ip, slice) in initial_ips.iter().zip(slices.iter_mut()) {
+                slice.metadata.name = Some(format!("peer-{}", ip.replace('.', "-")));
+            }
+            let mut writer = kube::runtime::reflector::store::Writer::<EndpointSlice>::default();
+            let store = writer.as_reader();
+            writer.apply_watcher_event(&watcher::Event::Init);
+            for slice in slices {
+                writer.apply_watcher_event(&watcher::Event::InitApply(slice));
+            }
+            writer.apply_watcher_event(&watcher::Event::InitDone);
+
+            let (changes_tx, changes_rx) = watch::channel(0u64);
+            let service = recovery_service().await;
+            let cancel = CancellationToken::new();
+
+            let attempts = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
+            let first_started = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let first_dropped = Arc::new(Notify::new());
+
+            struct DropSignal(Arc<Notify>);
+            impl Drop for DropSignal {
+                fn drop(&mut self) {
+                    self.0.notify_one();
+                }
+            }
+
+            let attempt_no = Arc::new(AtomicUsize::new(0));
+            let task = {
+                let service = service.clone();
+                let cancel = cancel.clone();
+                let attempts = attempts.clone();
+                let attempt_no = attempt_no.clone();
+                let first_started = first_started.clone();
+                let release = release.clone();
+                let first_dropped = first_dropped.clone();
+                tokio::spawn(async move {
+                    let mut known = BTreeSet::new();
+                    let mut changes_rx = changes_rx;
+                    recover_initial_index_with_attempt(
+                        &service,
+                        &store,
+                        9092,
+                        port,
+                        "192.0.2.99",
+                        &mut known,
+                        &mut changes_rx,
+                        &cancel,
+                        Duration::from_millis(10),
+                        Duration::from_millis(40),
+                        move |_service, peers| {
+                            let peers = peers.to_vec();
+                            attempts.lock().unwrap().push(peers.clone());
+                            let number = attempt_no.fetch_add(1, Ordering::SeqCst);
+                            let first_started = first_started.clone();
+                            let release = release.clone();
+                            let first_dropped = first_dropped.clone();
+                            Box::pin(async move {
+                                let _drop_signal = DropSignal(first_dropped);
+                                if number == 0 {
+                                    first_started.notify_one();
+                                    // Hold the first attempt until the test
+                                    // releases it. The test chooses its outcome:
+                                    // `Ok(false)` moves on to the next pending
+                                    // peer, `Ok(true)` completes recovery.
+                                    release.notified().await;
+                                    Ok(first_attempt_outcome)
+                                } else {
+                                    // Later attempts succeed: recovery completes.
+                                    Ok(true)
+                                }
+                            })
+                        },
+                    )
+                    .await
+                })
+            };
+
+            Self {
+                task,
+                cancel,
+                service,
+                changes_tx,
+                writer,
+                attempts,
+                first_started,
+                release,
+                first_dropped,
             }
         }
 
-        let port = 9093;
-        let old_ip = "192.0.2.10";
-        let new_ip = "192.0.2.11";
-        let old_slice = recovery_slice(old_ip, Some(true), Some(true));
-        let (store, mut writer) = store_and_writer(vec![old_slice]);
-        let (changes_tx, changes_rx) = watch::channel(0u64);
-        let service = recovery_service().await;
-        let cancel = CancellationToken::new();
+        async fn apply(&mut self, ip: &str, eligible: bool) {
+            let mut slice = recovery_slice(ip, Some(true), Some(eligible));
+            slice.metadata.name = Some(format!("peer-{}", ip.replace('.', "-")));
+            self.writer
+                .apply_watcher_event(&kube::runtime::watcher::Event::Apply(slice));
+            self.changes_tx.send(1).unwrap();
+        }
 
-        let first_started = Arc::new(Notify::new());
-        let first_dropped = Arc::new(Notify::new());
-        let attempts = Arc::new(std::sync::Mutex::new(Vec::<Vec<String>>::new()));
-        let attempt_number = Arc::new(AtomicUsize::new(0));
-        let task = tokio::spawn({
-            let service = service.clone();
-            let cancel = cancel.clone();
-            let first_started = first_started.clone();
-            let first_dropped = first_dropped.clone();
-            let attempts = attempts.clone();
-            let attempt_number = attempt_number.clone();
-            async move {
-                let mut known = BTreeSet::new();
-                let mut changes_rx = changes_rx;
-                recover_initial_index_with_attempt(
-                    &service,
-                    &store,
-                    9092,
-                    port,
-                    "192.0.2.99",
-                    &mut known,
-                    &mut changes_rx,
-                    &cancel,
-                    Duration::from_millis(10),
-                    Duration::from_millis(40),
-                    move |_service, peers| {
-                        let peers = peers.to_vec();
-                        attempts.lock().unwrap().push(peers.clone());
-                        let number = attempt_number.fetch_add(1, Ordering::SeqCst);
-                        let first_started = first_started.clone();
-                        let first_dropped = first_dropped.clone();
-                        Box::pin(async move {
-                            if number == 0 {
-                                let _drop_signal = DropSignal(first_dropped);
-                                first_started.notify_one();
-                                std::future::pending::<()>().await;
-                                unreachable!("the old recovery attempt must be cancelled");
-                            }
-                            Ok(peers == vec![format!("http://{new_ip}:{port}")])
-                        })
-                    },
-                )
+        async fn remove(&mut self, ip: &str) {
+            let mut slice = recovery_slice(ip, Some(true), Some(true));
+            slice.metadata.name = Some(format!("peer-{}", ip.replace('.', "-")));
+            self.writer
+                .apply_watcher_event(&kube::runtime::watcher::Event::Delete(slice));
+            self.changes_tx.send(1).unwrap();
+        }
+
+        async fn assert_active_not_dropped(&self) {
+            // The in-flight attempt must survive the churn: no Drop.
+            let dropped = self.first_dropped.clone();
+            let result = tokio::time::timeout(Duration::from_millis(200), dropped.notified()).await;
+            assert!(
+                result.is_err(),
+                "in-flight recovery attempt must NOT be cancelled by EndpointSlice churn"
+            );
+        }
+
+        async fn finish(self) {
+            self.release.notify_one();
+            tokio::time::timeout(Duration::from_secs(3), self.task)
                 .await
-            }
-        });
-
-        tokio::time::timeout(Duration::from_secs(1), first_started.notified())
-            .await
-            .expect("old recovery request must be in flight");
-        let mut replacement = recovery_slice(new_ip, Some(true), Some(true));
-        replacement.metadata.name = Some("epp-peers-0".to_string());
-        writer.apply_watcher_event(&watcher::Event::Apply(replacement));
-        changes_tx.send(1).unwrap();
-
-        tokio::time::timeout(Duration::from_secs(1), first_dropped.notified())
-            .await
-            .expect("peer change must drop the old recovery future");
-        tokio::time::timeout(Duration::from_secs(1), task)
-            .await
-            .expect("peer change must not wait for old HTTP timeout")
-            .expect("recovery task joins")
-            .expect("new peer dump completes recovery");
-        assert_eq!(
-            *attempts.lock().unwrap(),
-            vec![
-                vec![format!("http://{old_ip}:{port}")],
-                vec![format!("http://{new_ip}:{port}")],
-            ]
-        );
-
-        cancel.cancel();
-        service.shutdown().await;
+                .expect("recovery must complete")
+                .expect("recovery task joins")
+                .expect("recovery must succeed");
+            self.cancel.cancel();
+            self.service.shutdown().await;
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn peers_disappearing_during_recovery_bootstraps() {
+    async fn unchanged_churn_keeps_inflight_attempt() {
+        let port = 9093;
+        let mut harness = ChurnHarness::start(&["192.0.2.10"], port, true).await;
+        tokio::time::timeout(Duration::from_secs(1), harness.first_started.notified())
+            .await
+            .expect("first recovery attempt must be in flight");
+
+        // Unrelated churn: same eligible set, metadata-only change (the reflector
+        // bumps the change channel on every Apply).
+        let mut slice = recovery_slice("192.0.2.10", Some(true), Some(true));
+        slice.metadata.name = Some("epp-peers-churn".to_string());
+        slice.metadata.annotations = Some(
+            [("note".to_string(), "churn".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        harness
+            .writer
+            .apply_watcher_event(&kube::runtime::watcher::Event::Apply(slice));
+        harness.changes_tx.send(1).unwrap();
+
+        harness.assert_active_not_dropped().await;
+        let attempts = harness.attempts.clone();
+        harness.finish().await;
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            vec![vec![format!("http://192.0.2.10:{port}")]],
+            "unrelated churn must not restart the attempt"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn join_during_recovery_keeps_active_then_tries_new_peer() {
+        let port = 9093;
+        let mut harness = ChurnHarness::start(&["192.0.2.10"], port, false).await;
+        tokio::time::timeout(Duration::from_secs(1), harness.first_started.notified())
+            .await
+            .expect("first recovery attempt must be in flight");
+
+        // A new serving peer joins mid-recovery: the active request must not be
+        // cancelled; once it fails, the new peer is tried next.
+        harness.apply("192.0.2.11", true).await;
+        harness.assert_active_not_dropped().await;
+        let attempts = harness.attempts.clone();
+        harness.finish().await;
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            vec![
+                vec![format!("http://192.0.2.10:{port}")],
+                vec![format!("http://192.0.2.11:{port}")],
+            ],
+            "a join must not cancel the active attempt; the new peer is tried after it fails"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn removal_of_unattempted_peer_drops_it_from_pending() {
+        let port = 9093;
+        let mut harness = ChurnHarness::start(&["192.0.2.10", "192.0.2.11"], port, false).await;
+        tokio::time::timeout(Duration::from_secs(1), harness.first_started.notified())
+            .await
+            .expect("first recovery attempt must be in flight");
+
+        // The first attempt is on whichever peer the attempt-scoped shuffle put
+        // first; the OTHER peer is unattempted. Remove that one mid-flight: it
+        // must be dropped from pending and never tried.
+        let first_peer = {
+            let attempts = harness.attempts.lock().unwrap();
+            attempts.last().expect("first attempt recorded")[0].clone()
+        };
+        let unattempted = if first_peer.contains("192.0.2.10") {
+            "192.0.2.11"
+        } else {
+            "192.0.2.10"
+        };
+        harness.remove(unattempted).await;
+        harness.assert_active_not_dropped().await;
+        let attempts = harness.attempts.clone();
+        harness.finish().await;
+        let attempts = attempts.lock().unwrap().clone();
+        assert!(
+            attempts.iter().all(|a| a == &vec![first_peer.clone()]),
+            "the removed peer must never be tried, got: {attempts:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn removal_of_active_peer_does_not_cancel_its_request() {
+        let port = 9093;
+        let mut harness = ChurnHarness::start(&["192.0.2.10"], port, true).await;
+        tokio::time::timeout(Duration::from_secs(1), harness.first_started.notified())
+            .await
+            .expect("first recovery attempt must be in flight");
+
+        // The active peer leaves the slice mid-transfer: the request is kept
+        // and may still complete successfully.
+        harness.remove("192.0.2.10").await;
+        harness.assert_active_not_dropped().await;
+        let attempts = harness.attempts.clone();
+        harness.finish().await;
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            vec![vec![format!("http://192.0.2.10:{port}")]],
+            "removal of the active peer must not cancel its request"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn peers_disappearing_during_recovery_keep_active_request() {
         use kube::runtime::watcher;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1268,11 +1463,14 @@ mod tests {
         writer.apply_watcher_event(&watcher::Event::Delete(old_slice));
         changes_tx.send(1).unwrap();
 
-        tokio::time::timeout(Duration::from_secs(1), task)
+        // The in-flight request is kept even though every peer is gone; only
+        // once it completes (empty snapshot = success) does recovery finish.
+        gate.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(3), task)
             .await
-            .expect("empty peer set must bootstrap without waiting for old request")
+            .expect("recovery must finish after the kept request completes")
             .expect("recovery task joins")
-            .expect("empty peer set bootstraps");
+            .expect("kept request completes recovery");
 
         cancel.cancel();
         server.abort();
@@ -1313,8 +1511,8 @@ mod tests {
         // Recovery candidates exclude the not-ready sibling (10.0.0.2): a
         // not-ready replica has no KV index yet, so it cannot bootstrap a peer.
         assert_eq!(
-            recovery_peer_urls(&store, "10.0.0.9", 9093),
-            vec!["http://10.0.0.3:9093".to_string()]
+            recovery_peer_set(&store, "10.0.0.9", 9093),
+            BTreeSet::from(["http://10.0.0.3:9093".to_string()])
         );
     }
 
@@ -1337,7 +1535,7 @@ mod tests {
             ..Default::default()
         };
         let (store, _writer) = store_and_writer(vec![slice]);
-        assert!(recovery_peer_urls(&store, "10.0.0.9", 9093).is_empty());
+        assert!(recovery_peer_set(&store, "10.0.0.9", 9093).is_empty());
     }
 
     #[test]
@@ -1358,7 +1556,7 @@ mod tests {
             ..Default::default()
         };
         let (store, _writer) = store_and_writer(vec![slice]);
-        assert!(recovery_peer_urls(&store, "10.0.0.9", 9093).is_empty());
+        assert!(recovery_peer_set(&store, "10.0.0.9", 9093).is_empty());
     }
 
     #[test]
@@ -1372,7 +1570,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_peer_urls_bracket_ipv6() {
+    fn recovery_peer_set_brackets_ipv6() {
         let slice = EndpointSlice {
             address_type: "IPv6".to_string(),
             endpoints: vec![Endpoint {
@@ -1387,8 +1585,8 @@ mod tests {
         };
         let (store, _writer) = store_and_writer(vec![slice]);
         assert_eq!(
-            recovery_peer_urls(&store, "fd00::1", 9093),
-            vec!["http://[fd00::2]:9093".to_string()]
+            recovery_peer_set(&store, "fd00::1", 9093),
+            BTreeSet::from(["http://[fd00::2]:9093".to_string()])
         );
     }
 
