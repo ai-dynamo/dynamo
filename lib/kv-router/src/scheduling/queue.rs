@@ -39,6 +39,11 @@ pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
 
 const ADMISSION_CHANNEL_CAPACITY: usize = 65_536;
 
+/// Cadence of the background sweep that reclaims capacity from queued requests
+/// whose client has disconnected. Small enough to bound stale-capacity
+/// retention, large enough to stay negligible against request rates.
+const QUEUE_SWEEP_INTERVAL: Duration = Duration::from_millis(100);
+
 struct ClassQueueCounters {
     pending_count: AtomicUsize,
     pending_isl_tokens: AtomicUsize,
@@ -689,7 +694,19 @@ impl<
 {
     async fn run(mut self, mut rx: mpsc::Receiver<AdmissionCommand>) {
         let mut commands_since_cleanup = 0usize;
-        while let Some(command) = rx.recv().await {
+        let mut sweep = tokio::time::interval(QUEUE_SWEEP_INTERVAL);
+        sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            let command = tokio::select! {
+                command = rx.recv() => match command {
+                    Some(command) => command,
+                    None => break,
+                },
+                _ = sweep.tick() => {
+                    self.evict_stale_or_cancelled();
+                    continue;
+                }
+            };
             let drain_cleanup = self.queueing_enabled && {
                 commands_since_cleanup += 1;
                 let drain_cleanup = rx.is_empty() || commands_since_cleanup == 256;
@@ -759,6 +776,33 @@ impl<
 
             let mut request = entry.into_payload().request;
             request.respond(Err(KvSchedulerError::SubscriberShutdown));
+        }
+    }
+
+    /// Periodically reclaim capacity held by queued requests whose client has
+    /// already disconnected.
+    ///
+    /// Ticket-tracked entries are released through the admission-lease path in
+    /// `drain_cleanup`, which keeps admission accounting consistent. This sweep
+    /// is the backstop for queued requests that carry no admission ticket (for
+    /// example non-lifecycle tracked modes, which are never issued a lifecycle
+    /// lease): without it, a closed response is only noticed once the request
+    /// reaches the dispatch head, so a cancelled request parked behind others
+    /// keeps holding its counted capacity until it is dequeued. Freed capacity
+    /// is picked up by the next scheduling pass.
+    fn evict_stale_or_cancelled(&mut self) {
+        if self.pending.pending_count() == 0 {
+            return;
+        }
+        for class_index in 0..self.profile.classes().len() {
+            let (removed, _removed_ready_head) =
+                self.pending.take_if_in_class(class_index, |queued| {
+                    queued.admission.is_none() && queued.request.response_is_closed()
+                });
+            for entry in removed {
+                self.subtract_pending_counters(class_index, entry.snapshot());
+                tracing::debug!("evicted cancelled request from router admission queue");
+            }
         }
     }
 
@@ -2122,6 +2166,41 @@ mod tests {
 
         assert_eq!(queue.pending_count(), 0);
         slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test]
+    async fn cancelled_pending_request_is_swept_without_dispatch() {
+        let isl = 512;
+        let (queue, _slots) = make_queue(1, 16, isl, Some(0.0));
+
+        // First request books the only worker's capacity.
+        let (first, first_rx) = make_request("first", isl);
+        queue.enqueue(first).await;
+        first_rx
+            .await
+            .expect("first response sender dropped")
+            .expect("first request should occupy the worker");
+
+        // Second request parks in the admission queue behind the capacity holder.
+        let (cancelled, cancelled_rx) = make_request("cancelled", isl);
+        queue.enqueue(cancelled).await;
+        assert_eq!(queue.pending_count(), 1);
+        assert_eq!(queue.pending_isl_tokens(), isl);
+
+        // Client goes away. No dispatch, worker free, or update follows, so only
+        // the periodic sweep can reclaim the parked capacity.
+        drop(cancelled_rx);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while queue.pending_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("sweep did not evict the cancelled pending request");
+
+        assert_eq!(queue.pending_count(), 0);
+        assert_eq!(queue.pending_isl_tokens(), 0);
     }
 
     #[tokio::test]
