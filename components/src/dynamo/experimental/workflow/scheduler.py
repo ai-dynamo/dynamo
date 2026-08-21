@@ -59,6 +59,10 @@ class GraphScheduler:
             stage_outputs = await asyncio.shield(tasks[stage_id])
             return stage_outputs[output_name]
 
+        async def resolve_output(name: str, reference: ValueRef) -> Any:
+            value = await resolve_raw(reference)
+            return self._dispatcher.resolve_workflow_output(name, value)
+
         for stage in self._workflow.stages:
             tasks[stage.id] = asyncio.create_task(
                 run_stage(stage), name=f"workflow:{stage.id}"
@@ -67,8 +71,8 @@ class GraphScheduler:
         try:
             output_values = await asyncio.gather(
                 *(
-                    resolve_raw(reference)
-                    for reference in self._workflow.outputs.values()
+                    resolve_output(name, reference)
+                    for name, reference in self._workflow.outputs.items()
                 )
             )
             return dict(zip(self._workflow.outputs, output_values))

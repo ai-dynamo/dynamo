@@ -6,29 +6,21 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from types import MappingProxyType, SimpleNamespace
+from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
-from dynamo.experimental.workflow.nixl import NixlTensorFanout, NixlTensorRef
+from dynamo.experimental.workflow.generate import GenerateEndpointInvoker
+from dynamo.experimental.workflow.nixl import NixlTensorFanout
 from dynamo.experimental.workflow.plan import (
     NIXL_CARRIER,
     ExecutionPlan,
+    GenerateEndpointBinding,
     InlineBinding,
     RemoteBinding,
 )
-from dynamo.experimental.workflow.remote import RemoteStageClient
-from dynamo.experimental.workflow.runtime import (
-    StageContext,
-    StageRunner,
-    WorkflowExecutionError,
-    _validate_value,
-)
-from dynamo.experimental.workflow.types import (
-    StageContract,
-    ValueRef,
-    WorkflowValidationError,
-    _require_value_spec,
-)
+from dynamo.experimental.workflow.remote import NixlCarriedValue, RemoteStageClient
+from dynamo.experimental.workflow.runtime import StageContext, StageRunner, WorkflowExecutionError
+from dynamo.experimental.workflow.types import StageContract, ValueRef, WorkflowValidationError
 
 
 @runtime_checkable
@@ -53,7 +45,7 @@ class StageDispatcher:
         self,
         plan: ExecutionPlan,
         inline_runners: Mapping[str, StageRunner],
-        remote_clients: Mapping[str, RemoteStageInvoker] = MappingProxyType({}),
+        remote_clients: Mapping[str, Any] = MappingProxyType({}),
     ) -> None:
         if not isinstance(plan, ExecutionPlan):
             raise TypeError("plan must use ExecutionPlan")
@@ -61,6 +53,7 @@ class StageDispatcher:
             raise TypeError("inline_runners must be a mapping")
         if not isinstance(remote_clients, Mapping):
             raise TypeError("remote_clients must be a mapping")
+
         expected_keys = {
             binding.runner_key
             for binding in plan.bindings.values()
@@ -74,7 +67,6 @@ class StageDispatcher:
                 f"extra={sorted(actual_keys - expected_keys)}"
             )
 
-        runners = dict(inline_runners)
         expected_endpoints = {
             binding.endpoint_id
             for binding in plan.bindings.values()
@@ -87,13 +79,8 @@ class StageDispatcher:
                 f"missing={sorted(expected_endpoints - actual_endpoints)}, "
                 f"extra={sorted(actual_endpoints - expected_endpoints)}"
             )
-        clients = dict(remote_clients)
-        for endpoint_id, client in clients.items():
-            if not isinstance(client, RemoteStageInvoker):
-                raise WorkflowValidationError(
-                    f"remote client {endpoint_id!r} does not implement stage invocation"
-                )
 
+        runners = dict(inline_runners)
         for stage_id, contract in plan.stage_contracts.items():
             binding = plan.bindings[stage_id]
             if isinstance(binding, RemoteBinding):
@@ -109,24 +96,27 @@ class StageDispatcher:
                     "does not match its authored contract"
                 )
 
+        output_transfers: dict[str, dict[str, list[str]]] = {}
+        for target in plan.workflow.stages:
+            target_binding = plan.bindings[target.id]
+            if not self._nixl_remote(target_binding):
+                continue
+            for target_port, source in target.inputs.items():
+                if source.stage_id is None:
+                    continue
+                source_binding = plan.bindings[source.stage_id]
+                if not self._nixl_remote(source_binding):
+                    continue
+                source_output = source.output_name
+                assert source_output is not None
+                outputs = output_transfers.setdefault(source.stage_id, {})
+                outputs.setdefault(source_output, []).append(
+                    f"{target.id}.{target_port}"
+                )
+
         self._plan = plan
         self._inline_runners = MappingProxyType(runners)
-        self._remote_clients = MappingProxyType(clients)
-        self._edges_by_target = MappingProxyType(
-            {(edge.target_stage, edge.target_port): edge for edge in plan.edges}
-        )
-
-        output_transfers: dict[str, dict[str, list[str]]] = {}
-        for edge in plan.edges:
-            if edge.carrier != NIXL_CARRIER:
-                continue
-            source_stage_id = edge.source.stage_id
-            if source_stage_id is None:
-                continue
-            source_output_name = edge.source.output_name
-            assert source_output_name is not None
-            stage_outputs = output_transfers.setdefault(source_stage_id, {})
-            stage_outputs.setdefault(source_output_name, []).append(edge.transfer_id)
+        self._remote_clients = MappingProxyType(dict(remote_clients))
         self._output_transfers = MappingProxyType(
             {
                 stage_id: MappingProxyType(
@@ -137,6 +127,13 @@ class StageDispatcher:
                 )
                 for stage_id, outputs in output_transfers.items()
             }
+        )
+
+    @staticmethod
+    def _nixl_remote(binding: Any) -> bool:
+        return (
+            isinstance(binding, RemoteBinding)
+            and binding.tensor_carrier == NIXL_CARRIER
         )
 
     @classmethod
@@ -159,7 +156,7 @@ class StageDispatcher:
                 "runtime is required to bind remote workflow stages"
             )
 
-        clients: dict[str, RemoteStageInvoker] = {}
+        clients: dict[str, Any] = {}
         for endpoint_id in sorted(endpoint_ids):
             bindings = [
                 binding
@@ -180,7 +177,11 @@ class StageDispatcher:
             endpoint = runtime.endpoint(endpoint_id)
             client = await endpoint.client()
             await client.wait_for_instances()
-            clients[endpoint_id] = RemoteStageClient(client)
+            clients[endpoint_id] = (
+                GenerateEndpointInvoker(client)
+                if protocols == {GenerateEndpointBinding}
+                else RemoteStageClient(client)
+            )
         return cls(plan, inline_runners, clients)
 
     async def call(
@@ -201,27 +202,16 @@ class StageDispatcher:
                 f"missing={sorted(expected_inputs - actual_inputs)}, "
                 f"extra={sorted(actual_inputs - expected_inputs)}"
             )
-        binding = self._plan.bindings[stage_id]
-        for input_name, spec in contract.inputs.items():
-            value_spec = _require_value_spec(
-                spec, f"stage {stage_id!r} input {input_name!r}"
-            )
-            value = inputs[input_name]
-            location = f"stage {stage_id!r} input {input_name!r}"
-            if isinstance(binding, RemoteBinding) and value_spec.type == "tensor":
-                reference = NixlTensorRef.from_dict(value)
-                _validate_value(
-                    value_spec,
-                    SimpleNamespace(dtype=reference.dtype, shape=reference.shape),
-                    location,
-                )
-            else:
-                _validate_value(value_spec, value, location)
 
+        binding = self._plan.bindings[stage_id]
         frozen_inputs = MappingProxyType(dict(inputs))
         if isinstance(binding, InlineBinding):
             result = await self._inline_runners[binding.runner_key].run(
                 frozen_inputs, context
+            )
+        elif isinstance(binding, GenerateEndpointBinding):
+            result = await self._remote_clients[binding.endpoint_id].run(
+                stage_id, contract, frozen_inputs, context
             )
         else:
             result = await self._remote_clients[binding.endpoint_id].run(
@@ -243,30 +233,7 @@ class StageDispatcher:
                 f"missing={sorted(expected_outputs - actual_outputs)}, "
                 f"extra={sorted(actual_outputs - expected_outputs)}"
             )
-        outputs = dict(result)
-        for output_name, spec in contract.outputs.items():
-            value_spec = _require_value_spec(
-                spec, f"stage {stage_id!r} output {output_name!r}"
-            )
-            if isinstance(binding, RemoteBinding) and value_spec.type == "tensor":
-                fanout = NixlTensorFanout.from_dict(outputs[output_name])
-                expected_transfers = set(
-                    self._output_transfers.get(stage_id, MappingProxyType({})).get(
-                        output_name, ()
-                    )
-                )
-                if set(fanout.transfers) != expected_transfers:
-                    raise WorkflowExecutionError(
-                        f"remote stage {stage_id!r} tensor output "
-                        f"{output_name!r} transfers differ from execution plan"
-                    )
-            else:
-                _validate_value(
-                    spec,
-                    outputs[output_name],
-                    f"stage {stage_id!r} output {output_name!r}",
-                )
-        return outputs
+        return dict(result)
 
     async def resolve_edge(
         self,
@@ -275,26 +242,32 @@ class StageDispatcher:
         target_port: str,
         value: Any,
     ) -> Any:
-        """Materialize one compiled graph edge for its target placement."""
+        """Select a consumer-specific NIXL reference when a value was carried."""
 
-        edge = self._edges_by_target[(target_stage, target_port)]
-        if edge.source != reference:
-            raise WorkflowExecutionError(
-                f"edge targeting {target_stage!r}.{target_port!r} changed after compile"
-            )
-        if edge.carrier != NIXL_CARRIER:
+        if not isinstance(value, NixlCarriedValue):
             return value
-
-        if reference.stage_id is None or not isinstance(
-            self._plan.bindings[reference.stage_id], RemoteBinding
+        transfer_id = f"{target_stage}.{target_port}"
+        source_stage = reference.stage_id
+        if source_stage is None or not self._nixl_remote(
+            self._plan.bindings[source_stage]
         ):
             raise WorkflowExecutionError(
-                f"NIXL edge {edge.transfer_id!r} must connect two remote stages"
+                f"NIXL edge {transfer_id!r} must originate from a NIXL remote stage"
             )
-        if not isinstance(self._plan.bindings[target_stage], RemoteBinding):
+        if not self._nixl_remote(self._plan.bindings[target_stage]):
             raise WorkflowExecutionError(
-                f"NIXL edge {edge.transfer_id!r} must target a remote stage"
+                f"NIXL edge {transfer_id!r} must target a NIXL remote stage"
             )
-        return (
-            NixlTensorFanout.from_dict(value).for_transfer(edge.transfer_id).to_dict()
+        reference_value = NixlTensorFanout.from_dict(value.value).for_transfer(
+            transfer_id
         )
+        return NixlCarriedValue(reference_value.to_dict())
+
+    def resolve_workflow_output(self, output_name: str, value: Any) -> Any:
+        """Reject carried tensors from the current unary workflow boundary."""
+
+        if isinstance(value, NixlCarriedValue):
+            raise WorkflowExecutionError(
+                f"workflow output {output_name!r} cannot expose a NIXL tensor"
+            )
+        return value

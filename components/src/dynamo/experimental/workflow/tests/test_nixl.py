@@ -8,18 +8,20 @@ import torch
 
 from dynamo.experimental.workflow import (
     DeploymentSpec,
+    InlineBinding,
     NixlLeaseRegistry,
     NixlTensorCarrier,
     NixlTensorFanout,
     NixlTensorRef,
+    RemoteBinding,
     StageContract,
-    ValueSpec,
     Workflow,
     WorkflowExecutionError,
     WorkflowOrchestrator,
     compile_workflow,
 )
 from dynamo.experimental.workflow.dispatcher import StageDispatcher
+from dynamo.experimental.workflow.remote import NixlCarriedValue
 
 pytestmark = [
     pytest.mark.unit,
@@ -221,27 +223,26 @@ def test_tensor_reference_rejects_unknown_wire_fields() -> None:
         NixlTensorRef.from_dict(reference)
 
 
-TENSOR = ValueSpec(type="tensor", dtype="float32", shape=("dynamic", 8))
 ENCODER = StageContract(
     id="encoder",
-    inputs={"request": ValueSpec(type="json")},
-    outputs={"embedding": TENSOR},
+    inputs={"request"},
+    outputs={"embedding"},
 )
 CLASSIFIER = StageContract(
     id="classifier",
-    inputs={"embedding": TENSOR},
-    outputs={"scores": ValueSpec(type="json")},
+    inputs={"embedding"},
+    outputs={"scores"},
 )
 GENERATOR = StageContract(
     id="generator",
-    inputs={"embedding": TENSOR},
-    outputs={"text": ValueSpec(type="text")},
+    inputs={"embedding"},
+    outputs={"text"},
 )
 
 
 def _tensor_workflow() -> Workflow:
     workflow = Workflow("nixl-fanout")
-    request = workflow.input("request", ValueSpec(type="json"))
+    request = workflow.input("request")
     encoder = workflow.stage("encoder", ENCODER, request=request)
     classifier = workflow.stage("classifier", CLASSIFIER, embedding=encoder.embedding)
     generator = workflow.stage("generator", GENERATOR, embedding=encoder.embedding)
@@ -259,22 +260,26 @@ class _RemoteTensorInvoker:
         self.calls.append((dict(inputs), dict(output_transfers)))
         assert stage_id == self.role
         if self.role == "encoder":
+            transfer_ids = output_transfers.get("embedding", ("classifier.embedding",))
             return {
-                "embedding": NixlTensorFanout(
-                    {
-                        transfer_id: NixlTensorRef(
-                            transfer_id=transfer_id,
-                            lease_id=f"lease-{transfer_id}",
-                            shape=(4, 8),
-                            dtype="float32",
-                            device="cuda:0",
-                            rdma_metadata={"opaque": transfer_id},
-                        )
-                        for transfer_id in output_transfers["embedding"]
-                    }
-                ).to_dict()
+                "embedding": NixlCarriedValue(
+                    NixlTensorFanout(
+                        {
+                            transfer_id: NixlTensorRef(
+                                transfer_id=transfer_id,
+                                lease_id=f"lease-{transfer_id}",
+                                shape=(4, 8),
+                                dtype="float32",
+                                device="cuda:0",
+                                rdma_metadata={"opaque": transfer_id},
+                            )
+                            for transfer_id in transfer_ids
+                        }
+                    ).to_dict()
+                )
             }
-        reference = NixlTensorRef.from_dict(inputs["embedding"])
+        assert isinstance(inputs["embedding"], NixlCarriedValue)
+        reference = NixlTensorRef.from_dict(inputs["embedding"].value)
         assert reference.transfer_id == f"{self.role}.embedding"
         if self.role == "classifier":
             return {"scores": {"ok": 1.0}}
@@ -303,3 +308,62 @@ async def test_graph_dispatches_one_remote_nixl_reference_per_consumer() -> None
     assert invokers[endpoints["encoder"]].calls[0][1] == {
         "embedding": ("classifier.embedding", "generator.embedding")
     }
+
+
+async def test_carried_tensor_cannot_cross_inline_boundary() -> None:
+    workflow = Workflow("mixed-nixl")
+    request = workflow.input("request")
+    encoder = workflow.stage("encoder", ENCODER, request=request)
+    classifier = workflow.stage("classifier", CLASSIFIER, embedding=encoder.embedding)
+    workflow.output("scores", classifier.scores)
+    plan = compile_workflow(
+        workflow,
+        DeploymentSpec(
+            {
+                "encoder": RemoteBinding(
+                    "workflows.encoder.generate", tensor_carrier="nixl"
+                ),
+                "classifier": InlineBinding("classifier"),
+            }
+        ),
+    )
+
+    class InlineClassifier:
+        contract = CLASSIFIER
+
+        async def run(self, inputs, context):
+            raise AssertionError("inline runner must not receive a NIXL reference")
+
+    dispatcher = StageDispatcher(
+        plan,
+        {"classifier": InlineClassifier()},
+        {"workflows.encoder.generate": _RemoteTensorInvoker("encoder")},
+    )
+    executor = WorkflowOrchestrator(plan, dispatcher)
+
+    with pytest.raises(WorkflowExecutionError, match="must target a NIXL remote"):
+        await executor.run({"request": {"token_ids": [1]}})
+
+
+async def test_carried_tensor_cannot_be_a_workflow_output() -> None:
+    workflow = Workflow("nixl-output")
+    request = workflow.input("request")
+    encoder = workflow.stage("encoder", ENCODER, request=request)
+    workflow.output("embedding", encoder.embedding)
+    endpoint = "workflows.encoder.generate"
+    plan = compile_workflow(
+        workflow,
+        DeploymentSpec.remote(
+            tensor_carrier="nixl",
+            encoder=endpoint,
+        ),
+    )
+    dispatcher = StageDispatcher(
+        plan,
+        {},
+        {endpoint: _RemoteTensorInvoker("encoder")},
+    )
+    executor = WorkflowOrchestrator(plan, dispatcher)
+
+    with pytest.raises(WorkflowExecutionError, match="cannot expose a NIXL tensor"):
+        await executor.run({"request": {"token_ids": [1]}})

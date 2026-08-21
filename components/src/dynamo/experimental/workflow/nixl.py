@@ -356,6 +356,11 @@ class NixlTensorCarrier:
     def active_leases(self) -> int:
         return self._leases.active_count
 
+    def can_export(self, value: Any) -> bool:
+        """Whether ``value`` is a complete top-level tensor port value."""
+
+        return isinstance(value, self._torch.Tensor)
+
     async def export_tensor(self, tensor: Any, transfer_id: str) -> Mapping[str, Any]:
         references = await self.export_tensor_fanout(tensor, (transfer_id,))
         return references[transfer_id]
@@ -365,7 +370,7 @@ class NixlTensorCarrier:
     ) -> Mapping[str, Mapping[str, Any]]:
         """Export one shared tensor through one independently addressed read per consumer."""
 
-        if not isinstance(tensor, self._torch.Tensor):
+        if not self.can_export(tensor):
             raise WorkflowExecutionError("NIXL carrier can export torch.Tensor only")
         if not isinstance(transfer_ids, tuple) or not transfer_ids:
             raise WorkflowExecutionError("NIXL tensor export requires transfer ids")
