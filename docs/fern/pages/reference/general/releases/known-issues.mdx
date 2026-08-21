@@ -171,12 +171,6 @@ Dynamo + TRT-LLM servers hit a scheduler deadlock and crash roughly every 30 min
 
 > **Workaround:** Disable KV cache reuse or chunked prefill until the rc13 bump lands.
 
-#### Qwen3‑235B‑A22B‑FP8 CuTe Experimental NotImplementedError on Blackwell *(carryover from v1.0.0)*
-
-Deploying the `qwen3-235b-a22b-fp8` recipes (both agg and disagg) on GB200/Blackwell still fails at runtime with `NotImplementedError: CuTe Experimental module is only supported on Cuda toolkit 13.1 and above!`. Caused by a packaging mismatch in the container image: the bundled `nvidia-cutlass-dsl==4.3.4` wheel is the pre-CUDA-13.1 variant that stubs out `cutlass.cute.experimental`, while the image itself ships CUDA 13.1 and TRT‑LLM's Blackwell FP8 GEMM path requires `cute.experimental` to be functional.
-
-> **Workaround:** Use the GB200-supported recipe variants until the container packaging is realigned.
-
 #### TRT-LLM Disaggregated Multimodal Path Edge Cases
 
 The TRT-LLM disaggregated embeddings/prefill/decode path has had multiple fixes land in v1.1.0 (#6726, #6810, #6840, #6920, #6924) but specific model+config combinations can still raise input-shape errors because the LLM API does not accept the token IDs + multimodal embeddings tuple for all model classes.
@@ -352,12 +346,6 @@ Deploying the SGLang DSR1 recipe or using it as a base config in the SLA profile
 > **Workaround:** (1) Download the HF model into a standard HF directory and set `HF_HOME` to the PVC-mounted path, (2) update `--model-path` to point at the directory containing the downloaded HF cache (not supported for SLA profiler), or (3) provide `HF_TOKEN` so the model can be downloaded directly.
 
 ### TensorRT-LLM
-
-#### Qwen3‑235B‑A22B‑FP8 fails with CuTe Experimental NotImplementedError on Blackwell
-
-Deploying the `qwen3-235b-a22b-fp8` recipes (both agg and disagg) on GB200/Blackwell fails at runtime with: `NotImplementedError: CuTe Experimental module is only supported on Cuda toolkit 13.1 and above!`
-
-> **Workaround:** This is caused by a packaging mismatch in the container image: the `nvidia-cutlass-dsl==4.3.4` wheel baked into the image is the CUDA \< 13.1 variant that stubs out `cutlass.cute.experimental` by unconditionally raising `NotImplementedError`, while the image itself ships CUDA 13.1 and TensorRT‑LLM’s Blackwell FP8 GEMM path (`cute_dsl_fp8_gemm_blackwell`) requires `cute.experimental` to be functional
 
 </Accordion>
 

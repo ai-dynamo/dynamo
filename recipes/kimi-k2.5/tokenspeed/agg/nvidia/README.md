@@ -225,7 +225,7 @@ differs on three axes:
 
 1. **Engine knobs are inline CLI flags, not a ConfigMap.** TokenSpeed accepts engine
    knobs directly on the worker command line, similar to vLLM. Layout therefore
-   mirrors [`recipes/llama-3-70b/vllm/agg/`](../../../../llama-3-70b/vllm/agg/) rather
+   mirrors [`recipes/gpt-oss-120b/vllm/agg-b200-agentic/`](../../../../gpt-oss-120b/vllm/agg-b200-agentic/) rather
    than the TRT-LLM ConfigMap pattern.
 2. **Raw `Deployment` + `Service` resources, not a `DynamoGraphDeployment`.** The
    operator's `backendFramework` enum currently only validates `vllm`, `sglang`,

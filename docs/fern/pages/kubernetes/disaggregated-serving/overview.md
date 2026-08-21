@@ -282,9 +282,8 @@ template and adapt it:
 
 Good recipe starting points:
 
-- [Qwen3-32B vLLM disagg + KV router](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b)
-- [DeepSeek V3.2 TensorRT-LLM disagg + KV router](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v32-fp4)
-- [Llama 3 70B vLLM disaggregated recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b)
+- [Kimi-K3 vLLM disagg + KV router](https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k3)
+- [GPT-OSS-120B vLLM agentic recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes/gpt-oss-120b)
 
 Backend deployment examples with concrete worker flags:
 

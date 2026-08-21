@@ -478,36 +478,18 @@ navigation:
           - page: Nemotron 3 Super
             path: pages/recipes/model-recipes/nemotron-3-super.mdx
             slug: nemotron-3-super
-          - page: GLM-5 NVFP4
-            path: pages/recipes/model-recipes/glm-5-nvfp4.mdx
-            slug: glm-5-nvfp4
           - page: DeepSeek-V4-Pro
             path: pages/recipes/model-recipes/deepseek-v4-pro.mdx
             slug: deepseek-v4-pro
           - page: DeepSeek-V4-Flash
             path: pages/recipes/model-recipes/deepseek-v4-flash.mdx
             slug: deepseek-v4-flash
-          - page: DeepSeek V3.2 NVFP4
-            path: pages/recipes/model-recipes/deepseek-v3-2-nvfp4.mdx
-            slug: deepseek-v3-2-nvfp4
           - page: GPT-OSS-120B
             path: pages/recipes/model-recipes/gpt-oss-120b.mdx
             slug: gpt-oss-120b
-          - page: Qwen3-32B
-            path: pages/recipes/model-recipes/qwen3-32b.mdx
-            slug: qwen3-32b
           - page: Qwen3.5-122B-A10B
             path: pages/recipes/model-recipes/qwen3-5-122b.mdx
             slug: qwen3-5-122b
-          - page: Qwen3-235B-A22B FP8
-            path: pages/recipes/model-recipes/qwen3-235b-a22b-fp8.mdx
-            slug: qwen3-235b-a22b-fp8
-          - page: Qwen3-32B FP8
-            path: pages/recipes/model-recipes/qwen3-32b-fp8.mdx
-            slug: qwen3-32b-fp8
-          - page: Llama-3.3-70B FP8
-            path: pages/recipes/model-recipes/llama-3-3-70b-fp8.mdx
-            slug: llama-3-3-70b
 
       # ==================== Kubernetes Templates ====================
       - section: Kubernetes Templates
@@ -565,10 +547,6 @@ navigation:
             path: pages/recipes/feature-benchmarks/planner-replay-benchmarking.md
             slug: planner-replay-benchmarking
             hidden: true
-          - page: Qwen3-32B KV Routing A/B
-            path: pages/recipes/feature-benchmarks/qwen3-32b-kv-routing-a-b.mdx
-            slug: qwen3-32b-kv-routing
-            hidden: true
           - page: Agentic Coding Throughput Stack - Kimi-K2.5
             path: pages/recipes/feature-benchmarks/agentic-coding-throughput-stack-kimi-k2-5.mdx
             slug: kimi-k2-5-feature-stack
@@ -576,18 +554,6 @@ navigation:
           - page: Qwen3.6-35B Feature Stack
             path: pages/recipes/feature-benchmarks/qwen3-6-35b-feature-stack.mdx
             slug: qwen3-6-35b-feature-stack
-            hidden: true
-          - page: Qwen3-VL Embedding Cache
-            path: pages/recipes/feature-benchmarks/qwen3-vl-embedding-cache.mdx
-            slug: qwen3-vl-embedding-cache
-            hidden: true
-          - page: DeepSeek V3.2 WideEP Routing
-            path: pages/recipes/feature-benchmarks/deepseek-v3-2-wideep-routing.mdx
-            slug: deepseek-v3-2-wideep-routing
-            hidden: true
-          - page: Llama-3.3-70B Topology
-            path: pages/recipes/feature-benchmarks/llama-3-3-70b-topology.mdx
-            slug: llama-3-70b-topology
             hidden: true
           - page: KV Router A/B Testing
             path: pages/recipes/feature-benchmarks/kv-router-a-b-testing.md
