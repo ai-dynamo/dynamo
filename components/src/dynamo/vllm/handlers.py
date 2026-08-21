@@ -2043,10 +2043,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         except Exception as e:
             logger.error(f"Error in abort monitor for request {request_id}: {e}")
         finally:
+            to_drain = []
             for task in wait_for:
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(*wait_for, return_exceptions=True)
+                    to_drain.append(task)
+            # Avoid suspending with EngineShutdown in flight. The owner can
+            # otherwise cancel this monitor and replace the pending exception.
+            if to_drain:
+                await asyncio.gather(*to_drain, return_exceptions=True)
 
     @asynccontextmanager
     async def _abort_monitor(
