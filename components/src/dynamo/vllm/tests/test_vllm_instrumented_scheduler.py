@@ -37,6 +37,7 @@ from dynamo.vllm.benchmark_points import (  # noqa: E402
     PrefillPointCandidate,
 )
 from dynamo.vllm.instrumented_scheduler import (  # noqa: E402
+    EAGER_WARMUP_REASON,
     BenchmarkConfig,
     BenchmarkPoint,
     InstrumentedScheduler,
@@ -1647,8 +1648,13 @@ def test_benchmark_grid_has_no_point_cap():
     InstrumentedScheduler._bench_build_grid(stub)
 
     assert stub._bench_expected_points == 4097
-    assert len(stub._bench_grid) == 4097
-    assert [point.benchmark_id for point in stub._bench_grid] == list(range(1, 4098))
+    real_points = [
+        point
+        for point in stub._bench_grid
+        if EAGER_WARMUP_REASON not in point.sample_reasons
+    ]
+    assert len(real_points) == 4097
+    assert [point.benchmark_id for point in real_points] == list(range(1, 4098))
     assert stub._bench_grid_error is None
 
 
@@ -1674,7 +1680,21 @@ def test_benchmark_grid_assigns_stable_contiguous_ids_and_digest():
 
     InstrumentedScheduler._bench_build_grid(stub)
 
-    assert [point.benchmark_id for point in stub._bench_grid] == [1, 2]
+    real_points = [
+        point
+        for point in stub._bench_grid
+        if EAGER_WARMUP_REASON not in point.sample_reasons
+    ]
+    warmup_points = [
+        point
+        for point in stub._bench_grid
+        if EAGER_WARMUP_REASON in point.sample_reasons
+    ]
+    # Real points own the contiguous 1..N range (native-artifact contract);
+    # discarded eager-warmup replicas take IDs after the real range even
+    # though they execute first.
+    assert [point.benchmark_id for point in real_points] == [1, 2]
+    assert [point.benchmark_id for point in warmup_points] == [3, 4]
     assert len(stub._bench_grid_digest) == 64
 
 
@@ -2286,6 +2306,44 @@ def test_agg_grid_contains_piecewise_prefill_then_full_decode_points():
         for point in points
         if point.point_type == "decode"
     } == {"FULL"}
+
+
+def test_agg_eager_warmups_stay_contiguous_with_their_phase():
+    """``_bench_pop_next()`` treats a type mismatch at the queue front as
+    "phase complete", so eager warmups of both types prepended as a single
+    run would end PREFILL_SWEEP at the first decode warmup and DECODE_SWEEP
+    at the first real prefill point, silently dropping every real point."""
+    stub = _prefill_grid_stub()
+    stub._bench_grid = deque()
+    stub._bench_grid_built = False
+    stub._bench_missing_phases = []
+    stub._bench_grid_error = None
+    stub._bench_feasible_max_decode_batch_size = 0
+    stub._bench_config.mode = "agg"
+    stub._bench_explicit_points = None
+    # Captures end below the feasible max batch so decode also has eager
+    # shapes; prefill already has them (max tokens 40 > largest capture 16).
+    stub._bench_decode_capture_sizes = [1, 2, 4]
+    stub._bench_decode_cudagraph_mode = "FULL"
+
+    InstrumentedScheduler._bench_build_grid(stub)
+
+    points = list(stub._bench_grid)
+    warmup_types = {
+        point.point_type
+        for point in points
+        if instrumented_scheduler_module.EAGER_WARMUP_REASON in point.sample_reasons
+    }
+    assert warmup_types == {"prefill", "decode"}, "need warmups on both phases"
+
+    # Drain the grid exactly as the phase machine does: prefill until the
+    # front stops matching, then decode.
+    drained = 0
+    for phase in ("prefill", "decode"):
+        while InstrumentedScheduler._bench_pop_next(stub, phase) is not None:
+            drained += 1
+    assert not stub._bench_grid, "phase transitions must consume every point"
+    assert drained == len(points)
 
 
 def test_prefill_kv_read_ladder_is_total_block_aligned():
@@ -3647,3 +3705,153 @@ def test_steady_fpm_gate_only_fires_for_two_step_decode_points():
     stub._bench_current_point = BenchmarkPoint(point_type="decode")
     stub._last_update_time = 0.0  # previous update was an empty step
     assert InstrumentedScheduler._bench_steady_fpm_expected(stub) is False
+
+
+def test_eager_warmup_points_dedupe_and_flag():
+    EAGER_WARMUP_REASON = instrumented_scheduler_module.EAGER_WARMUP_REASON
+    grid = [
+        BenchmarkPoint(
+            point_type="decode",
+            batch_size=513,
+            total_kv_read_tokens=513,
+            expected_capture_size=None,
+        ),
+        BenchmarkPoint(
+            point_type="decode",
+            batch_size=513,
+            total_kv_read_tokens=2048,
+            expected_capture_size=None,
+        ),
+        BenchmarkPoint(
+            point_type="decode",
+            batch_size=512,
+            total_kv_read_tokens=512,
+            expected_capture_size=512,
+        ),
+        BenchmarkPoint(
+            point_type="prefill",
+            batch_size=1,
+            total_prefill_tokens=1024,
+            total_kv_read_tokens=0,
+            expected_capture_size=None,
+        ),
+        BenchmarkPoint(
+            point_type="prefill",
+            batch_size=2,
+            total_prefill_tokens=1024,
+            total_kv_read_tokens=4096,
+            expected_capture_size=None,
+        ),
+        BenchmarkPoint(
+            point_type="prefill",
+            batch_size=1,
+            total_prefill_tokens=256,
+            total_kv_read_tokens=0,
+            expected_capture_size=256,
+        ),
+    ]
+    stub = SimpleNamespace(_bench_grid=grid)
+    replicas = InstrumentedScheduler._bench_eager_warmup_points(stub)
+
+    assert [(p.point_type, p.batch_size, p.total_prefill_tokens) for p in replicas] == [
+        ("decode", 513, 0),
+        ("prefill", 1, 1024),
+    ]
+    assert all(p.sample_reasons == [EAGER_WARMUP_REASON] for p in replicas)
+    # originals untouched
+    assert all(EAGER_WARMUP_REASON not in p.sample_reasons for p in grid)
+
+
+def test_warmup_replica_with_failed_validation_is_discarded_not_skipped():
+    """A warmup replica whose FPM fails shape validation must be discarded:
+    recording it in skipped_points would mark the whole artifact unusable
+    even though every real measurement succeeded."""
+    point = BenchmarkPoint(
+        point_type="decode",
+        benchmark_id=9,
+        total_kv_read_tokens=48,
+        batch_size=3,
+        sample_reasons=[instrumented_scheduler_module.EAGER_WARMUP_REASON],
+    )
+    stub = _benchmark_save_stub(
+        point,
+        [
+            {
+                "scheduled_requests": {
+                    "num_decode_requests": 3,
+                    "sum_decode_kv_tokens": 47,  # mismatch -> validation failure
+                }
+            }
+        ],
+    )
+
+    InstrumentedScheduler._bench_save_current_point(stub)
+
+    assert stub._bench_results == []
+    assert stub._bench_skipped_points == []
+    assert stub._bench_current_point is None
+
+
+def test_warmup_replica_injection_failure_is_discarded_not_skipped():
+    """A warmup replica that dies BEFORE producing an FPM (decode injection
+    shortfall) must also stay out of skipped-point accounting: every
+    ``_bench_skip_point`` caller shares the central warmup exemption."""
+    point = BenchmarkPoint(
+        point_type="decode",
+        benchmark_id=9,
+        total_kv_read_tokens=48,
+        batch_size=3,
+        sample_reasons=[instrumented_scheduler_module.EAGER_WARMUP_REASON],
+    )
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_drain_if_pending = MagicMock(return_value=False)
+    stub._bench_active_req_ids = set()
+    stub._bench_grid = deque([point])
+    stub._bench_current_point = None
+    stub._bench_current_fpms = []
+    stub._bench_skipped_points = []
+    stub._bench_cleanup_requests = MagicMock()
+    stub._bench_inject_fake_decode = MagicMock(
+        return_value=SimpleNamespace(total_num_scheduled_tokens=0)
+    )
+
+    output = InstrumentedScheduler._bench_step_decode(stub)
+
+    assert output is None
+    assert stub._bench_current_point is None
+    assert stub._bench_skipped_points == []
+    stub._bench_cleanup_requests.assert_called_once_with()
+
+
+def test_skip_point_exempts_warmup_replicas_on_every_path():
+    """The exemption lives in ``_bench_skip_point`` itself, so fake-prefix,
+    injection, and validation failures are all covered; real points still
+    book a skipped entry."""
+    warmup = BenchmarkPoint(
+        point_type="prefill",
+        benchmark_id=1,
+        total_prefill_tokens=64,
+        batch_size=1,
+        sample_reasons=[instrumented_scheduler_module.EAGER_WARMUP_REASON],
+    )
+    real = BenchmarkPoint(
+        point_type="prefill",
+        benchmark_id=2,
+        total_prefill_tokens=64,
+        batch_size=1,
+    )
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_skipped_points = []
+
+    for reason in (
+        "fake_prefix_cache_allocation_failed",
+        "prefill_injection_failed",
+        "measured_batch_size_mismatch",
+    ):
+        InstrumentedScheduler._bench_skip_point(stub, warmup, reason)
+    assert stub._bench_skipped_points == []
+
+    InstrumentedScheduler._bench_skip_point(stub, real, "prefill_injection_failed")
+    assert stub._bench_skipped_points == [
+        SkippedBenchmarkPoint(point=real, reason="prefill_injection_failed")
+    ]
