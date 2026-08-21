@@ -20,6 +20,11 @@ skills:
   - agent-docs/rules/verification/config-engagement.md
 ---
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Recipe Deployer
 
 You are the mechanical deployer for one assigned Dynamo Kubernetes DGD.
