@@ -123,6 +123,14 @@ impl RoutingLoadState {
         request: &PreprocessedRequest,
         pinned_worker: Option<(u64, Option<u32>)>,
     ) -> Result<RoutingLoadReservation> {
+        // Cache-key extraction and cache-index reads are request work. Do them before the gate
+        // so DeviceAware requests do not serialize that work with other admissions.
+        let device_aware = pinned_worker
+            .is_none()
+            .then(|| router.prepare_device_aware_selection(Some(request)))
+            .flatten();
+        let tracked_request = self.tracked_request(request_id, request);
+
         // Serialize the policy decision with its slot booking. Without this boundary, concurrent
         // P2C decisions could all observe the same pre-admission load.
         let _selection = self.selection_gate.lock();
@@ -133,8 +141,20 @@ impl RoutingLoadState {
                 "worker {worker_id} has no runtime configuration"
             );
         }
-        let worker_id =
-            self.select_worker(router, &workers, pinned_worker.map(|target| target.0))?;
+        let worker_id = router.select_target_with_prepared_load(
+            device_aware.as_ref(),
+            pinned_worker.map(|target| target.0),
+            |worker_id| workers.contains_key(&worker_id),
+            |worker_id| {
+                workers.get(&worker_id).map_or(0, |config| {
+                    self.slots.active_request_count_for_worker(
+                        worker_id,
+                        config.data_parallel_start_rank(),
+                        config.data_parallel_size(),
+                    ) as u64
+                })
+            },
+        )?;
         let worker = match pinned_worker {
             Some((pinned_worker_id, Some(dp_rank))) => {
                 debug_assert_eq!(worker_id, pinned_worker_id);
@@ -142,7 +162,6 @@ impl RoutingLoadState {
             }
             _ => self.least_loaded_rank(&workers, worker_id)?,
         };
-        let tracked_request = self.tracked_request(request_id, request);
         self.slots
             .add_request_if_registered(tracked_request.sequence_request(worker), Instant::now())
             .with_context(|| format!("reserve routing load on worker {worker:?}"))?;
@@ -161,24 +180,12 @@ impl RoutingLoadState {
         &self,
         router: &PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<WorkerWithDpRank> {
+        let device_aware = router.prepare_device_aware_selection(None);
         let _selection = self.selection_gate.lock();
         let workers = self.workers.read();
-        let worker_id = self.select_worker(router, &workers, None)?;
-        self.least_loaded_rank(&workers, worker_id)
-    }
-
-    pub(crate) fn is_configured_worker(&self, worker_id: u64) -> bool {
-        self.workers.read().contains_key(&worker_id)
-    }
-
-    fn select_worker(
-        &self,
-        router: &PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        workers: &HashMap<u64, ModelRuntimeConfig>,
-        pinned_worker: Option<u64>,
-    ) -> Result<u64> {
-        router.select_target_with_load(
-            pinned_worker,
+        let worker_id = router.select_target_with_prepared_load(
+            device_aware.as_ref(),
+            None,
             |worker_id| workers.contains_key(&worker_id),
             |worker_id| {
                 workers.get(&worker_id).map_or(0, |config| {
@@ -189,7 +196,12 @@ impl RoutingLoadState {
                     ) as u64
                 })
             },
-        )
+        )?;
+        self.least_loaded_rank(&workers, worker_id)
+    }
+
+    pub(crate) fn is_configured_worker(&self, worker_id: u64) -> bool {
+        self.workers.read().contains_key(&worker_id)
     }
 
     fn least_loaded_rank(
@@ -385,5 +397,123 @@ impl Drop for RoutingLoadReservation {
                 "Failed to release routing load reservation"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{Arc, mpsc},
+        time::Duration,
+    };
+
+    use dynamo_runtime::{
+        DistributedRuntime, Runtime,
+        distributed::DistributedConfig,
+        pipeline::{MultimodalCacheIndex, RouterMode},
+    };
+    use tokio::sync::watch;
+
+    use super::*;
+    use crate::protocols::common::timing::WORKER_TYPE_DECODE;
+
+    struct NotifyingCacheIndex {
+        worker_id: u64,
+        entered: mpsc::Sender<()>,
+    }
+
+    impl MultimodalCacheIndex for NotifyingCacheIndex {
+        fn workers_with_cache_key_hits(&self, cache_keys: &[String]) -> Vec<(u64, usize)> {
+            let _ = self.entered.send(());
+            vec![(self.worker_id, cache_keys.len())]
+        }
+
+        fn remove_worker(&self, _worker_id: u64) {}
+    }
+
+    fn request() -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn device_aware_cache_preparation_does_not_wait_for_selection_gate() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("device-aware-cache-before-selection-gate".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+        let (_workers_tx, workers) =
+            watch::channel(HashMap::from([(worker_id, ModelRuntimeConfig::default())]));
+        let state = RoutingLoadState::start(
+            endpoint,
+            16,
+            workers,
+            KvRouterConfig::default(),
+            WORKER_TYPE_DECODE,
+        )
+        .await
+        .unwrap();
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let router = PushRouter::from_client_with_state(
+            client,
+            RouterMode::DeviceAwareWeighted,
+            None,
+            Some(Arc::new(NotifyingCacheIndex {
+                worker_id,
+                entered: entered_tx,
+            })),
+            Some(Arc::new(|_| vec!["image-key".to_string()])),
+        )
+        .await
+        .unwrap();
+
+        let selection_gate = state.selection_gate.lock();
+        let (result_tx, result_rx) = mpsc::channel();
+        let state_for_selection = Arc::clone(&state);
+        let router_for_selection = router.clone();
+        let runtime_handle = tokio::runtime::Handle::current();
+        let selection = std::thread::spawn(move || {
+            let _runtime = runtime_handle.enter();
+            let reservation = state_for_selection.select_and_reserve(
+                &router_for_selection,
+                "request-1",
+                &request(),
+                None,
+            );
+            result_tx.send(reservation).unwrap();
+        });
+
+        let prepared_before_gate = entered_rx.recv_timeout(Duration::from_millis(250)).is_ok();
+        drop(selection_gate);
+        let reservation = result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("selection must complete after the gate is released")
+            .expect("selection must reserve the configured worker");
+        selection.join().unwrap();
+        drop(reservation);
+
+        assert!(
+            prepared_before_gate,
+            "DeviceAware cache preparation must not wait for the selection gate"
+        );
+
+        runtime.shutdown();
     }
 }

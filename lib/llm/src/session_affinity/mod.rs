@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use dynamo_runtime::{component::Client, pipeline::Error};
 
-pub(crate) use coordinator::{AffinityAcquire, affinity_id};
+pub(crate) use coordinator::{AffinityAcquire, affinity_id, invalid_argument};
 pub use coordinator::{AffinityCoordinator, AffinityTarget, explicit_target};
 pub use push_router::SessionAffinityPushRouter;
 

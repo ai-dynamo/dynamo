@@ -31,6 +31,8 @@ where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     RoutingHost(Arc<RoutingHost<Sel>>),
+    // Kept for the deletion-only cleanup PR; production activation no longer constructs it.
+    #[allow(dead_code)]
     SimpleRouter(Arc<SessionAffinityPushRouter>),
 }
 
