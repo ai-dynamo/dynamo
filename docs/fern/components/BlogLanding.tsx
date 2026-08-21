@@ -9,7 +9,7 @@ const ARTICLES = [
     description:
       "A skillpack that turns coding agents into disciplined performance engineers: objective functions, experimental discipline, and inference domain knowledge.",
     href: "/dynamo/dev/digest/agent-optimization-skills",
-    date: "August 20, 2026",
+    date: "August 21, 2026",
     readTime: "2 min read",
     category: "Agentic AI",
     art: "hillclimb",
