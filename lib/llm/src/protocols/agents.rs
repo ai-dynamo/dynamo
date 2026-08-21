@@ -15,8 +15,6 @@ pub(crate) const HEADER_CODEX_THREAD_ID: &str = "thread-id";
 pub(crate) const HEADER_CODEX_PARENT_THREAD_ID: &str = "x-codex-parent-thread-id";
 pub(crate) const HEADER_CODEX_TURN_METADATA: &str = "x-codex-turn-metadata";
 pub(crate) const HEADER_DEEPSEEK_HARNESS_SESSION_ID: &str = "x-deepseek-harness-session-id";
-pub(crate) const HEADER_DEEPSEEK_HARNESS_PARENT_SESSION_ID: &str =
-    "x-deepseek-harness-parent-session-id";
 pub(crate) const HEADER_DEEPSEEK_HARNESS_COMPACT: &str = "x-deepseek-harness-compact";
 pub(crate) const HEADER_OPENCODE_SESSION_ID: &str = "x-session-id";
 pub(crate) const HEADER_OPENCODE_PARENT_SESSION_ID: &str = "x-parent-session-id";
@@ -48,7 +46,7 @@ const AGENT_HEADER_MAPPINGS: &[AgentHeaderMapping] = &[
     AgentHeaderMapping {
         root_session_header: HEADER_DEEPSEEK_HARNESS_SESSION_ID,
         child_session_header: None,
-        parent_session_header: Some(HEADER_DEEPSEEK_HARNESS_PARENT_SESSION_ID),
+        parent_session_header: None,
         infer_parent_from_session_for_child: false,
     },
     AgentHeaderMapping {

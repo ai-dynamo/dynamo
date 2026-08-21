@@ -46,8 +46,7 @@ const response = await fetch(endpoint, {
     authorization: 'Bearer ' + process.env.DEEPSEEK_API_KEY,
     'content-type': 'application/json',
     'x-deepseek-harness-user-id': 'stable-anonymous-user',
-    'x-deepseek-harness-session-id': 'child-session',
-    'x-deepseek-harness-parent-session-id': 'parent-session',
+    'x-deepseek-harness-session-id': 'dsh-session',
     'x-deepseek-harness-compact': '1',
   },
   body: JSON.stringify({ model: 'test-model', messages: [{ role: 'user', content: 'tool result' }], stream: true }),
@@ -210,7 +209,7 @@ test('normalizes root and versioned Dynamo endpoints without a protocol-relative
   assert.equal(normalizeBaseUrl('http://127.0.0.1:8000/v1/').toString(), 'http://127.0.0.1:8000/v1')
 })
 
-test('captures native lineage and sends one canonical final after normal exit', async () => {
+test('captures native session metadata and sends one canonical final after normal exit', async () => {
   const directory = temporaryDirectory()
   const upstream = await serverHarness()
   try {
@@ -223,19 +222,18 @@ test('captures native lineage and sends one canonical final after normal exit', 
     assert.equal(upstream.requests.length, 2)
     assert.equal(upstream.requests[0].headers.authorization, 'Bearer test-dynamo-secret')
     assert.equal(upstream.requests[0].headers['x-dynamo-session-id'], undefined)
-    assert.equal(upstream.requests[1].headers['x-dynamo-session-id'], 'child-session')
+    assert.equal(upstream.requests[1].headers['x-dynamo-session-id'], 'dsh-session')
     assert.equal(upstream.requests[1].headers['x-dynamo-session-final'], 'true')
     const records = evidence(capture)
     const request = records.find(record => record.kind === 'request')
     assert.equal(request.headers.authorization, '<redacted>')
-    assert.equal(request.headers['x-deepseek-harness-session-id'], 'child-session')
-    assert.equal(request.headers['x-deepseek-harness-parent-session-id'], 'parent-session')
+    assert.equal(request.headers['x-deepseek-harness-session-id'], 'dsh-session')
     assert.equal(request.headers['x-deepseek-harness-compact'], '1')
     assert.match(request.headers['x-deepseek-harness-user-id'], /^sha256:/)
     assert.deepEqual(records.find(record => record.kind === 'session_final'), {
       timestamp: records.find(record => record.kind === 'session_final').timestamp,
       kind: 'session_final',
-      session_id: 'child-session',
+      session_id: 'dsh-session',
       status: 200,
     })
     assert.deepEqual(JSON.parse(readFileSync(join(dshHome, 'child-env.json'), 'utf8')), {
@@ -268,10 +266,8 @@ test('adds canonical identity only when the Dynamo 1.3 compatibility bridge is s
     const result = await run.completed
 
     assert.equal(result.code, 0, result.stderr)
-    assert.equal(upstream.requests[0].headers['x-deepseek-harness-session-id'], 'child-session')
-    assert.equal(upstream.requests[0].headers['x-deepseek-harness-parent-session-id'], 'parent-session')
-    assert.equal(upstream.requests[0].headers['x-dynamo-session-id'], 'child-session')
-    assert.equal(upstream.requests[0].headers['x-dynamo-parent-session-id'], 'parent-session')
+    assert.equal(upstream.requests[0].headers['x-deepseek-harness-session-id'], 'dsh-session')
+    assert.equal(upstream.requests[0].headers['x-dynamo-session-id'], 'dsh-session')
     assert.equal(evidence(capture).find(record => record.kind === 'run_start').canonicalize_dynamo_headers, true)
   } finally {
     await upstream.close()
@@ -422,24 +418,6 @@ test('runs the published pinned DSH package end to end', { skip: process.env.DSH
   try {
     const capture = join(directory, 'capture.jsonl')
     const run = runWrapper({ baseUrl: upstream.baseUrl, capture })
-    const result = await run.completed
-
-    assert.equal(result.code, 0, result.stderr)
-    assert.match(result.stdout, /hello from mock Dynamo/)
-    assert.equal(typeof upstream.requests[0].headers['x-deepseek-harness-session-id'], 'string')
-    const final = upstream.requests.find(request => request.headers['x-dynamo-session-final'] === 'true')
-    assert.equal(final.headers['x-dynamo-session-id'], upstream.requests[0].headers['x-deepseek-harness-session-id'])
-  } finally {
-    await upstream.close()
-  }
-})
-
-test('runs a built patched DSH source tree end to end', { skip: process.env.DSH_PATCHED_BIN === undefined }, async () => {
-  const directory = temporaryDirectory()
-  const upstream = await serverHarness()
-  try {
-    const capture = join(directory, 'capture.jsonl')
-    const run = runWrapper({ baseUrl: upstream.baseUrl, capture, dshBin: process.env.DSH_PATCHED_BIN })
     const result = await run.completed
 
     assert.equal(result.code, 0, result.stderr)

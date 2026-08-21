@@ -750,9 +750,9 @@ mod tests {
         HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_PARENT_AGENT_ID,
         HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_PARENT_THREAD_ID, HEADER_CODEX_THREAD_ID,
         HEADER_CODEX_TURN_METADATA, HEADER_DEEPSEEK_HARNESS_COMPACT,
-        HEADER_DEEPSEEK_HARNESS_PARENT_SESSION_ID, HEADER_DEEPSEEK_HARNESS_SESSION_ID,
-        HEADER_DYNAMO_PARENT_SESSION_ID, HEADER_DYNAMO_SESSION_FINAL, HEADER_DYNAMO_SESSION_ID,
-        HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
+        HEADER_DEEPSEEK_HARNESS_SESSION_ID, HEADER_DYNAMO_PARENT_SESSION_ID,
+        HEADER_DYNAMO_SESSION_FINAL, HEADER_DYNAMO_SESSION_ID, HEADER_OPENCODE_PARENT_SESSION_ID,
+        HEADER_OPENCODE_SESSION_ID,
     };
 
     #[derive(Default)]
@@ -1155,18 +1155,11 @@ mod tests {
             HEADER_DEEPSEEK_HARNESS_SESSION_ID,
             "dsh-session".parse().unwrap(),
         );
-        headers.insert(
-            HEADER_DEEPSEEK_HARNESS_PARENT_SESSION_ID,
-            "dsh-parent".parse().unwrap(),
-        );
         headers.insert(HEADER_DEEPSEEK_HARNESS_COMPACT, "1".parse().unwrap());
 
         let agent_context = agent_context_from_headers(&headers).unwrap();
         assert_eq!(agent_context.session_id, "dsh-session");
-        assert_eq!(
-            agent_context.parent_session_id.as_deref(),
-            Some("dsh-parent")
-        );
+        assert_eq!(agent_context.parent_session_id, None);
         assert_eq!(agent_context.compaction, Some(AgentCompaction::default()));
         assert_eq!(
             session_affinity_from_headers(&headers).unwrap().as_str(),

@@ -51,7 +51,7 @@ Options:
                              Also send canonical identity headers to older Dynamo
   --capture PATH             Redacted JSONL request evidence (default: dsh-request-trace.jsonl)
   --cwd PATH                 DSH workspace (default: current directory)
-  --dsh-bin PATH             Built patched DSH bin.js instead of the pinned npm package
+  --dsh-bin PATH             Installed DSH bin.js instead of pnpm dlx
   --dsh-home PATH            Empty persistent DSH home (default: a removed temporary directory)
   --dsh-package SPEC         Package used by pnpm dlx (default: ${DEFAULT_DSH_PACKAGE})
   --final-timeout-ms N       Terminal request timeout (default: 5000)
@@ -186,12 +186,8 @@ function forwardHeaders(headers, canonicalizeDynamoHeaders) {
   }
   if (canonicalizeDynamoHeaders) {
     const sessionId = headers['x-deepseek-harness-session-id']
-    const parentSessionId = headers['x-deepseek-harness-parent-session-id']
     if (typeof sessionId === 'string' && sessionId.trim() !== '') {
       output.set('x-dynamo-session-id', sessionId)
-    }
-    if (typeof parentSessionId === 'string' && parentSessionId.trim() !== '') {
-      output.set('x-dynamo-parent-session-id', parentSessionId)
     }
   }
   return output
@@ -225,7 +221,7 @@ async function relayBody(upstream, downstream) {
 
 export async function startRelay({ baseUrl, canonicalizeDynamoHeaders, record }) {
   const upstreamOrigin = baseUrl.origin
-  const sessions = new Map()
+  const sessions = new Set()
   const controllers = new Set()
   const server = createServer((request, response) => {
     const controller = new AbortController()
@@ -233,8 +229,7 @@ export async function startRelay({ baseUrl, canonicalizeDynamoHeaders, record })
     void (async () => {
       const body = await readRequest(request)
       const sessionId = request.headers['x-deepseek-harness-session-id']
-      const parentSessionId = request.headers['x-deepseek-harness-parent-session-id']
-      if (typeof sessionId === 'string') sessions.set(sessionId, typeof parentSessionId === 'string' ? parentSessionId : null)
+      if (typeof sessionId === 'string') sessions.add(sessionId)
       record({
         kind: 'request',
         method: request.method,

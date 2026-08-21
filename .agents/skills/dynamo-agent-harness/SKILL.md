@@ -77,9 +77,9 @@ node .agents/skills/dynamo-agent-harness/scripts/drive_deepseek_harness.mjs --ba
 
 The relay reads `DYNAMO_API_KEY` only, then projects the selected value to the variable expected by DSH. An ambient `DEEPSEEK_API_KEY` is ignored. Use `--api-key-env NAME` only to explicitly select a different credential variable, and use `--overwrite-capture` only to intentionally replace an existing trace.
 
-Use `--canonicalize-dynamo-headers` only with an older server such as the pinned Dynamo 1.3 deployment. It preserves native headers while copying DSH session and parent identity into canonical Dynamo headers; it cannot backport native DSH compaction normalization. Leave it off against a server that includes the native mapping.
+Use `--canonicalize-dynamo-headers` only with an older server such as the pinned Dynamo 1.3 deployment. It preserves native headers while copying DSH session identity into the canonical Dynamo header; it cannot backport native DSH compaction normalization. Leave it off against a server that includes the native mapping.
 
-Use `--session-final` only against Dynamo's native ThunderAgent frontend. It sends one canonical final request for every DSH session observed by the relay after normal exit, SIGINT, or SIGTERM, and fails closed when cleanup is rejected or zero sessions were observed. Signals terminate the complete tracked Corepack/pnpm/DSH process tree, including detached descendants observed before shutdown, and return `130` for SIGINT or `143` for SIGTERM after cleanup. Do not enable it for stock KV endpoints. Use the full pinned lineage recipe in [`examples/agent_harnesses/deepseek_harness`](../../../examples/agent_harnesses/deepseek_harness/README.md) when a child must carry `x-deepseek-harness-parent-session-id`.
+Use `--session-final` only against Dynamo's native ThunderAgent frontend. It sends one canonical final request for every DSH session observed by the relay after normal exit, SIGINT, or SIGTERM, and fails closed when cleanup is rejected or zero sessions were observed. Signals terminate the complete tracked Corepack/pnpm/DSH process tree, including detached descendants observed before shutdown, and return `130` for SIGINT or `143` for SIGTERM after cleanup. Do not enable it for stock KV endpoints.
 
 ## Delegate safely
 
@@ -115,6 +115,6 @@ Return:
 - Codex may warn that custom model metadata is unavailable; the driver fixes reasoning effort to `medium` so unsupported catalog defaults are not sent to Dynamo.
 - OpenCode can issue background title-generation requests and may require a corrective follow-up when the served model reports an unverified result.
 - The adapters are pinned in `scripts/drive_harness.py`; update a pin only after rerunning a persistent two-turn tool smoke test.
-- DSH basic is pinned in `scripts/drive_deepseek_harness.mjs`. Its published package carries native session and compaction headers but needs the separately reviewable full patch for parent lineage.
-- DSH's basic container installs its complete dependency graph from the frozen recipe lockfile. A direct local `pnpm dlx` run pins the top-level package only, so use the container or full source build for reproducible qualification evidence.
+- DSH is pinned in `scripts/drive_deepseek_harness.mjs`. The supported recipe uses only the published package and claims native root-session and compaction metadata; immediate parent lineage is outside this path.
+- DSH's container installs its complete dependency graph from the frozen recipe lockfile. A direct local `pnpm dlx` run pins the top-level package only, so use the container for reproducible qualification evidence.
 - DSH request evidence contains plaintext model bodies even though credentials are redacted and its stable anonymous user ID is hashed. Handle the JSONL as sensitive data.

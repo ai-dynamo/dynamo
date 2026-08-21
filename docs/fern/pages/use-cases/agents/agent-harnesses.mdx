@@ -51,9 +51,9 @@ bash examples/backends/sglang/launch/agg_agent.sh
       --capture dsh-request-trace.jsonl
     ```
 
-    Dynamo maps DSH's `x-deepseek-harness-session-id` to `session_id`, `x-deepseek-harness-parent-session-id` to `parent_session_id`, and exact `x-deepseek-harness-compact: 1` to compaction metadata when DSH identity wins header precedence. The published basic package carries session and compaction identity; use the separately pinned full recipe under `examples/agent_harnesses/deepseek_harness` when child lineage is required.
+    Dynamo maps DSH's `x-deepseek-harness-session-id` to `session_id` and exact `x-deepseek-harness-compact: 1` to compaction metadata when DSH identity wins header precedence. The recipe uses only the published DSH package; it does not claim immediate parent lineage.
 
-    Add `--canonicalize-dynamo-headers` only for an older server that predates native DSH normalization. The relay preserves native headers and duplicates session and parent identity into canonical Dynamo headers; the option does not backport compaction normalization.
+    Add `--canonicalize-dynamo-headers` only for an older server that predates native DSH normalization. The relay preserves native headers and duplicates session identity into the canonical Dynamo header; the option does not backport compaction normalization.
 
     Add `--session-final` only when the target is the native ThunderAgent frontend. The relay waits for DSH to flush, then sends `x-dynamo-session-final: true` after normal or interrupted shutdown. It fails when no session reached Dynamo or cleanup is rejected, and returns `130` for SIGINT or `143` for SIGTERM. Stock KV has no program lifecycle to close, so leave the option off there.
 
@@ -220,7 +220,7 @@ bash examples/backends/sglang/launch/agg_agent.sh
 
 ## Drive a Harness from Another Agent
 
-Use the repository's `.agents/skills/dynamo-agent-harness` skill when an agent needs to keep a Claude Code, Codex, or OpenCode session open across multiple prompts, or run a one-shot DSH headless task, while Dynamo serves the model. The persistent drivers use Agent Client Protocol (ACP). The DSH driver uses its native Chat Completions transport through a loopback capture relay and an isolated generated profile.
+Use the repository's `.agents/skills/dynamo-agent-harness` skill when an agent needs to keep a Claude Code, Codex, or OpenCode session open across multiple prompts, or run a one-shot DSH headless task, while Dynamo serves the model. The persistent drivers use Agent Client Protocol (ACP). The DSH driver uses its native Chat Completions transport through a loopback capture relay and an isolated generated profile. DSH's headless command intentionally accepts one top-level task and exits after flushing it; a future persistent DSH path should host the separately published `@deepseek-ai/dsh-acp` server and keep its stdio connection alive for repeated prompts.
 
 The skill pins the Claude Code and Codex ACP adapters. If a harness release changes the model, endpoint, session header, authentication, or mode configuration, update this page and the skill in the same change after running a persistent two-turn tool smoke test.
 

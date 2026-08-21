@@ -7,22 +7,19 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Result
 
-The local Tier 0 protocol slice passes, and the stock NScale arm reaches the pinned real model through Dynamo. Dynamo normalizes DSH-native root session, immediate parent, and compaction metadata only when DSH identity is selected. The lifecycle relay passes a minimal child environment, ignores ambient DeepSeek credentials, preserves and redacts each request, uses exclusive capture creation, fails when lifecycle mode observes no sessions, sends exactly one canonical final per observed session, and terminates the complete tracked Corepack/pnpm/DSH process tree. Interrupted drains retain exit code `130` for SIGINT and `143` for SIGTERM.
+The local Tier 0 protocol slice passes, and the stock NScale arm reaches the pinned real model through Dynamo. Dynamo normalizes DSH-native root-session and compaction metadata only when DSH identity is selected. The lifecycle relay passes a minimal child environment, ignores ambient DeepSeek credentials, preserves and redacts each request, uses exclusive capture creation, fails when lifecycle mode observes no sessions, sends exactly one canonical final per observed session, and terminates the complete tracked Corepack/pnpm/DSH process tree. Interrupted drains retain exit code `130` for SIGINT and `143` for SIGTERM.
 
 ## Commands and outcomes
 
 | Command | Outcome |
 | --- | --- |
-| `DSH_PACKAGE_SMOKE=1 node --test .agents/skills/dynamo-agent-harness/scripts/test_drive_deepseek_harness.mjs` | 10 passed; one patched-source smoke skipped because this pass did not touch the source checkout |
+| `DSH_PACKAGE_SMOKE=1 node --test .agents/skills/dynamo-agent-harness/scripts/test_drive_deepseek_harness.mjs` | 10 passed |
 | `cargo test -p dynamo-llm --no-default-features agent_context_from_deepseek_harness_headers_preserves_compaction` | 1 passed |
 | `cargo test -p dynamo-llm --no-default-features deepseek_compaction_requires_selected_deepseek_identity` | 1 passed |
 | `cargo test -p dynamo-llm --no-default-features agent_context_from_headers_derives_agent_context_table` | 1 passed |
 | `cargo test -p dynamo-llm --no-default-features session_affinity_prefers_dynamo_header_over_agent_mappings` | 1 passed |
-| DSH focused Vitest for adapter and request reconstruction | 115 passed |
-| DSH `pnpm run typecheck` | passed |
 | Published `@deepseek-ai/dsh@0.1.0-rc.8` headless through the hardened relay and mock Dynamo SSE | passed |
 | Real `corepack pnpm dlx` wrapper with an uncooperative detached descendant, followed by SIGTERM | tracked tree received SIGTERM, detached descendant required bounded SIGKILL, wrapper returned `143`, and terminal request drained |
-| DSH Markdown wrap, Agent Note, translation-pair, and generated Cordis catalog checks | passed |
 | `kubectl kustomize` plus client-side apply dry-run | Namespace, ConfigMap, and Job passed |
 | `corepack pnpm@11.7.0 --dir examples/agent_harnesses/deepseek_harness/client install --prod --frozen-lockfile --ignore-scripts --lockfile-only` | passed supply-chain policy and frozen-lock checks |
 | `cargo +stable fmt --all -- --check` | passed; the branch-pinned custom toolchain has no applicable rustfmt component on this host |
@@ -38,13 +35,13 @@ The first corrected live attempt also exposed a relay defect: URL assignment thr
 
 ## Exact contract proved
 
-- Ordinary DSH requests carry `x-deepseek-harness-session-id`; patched child requests additionally carry `x-deepseek-harness-parent-session-id`.
+- Ordinary DSH requests carry `x-deepseek-harness-session-id`; the published-package path makes no immediate-parent-lineage claim.
 - A request selected through DSH identity carries compaction metadata only for exact `x-deepseek-harness-compact: 1`; mixed canonical, Codex, and Claude Code identities ignore the DSH compaction header.
 - Dynamo derives input trigger from Chat Completions messages and gives canonical `x-dynamo-session-id` precedence over harness-native mappings.
-- The relay selects `DYNAMO_API_KEY` rather than ambient `DEEPSEEK_API_KEY`, strips an injected unrelated credential from the child environment, redacts Authorization, hashes the stable anonymous user ID, and retains session, parent, compaction, body, response status, and terminal status.
-- The opt-in Dynamo 1.3 bridge preserves native headers while adding canonical session and parent identity. It does not claim older-server compaction normalization.
+- The relay selects `DYNAMO_API_KEY` rather than ambient `DEEPSEEK_API_KEY`, strips an injected unrelated credential from the child environment, redacts Authorization, hashes the stable anonymous user ID, and retains session, compaction, body, response status, and terminal status.
+- The opt-in Dynamo 1.3 bridge preserves native headers while adding canonical session identity. It does not claim older-server compaction normalization.
 - Terminal delivery uses `x-dynamo-session-id` plus `x-dynamo-session-final: true` and is opt-in because only ThunderAgent consumes it as lifecycle metadata.
 
 ## Remaining qualification
 
-No claim is made here about real-model tool quality, stock-KV route telemetry, ThunderAgent route telemetry, or post-final program count. The stock NScale arm proves a live DSH child and model response only. ThunderAgent lifecycle evidence remains a separate sequential arm. The local Docker daemon was unavailable, so the two pinned Dockerfiles were reviewed but not built locally.
+No claim is made here about real-model tool quality, stock-KV route telemetry, ThunderAgent route telemetry, or post-final program count. The stock NScale arm proves a live DSH child and model response only. ThunderAgent lifecycle evidence remains a separate sequential arm. The local Docker daemon was unavailable, so the pinned package-only Dockerfile was reviewed but not built locally.

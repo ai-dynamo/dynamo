@@ -27,4 +27,4 @@ The router independently logged `Released program session-aa5d0507-f889-45a5-bda
 
 ## Scope boundary
 
-This is the published-package root-session path. Immediate child lineage remains qualified by the isolated DSH source patch and local focused tests; the live tiny-model prompt did not create a child session. Tool quality and nontrivial coding-task correctness require a stronger model and are not claimed.
+This is the published-package root-session path. Immediate parent lineage is outside the supported contract, and the live tiny-model prompt did not create a child session. Tool quality and nontrivial coding-task correctness require a stronger model and are not claimed.
