@@ -63,8 +63,15 @@ jobs:
       # (e.g. fault_tolerance/deploy/*) that fail in this container-only
       # context. Matches the coverage of the old container-validation-dynamo
       # workflow.
-      cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
-      cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      # `defaulted` is applied by the repository-root conftest.py to any test that
+      # declared no lifecycle or hardware marker. It is routed here, not to the
+      # sequential job: sequential runs the fault-tolerance suite in one process
+      # and was OOM-killed (exit 137) once every unmarked test landed in it.
+      # NOTE: this job is `-n 0` today (cpu_parallel_mode: 'none'), so `defaulted`
+      # only picks the pod. Before enabling real xdist here, vet these tests for
+      # parallel-safety or split them into their own job -- unlike `parallel`,
+      # `defaulted` is not an author's claim that the test is parallel-safe.
+      cpu_parallel_test_markers: 'pre_merge and (parallel or defaulted) and not (vllm or sglang or trtllm) and (gpu_0)'
       gpu_test_markers: 'pre_merge and none and gpu_1'
     secrets: inherit
 
@@ -455,7 +462,7 @@ jobs:
       dd_env: post-merge
       test_suite_name: vllm-efa
       test_type: CPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
+      amd_runner: prod-tester-amd-v2 # EFA image validation runs gpu_0 tests only
       target_tag_plain: ${{ needs.vllm-efa-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]'
@@ -576,7 +583,7 @@ jobs:
       dd_env: post-merge
       test_suite_name: trtllm-efa
       test_type: CPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
+      amd_runner: prod-tester-amd-v2 # EFA image validation runs gpu_0 tests only
       target_tag_plain: ${{ needs.trtllm-efa-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]'

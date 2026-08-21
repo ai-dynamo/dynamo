@@ -36,7 +36,6 @@ jobs:
       api_docs: ${{ steps.changes.outputs.api_docs }}
       fern_components: ${{ steps.changes.outputs.fern_components }}
       operator: ${{ steps.changes.outputs.operator }}
-      snapshot: ${{ steps.changes.outputs.snapshot }}
       rust: ${{ steps.changes.outputs.rust }}
     steps:
       - name: Checkout code
@@ -407,9 +406,6 @@ jobs:
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
       run: |
-        cargo test --locked -p aisimulate-core canonical_record_sorts_roots_and_injects_schema
-        cargo test --locked -p aisimulate-core execution_local_pressure_ordinals_link_to_request_records
-        cargo test --locked -p aisimulate-core fresh_prefill_tracks_cache_owned_prefix_pages_and_pressure_event
         cargo test --locked -p dynamo-bench --features replay-bench \
           --bench offline_replay_bench -- \
           testdata/mooncake_trace_tiny.jsonl \

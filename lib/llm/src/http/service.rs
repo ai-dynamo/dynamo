@@ -41,6 +41,27 @@ pub use frontend_extension::{
 };
 pub use metrics::Metrics;
 
+use crate::{
+    preprocessor::OpenAIPreprocessor,
+    protocols::openai::{
+        ParsingOptions, chat_completions::NvCreateChatCompletionRequest,
+        chat_completions::tool_parser_v2::batch_tool_choice_eligible,
+    },
+};
+
+/// Apply the request-level tool-call gates shared by the HTTP protocol handlers.
+fn apply_request_tool_call_parsing_options(
+    parsing_options: ParsingOptions,
+    request: &NvCreateChatCompletionRequest,
+) -> ParsingOptions {
+    let tool_call_parsing_enabled = OpenAIPreprocessor::tool_call_parsing_enabled(request);
+    parsing_options
+        .with_experimental_v2_batch_eligible(batch_tool_choice_eligible(
+            request.inner.tool_choice.as_ref(),
+        ))
+        .with_tool_call_parsing_enabled(tool_call_parsing_enabled)
+}
+
 /// Documentation for a route
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RouteDoc {

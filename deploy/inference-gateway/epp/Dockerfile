@@ -32,7 +32,7 @@
 #     -t dynamo/dynamo-epp:dev .
 
 ARG RUST_IMAGE=rust:1.96.1
-ARG BUILDER_IMAGE=golang:1.26.3
+ARG BUILDER_IMAGE=golang:1.26.6
 ARG BASE_IMAGE=ubuntu:24.04
 
 # =============================================================================
@@ -75,10 +75,8 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 COPY --from=dynamo .cargo/ .cargo/
 COPY --from=dynamo Cargo.toml Cargo.lock README.md ./
 
-# Copy all workspace crates. Cargo resolves every workspace member before it
-# builds libdynamo_llm, including the AISimulate crates.
+# Copy all local workspace crates. AISimulate resolves from crates.io.
 COPY --from=dynamo lib/ lib/
-COPY --from=dynamo aisimulate/crates/ aisimulate/crates/
 COPY --from=dynamo examples/router/custom-policy-example/ examples/router/custom-policy-example/
 
 # ext-proc is also a workspace member (referenced from the root Cargo.toml),

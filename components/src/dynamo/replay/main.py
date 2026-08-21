@@ -22,7 +22,6 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Protocol
 
 import msgspec
-
 from aisimulate.aic import materialize_aic_num_gpu_blocks
 from aisimulate.replay.cli import add_base_replay_arguments
 from aisimulate.replay.config import parse_base_replay_config
