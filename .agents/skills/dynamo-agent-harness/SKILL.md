@@ -26,7 +26,8 @@ Treat the [Agent Harnesses guide](https://github.com/ai-dynamo/dynamo/blob/main/
 
 ## Prerequisites
 
-- A reachable Dynamo endpoint whose `/v1/models` includes the requested model.
+- Deploy a supported configuration from the [Dynamo recipe catalog](https://github.com/ai-dynamo/dynamo/tree/main/recipes) on Kubernetes, then retain its reachable frontend URL and exact served model. This skill consumes that endpoint; it does not deploy Dynamo.
+- A successful `GET $DYNAMO_BASE_URL/v1/models` result containing `$DYNAMO_MODEL`.
 - `uv` and Node.js 22+.
 - Node.js 24+ for DSH.
 - A POSIX host with Linux `/proc` or `/bin/ps` for process-tree cleanup.
@@ -39,10 +40,13 @@ Treat the [Agent Harnesses guide](https://github.com/ai-dynamo/dynamo/blob/main/
 Default to `verify`. Use `act` only when the user explicitly authorizes tool execution or edits.
 
 ```bash
+export DYNAMO_BASE_URL=http://127.0.0.1:8000
+export DYNAMO_MODEL=your-recipe-served-model
+
 .agents/skills/dynamo-agent-harness/scripts/drive_harness.py \
   --harness codex \
-  --base-url http://127.0.0.1:8000 \
-  --model zai-org/GLM-4.7-Flash \
+  --base-url "$DYNAMO_BASE_URL" \
+  --model "$DYNAMO_MODEL" \
   --cwd /absolute/worktree \
   --capability verify
 ```
@@ -72,7 +76,7 @@ The driver hides their incompatible model, mode, gateway-auth, and environment c
 DSH is not driven through the ACP script above. Its shipped `headless` profile creates one fresh persisted session, runs one task, flushes it, prints the final answer, and exits. The dedicated relay pins `@deepseek-ai/dsh@0.1.0-rc.8`, generates an isolated model profile, preserves native request headers, passes a minimal child environment, and writes redacted JSONL evidence with exclusive creation:
 
 ```bash
-node .agents/skills/dynamo-agent-harness/scripts/drive_deepseek_harness.mjs --base-url http://127.0.0.1:8000 --model Qwen/Qwen3-0.6B --task 'Use tools to inspect this workspace and report one verified fact.' --capture dsh-request-trace.jsonl
+node .agents/skills/dynamo-agent-harness/scripts/drive_deepseek_harness.mjs --base-url "$DYNAMO_BASE_URL" --model "$DYNAMO_MODEL" --task 'Use tools to inspect this workspace and report one verified fact.' --capture dsh-request-trace.jsonl
 ```
 
 The relay reads `DYNAMO_API_KEY` only, then projects the selected value to the variable expected by DSH. An ambient `DEEPSEEK_API_KEY` is ignored. Use `--api-key-env NAME` only to explicitly select a different credential variable, and use `--overwrite-capture` only to intentionally replace an existing trace.

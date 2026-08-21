@@ -8,14 +8,18 @@ subtitle: Point coding-agent CLIs at a Dynamo deployment
 Dynamo exposes `v1/chat/completions`, `v1/responses`, and `v1/messages`, so any agent that uses these APIs can talk to a Dynamo endpoint even if it is not listed in this guide. This guide focuses on popular agent harnesses that send stable session IDs. Dynamo normalizes these IDs for tracing and other explicitly configured consumers.
 
 <Steps toc={true}>
-<Step title="Start a local agent endpoint" id="local-setup">
-To locally test these out, we have a small script that runs an SGLang-backed `zai-org/GLM-4.7-Flash` endpoint. This script starts a TP2 instance on port 8000 and enables request tracing for replay and visualization. By default traces are saved in `/tmp/dynamo-request-trace-$(date +%Y%m%d-%H%M%S)`
+<Step title="Deploy a Dynamo recipe" id="deploy-recipe">
+Install the [Dynamo Kubernetes Platform](../../kubernetes/getting-started/quickstart.mdx), then choose a supported model and topology from the [Dynamo recipe catalog](https://github.com/ai-dynamo/dynamo/tree/main/recipes). Follow that recipe through model preparation, `DynamoGraphDeployment` readiness, and frontend exposure. This guide does not create a second backend or assume a service name.
 
-To start it, run:
+When the recipe is ready, retain its frontend URL and exact served model as the inputs to every harness command:
 
 ```bash
-bash examples/backends/sglang/launch/agg_agent.sh
+export DYNAMO_BASE_URL=http://127.0.0.1:8000
+export DYNAMO_MODEL=your-recipe-served-model
+curl -fsS "$DYNAMO_BASE_URL/v1/models" | jq -e --arg model "$DYNAMO_MODEL" '.data[]? | select(.id == $model)'
 ```
+
+The examples below assume that Kubernetes deployment remains running and reachable at `DYNAMO_BASE_URL`. Export `DYNAMO_API_KEY` too when the deployed endpoint requires authentication.
 
 </Step>
 <Step title="Configure a harness" id="configure-a-harness">
@@ -45,8 +49,8 @@ bash examples/backends/sglang/launch/agg_agent.sh
 
     ```bash
     node .agents/skills/dynamo-agent-harness/scripts/drive_deepseek_harness.mjs \
-      --base-url http://localhost:8000 \
-      --model Qwen/Qwen3-0.6B \
+      --base-url "$DYNAMO_BASE_URL" \
+      --model "$DYNAMO_MODEL" \
       --task 'Use tools to inspect this workspace and report one verified fact.' \
       --capture dsh-request-trace.jsonl
     ```
