@@ -19,6 +19,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib import error as urlerror
+from urllib import request as urlrequest
 from urllib.parse import urlsplit
 
 from acp import PROTOCOL_VERSION, spawn_agent_process, text_block
@@ -44,6 +46,8 @@ class HarnessConfig:
     command: tuple[str, ...]
     environment: dict[str, str]
     gateway_url: str | None
+    openai_url: str
+    api_key: str
     mode: str
     model: str
     session_model: str
@@ -98,6 +102,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--add-dir", action="append", default=[], type=Path)
     parser.add_argument("--capability", choices=("verify", "act"), default="verify")
     parser.add_argument("--api-key-env", default="DYNAMO_API_KEY")
+    parser.add_argument(
+        "--session-final",
+        action="store_true",
+        help="send a terminal ThunderAgent lifecycle signal when a Codex session closes",
+    )
+    parser.add_argument("--session-final-timeout", type=float, default=5.0)
     return parser.parse_args()
 
 
@@ -174,6 +184,8 @@ def build_config(args: argparse.Namespace) -> HarnessConfig:
         command=COMMANDS[args.harness],
         environment=environment,
         gateway_url=gateway_url,
+        openai_url=openai_url,
+        api_key=api_key,
         mode=MODES[(args.harness, args.capability)],
         model=args.model,
         session_model=session_model,
@@ -260,8 +272,69 @@ def emit(value: Any) -> None:
     print(json.dumps(value, separators=(",", ":")), flush=True)
 
 
+def post_session_final(
+    config: HarnessConfig,
+    session_id: str,
+    timeout: float,
+) -> None:
+    """Terminate one ThunderAgent program without forwarding work to the engine."""
+    payload = json.dumps(
+        {
+            "model": config.model,
+            "messages": [{"role": "user", "content": "."}],
+            "max_tokens": 1,
+            "stream": False,
+        }
+    ).encode()
+    request = urlrequest.Request(
+        f"{config.openai_url}/chat/completions",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {config.api_key}",
+            "Content-Type": "application/json",
+            "x-dynamo-session-id": session_id,
+            "x-dynamo-session-final": "true",
+        },
+        method="POST",
+    )
+    try:
+        with urlrequest.urlopen(request, timeout=timeout) as response:
+            status = response.status
+            response.read()
+    except urlerror.URLError as error:
+        raise RuntimeError(f"session-final request failed: {error.reason}") from error
+    if not 200 <= status < 300:
+        raise RuntimeError(f"session-final request returned HTTP {status}")
+
+
+async def send_session_final(
+    config: HarnessConfig,
+    session_id: str,
+    timeout: float,
+) -> None:
+    try:
+        await asyncio.to_thread(post_session_final, config, session_id, timeout)
+    except Exception as error:
+        emit(
+            {
+                "type": "session_final",
+                "session_id": session_id,
+                "ok": False,
+                "error": str(error),
+            }
+        )
+        raise
+    emit({"type": "session_final", "session_id": session_id, "ok": True})
+
+
 async def run(args: argparse.Namespace) -> None:
     cwd, additional = validate_paths(args.cwd, args.add_dir)
+    if args.session_final and args.harness != "codex":
+        raise ValueError(
+            "--session-final is currently verified only with --harness codex"
+        )
+    if args.session_final_timeout <= 0:
+        raise ValueError("--session-final-timeout must be greater than zero")
     config = build_config(args)
     if shutil.which(config.command[0]) is None:
         raise FileNotFoundError(f"executable not found: {config.command[0]}")
@@ -344,6 +417,12 @@ async def run(args: argparse.Namespace) -> None:
                     emit({"type": "error", "ok": False, "error": str(error)})
                     continue
                 await prompt(conn, client, session_id, prompt_text)
+            if args.session_final:
+                await send_session_final(
+                    config,
+                    session_id,
+                    args.session_final_timeout,
+                )
         finally:
             stderr_task.cancel()
 

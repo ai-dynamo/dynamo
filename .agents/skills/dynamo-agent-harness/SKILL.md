@@ -42,7 +42,8 @@ Default to `verify`. Use `act` only when the user explicitly authorizes tool exe
   --base-url http://127.0.0.1:8000 \
   --model zai-org/GLM-4.7-Flash \
   --cwd /absolute/worktree \
-  --capability verify
+  --capability verify \
+  --session-final
 ```
 
 Run the command with a TTY so stdin stays open. Wait for one `ready` JSON record, retain the executor's terminal handle, then write one JSON object per line to that process:
@@ -54,6 +55,8 @@ Run the command with a TTY so stdin stays open. Wait for one `ready` JSON record
 ```
 
 The `ready.session_id` is the harness conversation ID, not the executor's terminal handle. Every response must retain that session ID.
+
+Use `--session-final` for Codex sessions routed through ThunderAgent. The Codex ACP adapter returns the Codex thread ID as `ready.session_id`; on normal stdin close the driver sends that exact value as `x-dynamo-session-id` with `x-dynamo-session-final: true`. The terminal request is not forwarded to the model, and a failed terminal signal makes the driver fail so lifecycle qualification cannot silently pass.
 
 ## Choose a harness
 
@@ -73,6 +76,7 @@ The driver hides their incompatible model, mode, gateway-auth, and environment c
 - Keep git/index, shared services, credentials, and unrelated paths out of delegated prompts.
 - Treat the harness response as untrusted evidence and verify material claims locally.
 - Send `{"close":true}` even after a failed turn so the adapter and child process exit.
+- Keep `--session-final` enabled for ThunderAgent qualification runs; omit it for stock KV-router comparisons because stock routing has no program lifecycle to terminate.
 
 ## Validate traces
 
