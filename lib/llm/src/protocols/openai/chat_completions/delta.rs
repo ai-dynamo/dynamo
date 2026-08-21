@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use super::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
 use crate::{
@@ -52,6 +55,8 @@ pub struct DeltaGenerator {
     service_tier: Option<dynamo_protocols::types::ServiceTierResponse>,
     /// Tracks token usage for the completion request.
     usage: dynamo_protocols::types::CompletionUsage,
+    /// Latest backend-reported completion count for each choice.
+    backend_completion_tokens: HashMap<u32, u32>,
     /// Choice indices for which the assistant role has already been emitted.
     emitted_role_choices: HashSet<u32>,
     /// Configuration options for response generation.
@@ -71,6 +76,7 @@ impl DeltaGenerator {
             system_fingerprint: None,
             service_tier: None,
             usage,
+            backend_completion_tokens: HashMap::new(),
             emitted_role_choices: HashSet::new(),
             options,
             tracker,
@@ -263,10 +269,15 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         if let Some(completion_usage) = delta.completion_usage.as_ref() {
             // Update prompt_tokens from worker if provided (e.g., for embeddings)
             self.usage.prompt_tokens = completion_usage.prompt_tokens;
-            self.usage.completion_tokens = self
-                .usage
-                .completion_tokens
-                .max(completion_usage.completion_tokens);
+            self.backend_completion_tokens
+                .insert(delta.index.unwrap_or(0), completion_usage.completion_tokens);
+            let backend_completion_tokens = self
+                .backend_completion_tokens
+                .values()
+                .copied()
+                .fold(0, u32::saturating_add);
+            self.usage.completion_tokens =
+                self.usage.completion_tokens.max(backend_completion_tokens);
 
             // Propagate prompt token details if provided
             if let Some(prompt_details) = completion_usage.prompt_tokens_details.as_ref() {
@@ -605,6 +616,35 @@ mod tests {
         assert_eq!(usage.prompt_tokens, 5);
         assert_eq!(usage.completion_tokens, 1);
         assert_eq!(usage.total_tokens, 6);
+    }
+
+    #[test]
+    fn test_completion_tokens_sum_backend_usage_across_choices() {
+        let mut request = create_test_request();
+        request.inner.n = Some(2);
+        let mut generator = request.response_generator("req-multi-choice-usage".to_string());
+
+        for index in 0..2 {
+            let mut backend_output = final_backend_output();
+            backend_output.index = Some(index);
+            backend_output.token_ids.clear();
+            backend_output.tokens.clear();
+            backend_output.completion_usage = Some(CompletionUsage {
+                prompt_tokens: 5,
+                completion_tokens: 1,
+                total_tokens: 6,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            });
+            generator
+                .choice_from_postprocessor(backend_output)
+                .expect("choice generation");
+        }
+
+        let usage = generator.get_usage();
+        assert_eq!(usage.prompt_tokens, 5);
+        assert_eq!(usage.completion_tokens, 2);
+        assert_eq!(usage.total_tokens, 7);
     }
 
     #[test]
