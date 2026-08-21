@@ -696,12 +696,14 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 ##################################
 ##### wheel_builder ##############
 ##################################
-{% if "nixl_ref" in context[framework] or device == "xpu" %}
+{% if ("nixl_ref" in context[framework] or device == "xpu") and target != "frontend" %}
 # Builds NIXL (native + Python wheel) and NIXL-linked extension wheels, then
 # consolidates all wheels.
 # Runtime templates COPY from this stage.
 # Note: XPU triggers this path even when the framework section lacks nixl_ref,
 # because no upstream XPU runtime image ships pre-built NIXL.
+# Note: frontend is excluded — it installs NIXL from PyPI at NIXL_REF and does
+# not install KVBM, so nothing in that image consumes a from-source NIXL build.
 
 FROM wheel_builder_base AS wheel_builder
 
@@ -861,9 +863,10 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     echo "kvbm wheel NOTICES step done"
 
 {% else %}
-# SGLang CUDA uses NIXL from the upstream lmsysorg/sglang runtime image and
-# does not build Dynamo KVBM. Keep this alias so downstream stages can still
-# COPY Dynamo wheels and build tools from a common wheel_builder stage name.
+# SGLang CUDA uses NIXL from the upstream lmsysorg/sglang runtime image and the
+# frontend installs it from PyPI; neither builds Dynamo KVBM. Keep this alias so
+# downstream stages can still COPY Dynamo wheels and build tools from a common
+# wheel_builder stage name.
 # SGLang dev/source builds may link nixl-sys against stubs when native NIXL is
 # absent; block-manager/KVBM runtime work should use vllm/trtllm/none images.
 FROM runtime_wheel_builder AS wheel_builder
