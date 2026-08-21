@@ -106,7 +106,7 @@ spec:
               --kda-prefill-backend flashkda \
               --kernel-config '{"enable_cutedsl_warmup":true}' \
               --max-num-seqs 1907 \
-              --max-num-batched-tokens 16384 \
+              --max-num-batched-tokens 32768 \
               --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":8192,"cudagraph_capture_sizes":[1,2,4,8,12,16,24,32,64,128,256,512,1024,2048,4096,5120,6144,6656,7168,7680,8192]}' \
               --block-size 64 \
               --no-enable-flashinfer-autotune \
