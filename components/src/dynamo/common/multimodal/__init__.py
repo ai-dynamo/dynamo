@@ -126,7 +126,12 @@ if not TYPE_CHECKING:
 
 
 def __dir__() -> list[str]:
-    return sorted(__all__)
+    # `__all__` alone under-reports: it omits the submodules, and it omits
+    # `AbstractEmbeddingSender` / `AbstractEmbeddingReceiver`, which resolve
+    # through `__getattr__` but were never public names. Union in the lazy
+    # exports and whatever is already materialised so `dir()` and REPL
+    # completion do not hide things that import fine.
+    return sorted(set(__all__) | _EMBEDDING_TRANSFER_EXPORTS | set(globals()))
 
 
 __all__ = [
