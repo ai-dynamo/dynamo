@@ -22,7 +22,7 @@ use dynamo_kv_router::{
 use dynamo_runtime::{
     pipeline::{
         AsyncEngineContextProvider, Context, ManyOut, Operator, ResponseStream, RouterMode,
-        ServerStreamingEngine, SingleIn, async_trait,
+        ServerStreamingEngine, SingleIn, async_trait, propagate_first_response_guard,
     },
     protocols::{EndpointId, annotated::Annotated},
 };
@@ -391,6 +391,7 @@ where
         let tracker = prefill_req.tracker.clone();
         let mut prefill_context =
             Context::with_id_and_metadata(prefill_req, request_id.clone(), metadata.clone());
+        propagate_first_response_guard(&context, &mut prefill_context)?;
         if let Some(session_affinity) = session_affinity {
             prefill_context.insert(
                 SESSION_AFFINITY_CONTEXT_KEY,

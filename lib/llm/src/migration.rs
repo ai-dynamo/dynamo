@@ -17,6 +17,7 @@ use crate::{
         common::{
             extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
             llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
+            preprocessor::MultimodalData,
             timing::RequestPhase,
         },
     },
@@ -28,7 +29,7 @@ use dynamo_runtime::error::{self, BackendError, DynamoError, ErrorType};
 use dynamo_runtime::metrics::prometheus_names::frontend_service;
 use dynamo_runtime::pipeline::{
     AsyncEngineContext, AsyncEngineContextProvider, Context, ManyOut, Operator, PipelineOperator,
-    ResponseStream, ServerStreamingEngine, SingleIn, async_trait,
+    ResponseStream, ServerStreamingEngine, SingleIn, async_trait, attach_first_response_guard,
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 
@@ -399,6 +400,21 @@ where
                     ))
                     .build()
                     .into());
+            }
+            let source_guards = self
+                .request
+                .multi_modal_data
+                .as_ref()
+                .into_iter()
+                .flat_map(|media| media.values())
+                .flatten()
+                .filter_map(|item| match item {
+                    MultimodalData::Decoded(descriptor) => descriptor.source_storage.clone(),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if !source_guards.is_empty() {
+                attach_first_response_guard(&mut request, Arc::new(source_guards));
             }
             response_stream = Some(self.next_generate.generate(request).await);
             if let Some(err) = response_stream.as_ref().unwrap().as_ref().err()
