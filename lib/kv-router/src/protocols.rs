@@ -1048,6 +1048,9 @@ pub struct ActiveSequenceEvent {
     pub router_id: u64,
     #[serde(default)]
     pub lora_name: Option<String>,
+    /// Populated locally from the transport envelope; skipped for wire compatibility.
+    #[serde(skip)]
+    pub delivery_age: Duration,
 }
 
 /// Active-sequence lifecycle events carried in publisher-queue arrival order.

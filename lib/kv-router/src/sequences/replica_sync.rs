@@ -161,15 +161,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             data,
             router_id,
             lora_name,
+            delivery_age,
         } = event;
 
         if router_id == self.router_id {
             return;
         }
 
-        // ActiveSequenceEvent does not carry prompt-load decay timestamps yet.
-        // Peer routers still approximate decay anchoring with local receive time.
-        let decay_now = Instant::now();
+        let receive_now = Instant::now();
 
         match data {
             ActiveSequenceEventData::AddRequest {
@@ -178,10 +177,32 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 expected_output_tokens,
                 prefill_load_hint,
             } => {
-                if self.replica_worker_policy == ReplicaWorkerPolicy::LazyRegister {
-                    self.ensure_worker_registered(event_worker);
+                let decay_now = receive_now.checked_sub(delivery_age).unwrap_or_else(|| {
+                    tracing::debug!(
+                        delivery_age_ms = delivery_age.as_millis(),
+                        "Replica event age exceeds the local monotonic clock range; using receive time"
+                    );
+                    receive_now
+                });
+                let mut table = self.workers.read();
+                if table
+                    .expiry_duration()
+                    .is_some_and(|expiry_duration| delivery_age >= expiry_duration)
+                {
+                    tracing::trace!(
+                        request_id,
+                        delivery_age_ms = delivery_age.as_millis(),
+                        "Dropping replica AddRequest that expired before arrival"
+                    );
+                    return;
                 }
-                let table = self.workers.read();
+                if self.replica_worker_policy == ReplicaWorkerPolicy::LazyRegister
+                    && !table.index.contains_key(&event_worker)
+                {
+                    drop(table);
+                    self.ensure_worker_registered(event_worker);
+                    table = self.workers.read();
+                }
                 let Some(&idx) = table.index.get(&event_worker) else {
                     tracing::debug!(
                         worker = ?event_worker,
@@ -229,7 +250,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 let load = {
                     let slot = &table.slots[idx];
                     let mut seq = slot.sequences.write();
-                    let delta = seq.free(&request_id, decay_now);
+                    let delta = seq.free(&request_id, receive_now);
                     let load = seq.worker_load_snapshot();
                     self.prompt_registry
                         .apply_membership_delta_and_load_without_cleanup(worker, delta, load);
@@ -250,7 +271,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 };
                 let load = {
                     let mut seq = table.slots[idx].sequences.write();
-                    seq.mark_prefill_completed(&request_id, decay_now);
+                    seq.mark_prefill_completed(&request_id, receive_now);
                     let load = seq.worker_load_snapshot();
                     self.prompt_registry.replace_worker_load_state(worker, load);
                     load

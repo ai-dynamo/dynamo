@@ -197,7 +197,7 @@ impl ActiveSequences {
         }
 
         let mut outcome = self.force_expiry();
-        let started_at = Instant::now();
+        let started_at = decay_now;
 
         let prompt_hashes = token_sequence.unwrap_or_default();
         let (blocks, first_new_prompt_idx) = self.blocks.acquire_prompt(&prompt_hashes);

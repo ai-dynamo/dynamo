@@ -88,7 +88,7 @@ by shifting the effective anchor forward by the removed request's modeled durati
 removal time. This keeps completed non-anchor work from also counting as elapsed progress against the
 remaining modeled backlog. `Free` keeps its existing implicit prefill-completion cleanup behavior and
 applies the same credit when the prefill is still tracked. Replica-synced state remains advisory and
-receive-time anchored.
+uses event-envelope delivery age as its decay and expiry anchor.
 
 When any active prefill for a worker lacks an expected duration, the modeled-time read returns
 `Err(MissingExpectedDuration)`. That is the normal default/no-AIC or prediction-failed state, and the
