@@ -8,8 +8,6 @@ from dynamo.experimental.workflow import (
     ExecutionPlan,
     InlineBinding,
     StageContract,
-    StreamSpec,
-    ValueSpec,
     Workflow,
     WorkflowValidationError,
     compile_workflow,
@@ -25,13 +23,13 @@ pytestmark = [
 
 def _workflow() -> Workflow:
     workflow = Workflow("physical-plan")
-    text = workflow.input("text", ValueSpec(type="text"))
+    text = workflow.input("text")
     stage = workflow.stage(
         "normalize",
         StageContract(
             id="normalize",
-            inputs={"text": ValueSpec(type="text")},
-            outputs={"normalized": ValueSpec(type="text")},
+            inputs={"text"},
+            outputs={"normalized"},
         ),
         text=text,
     )
@@ -50,25 +48,6 @@ def test_compilation_defaults_to_stage_id_inline_bindings() -> None:
     plan = compile_workflow(_workflow())
 
     assert plan.bindings == {"normalize": InlineBinding(runner_key="normalize")}
-
-
-def test_compilation_rejects_declared_stream_execution() -> None:
-    chunks = StreamSpec(item=ValueSpec(type="json"))
-    workflow = Workflow("stream-plan")
-    source = workflow.input("chunks", chunks)
-    stage = workflow.stage(
-        "stream",
-        StageContract(
-            id="stream",
-            inputs={"chunks": chunks},
-            outputs={"chunks": chunks},
-        ),
-        chunks=source,
-    )
-    workflow.output("chunks", stage.chunks)
-
-    with pytest.raises(WorkflowValidationError, match="not supported"):
-        compile_workflow(workflow)
 
 
 def test_execution_plan_rejects_missing_stage_bindings() -> None:

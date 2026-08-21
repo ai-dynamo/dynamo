@@ -12,7 +12,6 @@ from dynamo.experimental.workflow import (
     StageContext,
     StageContract,
     StageRunner,
-    ValueSpec,
     Workflow,
     WorkflowExecutionError,
     WorkflowOrchestrator,
@@ -28,27 +27,26 @@ pytestmark = [
 ]
 
 
-EMBEDDING = ValueSpec(type="object", class_id="embedding")
 ENCODER = StageContract(
     id="encoder-worker",
-    inputs={"text": ValueSpec(type="text")},
-    outputs={"embedding": EMBEDDING},
+    inputs={"text"},
+    outputs={"embedding"},
 )
 CLASSIFIER = StageContract(
     id="classifier-worker",
-    inputs={"embedding": EMBEDDING},
-    outputs={"scores": ValueSpec(type="json")},
+    inputs={"embedding"},
+    outputs={"scores"},
 )
 GENERATOR = StageContract(
     id="generator-worker",
-    inputs={"embedding": EMBEDDING},
-    outputs={"text": ValueSpec(type="text")},
+    inputs={"embedding"},
+    outputs={"text"},
 )
 
 
 def _workflow() -> Workflow:
     workflow = Workflow("local-execution")
-    text = workflow.input("text", ValueSpec(type="text"))
+    text = workflow.input("text")
     encoder = workflow.stage("encoder", _Encoder.contract, text=text)
     classifier = workflow.stage(
         "classifier", _Classifier.contract, embedding=encoder.embedding
@@ -289,7 +287,7 @@ async def test_compile_requires_exact_bindings_and_matching_contracts():
         )
 
 
-async def test_runtime_rejects_bad_inputs_and_worker_outputs():
+async def test_runtime_accepts_opaque_values_and_rejects_bad_outputs():
     embedding = object()
     plan = await _compile_local(
         _workflow(),
@@ -297,8 +295,10 @@ async def test_runtime_rejects_bad_inputs_and_worker_outputs():
         classifier=_Classifier(embedding),
         generator=_Generator(embedding),
     )
-    with pytest.raises(WorkflowExecutionError, match="must be text"):
-        await plan.run({"text": b"not text"})
+    assert await plan.run({"text": object()}) == {
+        "scores": {"class-a": 0.75, "class-b": 0.25},
+        "text": "generated",
+    }
     with pytest.raises(WorkflowExecutionError, match="extra"):
         await plan.run({"text": "hello", "extra": "value"})
 
@@ -316,56 +316,3 @@ async def test_runtime_rejects_bad_inputs_and_worker_outputs():
     )
     with pytest.raises(WorkflowExecutionError, match="outputs differ"):
         await bad_plan.run({"text": "hello"})
-
-
-async def test_runtime_enforces_json_data_model() -> None:
-    workflow = Workflow("json-values")
-    value = workflow.input("value", ValueSpec(type="json"))
-    workflow.output("value", value)
-    plan = await _compile_local(workflow)
-
-    shared = [1, 2]
-    valid = {"none": None, "bool": True, "number": 1.5, "shared": [shared, shared]}
-    assert await plan.run({"value": valid}) == {"value": valid}
-
-    cyclic: list[object] = []
-    cyclic.append(cyclic)
-    invalid_values: list[object] = [
-        (1, 2),
-        {1: "non-string key"},
-        float("nan"),
-        float("inf"),
-        cyclic,
-    ]
-    for invalid in invalid_values:
-        with pytest.raises(WorkflowExecutionError, match="JSON data model"):
-            await plan.run({"value": invalid})
-
-
-async def test_tensor_and_image_constraints_are_checked_without_framework_imports():
-    tensor_contract = StageContract(
-        id="tensor",
-        inputs={
-            "tensor": ValueSpec(type="tensor", dtype="float32", shape=("dynamic", 4))
-        },
-        outputs={"image": ValueSpec(type="image", mode="RGB")},
-    )
-    workflow = Workflow("runtime-types")
-    tensor = workflow.input(
-        "tensor", ValueSpec(type="tensor", dtype="float32", shape=("dynamic", 4))
-    )
-    stage = workflow.stage("convert", tensor_contract, tensor=tensor)
-    workflow.output("image", stage.image)
-
-    class Converter:
-        contract = tensor_contract
-
-        async def run(self, inputs, context):
-            return {"image": SimpleNamespace(mode="RGB", size=(10, 10))}
-
-    plan = await _compile_local(workflow, convert=Converter())
-    value = SimpleNamespace(dtype="float32", shape=(2, 4))
-
-    assert (await plan.run({"tensor": value}))["image"].mode == "RGB"
-    with pytest.raises(WorkflowExecutionError, match="shape"):
-        await plan.run({"tensor": SimpleNamespace(dtype="float32", shape=(2, 3))})
