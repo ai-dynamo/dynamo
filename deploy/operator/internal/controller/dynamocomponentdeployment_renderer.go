@@ -260,7 +260,7 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		return nil, errors.New("no containers found in base pod spec")
 	}
 
-	if err := r.applyNVLinkTopologyCapability(ctx, role, podSpec); err != nil {
+	if err := r.applyNVLinkTopologyCapability(ctx, role, dcd, podSpec); err != nil {
 		return nil, err
 	}
 
@@ -332,13 +332,24 @@ func (r *dcdWorkloadRenderer) applyDiscoveryLabels(role dynamo.Role, podAnnotati
 // healthy but has no NVLink route to the leader, so the EP collective fails only when it
 // runs and an apparently successful scale serves wrong or failing inference.
 //
-// That label is stamped by the DRA driver on GB200-class nodes. On hardware that never
-// carries it the required term can never be satisfied, so the follower would sit Pending
-// forever with nothing explaining why -- and admission enables this path from the vLLM
-// flags alone, so the user gets no signal that GB200 was required. Check the cluster
-// instead: keep the term where a partition exists to pin to, and drop it where none
-// does, leaving the follower to schedule normally.
-func (r *dcdWorkloadRenderer) applyNVLinkTopologyCapability(ctx context.Context, role dynamo.Role, podSpec *corev1.PodSpec) error {
+// That label is stamped by the DRA driver on GB200-class nodes. Where it is absent the
+// required term can never be satisfied, so the follower would sit Pending forever with
+// nothing explaining why -- and admission enables this path from the vLLM flags alone, so
+// the user gets no signal that GB200 was required. Keep the term where it can be honoured
+// and drop it where it cannot, letting the follower schedule normally.
+//
+// The question is about the *leader's* node, not the cluster. A pod affinity on
+// nvidia.com/gpu.clique matches by comparing that label between the candidate node and a
+// node already running a leader pod, so an unrelated GB200 node elsewhere in a mixed
+// cluster does not make the term satisfiable: if the leader landed on an unlabeled node,
+// nothing can ever match it. Asking "does any node carry the label" would answer yes and
+// strand the follower.
+func (r *dcdWorkloadRenderer) applyNVLinkTopologyCapability(
+	ctx context.Context,
+	role dynamo.Role,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	podSpec *corev1.PodSpec,
+) error {
 	if role != dynamo.RoleFollower || podSpec.Affinity == nil || podSpec.Affinity.PodAffinity == nil {
 		return nil
 	}
@@ -351,9 +362,9 @@ func (r *dcdWorkloadRenderer) applyNVLinkTopologyCapability(ctx context.Context,
 			kept = append(kept, term)
 			continue
 		}
-		supported, err := r.clusterHasNVLinkDomain(ctx)
+		supported, err := r.leaderHasNVLinkDomain(ctx, dcd, term.LabelSelector)
 		if err != nil {
-			return errors.Wrap(err, "failed to determine whether the cluster exposes NVLink partitions")
+			return errors.Wrap(err, "failed to determine whether the elastic-EP leader sits in an NVLink partition")
 		}
 		if supported {
 			kept = append(kept, term)
@@ -366,7 +377,7 @@ func (r *dcdWorkloadRenderer) applyNVLinkTopologyCapability(ctx context.Context,
 	}
 
 	log.FromContext(ctx).Info(
-		"no node exposes an NVLink partition label; scheduling the elastic-EP follower without partition affinity",
+		"elastic-EP leader is not in an NVLink partition; scheduling the follower without partition affinity",
 		"topologyKey", commonconsts.NodeLabelGPUClique,
 	)
 	podSpec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution = kept
@@ -378,17 +389,47 @@ func (r *dcdWorkloadRenderer) applyNVLinkTopologyCapability(ctx context.Context,
 	return nil
 }
 
-// clusterHasNVLinkDomain reports whether any node advertises an NVLink partition.
-// Bounded to a single item: the question is existence, not which nodes.
-func (r *dcdWorkloadRenderer) clusterHasNVLinkDomain(ctx context.Context) (bool, error) {
-	nodes := &corev1.NodeList{}
-	if err := r.reader.List(ctx, nodes,
-		client.HasLabels{commonconsts.NodeLabelGPUClique},
-		client.Limit(1),
+// leaderHasNVLinkDomain reports whether the node already running this follower's leader
+// advertises an NVLink partition.
+//
+// Until a leader pod is scheduled there is nothing to compare against, so the answer is
+// "not yet" and the term is dropped. That is self-correcting: the follower rests at zero
+// replicas, and every reconcile re-renders it, so once the leader is placed on a labelled
+// node a later reconcile restores the affinity before anything scales the follower up.
+func (r *dcdWorkloadRenderer) leaderHasNVLinkDomain(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	leaderSelector *metav1.LabelSelector,
+) (bool, error) {
+	if leaderSelector == nil || len(leaderSelector.MatchLabels) == 0 {
+		return false, nil
+	}
+
+	leaderPods := &corev1.PodList{}
+	if err := r.reader.List(ctx, leaderPods,
+		client.InNamespace(dcd.Namespace),
+		client.MatchingLabels(leaderSelector.MatchLabels),
 	); err != nil {
 		return false, err
 	}
-	return len(nodes.Items) > 0, nil
+
+	for i := range leaderPods.Items {
+		nodeName := leaderPods.Items[i].Spec.NodeName
+		if nodeName == "" {
+			continue
+		}
+		node := &corev1.Node{}
+		if err := r.reader.Get(ctx, types.NamespacedName{Name: nodeName}, node); err != nil {
+			if k8serrors.IsNotFound(err) {
+				continue
+			}
+			return false, err
+		}
+		if _, ok := node.Labels[commonconsts.NodeLabelGPUClique]; ok {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (r *dcdWorkloadRenderer) generateService(

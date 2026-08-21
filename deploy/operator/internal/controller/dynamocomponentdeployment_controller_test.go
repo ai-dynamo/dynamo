@@ -940,18 +940,47 @@ func TestDynamoComponentDeploymentReconciler_ElasticEPHeadlessServiceGate(t *tes
 	}
 }
 
-// The follower's NVLink-partition affinity is required, so it can only be honoured on
-// hardware that advertises partitions. Keeping it on a cluster with no such nodes would
-// leave the follower Pending forever with no explanation; dropping it there lets the pod
-// schedule normally. Both behaviours are asserted so neither can regress silently.
+// The follower's NVLink-partition affinity is required, so it can only be honoured when
+// the leader itself sits in a partition. The check is deliberately about the leader's
+// node rather than the cluster: pod affinity on gpu.clique matches by comparing that
+// label against a node already running a leader pod, so an unrelated labelled node in a
+// mixed cluster does not make the term satisfiable. Keeping it anyway would leave the
+// follower Pending forever; dropping it lets the pod schedule normally.
 func TestDynamoComponentDeploymentReconciler_NVLinkTopologyCapability(t *testing.T) {
 	tests := []struct {
-		name           string
-		nodeHasClique  bool
-		wantCliqueTerm bool
+		name            string
+		leaderNodeLabel bool // leader pod runs on a node carrying gpu.clique
+		otherNodeLabel  bool // an unrelated node carries it (mixed cluster)
+		leaderScheduled bool
+		wantCliqueTerm  bool
 	}{
-		{name: "cluster advertises NVLink partitions: pin the follower", nodeHasClique: true, wantCliqueTerm: true},
-		{name: "cluster has none: schedule normally instead of Pending forever", nodeHasClique: false, wantCliqueTerm: false},
+		{
+			name:            "leader sits in a partition: pin the follower to it",
+			leaderNodeLabel: true,
+			leaderScheduled: true,
+			wantCliqueTerm:  true,
+		},
+		{
+			name:            "leader is on an unlabelled node: schedule normally instead of Pending forever",
+			leaderScheduled: true,
+			wantCliqueTerm:  false,
+		},
+		{
+			// The case a cluster-wide check gets wrong: a GB200 node exists, but not the
+			// leader's, so the required term could never match and the follower would hang.
+			name:            "mixed cluster, leader unlabelled: an unrelated labelled node must not count",
+			otherNodeLabel:  true,
+			leaderScheduled: true,
+			wantCliqueTerm:  false,
+		},
+		{
+			// Self-correcting: the follower rests at zero and is re-rendered every
+			// reconcile, so the affinity returns once the leader is placed.
+			name:            "leader not scheduled yet: nothing to compare against",
+			leaderNodeLabel: true,
+			leaderScheduled: false,
+			wantCliqueTerm:  false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -980,7 +1009,13 @@ func TestDynamoComponentDeploymentReconciler_NVLinkTopologyCapability(t *testing
 								Affinity: &corev1.Affinity{
 									PodAffinity: &corev1.PodAffinity{
 										RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
-											{TopologyKey: commonconsts.NodeLabelGPUClique},
+											{
+												TopologyKey: commonconsts.NodeLabelGPUClique,
+												LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+													commonconsts.KubeLabelDynamoComponent: "decode",
+													commonconsts.KubeLabelDynamoNamespace: "default",
+												}},
+											},
 										},
 									},
 									PodAntiAffinity: &corev1.PodAntiAffinity{
@@ -996,14 +1031,31 @@ func TestDynamoComponentDeploymentReconciler_NVLinkTopologyCapability(t *testing
 			}
 			dcd := betaDCD(t, alpha)
 
-			objects := []client.Object{dcd}
-			if tt.nodeHasClique {
-				objects = append(objects, &corev1.Node{
+			t.Log("Place the leader pod and its node exactly as the case describes")
+			leaderNode := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "leader-node"}}
+			if tt.leaderNodeLabel {
+				leaderNode.Labels = map[string]string{commonconsts.NodeLabelGPUClique: "clique-a"}
+			}
+			objects := []client.Object{dcd, leaderNode}
+			if tt.otherNodeLabel {
+				objects = append(objects, &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+					Name:   "unrelated-gb200",
+					Labels: map[string]string{commonconsts.NodeLabelGPUClique: "clique-z"},
+				}})
+			}
+			if tt.leaderScheduled {
+				leaderPod := &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:   "gb200-0",
-						Labels: map[string]string{commonconsts.NodeLabelGPUClique: "clique-a"},
+						Name:      "leader-0",
+						Namespace: "default",
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent: "decode",
+							commonconsts.KubeLabelDynamoNamespace: "default",
+						},
 					},
-				})
+					Spec: corev1.PodSpec{NodeName: leaderNode.Name},
+				}
+				objects = append(objects, leaderPod)
 			}
 
 			r := &DynamoComponentDeploymentReconciler{
@@ -1020,7 +1072,7 @@ func TestDynamoComponentDeploymentReconciler_NVLinkTopologyCapability(t *testing
 				context.Background(), dcd, dynamo.RoleFollower, noContainerGPUs())
 			require.NoError(t, err)
 
-			t.Log("The partition affinity survives only where a partition exists to pin to")
+			t.Log("The partition affinity survives only when the leader is in a partition to pin to")
 			var gotClique bool
 			if aff := podTemplate.Spec.Affinity; aff != nil && aff.PodAffinity != nil {
 				for _, term := range aff.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution {

@@ -40,6 +40,10 @@ const (
 
 func vllmComponent(extraArgs ...string) *v1beta1.DynamoComponentDeploymentSharedSpec {
 	return &v1beta1.DynamoComponentDeploymentSharedSpec{
+		// Elastic EP is a worker topology, and synthesis now requires it: the leader is
+		// the engine heading the Ray cluster, so a planner or frontend carrying the same
+		// flags must not derive a follower.
+		ComponentType: commonconsts.ComponentTypeWorker,
 		PodTemplate: &corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{{
@@ -141,6 +145,67 @@ func TestSynthesizeElasticEPFollowerDCD_OnlyForElasticEP(t *testing.T) {
 			t.Log("a follower is synthesized only for a shape whose leader Service is emitted")
 			if gotSynthesis := follower != nil; gotSynthesis != tt.wantSynthesis {
 				t.Fatalf("synthesized = %v, want %v (got %+v)", gotSynthesis, tt.wantSynthesis, follower)
+			}
+		})
+	}
+}
+
+// The follower is a deep copy, so it inherits spec.experimental.checkpoint verbatim. An
+// explicit checkpointRef there is resolved by the renderer no matter what the reconciler
+// looks up, and would restore-shape the follower's main container -- so once scaled it
+// would restore a leader engine image instead of running its bare Ray join.
+func TestSynthesizeElasticEPFollowerDCD_StripsCheckpointConfig(t *testing.T) {
+	leader := leaderDCD(elasticEPComponent())
+	checkpointRef := "leader-checkpoint"
+	leader.Spec.Experimental = &v1beta1.ExperimentalSpec{
+		Checkpoint: &v1beta1.ComponentCheckpointConfig{
+			Enabled:       true,
+			CheckpointRef: &checkpointRef,
+		},
+	}
+
+	t.Log("derive the follower from a leader with an explicit checkpoint reference")
+	follower := synthesizeElasticEPFollowerDCD(leader, leaderComponent)
+	if follower == nil {
+		t.Fatal("expected a follower to be synthesized")
+	}
+
+	t.Log("the inherited checkpoint config is dropped, so nothing restore-shapes the follower")
+	if follower.Spec.Experimental != nil && follower.Spec.Experimental.Checkpoint != nil {
+		t.Errorf("follower kept checkpoint config %+v; it would restore a leader engine instead of running its Ray join",
+			follower.Spec.Experimental.Checkpoint)
+	}
+
+	t.Log("the leader's own checkpoint config is untouched by the derivation")
+	if leader.Spec.Experimental.Checkpoint == nil || !leader.Spec.Experimental.Checkpoint.Enabled {
+		t.Error("leader lost its checkpoint config during follower synthesis")
+	}
+}
+
+// Admission accepts the elastic-EP launch flags on any component, so without a
+// component-type gate a global-vLLM graph could put them on a planner or frontend and
+// have a follower derived for it.
+func TestIsSinglePodElasticEPLeader_RequiresAWorkerComponent(t *testing.T) {
+	tests := []struct {
+		name          string
+		componentType v1beta1.ComponentType
+		want          bool
+	}{
+		{name: "worker qualifies", componentType: commonconsts.ComponentTypeWorker, want: true},
+		{name: "decode worker qualifies", componentType: commonconsts.ComponentTypeDecode, want: true},
+		{name: "prefill worker qualifies", componentType: commonconsts.ComponentTypePrefill, want: true},
+		{name: "frontend does not", componentType: commonconsts.ComponentTypeFrontend, want: false},
+		{name: "planner does not", componentType: commonconsts.ComponentTypePlanner, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			component := elasticEPComponent()
+			component.ComponentType = tt.componentType
+
+			t.Log("elastic EP is a worker topology: the leader is the engine heading the Ray cluster")
+			if got := IsSinglePodElasticEPLeader(component); got != tt.want {
+				t.Errorf("IsSinglePodElasticEPLeader(%s) = %v, want %v", tt.componentType, got, tt.want)
 			}
 		})
 	}

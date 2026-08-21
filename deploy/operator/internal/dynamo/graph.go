@@ -301,10 +301,13 @@ func GenerateDynamoComponentsDeployments(
 	}
 
 	// Collected up front so a derived follower identity is checked against every
-	// declared component, not just the ones generated before it.
+	// declared component, not just the ones generated before it. Compared
+	// case-insensitively: the derived name is normalized to lowercase, so a graph
+	// declaring "Decode" and "DECODE-FLW" collides on "decode-flw" even though the two
+	// spellings differ.
 	declaredComponentNames := make(map[string]bool, len(parentDGD.Spec.Components))
 	for i := range parentDGD.Spec.Components {
-		declaredComponentNames[parentDGD.Spec.Components[i].ComponentName] = true
+		declaredComponentNames[strings.ToLower(parentDGD.Spec.Components[i].ComponentName)] = true
 	}
 
 	// Generate DCDs for each component.
@@ -344,9 +347,9 @@ func GenerateDynamoComponentsDeployments(
 		// rendering, worker hashing, and status depending on component order, so fail
 		// loudly instead.
 		followerComponentName := GetDCDComponentName(follower)
-		if declaredComponentNames[followerComponentName] {
+		if declaredComponentNames[strings.ToLower(followerComponentName)] {
 			return nil, fmt.Errorf(
-				"elastic-EP component %q derives a follower named %q, which collides with a component declared in this graph; rename that component",
+				"elastic-EP component %q derives a follower named %q, which collides with a component declared in this graph (compared case-insensitively); rename that component",
 				componentName, followerComponentName,
 			)
 		}
@@ -421,6 +424,13 @@ func ElasticEPComponentIdentity(component *v1beta1.DynamoComponentDeploymentShar
 // renders leader and worker pods that share the component labels, reconciles through
 // the LWS path, and already reaches its leader through the framework hostname.
 func IsSinglePodElasticEPLeader(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	// Elastic EP is a worker topology: the leader is the engine that heads the Ray
+	// cluster and the follower lends it a GPU. Admission accepts the launch flags on any
+	// component, so without this a global-vLLM graph could put them on a planner or
+	// frontend and have a follower derived for it.
+	if !IsWorkerComponent(string(component.ComponentType)) {
+		return false
+	}
 	container := GetMainContainer(component)
 	if container == nil || !IsElasticEPRayLaunch(container) {
 		return false
@@ -460,6 +470,16 @@ func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment
 	follower := leaderDCD.DeepCopy()
 	follower.Name = elasticEPFollowerName(leaderDCD.Name)
 	follower.Spec.Replicas = ptr.To(int32(0))
+
+	// Drop the leader's checkpoint configuration. The deep copy carries
+	// spec.experimental.checkpoint verbatim, and an explicit checkpointRef there is
+	// resolved by the renderer regardless of what the reconciler looks up -- it would
+	// restore-shape the follower's main container, so once scaled the follower would
+	// restore a leader engine image instead of running its bare Ray join. Not passing
+	// the leader's checkpointInfo is not enough on its own; the inherited spec has to go.
+	if follower.Spec.Experimental != nil {
+		follower.Spec.Experimental.Checkpoint = nil
+	}
 	// GetDCDComponentName prefers Spec.ComponentName over the label, so both must carry
 	// the follower name or its resources and worker hash collide with the leader's.
 	if follower.Spec.ComponentName != "" {
