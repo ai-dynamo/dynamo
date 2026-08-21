@@ -62,7 +62,7 @@ policy_classes:
     cache_bucket: large
     queue_policy: fcfs
     quantum: 512
-    prefill_busy_threshold_frac: 16.0
+    prefill_busy_threshold_frac: 0.95
     request_queue_limit_per_worker: 0
 
   # Retries already have a client prepared to come back, so shed them well
@@ -72,7 +72,7 @@ policy_classes:
     cache_bucket: small
     queue_policy: wspt
     quantum: 2048
-    prefill_busy_threshold_frac: 8.0
+    prefill_busy_threshold_frac: 0.85
     request_queue_limit_per_worker: 0
 
   # An oversized retry is the most expensive and least urgent work there is.
@@ -81,5 +81,5 @@ policy_classes:
     cache_bucket: large
     queue_policy: fcfs
     quantum: 512
-    prefill_busy_threshold_frac: 4.0
+    prefill_busy_threshold_frac: 0.70
     request_queue_limit_per_worker: 0
