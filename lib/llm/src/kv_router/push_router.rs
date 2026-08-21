@@ -830,25 +830,7 @@ where
 
         guard.start_dispatch(&phase_label);
         guard.record_prefill_start();
-        let dispatch_result = if let Some(allowed_fallback) = lora_fallback.as_ref() {
-            cancel_on_stop(
-                request_context.as_ref(),
-                self.inner.direct_within_prepared(
-                    request,
-                    initial_worker,
-                    Some(allowed_fallback),
-                    |request, worker_id| {
-                        guard.retarget_worker(worker_id)?;
-                        let target = AffinityTarget::new(worker_id, None);
-                        request.routing_mut().dp_rank = None;
-                        prepare(request, target).map(|metadata| (metadata, target))
-                    },
-                ),
-            )
-            .await
-            .and_then(|result| result)
-            .map(|((metadata, target), stream)| (metadata, target, stream))
-        } else if policy == BuiltinRoutingPolicy::Direct && !has_affinity_session {
+        let dispatch_result = if policy == BuiltinRoutingPolicy::Direct && !has_affinity_session {
             // Preserve the old Direct adapter's transport fallback. This is intentionally only
             // for a standalone Direct request: an active affinity session owns a hard binding
             // and must not silently move to a different worker.
@@ -912,23 +894,26 @@ where
             .and_then(|result| result)
             .map(|((metadata, target), stream)| (metadata, target, stream))
         } else {
-            let target = AffinityTarget::new(initial_worker, None);
-            request.routing_mut().dp_rank = None;
-            let metadata = match prepare(&mut request, target) {
-                Ok(metadata) => metadata,
-                Err(error) => {
-                    guard.abort().await;
-                    invalidate_on_non_cancellation(&mut operation, &error);
-                    return Err(error);
-                }
-            };
+            // Stateless selection supplies a preferred worker. Keep the normal transport
+            // recovery path: LoRA requests constrain a fallback to their replica set, while
+            // base-model requests may use any ready worker.
             cancel_on_stop(
                 request_context.as_ref(),
-                self.inner.dispatch_exact(request, target.worker_id),
+                self.inner.direct_within_prepared(
+                    request,
+                    initial_worker,
+                    lora_fallback.as_ref(),
+                    |request, worker_id| {
+                        guard.retarget_worker(worker_id)?;
+                        let target = AffinityTarget::new(worker_id, None);
+                        request.routing_mut().dp_rank = None;
+                        prepare(request, target).map(|metadata| (metadata, target))
+                    },
+                ),
             )
             .await
             .and_then(|result| result)
-            .map(|stream| (metadata, target, stream))
+            .map(|((metadata, target), stream)| (metadata, target, stream))
         };
 
         let (metadata, target, response_stream) = match dispatch_result {
@@ -1487,7 +1472,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn builtin_lora_capability_filters_candidates_and_tracks_load() {
+    async fn builtin_lora_base_model_falls_back_and_adapter_filters_candidates() {
         let runtime = Runtime::from_current().unwrap();
         let distributed =
             DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -1502,7 +1487,8 @@ mod tests {
         let client = endpoint.client().await.unwrap();
         endpoint.register_endpoint_instance().await.unwrap();
         let worker_id = client.wait_for_instances().await.unwrap()[0].id();
-        client.override_instance_avail(vec![worker_id.wrapping_add(1), worker_id]);
+        let stale_worker = worker_id.wrapping_add(1);
+        client.override_instance_avail(vec![stale_worker, worker_id]);
         let dispatch = Arc::new(CompletedBuiltinDispatch::default());
         let inner = PushRouter::from_client_with_dispatch(
             client,
@@ -1531,12 +1517,39 @@ mod tests {
             Some((filter, Arc::clone(&estimator))),
         )
         .unwrap();
+
+        // Advance RoundRobin once so the base-model request selects the stale worker.
+        assert_eq!(
+            host.peek_next_worker().unwrap(),
+            Some(AffinityTarget::new(worker_id, None))
+        );
+        let mut first_stream = host.generate(Context::new(request())).await.unwrap();
+        while first_stream.next().await.is_some() {}
+        assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[worker_id]);
+
+        // Base-model traffic keeps normal RoundRobin recovery: the selected worker can vanish,
+        // but fallback must not inherit the adapter replica-set filter.
+        assert_eq!(
+            host.peek_next_worker().unwrap(),
+            Some(AffinityTarget::new(stale_worker, None))
+        );
+        let mut base_stream = host.generate(Context::new(request())).await.unwrap();
+        while base_stream.next().await.is_some() {}
+        assert_eq!(
+            dispatch.worker_ids.lock().unwrap().as_slice(),
+            &[worker_id, worker_id]
+        );
+        assert!(estimator.get_inflight_counts().is_empty());
+
         let mut request = request();
         request.routing_mut().lora_name = Some("adapter".to_string());
 
         let mut stream = host.generate(Context::new(request)).await.unwrap();
         assert_eq!(estimator.get_inflight_counts().get("adapter"), Some(&1));
-        assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[worker_id]);
+        assert_eq!(
+            dispatch.worker_ids.lock().unwrap().as_slice(),
+            &[worker_id, worker_id, worker_id]
+        );
         while stream.next().await.is_some() {}
         assert!(!estimator.get_inflight_counts().contains_key("adapter"));
 
