@@ -26,7 +26,8 @@ Treat the [Agent Harnesses guide](https://github.com/ai-dynamo/dynamo/blob/main/
 
 ## Prerequisites
 
-- A reachable Dynamo endpoint whose `/v1/models` includes the requested model.
+- Deploy a supported configuration from the [Dynamo recipe catalog](https://github.com/ai-dynamo/dynamo/tree/main/recipes) on Kubernetes, then retain its reachable frontend URL and exact served model. This skill consumes that endpoint; it does not deploy Dynamo.
+- A successful `GET $DYNAMO_BASE_URL/v1/models` result containing `$DYNAMO_MODEL`.
 - `uv` and Node.js 22+.
 - `opencode` on `PATH` only when selecting the OpenCode harness.
 - A working directory that limits the delegated agent's scope.
@@ -37,10 +38,13 @@ Treat the [Agent Harnesses guide](https://github.com/ai-dynamo/dynamo/blob/main/
 Default to `verify`. Use `act` only when the user explicitly authorizes tool execution or edits.
 
 ```bash
+export DYNAMO_BASE_URL=http://127.0.0.1:8000
+export DYNAMO_MODEL=your-recipe-served-model
+
 .agents/skills/dynamo-agent-harness/scripts/drive_harness.py \
   --harness codex \
-  --base-url http://127.0.0.1:8000 \
-  --model zai-org/GLM-4.7-Flash \
+  --base-url "$DYNAMO_BASE_URL" \
+  --model "$DYNAMO_MODEL" \
   --cwd /absolute/worktree \
   --capability verify
 ```
@@ -65,8 +69,8 @@ For an endpoint that is explicitly deployed with ThunderAgent, add the lifecycle
 ```bash
 .agents/skills/dynamo-agent-harness/scripts/drive_harness.py \
   --harness codex \
-  --base-url http://127.0.0.1:8000 \
-  --model zai-org/GLM-4.7-Flash \
+  --base-url "$DYNAMO_BASE_URL" \
+  --model "$DYNAMO_MODEL" \
   --cwd /absolute/worktree \
   --capability verify \
   --session-final

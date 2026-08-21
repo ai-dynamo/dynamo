@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Codex through Dynamo
 
-This runbook drives one persistent Codex session through a Dynamo endpoint by using the pinned Codex ACP adapter. It defaults to read-only verification and stock Dynamo semantics. ThunderAgent lifecycle finalization is a separate opt-in operation.
+This runbook drives one persistent Codex session through an existing Dynamo endpoint by using the pinned Codex ACP adapter. It defaults to read-only verification and stock Dynamo semantics. ThunderAgent lifecycle finalization is a separate opt-in operation. It does not deploy Dynamo or prescribe a Kubernetes topology.
 
 ## Frozen qualification tuple
 
@@ -20,16 +20,20 @@ This runbook drives one persistent Codex session through a Dynamo endpoint by us
 
 The driver owns the ACP client and adapter pins in [drive_harness.py](https://github.com/ai-dynamo/dynamo/blob/main/.agents/skills/dynamo-agent-harness/scripts/drive_harness.py). Update a pin only after repeating the deterministic tests and a two-turn live smoke test.
 
+## Deploy Dynamo first
+
+Install the [Dynamo Kubernetes Platform](../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx), then choose and deploy a supported configuration from the [Dynamo recipe catalog](../../../recipes/README.md). Follow that recipe through model preparation, `DynamoGraphDeployment` readiness, and frontend exposure. This Codex path begins only after the recipe has produced a reachable frontend URL and exact served model name.
+
 ## Prerequisites
 
 - Use a clean, narrowly scoped worktree for `--cwd`.
-- Start a Dynamo endpoint and confirm that `GET /v1/models` lists the intended model.
+- Keep the selected recipe deployment running and confirm that `GET /v1/models` lists its intended model.
 - Export `DYNAMO_API_KEY` only when the endpoint requires authentication. The driver uses `dummy` when it is unset.
 - Keep `--capability verify` unless edits or tool execution were explicitly authorized.
 
 ```bash
 export DYNAMO_BASE_URL=http://127.0.0.1:8000
-export DYNAMO_MODEL=zai-org/GLM-4.7-Flash
+export DYNAMO_MODEL=your-recipe-served-model
 export CODEX_WORKTREE=/absolute/worktree
 
 curl -fsS "$DYNAMO_BASE_URL/v1/models" | jq -e --arg model "$DYNAMO_MODEL" '.data[] | select(.id == $model)'
