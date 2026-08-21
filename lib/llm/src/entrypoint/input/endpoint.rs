@@ -4,8 +4,9 @@
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use crate::{
-    backend::Backend,
+    backend::{Backend, ExecutionContext},
     engines::StreamingEngineAdapter,
+    first_token::{FirstTokenNotifier, FirstTokenSource},
     model_type::{ModelInput, ModelType},
     preprocessor::{BackendOutput, PreprocessedRequest},
     types::{
@@ -19,11 +20,52 @@ use crate::{
 
 use dynamo_runtime::engine::AsyncEngineStream;
 use dynamo_runtime::pipeline::{
-    Context, ManyOut, Operator, SegmentSource, ServiceBackend, SingleIn, Source, network::Ingress,
+    AsyncEngine, AsyncEngineContextProvider, Context, Error, ManyOut, Operator, ResponseStream,
+    SegmentSource, ServiceBackend, SingleIn, Source, async_trait, network::Ingress,
 };
 use dynamo_runtime::{DistributedRuntime, protocols::EndpointId};
+use futures::StreamExt;
 
 use crate::entrypoint::EngineConfig;
+
+struct FirstTokenExecutionContext {
+    inner: ExecutionContext,
+    source: FirstTokenSource,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<PreprocessedRequest>,
+        ManyOut<Annotated<crate::protocols::common::llm_backend::LLMEngineOutput>>,
+        Error,
+    > for FirstTokenExecutionContext
+{
+    async fn generate(
+        &self,
+        input: SingleIn<PreprocessedRequest>,
+    ) -> Result<ManyOut<Annotated<crate::protocols::common::llm_backend::LLMEngineOutput>>, Error>
+    {
+        let request_id = input.id().to_string();
+        let dp_rank = input.routing.as_ref().and_then(|routing| routing.dp_rank);
+        let notifier =
+            FirstTokenNotifier::for_request(None, Some(&self.source), &request_id, dp_rank);
+        let output = self.inner.generate(input).await?;
+        let context = output.context();
+        let stream = output.map(move |chunk| {
+            if chunk
+                .data
+                .as_ref()
+                .is_some_and(|data| !data.token_ids.is_empty())
+                && let Some(notifier) = &notifier
+            {
+                notifier.notify();
+            }
+            chunk
+        });
+        Ok(ResponseStream::new(Box::pin(stream), context))
+    }
+}
 
 pub async fn run(
     distributed_runtime: DistributedRuntime,
@@ -62,11 +104,38 @@ pub async fn run(
             Box::pin(fut_chat)
         }
         EngineConfig::InProcessTokens {
-            engine: inner_engine,
+            engine,
             mut model,
             is_prefill,
             is_decode,
         } => {
+            let (model_type, worker_type, needs) = if is_prefill {
+                (
+                    ModelType::empty(),
+                    WorkerType::Prefill,
+                    vec![vec![WorkerType::Decode]],
+                )
+            } else if is_decode {
+                (
+                    ModelType::Chat | ModelType::Completions,
+                    WorkerType::Decode,
+                    vec![vec![WorkerType::Prefill]],
+                )
+            } else {
+                (
+                    ModelType::Chat | ModelType::Completions,
+                    WorkerType::Aggregated,
+                    Vec::new(),
+                )
+            };
+            let inner_engine = match FirstTokenSource::for_endpoint(&endpoint, worker_type).await {
+                Some(source) => Arc::new(FirstTokenExecutionContext {
+                    inner: engine,
+                    source,
+                }) as ExecutionContext,
+                None => engine,
+            };
+
             // Pre-processing is done ingress-side, so it should be already done.
             let frontend = SegmentSource::<
                 SingleIn<PreprocessedRequest>,
@@ -90,32 +159,13 @@ pub async fn run(
             // decode `needs` Prefill and prefill `needs` Decode). A worker
             // that is neither is a standalone `Aggregated` worker with no
             // peer dependency.
-            let (model_type, worker_type, needs) = if is_prefill {
-                (
-                    ModelType::empty(),
-                    Some(WorkerType::Prefill),
-                    vec![vec![WorkerType::Decode]],
-                )
-            } else if is_decode {
-                (
-                    ModelType::Chat | ModelType::Completions,
-                    Some(WorkerType::Decode),
-                    vec![vec![WorkerType::Prefill]],
-                )
-            } else {
-                (
-                    ModelType::Chat | ModelType::Completions,
-                    Some(WorkerType::Aggregated),
-                    Vec::new(),
-                )
-            };
             model
                 .attach(
                     &endpoint,
                     model_type,
                     ModelInput::Tokens,
                     None,
-                    worker_type,
+                    Some(worker_type),
                     needs,
                 )
                 .await?;
@@ -150,6 +200,80 @@ pub async fn run(
             tracing::debug!("Endpoint service cancelled");
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dynamo_kv_router::protocols::ActiveSequenceEventData;
+    use dynamo_runtime::pipeline::context::Controller;
+    use tokio::sync::mpsc::error::TryRecvError;
+    use tokio_util::sync::CancellationToken;
+
+    use super::*;
+    use crate::kv_router::sequence::ActiveSequenceEventPublisher;
+    use crate::protocols::common::llm_backend::LLMEngineOutput;
+
+    struct SyntheticExecutionContext;
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for SyntheticExecutionContext
+    {
+        async fn generate(
+            &self,
+            input: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let outputs = [
+                LLMEngineOutput::default(),
+                LLMEngineOutput {
+                    token_ids: vec![101],
+                    ..Default::default()
+                },
+                LLMEngineOutput {
+                    token_ids: vec![102],
+                    ..Default::default()
+                },
+            ]
+            .into_iter()
+            .map(Annotated::from_data);
+            Ok(ResponseStream::new(
+                Box::pin(futures::stream::iter(outputs)),
+                input.context(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_token_engine_notifies_once_after_empty_output() {
+        let (publisher, mut receiver) =
+            ActiveSequenceEventPublisher::channel(4, CancellationToken::new());
+        let source =
+            FirstTokenSource::from_publisher(publisher, 7, WorkerType::Aggregated).unwrap();
+        let engine = FirstTokenExecutionContext {
+            inner: Arc::new(SyntheticExecutionContext),
+            source,
+        };
+        let request: PreprocessedRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "token_ids": [1],
+            "routing": {"dp_rank": 3}
+        }))
+        .unwrap();
+        let input = Context::with_controller(request, Controller::new("request-1".to_string()));
+
+        let mut output = engine.generate(input).await.unwrap();
+        while output.next().await.is_some() {}
+
+        let event = receiver.try_recv().unwrap();
+        assert_eq!(event.request_id, "request-1");
+        assert_eq!(event.worker.worker_id, 7);
+        assert_eq!(event.worker.dp_rank, 3);
+        assert!(matches!(
+            event.data,
+            ActiveSequenceEventData::MarkPrefillCompleted
+        ));
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
     }
 }
 

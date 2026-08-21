@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use async_trait::async_trait;
-use dynamo_llm::kv_router::sequence::ActiveSequenceEventPublisher;
+use dynamo_llm::first_token::FirstTokenSource;
 use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
 use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
 use dynamo_runtime::engine::AsyncEngineContext;
@@ -136,7 +136,7 @@ impl Drop for CancelMonitorGuard {
 pub(crate) struct EngineAdapter {
     engine: Arc<dyn LLMEngine>,
     mode: DisaggregationMode,
-    prefill_publisher: Option<(ActiveSequenceEventPublisher, u64)>,
+    first_token_source: Option<FirstTokenSource>,
 }
 
 impl EngineAdapter {
@@ -144,16 +144,12 @@ impl EngineAdapter {
         Self {
             engine,
             mode,
-            prefill_publisher: None,
+            first_token_source: None,
         }
     }
 
-    pub(crate) fn with_prefill_publisher(
-        mut self,
-        publisher: ActiveSequenceEventPublisher,
-        worker_id: u64,
-    ) -> Self {
-        self.prefill_publisher = Some((publisher, worker_id));
+    pub(crate) fn with_first_token_source(mut self, source: FirstTokenSource) -> Self {
+        self.first_token_source = Some(source);
         self
     }
 }
@@ -304,18 +300,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             (None, None)
         };
 
-        let lifecycle = if self.mode.is_prefill() || self.mode.is_encode() {
-            None
-        } else {
-            self.prefill_publisher
-                .as_ref()
-                .and_then(|(publisher, worker_id)| {
-                    request.routing.as_ref()?.dp_rank.map(|dp_rank| {
-                        (publisher.clone(), ctx.id().to_string(), *worker_id, dp_rank)
-                    })
-                })
-        };
-        let first_token = FirstTokenNotifier::new(ft_tx.clone(), lifecycle);
+        let dp_rank = request.routing.as_ref().and_then(|routing| routing.dp_rank);
+        let first_token = FirstTokenNotifier::for_request(
+            ft_tx.clone(),
+            self.first_token_source.as_ref(),
+            ctx.id(),
+            dp_rank,
+        );
         let gen_ctx = GenerateContext::with_first_token_notifier(
             ctx.clone(),
             first_token.clone(),

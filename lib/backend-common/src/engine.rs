@@ -14,15 +14,14 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
-use dynamo_llm::kv_router::sequence::ActiveSequenceEventPublisher;
 use futures::stream::BoxStream;
 use tokio::sync::watch;
 
 use crate::error::DynamoError;
 
+pub use dynamo_llm::first_token::FirstTokenNotifier;
 pub use dynamo_llm::kv_router::publisher::KvEventPublisher;
 pub use dynamo_llm::protocols::common::llm_backend::{
     LLMEngineOutput, LogProbs, TopLogprob, TopLogprobs,
@@ -36,71 +35,6 @@ pub use dynamo_llm::protocols::common::{
 };
 pub use dynamo_protocols::types::{CompletionUsage, StopReason};
 pub use dynamo_runtime::engine::AsyncEngineContext;
-
-/// Shared one-shot action fired by explicit engine notification or first output observation.
-#[derive(Clone)]
-pub struct FirstTokenNotifier {
-    inner: Arc<FirstTokenNotifierInner>,
-}
-
-struct FirstTokenNotifierInner {
-    notified: AtomicBool,
-    abort_sender: Option<watch::Sender<bool>>,
-    lifecycle: Option<FirstTokenLifecycle>,
-}
-
-struct FirstTokenLifecycle {
-    publisher: ActiveSequenceEventPublisher,
-    request_id: String,
-    worker_id: u64,
-    dp_rank: u32,
-}
-
-impl FirstTokenNotifier {
-    pub(crate) fn new(
-        abort_sender: Option<watch::Sender<bool>>,
-        lifecycle: Option<(ActiveSequenceEventPublisher, String, u64, u32)>,
-    ) -> Option<Self> {
-        if abort_sender.is_none() && lifecycle.is_none() {
-            return None;
-        }
-        Some(Self {
-            inner: Arc::new(FirstTokenNotifierInner {
-                notified: AtomicBool::new(false),
-                abort_sender,
-                lifecycle: lifecycle.map(|(publisher, request_id, worker_id, dp_rank)| {
-                    FirstTokenLifecycle {
-                        publisher,
-                        request_id,
-                        worker_id,
-                        dp_rank,
-                    }
-                }),
-            }),
-        })
-    }
-
-    /// Run the configured abort-release and lifecycle-publication actions at most once.
-    pub fn notify(&self) {
-        if self.inner.notified.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        if let Some(sender) = &self.inner.abort_sender {
-            let _ = sender.send(true);
-        }
-        if let Some(lifecycle) = &self.inner.lifecycle {
-            let _ = lifecycle.publisher.mark_prefill_completed(
-                lifecycle.request_id.clone(),
-                lifecycle.worker_id,
-                lifecycle.dp_rank,
-            );
-        }
-    }
-
-    fn abort_sender(&self) -> Option<&watch::Sender<bool>> {
-        self.inner.abort_sender.as_ref()
-    }
-}
 
 /// Per-request handle wrapping the runtime context. `Deref`s to
 /// `dyn AsyncEngineContext` so engine code uses it transparently.
@@ -117,7 +51,7 @@ impl GenerateContext {
     ) -> Self {
         Self {
             inner,
-            first_token: FirstTokenNotifier::new(first_token, None),
+            first_token: FirstTokenNotifier::for_request(first_token, None, "", None),
             metadata: BTreeMap::new(),
         }
     }
@@ -129,7 +63,7 @@ impl GenerateContext {
     ) -> Self {
         Self {
             inner,
-            first_token: FirstTokenNotifier::new(first_token, None),
+            first_token: FirstTokenNotifier::for_request(first_token, None, "", None),
             metadata,
         }
     }
@@ -739,7 +673,8 @@ mod tests {
     #[test]
     fn first_token_notifier_is_one_shot() {
         let (tx, mut rx) = watch::channel(false);
-        let notifier = FirstTokenNotifier::new(Some(tx), None).expect("abort action exists");
+        let notifier =
+            FirstTokenNotifier::for_request(Some(tx), None, "", None).expect("abort action exists");
 
         notifier.notify();
         assert!(rx.has_changed().unwrap());

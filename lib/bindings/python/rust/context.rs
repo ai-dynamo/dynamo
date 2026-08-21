@@ -209,6 +209,15 @@ impl Context {
             .clone()
     }
 
+    pub(crate) fn bind_first_token_source(
+        &mut self,
+        source: &dynamo_llm::first_token::FirstTokenSource,
+        dp_rank: Option<u32>,
+    ) {
+        self.first_token =
+            FirstTokenNotifier::for_request(None, Some(source), self.inner.id(), dp_rank);
+    }
+
     /// Build the `traceparent` header value. Prefers the engine.generate
     /// OTel span context when valid so downstream engine spans nest under
     /// `engine.generate`; falls back to the inbound trace context.

@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dynamo_llm::kv_router::sequence::ActiveSequenceEventPublisher;
+use dynamo_llm::first_token::FirstTokenSource;
 use dynamo_llm::local_model::runtime_config::{
     DisaggregatedEndpoint, ModelRuntimeConfig, StructuralTagMode, StructuralTagSchemaMode,
     StructuralTagScope, TOPOLOGY_TAINT_PREFIX,
@@ -56,7 +56,6 @@ const DRAIN_HEARTBEAT_INTERVAL_S: f64 = 5.0;
 /// Budget reserved for `cleanup()` so the drain loop can't consume the whole
 /// graceful-shutdown deadline and trip the hard-exit that skips cleanup.
 const CLEANUP_RESERVE_S: f64 = 5.0;
-const PREFILL_COMPLETION_CHANNEL_CAPACITY: usize = 4096;
 
 /// Operator override for the health-check canary, mirrors the Python helper
 /// in `lib/bindings/python/src/dynamo/health_check.py`.
@@ -664,7 +663,7 @@ impl Worker {
             return Ok(());
         }
 
-        self.serve_with_orchestrator(&engine_config, endpoint, worker_id, shutdown.clone())
+        self.serve_with_orchestrator(&engine_config, endpoint, shutdown.clone())
             .await
     }
 
@@ -695,22 +694,9 @@ impl Worker {
             self.lifecycle = Some(lifecycle);
             return Ok(());
         }
-        let prefill_publisher = if matches!(&self.engine, EngineKind::Llm(_)) {
-            match ActiveSequenceEventPublisher::for_endpoint(
-                endpoint,
-                PREFILL_COMPLETION_CHANNEL_CAPACITY,
-            )
-            .await
-            {
-                Ok(publisher) => Some(publisher),
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "worker prefill-completion publisher unavailable; continuing with response-side cleanup"
-                    );
-                    None
-                }
-            }
+        let first_token_source = if matches!(&self.engine, EngineKind::Llm(_)) {
+            let (worker_type, _) = resolve_worker_type_and_needs(&self.config);
+            FirstTokenSource::for_endpoint(endpoint, worker_type).await
         } else {
             None
         };
@@ -719,7 +705,7 @@ impl Worker {
             tracing::debug!(
                 "engine returned no KV sources / dp_ranks; skipping KV/snapshot publishers"
             );
-            self.publishers = Some(PublisherHandles::lifecycle_only(prefill_publisher));
+            self.publishers = Some(PublisherHandles::lifecycle_only(first_token_source));
             self.lifecycle = Some(lifecycle);
             return Ok(());
         }
@@ -756,7 +742,7 @@ impl Worker {
             bindings.on_publisher_ready,
             kv_cache_block_size,
             enable_local_indexer,
-            prefill_publisher,
+            first_token_source,
         )
         .await?;
         self.publishers = Some(handles);
@@ -944,7 +930,6 @@ impl Worker {
         &mut self,
         engine_config: &EngineConfig,
         endpoint: dynamo_runtime::component::Endpoint,
-        worker_id: u64,
         shutdown: CancellationToken,
     ) -> Result<(), DynamoError> {
         let model_type = resolve_model_type(&self.config)?;
@@ -1017,12 +1002,12 @@ impl Worker {
             EngineKind::Llm(engine) => {
                 let mut engine_adapter =
                     EngineAdapter::new(engine.clone(), self.config.disaggregation_mode);
-                if let Some(publisher) = self
+                if let Some(source) = self
                     .publishers
                     .as_ref()
-                    .and_then(PublisherHandles::prefill_publisher)
+                    .and_then(PublisherHandles::first_token_source)
                 {
-                    engine_adapter = engine_adapter.with_prefill_publisher(publisher, worker_id);
+                    engine_adapter = engine_adapter.with_first_token_source(source);
                 }
                 let engine_adapter = Arc::new(engine_adapter);
                 let ingress = Ingress::for_engine(engine_adapter.clone()).map_err(|e| {

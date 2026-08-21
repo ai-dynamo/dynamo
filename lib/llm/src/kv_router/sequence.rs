@@ -68,7 +68,7 @@ pub struct ActiveSequenceEventPublisher {
 }
 
 impl ActiveSequenceEventPublisher {
-    fn channel(
+    pub(crate) fn channel(
         capacity: usize,
         cancellation_token: CancellationToken,
     ) -> (Self, mpsc::Receiver<ActiveSequenceEvent>) {

@@ -215,6 +215,7 @@ def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool =
         server_args=SimpleNamespace(served_model_name="test-model"),
         dynamo_args=SimpleNamespace(enable_rl=enable_rl),
     )
+    handler._first_token_source = None
 
     @asynccontextmanager
     async def no_cancellation_monitor(*args, **kwargs):
@@ -340,6 +341,31 @@ async def test_native_generate_stream_forwards_only_opaque_response():
         {"token_ids": [], "engine_data": {"sglang_response": native_response}}
     ]
     assert chunks[0]["engine_data"]["sglang_response"] is native_response
+
+
+@pytest.mark.asyncio
+async def test_native_stream_notifies_once_after_empty_output():
+    handler = _new_decode_handler()
+    context = _Context()
+    chunks = [
+        {"token_ids": [], "engine_data": {"sglang_response": {"output_ids": []}}},
+        {
+            "token_ids": [],
+            "engine_data": {"sglang_response": {"output_ids": [101]}},
+        },
+        {
+            "token_ids": [],
+            "engine_data": {"sglang_response": {"output_ids": [102]}},
+        },
+    ]
+
+    assert (
+        await _collect(
+            handler._process_native_generate_stream(_stream(chunks), context)
+        )
+        == chunks
+    )
+    assert context.first_token_notifications == 1
 
 
 def _new_token_input_handler(maximum_input_token_id: int = 151935):
@@ -566,8 +592,14 @@ async def _stream(items):
 
 
 class _Context:
+    def __init__(self):
+        self.first_token_notifications = 0
+
     def is_stopped(self):
         return False
+
+    def notify_first_token(self):
+        self.first_token_notifications += 1
 
 
 def test_build_sampling_params_passes_n_for_token_requests():
@@ -978,6 +1010,37 @@ async def test_process_token_stream_treats_completion_usage_as_optional():
 
 
 @pytest.mark.asyncio
+async def test_token_stream_notifies_once_after_empty_output():
+    handler = _new_decode_handler()
+    context = _Context()
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "output_ids": [],
+                        "meta_info": {"id": "request-1", "finish_reason": None},
+                    },
+                    {
+                        "output_ids": [101],
+                        "meta_info": {"id": "request-1", "finish_reason": None},
+                    },
+                    {
+                        "output_ids": [102],
+                        "meta_info": {"id": "request-1", "finish_reason": None},
+                    },
+                ]
+            ),
+            context,
+        )
+    )
+
+    assert [chunk["token_ids"] for chunk in chunks] == [[101], [102]]
+    assert context.first_token_notifications == 1
+
+
+@pytest.mark.asyncio
 async def test_process_token_stream_accepts_incremental_logprob_arrays():
     handler = _new_decode_handler()
 
@@ -1228,6 +1291,41 @@ async def test_process_text_stream_tracks_delta_per_choice_index():
         "llo",
         "od",
     ]
+
+
+@pytest.mark.asyncio
+async def test_text_stream_notifies_once_after_empty_output():
+    handler = _new_decode_handler()
+    context = _Context()
+
+    chunks = await _collect(
+        handler._process_text_stream(
+            _stream(
+                [
+                    {
+                        "text": "",
+                        "meta_info": {"id": "request-1", "finish_reason": None},
+                    },
+                    {
+                        "text": "Hello",
+                        "meta_info": {"id": "request-1", "finish_reason": None},
+                    },
+                    {
+                        "text": "Hello world",
+                        "meta_info": {"id": "request-1", "finish_reason": None},
+                    },
+                ]
+            ),
+            context,
+        )
+    )
+
+    assert [chunk["choices"][0]["delta"]["content"] for chunk in chunks] == [
+        "",
+        "Hello",
+        " world",
+    ]
+    assert context.first_token_notifications == 1
 
 
 @pytest.mark.asyncio

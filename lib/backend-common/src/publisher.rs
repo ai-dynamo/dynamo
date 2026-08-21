@@ -17,10 +17,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use dynamo_llm::first_token::FirstTokenSource;
 use dynamo_llm::kv_router::publisher::{
     KvEventPublisher, KvEventSourceConfig, WorkerMetricsPublisher,
 };
-use dynamo_llm::kv_router::sequence::ActiveSequenceEventPublisher;
 use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::protocols::EndpointId;
 
@@ -40,19 +40,19 @@ pub(crate) struct PublisherHandles {
     /// inside don't drop their NATS endpoints prematurely.
     #[allow(dead_code)]
     snapshot_publisher: Option<Arc<SnapshotPublisher>>,
-    prefill_publisher: Option<ActiveSequenceEventPublisher>,
+    first_token_source: Option<FirstTokenSource>,
 }
 
 impl PublisherHandles {
-    pub(crate) fn prefill_publisher(&self) -> Option<ActiveSequenceEventPublisher> {
-        self.prefill_publisher.clone()
+    pub(crate) fn first_token_source(&self) -> Option<FirstTokenSource> {
+        self.first_token_source.clone()
     }
 
-    pub(crate) fn lifecycle_only(prefill_publisher: Option<ActiveSequenceEventPublisher>) -> Self {
+    pub(crate) fn lifecycle_only(first_token_source: Option<FirstTokenSource>) -> Self {
         Self {
             kv_publishers: Vec::new(),
             snapshot_publisher: None,
-            prefill_publisher,
+            first_token_source,
         }
     }
 }
@@ -152,7 +152,7 @@ pub(crate) async fn setup_publishers(
     on_publisher_ready: Option<crate::engine::OnSnapshotPublisherReady>,
     kv_cache_block_size: Option<u32>,
     enable_local_indexer: bool,
-    prefill_publisher: Option<ActiveSequenceEventPublisher>,
+    first_token_source: Option<FirstTokenSource>,
 ) -> Result<PublisherHandles, DynamoError> {
     // KV event publishers require the engine's block size; without it, the
     // router can't translate token IDs into cache blocks. Snapshot publisher
@@ -191,6 +191,6 @@ pub(crate) async fn setup_publishers(
     Ok(PublisherHandles {
         kv_publishers,
         snapshot_publisher,
-        prefill_publisher,
+        first_token_source,
     })
 }
