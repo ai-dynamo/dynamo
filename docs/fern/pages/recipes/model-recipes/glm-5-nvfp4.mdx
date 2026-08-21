@@ -9,34 +9,60 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-This recipe serves `nvidia/GLM-5-NVFP4` with disaggregated prefill/decode and EAGLE MTP speculative decoding across 5 nodes of 4x GB200 (TP4 prefill, TP16/DP16/EP16 decode), sustaining roughly 16.8K output tokens/sec on the standard UCX path (19K with the AWS EFA variant) at 512-way concurrency on a 1K ISL / 8K OSL long-output workload. Pick your KV-transfer path; every command on this page updates to match.
+This recipe serves `nvidia/GLM-5-NVFP4` with disaggregated prefill/decode and EAGLE MTP speculative decoding across 5 nodes of 4x GB200 (TP4 prefill, TP16/DP16/EP16 decode), sustaining roughly 16.8K output tokens/sec on the standard UCX path (19.1K with the AWS EFA variant, measured on 5x p6e-gb200.36xlarge) at 512-way concurrency on a 1K ISL / 8K OSL long-output workload. Both targets are SGLang, disaggregated, on 20x GB200 under the same static synthetic workload; they differ only in the KV-transfer path. Pick your target below and every command on this page updates to match.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
 <div className="dynamo-target-picker-row">
-<span className="dynamo-target-picker-dim">KV transfer</span>
-<input type="radio" id="recipe-variant-standard" name="recipe-variant" value="standard" defaultChecked />
-<label htmlFor="recipe-variant-standard">Standard (UCX) <span className="dynamo-target-picker-hint">Recommended</span></label>
-<input type="radio" id="recipe-variant-efa" name="recipe-variant" value="efa" />
-<label htmlFor="recipe-variant-efa">AWS EFA (custom build)</label>
+<span className="dynamo-target-picker-dim">GPU</span>
+<input type="radio" id="recipe-sku-gb200" name="recipe-sku" value="gb200" defaultChecked />
+<label htmlFor="recipe-sku-gb200">GB200</label>
 </div>
-<div className="dynamo-target-picker-summary" data-variant="standard">
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Workload</span>
+<input type="radio" id="recipe-usecase-static" name="recipe-usecase" value="static" defaultChecked />
+<label htmlFor="recipe-usecase-static">Static synthetic</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Backend</span>
+<input type="radio" id="recipe-engine-sglang" name="recipe-engine" value="sglang" defaultChecked />
+<label htmlFor="recipe-engine-sglang">SGLang</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Topology</span>
+<input type="radio" id="recipe-variant-standard" name="recipe-variant" value="standard" defaultChecked />
+<label htmlFor="recipe-variant-standard">Disaggregated, UCX <span className="dynamo-target-picker-hint">Recommended</span></label>
+<input type="radio" id="recipe-variant-efa" name="recipe-variant" value="efa" />
+<label htmlFor="recipe-variant-efa">Disaggregated, AWS EFA</label>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="gb200" data-engine="sglang" data-usecase="static" data-variant="standard">
 <span><b>Checkpoint</b> nvidia/GLM-5-NVFP4</span>
 <span><b>Precision</b> NVFP4 + FP8 KV cache</span>
-<span><b>GPUs</b> 20x GB200, 5 nodes of 4</span>
+<span><b>GPUs</b> 20x GB200 (5x 4-GPU nodes, NVL36/NVL72)</span>
 <span><b>Parallelism</b> TP4 prefill, TP16/DP16/EP16 decode</span>
 <span><b>KV transfer</b> NIXL over UCX</span>
 <span><b>Workload</b> 1K ISL / 8K OSL, 512 concurrency</span>
+<span><b>Container image</b> Published runtime image</span>
+<span><b>Output throughput</b> 16,824 tok/s</span>
 </div>
-<div className="dynamo-target-picker-summary" data-variant="efa">
+<div className="dynamo-target-picker-summary" data-sku="gb200" data-engine="sglang" data-usecase="static" data-variant="efa">
 <span><b>Checkpoint</b> nvidia/GLM-5-NVFP4</span>
 <span><b>Precision</b> NVFP4 + FP8 KV cache</span>
-<span><b>GPUs</b> 20x GB200, 5x p6e-gb200.36xlarge</span>
+<span><b>GPUs</b> 20x GB200 (5x p6e-gb200.36xlarge)</span>
 <span><b>Parallelism</b> TP4 prefill, TP16/DP16/EP16 decode</span>
 <span><b>KV transfer</b> NIXL LIBFABRIC over EFA RDMA</span>
 <span><b>Workload</b> 1K ISL / 8K OSL, 512 concurrency</span>
+<span><b>Container image</b> Custom build from `Dockerfile.efa`</span>
+<span><b>Extra requirements</b> EFA driver 3.0.0g+, privileged containers</span>
+<span><b>Output throughput</b> 19,131 tok/s</span>
 </div>
 </div>
+
+## Topology
+
+Both targets run the same disaggregated topology — 1 prefill node (TP4) plus 4 decode nodes (TP16/DP16/EP16) with EAGLE MTP speculative decoding and FP8 KV cache — and differ only in infrastructure and the KV-transfer backend.
+
+The EFA README compares against an approximate ~19,000 tok/s non-EFA baseline rather than the exact 16,824 tok/s measured on the standard target below.
 
 ## Prerequisites
 
@@ -44,19 +70,65 @@ This recipe serves `nvidia/GLM-5-NVFP4` with disaggregated prefill/decode and EA
 - A shared RWX PVC for model weights and FlashInfer JIT artifacts.
 - A Hugging Face token with access to `nvidia/GLM-5-NVFP4`.
 
-<div data-variant="standard">
+<div data-sku="gb200" data-engine="sglang" data-usecase="static" data-variant="standard">
 
-- **5x 4xGB200 nodes** in an NVL36 or NVL72 domain. The published runtime image (`nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1-cuda13`) is used as-is.
+- **5x 4xGB200 nodes** in an NVL36 or NVL72 domain.
 
 </div>
 
-<div data-variant="efa">
+<div data-sku="gb200" data-engine="sglang" data-usecase="static" data-variant="efa">
 
 - **5x p6e-gb200.36xlarge** nodes (4x GB200 + 4x EFA NICs each) or equivalent GB200 in an MNNVL domain.
 - AWS EFA driver 3.0.0g or newer on the nodes (default on modern AWS EKS AMIs).
+- Kernel 5.12 or newer — modern AWS EKS AMIs ship kernel 6.14, which is fine. On older kernels the host also needs the `efa_nv_peermem` module loaded; on 5.12 and newer the dmabuf path is the default and peermem is not required.
 - A container registry you can push to — this variant requires building a custom image from `Dockerfile.efa` before deploying (there is no prebuilt EFA image).
 
+The libfabric is built into the image, so no cluster-side DaemonSet is required. See [EFA on AWS](../../kubernetes/installation/rdma-setup/efa-on-aws.mdx) for more on EFA.
+
 </div>
+
+<Warning>
+The manifests use standard NVIDIA GPU Feature Discovery labels to select GB200 nodes and include common GPU/ARM tolerations. If your cluster uses different labels, taints, or storage classes, update `nodeSelector`, `tolerations`, and `storageClassName` before deploying.
+</Warning>
+
+## Step 1: Container Image
+
+Worker containers run as root because FlashInfer's bundled cubin package creates TRTLLM MoE symlinks inside its installed package directory during startup.
+
+<div data-sku="gb200" data-engine="sglang" data-usecase="static" data-variant="standard">
+
+The published runtime image (`nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.1.1-cuda13`) is used as-is.
+
+</div>
+
+<div data-sku="gb200" data-engine="sglang" data-usecase="static" data-variant="efa">
+
+Build the custom container image first — it bakes a patched libfabric ([ofiwg/libfabric#12019](https://github.com/ofiwg/libfabric/pull/12019)) into the runtime so `fi_mr_reg` on CUDA VRAM succeeds on GB200's 64K-page arm64 kernel:
+
+```bash
+docker buildx build \
+  --platform linux/arm64 \
+  --build-arg ARCH=arm64 \
+  -t <your-registry>/sglang-dynamo-glm5-efa:latest \
+  -f recipes/glm-5-nvfp4/sglang/disagg/efa/Dockerfile.efa \
+  --push .
+```
+
+Sanity-check the resulting image to confirm the patched, CUDA-linked libfabric actually landed in it:
+
+```bash
+docker run --rm <your-registry>/sglang-dynamo-glm5-efa:latest \
+  bash -c '
+    /opt/amazon/efa/bin/fi_info --version &&
+    ldd /opt/amazon/efa/lib/libfabric.so.1 | grep -i cuda &&
+    grep -F "efa_mr_is_cuda(efa_mr)" \
+      /opt/amazon/efa/share/doc/libfabric/efa_mr.c.diff 2>/dev/null ||
+      echo "(patch verified at build time via Dockerfile RUN grep)"'
+```
+
+</div>
+
+## Step 2: Download the Model
 
 Create the namespace and token secret:
 
@@ -68,12 +140,6 @@ kubectl create secret generic hf-token-secret \
   -n ${NAMESPACE}
 ```
 
-<Warning>
-The manifests use standard NVIDIA GPU Feature Discovery labels to select GB200 nodes and include common GPU/ARM tolerations. If your cluster uses different labels, taints, or storage classes, update `nodeSelector`, `tolerations`, and `storageClassName` before deploying.
-</Warning>
-
-## Deploy
-
 Create the model-cache PVC and download the weights (shared by both targets):
 
 ```bash
@@ -84,9 +150,11 @@ kubectl apply -f recipes/glm-5-nvfp4/model-cache/model-download.yaml -n ${NAMESP
 kubectl wait --for=condition=complete job/model-download -n ${NAMESPACE} --timeout=3600s
 ```
 
-If your cluster already provides a shared RWX cache PVC, skip `model-cache.yaml` and update `claimName: model-cache` in the download, deploy, and perf manifests, keeping the mount path as `/model-store`.
+If your cluster already provides a shared RWX cache PVC, skip `model-cache.yaml` and update `claimName: model-cache` in the download, deploy, and perf manifests. Keep the mount path as `/model-store` so the workers, model download job, and benchmark job share the same Hugging Face cache and JIT artifacts.
 
-<div data-variant="standard">
+## Step 3: Deploy
+
+<div data-sku="gb200" data-engine="sglang" data-usecase="static" data-variant="standard">
 
 Edit `sglang/disagg/deploy.yaml` and replace the `<your-namespace>` placeholder, then:
 
@@ -105,35 +173,22 @@ kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/part-of=glm5-sglang -w
 
 </div>
 
-<div data-variant="efa">
+<div data-sku="gb200" data-engine="sglang" data-usecase="static" data-variant="efa">
 
-Build the custom container image first — it bakes a patched libfabric ([ofiwg/libfabric#12019](https://github.com/ofiwg/libfabric/pull/12019)) into the runtime so `fi_mr_reg` on CUDA VRAM succeeds on GB200's 64K-page arm64 kernel:
-
-```bash
-docker buildx build \
-  --platform linux/arm64 \
-  --build-arg ARCH=arm64 \
-  -t <your-registry>/sglang-dynamo-glm5-efa:latest \
-  -f recipes/glm-5-nvfp4/sglang/disagg/efa/Dockerfile.efa \
-  --push .
-```
-
-Then edit `sglang/disagg/efa/deploy.yaml` to replace `<your-namespace>` and the image placeholder, and:
+Edit `sglang/disagg/efa/deploy.yaml` to replace `<your-namespace>` and the image placeholder, then:
 
 ```bash
 kubectl apply -f recipes/glm-5-nvfp4/sglang/disagg/efa/deploy.yaml
 kubectl get pods -n ${NAMESPACE} -l app.kubernetes.io/part-of=glm5-sglang-efa -w
 ```
 
-After startup, verify the LIBFABRIC backend is actually carrying KV traffic (not silent TCP fallback) — the [EFA README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/efa/README.md) includes three checks (NIXL backend log line, executable `libplugin_LIBFABRIC.so` mapping, and `nixl_num_failed_transfers_total` staying at 0).
-
 </div>
 
-## Smoke Test
+## Step 4: Test
 
 Send a test request to verify the deployment serves traffic:
 
-<div data-variant="standard">
+<div data-sku="gb200" data-engine="sglang" data-usecase="static" data-variant="standard">
 
 ```bash
 kubectl port-forward svc/glm5-sglang-frontend 8000:8000 -n ${NAMESPACE} &
@@ -141,7 +196,7 @@ kubectl port-forward svc/glm5-sglang-frontend 8000:8000 -n ${NAMESPACE} &
 
 </div>
 
-<div data-variant="efa">
+<div data-sku="gb200" data-engine="sglang" data-usecase="static" data-variant="efa">
 
 ```bash
 kubectl port-forward svc/glm5-sglang-efa-frontend 8000:8000 -n ${NAMESPACE} &
@@ -152,14 +207,44 @@ kubectl port-forward svc/glm5-sglang-efa-frontend 8000:8000 -n ${NAMESPACE} &
 ```bash
 curl http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"nvidia/GLM-5-NVFP4","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":128}'
+  -d '{"model":"nvidia/GLM-5-NVFP4","messages":[{"role":"user","content":"Hello!"}],"max_tokens":128}'
 ```
 
-## Benchmark
+<div data-sku="gb200" data-engine="sglang" data-usecase="static" data-variant="efa">
+
+After startup, three quick checks confirm the LIBFABRIC backend is actually carrying KV traffic (not silent TCP fallback):
+
+```bash
+NS=<your-namespace>
+POD=$(kubectl -n $NS get pods -l nvidia.com/dynamo-component=decode \
+        -o jsonpath='{.items[0].metadata.name}')
+
+# 1. NIXL selected LIBFABRIC at startup.
+kubectl -n $NS logs $POD | grep -i 'NIXL.*backend.*LIBFABRIC' | head -1
+# Expected: "NIXL INFO Backend LIBFABRIC was instantiated" or similar.
+# WRONG:    "NIXL agent uses UCX backend".
+
+# 2. libplugin_LIBFABRIC.so is actually executing (not just dlopen'd).
+kubectl -n $NS exec $POD -- bash -c '
+  grep libplugin_LIBFABRIC /proc/$(pgrep -f sglang | head -1)/maps |
+    grep "r-xp"' | head -3
+# Expected: at least one line ending in "r-xp" (executable mapping).
+
+# 3. NIXL transfer metrics show no failures.
+kubectl -n $NS exec $POD -- curl -s localhost:19090/metrics |
+  grep -E 'nixl_(bytes_transferred|num_failed)'
+# Expected: nixl_num_failed_transfers_total stays 0; bytes_transferred grows.
+```
+
+If check 1 shows UCX, the most likely cause is `SGLANG_DISAGGREGATION_NIXL_BACKEND=LIBFABRIC` not being applied — verify the env block in the running pod. If check 2 is empty, `LD_LIBRARY_PATH` ordering is wrong: `/opt/amazon/efa/lib` must come before any other libfabric on the path.
+
+</div>
+
+## Step 5: Benchmark (optional)
 
 Both targets ship a `perf.yaml` Kubernetes Job with the same workload shape: ISL=1000, OSL=8192, concurrency=512 (32 per decode GPU), 1,536 requests.
 
-<div data-variant="standard">
+<div data-sku="gb200" data-engine="sglang" data-usecase="static" data-variant="standard">
 
 The Job wraps this AIPerf run:
 
@@ -182,7 +267,7 @@ kubectl logs -f -l job-name=glm5-disagg-bench -n ${NAMESPACE}
 
 </div>
 
-<div data-variant="efa">
+<div data-sku="gb200" data-engine="sglang" data-usecase="static" data-variant="efa">
 
 The Job wraps this AIPerf run:
 
@@ -205,9 +290,37 @@ kubectl logs -f -l job-name=glm5-disagg-efa-bench -n ${NAMESPACE}
 
 </div>
 
-## Expected Performance
+The benchmark pod runs as a non-root user, installs AIPerf into `/tmp/.local`, and pins Transformers v5 because `nvidia/GLM-5-NVFP4` declares `tokenizer_class=TokenizersBackend`, which older Transformers v4 releases do not load.
 
-<div data-variant="standard">
+## Key Configuration Notes
+
+### Speculative Decoding (EAGLE MTP)
+
+**EAGLE MTP speculative decoding** (~85-95% accept rate) is enabled by two env vars: `SGLANG_ENABLE_SPEC_V2=1` (EAGLEWorkerV2 with overlap scheduler) and `SGLANG_NVFP4_CKPT_FP8_NEXTN_MOE=1` (quantizes the BF16 MTP layer to FP8 at load time, matching the base model's compute path). The MTP layer weights in `nvidia/GLM-5-NVFP4` are BF16, split across shards 271-274, and fully indexed in the checkpoint's `model.safetensors.index.json`.
+
+### KV Cache
+
+**FP8 KV cache**: uses `--kv-cache-dtype fp8_e4m3` (the NSA backend auto-selects this on SM100/GB200), saving roughly 50% KV memory vs BF16.
+
+### FlashInfer JIT Cache
+
+**FlashInfer JIT cache**: the runtime image has no prebuilt `flashinfer-jit-cache` wheel, so the recipe sets `FLASHINFER_WORKSPACE_BASE=/model-store` to persist first-run JIT artifacts on the shared PVC for later pod starts.
+
+### NIXL / UCX
+
+The standard target sets `UCX_TLS=cuda_copy,cuda_ipc,tcp` for NIXL/UCX KV transfer, so CUDA IPC/copy handles GPU memory movement while TCP provides UCX active-message control traffic. The EFA variant instead sets `SGLANG_DISAGGREGATION_NIXL_BACKEND=LIBFABRIC` and runs containers privileged so `fi_mr_reg` can pin VRAM for RDMA. Without the env var, SGLang silently falls back to TCP on kernel 6.8+.
+
+### Discovery
+
+**Discovery**: the recipe uses Kubernetes service discovery. Worker registration is tied to pod lifetime via Kubernetes EndpointSlices, which prevents TTL expiry issues under high load.
+
+### Recovery and Rollouts
+
+**Recovery caveat**: the decode side is one TP16 rank group spread across four nodes. Treat single decode-pod replacement as disruptive and validate full-group recovery before relying on individual decode pod restarts. In validation, cold deploy plus frontend and prefill replacement recovered successfully, while deleting one decode worker restarted the decode leader and left the graph NotReady through repeated rank-group reinitialization attempts.
+
+## Performance (ISL=1k, OSL=8k, concurrency=512)
+
+<div data-sku="gb200" data-engine="sglang" data-usecase="static" data-variant="standard">
 
 Reference AIPerf run for the standard target (ISL=1k, OSL=8k, concurrency=512): 1,536 requests, 0 errors, 747.87s benchmark duration. This is a concurrency-burst benchmark, so TTFT includes queueing under 512 concurrent users.
 
@@ -222,41 +335,39 @@ Reference AIPerf run for the standard target (ISL=1k, OSL=8k, concurrency=512): 
 
 </div>
 
-<div data-variant="efa">
+<div data-sku="gb200" data-engine="sglang" data-usecase="static" data-variant="efa">
 
-Reference AIPerf run for the EFA variant at the same workload shape (ISL=1k, OSL=8k, concurrency=512; measured on 5x p6e-gb200.36xlarge, EFA driver 3.0.0g):
+Reference AIPerf run for the EFA variant at the same workload shape (ISL=1k, OSL=8k, concurrency=512), measured on 5x p6e-gb200.36xlarge, EFA driver 3.0.0g, kernel 6.14.0-1018-aws-64k:
 
-| Metric | Value |
-| --- | ---: |
-| Output throughput | 19,131 tokens/sec |
-| TTFT p50 | 621 ms |
-| ITL avg | 24.5 ms/token |
-| Output tokens/user/sec | 41.0 |
+| Metric | EFA (this recipe) | Non-EFA (UCX/RoCE) baseline |
+| --- | ---: | ---: |
+| Output token throughput | **19,131 tok/s** | ~19,000 tok/s |
+| Total token throughput | 21,468 tok/s | — |
+| TTFT p50 | **621 ms** | ~850 ms |
+| TTFT avg | 2,786 ms | — |
+| ITL avg | **24.5 ms/token** | ~24 ms/token |
+| Output tokens/user/sec | **41.0** | ~41 |
+| Request count | 1,536 | — |
+| Benchmark duration | 657 s | — |
 
-At long context (ISL=20k, OSL=2k, concurrency=64), the LIBFABRIC backend delivers 39% higher throughput and 56% lower TTFT p50 than the UCX default — full tables in the [EFA README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/glm-5-nvfp4/sglang/disagg/efa/README.md).
+EFA achieves parity on all four published metrics. TTFT p50 is lower (better) on EFA, though TTFT avg is higher with a long tail (p99 approximately 12.5 s).
+
+### Long-context performance (ISL=20k, OSL=2k, concurrency=64)
+
+The benefit of the LIBFABRIC backend grows with per-request KV cache size. Running the same recipe with `SGLANG_DISAGGREGATION_NIXL_BACKEND=LIBFABRIC` set vs. unset (NIXL defaults to UCX) on the same 5x p6e-gb200.36xlarge hardware:
+
+| Metric | LIBFABRIC (this recipe) | UCX (default) |
+| --- | ---: | ---: |
+| Output token throughput | **2,023 tok/s** | 1,454 tok/s |
+| TTFT p50 | **20,273 ms** | 46,369 ms |
+| TTFT avg | **20,452 ms** | 41,746 ms |
+| ITL avg | 17.56 ms | 17.20 ms |
+| Benchmark duration | **194 s** | 270 s |
+| Request count | 192 | 192 |
+
+With a 20x larger per-request KV cache, LIBFABRIC delivers **39% higher throughput** and **56% lower TTFT p50** than UCX. ITL is essentially unchanged because steady-state decoding never touches the KV transfer path — only the prefill-to-decode KV hand-off does.
 
 </div>
-
-## Compare All Targets
-
-Both targets run the same disaggregated topology — 1 prefill node (TP4) plus 4 decode nodes (TP16/DP16/EP16) with EAGLE MTP speculative decoding and FP8 KV cache — and differ only in infrastructure and the KV-transfer backend:
-
-| | Standard (UCX) | AWS EFA (custom build) |
-|---|---|---|
-| **Hardware** | 20x GB200 (5x 4-GPU nodes, NVL36/NVL72) | 20x GB200 (5x p6e-gb200.36xlarge) |
-| **KV transfer** | NIXL over UCX | NIXL LIBFABRIC over EFA RDMA |
-| **Container image** | Published runtime image | Custom build from `Dockerfile.efa` |
-| **Extra requirements** | — | EFA driver 3.0.0g+, privileged containers |
-| **Output throughput** | 16,824 tok/s | 19,131 tok/s |
-
-## Notes
-
-- **EAGLE MTP speculative decoding** (~85-95% accept rate) is enabled by two env vars: `SGLANG_ENABLE_SPEC_V2=1` (EAGLEWorkerV2 with overlap scheduler) and `SGLANG_NVFP4_CKPT_FP8_NEXTN_MOE=1` (quantizes the BF16 MTP layer to FP8 at load time, matching the base model's compute path).
-- **FP8 KV cache**: uses `--kv-cache-dtype fp8_e4m3` (the NSA backend auto-selects this on SM100/GB200), saving roughly 50% KV memory vs BF16.
-- **FlashInfer JIT cache**: the runtime image has no prebuilt `flashinfer-jit-cache` wheel, so the recipe sets `FLASHINFER_WORKSPACE_BASE=/model-store` to persist first-run JIT artifacts on the shared PVC for later pod starts.
-- Worker containers run as root because FlashInfer's bundled cubin package creates TRTLLM MoE symlinks inside its installed package directory during startup. The benchmark pod runs as a non-root user and pins Transformers v5 because `nvidia/GLM-5-NVFP4` declares `tokenizer_class=TokenizersBackend`.
-- The standard target sets `UCX_TLS=cuda_copy,cuda_ipc,tcp` for NIXL/UCX KV transfer; the EFA variant instead sets `SGLANG_DISAGGREGATION_NIXL_BACKEND=LIBFABRIC` and runs containers privileged so `fi_mr_reg` can pin VRAM for RDMA. Without the env var, SGLang silently falls back to TCP on kernel 6.8+.
-- **Recovery caveat**: the decode side is one TP16 rank group spread across four nodes. Treat single decode-pod replacement as disruptive and validate full-group recovery before relying on individual decode pod restarts; in validation, deleting one decode worker left the graph NotReady through repeated rank-group reinitialization attempts.
 
 ## Source
 

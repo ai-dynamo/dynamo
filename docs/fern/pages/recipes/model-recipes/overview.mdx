@@ -78,6 +78,15 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <div className="dynamo-model-tags"><span>vLLM</span><span>GB200 · GB300</span><span>Day-0</span></div>
   <a className="dynamo-card-link" href="kimi-k3.mdx" aria-label="Open the Kimi-K3 recipe">Open recipe</a>
   </div>
+  <div className="dynamo-model-card" data-recipe-card data-provider="qwen" data-runtime="vllm sglang" data-hardware="gb200 gb300" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/qwen.webp" alt="" />
+      <div><h3>Qwen3.8-2.4T-A95B</h3><p>Qwen</p></div>
+    </div>
+    <p className="dynamo-model-summary">vLLM and SGLang recipes for a 2.4T hybrid gated-delta-net + 512-expert MoE checkpoint on 16x GB300 or GB200, aggregated or SGLang-disaggregated, with TP16 over MNNVL and KV-aware routing.</p>
+    <div className="dynamo-model-tags"><span>vLLM + SGLang</span><span>16x GB300 · GB200 per worker</span><span>Chat + agentic · 262K context</span></div>
+  <a className="dynamo-card-link" href="qwen-3-8-2-4t-a95b-fp8.mdx" aria-label="Open the Qwen3.8-2.4T-A95B recipe">Open recipe</a>
+  </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="zai" data-runtime="sglang" data-hardware="b200 h200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/zai-org.svg" alt="" />

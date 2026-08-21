@@ -9,26 +9,151 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-This recipe deploys `Qwen/Qwen3-32B` on 16x H200 with prefill/decode disaggregation and KV-aware routing — the winning configuration from the [KV routing A/B benchmark](../feature-benchmarks/qwen3-32b-kv-routing-a-b.mdx), validated against a real Mooncake conversation trace (12,031 requests, 12K average input length, 36.64% cache efficiency). It fits multi-turn conversational workloads where requests share long prefixes that KV-aware routing can exploit.
+This recipe deploys `Qwen/Qwen3-32B` on vLLM in three shapes: the headline **disaggregated + KV-aware routing** target on 16x H200 across 2 nodes — the winning configuration from the [KV routing A/B benchmark](../feature-benchmarks/qwen3-32b-kv-routing-a-b.mdx), validated against a real [Mooncake conversation trace](https://github.com/kvcache-ai/Mooncake) (12,031 requests, 12,035 average input length, 36.64% cache efficiency); a single-GPU **aggregated + KVBM** target that extends the cache beyond GPU HBM by offloading cold KV blocks to host memory; and a **1P1D cloud provider** family whose overlays adapt one deployment to each vendor's RDMA fabric. Pick your target; every command on this page updates to match.
 
-<div className="dynamo-target-picker static">
-<p className="dynamo-target-picker-title">Deployment target</p>
-<div className="dynamo-target-picker-summary">
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">GPU</span>
+<input type="radio" id="recipe-sku-h200" name="recipe-sku" value="h200" defaultChecked />
+<label htmlFor="recipe-sku-h200">H200</label>
+<input type="radio" id="recipe-sku-b200" name="recipe-sku" value="b200" />
+<label htmlFor="recipe-sku-b200" data-needs-variant="kvbm">B200</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Workload</span>
+<input type="radio" id="recipe-usecase-chat" name="recipe-usecase" value="chat" defaultChecked />
+<label htmlFor="recipe-usecase-chat">Conversational chat</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Backend</span>
+<input type="radio" id="recipe-engine-vllm" name="recipe-engine" value="vllm" defaultChecked />
+<label htmlFor="recipe-engine-vllm">vLLM</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Topology</span>
+<input type="radio" id="recipe-variant-disagg-multi-node" name="recipe-variant" value="disagg-multi-node" defaultChecked />
+<label htmlFor="recipe-variant-disagg-multi-node" data-needs-sku="h200">Disaggregated + KV routing (16 GPU, 2 nodes) <span className="dynamo-target-picker-hint">Recommended</span></label>
+<input type="radio" id="recipe-variant-kvbm" name="recipe-variant" value="kvbm" />
+<label htmlFor="recipe-variant-kvbm">Aggregated + KVBM (1 GPU)</label>
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
+<label htmlFor="recipe-variant-disagg" data-needs-sku="h200">Disaggregated 1P1D, cloud fabrics</label>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="h200" data-engine="vllm" data-usecase="chat" data-variant="disagg-multi-node">
 <span><b>Checkpoint</b> Qwen/Qwen3-32B</span>
 <span><b>Precision</b> BF16</span>
+<span><b>Backend</b> vLLM</span>
 <span><b>GPUs</b> 16x H200, 2 nodes: 6x TP2 prefill + 2x TP2 decode</span>
 <span><b>Techniques</b> Disaggregated P/D + KV-aware routing</span>
-<span><b>Workload</b> Multi-turn conversation with prefix reuse (Mooncake trace, 12K avg ISL / 343 avg OSL)</span>
+<span><b>Workload</b> Mooncake conversation trace: 12,031 requests over ~59 min (3.4 req/s), 12,035 avg ISL / 343 avg OSL</span>
 <span><b>SLA</b> Goodput at TTFT 2s / ITL 25ms</span>
 </div>
+<div className="dynamo-target-picker-summary" data-sku="h200" data-engine="vllm" data-usecase="chat" data-variant="kvbm">
+<span><b>Checkpoint</b> Qwen/Qwen3-32B</span>
+<span><b>Precision</b> BF16</span>
+<span><b>Backend</b> vLLM</span>
+<span><b>GPUs</b> 1x H200 (141 GB)</span>
+<span><b>Host memory</b> ≥ ~150 GiB, 100 GiB of it pinned for the KVBM host tier</span>
+<span><b>Techniques</b> Aggregated + KVBM host-memory KV offload</span>
+<span><b>Workload</b> Conversational chat, no bundled dataset</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="b200" data-engine="vllm" data-usecase="chat" data-variant="kvbm">
+<span><b>Checkpoint</b> Qwen/Qwen3-32B</span>
+<span><b>Precision</b> BF16</span>
+<span><b>Backend</b> vLLM</span>
+<span><b>GPUs</b> 1x B200 (192 GB)</span>
+<span><b>Host memory</b> ≥ ~150 GiB, 100 GiB of it pinned for the KVBM host tier</span>
+<span><b>Techniques</b> Aggregated + KVBM host-memory KV offload</span>
+<span><b>Workload</b> Conversational chat, no bundled dataset</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="h200" data-engine="vllm" data-usecase="chat" data-variant="disagg">
+<span><b>Checkpoint</b> Qwen/Qwen3-32B</span>
+<span><b>Precision</b> BF16</span>
+<span><b>Backend</b> vLLM</span>
+<span><b>GPUs</b> 1 prefill + 1 decode worker (1P1D), 4 GPUs each</span>
+<span><b>Techniques</b> Disaggregated P/D + provider fabric overlays</span>
+<span><b>Fabrics</b> Azure AKS IB, AWS EFA (p5.48xlarge), GKE RoCE, Nebius IB, Nscale IB</span>
+<span><b>Workload</b> Conversational chat, no bundled dataset</span>
+</div>
+</div>
+
+## Results
+
+<div data-sku="h200" data-engine="vllm" data-usecase="chat" data-variant="disagg-multi-node">
+
+The recipe publishes the outcome of the comparison as a [results video](https://github.com/user-attachments/assets/c425002b-4459-47c4-bfca-fd1e2620500c) rather than a numeric table.
+
+</div>
+
+<div data-sku="h200 b200" data-engine="vllm" data-usecase="chat" data-variant="kvbm disagg">
+
+This target ships deployment manifests only — the published comparison covers the disaggregated + KV-routing target, and there are no measured numbers for this one.
+
+</div>
+
+## Experiment Overview
+
+- The aggregated round-robin configuration (`recipes/qwen3-32b/vllm/agg-round-robin/`, deployment `agg-8xtp2`, 8x TP2 workers) ships in this recipe directory as a benchmark control, but is documented on the related Feature Benchmarks page rather than here.
+
+## Dataset: Mooncake Conversation Trace
+
+<div data-sku="h200" data-engine="vllm" data-usecase="chat" data-variant="disagg-multi-node">
+
+The benchmark replays a production conversation trace with significant prefix-sharing potential:
+
+| Metric | Value |
+|--------|-------|
+| Requests | 12,031 over ~59 minutes (3.4 req/s) |
+| Input tokens/sec | 40,937 tok/s |
+| Input length | avg 12,035 tokens (range: 891 - 126,195) |
+| Output length | avg 343 tokens |
+
+Cache reuse analysis:
+
+| Metric | Value | What it measures |
+|--------|-------|------------------|
+| Blocks reused | 24.2% | Of 182,790 unique blocks, 44,144 appeared in more than one request |
+| Cache efficiency | 36.64% | Of 288,500 total block references, 105,710 were repeats (reusable with infinite cache) |
+
+The two differ because block reuse counts unique blocks that repeat, ignoring how often they repeat, while cache efficiency weights by frequency — a block reused 12,031 times contributes more than one reused once. With 36.64% cache efficiency, requests can be routed to workers that already hold the relevant KV blocks, which is what makes this workload ideal for KV-aware routing and significantly reduces TTFT.
+
+</div>
+
+<div data-sku="h200 b200" data-engine="vllm" data-usecase="chat" data-variant="kvbm disagg">
+
+The Mooncake trace ships only with the disaggregated + KV-routing target's `perf.yaml`. This target has no bundled dataset — benchmark it against your own workload.
+
 </div>
 
 ## Prerequisites
 
-- A Kubernetes cluster with the Dynamo platform installed and **16x H200 across 2 nodes** available.
+<div data-sku="h200" data-engine="vllm" data-usecase="chat" data-variant="disagg-multi-node">
+
+- A Kubernetes cluster with the Dynamo platform installed and **16x H200 across 2 nodes** available — see the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
+- A Hugging Face token with access to `Qwen/Qwen3-32B`.
+- RDMA NICs exposed to pods (an `rdma/ib` device plugin) for NIXL KV transfer — each prefill and decode worker reserves 2 `rdma/ib` devices.
+
+</div>
+
+<div data-sku="h200 b200" data-engine="vllm" data-usecase="chat" data-variant="kvbm">
+
+- A Kubernetes cluster with the Dynamo platform installed and **1x NVIDIA H200 (141 GB) or B200 (192 GB)** available — see the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx). Qwen3-32B in BF16 is ~64 GB of weights plus KV cache and activations, so an 80 GB H100 leaves very little room and is likely to OOM under real load; if you only have H100 80 GB, use the [Qwen3-32B FP8 recipe](qwen3-32b-fp8.mdx) instead.
+- **≥ ~150 GiB of host memory on the node.** `DYN_KVBM_CPU_CACHE_GB=100` is pinned as page-locked host memory for KVBM's G2 tier, and the worker declares `resources.requests.memory: 150Gi` and `resources.limits.memory: 200Gi` (100 GiB pinned KV pool plus ~50 GiB headroom for Python, weight-loader working memory, and CUDA/NCCL buffers). If you raise `DYN_KVBM_CPU_CACHE_GB`, scale both memory values up by roughly the same delta.
+- Pre-existing `model-cache` and `compilation-cache` PVCs — created by the storage step in [Quick Start](#quick-start).
 - A Hugging Face token with access to `Qwen/Qwen3-32B`.
 
-Create the namespace and token secret:
+</div>
+
+<div data-sku="h200" data-engine="vllm" data-usecase="chat" data-variant="disagg">
+
+- A Kubernetes cluster with the Dynamo platform installed on one of the supported provider fabrics — Azure AKS InfiniBand, AWS EFA on `p5.48xlarge`, GKE RoCE, Nebius InfiniBand, or Nscale InfiniBand. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
+- A Hugging Face token with access to `Qwen/Qwen3-32B`.
+
+</div>
+
+- For 80 GB GPUs (H100), use the [Qwen3-32B FP8 recipe](qwen3-32b-fp8.mdx) — BF16 weights are ~64 GB and leave little KV headroom.
+
+Create the token secret in your namespace:
 
 ```bash
 export NAMESPACE=your-namespace
@@ -42,18 +167,30 @@ kubectl create secret generic hf-token-secret \
 Edit namespace, storage class, image tags, node selectors, resource claims, Hugging Face secrets, and cluster-specific placement before applying these manifests.
 </Warning>
 
-## Deploy
+## Quick Start
+
+### 1. Create Storage
 
 Prepare the model cache and download the checkpoint (`cache.yaml` creates the `model-cache`, `compilation-cache`, and `perf-cache` PVCs):
 
 ```bash
 # Edit storageClassName in cache.yaml to match your cluster first.
+# Run `kubectl get storageclass` to find the available options.
 kubectl apply -f recipes/qwen3-32b/model-cache/cache.yaml -n ${NAMESPACE}
+```
+
+### 2. Download Model
+
+```bash
 kubectl apply -f recipes/qwen3-32b/model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=600s
 ```
 
-Then deploy:
+### 3. Deploy & Benchmark
+
+Deploy the target you selected:
+
+<div data-sku="h200" data-engine="vllm" data-usecase="chat" data-variant="disagg-multi-node">
 
 ```bash
 kubectl apply -f recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml -n ${NAMESPACE}
@@ -63,22 +200,147 @@ kubectl wait --for=condition=ready pod \
   -n ${NAMESPACE} --timeout=1200s
 ```
 
-## Smoke Test
+</div>
+
+<div data-sku="h200 b200" data-engine="vllm" data-usecase="chat" data-variant="kvbm">
+
+A single aggregated worker with the KV Block Manager (KVBM) enabled, so cold KV cache blocks spill to host memory and the effective cache footprint extends beyond GPU HBM — which improves prefix-reuse hit rate on long or repeated prompts without adding GPUs:
+
+```bash
+kubectl apply -f recipes/qwen3-32b/vllm/agg-kvbm/deploy.yaml -n ${NAMESPACE}
+
+kubectl wait --for=condition=ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=agg-kvbm-qwen3-32b \
+  -n ${NAMESPACE} --timeout=1200s
+```
+
+</div>
+
+<div data-sku="h200" data-engine="vllm" data-usecase="chat" data-variant="disagg">
+
+The base keeps the common Qwen3-32B 1P1D vLLM deployment in one `DynamoGraphDeployment`, and provider overlays patch only the pieces that vary by fabric: RDMA resources, annotations, host mounts, image selection, and runtime environment. Apply the rendered manifest for your fabric:
+
+```bash
+# Azure AKS InfiniBand
+kubectl apply -f recipes/qwen3-32b/vllm/cloud-providers/deploy-aks-ib.yaml -n ${NAMESPACE}
+# OR AWS EFA + libfabric on p5.48xlarge (16 EFA per worker)
+kubectl apply -f recipes/qwen3-32b/vllm/cloud-providers/deploy-aws-p5.48xlarge.yaml -n ${NAMESPACE}
+# OR GKE RoCE
+kubectl apply -f recipes/qwen3-32b/vllm/cloud-providers/deploy-gke-roce.yaml -n ${NAMESPACE}
+# OR Nebius InfiniBand
+kubectl apply -f recipes/qwen3-32b/vllm/cloud-providers/deploy-nebius-ib.yaml -n ${NAMESPACE}
+# OR Nscale InfiniBand
+kubectl apply -f recipes/qwen3-32b/vllm/cloud-providers/deploy-nscale-ib.yaml -n ${NAMESPACE}
+```
+
+Kustomize is both the authoring model and the documentation for these variants: the base and Components explain the provider settings, and each public overlay documents the concrete selection. Applying a rendered `deploy-*.yaml` and applying its public overlay are equivalent, and neither path requires regeneration. Each manifest's overlay:
+
+- `deploy-aks-ib.yaml` (Azure AKS InfiniBand) — `kustomize/overlays/aks-ib/`
+- `deploy-aws-p5.48xlarge.yaml` (AWS EFA + libfabric on `p5.48xlarge`, 16 EFA per worker) — `kustomize/overlays/aws-p5.48xlarge/`
+- `deploy-gke-roce.yaml` (GKE RoCE) — `kustomize/overlays/gke-roce/`
+- `deploy-nebius-ib.yaml` (Nebius InfiniBand) — `kustomize/overlays/nebius-ib/`
+- `deploy-nscale-ib.yaml` (Nscale InfiniBand) — `kustomize/overlays/nscale-ib/`
+
+For example, apply the GKE RoCE composition directly from its checked-in Kustomization:
+
+```bash
+kubectl apply -k recipes/qwen3-32b/vllm/cloud-providers/kustomize/overlays/gke-roce -n ${NAMESPACE}
+```
+
+To make a local, uncommitted composition, create your own `kustomization.yaml` in the repository checkout, or run `compose` from the repository root:
+
+```bash
+scripts/kustomize-matrix.py compose \
+  recipes/qwen3-32b/vllm/cloud-providers/kustomize/base \
+  recipes/kustomize/components/aks-ib \
+  | kubectl apply -f - -n ${NAMESPACE}
+```
+
+The vLLM command line reads provider-specific values from environment variables — `KV_TRANSFER_CONFIG`, `GPU_MEMORY_UTILIZATION`, `HF_HOME`, and transport-specific variables such as `UCX_NET_DEVICES` or `DYN_KVBM_NIXL_BACKEND_LIBFABRIC` — so overlays can patch individual values without replacing the shared `args` list. Shared provider Components apply to the backend-neutral `PrefillWorker` and `DecodeWorker` service keys, while model-specific images, mounts, and command configuration remain in local Components; the EFA leaf Component includes its AWS and libfabric parents and names the per-worker EFA request explicitly.
+
+Only recipe contributors update the checked-in derived artifacts. The source of truth is `.kustomize-matrix.yaml`, `kustomize/base/`, the recipe-local Components, plus the referenced shared Components under `recipes/kustomize/components/`; the public overlay `kustomization.yaml` files and the `deploy-*.yaml` manifests are generated — commit them for review, but do not edit them by hand. Regenerate them from the repository root:
+
+```bash
+scripts/kustomize-matrix.py unfold recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml
+scripts/kustomize-matrix.py render recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml
+```
+
+</div>
 
 Send a test request to verify the deployment serves traffic:
 
-```bash
-kubectl port-forward svc/disagg-router-6p-2d-frontend 8000:8000 -n ${NAMESPACE} &
-sleep 3
+<div data-sku="h200" data-engine="vllm" data-usecase="chat" data-variant="disagg-multi-node">
 
-curl http://localhost:8000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"Qwen/Qwen3-32B","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+```bash
+kubectl port-forward svc/disagg-router-6p-2d-frontend 8000:8000 -n ${NAMESPACE}
 ```
 
-## Benchmark
+</div>
 
-The checked-in `perf.yaml` downloads the Mooncake conversation trace (FAST25; 12,031 requests over ~59 minutes) and replays it on a fixed schedule, so throughput is set by the trace and latency is what you measure. It wraps this AIPerf run:
+<div data-sku="h200 b200" data-engine="vllm" data-usecase="chat" data-variant="kvbm">
+
+```bash
+kubectl port-forward svc/agg-kvbm-qwen3-32b-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="h200" data-engine="vllm" data-usecase="chat" data-variant="disagg">
+
+```bash
+kubectl port-forward svc/q32b-1p1d-cloud-provider-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-32B",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "max_tokens": 64
+  }'
+```
+
+<div data-sku="h200 b200" data-engine="vllm" data-usecase="chat" data-variant="kvbm">
+
+#### KVBM Configuration
+
+The connector is selected through the worker's `--kv-transfer-config`:
+
+```json
+{"kv_connector":"DynamoConnector","kv_role":"kv_both","kv_connector_module_path":"kvbm.vllm_integration.connector"}
+```
+
+This recipe sets one worker environment variable:
+
+| Variable | Default in this recipe | Description |
+|---|---|---|
+| `DYN_KVBM_CPU_CACHE_GB` | `100` | CPU memory reserved for offloaded KV blocks. Raise it for longer contexts or higher reuse; if you change it, also bump `resources.requests.memory` / `limits.memory` on the worker by roughly the same delta. |
+
+##### Prometheus Metrics (Optional)
+
+Metrics are **off** by default. To expose them, add the following to the worker's `env` and `mainContainer.ports` in `deploy.yaml`:
+
+```yaml
+env:
+  - name: DYN_KVBM_METRICS
+    value: "true"
+  - name: DYN_KVBM_METRICS_PORT
+    value: "6880"
+ports:
+  - name: kvbm
+    containerPort: 6880
+```
+
+Once enabled, scrape `:6880/metrics` for counters like `kvbm_offload_blocks_d2h`, `kvbm_onboard_blocks_h2d`, `kvbm_matched_tokens`, and `kvbm_host_cache_hit_rate`, plus per-route transfer counters. If you run the Prometheus Operator, add a `PodMonitor` selecting pods with `nvidia.com/dynamo-component-type: worker` and port `kvbm`.
+
+</div>
+
+<div data-sku="h200" data-engine="vllm" data-usecase="chat" data-variant="disagg-multi-node">
+
+The checked-in `perf.yaml` downloads the Mooncake conversation trace (FAST25) and replays it on a fixed schedule, so throughput is set by the trace and latency is what you measure. It wraps this AIPerf run:
 
 ```bash
 aiperf profile -m Qwen/Qwen3-32B \
@@ -92,25 +354,119 @@ aiperf profile -m Qwen/Qwen3-32B \
 
 ```bash
 kubectl apply -f recipes/qwen3-32b/vllm/disagg-kv-router/perf.yaml -n ${NAMESPACE}
+```
 
+</div>
+
+### 4. Monitor Benchmark Progress
+
+<div data-sku="h200" data-engine="vllm" data-usecase="chat" data-variant="disagg-multi-node">
+
+```bash
 # The benchmark runs in a tmux session; attach to watch intermediate results.
 kubectl get pods -n ${NAMESPACE} | grep benchmark
 kubectl exec -it -n ${NAMESPACE} <benchmark-pod-name> -- tmux a -t benchmark
+
+# Detach from tmux: Ctrl+B, then D
 ```
 
-Results land on the `perf-cache` PVC under `/perf-cache/artifacts/`.
+</div>
 
-## Related Feature Benchmarks
+<div data-sku="h200 b200" data-engine="vllm" data-usecase="chat" data-variant="kvbm disagg">
+
+This target ships no benchmark job, so there is nothing to monitor — skip to the next step.
+
+</div>
+
+### 5. View Results
+
+<div data-sku="h200" data-engine="vllm" data-usecase="chat" data-variant="disagg-multi-node">
+
+Results land on the `perf-cache` PVC under `/perf-cache/artifacts/`:
+
+```bash
+# Check the artifact directory
+kubectl exec -it -n ${NAMESPACE} <benchmark-pod-name> -- ls -la /perf-cache/artifacts/
+
+# Copy results to your local machine
+kubectl cp ${NAMESPACE}/<benchmark-pod-name>:/perf-cache/artifacts ./benchmark-results
+```
+
+</div>
+
+<div data-sku="h200 b200" data-engine="vllm" data-usecase="chat" data-variant="kvbm disagg">
+
+This target produces no benchmark artifacts. Collect results from your own load generator instead.
+
+</div>
+
+## Expected Results
+
+<div data-sku="h200" data-engine="vllm" data-usecase="chat" data-variant="disagg-multi-node">
+
+Since the replay is fixed-schedule — requests arrive at their original timestamps — throughput metrics are fixed by the trace, and the latency metrics are what the comparison turns on:
+
+| Metric | Why it matters |
+|--------|----------------|
+| **TTFT** (time to first token) | KV-aware routing reduces prefill compute via prefix cache hits |
+| **ITL** (inter-token latency) | Disaggregated serving isolates decode from prefill interference |
+| **Total request latency** | Combined benefit of both optimizations |
+
+Why disaggregated serving plus KV-aware routing helps this workload:
+
+1. **KV-aware routing** leverages the 36% cache efficiency to route requests to workers that already have relevant KV cache blocks, reducing redundant prefill computation and lowering TTFT.
+2. **Disaggregated serving** separates prefill and decode workers. With long input sequences (avg 12K tokens) and short outputs (avg 343 tokens), dedicated decode workers avoid "prefill injection" — where a new long-context request interrupts ongoing decode operations, causing ITL spikes.
+
+</div>
+
+<div data-sku="h200 b200" data-engine="vllm" data-usecase="chat" data-variant="kvbm disagg">
+
+There is no published baseline for this target. For background on why disaggregated serving and KV-aware routing help prefix-heavy conversational traffic, see the [Qwen3-32B KV routing A/B](../feature-benchmarks/qwen3-32b-kv-routing-a-b.mdx) benchmark.
+
+</div>
+
+## Cleanup
+
+<div data-sku="h200" data-engine="vllm" data-usecase="chat" data-variant="disagg-multi-node">
+
+```bash
+# Delete benchmark pods
+kubectl delete pod -l app=benchmark -n ${NAMESPACE}
+
+# Delete deployments
+kubectl delete dynamographdeployment disagg-router-6p-2d -n ${NAMESPACE}
+# ...and the aggregated round-robin control, if you deployed it
+kubectl delete dynamographdeployment agg-8xtp2 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="h200 b200" data-engine="vllm" data-usecase="chat" data-variant="kvbm">
+
+```bash
+kubectl delete dynamographdeployment agg-kvbm-qwen3-32b -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="h200" data-engine="vllm" data-usecase="chat" data-variant="disagg">
+
+```bash
+kubectl delete dynamographdeployment q32b-1p1d-cloud-provider -n ${NAMESPACE}
+```
+
+</div>
+
+## References
 
 - [Qwen3-32B KV routing A/B](../feature-benchmarks/qwen3-32b-kv-routing-a-b.mdx) — the evidence behind this recipe: this configuration vs. aggregated round-robin on the same trace.
-
-## Notes
-
-- The aggregated round-robin manifest is a benchmark control and lives on the related Feature Benchmarks page, not in this recipe.
-- For 80 GB GPUs (H100), use the [Qwen3-32B FP8 recipe](qwen3-32b-fp8.mdx) — BF16 weights are ~64 GB and leave little KV headroom.
 
 ## Source
 
 - Source README: [recipes/qwen3-32b/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/README.md)
 - Deploy and benchmark: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/disagg-kv-router/perf.yaml)
+- Aggregated round-robin control: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/agg-round-robin/deploy.yaml) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/agg-round-robin/perf.yaml)
+- Aggregated + KVBM: [README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/agg-kvbm/README.md) and [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/agg-kvbm/deploy.yaml)
+- Cloud provider overlays: [README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/cloud-providers/README.md), [deploy-aks-ib.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/cloud-providers/deploy-aks-ib.yaml), [deploy-aws-p5.48xlarge.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/cloud-providers/deploy-aws-p5.48xlarge.yaml), [deploy-gke-roce.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/cloud-providers/deploy-gke-roce.yaml), [deploy-nebius-ib.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/cloud-providers/deploy-nebius-ib.yaml), and [deploy-nscale-ib.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/cloud-providers/deploy-nscale-ib.yaml) — adapted from the provider-specific examples in [ai-dynamo/dynamo#10202](https://github.com/ai-dynamo/dynamo/pull/10202)
 - Setup assets: [model-cache/cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/model-cache/cache.yaml) and [model-cache/model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/model-cache/model-download.yaml)
+- Trace source: [Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving](https://github.com/kvcache-ai/Mooncake) — FAST25 paper and trace data

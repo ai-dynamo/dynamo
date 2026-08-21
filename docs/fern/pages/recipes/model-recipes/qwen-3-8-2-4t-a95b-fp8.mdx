@@ -10,7 +10,7 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 <RecipeStyles />
 
 
-Each target below is a Dynamo + vLLM or SGLang deployment of [Qwen3.8-2.4T-A95B](https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B-FP8) — a hybrid gated-delta-net + MoE model with 512 experts and a 262k-token context — with KV-aware routing and FP8 weights/KV cache. Tensor parallelism runs over MNNVL through Kubernetes ComputeDomains. Pick your GPU architecture, serving topology, and inference engine; every command on this page updates to match.
+Each target below is a Dynamo + vLLM or SGLang deployment of [Qwen3.8-2.4T-A95B](https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B-FP8) — a hybrid model that interleaves gated delta-net (GDN, linear attention with a short convolution state) with full grouped-query attention (GQA), on top of a 512-expert MoE and a 262k-token context — with KV-aware routing and FP8 weights/KV cache. The supported modality is text only; the model has no vision tower. Tensor parallelism runs over MNNVL through Kubernetes ComputeDomains. Pick your GPU, workload, backend, and serving topology; every command on this page updates to match.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
@@ -22,66 +22,167 @@ Each target below is a Dynamo + vLLM or SGLang deployment of [Qwen3.8-2.4T-A95B]
 <label htmlFor="recipe-sku-gb200">GB200</label>
 </div>
 <div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Workload</span>
+<input type="radio" id="recipe-usecase-chat" name="recipe-usecase" value="chat" defaultChecked />
+<label htmlFor="recipe-usecase-chat">Chat</label>
+<input type="radio" id="recipe-usecase-agentic" name="recipe-usecase" value="agentic" />
+<label htmlFor="recipe-usecase-agentic" data-needs-engine="vllm" data-needs-variant="agg">Agentic</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Backend</span>
+<input type="radio" id="recipe-engine-vllm" name="recipe-engine" value="vllm" defaultChecked />
+<label htmlFor="recipe-engine-vllm" data-needs-variant="agg">vLLM</label>
+<input type="radio" id="recipe-engine-sglang" name="recipe-engine" value="sglang" />
+<label htmlFor="recipe-engine-sglang" data-needs-usecase="chat">SGLang</label>
+</div>
+<div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">Topology</span>
 <input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
 <label htmlFor="recipe-variant-agg">Aggregated</label>
 <input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
-<label htmlFor="recipe-variant-disagg">Disaggregated</label>
+<label htmlFor="recipe-variant-disagg" data-needs-engine="sglang" data-needs-usecase="chat">Disaggregated</label>
 </div>
-<div className="dynamo-target-picker-row">
-<span className="dynamo-target-picker-dim">Engine</span>
-<input type="radio" id="recipe-engine-vllm" name="recipe-engine" value="vllm" defaultChecked />
-<label htmlFor="recipe-engine-vllm">vLLM</label>
-<input type="radio" id="recipe-engine-sglang" name="recipe-engine" value="sglang" />
-<label htmlFor="recipe-engine-sglang">SGLang</label>
-</div>
-<div className="dynamo-target-picker-summary" data-sku="gb300" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-sku="gb300" data-engine="vllm" data-usecase="chat agentic" data-variant="agg">
 <span><b>Checkpoint</b> Qwen/Qwen3.8-2.4T-A95B-FP8</span>
 <span><b>Precision</b> FP8 weights, FP8 KV</span>
-<span><b>GPUs</b> 16x GB300 (4 nodes), 1 replica</span>
+<span><b>GPUs</b> 16× GB300, 4 nodes, 1 replica</span>
 <span><b>Parallelism</b> TP16 over MNNVL</span>
-<span><b>Routing</b> event-driven KV-aware, prefix caching</span>
+<span><b>MoE backend</b> not set in the manifest</span>
+<span><b>AllReduce backend</b> FlashInfer MNNVL</span>
+<span><b>Speculative decoding</b> MTP, 3 speculative tokens</span>
+<span><b>Context length</b> 262 144</span>
+<span><b>CUDA graphs</b> FULL_AND_PIECEWISE, capped at batch size 512</span>
+<span><b>Batching</b> 12288 tokens / 512 sequences</span>
+<span><b>GPU memory utilization</b> 0.90</span>
+<span><b>Routing</b> event-driven KV-aware</span>
+<span><b>Prefix caching</b> Enabled</span>
 </div>
 
-<div className="dynamo-target-picker-summary" data-sku="gb300" data-variant="disagg" data-engine="sglang">
+<div className="dynamo-target-picker-summary" data-sku="gb300" data-engine="sglang" data-usecase="chat" data-variant="agg">
 <span><b>Checkpoint</b> Qwen/Qwen3.8-2.4T-A95B-FP8</span>
 <span><b>Precision</b> FP8 weights, FP8 KV</span>
-<span><b>GPUs</b> 16x GB300 prefill (4 nodes) + 16x GB300 decode (4 nodes)</span>
-<span><b>Parallelism</b> TP16 / TP16 over MNNVL</span>
-<span><b>KV transfer</b> NIXL over cuda_ipc + MNNVL</span>
-<span><b>Routing</b> KV-aware, load-balanced prefill; NIXL KV transfer</span>
-</div>
-<div className="dynamo-target-picker-summary" data-sku="gb200" data-variant="agg" data-engine="vllm">
-<span><b>Checkpoint</b> Qwen/Qwen3.8-2.4T-A95B-FP8</span>
-<span><b>Precision</b> FP8 weights, FP8 KV</span>
-<span><b>GPUs</b> 16x GB200 (4 nodes), 1 replica</span>
+<span><b>GPUs</b> 16× GB300, 4 nodes, 1 replica</span>
 <span><b>Parallelism</b> TP16 over MNNVL</span>
 <span><b>MoE backend</b> flashinfer_trtllm</span>
-<span><b>Routing</b> KV-aware (ZMQ events)</span>
+<span><b>Attention backend</b> trtllm_mha</span>
+<span><b>AllReduce backend</b> FlashInfer MNNVL</span>
+<span><b>Speculative decoding</b> NEXTN, 3 steps / 4 draft tokens, eagle-topk 1</span>
+<span><b>Context length</b> 262 144</span>
+<span><b>CUDA graphs</b> breakable prefill / full decode</span>
+<span><b>mem-fraction-static</b> 0.90</span>
+<span><b>Watchdog timeout</b> 900s</span>
+<span><b>Routing</b> event-driven KV-aware</span>
+<span><b>Prefix caching</b> Enabled (radix cache)</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="gb200" data-variant="agg" data-engine="sglang">
+
+<div className="dynamo-target-picker-summary" data-sku="gb300" data-engine="sglang" data-usecase="chat" data-variant="disagg">
 <span><b>Checkpoint</b> Qwen/Qwen3.8-2.4T-A95B-FP8</span>
 <span><b>Precision</b> FP8 weights, FP8 KV</span>
-<span><b>GPUs</b> 16x GB200 (4 nodes), 1 replica</span>
-<span><b>Parallelism</b> TP16 over MNNVL</span>
-<span><b>MoE backend</b> flashinfer_trtllm; trtllm_mha attention</span>
-<span><b>Routing</b> KV-aware (ZMQ events)</span>
-</div>
-<div className="dynamo-target-picker-summary" data-sku="gb200" data-variant="disagg" data-engine="sglang">
-<span><b>Checkpoint</b> Qwen/Qwen3.8-2.4T-A95B-FP8</span>
-<span><b>Precision</b> FP8 weights, FP8 KV</span>
-<span><b>GPUs</b> 16x GB200 × 2 prefill + 16x GB200 decode (2P1D, 12 nodes)</span>
+<span><b>GPUs</b> 16× GB300 prefill + 16× GB300 decode (1P1D, 8 nodes)</span>
 <span><b>Parallelism</b> TP16 / TP16 over MNNVL</span>
-<span><b>MoE backend</b> flashinfer_trtllm; trtllm_mha attention</span>
-<span><b>Routing</b> KV-aware, load-balanced across prefill replicas; NIXL KV transfer over cuda_ipc + MNNVL</span>
+<span><b>KV transfer</b> NIXL over cuda_ipc + MNNVL</span>
+<span><b>MoE backend</b> flashinfer_trtllm</span>
+<span><b>Attention backend</b> trtllm_mha</span>
+<span><b>AllReduce backend</b> FlashInfer MNNVL</span>
+<span><b>Speculative decoding</b> NEXTN, 3 steps / 4 draft tokens, eagle-topk 1</span>
+<span><b>Context length</b> 262 144</span>
+<span><b>CUDA graphs</b> breakable prefill / full decode</span>
+<span><b>mem-fraction-static</b> 0.90 both roles</span>
+<span><b>Watchdog timeout</b> 900s</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Prefix caching</b> Prefill-side only</span>
+</div>
+
+<div className="dynamo-target-picker-summary" data-sku="gb200" data-engine="vllm" data-usecase="chat agentic" data-variant="agg">
+<span><b>Checkpoint</b> Qwen/Qwen3.8-2.4T-A95B-FP8</span>
+<span><b>Precision</b> FP8 weights, FP8 KV</span>
+<span><b>GPUs</b> 16× GB200, 4 nodes, 1 replica</span>
+<span><b>Parallelism</b> TP16 over MNNVL</span>
+<span><b>MoE backend</b> flashinfer_trtllm</span>
+<span><b>AllReduce backend</b> FlashInfer MNNVL</span>
+<span><b>Speculative decoding</b> MTP, 3 speculative tokens</span>
+<span><b>Context length</b> 262 144</span>
+<span><b>CUDA graphs</b> FULL_AND_PIECEWISE, capped at batch size 512</span>
+<span><b>Batching</b> 12288 tokens / 512 sequences</span>
+<span><b>GPU memory utilization</b> 0.90</span>
+<span><b>Routing</b> KV-aware (ZMQ events)</span>
+<span><b>Prefix caching</b> Enabled</span>
+</div>
+
+<div className="dynamo-target-picker-summary" data-sku="gb200" data-engine="sglang" data-usecase="chat" data-variant="agg">
+<span><b>Checkpoint</b> Qwen/Qwen3.8-2.4T-A95B-FP8</span>
+<span><b>Precision</b> FP8 weights, FP8 KV</span>
+<span><b>GPUs</b> 16× GB200, 4 nodes, 1 replica</span>
+<span><b>Parallelism</b> TP16 over MNNVL</span>
+<span><b>MoE backend</b> flashinfer_trtllm</span>
+<span><b>Attention backend</b> trtllm_mha</span>
+<span><b>AllReduce backend</b> FlashInfer MNNVL</span>
+<span><b>Speculative decoding</b> Not enabled</span>
+<span><b>Context length</b> 262 144</span>
+<span><b>CUDA graphs</b> breakable prefill / full decode</span>
+<span><b>mem-fraction-static</b> 0.92</span>
+<span><b>Watchdog timeout</b> 900s</span>
+<span><b>Routing</b> KV-aware (ZMQ events)</span>
+<span><b>Prefix caching</b> Enabled (radix cache)</span>
+</div>
+
+<div className="dynamo-target-picker-summary" data-sku="gb200" data-engine="sglang" data-usecase="chat" data-variant="disagg">
+<span><b>Checkpoint</b> Qwen/Qwen3.8-2.4T-A95B-FP8</span>
+<span><b>Precision</b> FP8 weights, FP8 KV</span>
+<span><b>GPUs</b> 2× 16× GB200 prefill + 16× GB200 decode (2P1D, 12 nodes)</span>
+<span><b>Parallelism</b> TP16 / TP16 over MNNVL</span>
+<span><b>KV transfer</b> NIXL over cuda_ipc + MNNVL (~900 GB/s/GPU)</span>
+<span><b>MoE backend</b> flashinfer_trtllm</span>
+<span><b>Attention backend</b> trtllm_mha</span>
+<span><b>AllReduce backend</b> FlashInfer MNNVL</span>
+<span><b>Speculative decoding</b> Not enabled</span>
+<span><b>Context length</b> 262 144</span>
+<span><b>CUDA graphs</b> breakable prefill / full decode</span>
+<span><b>mem-fraction-static</b> 0.85 prefill / 0.92 decode</span>
+<span><b>Watchdog timeout</b> 7200s (breakable graph capture takes 30–60 min)</span>
+<span><b>Routing</b> KV-aware, load-balanced across prefill replicas</span>
+<span><b>Prefix caching</b> Prefill-side only</span>
 </div>
 </div>
+
+## Configurations
+
+Aggregated targets support both vLLM and SGLang. Disaggregated targets are SGLang only. GB300 disagg is 1P1D; GB200 disagg is 2P1D.
+
+<div data-engine="vllm" data-usecase="chat" data-variant="agg">
+
+The chat profiles are tuned for an 8k total context / 1k output workload with 70% KV cache reuse.
+
+</div>
+
+<div data-engine="vllm" data-usecase="agentic" data-variant="agg">
+
+The agentic profiles are tuned for a 64k total context / 400 output workload with 90% KV cache reuse.
+
+</div>
+
+<div data-engine="sglang" data-usecase="chat">
+
+The SGLang targets ship chat profiles only — switch the engine to vLLM for the agentic profiles.
+
+</div>
+
+<div data-engine="vllm" data-variant="agg">
+
+The disaggregated targets ship SGLang only — switch the engine to SGLang for the 1P1D and 2P1D profiles.
+
+</div>
+
+## Supported features
+
+- **Multi-replica scale-out.** Supported; the shipped manifests run one replica per worker role, apart from the two prefill replicas on the GB200 2P1D target.
+- **Speculative decoding.** The vLLM targets run MTP with 3 speculative tokens. The GB300 SGLang targets run NEXTN with 3 steps and 4 draft tokens (`speculative-eagle-topk: 1`). The GB200 SGLang targets ship without speculative decoding.
 
 ## Prerequisites
 
 <div data-sku="gb300">
 
-- A Kubernetes cluster with the Dynamo platform installed and GB300 GPUs available — 16x (4 nodes). See the [Kubernetes Deployment Guide](../kubernetes/quickstart.mdx).
+- A Kubernetes cluster with the Dynamo platform installed and GB300 GPUs available — 16x (4 nodes) for aggregated; 32x (8 nodes, 4 prefill + 4 decode) for 1P1D disaggregated. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
 - The NVIDIA DRA driver with ComputeDomain support installed (required for multi-node NVLink).
 - A Hugging Face token with access to `Qwen/Qwen3.8-2.4T-A95B-FP8`.
 
@@ -89,12 +190,36 @@ Each target below is a Dynamo + vLLM or SGLang deployment of [Qwen3.8-2.4T-A95B]
 
 <div data-sku="gb200">
 
-- A Kubernetes cluster with the Dynamo platform installed and GB200 GPUs available — 16x (4 nodes) for aggregated; 48x (12 nodes, 2×4 prefill + 4 decode) for 2P1D disaggregated. See the [Kubernetes Deployment Guide](../kubernetes/quickstart.mdx).
+- A Kubernetes cluster with the Dynamo platform installed and GB200 GPUs available — 16x (4 nodes) for aggregated; 48x (12 nodes, 2×4 prefill + 4 decode) for 2P1D disaggregated. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
 - The NVIDIA DRA driver with ComputeDomain support installed (required for multi-node NVLink).
 - A Hugging Face token with access to `Qwen/Qwen3.8-2.4T-A95B-FP8`.
-- The `model-cache` PVC, populated by the model-download Job (see step 3 below).
+- The `model-cache` PVC, populated by the model-download Job (applied in the [Download the model](#3-download-the-model) section below).
 
 </div>
+
+Confirm the ComputeDomain CRD is present:
+
+```bash
+kubectl get crd | grep computedomain
+```
+
+Each deploy manifest creates its own `ComputeDomain` and the workers claim its channel, so you do not create one yourself.
+
+<div data-sku="gb300">
+
+The vLLM manifests create `qwen38max-compute-domain`; the SGLang manifests create `sglang-qwen38max-compute-domain`.
+
+</div>
+
+<div data-sku="gb200">
+
+The vLLM manifests create `qwen38max-agg-cd` (chat) and `qwen38max-agg-agentic-cd` (agentic); the SGLang manifests create `qwen38max-sgl-agg-cd` (aggregated) and `qwen38max-sgl-disagg-cd` (disaggregated).
+
+</div>
+
+## Quick Start
+
+### 1. Create namespace and secret
 
 Create the namespace:
 
@@ -109,13 +234,22 @@ Create the Hugging Face token secret:
 kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN="your-token" -n ${NAMESPACE}
 ```
 
+### 2. Create storage
+
 <Warning>
 Edit `storageClassName` in `model-cache/model-cache.yaml` to a ReadWriteMany storage class on your
 cluster (`kubectl get storageclass`) before applying it. Review namespace, image tag, node selectors,
 and resource claims in the manifests as well.
 </Warning>
 
-## Deploy
+### 3. Download the model
+
+<Note>
+If you previously ran `model-download` against `Qwen/Qwen3.8-2.4T-A95B`, re-run the Job — workers resolve
+weights from the Hugging Face cache key `models--Qwen--Qwen3.8-2.4T-A95B-FP8` and fail offline until the new
+download completes. The old `models--Qwen--Qwen3.8-2.4T-A95B` directory (~2.4 TB) can be removed once the new
+download is verified.
+</Note>
 
 <div data-sku="gb300">
 
@@ -141,129 +275,208 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 
 </div>
 
+The Job sets `HF_HOME=/model-cache`, so the checkpoint lands in the PVC's Hugging Face cache; each worker then passes the repo id `Qwen/Qwen3.8-2.4T-A95B-FP8` to `--model` and resolves the weights from there.
+
+<Note>
+The containers run as `runAsUser: 0` because the cached weight files are root-owned while the image
+defaults to a non-root uid.
+</Note>
+
+### 4. Deploy the DGD
+
 Then deploy the target DGD:
 
-<div className="dynamo-target-picker-row">
-<span className="dynamo-target-picker-dim">Workload</span>
-<input type="radio" id="recipe-usecase-chat" name="recipe-usecase" value="chat" defaultChecked />
-<label htmlFor="recipe-usecase-chat">Chat</label>
-<input type="radio" id="recipe-usecase-agentic" name="recipe-usecase" value="agentic" />
-<label htmlFor="recipe-usecase-agentic">Agentic</label>
-</div>
-
-<div data-sku="gb300" data-variant="agg" data-engine="vllm" data-usecase="chat">
+<div data-sku="gb300" data-engine="vllm" data-usecase="chat" data-variant="agg">
 
 ```bash
 kubectl apply -f recipes/qwen3.8-2.4t-a95b-fp8/vllm/agg-gb300-chat/deploy.yaml -n ${NAMESPACE}
+
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=qwen38max-agg-chat \
+  -n ${NAMESPACE} --timeout=7200s
 ```
 
 </div>
 
-<div data-sku="gb300" data-variant="agg" data-engine="vllm" data-usecase="agentic">
+<div data-sku="gb300" data-engine="vllm" data-usecase="agentic" data-variant="agg">
 
 ```bash
 kubectl apply -f recipes/qwen3.8-2.4t-a95b-fp8/vllm/agg-gb300-agentic/deploy.yaml -n ${NAMESPACE}
+
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=qwen38max-agg-agentic \
+  -n ${NAMESPACE} --timeout=7200s
 ```
 
 </div>
 
-<div data-sku="gb300" data-variant="agg" data-engine="sglang" data-usecase="chat">
+<div data-sku="gb300" data-engine="sglang" data-usecase="chat" data-variant="agg">
 
 ```bash
 kubectl apply -f recipes/qwen3.8-2.4t-a95b-fp8/sglang/agg-gb300-chat/deploy.yaml -n ${NAMESPACE}
+
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=sglang-qwen38max-agg \
+  -n ${NAMESPACE} --timeout=7200s
 ```
 
 </div>
 
-<div data-sku="gb300" data-variant="disagg" data-engine="sglang" data-usecase="chat">
+<div data-sku="gb300" data-engine="sglang" data-usecase="chat" data-variant="disagg">
 
 ```bash
 kubectl apply -f recipes/qwen3.8-2.4t-a95b-fp8/sglang/disagg-gb300-chat/deploy.yaml -n ${NAMESPACE}
+
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=sglang-qwen38max-1p1d \
+  -n ${NAMESPACE} --timeout=7200s
 ```
 
 </div>
 
 
-<div data-sku="gb200" data-variant="agg" data-engine="vllm" data-usecase="chat">
+<div data-sku="gb200" data-engine="vllm" data-usecase="chat" data-variant="agg">
 
 ```bash
 kubectl apply -f recipes/qwen3.8-2.4t-a95b-fp8/vllm/agg-gb200-chat/deploy.yaml -n ${NAMESPACE}
+
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=qwen38max-agg \
+  -n ${NAMESPACE} --timeout=7200s
 ```
 
 </div>
 
 
-<div data-sku="gb200" data-variant="agg" data-engine="vllm" data-usecase="agentic">
+<div data-sku="gb200" data-engine="vllm" data-usecase="agentic" data-variant="agg">
 
 ```bash
 kubectl apply -f recipes/qwen3.8-2.4t-a95b-fp8/vllm/agg-gb200-agentic/deploy.yaml -n ${NAMESPACE}
+
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=qwen38max-agg-agentic \
+  -n ${NAMESPACE} --timeout=7200s
 ```
 
 </div>
 
 
-<div data-sku="gb200" data-variant="agg" data-engine="sglang" data-usecase="chat">
+<div data-sku="gb200" data-engine="sglang" data-usecase="chat" data-variant="agg">
 
 ```bash
 kubectl apply -f recipes/qwen3.8-2.4t-a95b-fp8/sglang/agg-gb200-chat/deploy.yaml -n ${NAMESPACE}
+
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=qwen38max-sgl-agg \
+  -n ${NAMESPACE} --timeout=7200s
 ```
 
 </div>
 
-<div data-sku="gb200" data-variant="disagg" data-engine="sglang" data-usecase="chat">
+<div data-sku="gb200" data-engine="sglang" data-usecase="chat" data-variant="disagg">
 
 ```bash
 kubectl apply -f recipes/qwen3.8-2.4t-a95b-fp8/sglang/disagg-gb200-chat/deploy.yaml -n ${NAMESPACE}
+
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=qwen38max-sgl-disagg \
+  -n ${NAMESPACE} --timeout=7200s
 ```
 
 </div>
 
-First worker launch loads ~2.4 TB of FP8 weights across the TP ranks and warms CUDA graphs. Allow up to 4 hours; the multinode pod set reports ready only once all nodes have joined the TP group.
+First worker launch loads the checkpoint across the TP ranks and warms CUDA graphs. Each worker pod pulls the full checkpoint from the shared filesystem, so first-load time is bounded by the storage backend, not the GPUs. Allow up to 2 hours — the worker startup probe budgets 120 minutes (`failureThreshold: 720`); raise it if your storage is slower. The multinode pod set reports ready only once all nodes have joined the TP group.
 
-## Smoke Test
+<div data-sku="gb200" data-engine="sglang" data-usecase="chat" data-variant="disagg">
+
+Breakable CUDA-graph capture takes 30–60 minutes on this target, so both roles run with `--watchdog-timeout 7200`. The other SGLang targets use 900s.
+
+</div>
+
+### 5. Smoke test
 
 Forward the frontend port:
 
-<div data-sku="gb300" data-variant="agg">
+<div data-sku="gb300" data-engine="vllm" data-usecase="chat" data-variant="agg">
 
 ```bash
-kubectl port-forward svc/qwen38max-agg-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/qwen38max-agg-chat-frontend 8000:8000 -n ${NAMESPACE} &
 ```
 
 </div>
 
-<div data-sku="gb300" data-variant="disagg">
+<div data-sku="gb300" data-engine="vllm" data-usecase="agentic" data-variant="agg">
 
 ```bash
-kubectl port-forward svc/sglang-qwen38max-1p1d-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/qwen38max-agg-agentic-frontend 8000:8000 -n ${NAMESPACE} &
 ```
 
 </div>
 
-<div data-sku="gb200" data-variant="agg">
+<div data-sku="gb300" data-engine="sglang" data-usecase="chat" data-variant="agg">
 
 ```bash
-kubectl port-forward svc/qwen38max-agg-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/sglang-qwen38max-agg-frontend 8000:8000 -n ${NAMESPACE} &
 ```
 
 </div>
 
-<div data-sku="gb200" data-variant="disagg">
+<div data-sku="gb300" data-engine="sglang" data-usecase="chat" data-variant="disagg">
 
 ```bash
-kubectl port-forward svc/qwen38max-sgl-disagg-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/sglang-qwen38max-1p1d-frontend 8000:8000 -n ${NAMESPACE} &
 ```
 
 </div>
+
+<div data-sku="gb200" data-engine="vllm" data-usecase="chat" data-variant="agg">
+
+```bash
+kubectl port-forward svc/qwen38max-agg-frontend 8000:8000 -n ${NAMESPACE} &
+```
+
+</div>
+
+<div data-sku="gb200" data-engine="vllm" data-usecase="agentic" data-variant="agg">
+
+```bash
+kubectl port-forward svc/qwen38max-agg-agentic-frontend 8000:8000 -n ${NAMESPACE} &
+```
+
+</div>
+
+<div data-sku="gb200" data-engine="sglang" data-usecase="chat" data-variant="agg">
+
+```bash
+kubectl port-forward svc/qwen38max-sgl-agg-frontend 8000:8000 -n ${NAMESPACE} &
+```
+
+</div>
+
+<div data-sku="gb200" data-engine="sglang" data-usecase="chat" data-variant="disagg">
+
+```bash
+kubectl port-forward svc/qwen38max-sgl-disagg-frontend 8000:8000 -n ${NAMESPACE} &
+```
+
+</div>
+
+Backgrounding the port-forward keeps the same shell free for the requests below.
+
+#### Text
 
 Send a test request:
 
 <div data-sku="gb300">
 
 ```bash
-curl http://localhost:8000/v1/chat/completions \
+curl -s http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"Qwen/Qwen3.8-2.4T-A95B-FP8","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+  -d '{
+    "model": "Qwen/Qwen3.8-2.4T-A95B-FP8",
+    "messages": [{"role": "user", "content": "Hello, who are you?"}],
+    "max_tokens": 128
+  }'
 ```
 
 </div>
@@ -271,16 +484,50 @@ curl http://localhost:8000/v1/chat/completions \
 <div data-sku="gb200">
 
 ```bash
-curl http://localhost:8000/v1/chat/completions \
+curl -s http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"Qwen/Qwen3.8-2.4T-A95B-FP8","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+  -d '{
+    "model": "Qwen/Qwen3.8-2.4T-A95B-FP8",
+    "messages": [{"role": "user", "content": "Hello, who are you?"}],
+    "max_tokens": 128
+  }'
 ```
 
 </div>
 
-Qwen3.8-2.4T-A95B reasons before answering; chain-of-thought lands in `choices[0].message.reasoning_content` and the answer in `choices[0].message.content`. The deployment wires the `qwen3` reasoning parser and `qwen3_coder` tool-call parser at the frontend.
+Qwen3.8-2.4T-A95B reasons before answering; chain-of-thought lands in `choices[0].message.reasoning_content` and the answer in `choices[0].message.content`. The deployment wires the `qwen3` reasoning parser and `qwen3_coder` tool-call parser at the frontend. If `reasoning_content` is `null` and raw `</think>` markers show up in `content`, the parsers are not wired — check `--reasoning-parser qwen3` and `--dyn-reasoning-parser qwen3` on the worker command.
 
-## Benchmark
+#### Tool calling
+
+Exercise the tool-call parser:
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Qwen/Qwen3.8-2.4T-A95B-FP8",
+    "messages": [{"role": "user", "content": "What is the weather in San Francisco?"}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a location",
+        "parameters": {
+          "type": "object",
+          "properties": {"location": {"type": "string", "description": "City name"}},
+          "required": ["location"]
+        }
+      }
+    }],
+    "max_tokens": 300
+  }' | python3 -m json.tool
+```
+
+Expected: `choices[0].message.tool_calls[0].function.name` is `get_weather` and `finish_reason` is `tool_calls`.
+
+### 6. Benchmark
+
+<div data-usecase="chat">
 
 Standard chat workload: 8k total context / 1k output, 70% KV cache reuse.
 
@@ -304,25 +551,46 @@ for C in 2 4 8 16 32 64 128; do
 done
 ```
 
-## Compare All Targets
+</div>
 
-Aggregated targets support both vLLM and SGLang. Disaggregated targets are SGLang only. GB300 disagg is 1P1D; GB200 disagg is 2P1D.
+<div data-usecase="agentic">
 
-| | GB300 agg | GB300 disagg (SGLang) | GB200 agg | GB200 disagg (SGLang, 2P1D) |
-|---|---|---|---|---|
-| **GPUs** | 16× GB300, 4 nodes | 16× GB300 prefill + 16× GB300 decode (1P1D, 8 nodes) | 16× GB200, 4 nodes | 2× 16× GB200 prefill + 16× GB200 decode (2P1D, 12 nodes) |
-| **Parallelism** | TP16 | TP16 / TP16 | TP16 | TP16 / TP16 |
-| **KV transfer** | — | NIXL over cuda_ipc + MNNVL | — | NIXL over cuda_ipc + MNNVL |
-| **MoE backend** | flashinfer_trtllm | flashinfer_trtllm | flashinfer_trtllm | flashinfer_trtllm |
-| **Precision** | FP8 weights, FP8 KV | FP8 weights, FP8 KV | FP8 weights, FP8 KV | FP8 weights, FP8 KV |
-| **Context length** | 262 144 | 262 144 | 262 144 | 262 144 |
+Agentic workload: 64k total context / 400 output, 90% KV cache reuse — the profile the agentic manifests are tuned for.
 
-## Notes
+```bash
+BASE_URL="http://localhost:8000"
+SALT=$(openssl rand -base64 4 | tr -d '=+/')
+for C in 2 4 8 16 32 64 128; do
+  aiperf profile \
+    --model Qwen/Qwen3.8-2.4T-A95B-FP8 \
+    --url "${BASE_URL}" \
+    --endpoint-type chat --streaming \
+    --shared-system-prompt-length 58982 \
+    --isl 6554 --osl 400 \
+    --concurrency ${C} --workers-max ${C} \
+    --num-requests $((C*3)) --num-prompts $((C*3)) \
+    --extra-inputs ignore_eos:true \
+    --extra-inputs "cache_salt:salt_${SALT}_c${C}" \
+    --request-timeout-seconds 300 \
+    --warmup-request-count 1 \
+    --tokenizer builtin --use-server-token-count
+done
+```
 
-- **Event-driven KV-aware routing.** Both workers publish KV events (`--kv-events-config` over ZMQ), and the frontend enables `--router-kv-events`; otherwise the disaggregated route cannot be verified.
+</div>
+
+## Configuration notes
+
+- **Model resolution.** Each worker pod mounts the `model-cache` PVC at `/model-cache` with `HF_HOME=/model-cache` and passes the repo id `Qwen/Qwen3.8-2.4T-A95B-FP8` to `--model`, so the engine loads the checkpoint out of the PVC's Hugging Face cache. The workers resolve everything offline (`HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`); only the model-download Job consumes `hf-token-secret` through `envFrom`.
+- **Event-driven KV-aware routing.** Both workers publish KV events (`--kv-events-config` over ZMQ), and the frontend runs with `--router-mode kv --router-kv-events`. Missing either worker flag can silently route traffic as aggregated/random instead of a verifiable prefill-to-decode path.
 - **`--no-async-scheduling`** is required for the shipped fixed shapes.
-- **MNNVL all-reduce.** `VLLM_ALLREDUCE_USE_FLASHINFER=1` with `VLLM_FLASHINFER_ALLREDUCE_BACKEND=mnnvl`. Keep `VLLM_USE_NCCL_SYMM_MEM=0` alongside it.
-- **GB300 P-to-D fabric.** The disaggregated workers select the DRA-injected RoCE HCA and use `UCX_TLS=rc_x,rc,cuda_copy,cuda_ipc` with Ethernet GIDs. This is RC/GDR for NIXL payloads; MNNVL remains the TP all-reduce fabric.
+- **MNNVL all-reduce.** On vLLM, `VLLM_ALLREDUCE_USE_FLASHINFER=1` with `VLLM_FLASHINFER_ALLREDUCE_BACKEND=mnnvl`. Keep `VLLM_USE_NCCL_SYMM_MEM=0` alongside it — symmetric memory breaks CUDA-graph capture on this build. The SGLang targets reach the same fabric through `flashinfer-allreduce-fusion-backend: mnnvl` on every worker role.
+- **Disaggregated KV fabric.** The SGLang prefill and decode workers move KV over NIXL with the UCX backend (`SGLANG_DISAGGREGATION_NIXL_BACKEND=UCX`), pinned to `UCX_TLS=cuda_copy,cuda_ipc,tcp` with `UCX_CUDA_IPC_ENABLE_MNNVL=y` and `UCX_MEMTYPE_CACHE=n` so the transfer rides MNNVL instead of falling back to TCP. MNNVL remains the TP all-reduce fabric on both roles.
+- **Pod networking.** DGD pods use CNI networking, so `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` are pinned to `eth0`.
+
+## Known issues
+
+- **Cold-start cost.** Every worker replica loads its own copy of the checkpoint from the PVC on every cold start, with no shared or streamed loading — pod restarts are expensive.
 
 ## Source
 

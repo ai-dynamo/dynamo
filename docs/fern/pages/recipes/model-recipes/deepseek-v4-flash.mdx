@@ -9,7 +9,7 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Each target below is an agentic-workload vLLM deployment of DeepSeek-V4-Flash — a MoE model (284B total / 13B active) with hybrid CSA + HCA attention, FP8 KV cache, and KV-aware routing. B200 serves the `nvidia/DeepSeek-V4-Flash-NVFP4` checkpoint; H200 serves the public `deepseek-ai/DeepSeek-V4-Flash`. Pick your GPU and topology; every command on this page updates to match. Text only; reasoning + tool calling supported.
+Each target below is an agentic-workload vLLM deployment of DeepSeek-V4-Flash — a MoE model (284B total / 13B active) with hybrid CSA + HCA attention, a Blackwell FP4 indexer cache, FP8 KV cache (block 256), and KV-aware routing with prefix caching. The two agentic B200 targets serve the `nvidia/DeepSeek-V4-Flash-NVFP4` checkpoint; H200 serves the public `deepseek-ai/DeepSeek-V4-Flash`. Pick your GPU and topology — the backend and workload rows carry a single option each, because every benchmarked target here is vLLM on the agentic workload; every command on this page updates to match. Text only; reasoning + tool calling supported.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
@@ -21,41 +21,232 @@ Each target below is an agentic-workload vLLM deployment of DeepSeek-V4-Flash �
 <label htmlFor="recipe-sku-h200">H200</label>
 </div>
 <div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Workload</span>
+<input type="radio" id="recipe-usecase-agentic" name="recipe-usecase" value="agentic" defaultChecked />
+<label htmlFor="recipe-usecase-agentic">Agentic</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Backend</span>
+<input type="radio" id="recipe-engine-vllm" name="recipe-engine" value="vllm" defaultChecked />
+<label htmlFor="recipe-engine-vllm">vLLM</label>
+</div>
+<div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">Topology</span>
 <input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" defaultChecked />
 <label htmlFor="recipe-variant-disagg">Disaggregated <span className="dynamo-target-picker-hint">Higher throughput</span></label>
 <input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" />
 <label htmlFor="recipe-variant-agg">Aggregated</label>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="b200" data-variant="agg" data-usecase="agentic">
+<div className="dynamo-target-picker-summary" data-sku="b200" data-engine="vllm" data-usecase="agentic" data-variant="agg">
 <span><b>Checkpoint</b> nvidia/DeepSeek-V4-Flash-NVFP4</span>
-<span><b>GPUs</b> 4x B200, TP4 + EP</span>
-<span><b>MoE / KV</b> FLASHINFER_TRTLLM, FP8 KV (block 256)</span>
+<span><b>GPUs</b> 4x B200</span>
+<span><b>Parallelism</b> TP4</span>
+<span><b>MoE backend</b> FLASHINFER_TRTLLM</span>
+<span><b>Spec. decode</b> none</span>
+<span><b>KV cache</b> FP8 KV (block 256)</span>
 <span><b>Routing</b> KV-aware, prefix caching</span>
 <span><b>Context</b> 1,048,576</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="b200" data-variant="disagg" data-usecase="agentic">
+<div className="dynamo-target-picker-summary" data-sku="b200" data-engine="vllm" data-usecase="agentic" data-variant="disagg">
 <span><b>Checkpoint</b> nvidia/DeepSeek-V4-Flash-NVFP4</span>
-<span><b>GPUs</b> 12x B200 — 2P1D (2 prefill + 1 decode, TP4 each)</span>
-<span><b>MoE / KV</b> FLASHINFER_TRTLLM, FP8 KV (block 256)</span>
-<span><b>Transfer</b> NIXL over RDMA/GDR</span>
+<span><b>GPUs</b> 12x B200</span>
+<span><b>Topology</b> 2P1D (2 prefill + 1 decode, TP4 each)</span>
+<span><b>Parallelism</b> TP4 / TP4</span>
+<span><b>MoE backend</b> FLASHINFER_TRTLLM</span>
+<span><b>Spec. decode</b> none</span>
+<span><b>KV cache</b> FP8 KV (block 256)</span>
+<span><b>Transfer</b> NIXL GDR</span>
 <span><b>Context</b> 1,048,576</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="h200" data-variant="agg" data-usecase="agentic">
+<div className="dynamo-target-picker-summary" data-sku="h200" data-engine="vllm" data-usecase="agentic" data-variant="agg">
 <span><b>Checkpoint</b> deepseek-ai/DeepSeek-V4-Flash</span>
-<span><b>GPUs</b> 4x H200, DP4 + TP1 + EP</span>
-<span><b>MoE / spec</b> MARLIN (FLASHINFER_MLA attn), MTP-1</span>
+<span><b>GPUs</b> 4x H200</span>
+<span><b>Parallelism</b> DP4 + TP1 + EP</span>
+<span><b>MoE backend</b> MARLIN (FLASHINFER_MLA attn)</span>
+<span><b>Spec. decode</b> MTP-1</span>
 <span><b>Routing</b> KV-aware, prefix caching</span>
-<span><b>Context</b> 1,048,576</span>
+<span><b>Context</b> 1,048,576 (model default, not pinned)</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="h200" data-variant="disagg" data-usecase="agentic">
+<div className="dynamo-target-picker-summary" data-sku="h200" data-engine="vllm" data-usecase="agentic" data-variant="disagg">
 <span><b>Checkpoint</b> deepseek-ai/DeepSeek-V4-Flash</span>
-<span><b>GPUs</b> 28x H200 — 4P3D (DP4+TP1+EP per worker)</span>
-<span><b>MoE / spec</b> MARLIN, decode MTP-1</span>
-<span><b>Transfer</b> NIXL over RDMA/GDR</span>
+<span><b>GPUs</b> 28x H200</span>
+<span><b>Topology</b> 4P3D (DP4+TP1+EP per worker)</span>
+<span><b>Parallelism</b> DP4+TP1+EP / DP4+TP1+EP</span>
+<span><b>MoE backend</b> MARLIN (decode FLASHINFER_MLA attn)</span>
+<span><b>Spec. decode</b> decode MTP-1</span>
+<span><b>Transfer</b> NIXL GDR</span>
 <span><b>Context</b> 1,048,576</span>
 </div>
 </div>
+
+<Note>
+Recommended picks per SKU: **B200 → `disagg-b200-agentic` (2P1D)**; **H200 → `disagg-h200-agentic` (4P3D)**.
+</Note>
+
+## Recipes
+
+### Agentic (vLLM)
+
+The four agentic targets are the four combinations of the target picker above (`agg-b200`, `disagg-b200` 2P1D, `agg-h200`, `disagg-h200` 4P3D); each target's summary panel lists its full configuration.
+
+### Day-0
+
+The recipe tree also ships the four original single-node, single-replica aggregated recipes. They are **experimental (Day-0)**, text only, and functional but unbenchmarked:
+
+| Variant | Engine | GPUs | Parallelism | MoE backend | Spec. decode |
+|---|---|---|---|---|---|
+| `vllm/agg_b200` | vLLM | 4x B200 | DP4 + TP1 + EP | vLLM V4 expert (FP4) | none |
+| `vllm/agg_gb200` | vLLM | 4x GB200 | TP4 + EP | `deep_gemm_mega_moe` | none |
+| `sglang/agg` | SGLang | 4x B200 | TP4 | `flashinfer_mxfp4` | EAGLE MTP 3/4 |
+| `sglang/agg-gb200` | SGLang | 4x GB200 | TP4 | `flashinfer_mxfp4` | EAGLE MTP 3/4 |
+
+The B200 variants fill 4 of the 8 GPUs on a B200 node; the GB200 variants fill all 4 GPUs of a single GB200 NVL4 tray (arm64), whose nodes must be labeled `nvidia.com/gpu.product=NVIDIA-GB200` and tainted `kubernetes.io/arch=arm64:NoSchedule` — the manifests carry the matching `nodeSelector` and `toleration`. All four serve the public checkpoint and use prebuilt NGC images: `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.0-deepseek-v4-cuda13-dev.3` (multi-arch) for both vLLM variants, `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda12-dev.3` for SGLang B200, and `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.2.0-deepseek-v4-cuda13-dev.3` (arm64) for SGLang GB200. To rebuild from source — a custom Dynamo branch, a different engine base — see the [container README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/container/README.md).
+
+## Performance
+
+Floor-picks (max system tok/s/GPU at user P50 >= 50 tok/s), default temperature. Flash is characterized on two workloads (Pro is agentic-only):
+
+| Workload | Median ISL | Median OSL | KV reuse | User output tok/s |
+|---|---:|---:|---:|---:|
+| Agentic (coding / tool use) | 64k | 400 | 90% | >= 50 |
+| Custom (decode-heavy synthetic) | 10k | 1k | 10% | >= 50 |
+
+### Agentic workload
+
+| Target | Concurrency | User tok/s | System tok/s/GPU |
+|---|---:|---:|---:|
+| agg-b200 | 38 | 50.6 | 362.1 |
+| disagg-b200 (2P1D) | 128 | 50.35 | 409.9 |
+| agg-h200 | 16 | 50.7 | 145.4 |
+| disagg-h200 (4P3D) | 128 | 51.8 | 201.9 |
+
+### Custom workload
+
+| Target | Concurrency | User tok/s | System tok/s/GPU |
+|---|---:|---:|---:|
+| agg-b200 | 64 | 50.1 | 741.6 |
+| disagg-b200 (2P1D) | 128 | 51.9 | 738.2 |
+| agg-h200 | 16 | 58.9 | 222.0 |
+| disagg-h200 (4P3D) | 416 | 51.8 | 513.6 |
+
+<div data-sku="b200" data-variant="disagg">
+
+The disagg-b200 custom-workload figure (738.2) was measured at a **1P1D** prefill:decode ratio — optimal for that decode-heavy workload — while the shipped `disagg-b200-agentic` `deploy.yaml` is **2P1D** (agentic-tuned). The config is otherwise the same, so set the `VllmPrefillWorker` / `VllmDecodeWorker` replicas to 1P1D to reproduce it.
+
+</div>
+
+<div data-sku="b200" data-variant="agg">
+
+The agg-b200 custom-workload figure (741.6) was measured on the shipped `agg-b200-agentic` `deploy.yaml` as-is — no replica or parallelism change. Only the client load differs: set `CONCURRENCY` to `64` instead of the agentic floor-pick of `38`.
+
+</div>
+
+<div data-sku="h200">
+
+The H200 custom-workload figures were measured on the shipped `agg-h200-agentic` and `disagg-h200-agentic` `deploy.yaml`s as-is — no replica or parallelism change, and `disagg-h200` keeps its 4P3D layout. Only the client load differs: set `CONCURRENCY` to `16` for `agg-h200` and `416` for `disagg-h200`.
+
+</div>
+
+The AGG rows are single-replica floor-picks; scale AGG by deploying independent single-replica DGDs.
+
+The disaggregated figures were measured with the per-rank NIC map in place (GDR). Without it, KV transfer falls back to host-staging and these numbers are not reproducible.
+
+### Benchmark
+
+The shared [`perf.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/perf/perf.yaml) replays the agentic [Mooncake-format](https://github.com/kvcache-ai/Mooncake) trace (64k median ISL / 400 median OSL, 90% KV reuse) with AIPerf against the deployed frontend, and writes its artifacts to `/model-cache/perf` on the model-cache PVC.
+
+The Job reads its trace from the `model-cache` PVC, so stage the traces first — they are vendored via Git LFS, and `kubectl run` returns before the helper pod is Ready:
+
+```bash
+git lfs pull --include="recipes/deepseek-v4/perf/traces/*.jsonl"
+
+kubectl run pvc-helper -n ${NAMESPACE} \
+  --image=busybox:1.36 --restart=Never \
+  --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.36","command":["sleep","3600"],"volumeMounts":[{"name":"model-cache","mountPath":"/model-cache"}]}],"volumes":[{"name":"model-cache","persistentVolumeClaim":{"claimName":"model-cache"}}]}}' \
+  --command -- sleep 3600
+
+kubectl wait --for=condition=Ready pod/pvc-helper -n ${NAMESPACE} --timeout=120s
+kubectl cp recipes/deepseek-v4/perf/traces ${NAMESPACE}/pvc-helper:/model-cache/
+```
+
+The Job expects three Mooncake JSONL traces on the PVC — `/model-cache/traces/64k_400_90kv_agent_new_noschedule.jsonl` plus the `..._short_30perc.jsonl` and `..._short_15perc.jsonl` subsets. The shipped `TRACE_FILE` default is the 15% subset.
+
+`perf.yaml` ships pointed at the Pro AGG B200 deployment, so edit its `env` block before applying. `ENDPOINT` is the target's frontend service (`${DGD}-frontend:8000`) and `TARGET_MODEL` is the served model name for your SKU, which must match what `GET /v1/models` reports:
+
+<div data-sku="b200" data-variant="agg">
+
+```yaml
+- name: ENDPOINT
+  value: dsv4-flash-agg-b200-agentic-frontend:8000
+- name: TARGET_MODEL
+  value: nvidia/DeepSeek-V4-Flash-NVFP4
+```
+
+</div>
+
+<div data-sku="b200" data-variant="disagg">
+
+```yaml
+- name: ENDPOINT
+  value: dsv4-flash-disagg-b200-agentic-frontend:8000
+- name: TARGET_MODEL
+  value: nvidia/DeepSeek-V4-Flash-NVFP4
+```
+
+</div>
+
+<div data-sku="h200" data-variant="agg">
+
+```yaml
+- name: ENDPOINT
+  value: dsv4-flash-agg-h200-agentic-frontend:8000
+- name: TARGET_MODEL
+  value: deepseek-ai/DeepSeek-V4-Flash
+```
+
+</div>
+
+<div data-sku="h200" data-variant="disagg">
+
+```yaml
+- name: ENDPOINT
+  value: dsv4-flash-disagg-h200-agentic-frontend:8000
+- name: TARGET_MODEL
+  value: deepseek-ai/DeepSeek-V4-Flash
+```
+
+</div>
+
+```bash
+kubectl apply -f recipes/deepseek-v4/perf/perf.yaml -n ${NAMESPACE}
+kubectl logs -n ${NAMESPACE} -l job-name=dsv4-bench -f
+kubectl wait --for=condition=Complete job/dsv4-bench -n ${NAMESPACE} --timeout=7200s
+```
+
+Fetch the artifacts from the PVC with the same helper pod:
+
+```bash
+kubectl cp ${NAMESPACE}/pvc-helper:/model-cache/perf/<epoch>_dsv4-bench ./results
+```
+
+The rest of the `env` block is tunable:
+
+- `CONCURRENCY` is one value per Job and defaults to `16`, the agentic floor-pick concurrency for `agg-h200` only — the other three targets need `38` (`agg-b200`) or `128` (both disaggregated) to reproduce the [Performance](#performance) numbers.
+- `TRACE_FILE` defaults to the 15% agentic subset on the PVC.
+- `REQUEST_TIMEOUT_SECONDS` defaults to `1200`, long enough for long-context requests.
+- `AIPERF_VERSION` defaults to `0.10.0`; match local benchmark runs unless you update it intentionally.
+
+For a concurrency sweep, run one concurrency per Job and reset server state between rows:
+
+1. Delete the previous benchmark Job.
+2. Stop clients and wait for in-flight requests to drain.
+3. Delete/restart the worker pods to clear backend KV/prefix-cache state.
+4. Restart the frontend/router if testing KV-aware routing, so router state is also cleared.
+5. Wait for `/v1/models`, run a chat smoke test, then launch the next Job.
+
+Do not rely on `cache_salt` for Dynamo unless that support has been explicitly validated for the deployed frontend/backend path.
+
+Record this evidence for every result row you report: deploy manifest path, image ref/digest, endpoint, target model, trace path and sha256, concurrency, reset sequence, `profile_export_aiperf.json`, metrics summary, frontend/router metrics when KV-aware routing is enabled, and worker prefix-cache metrics.
 
 ## Prerequisites
 
@@ -63,21 +254,78 @@ Each target below is an agentic-workload vLLM deployment of DeepSeek-V4-Flash �
 
 <div data-sku="b200">
 
-- **4x B200** (aggregated) or **12x B200** (disaggregated, 2P1D) available.
+- **4x B200** (aggregated: 4 GPUs on one x86_64 node) or **12x B200** (disaggregated, 2P1D) available; the disaggregated pods — (2 prefill + 1 decode) x 4 GPUs — span **multiple nodes**.
+- For **disaggregated**, an RDMA device plugin that provides `rdma/shared_ib`: each worker requests `rdma/shared_ib: "1"` — see [Per-Rank NIC Map](#per-rank-nic-map).
 - A Hugging Face token with access to `nvidia/DeepSeek-V4-Flash-NVFP4`.
 
 </div>
 
 <div data-sku="h200">
 
-- **4x H200** (aggregated) or **28x H200** (disaggregated, 4P3D) available.
+- **4x H200** (aggregated: 4 GPUs on one x86_64 node) or **28x H200** (disaggregated, 4P3D) available; the disaggregated pods — (4 prefill + 3 decode) x 4 GPUs — span **multiple nodes**.
+- For **disaggregated**, an RDMA device plugin that provides `rdma/ib`: each worker requests `rdma/ib` — see [Per-Rank NIC Map](#per-rank-nic-map).
 - A Hugging Face token with access to `deepseek-ai/DeepSeek-V4-Flash`.
 
 </div>
 
-- The `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0` image (pinned in each `deploy.yaml`).
+- The `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0` image (pinned in each agentic `deploy.yaml`).
 
-Create the namespace and token secret:
+### Per-Rank NIC Map
+
+<div data-variant="agg">
+
+Aggregated targets need no NIC map: there is no cross-worker KV transfer, so the aggregated recipes set neither NIC env var and need no GDR. Continue to [Deploy](#deploy).
+
+</div>
+
+<div data-variant="disagg">
+
+In disaggregated serving the prefill workers stream the KV cache to the decode workers' GPUs over InfiniBand using **GPU-Direct RDMA (GDR)**. Each tensor-parallel rank should transfer over the RDMA NIC on **its own PCIe switch** (its affine NIC); if several ranks are forced onto the **same** NIC they oversubscribe it and GPU-direct registration collapses to slow host-staging — **~0.76 GB/s with 4 ranks on one NIC vs ~15-25 GB/s with one NIC per rank (~25x slower)**. The disaggregated recipe originally pinned every rank to one device (`UCX_NET_DEVICES=mlx5_0:1`), triggering exactly this. `VLLM_GPU_NIC_PCIE_MAPPING` together with `VLLM_NIC_SELECTION_VARS=UCX_NET_DEVICES:1` ([vLLM #42083](https://github.com/vllm-project/vllm/pull/42083)) assigns each rank its PCIe-affine NIC and restores GDR. This is a general tensor-parallel NIC-assignment requirement, not a DeepSeek-V4 property — any TP>1 NIXL disaggregated worker pinned to a single NIC collapses the same way, and DeepSeek-V4's packed KV layout was ruled out as the cause.
+
+Regenerate the map on a target node:
+
+```bash
+# 1) GPU PCIe BDFs, in device order:
+nvidia-smi --query-gpu=index,pci.bus_id --format=csv,noheader
+#    -> e.g. 0, 00000000:18:00.0
+
+# 2) RDMA NIC PCIe BDF for each mlx5 device:
+for d in /sys/class/infiniband/*/device; do
+  echo "$(basename "$(dirname "$d")") -> $(basename "$(readlink -f "$d")")"
+done
+#    -> e.g. mlx5_0 -> 0000:19:00.0
+```
+
+Pair each GPU with the NIC sharing its PCIe switch (its closest NIC), join the pairs in GPU order, and set both env vars on **both** the prefill and decode workers:
+
+```text
+VLLM_GPU_NIC_PCIE_MAPPING="<gpu0_bdf>=<nic0_bdf>,<gpu1_bdf>=<nic1_bdf>,..."
+VLLM_NIC_SELECTION_VARS="UCX_NET_DEVICES:1"
+```
+
+There is no "just auto-select" shortcut: pinning all ranks to one NIC degrades to single-NIC host-staging (~20x slower, but still functional), while *unsetting* `UCX_NET_DEVICES` to expose all NICs can fail NIXL backend creation — the working fast path is exactly one affine NIC per rank. The map references the NIC BDFs the cluster injects into the pod, so it breaks if the cluster injects a different NIC set; derive it from the pod's actual `/sys/class/infiniband` rather than hard-coding it. With no RDMA fabric at all, fall back to TCP: set `NCCL_IB_DISABLE=1` and `NCCL_NET=Socket`, and drop the RDMA resource requests.
+
+Which RDMA resource to request is cluster-plugin-dependent, not GPU-dependent. `rdma/ib: "N"` (N exclusive devices) is clean and NIC-isolated but relies on the plugin injecting the pod's *affine* NICs; `rdma/shared_ib: "1"` exposes **all** of the node's NICs to the pod, so the per-rank map can always find each rank's affine NIC even when the plugin would inject a non-affine set. Both pair with the same `VLLM_GPU_NIC_PCIE_MAPPING` — pick whichever your cluster's plugin exposes.
+
+<div data-sku="b200">
+
+The B200 disaggregated recipe ships `rdma/shared_ib`, and because that exposes **all** NICs a wrong or stale map **fails silently**: the NIC is present, so the rank quietly opens a **non-affine** NIC and GDR degrades to a cross-socket path with no error. (Under exclusive `rdma/ib` the same map hard-fails with `createBackend` errors.) Derive the map from the pod's actual `/sys/class/infiniband` at deploy time and verify the per-rank NIC selection in the worker log rather than trusting a hard-coded map. Shared NICs are also not bandwidth-isolated from co-tenant pods — a throughput, not a correctness, concern.
+
+</div>
+
+<div data-sku="h200">
+
+The H200 disaggregated recipe ships exclusive `rdma/ib`, so a map that points a rank at a NIC not injected into the pod hard-fails with `createBackend` errors instead of degrading silently (which is what happens under `rdma/shared_ib`, where every NIC is present). Still derive the map from the pod's actual `/sys/class/infiniband` at deploy time and verify the per-rank NIC selection in the worker log rather than trusting a hard-coded map.
+
+</div>
+
+After deploying, confirm the worker log shows NIXL registering the CUDA/GDR path (~15-17 GB/s KV transfer). A wrong or missing map degrades to slow TCP transfer or fails NIXL setup.
+
+</div>
+
+## Quick Start
+
+Create the namespace and token secret. The secret is consumed by the download Job and, as a convenience, by the worker (workers mount it via `envFrom`):
 
 ```bash
 export NAMESPACE=your-namespace
@@ -86,18 +334,16 @@ kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN="your-toke
 ```
 
 <Warning>
-Edit cluster-specific values before applying: `storageClassName` in `model-cache/model-cache.yaml` (a RWX class). For **disaggregated** targets, also set `VLLM_GPU_NIC_PCIE_MAPPING` in the manifest to your node's per-rank affine NICs — see [Per-rank NIC mapping](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/README.md#per-rank-nic-mapping-b200--h200-disaggregated).
+Edit cluster-specific values before applying: `storageClassName` in `model-cache/model-cache.yaml` (a RWX class). For **disaggregated** targets, also set **both** `VLLM_GPU_NIC_PCIE_MAPPING` (your node's `GPU_BDF=NIC_BDF` map) and `VLLM_NIC_SELECTION_VARS=UCX_NET_DEVICES:1` on the prefill and decode workers — they are a pair, setting only one fails EngineCore init, and the manifests ship neither. See [Per-Rank NIC Map](#per-rank-nic-map).
 </Warning>
 
-## Deploy
-
-Create storage, download the checkpoint into the PVC, then apply the target's `deploy.yaml`:
+Create storage, download the checkpoint into the PVC, then apply the target's `deploy.yaml`. The PVC requests 400Gi; DeepSeek-V4-Flash is ~160 GB on disk (46 safetensors shards, FP4 + FP8 mixed) and typically takes 30-60 min to download on first apply:
 
 ```bash
 kubectl apply -f recipes/deepseek-v4/deepseek-v4-flash/model-cache/model-cache.yaml -n ${NAMESPACE}
 ```
 
-There is one download Job per checkpoint, because the PVC holds one, not both. B200 serves the NVFP4 checkpoint; every other variant serves the public one.
+There is one download Job per checkpoint, because the PVC holds one, not both. The two agentic B200 targets (`vllm/agg-b200-agentic` and `vllm/disagg-b200-agentic`) serve the NVFP4 checkpoint; the other six variants — H200 agentic, GB200, Day-0 B200, and all SGLang — serve the public one.
 
 <div data-sku="b200">
 
@@ -124,6 +370,8 @@ The workers mount the PVC read-only with `HF_HUB_OFFLINE=1`, so they cannot fetc
 <Note>
 To switch a populated PVC to the other checkpoint: stop the workers, delete the PVC, re-apply `model-cache.yaml`, then apply the other Job. The two Jobs have distinct names, so applying the second one does not collide with the first.
 </Note>
+
+### Deploy
 
 <div data-sku="b200" data-variant="agg">
 
@@ -157,6 +405,12 @@ RECIPE=recipes/deepseek-v4/deepseek-v4-flash/vllm/disagg-h200-agentic
 
 </div>
 
+<div data-variant="disagg">
+
+Set `VLLM_GPU_NIC_PCIE_MAPPING` and `VLLM_NIC_SELECTION_VARS` on the prefill and decode workers in `${RECIPE}/deploy.yaml` before applying — see [Per-Rank NIC Map](#per-rank-nic-map).
+
+</div>
+
 ```bash
 kubectl apply -f ${RECIPE}/deploy.yaml -n ${NAMESPACE}
 
@@ -166,11 +420,11 @@ kubectl wait --for=condition=Ready pod \
   -l nvidia.com/dynamo-graph-deployment-name=${DGD} -n ${NAMESPACE} --timeout=3600s
 ```
 
-First launch loads weights and warms CUDA graphs; the startup probes allow for it.
+First worker launch loads weights and warms CUDA graphs / kernels — up to ~60 min; the manifests' startup probes are sized for it.
 
-## Smoke Test
+### Test the Deployment
 
-The `model` field must be the **served model name for your SKU** (the `--served-model-name` in the deploy): B200 serves `nvidia/DeepSeek-V4-Flash-NVFP4`, H200 serves `deepseek-ai/DeepSeek-V4-Flash`.
+The `model` field must be the **served model name for your SKU** (the `--served-model-name` in the deploy): B200 serves `nvidia/DeepSeek-V4-Flash-NVFP4`, H200 serves `deepseek-ai/DeepSeek-V4-Flash`. The same OpenAI-compatible endpoints apply to the vLLM and SGLang variants.
 
 <div data-sku="b200">
 
@@ -196,32 +450,124 @@ curl http://localhost:8000/v1/chat/completions -H 'Content-Type: application/jso
 
 Flash reasons by default: the chain-of-thought fills `message.reasoning_content` and the answer fills `message.content`. With too small a `max_tokens` the budget is spent on reasoning before any `content` (`content: null`, `finish_reason: "length"`) — expected; raise `max_tokens`.
 
-## Benchmark
+### Verifying Reasoning
 
-The shared [`perf.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/perf/perf.yaml) replays the agentic MoonTrace (64K avg ISL / 400 OSL, 90% KV reuse) with AIPerf against the deployed frontend. Point `ENDPOINT` at `${DGD}-frontend:8000` and apply it:
+Same flow on every variant — same model, same `--dyn-reasoning-parser deepseek_v4`:
+
+<div data-sku="b200">
 
 ```bash
-kubectl apply -f recipes/deepseek-v4/perf/perf.yaml -n ${NAMESPACE}
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "nvidia/DeepSeek-V4-Flash-NVFP4",
+    "messages": [{"role": "user", "content": "What is 2+2? Answer briefly."}],
+    "max_tokens": 200
+  }' | python3 -m json.tool
 ```
 
-## Compare All Targets
+</div>
 
-| Target | GPUs | Parallelism | MoE backend | Spec. decode | Transfer |
-|---|---|---|---|---|---|
-| agg-b200 | 4x B200 | TP4 + EP | FLASHINFER_TRTLLM | none | — |
-| disagg-b200 (2P1D) | 12x B200 | TP4 / TP4 | FLASHINFER_TRTLLM | none | NIXL GDR |
-| agg-h200 | 4x H200 | DP4 + TP1 + EP | MARLIN (FLASHINFER_MLA attn) | MTP-1 | — |
-| disagg-h200 (4P3D) | 28x H200 | DP4+TP1+EP / DP4+TP1+EP | MARLIN | decode MTP-1 | NIXL GDR |
+<div data-sku="h200">
 
-## Notes
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-ai/DeepSeek-V4-Flash",
+    "messages": [{"role": "user", "content": "What is 2+2? Answer briefly."}],
+    "max_tokens": 200
+  }' | python3 -m json.tool
+```
+
+</div>
+
+Expected:
+
+- `choices[0].message.reasoning_content` contains the model's chain-of-thought.
+- `choices[0].message.content` contains only the final answer.
+- No raw `</think>` tags in either field.
+
+If `reasoning_content` is `null` and `</think>` appears in `content`, the reasoning parser is not wired up — confirm `--dyn-reasoning-parser deepseek_v4` is on the worker command.
+
+### Verifying Tool Calling
+
+Same flow on every variant:
+
+<div data-sku="b200">
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "nvidia/DeepSeek-V4-Flash-NVFP4",
+    "messages": [{"role": "user", "content": "What is the weather in San Francisco?"}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a location",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "location": {"type": "string", "description": "City name"}
+          },
+          "required": ["location"]
+        }
+      }
+    }],
+    "max_tokens": 300
+  }' | python3 -m json.tool
+```
+
+</div>
+
+<div data-sku="h200">
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-ai/DeepSeek-V4-Flash",
+    "messages": [{"role": "user", "content": "What is the weather in San Francisco?"}],
+    "tools": [{
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a location",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "location": {"type": "string", "description": "City name"}
+          },
+          "required": ["location"]
+        }
+      }
+    }],
+    "max_tokens": 300
+  }' | python3 -m json.tool
+```
+
+</div>
+
+Expected:
+
+- `choices[0].message.tool_calls` is a structured array with `function.name`, `function.arguments`, and `id`.
+- `choices[0].finish_reason` is `"tool_calls"`.
+- `choices[0].message.reasoning_content` may contain the model's reasoning about tool selection.
+
+If `tool_calls` is missing and raw tool-call markers appear in `content`, confirm `--dyn-tool-call-parser deepseek_v4` is on the worker command.
+
+### Notes
 
 - **Reasoning / tool parsers** are wired via the Dynamo variants (`--dyn-reasoning-parser deepseek_v4`, `--dyn-tool-call-parser deepseek_v4`); the engine-native parsers do not feed the Dynamo OpenAI renderer.
-- **Disaggregated** targets require the per-rank NIC map (`VLLM_GPU_NIC_PCIE_MAPPING`) for GPU-Direct RDMA KV transfer; B200 ships `rdma/shared_ib`, H200 ships `rdma/ib`. See the [top-level recipe README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/README.md#per-rank-nic-mapping-b200--h200-disaggregated).
-- **AGG scales by independent single-replica DGDs** — KV-routed multi-replica AGG does not improve per-GPU throughput.
-- Day-0 / GB200 SGLang variants exist in the recipe tree but are experimental (dev images) and not shown here.
+- **Disaggregated** targets require the per-rank NIC map (the `VLLM_GPU_NIC_PCIE_MAPPING` + `VLLM_NIC_SELECTION_VARS` pair) for GPU-Direct RDMA KV transfer; B200 ships `rdma/shared_ib`, H200 ships `rdma/ib`. See [Per-Rank NIC Map](#per-rank-nic-map).
+- **AGG scales by independent single-replica DGDs.** With `DYN_ROUTER_MODE=kv` the KV-affinity router concentrates the 90%-reuse agentic prefixes onto a few replicas, so KV-routed multi-replica AGG lands *below* single-replica per-GPU throughput (measured N=7 at `router_temperature=1.0`: B200 293 vs 362, H200 121 vs 145 tok/s/GPU). The disaggregated variants are the multi-worker path.
+- **Workers run as `runAsUser: 0`** — FlashInfer's TRT-LLM FP4 MoE JIT writes cubins into a root-owned `site-packages` directory during `determine_available_memory`, which a non-root user cannot write. The fix (making that directory group-writable in the image) is tracked separately; drop `runAsUser: 0` once it lands.
 
 ## Source
 
 - Recipe README: [recipes/deepseek-v4/deepseek-v4-flash/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/deepseek-v4-flash/README.md)
 - Top-level DeepSeek-V4 README (shared workloads, NIC mapping, limitations): [recipes/deepseek-v4/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/README.md)
-- Manifests: [vllm/](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-flash/vllm) and shared [perf/perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/perf/perf.yaml)
+- Manifests: [vllm/](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-flash/vllm), [sglang/](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-flash/sglang), and shared [perf/perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/perf/perf.yaml)
+- Benchmark README (trace staging, variant targeting, sweep and reset procedure): [recipes/deepseek-v4/perf/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4/perf/README.md)
