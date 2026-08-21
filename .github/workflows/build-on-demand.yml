@@ -22,6 +22,10 @@ on:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      run_g6e_multi_gpu_canary:
+        description: 'Run the vLLM multi-GPU suite on the isolated OPS-8335 G6e runner'
+        type: boolean
+        default: false
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
@@ -89,6 +93,22 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_timeout_minutes: 60
+    secrets: inherit
+
+  g6e-multi-gpu-canary:
+    name: G6e L40S vLLM multi-GPU canary
+    needs: [vllm-build]
+    if: inputs.run_g6e_multi_gpu_canary && inputs.build_vllm
+    uses: ./.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: G6e Multi-GPU Canary
+      amd_runner: ops-8335-g6e-l40s-canary
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      gpu_test_markers: pre_merge and vllm and (gpu_2 or gpu_4)
+      gpu_test_timeout_minutes: 60
     secrets: inherit
 
   vllm-copy-to-acr:
