@@ -52,15 +52,6 @@ pub struct NvCreateResponse {
     #[schema(value_type = Object)]
     pub nvext: Option<NvExt>,
 
-    /// Extra args to pass to the chat template rendering context.
-    /// Also accepts "chat_template_kwargs" as an alias for compatibility.
-    ///
-    /// Declared here rather than inherited from the flattened `inner`:
-    /// `CreateResponse` has no equivalent field, and because `inner` is
-    /// flattened, an undeclared top-level key is silently swallowed rather
-    /// than rejected. Mirrors the identically named field on
-    /// `NvCreateChatCompletionRequest`, which is where
-    /// `TryFrom<NvCreateResponse>` forwards it.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1443,9 +1434,6 @@ mod tests {
 
     #[test]
     fn test_responses_chat_template_args_forwarded_to_chat_completion() {
-        // Deserialize from the wire rather than building the struct by hand:
-        // the field only reaches the conversion if serde binds the top-level
-        // key past the flattened `inner`.
         let req: NvCreateResponse = serde_json::from_value(serde_json::json!({
             "model": "dummy-model",
             "input": "hello",
@@ -1463,8 +1451,6 @@ mod tests {
 
     #[test]
     fn test_responses_chat_template_kwargs_alias_forwarded_to_chat_completion() {
-        // vLLM-style spelling; accepted on /v1/chat/completions, so a client
-        // should not have to respell it for /v1/responses.
         let req: NvCreateResponse = serde_json::from_value(serde_json::json!({
             "model": "dummy-model",
             "input": "hello",
@@ -1482,8 +1468,6 @@ mod tests {
 
     #[test]
     fn test_responses_without_chat_template_args_converts_to_none() {
-        // Not an empty map: an empty map would render a different prompt and
-        // would defeat `skip_serializing_if` on the chat request.
         let req: NvCreateResponse = serde_json::from_value(serde_json::json!({
             "model": "dummy-model",
             "input": "hello"

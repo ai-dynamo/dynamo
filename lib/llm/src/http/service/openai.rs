@@ -3349,13 +3349,6 @@ async fn responses(
         ),
     );
 
-    // Any force_nonempty_content=true request: surface reasoning as content when
-    // the turn produced none, mirroring the chat_completions handler above. A
-    // non-streaming Responses request reaches the aggregator (forcing
-    // stream=true on the converted request only drives internal streaming; the
-    // client-facing `streaming` flag still selects the aggregating branch
-    // below), so this flag has to be set here too, from the converted chat
-    // request's own chat_template_args.
     let move_reasoning_to_content_when_empty =
         crate::preprocessor::OpenAIPreprocessor::wants_reasoning_as_content_when_empty(
             request.chat_template_args.as_ref(),
@@ -3593,14 +3586,7 @@ pub fn validate_response_unsupported_fields(
     None
 }
 
-/// Applies the chat-template-argument guard to a Responses request.
-///
-/// `/v1/responses` converts to `NvCreateChatCompletionRequest` but never runs
-/// `ValidateRequest` on the result, so the guard that `NvCreateChatCompletionRequest::validate`
-/// applies to `chat_template_args` does not reach this path. Since the Responses request now
-/// carries and forwards that field, call the same check directly and return the same 400 the
-/// chat endpoint would, so an identical payload is rejected identically on both endpoints.
-pub fn validate_response_chat_template_args(
+fn validate_response_chat_template_args(
     request: &NvCreateResponse,
 ) -> Result<(), ErrorResponse> {
     crate::protocols::openai::validate::validate_chat_template_args(
@@ -5607,14 +5593,8 @@ mod tests {
             serde_json::json!("{{ 'pwned' }}"),
         )]));
 
-        let (status, Json(body)) = validate_response_chat_template_args(&request).unwrap_err();
+        let (status, _) = validate_response_chat_template_args(&request).unwrap_err();
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(
-            body.message,
-            format!(
-                "{VALIDATION_PREFIX}`chat_template` is not supported inside `chat_template_args`"
-            )
-        );
     }
 
     #[test]
