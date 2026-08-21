@@ -389,6 +389,23 @@ func elasticEPFollowerName(leaderName string) string {
 	return NormalizeKubeResourceName(leaderName[:keep] + "-" + suffix + "-" + commonconsts.GroveRoleSuffixFollower)
 }
 
+// ElasticEPComponentIdentity returns the component name that infrastructure keyed by
+// component should be resolved under.
+//
+// For everything except a synthesized elastic-EP follower that is just the component's
+// own name. The follower is different: it is derived rather than declared, so anything
+// created per declared component -- GMS DRA claim templates, checkpoint info -- exists
+// only under the leader's name. Resolving under the follower's own "<leader>-flw" name
+// finds nothing, which fails loudly for the claim template (an unschedulable pod
+// referencing a template that was never created) and silently for checkpoints (a nil
+// lookup, so no checkpoint config at all).
+func ElasticEPComponentIdentity(component *v1beta1.DynamoComponentDeploymentSharedSpec, componentName string) string {
+	if leader := GetPodTemplateAnnotations(component)[commonconsts.KubeAnnotationElasticEPLeaderComponent]; leader != "" {
+		return leader
+	}
+	return componentName
+}
+
 // IsSinglePodElasticEPLeader reports whether a component is the single-pod elastic-EP
 // leader that the headless Ray Service addresses and a follower can join.
 //
@@ -459,6 +476,12 @@ func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment
 	followerPodTemplate := ensurePodTemplate(&follower.Spec.DynamoComponentDeploymentSharedSpec)
 	followerPodTemplate.Annotations[commonconsts.KubeAnnotationElasticEPLeaderService] =
 		ElasticEPLeaderServiceNameForDCD(leaderDCD)
+
+	// Carry the leader's component name for the same reason. Anything keyed by component
+	// name -- the GMS DRA claim template, checkpoint info -- is only created for
+	// components declared in the DGD, so resolving it under this follower's invented
+	// name finds nothing.
+	followerPodTemplate.Annotations[commonconsts.KubeAnnotationElasticEPLeaderComponent] = leaderComponentName
 
 	// Placement: pin the follower into the leader's NVLink partition and off the leader's
 	// node, merging with any user affinity inherited from the leader's deep copy. The terms
@@ -1967,7 +1990,13 @@ func GenerateBasePodSpec(
 			return nil, err
 		}
 
-		claimTemplateName := dra.ResourceClaimTemplateName(parentGraphDeploymentName, serviceName)
+		// Claim templates are created only for components declared in the DGD, so a
+		// synthesized follower must resolve the leader's, not one under its own invented
+		// name -- that template never exists and the pod would never schedule.
+		claimTemplateName := dra.ResourceClaimTemplateName(
+			parentGraphDeploymentName,
+			ElasticEPComponentIdentity(component, serviceName),
+		)
 		if err := dra.ApplyClaim(&podSpec, claimTemplateName); err != nil {
 			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
 		}

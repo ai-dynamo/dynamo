@@ -63,6 +63,15 @@ const (
 	// leader's serve command. Operator-set when it expands a leader; never user-set.
 	KubeAnnotationElasticEPFollower = "nvidia.com/elastic-ep-follower"
 
+	// KubeAnnotationElasticEPLeaderComponent carries the leader's component name on a
+	// synthesized follower. Infrastructure that is keyed by component name -- GMS DRA
+	// claim templates, checkpoint info -- is only created for components declared in the
+	// DGD, so resolving it under the follower's own invented "<leader>-flw" name finds
+	// nothing: the claim template never exists and the pod cannot schedule, and the
+	// checkpoint lookup silently returns nil. Those lookups read this instead.
+	// Operator-set; never user-set.
+	KubeAnnotationElasticEPLeaderComponent = "nvidia.com/elastic-ep-leader-component"
+
 	// KubeAnnotationElasticEPLeaderService carries the exact headless Service name the
 	// follower must join, stamped on the follower's pod template when it is synthesized.
 	// The follower reads this instead of recomputing the name from its own identity, so

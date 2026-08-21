@@ -91,7 +91,12 @@ func (r *componentWorkloadsReconciler) Reconcile(
 	}
 
 	for key, dcd := range dcds {
-		if err := r.applyCheckpointStartupPolicy(dcd, checkpointInfos[key]); err != nil {
+		// checkpointInfos is keyed by declared component name. A synthesized elastic-EP
+		// follower has an invented "<leader>-flw" key that is never present, so resolve
+		// the leader's entry instead -- otherwise the lookup silently returns nil and the
+		// follower renders with no checkpoint config at all.
+		checkpointKey := dynamo.ElasticEPComponentIdentity(&dcd.Spec.DynamoComponentDeploymentSharedSpec, key)
+		if err := r.applyCheckpointStartupPolicy(dcd, checkpointInfos[checkpointKey]); err != nil {
 			return ReconcileResult{}, fmt.Errorf("failed to apply checkpoint startup policy for %s: %w", key, err)
 		}
 		logger.Info("Reconciling DynamoComponentDeployment", "key", key, "name", dcd.Name)

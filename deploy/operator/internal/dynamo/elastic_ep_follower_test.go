@@ -146,6 +146,51 @@ func TestSynthesizeElasticEPFollowerDCD_OnlyForElasticEP(t *testing.T) {
 	}
 }
 
+// Infrastructure keyed by component name -- GMS DRA claim templates, checkpoint info --
+// is only created for components declared in the DGD. The follower is derived, not
+// declared, so resolving under its own "<leader>-flw" name finds nothing: the claim
+// template never exists and the pod cannot schedule, and the checkpoint lookup silently
+// returns nil. It must resolve under the leader's identity instead.
+func TestElasticEPComponentIdentity(t *testing.T) {
+	tests := []struct {
+		name          string
+		component     *v1beta1.DynamoComponentDeploymentSharedSpec
+		componentName string
+		want          string
+	}{
+		{
+			name:          "a declared component resolves under its own name",
+			component:     elasticEPComponent(),
+			componentName: leaderComponent,
+			want:          leaderComponent,
+		},
+		{
+			name: "a synthesized follower resolves under the leader's name",
+			component: func() *v1beta1.DynamoComponentDeploymentSharedSpec {
+				follower := synthesizeElasticEPFollowerDCD(leaderDCD(elasticEPComponent()), leaderComponent)
+				if follower == nil {
+					t.Fatal("expected a follower to be synthesized")
+				}
+				return &follower.Spec.DynamoComponentDeploymentSharedSpec
+			}(),
+			componentName: leaderComponent + "-" + commonconsts.GroveRoleSuffixFollower,
+			want:          leaderComponent,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("resolve the identity that component-keyed infrastructure is looked up under")
+			got := ElasticEPComponentIdentity(tt.component, tt.componentName)
+
+			t.Log("only a name a declared component owns can resolve to real infrastructure")
+			if got != tt.want {
+				t.Errorf("ElasticEPComponentIdentity = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // A 60-63 character leader name is itself valid, but appending the follower suffix pushes
 // the result past the 63-character DNS-1123 limit, and the API server then rejects the
 // generated DCD and stalls the whole reconcile.
