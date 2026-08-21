@@ -24,6 +24,7 @@ use crate::{
         TokenIdType,
         common::{preprocessor::RoutingHints, timing::RequestPhase},
     },
+    session_affinity::AffinityTarget,
 };
 
 pub(super) struct WorkerSelection {
@@ -52,7 +53,7 @@ impl<'a> RoutingRequestParts<'a> {
 }
 
 pub(super) struct SelectionOptions {
-    pub(super) affinity_worker: Option<WorkerWithDpRank>,
+    pub(super) affinity_target: Option<AffinityTarget>,
     pub(super) policy_class: Option<String>,
     pub(super) session_context: Option<dynamo_kv_router::SessionContext>,
 }
@@ -183,11 +184,37 @@ where
         let return_routing_hashes =
             !is_query_only && self.kv_router().indexer().records_routing_decisions();
         let SelectionOptions {
-            affinity_worker,
+            affinity_target,
             policy_class,
             session_context,
         } = options;
-        let affinity_pin = affinity_worker.map(|worker| (worker.worker_id, Some(worker.dp_rank)));
+        let worker_only_affinity = affinity_target.filter(|target| target.dp_rank.is_none());
+        if let Some(target) = worker_only_affinity {
+            match &mut allowed_worker_ids {
+                Some(allowed_workers) => {
+                    allowed_workers.retain(|worker_id| *worker_id == target.worker_id);
+                }
+                None => {
+                    allowed_worker_ids = Some(HashSet::from([target.worker_id]));
+                }
+            }
+        }
+        let explicit_pin = match (explicit_pin, worker_only_affinity) {
+            (Some((worker_id, None)), Some(affinity_target))
+                if worker_id == affinity_target.worker_id =>
+            {
+                // A worker-only session binding allows the KV scheduler to select this
+                // request's rank, so do not turn a matching worker-only request hint into an
+                // exact-rank pin.
+                None
+            }
+            (explicit_pin, _) => explicit_pin,
+        };
+        let affinity_pin = affinity_target.and_then(|target| {
+            target
+                .dp_rank
+                .map(|dp_rank| (target.worker_id, Some(dp_rank)))
+        });
         let Some((pinned_worker_id, requested_dp_rank)) =
             merge_affinity_pin(explicit_pin, affinity_pin)
         else {

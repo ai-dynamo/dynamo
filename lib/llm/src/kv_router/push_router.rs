@@ -195,13 +195,13 @@ struct LoraSelection {
 
 /// The policy-owned result of selecting a builtin worker.
 ///
-/// Session affinity is resolved before this point. `pinned_target` is the exact target required
-/// by either that affinity binding or an explicit request hint; a load reservation supplies the
-/// selected DP rank when the policy tracks load.
+/// `target_constraint` carries the worker/rank scope imposed by session affinity or an explicit
+/// request hint. `dispatch_target` is the concrete target selected for this request, including a
+/// rank chosen by a load reservation under a worker-only constraint.
 struct BuiltinSelection {
     initial_worker: u64,
-    pinned_target: Option<AffinityTarget>,
-    reserved_target: Option<AffinityTarget>,
+    target_constraint: Option<AffinityTarget>,
+    dispatch_target: Option<AffinityTarget>,
     load_reservation: Option<load::RoutingLoadReservation>,
 }
 
@@ -344,11 +344,11 @@ where
         }
     }
 
-    pub(crate) fn query_affinity_worker(
+    pub(crate) fn query_affinity_target(
         &self,
         request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
-    ) -> Result<Option<WorkerWithDpRank>, Error> {
+    ) -> Result<Option<AffinityTarget>, Error> {
         let Some(affinity) = self.affinity.as_ref() else {
             return Ok(None);
         };
@@ -356,8 +356,7 @@ where
             return Ok(None);
         };
         let explicit = explicit_target(request, phase)?;
-        let target = affinity.query_target(&session_id, explicit)?;
-        Ok(target.and_then(affinity_worker))
+        affinity.query_target(&session_id, explicit)
     }
 
     async fn select_request(
@@ -365,7 +364,7 @@ where
         request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
         is_query_only: bool,
-        affinity_worker: Option<WorkerWithDpRank>,
+        affinity_target: Option<AffinityTarget>,
     ) -> Result<WorkerSelection, Error> {
         let context_id = request.context().id().to_string();
         let policy_class = request.metadata().get("policy-class").cloned();
@@ -383,7 +382,7 @@ where
                 phase,
                 is_query_only,
                 SelectionOptions {
-                    affinity_worker,
+                    affinity_target,
                     policy_class,
                     session_context,
                 },
@@ -456,12 +455,7 @@ where
         is_query_only: bool,
     ) -> Result<(WorkerSelection, Option<AffinityAcquire>), Error> {
         self.select_with_session_affinity(request, phase, is_query_only, |target| {
-            self.select_request(
-                request,
-                phase,
-                is_query_only,
-                target.and_then(affinity_worker),
-            )
+            self.select_request(request, phase, is_query_only, target)
         })
         .await
     }
@@ -729,7 +723,7 @@ where
     fn select_builtin_worker(
         &self,
         request: &SingleIn<PreprocessedRequest>,
-        pinned_target: Option<AffinityTarget>,
+        target_constraint: Option<AffinityTarget>,
     ) -> Result<BuiltinSelection, Error> {
         let RoutingPlane::Builtin(policy) = &self.plane else {
             unreachable!("builtin worker selection called for KV routing")
@@ -744,23 +738,23 @@ where
                 &self.inner,
                 request.context().id(),
                 request.content(),
-                pinned_target.map(|target| (target.worker_id, target.dp_rank)),
+                target_constraint.map(|target| (target.worker_id, target.dp_rank)),
             )?;
             let worker = reservation.worker();
             Ok(BuiltinSelection {
                 initial_worker: worker.worker_id,
-                pinned_target,
-                reserved_target: Some(route_target(worker)),
+                target_constraint,
+                dispatch_target: Some(route_target(worker)),
                 load_reservation: Some(reservation),
             })
         } else {
             let worker = self
                 .inner
-                .select_policy_target(pinned_target.map(|target| target.worker_id))?;
+                .select_policy_target(target_constraint.map(|target| target.worker_id))?;
             Ok(BuiltinSelection {
                 initial_worker: worker,
-                pinned_target,
-                reserved_target: None,
+                target_constraint,
+                dispatch_target: None,
                 load_reservation: None,
             })
         }
@@ -802,8 +796,8 @@ where
             (
                 BuiltinSelection {
                     initial_worker: target,
-                    pinned_target: None,
-                    reserved_target: None,
+                    target_constraint: None,
+                    dispatch_target: None,
                     load_reservation: None,
                 },
                 None,
@@ -816,8 +810,8 @@ where
         };
         let BuiltinSelection {
             initial_worker,
-            pinned_target,
-            reserved_target,
+            target_constraint,
+            dispatch_target,
             load_reservation,
         } = selection;
         let mut guard: RequestGuard<Sel> = RequestGuard::new_builtin(
@@ -858,7 +852,7 @@ where
             // Preserve the old Direct adapter's transport fallback. This is intentionally only
             // for a standalone Direct request: an active affinity session owns a hard binding
             // and must not silently move to a different worker.
-            let target = pinned_target.expect("Direct routing requires an explicit target");
+            let target = target_constraint.expect("Direct routing requires an explicit target");
             cancel_on_stop(
                 request_context.as_ref(),
                 self.inner.direct_within_prepared(
@@ -879,8 +873,8 @@ where
             .await
             .and_then(|result| result)
             .map(|((metadata, target), stream)| (metadata, target, stream))
-        } else if let Some(target) = pinned_target {
-            let target = reserved_target.unwrap_or(target);
+        } else if let Some(target) = target_constraint {
+            let target = dispatch_target.unwrap_or(target);
             request.routing_mut().dp_rank = target.dp_rank;
             let metadata = match prepare(&mut request, target) {
                 Ok(metadata) => metadata,
@@ -1160,12 +1154,6 @@ where
             None => Ok(stream),
         }
     }
-}
-
-fn affinity_worker(target: AffinityTarget) -> Option<WorkerWithDpRank> {
-    target
-        .dp_rank
-        .map(|rank| WorkerWithDpRank::new(target.worker_id, rank))
 }
 
 /// A direct routing wrapper for `RouterMode::Direct`.
@@ -2305,12 +2293,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_affinity_worker_returns_existing_binding_without_reserving() {
+    async fn query_affinity_target_returns_existing_binding_without_reserving() {
         let (router, runtime) = router(Some(Duration::from_secs(10))).await;
         let session_id = SessionAffinityId::new("query-existing-binding");
         let target = AffinityTarget {
             worker_id: 7,
-            dp_rank: Some(0),
+            dp_rank: None,
         };
         let AffinityAcquire::Initialize(initializer) = router
             .affinity
@@ -2329,9 +2317,9 @@ mod tests {
 
         assert_eq!(
             router
-                .query_affinity_worker(&request, RequestPhase::Prefill)
+                .query_affinity_target(&request, RequestPhase::Prefill)
                 .unwrap(),
-            Some(WorkerWithDpRank::new(7, 0))
+            Some(target)
         );
         assert_eq!(
             router
@@ -2341,6 +2329,73 @@ mod tests {
                 .query_target(&session_id, None)
                 .unwrap(),
             Some(target)
+        );
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn worker_only_affinity_constrains_kv_query_selection() {
+        let bound_worker = 7;
+        let other_worker = 8;
+        let bound_config = ModelRuntimeConfig {
+            data_parallel_start_rank: 3,
+            data_parallel_size: 2,
+            ..Default::default()
+        };
+        let workers = HashMap::from([
+            (bound_worker, bound_config),
+            (other_worker, ModelRuntimeConfig::default()),
+        ]);
+        let (router, runtime) =
+            router_with_worker_configs(Some(Duration::from_secs(10)), workers).await;
+        let session_id = SessionAffinityId::new("worker-only-kv-selection");
+        let binding = AffinityTarget::new(bound_worker, None);
+        let AffinityAcquire::Initialize(initializer) = router
+            .affinity
+            .as_ref()
+            .unwrap()
+            .acquire(&session_id, None)
+            .await
+            .unwrap()
+        else {
+            panic!("first request must initialize");
+        };
+        drop(initializer.commit(binding).unwrap());
+
+        let mut constrained_input = request();
+        constrained_input.routing_mut().allowed_worker_ids =
+            Some(HashSet::from([bound_worker, other_worker]));
+        let mut constrained_request = Context::new(constrained_input);
+        constrained_request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
+        let (selection, operation) = router
+            .select_with_affinity(&constrained_request, RequestPhase::Aggregated, true)
+            .await
+            .unwrap();
+        assert_eq!(selection.worker.worker_id, bound_worker);
+        assert!(matches!(selection.worker.dp_rank, 3 | 4));
+        assert!(operation.is_none());
+
+        let mut conflicting_input = request();
+        conflicting_input.routing_mut().allowed_worker_ids = Some(HashSet::from([other_worker]));
+        let mut conflicting_request = Context::new(conflicting_input);
+        conflicting_request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
+        assert!(
+            router
+                .select_with_affinity(&conflicting_request, RequestPhase::Aggregated, true)
+                .await
+                .is_err()
+        );
+
+        assert_eq!(
+            router
+                .affinity
+                .as_ref()
+                .unwrap()
+                .query_target(&SessionAffinityId::new("worker-only-kv-selection"), None)
+                .unwrap(),
+            Some(binding)
         );
 
         drop(router);

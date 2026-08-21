@@ -555,9 +555,9 @@ impl AffinityAcquire {
                     lease.invalidate();
                     return Err(error);
                 }
-                // TODO: Revisit this split with the DP-rank-routing design. A worker-only
-                // binding deliberately permits per-request rank selection, so scheduling must
-                // not silently narrow the persisted affinity to the selected rank.
+                // TODO: Revisit this split with the DP-rank-routing design. Decide whether a
+                // session binds at worker or rank scope; changing persisted scope requires an
+                // ordered replica-migration protocol, not conversion of a dispatch target.
                 lease.publish(target);
                 Ok(lease.into_stream(stream))
             }
