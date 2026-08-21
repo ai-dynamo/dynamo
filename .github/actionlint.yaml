@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+paths:
+  .github/workflows/shared-test.yml:
+    ignore:
+      # actionlint 1.7.12 does not recognize GitHub's self-repository syntax yet.
+      - '^specifying action "\$/\.github/actions/pytest-local" in invalid format because ref is missing\.'
