@@ -480,6 +480,22 @@ fn rl_worker_metadata_identifies_zero_parallelism_dimensions() {
 }
 
 #[test]
+fn rl_worker_metadata_includes_prefill_context_parallelism() {
+    let mut server = server_info();
+    let parallelism = server.parallelism.as_mut().expect("parallelism metadata");
+    parallelism.tensor_parallel_size = 2;
+    parallelism.pipeline_parallel_size = 3;
+    parallelism.data_parallel_size = 5;
+    parallelism.world_size = 12;
+
+    let model = DiscoveredModel::from_proto(model_info(), server).expect("valid discovery");
+    assert_eq!(
+        model.rl_worker_metadata(None).expect("valid RL metadata"),
+        RlWorkerMetadata::new(60, None).expect("valid expected metadata")
+    );
+}
+
+#[test]
 fn http_admin_endpoint_accepts_http_https_and_path_prefixes() {
     for endpoint in [
         "http://worker:8120",
