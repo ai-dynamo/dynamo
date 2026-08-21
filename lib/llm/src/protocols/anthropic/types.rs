@@ -1114,7 +1114,14 @@ mod tests {
         let response = chat_completion_to_anthropic_response(chat_resp, "test-model", None);
         assert_eq!(response.usage.input_tokens, 1);
         assert_eq!(response.usage.cache_read_input_tokens, Some(11));
+        assert_eq!(response.usage.cache_creation_input_tokens, Some(0));
         assert_eq!(response.usage.output_tokens, 5);
+
+        let serialized = serde_json::to_value(&response.usage).expect("usage serializes");
+        assert_eq!(serialized["input_tokens"], 1);
+        assert_eq!(serialized["cache_read_input_tokens"], 11);
+        assert_eq!(serialized["cache_creation_input_tokens"], 0);
+        assert_eq!(serialized["output_tokens"], 5);
     }
 
     #[test]
@@ -1134,60 +1141,6 @@ mod tests {
         assert_eq!(usage.input_tokens, 0);
         assert_eq!(usage.cache_read_input_tokens, Some(12));
         assert_eq!(usage.output_tokens, 5);
-    }
-
-    #[allow(deprecated)]
-    #[test]
-    fn test_anthropic_response_emits_zero_cache_creation_tokens() {
-        let chat_resp = NvCreateChatCompletionResponse {
-            inner: dynamo_protocols::types::CreateChatCompletionResponse {
-                id: "chatcmpl-cache-zero".into(),
-                choices: vec![dynamo_protocols::types::ChatChoice {
-                    index: 0,
-                    message: dynamo_protocols::types::ChatCompletionResponseMessage {
-                        content: Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(
-                            "Hi!".to_string(),
-                        )),
-                        refusal: None,
-                        tool_calls: None,
-                        role: dynamo_protocols::types::Role::Assistant,
-                        function_call: None,
-                        audio: None,
-                        reasoning_content: None,
-                    },
-                    finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
-                    logprobs: None,
-                }],
-                created: 1726000000,
-                model: "test-model".into(),
-                service_tier: None,
-                system_fingerprint: None,
-                object: "chat.completion".to_string(),
-                usage: Some(dynamo_protocols::types::CompletionUsage {
-                    prompt_tokens: 12,
-                    completion_tokens: 3,
-                    total_tokens: 15,
-                    prompt_tokens_details: Some(dynamo_protocols::types::PromptTokensDetails {
-                        audio_tokens: None,
-                        cached_tokens: Some(5),
-                    }),
-                    completion_tokens_details: None,
-                }),
-            },
-            nvext: None,
-        };
-
-        let response = chat_completion_to_anthropic_response(chat_resp, "test-model", None);
-        assert_eq!(response.usage.input_tokens, 7);
-        assert_eq!(response.usage.cache_read_input_tokens, Some(5));
-        assert_eq!(response.usage.cache_creation_input_tokens, Some(0));
-        assert_eq!(response.usage.output_tokens, 3);
-
-        let serialized = serde_json::to_value(&response.usage).expect("usage serializes");
-        assert_eq!(serialized["input_tokens"], 7);
-        assert_eq!(serialized["cache_read_input_tokens"], 5);
-        assert_eq!(serialized["cache_creation_input_tokens"], 0);
-        assert_eq!(serialized["output_tokens"], 3);
     }
 
     #[allow(deprecated)]

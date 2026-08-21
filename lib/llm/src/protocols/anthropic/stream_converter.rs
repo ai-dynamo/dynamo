@@ -1066,6 +1066,7 @@ mod tests {
         assert!(events.is_empty(), "usage-only chunk emits no SSE events");
         assert_eq!(conv.usage.input_tokens, 1);
         assert_eq!(conv.usage.cache_read_input_tokens, Some(11));
+        assert_eq!(conv.usage.cache_creation_input_tokens, Some(0));
         assert_eq!(conv.usage.output_tokens, 5);
 
         let delta = conv.emit_end_events_tagged();
@@ -1077,64 +1078,11 @@ mod tests {
             AnthropicStreamEvent::MessageDelta { usage, .. } => {
                 assert_eq!(usage.input_tokens, 1);
                 assert_eq!(usage.cache_read_input_tokens, Some(11));
+                assert_eq!(usage.cache_creation_input_tokens, Some(0));
                 assert_eq!(usage.output_tokens, 5);
             }
             other => panic!("expected MessageDelta, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn test_streaming_final_usage_emits_zero_cache_creation_tokens() {
-        let mut conv = AnthropicStreamConverter::new("test-model".into(), 19);
-
-        let mut events = Vec::new();
-        conv.append_chunk_events(&usage_chunk(12, Some(5), 3), &mut events);
-        assert!(
-            events.is_empty(),
-            "usage-only chunk emits no content events"
-        );
-
-        let delta = conv.emit_end_events_tagged();
-        let message_delta = delta
-            .iter()
-            .find(|e| e.event_type == "message_delta")
-            .expect("message_delta present");
-        match &message_delta.data {
-            AnthropicStreamEvent::MessageDelta { usage, .. } => {
-                assert_eq!(usage.input_tokens, 7);
-                assert_eq!(usage.cache_read_input_tokens, Some(5));
-                assert_eq!(usage.cache_creation_input_tokens, Some(0));
-                assert_eq!(usage.output_tokens, 3);
-            }
-            other => panic!("expected MessageDelta, got {other:?}"),
-        }
-
-        let serialized =
-            serde_json::to_value(&message_delta.data).expect("message_delta serializes");
-        assert_eq!(serialized["usage"]["input_tokens"], 7);
-        assert_eq!(serialized["usage"]["cache_read_input_tokens"], 5);
-        assert_eq!(serialized["usage"]["cache_creation_input_tokens"], 0);
-        assert_eq!(serialized["usage"]["output_tokens"], 3);
-    }
-
-    #[test]
-    fn test_seeded_usage_carries_cache_creation_key_without_backend_usage() {
-        let conv = AnthropicStreamConverter::new("test-model".into(), 7);
-        assert!(!conv.saw_backend_usage);
-        assert_eq!(conv.usage.cache_creation_input_tokens, Some(0));
-
-        let start_usage = serde_json::to_value(&conv.usage).expect("usage serializes");
-        assert_eq!(start_usage["input_tokens"], 7);
-        assert_eq!(start_usage["cache_creation_input_tokens"], 0);
-
-        let delta = AnthropicStreamEvent::ContentBlockDelta {
-            index: 0,
-            delta: AnthropicDelta::TextDelta {
-                text: "hi".to_string(),
-            },
-        };
-        let value = event_json_with_usage(&delta, &conv.usage).expect("serialize");
-        assert_eq!(value["usage"]["cache_creation_input_tokens"], 0);
     }
 
     /// Backends that never populate per-chunk `usage` (the `ModelInput::Text`
@@ -1145,6 +1093,7 @@ mod tests {
     fn test_fallback_counter_advances_before_each_token_chunk() {
         let mut conv = AnthropicStreamConverter::new("test-model".into(), 7);
         let mut events = Vec::new();
+        assert_eq!(conv.usage.cache_creation_input_tokens, Some(0));
 
         // First content chunk: content_block_start + content_block_delta. The
         // fallback advances output_tokens to 1 before the delta is serialized.
