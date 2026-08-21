@@ -85,6 +85,35 @@ Added by an individual metric family. Each label appears only on the metrics not
   `[Shared]` On `dynamo_frontend_worker_*` — the data-parallel rank of the worker. Example: `0`.
 </ParamField>
 
+<ParamField path="stream" type="string">
+  `[Shared]` On `dynamo_component_kv_dc_relay_subscribers`,
+  `dynamo_component_kv_dc_relay_subscriber_lagged_total`, and
+  `dynamo_component_kv_dc_relay_subscriber_limit_rejected_total` — the Relay stream type.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>catalog</Badge> <Badge intent="note" minimal>pool</Badge> <Badge intent="note" minimal>readiness</Badge> <Badge intent="note" minimal>load</Badge></span>
+</ParamField>
+
+<ParamField path="scope" type="string">
+  `[Shared]` On `dynamo_component_kv_dc_relay_subscriber_limit_rejected_total` — the configured
+  limit that rejected the subscriber.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>total</Badge> <Badge intent="note" minimal>per_pool</Badge> <Badge intent="note" minimal>initialized_hub</Badge></span>
+</ParamField>
+
+<ParamField path="state" type="string">
+  `[Shared]` On `dynamo_component_kv_dc_relay_serving_topology_count` — the current readiness
+  state of a namespace model topology.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>unknown</Badge> <Badge intent="note" minimal>unavailable</Badge> <Badge intent="note" minimal>ready</Badge></span>
+</ParamField>
+
+<ParamField path="material" type="string">
+  `[Shared]` On `dynamo_component_kv_dc_relay_tls_expiry_timestamp_seconds` — the TLS material whose
+  expiry is reported.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>server_cert</Badge> <Badge intent="note" minimal>client_ca</Badge></span>
+</ParamField>
+
 <ParamField path="policy_class" type="string">
   `[Shared]` On `dynamo_frontend_router_queue_*` — the resolved physical scheduler queue. With policy-family or cache-bucket configuration, this can differ from the family requested by the client.
 </ParamField>
@@ -171,6 +200,7 @@ Values you will see in the `dynamo_component` label on `dynamo_component_*` seri
 | Value | Meaning |
 |-------|---------|
 | `router` | The standalone KV router (`python -m dynamo.router`). |
+| `kv_dc_relay` | The DC KV Relay (`python -m dynamo.kv_dc_relay`). |
 | `Planner` | The planner component (`python -m dynamo.planner`). Note the capital `P`. |
 | `prefill` | The prefill worker in disaggregated serving (all backends). |
 | `backend` | The decode worker in disaggregated serving for all backends, **and** the combined worker for vLLM in aggregated mode. |

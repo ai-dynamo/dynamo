@@ -32,6 +32,15 @@ bench = ["dynamo-kv-router/bench"]
 # Pull-only CKF Relay stats and snapshots. Keep this separate from `metrics`, which
 # is enabled by normal `dynamo-llm` builds and must not retain diagnostic hot-path work.
 ckf-diagnostics = []
+kv-dc-relay-proto = []
+kv-dc-relay-wan = [
+  "kv-dc-relay-proto",
+  "dep:tonic-health",
+  "dep:tonic-reflection",
+  "tonic/tls-aws-lc",
+  "tonic/zstd",
+  "dep:x509-parser",
+]
 kv-router-stress = ["dep:clap", "dep:indicatif", "bench"]
 mm-routing = ["dep:llm-multimodal", "dep:llm-tokenizer"]
 request-trace-bench = []
@@ -106,7 +115,7 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 tmq = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = { workspace = true }
+tokio-stream = { workspace = true, features = ["net"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 opentelemetry = { workspace = true }
@@ -163,6 +172,9 @@ utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 # ping version to 0.13.1 so it depends on prost 0.13.5
 # which is used across other libraries
 tonic = { version = "0.13.1" }
+tonic-health = { workspace = true, optional = true }
+tonic-reflection = { version = "0.13.1", optional = true }
+x509-parser = { version = "0.16", optional = true }
 # Request prost specifically so tonic-build properly compiles protobuf message
 prost = { version = "0.13.5" }
 
@@ -223,6 +235,7 @@ hf-hub = { workspace = true }
 modelexpress-client = { workspace = true }
 modelexpress-common = { workspace = true }
 reqwest = { workspace = true }
+rcgen = { workspace = true }
 rstest = "0.18.2"
 serial_test = "3"
 temp-env = { version = "0.3.6", features = ["async_closure"] }

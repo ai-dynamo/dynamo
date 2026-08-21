@@ -1,0 +1,276 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package dynamo.kvrelay.v1;
+
+// Every top-level request and response carries contract_marker so messages
+// from the retired branch-local v1 schema fail closed.
+service KvEventRelay
+{
+  rpc GetRelayInfo(RelayInfoRequest) returns (RelayInfo);
+  rpc WatchKvPoolCatalog(WatchKvPoolCatalogRequest) returns (stream KvPoolCatalogUpdate);
+  rpc SubscribeKvPool(SubscribeKvPoolRequest) returns (stream FilterUpdate);
+  rpc SubscribeServingReadiness(SubscribeServingReadinessRequest) returns (stream ServingReadinessUpdate);
+  rpc SubscribeKvPoolLoad(SubscribeKvPoolLoadRequest) returns (stream KvPoolLoadUpdate);
+}
+
+enum IdentitySource {
+  IDENTITY_SOURCE_UNSPECIFIED = 0;
+  IDENTITY_SOURCE_DEFAULT_DERIVED = 1;
+  IDENTITY_SOURCE_EXPLICIT = 2;
+}
+
+enum FilterUpdateKind {
+  FILTER_UPDATE_KIND_UNSPECIFIED = 0;
+  FILTER_UPDATE_KIND_SNAPSHOT_CHUNK = 1;
+  FILTER_UPDATE_KIND_DELTA = 2;
+  FILTER_UPDATE_KIND_HEARTBEAT = 3;
+}
+
+enum ServingReadinessState {
+  SERVING_READINESS_STATE_UNKNOWN = 0;
+  SERVING_READINESS_STATE_UNAVAILABLE = 1;
+  SERVING_READINESS_STATE_READY = 2;
+}
+
+enum WorkerRole {
+  WORKER_ROLE_UNSPECIFIED = 0;
+  WORKER_ROLE_PREFILL = 1;
+  WORKER_ROLE_DECODE = 2;
+  WORKER_ROLE_ENCODE = 3;
+  WORKER_ROLE_AGGREGATED = 4;
+  WORKER_ROLE_LEGACY = 5;
+}
+
+// One atomic, executable token-to-sequence-hash pipeline. Consumers must reject
+// unspecified or unknown formats rather than combining independently versioned steps.
+enum KvQueryHashFormat {
+  KV_QUERY_HASH_FORMAT_UNSPECIFIED = 0;
+  KV_QUERY_HASH_FORMAT_DYNAMO_STANDARD_V1 = 1;
+  KV_QUERY_HASH_FORMAT_DYNAMO_EAGLE_V1 = 2;
+}
+
+message RelayIdentity
+{
+  fixed64 drt_instance_id = 1;
+  fixed64 relay_incarnation = 2;
+}
+
+message DigestIdentity
+{
+  bytes digest = 1;
+  IdentitySource source = 2;
+}
+
+message IndexerDomainId
+{
+  DigestIdentity cache_semantics = 1;
+  DigestIdentity routing_scope = 2;
+}
+
+message KvPoolId
+{
+  uint32 identity_version = 1;
+  IndexerDomainId indexer_domain = 2;
+  fixed64 dc_id = 3;
+}
+
+message CkfFormat
+{
+  uint32 format_version = 1;
+  fixed64 seed = 2;
+  uint64 bucket_count = 3;
+  uint32 fingerprint_bits = 4;
+  uint32 slots_per_bucket = 5;
+}
+
+message ProducerIdentity
+{
+  KvPoolId pool_id = 1;
+  fixed64 producer_incarnation = 2;
+  uint64 layout_generation = 3;
+  CkfFormat ckf_format = 4;
+}
+
+message DynamoEndpointId
+{
+  string namespace = 1;
+  string component = 2;
+  string endpoint = 3;
+}
+
+message BaseModelTarget
+{
+  string base_model = 1;
+}
+
+message LoraModelTarget
+{
+  string base_model = 1;
+  string adapter = 2;
+}
+
+message ModelTarget
+{
+  oneof target
+  {
+    BaseModelTarget base = 1;
+    LoraModelTarget lora = 2;
+  }
+}
+
+message ModelRegistration
+{
+  string canonical_model_id = 1;
+  ModelTarget target = 2;
+  repeated string aliases = 3;
+}
+
+message KvQuerySemantics
+{
+  uint32 kv_block_size = 1;
+  KvQueryHashFormat hash_format = 2;
+}
+
+message KvPoolDescriptor
+{
+  ProducerIdentity producer = 1;
+  DynamoEndpointId serving_endpoint = 2;
+  repeated ModelRegistration registrations = 3;
+  KvQuerySemantics query_semantics = 4;
+  // Roles declared by the endpoint's current base-model cards, independent of liveness.
+  repeated WorkerRole pool_roles = 5;
+}
+
+message KvPoolCatalogSnapshot
+{
+  repeated KvPoolDescriptor pools = 1;
+}
+
+message RelayInfoRequest
+{
+  fixed32 contract_marker = 127;
+}
+
+message RelayInfo
+{
+  uint32 protocol_version = 1;
+  RelayIdentity relay = 2;
+  fixed32 contract_marker = 127;
+}
+
+message WatchKvPoolCatalogRequest
+{
+  string subscriber_id = 1;
+  fixed32 contract_marker = 127;
+}
+
+message KvPoolCatalogUpdate
+{
+  uint32 protocol_version = 1;
+  RelayIdentity relay = 2;
+  uint64 revision = 3;
+  KvPoolCatalogSnapshot snapshot = 4;
+  fixed32 contract_marker = 127;
+}
+
+message SubscribeKvPoolRequest
+{
+  string subscriber_id = 1;
+  ProducerIdentity expected_producer = 2;
+  fixed32 contract_marker = 127;
+}
+
+message FilterUpdate
+{
+  uint32 protocol_version = 1;
+  RelayIdentity relay = 2;
+  ProducerIdentity producer = 3;
+  uint64 base_sequence = 4;
+  uint64 sequence = 5;
+  uint64 send_ts_us = 6;
+  FilterUpdateKind kind = 7;
+  bytes payload = 8;
+  fixed32 contract_marker = 127;
+}
+
+message SubscribeServingReadinessRequest
+{
+  string subscriber_id = 1;
+  fixed32 contract_marker = 127;
+}
+
+message TopologyMember
+{
+  DynamoEndpointId endpoint = 1;
+  repeated WorkerRole roles = 2;
+  // Stable pool link. Absent when this topology endpoint has no materialized KV pool.
+  optional KvPoolId pool_id = 3;
+}
+
+message AdapterReadiness
+{
+  string canonical_model_id = 1;
+  ServingReadinessState state = 2;
+  repeated WorkerRole missing_roles = 3;
+}
+
+message TopologyEntry
+{
+  // Stable serving-topology key. Producer generations are resolved through members.pool_id.
+  string namespace = 1;
+  string canonical_model_id = 2;
+  ServingReadinessState state = 3;
+  repeated WorkerRole present_roles = 4;
+  repeated WorkerRole missing_roles = 5;
+  repeated TopologyMember members = 6;
+  // Unique typed roles advertised by more than one endpoint in this topology.
+  // Only PREFILL and DECODE are valid values.
+  repeated WorkerRole duplicate_role_endpoints = 7;
+  bool legacy_fallback_active = 8;
+  repeated AdapterReadiness adapters = 9;
+}
+
+message ServingReadinessUpdate
+{
+  uint32 protocol_version = 1;
+  RelayIdentity relay = 2;
+  uint64 revision = 3;
+  repeated TopologyEntry entries = 4;
+  fixed32 contract_marker = 127;
+}
+
+message SubscribeKvPoolLoadRequest
+{
+  string subscriber_id = 1;
+  fixed32 contract_marker = 127;
+}
+
+message KvPoolLoadEntry
+{
+  ProducerIdentity producer = 1;
+  uint64 kv_used_blocks = 2;
+  uint64 total_kv_blocks = 3;
+  uint32 kv_observed_ranks = 4;
+  uint32 kv_expected_ranks = 5;
+  uint64 active_decode_blocks = 6;
+  uint32 decode_observed_ranks = 7;
+  uint32 decode_expected_ranks = 8;
+  uint64 active_prefill_tokens = 9;
+  uint64 prefill_token_capacity = 10;
+  uint32 prefill_observed_ranks = 11;
+  uint32 prefill_expected_ranks = 12;
+}
+
+message KvPoolLoadUpdate
+{
+  uint32 protocol_version = 1;
+  RelayIdentity relay = 2;
+  uint64 window_sequence = 3;
+  uint64 observed_ms = 4;
+  uint64 window_ms = 5;
+  repeated KvPoolLoadEntry pools = 6;
+  fixed32 contract_marker = 127;
+}
