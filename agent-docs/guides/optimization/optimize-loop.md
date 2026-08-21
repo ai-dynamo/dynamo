@@ -31,12 +31,12 @@ rules:
   - agent-docs/rules/verification/stack-verdict.md
 ---
 
+# Optimize Loop
+
 <!--
 SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
-
-# Optimize Loop
 
 Use this workflow for an end-to-end Dynamo configuration optimization job. The user supplies the baseline DGD;
 `user-interviewer` captures it and hands it directly to `recipe-deployer`. There is no recipe-discovery or
