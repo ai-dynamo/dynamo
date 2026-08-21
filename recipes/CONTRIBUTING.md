@@ -200,11 +200,12 @@ The effective files are rendered once into the selected output path. A
 values-only selected directory inherits the parent's files unchanged. A
 specialized directory can replace `kustomization.yaml.j2` or any other inherited
 YAML file by providing the same output name. Subdirectories and non-YAML files
-are never materialized. A template can select shared Components; `unfold`
-rebases those external paths for the generated location. Jinja rendering uses
-strict, immutable sandboxed values: undefined names and attempts to mutate data
-are errors. Rendering a matrix that selects templates requires
-`jinja2==3.1.6`, which is installed in the development and test dependency sets.
+are never materialized. A template can reference shared Components or
+resources; `unfold` rebases those external paths for the generated location.
+Jinja rendering uses strict, immutable sandboxed values: undefined names and
+attempts to mutate data are errors. Rendering a matrix that selects templates
+requires `jinja2==3.1.6`, which is installed in the development and test
+dependency sets.
 
 Regenerate derived artifacts in order: `unfold` writes every checked-in Level-2
 public overlay `kustomization.yaml` file for the matrix; `render` invokes

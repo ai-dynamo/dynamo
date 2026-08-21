@@ -609,7 +609,7 @@ def bundle_contains_path(
     )
 
 
-def external_component_path_replacements(
+def external_path_replacements(
     component: dict[str, Any],
     template: TemplateBundle,
     source_path: Path,
@@ -627,13 +627,13 @@ def external_component_path_replacements(
             if bundle_contains_path(template, relative_source, reference):
                 continue
             source = (source_path.parent / reference).resolve()
-            if not source.is_dir():
+            if not source.exists():
                 continue
             replacements[reference] = relative_path(source, component_dir)
     return replacements
 
 
-def rebase_rendered_component_paths(
+def rebase_rendered_paths(
     rendered: str, replacements: dict[str, str], source_path: Path
 ) -> str:
     for source, replacement in replacements.items():
@@ -647,8 +647,7 @@ def rebase_rendered_component_paths(
         )
         if count == 0:
             raise ValueError(
-                f"failed to rebase Component path {source!r} in "
-                f"{display_path(source_path)}"
+                f"failed to rebase path {source!r} in {display_path(source_path)}"
             )
     return rendered
 
@@ -685,9 +684,9 @@ def render_template_component(
             f"template {display_path(template.selection.source)} must render a v1alpha1 Kustomize Component"
         )
     if component_dir:
-        rendered = rebase_rendered_component_paths(
+        rendered = rebase_rendered_paths(
             rendered,
-            external_component_path_replacements(
+            external_path_replacements(
                 component,
                 template,
                 source_path,
