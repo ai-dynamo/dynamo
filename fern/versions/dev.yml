@@ -40,6 +40,10 @@ tabs:
   recipes:
     display-name: Recipes
     icon: file-code
+  agent-skills:
+    display-name: Agent Skills
+    icon: robot
+    slug: agent-skills
   developer-guide:
     display-name: Developer Guide
     icon: code
@@ -568,6 +572,11 @@ navigation:
             path: ../pages-dev/recipes/feature-benchmarks/kv-router-a-b-testing.md
             slug: kv-router-ab-testing
             hidden: true
+  - tab: agent-skills
+    layout:
+      - page: Overview
+        path: ../pages-dev/agent-skills/overview.mdx
+  # ==================== Developer Guide ====================
   - tab: developer-guide
     layout:
       # ==================== Knowledge Base ====================
