@@ -1169,6 +1169,15 @@ impl DistributedRuntime {
         };
         let request_plane: RequestPlaneMode = request_plane.parse().map_err(to_pyerr)?;
         let explicit_event_plane = event_plane.as_deref().filter(|value| !value.is_empty());
+        // Treat DYN_EVENT_PLANE the same as an explicit constructor kwarg: when the
+        // caller opts into ZMQ (or NATS) via env, ambient NATS_SERVER must not force
+        // a NATS client. Frontend/worker paths already pass event_plane=; planner and
+        // other @dynamo_worker components historically only set the env var.
+        let env_event_plane_set =
+            std::env::var(config::environment_names::event_plane::DYN_EVENT_PLANE)
+                .ok()
+                .filter(|value| !value.is_empty())
+                .is_some();
         let event_transport_kind =
             resolve_event_transport_kind(&discovery_backend_config, event_plane.as_deref())?;
 
@@ -1198,6 +1207,7 @@ impl DistributedRuntime {
                 dynamo_runtime::discovery::EventTransportKind::Nats
             )
             || (explicit_event_plane.is_none()
+                && !env_event_plane_set
                 && std::env::var(config::environment_names::nats::NATS_SERVER).is_ok());
 
         let runtime_config = DistributedConfig {
