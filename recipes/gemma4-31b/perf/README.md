@@ -23,8 +23,8 @@ name so the benchmark pod is co-located with the correct frontend.
 | Variant | DGD affinity | `ENDPOINT` | `TARGET_MODEL` | `TRACE_FILE` | `CONCURRENCY` |
 | --- | --- | --- | --- | --- | --- |
 | B200 aggregate agentic | `gemma4-31b-agg-b200-agentic` | `gemma4-31b-agg-b200-agentic-frontend:8000` | `nvidia/Gemma-4-31B-IT-NVFP4` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | `192` |
-| GB200 aggregate agentic | `gemma4-31b-agg-gb200-agentic` | `gemma4-31b-agg-gb200-agentic-frontend:8000` | `nvidia/Gemma-4-31B-IT-NVFP4` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | |
-| H200 aggregate agentic | `gemma4-31b-agg-h200-agentic` | `gemma4-31b-agg-h200-agentic-frontend:8000` | `google/gemma-4-31B-it` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | |
+| GB200 aggregate agentic | `gemma4-31b-agg-gb200-agentic` | `gemma4-31b-agg-gb200-agentic-frontend:8000` | `nvidia/Gemma-4-31B-IT-NVFP4` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | `192` |
+| H200 aggregate agentic | `gemma4-31b-agg-h200-agentic` | `gemma4-31b-agg-h200-agentic-frontend:8000` | `google/gemma-4-31B-it` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | `32` |
 
 <!--
 When adding a variant, add its values to this table and keep the matching
