@@ -204,6 +204,49 @@ func validateElasticEPRequiresCommand(
 	return allErrs
 }
 
+// validateElasticEPSingleReplica rejects a vLLM component that requests the elastic-EP
+// Ray topology with more than one replica.
+//
+// Elastic EP grows by adding followers to one leader's Ray cluster, not by adding
+// leaders -- the leader is the Ray head. Two replicas therefore mean two independent Ray
+// clusters, but the operator renders them with one identity: a single "<component>-ray"
+// headless Service selecting every pod carrying the component labels, and a single
+// follower derived per component. A follower would join whichever head DNS happened to
+// resolve, and nothing can express which leader it belongs to.
+//
+// Running several independent elastic-EP clusters is a reasonable thing to want. It needs
+// per-replica identity -- a Ray Service and follower set per replica -- which this
+// operator does not render yet. Reject it here rather than silently degrade: without this
+// the operator quietly stops emitting both the Ray Service and the follower, leaving the
+// user with leaders that can never grow and no indication why.
+func validateElasticEPSingleReplica(
+	backendFramework string,
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	var allErrs field.ErrorList
+	if backendFramework != string(dynamo.BackendFrameworkVLLM) || spec.PodTemplate == nil {
+		return allErrs
+	}
+	if spec.Replicas == nil || *spec.Replicas <= 1 {
+		return allErrs
+	}
+	containers := spec.PodTemplate.Spec.Containers
+	index := containerIndexByName(containers, consts.MainContainerName)
+	if index < 0 || !dynamo.IsElasticEPRayLaunch(&containers[index]) {
+		return allErrs
+	}
+	allErrs = append(allErrs, field.Invalid(
+		fldPath.Child("replicas"),
+		*spec.Replicas,
+		"elastic expert parallelism (--enable-elastic-ep with --data-parallel-backend ray) supports a single "+
+			"leader replica: the leader is the Ray head, and capacity is added by scaling followers rather than "+
+			"leaders. Multiple independent elastic-EP clusters are not rendered yet, because each replica would "+
+			"need its own Ray Service and follower set; use replicas: 1, or declare separate components",
+	))
+	return allErrs
+}
+
 func gpuMemoryServiceFor(
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) *nvidiacomv1beta1.GPUMemoryServiceSpec {

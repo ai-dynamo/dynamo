@@ -231,6 +231,85 @@ func TestValidateElasticEPRequiresCommand(t *testing.T) {
 	}
 }
 
+// Elastic EP grows by adding followers to one leader's Ray cluster, not by adding
+// leaders. Two replicas mean two independent Ray heads, but the operator renders one
+// "<component>-ray" Service and one derived follower per component, so a follower cannot
+// say which leader it belongs to. Rejecting here is what keeps the operator from silently
+// dropping both the Service and the follower and leaving leaders that can never grow.
+func TestValidateElasticEPSingleReplica(t *testing.T) {
+	const vllm = "vllm"
+	rayArgs := []string{"--model", "test", "--data-parallel-backend", "ray", "--enable-elastic-ep"}
+	command := []string{"python3", "-m", "dynamo.vllm"}
+	fldPath := field.NewPath("spec")
+	const replicasPath = "spec.replicas"
+
+	withReplicas := func(spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, n *int32) *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+		spec.Replicas = n
+		return spec
+	}
+
+	tests := []struct {
+		name    string
+		backend string
+		spec    *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+		want    []string
+	}{
+		{
+			name:    "elastic-EP with two replicas is rejected",
+			backend: vllm,
+			spec:    withReplicas(elasticEPSharedSpec(command, rayArgs), k8sptr.To(int32(2))),
+			want:    []string{replicasPath},
+		},
+		{
+			name:    "a single replica is accepted",
+			backend: vllm,
+			spec:    withReplicas(elasticEPSharedSpec(command, rayArgs), k8sptr.To(int32(1))),
+			want:    nil,
+		},
+		{
+			name:    "unset replicas is accepted: it defaults to one leader",
+			backend: vllm,
+			spec:    withReplicas(elasticEPSharedSpec(command, rayArgs), nil),
+			want:    nil,
+		},
+		{
+			name:    "zero replicas is accepted: a scaled-to-zero leader has no Ray head to confuse",
+			backend: vllm,
+			spec:    withReplicas(elasticEPSharedSpec(command, rayArgs), k8sptr.To(int32(0))),
+			want:    nil,
+		},
+		{
+			name:    "a non-elastic-EP component may scale freely",
+			backend: vllm,
+			spec:    withReplicas(elasticEPSharedSpec(command, []string{"--model", "test"}), k8sptr.To(int32(4))),
+			want:    nil,
+		},
+		{
+			name:    "elastic-EP on a non-ray backend may scale freely",
+			backend: vllm,
+			spec:    withReplicas(elasticEPSharedSpec(command, []string{"--model", "test", "--data-parallel-backend", "mp", "--enable-elastic-ep"}), k8sptr.To(int32(3))),
+			want:    nil,
+		},
+		{
+			name:    "non-vllm backend is not validated",
+			backend: sglangBackendFramework,
+			spec:    withReplicas(elasticEPSharedSpec(command, rayArgs), k8sptr.To(int32(2))),
+			want:    nil,
+		},
+		{
+			name:    "nil pod template is ignored",
+			backend: vllm,
+			spec:    &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{Replicas: k8sptr.To(int32(2))},
+			want:    nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertFieldPaths(t, validateElasticEPSingleReplica(tt.backend, tt.spec, fldPath), tt.want)
+		})
+	}
+}
+
 // TestDynamoGraphDeploymentRejectsElasticEPWithoutCommand proves the rule is
 // wired into the DGD admission path end to end, not just callable in isolation.
 func TestDynamoGraphDeploymentRejectsElasticEPWithoutCommand(t *testing.T) {

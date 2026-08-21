@@ -281,6 +281,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		allErrs = append(allErrs, v.validateDGDComponentPowerAnnotation(component, componentPath)...)
 
 		allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, component, componentPath)...)
+		allErrs = append(allErrs, validateElasticEPSingleReplica(spec.BackendFramework, component, componentPath)...)
 
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 			component,
