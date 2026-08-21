@@ -37,7 +37,7 @@ more reliable since SGLang's internal layout doesn't always match the version st
 `worker()` parses args, creates the distributed runtime, installs graceful shutdown,
 then dispatches to one of 10 init functions based on CLI flags:
 
-```
+```text
 args.py:parse_args() -> Config(server_args, dynamo_args)
 
 Worker dispatch (main.py:60-132):
@@ -85,7 +85,7 @@ registration with the Rust side.
 
 ## Handler Hierarchy
 
-```
+```text
 BaseGenerativeHandler (handler_base.py)
   Abstract base. Has config, publisher, tracing. No engine.
   Subclasses: ImageDiffusionWorkerHandler, VideoGenerationWorkerHandler
@@ -169,7 +169,7 @@ registration on the global range and local publishers on the local range.
 
 ## Init Flow (typical LLM decode)
 
-```
+```text
 init_decode():
   engine = sgl.Engine(server_args)
   handler = DecodeWorkerHandler(engine, config, publisher, endpoint, shutdown_event)
@@ -213,7 +213,7 @@ capture SGLang's internal signal registrations and defer them. On SIGTERM/SIGINT
 
 ## Request Flow
 
-```
+```text
 Frontend (Rust, lib/llm/)
   -> Preprocessor (tokenizes, builds PreprocessedRequest with token_ids + sampling + stop + output_options)
   -> Dynamo RPC to endpoint (dyn://{namespace}.{component}.{endpoint})
@@ -286,7 +286,7 @@ Health check payloads can be overridden via `DYNAMO_HEALTH_CHECK_PAYLOAD` env va
 Examples in `examples/backends/sglang/launch/`. Each script starts a frontend + worker(s)
 in one terminal. GPU requirements are documented in script headers.
 
-```
+```text
 agg.sh              # 1 GPU  - Single aggregated worker
 agg_embed.sh        # 1 GPU  - Embedding model
 agg_vision.sh       # 1 GPU  - Multimodal (vision + LLM)
@@ -369,7 +369,7 @@ Checklist for adding a new worker (e.g., a new modality or serving mode):
 
 ## File Index
 
-```
+```text
 sglang/
   _compat.py               # SGLang version compat shim (signature probing for async_generate kwargs)
   __main__.py              # Entry point

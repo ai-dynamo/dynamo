@@ -10,7 +10,7 @@ logic but do not share the same serialization, RPC, or process boundaries.
 
 1. **Integrated Rust frontend**
 
-   ```
+   ```text
    dynamo.frontend
      -> Rust OpenAIPreprocessor
      -> in-process Rust KvPushRouter / KvRouter
@@ -23,7 +23,7 @@ logic but do not share the same serialization, RPC, or process boundaries.
 
 2. **Python chat processor inside `dynamo.frontend`**
 
-   ```
+   ```text
    dynamo.frontend
      -> Python VllmProcessor or SglangProcessor
      -> PyO3 RoutedEngine
@@ -38,7 +38,7 @@ logic but do not share the same serialization, RPC, or process boundaries.
 
 3. **Standalone or custom Python router service**
 
-   ```
+   ```text
    frontend
      -> router service RPC
      -> binding-level KvRouter
