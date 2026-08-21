@@ -419,6 +419,10 @@ impl RoutingInstancesState {
         self.snapshot().overloaded_ids()
     }
 
+    fn is_overloaded(&self, instance_id: u64) -> bool {
+        self.snapshot().is_overloaded(instance_id)
+    }
+
     fn instance_avail_watcher(&self) -> tokio::sync::watch::Receiver<Vec<u64>> {
         self.instance_avail_rx.clone()
     }
@@ -654,6 +658,13 @@ impl Client {
 
     pub fn overloaded_instance_ids(&self) -> Option<HashSet<u64>> {
         self.routing_instances.overloaded_ids()
+    }
+
+    /// Whether a single instance is currently reported overloaded. Prefer this
+    /// over `overloaded_instance_ids()` when testing membership for a small set
+    /// of candidate ids — it avoids cloning the full overloaded set.
+    pub fn is_overloaded(&self, instance_id: u64) -> bool {
+        self.routing_instances.is_overloaded(instance_id)
     }
 
     /// Monitor the key-value instance source and update instance_avail.

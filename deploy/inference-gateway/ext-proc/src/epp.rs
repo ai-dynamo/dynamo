@@ -343,17 +343,15 @@ impl Router {
         // Subset-scoped request: shed only if every candidate worker is
         // overloaded. The decode client's overloaded set is the full published
         // set (decode + prefill), so this is pool-agnostic and never sheds based
-        // on workers outside the requested subset.
+        // on workers outside the requested subset. Tested per-id via
+        // `is_overloaded` rather than cloning the full overloaded set, since
+        // that set can be as large as the whole pool on the hot path.
         if let Some(ids) = allowed_worker_ids {
             if ids.is_empty() {
                 return None;
             }
-            let overloaded = self
-                .decode_router
-                .client()
-                .overloaded_instance_ids()
-                .unwrap_or_default();
-            if ids.iter().all(|id| overloaded.contains(id)) {
+            let client = self.decode_router.client();
+            if ids.iter().all(|id| client.is_overloaded(*id)) {
                 tracing::info!(
                     candidates = ids.len(),
                     "All candidate workers overloaded; shedding subset-scoped request (HTTP 429)"
@@ -365,11 +363,19 @@ impl Router {
             return None;
         }
 
-        // No subset hint: shed when a whole pool is saturated.
+        // No subset hint: shed when a whole pool is saturated. Gate on
+        // `routable > 0` (not `discovered > 0`): `free` is derived from the
+        // routable set, which excludes instances marked down for reasons
+        // unrelated to load (e.g. `report_instance_down` after a transient
+        // connection failure). Gating on `discovered` would misclassify "every
+        // worker is unreachable" as "every worker is overloaded" and shed with
+        // 429 (a deliberate backpressure signal) instead of surfacing the
+        // dependency failure through the normal routing-failure path.
         let decode = self.decode_router.client().routing_instance_counts();
-        if decode.discovered > 0 && decode.free == 0 {
+        if decode.routable > 0 && decode.free == 0 {
             tracing::info!(
                 discovered = decode.discovered,
+                routable = decode.routable,
                 overloaded = decode.overloaded,
                 "All decode workers overloaded; shedding request (HTTP 429)"
             );
@@ -382,13 +388,15 @@ impl Router {
         // saturated rather than silently degrading to aggregated. Prefill load is
         // observed via the shared monitor's prefill `Client` (attached on
         // prefill-router activation); `None` means prefill is not active (agg).
+        // Same `routable`-vs-`discovered` reasoning as the decode pool above.
         if self.prefill_router.is_activated()
             && let Some(prefill) = self.worker_monitor.prefill_routing_instance_counts()
-            && prefill.discovered > 0
+            && prefill.routable > 0
             && prefill.free == 0
         {
             tracing::info!(
                 discovered = prefill.discovered,
+                routable = prefill.routable,
                 overloaded = prefill.overloaded,
                 "All prefill workers overloaded; shedding request (HTTP 429)"
             );
