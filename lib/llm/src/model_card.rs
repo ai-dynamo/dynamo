@@ -63,9 +63,22 @@ fn tokenizer_cache_enabled(value: Option<&str>) -> bool {
 }
 
 fn tokenizer_cache_bytes(value: Option<&str>) -> usize {
-    value
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_TOKENIZER_CACHE_BYTES)
+    match value {
+        Some(value) => match value.parse::<usize>() {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(
+                    env_var = "DYN_TOKENIZER_CACHE_BYTES",
+                    value,
+                    default = DEFAULT_TOKENIZER_CACHE_BYTES,
+                    %error,
+                    "Failed to parse tokenizer cache byte budget; using default"
+                );
+                DEFAULT_TOKENIZER_CACHE_BYTES
+            }
+        },
+        None => DEFAULT_TOKENIZER_CACHE_BYTES,
+    }
 }
 
 fn tokenizer_cache_token_observer(model: &str) -> crate::tokenizers::CacheTokenUsageFn {

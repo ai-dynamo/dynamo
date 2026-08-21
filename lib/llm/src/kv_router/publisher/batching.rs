@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use dynamo_kv_router::indexer::LocalKvIndexer;
 use dynamo_kv_router::protocols::{KvCacheEventData, Placement, PlacementEvent, RouterEvent};
 
-use super::dedup::EventDedupFilter;
+use super::dedup::{EventDedupFilter, EventDedupPolicy};
 use super::sinks::emit;
 
 /// Pure accumulator for adjacent compatible placement mutations.
@@ -192,15 +192,25 @@ impl BatchingState {
         let mut event = placement_event.event;
         event.data = match event.data {
             KvCacheEventData::Removed(data) => {
-                let Some(filtered) =
-                    dedup.filter_remove_in_domain(event.dp_rank, tier, domain, data)
-                else {
+                let Some(filtered) = dedup.filter_remove_in_domain(
+                    event.dp_rank,
+                    tier,
+                    domain,
+                    EventDedupPolicy::RefCounted,
+                    data,
+                ) else {
                     return;
                 };
                 KvCacheEventData::Removed(filtered)
             }
             KvCacheEventData::Stored(data) => {
-                dedup.track_store_in_domain(event.dp_rank, tier, domain, &data);
+                dedup.track_store_in_domain(
+                    event.dp_rank,
+                    tier,
+                    domain,
+                    EventDedupPolicy::RefCounted,
+                    &data,
+                );
                 KvCacheEventData::Stored(data)
             }
             KvCacheEventData::Cleared => {

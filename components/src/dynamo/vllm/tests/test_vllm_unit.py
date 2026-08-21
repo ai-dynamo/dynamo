@@ -861,6 +861,7 @@ class TestBenchmarkConfig:
             "decode_max_kv_read_token_samples": 128,
             "decode_max_batch_size_samples": 128,
             "prefix_max_batch_size_samples": 3,
+            "collect_imbalanced": False,
         }
 
     def test_benchmark_points_file_is_embedded_in_benchmark_config(
@@ -1537,6 +1538,7 @@ def _make_dynamo_config(**overrides):
         "decode_max_kv_read_token_samples": 128,
         "decode_max_batch_size_samples": 128,
         "prefix_max_batch_size_samples": 3,
+        "benchmark_collect_imbalanced": False,
         "_benchmark_points": None,
     }
     defaults.update(overrides)

@@ -122,7 +122,6 @@ impl HostMetrics {
 
 struct HostControlEngine {
     status: Arc<ArcSwap<KvStateHostStatus>>,
-    slots: Arc<Mutex<HashMap<CacheOwnerId, HostedSlot>>>,
 }
 
 #[async_trait]
@@ -136,47 +135,6 @@ impl AsyncEngine<SingleIn<KvStateHostControlRequest>, ManyOut<KvStateHostStatus>
         let (request, context) = request.into_parts();
         match request {
             KvStateHostControlRequest::Status => {}
-            KvStateHostControlRequest::SetCacheReadable {
-                cache_owner_id,
-                producer_instance,
-                intent_incarnation,
-                readable,
-            } => {
-                // NOTE: The Dynamo namespace/DRT control plane is a trusted
-                // component boundary. These identities fence the current
-                // attachment; they are not authentication secrets. A future
-                // untrusted control plane requires transport authentication,
-                // not a capability copied through discovery.
-                let (agent, generation) = {
-                    let slots = self.slots.lock().await;
-                    let slot = slots
-                        .get(&cache_owner_id)
-                        .context("KV state-agent slot is not present")?;
-                    if slot.lifecycle != SlotLifecycle::Active
-                        || slot.intent_incarnation != Some(intent_incarnation)
-                        || slot.producer_instance.as_ref() != Some(producer_instance.as_ref())
-                    {
-                        anyhow::bail!(
-                            "readability update does not match the active attachment intent"
-                        );
-                    }
-                    let agent = slot
-                        .agent
-                        .clone()
-                        .context("active slot has no state agent")?;
-                    let generation = agent
-                        .status()
-                        .attachment
-                        .as_ref()
-                        .context("active slot has no engine attachment")?
-                        .generation;
-                    (agent, generation)
-                };
-                agent
-                    .set_cache_readable(generation, readable)
-                    .await
-                    .context("failed to update CacheOwner readability")?;
-            }
         }
         Ok(ResponseStream::new(
             Box::pin(stream::iter(vec![(*self.status.load_full()).clone()])),
@@ -213,7 +171,6 @@ impl KvStateAgentHost {
             .endpoint_builder()
             .handler(Ingress::for_engine(Arc::new(HostControlEngine {
                 status: status.clone(),
-                slots: slots.clone(),
             }))?)
             .graceful_shutdown(true)
             .start_with_registration()

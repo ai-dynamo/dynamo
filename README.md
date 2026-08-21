@@ -132,6 +132,10 @@ the Gateway API setup, supported features, and configuration.
 
 ## Quick Start
 
+> This repo ships agent skills: if you work with an AI coding agent (Claude Code, Codex,
+> Cursor), clone the repo and ask it to deploy, troubleshoot, benchmark, or optimize a Dynamo
+> deployment. The skills activate automatically; no setup required.
+
 ### Option A: Container (fastest)
 
 ```bash

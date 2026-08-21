@@ -112,6 +112,12 @@ func ConvertFromDynamoGraphDeploymentSpec(src *DynamoGraphDeploymentSpec, dst *v
 	dst.PriorityClassName = src.PriorityClassName
 	dst.BackendFramework = src.BackendFramework
 
+	// Convert the root provider context without interpreting its opaque value.
+	if src.ProviderOverride != nil {
+		dst.ProviderOverride = &v1beta1.ProviderOverride{}
+		ConvertFromProviderOverride(src.ProviderOverride, dst.ProviderOverride)
+	}
+
 	if src.Restart != nil {
 		dst.Restart = &v1beta1.Restart{}
 		ConvertFromRestart(src.Restart, dst.Restart)
@@ -418,6 +424,12 @@ func ConvertToDynamoGraphDeploymentSpec(src *v1beta1.DynamoGraphDeploymentSpec, 
 	dst.Labels = src.Labels
 	dst.PriorityClassName = src.PriorityClassName
 	dst.BackendFramework = src.BackendFramework
+
+	// Convert the root provider context without interpreting its opaque value.
+	if src.ProviderOverride != nil {
+		dst.ProviderOverride = &ProviderOverride{}
+		ConvertToProviderOverride(src.ProviderOverride, dst.ProviderOverride)
+	}
 
 	if src.Restart != nil {
 		dst.Restart = &Restart{}
