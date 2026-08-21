@@ -240,8 +240,10 @@ Do not send `force_nonempty_content` as a top-level request parameter.
 
 1. Optional OpenAI/vLLM/NIM API fields are shared Dynamo API compatibility gaps, not Ultra recipe-specific failures.
 2. Top-level reasoning controls such as `include_reasoning`, `thinking_token_budget`, `reasoning_effort`, and `usage.reasoning_tokens` are part of that shared API compatibility work. Use the Ultra-specific `chat_template_kwargs` and `nvext` controls above as the current model-specific workaround.
-3. Do not remove `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel` or `--no-enable-flashinfer-autotune` from the vLLM worker commands unless rerunning the benchmark qualification. These are part of the performance recipe.
-4. Raw Moontrace replay may contain over-context or pathological long-generation rows. Do not drop those rows silently; preserve them as HTTP/error evidence or classify the run accordingly.
+3. With the OSS vLLM version bundled in the pinned Dynamo 1.4.0 runtime, reasoning-enabled requests using `response_format` with `json_object` or `json_schema` may return malformed JSON with HTTP 200. The fix is available upstream in [vLLM PR #44993](https://github.com/vllm-project/vllm/pull/44993) but is not included in the pinned runtime. Disable thinking for constrained output when appropriate, and validate structured output before consuming the response.
+4. The same bundled OSS vLLM limitation affects reasoning-enabled requests using `tool_choice: "required"` or a named tool choice: the response may contain plain `content` with `finish_reason: "stop"` instead of structured `tool_calls`. Disable thinking for constrained tool calls when appropriate, and validate `tool_calls` before consuming the response.
+5. Do not remove `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel` or `--no-enable-flashinfer-autotune` from the vLLM worker commands unless rerunning the benchmark qualification. These are part of the performance recipe.
+6. Raw Moontrace replay may contain over-context or pathological long-generation rows. Do not drop those rows silently; preserve them as HTTP/error evidence or classify the run accordingly.
 
 ## File Layout
 
