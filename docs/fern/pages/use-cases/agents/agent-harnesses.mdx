@@ -41,9 +41,19 @@ bash examples/backends/sglang/launch/agg_agent.sh
   </Tab>
   <Tab title="Omnigent">
 
-    Omnigent is an open-source meta-harness from the Databricks AI team and Neon. The experimental pinned path wraps Codex, configures a generic gateway provider with Dynamo's `/v1` Responses endpoint, and isolates Omnigent, Codex, and uv state from the user's normal configuration:
+    Omnigent is an open-source meta-harness from the Databricks AI team and Neon. The experimental path is based on Dynamo commit `a6261680a974ca7c74dcf49592a7376d7de99380` on branch `omnigent-well-lit-path` and requires Omnigent commit `733234c303af7254597f99b14bda058878d3e8ca`, `uv 0.11.8`, and Codex CLI `0.147.0`. Prepare a detached, clean Omnigent checkout:
 
     ```bash
+    git clone https://github.com/omnigent-ai/omnigent.git /absolute/path/to/omnigent
+    git -C /absolute/path/to/omnigent checkout --detach 733234c303af7254597f99b14bda058878d3e8ca
+    git -C /absolute/path/to/omnigent status --short
+    codex --version
+    ```
+
+    The status command must print nothing, and the version command must print `codex-cli 0.147.0`. The helper wraps Codex, configures a generic gateway provider with Dynamo's `/v1` Responses endpoint, and isolates Omnigent, Codex, and uv state from normal user configuration:
+
+    ```bash
+    export DYNAMO_API_KEY=dummy
     .agents/skills/dynamo-agent-harness/scripts/drive_omnigent.py run \
       --omnigent-repo /absolute/path/to/omnigent \
       --base-url http://localhost:8000 \
@@ -52,9 +62,11 @@ bash examples/backends/sglang/launch/agg_agent.sh
       --prompt 'Inspect one file and report one verified fact.'
     ```
 
-    The helper requires Omnigent commit `733234c303af7254597f99b14bda058878d3e8ca` and a clean checkout. Codex sends streaming `/v1/responses` requests with `thread-id`; Dynamo maps each value to normalized `agent_context.session_id`. Omnigent can also launch a background title turn with its own thread, which is an independent routable session.
+    The helper defaults to `--capability verify`, passes only an allowlisted process environment plus `DYNAMO_API_KEY`, disables host skills and web search, and rejects Codex version drift. It materializes an invocation-owned Omnigent agent bundle with a hard platform sandbox, the selected workspace as the write path, and no environment passthrough. This avoids the pinned shorthand CLI's temporary `sandbox: none` spec. Omnigent projects the authored OS environment into its wrapped Codex process. Codex runs with `workspace-write` and approvals set to `never`; it never defaults to `danger-full-access`. Because `workspace-write` can change the selected worktree, the verify-mode no-edit instruction is not a kernel-enforced read-only boundary. Check `git status --short` after the run. Pass `--capability act` only when workspace edits are authorized.
 
-    This path is compatible with stock Dynamo routing but is not ThunderAgent lifecycle-qualified. The audited Omnigent shutdown stops its local host, runner, tmux, and Codex processes but does not send `x-dynamo-session-final`. See the repository skill's `OMNIGENT_COMPATIBILITY.md` for the evidence and ownership boundary.
+    Codex sends streaming `/v1/responses` requests with `thread-id`; Dynamo maps each value to normalized `agent_context.session_id`. Omnigent can also launch a background title turn with its own thread, which is an independent routable session.
+
+    This one-shot path is qualified only for stock Dynamo request compatibility and session affinity. A shared one-GPU NScale deployment returned a successful `Qwen/Qwen3-0.6B` smoke response, but this branch contains no Kubernetes manifest. It does not prove persistent main-thread reuse and is not ThunderAgent lifecycle-qualified because shutdown does not send `x-dynamo-session-final`. The helper launches outside the selected workspace, forces local Omnigent plus explicit Codex/model choices, and cleans up only daemon records and the server PID file in its private runtime; it never calls Omnigent's machine-wide `stop` sweep. It rejects pre-existing `.codex-tmp` state and checks run-created temp plus disposable runtime removal. On failure it prints structured, credential-redacted command and cleanup diagnostics to stderr. Do not use broad process-kill commands on a shared host. See the [Omnigent compatibility assessment](https://github.com/ai-dynamo/dynamo/blob/main/.agents/skills/dynamo-agent-harness/OMNIGENT_COMPATIBILITY.md) for the complete tuple, teardown command, troubleshooting, evidence, and ownership boundary.
 
   </Tab>
   <Tab title="Pi">
@@ -219,7 +231,7 @@ bash examples/backends/sglang/launch/agg_agent.sh
 
 ## Drive a Harness from Another Agent
 
-Use the repository's `.agents/skills/dynamo-agent-harness` skill when an agent needs to keep a Claude Code, Codex, or OpenCode session open across multiple prompts while Dynamo serves the model. The skill uses Agent Client Protocol (ACP) and injects the provider configuration through the child process environment instead of adding harness configuration files to the delegated worktree.
+Use the repository's `.agents/skills/dynamo-agent-harness` skill when an agent needs to keep a Claude Code, Codex, or OpenCode session open across multiple prompts while Dynamo serves the model. Those persistent paths use Agent Client Protocol (ACP) and inject provider configuration through the child process environment instead of adding harness configuration files to the delegated worktree. The same skill also contains the separate pinned Omnigent/Codex one-shot helper described above; Omnigent does not use ACP and does not provide a persistent multi-prompt session in this qualification.
 
 The skill pins the Claude Code and Codex ACP adapters. If a harness release changes the model, endpoint, session header, authentication, or mode configuration, update this page and the skill in the same change after running a persistent two-turn tool smoke test.
 
