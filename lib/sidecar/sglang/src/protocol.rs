@@ -239,7 +239,7 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
     Ok(())
 }
 
-fn resolve_disaggregated_params(
+pub(crate) fn resolve_disaggregated_params(
     request: &PreprocessedRequest,
     mode: DisaggregationMode,
     bootstrap_host: Option<&str>,
