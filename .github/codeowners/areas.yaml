@@ -552,6 +552,18 @@ shared:
   owners:
   - process
   - agents
+- glob: .codex/
+  owners:
+  - process
+  - agents
+- glob: agents/
+  owners:
+  - process
+  - agents
+- glob: agent-docs/
+  owners:
+  - process
+  - agents
 - glob: .github/workflows/fern-docs.yml
   owners:
   - ops

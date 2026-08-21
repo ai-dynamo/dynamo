@@ -4047,6 +4047,119 @@ dependencies = [
 ]
 
 [[package]]
+name = "kvbm-common"
+version = "1.5.0"
+dependencies = [
+ "dynamo-tokens",
+ "serde",
+]
+
+[[package]]
+name = "kvbm-config"
+version = "1.5.0"
+dependencies = [
+ "anyhow",
+ "dynamo-memory",
+ "figment",
+ "nix 0.30.1",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "validator",
+ "velo",
+]
+
+[[package]]
+name = "kvbm-engine"
+version = "1.5.0"
+dependencies = [
+ "anyhow",
+ "aws-config",
+ "aws-sdk-s3",
+ "bytes",
+ "chrono",
+ "crossbeam-queue",
+ "dashmap",
+ "derive_builder",
+ "dynamo-memory",
+ "futures",
+ "kvbm-common",
+ "kvbm-config",
+ "kvbm-logical",
+ "kvbm-physical",
+ "oneshot",
+ "parking_lot",
+ "rayon",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-rayon",
+ "tokio-stream",
+ "tracing",
+ "uuid",
+ "velo",
+]
+
+[[package]]
+name = "kvbm-kernels"
+version = "1.5.0"
+dependencies = [
+ "cudarc",
+]
+
+[[package]]
+name = "kvbm-logical"
+version = "1.5.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "bincode 2.0.1",
+ "bytes",
+ "derive_builder",
+ "dynamo-tokens",
+ "futures",
+ "indexmap 2.14.0",
+ "lru 0.16.4",
+ "parking_lot",
+ "prometheus",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "kvbm-physical"
+version = "1.5.0"
+dependencies = [
+ "aligned-vec",
+ "anyhow",
+ "bincode 2.0.1",
+ "blake3",
+ "cudarc",
+ "derive-getters",
+ "derive_builder",
+ "dynamo-memory",
+ "futures",
+ "kvbm-common",
+ "kvbm-kernels",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "validator",
+ "velo",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
