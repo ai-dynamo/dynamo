@@ -94,21 +94,9 @@ impl RoutingLoadState {
                             break;
                         };
                         let configured_workers = workers.borrow_and_update().clone();
-                        let ranges = configured_workers
-                            .iter()
-                            .map(|(&worker_id, config)| {
-                                WorkerDpRange::new(
-                                    worker_id,
-                                    config.data_parallel_start_rank(),
-                                    config.data_parallel_size(),
-                                )
-                            })
-                            .collect::<Vec<_>>();
                         let _selection = state.selection_gate.lock();
-                        if let Err(error) = state.slots.reconcile_workers(ranges) {
+                        if let Err(error) = state.update_worker_topology(configured_workers) {
                             tracing::error!(%error, "Invalid routing load worker topology update");
-                        } else {
-                            *state.workers.write() = configured_workers;
                         }
                     }
                 }
@@ -169,6 +157,79 @@ impl RoutingLoadState {
 
     pub(crate) fn is_configured_worker(&self, worker_id: u64) -> bool {
         self.workers.read().contains_key(&worker_id)
+    }
+
+    fn prune_unconfigured_worker(&self, worker_id: u64) -> Result<()> {
+        if self.is_configured_worker(worker_id) {
+            return Ok(());
+        }
+
+        let Some(range) = self
+            .slots
+            .worker_ranges()
+            .into_iter()
+            .find(|range| range.worker_id == worker_id)
+        else {
+            return Ok(());
+        };
+
+        if self.slots.active_request_count_for_worker(
+            range.worker_id,
+            range.dp_start,
+            range.dp_size,
+        ) == 0
+        {
+            self.slots
+                .unregister_worker(worker_id)
+                .with_context(|| format!("remove drained routing load worker {worker_id}"))?;
+        }
+        Ok(())
+    }
+
+    /// Update the workers eligible for new requests without discarding live bookings.
+    ///
+    /// This state owns caller-side reservations. Discovery absence removes a worker from
+    /// `workers` immediately, while its slot remains until the final reservation releases.
+    fn update_worker_topology(
+        &self,
+        configured_workers: HashMap<u64, ModelRuntimeConfig>,
+    ) -> Result<()> {
+        let ranges = configured_workers
+            .iter()
+            .map(|(&worker_id, config)| {
+                WorkerDpRange::new(
+                    worker_id,
+                    config.data_parallel_start_rank(),
+                    config.data_parallel_size(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for range in &ranges {
+            range
+                .validate()
+                .context("validate routing load worker topology")?;
+        }
+
+        for range in ranges {
+            let worker_id = range.worker_id;
+            self.slots
+                .upsert_worker(range)
+                .with_context(|| format!("update routing load worker {worker_id}"))?;
+        }
+
+        *self.workers.write() = configured_workers;
+
+        for worker_id in self
+            .slots
+            .worker_ranges()
+            .into_iter()
+            .map(|range| range.worker_id)
+            .collect::<Vec<_>>()
+        {
+            self.prune_unconfigured_worker(worker_id)?;
+        }
+
+        Ok(())
     }
 
     fn select_worker(
@@ -323,6 +384,7 @@ impl RoutingLoadReservation {
         let _selection = self.state.selection_gate.lock();
         let workers = self.state.workers.read();
         let next_worker = self.state.least_loaded_rank(&workers, worker_id)?;
+        drop(workers);
         self.state
             .slots
             .free_if_worker(
@@ -332,6 +394,8 @@ impl RoutingLoadReservation {
             )
             .context("release routing load before transport fallback")?;
         self.armed = false;
+        self.state
+            .prune_unconfigured_worker(self.worker.worker_id)?;
         self.state
             .slots
             .add_request_if_registered(
@@ -362,6 +426,7 @@ impl RoutingLoadReservation {
         if !self.armed {
             return Ok(());
         }
+        let _selection = self.state.selection_gate.lock();
         self.state
             .slots
             .free_if_worker(
@@ -371,6 +436,8 @@ impl RoutingLoadReservation {
             )
             .context("release routing load reservation")?;
         self.armed = false;
+        self.state
+            .prune_unconfigured_worker(self.worker.worker_id)?;
         Ok(())
     }
 }
