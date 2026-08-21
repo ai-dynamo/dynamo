@@ -17,6 +17,11 @@ metadata:
 
 # Author Baseline DGD
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 Draft ONE candidate baseline DGD for a greenfield engagement and present it for the user's explicit confirmation.
 Do not deploy, benchmark, apply, or record anything as the baseline: an unconfirmed draft is a proposal, and only
 the user's confirmation makes it a user-provided baseline.

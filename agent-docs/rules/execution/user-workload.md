@@ -102,6 +102,9 @@ created_at: ""
   traffic-shape information for a defensible benchmark.
 - Require `deployment.dgd_path` to resolve to `<EXP_ROOT>/inputs/user_provided_dgd.yaml`, and require
   `deployment.dgd_sha256` to match that file.
+- Require `deployment.origin` to be exactly `user`, `recipe-confirmed`, or `agent-authored`. Require
+  `deployment.origin_source` to be empty for `user`, and non-empty for the other origins (the recipe path for
+  `recipe-confirmed`; `inputs/baseline-evidence.md` for `agent-authored`).
 - `kube_context` and `namespace` are required. The namespace must already exist.
 - Treat `resources.gpu_ceiling` as authorization, not entitlement: every GPU-consuming experiment still requires its
   own evidence and adversarial review. `hardware[]` describes what the workload serves on; `gpu_ceiling` bounds the

@@ -115,8 +115,9 @@ Create the canonical baseline input:
 - When the baseline came from the ladder (rung 2 adapted recipe or rung 3 authored draft), materialize the exact
   manifest the user confirmed - byte-for-byte as confirmed, including any user amendments - and record the
   matching `origin` and `origin_source`.
-- Parse the canonical copy as YAML and require at least one mapping document whose `kind` is
-  `DynamoGraphDeployment`.
+- Parse the canonical copy as YAML and require exactly one mapping document whose `kind` is
+  `DynamoGraphDeployment`; reject a file containing zero or multiple such documents, since a multi-DGD file leaves
+  `recipe-deployer` without a deterministic baseline.
 - Reject embedded secret values or Kubernetes `Secret` resources; references to pre-existing Secret names are allowed.
 - Reject a recipe directory, catalog choice, generated substitute, or inferred default in place of the user's DGD.
   A specific manifest the user explicitly presents OR confirms as their baseline is a user-provided baseline,
