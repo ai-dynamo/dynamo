@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Blocker claim for verifying GMS on clusters where the NVIDIA device plugin
+# also serves nvidia.com/gpu workloads. The DRA scheduler cannot see
+# device-plugin allocations, so it can place the GMS claim on a GPU that is
+# already fully occupied. Reserving the occupied devices with this claim before
+# deploying a GMS workload steers the generated claims onto free devices.
+#
+# Devices are selected by GPU UUID. List the UUIDs with `nvidia-smi -L` on the
+# node, or map DRA device names to UUIDs from the v1 ResourceSlices (the shape
+# below is resource.k8s.io/v1; querying the version explicitly fails loudly on
+# clusters that do not serve it):
+#   kubectl get resourceslices.v1.resource.k8s.io -o jsonpath='{range .items[*].spec.devices[*]}{.name}{" "}{.attributes.uuid.string}{"\n"}{end}'
+# The ResourceClaim spec is immutable: to change the UUIDs or count later,
+# delete both objects and apply the manifest again.
+# Replace the UUIDs and count below with the occupied GPUs on your node, then:
+#   kubectl apply -n <namespace> -f gms-dra-blocker.yaml
+# The busybox pod holds the devices in the DRA ledger without starting any CUDA
+# process, so the occupied GPUs keep serving their existing workloads.
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: gms-dra-blocker
+spec:
+  devices:
+    requests:
+      - name: blocked
+        exactly:
+          deviceClassName: gpu.nvidia.com
+          allocationMode: ExactCount
+          count: 2
+          selectors:
+            - cel:
+                expression: >-
+                  device.attributes["gpu.nvidia.com"].uuid == "GPU-b390fd89-5025-58d1-977b-75e706fe0fc1" ||
+                  device.attributes["gpu.nvidia.com"].uuid == "GPU-190d0ebe-9b3f-4c01-9c3f-47abe8f34439"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gms-dra-blocker
+spec:
+  restartPolicy: Never
+  resourceClaims:
+    - name: blocker
+      resourceClaimName: gms-dra-blocker
+  containers:
+    - name: hold
+      image: busybox:1.36
+      command: ["sleep", "infinity"]
+      # Guaranteed QoS keeps the holder off the node-pressure eviction list;
+      # evicting the only consumer would release the claim's reservation.
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 10m
+          memory: 16Mi
+        claims:
+          - name: blocker

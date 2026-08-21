@@ -55,3 +55,7 @@
 # The v1.4.0 release entry lands with the current-release promotion; the tag
 # URL 404s from CI until v1.4.0 is cut. Remove after the tag exists.
 ^https://github\.com/ai-dynamo/dynamo/releases/tag/v1\.4\.0$
+
+# The GMS blocker example is introduced by the same PR as its docs link, so the
+# blob/main URL 404s from CI until the PR merges. Remove once it lands on main.
+^https://github\.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/gms-dra-blocker\.yaml$
