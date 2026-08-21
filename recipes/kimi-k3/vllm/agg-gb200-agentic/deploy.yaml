@@ -118,6 +118,7 @@ spec:
               --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' \
               --cpu-distributed-timeout-seconds 3600 \
               --scheduler-cls vllm.v1.core.sched.async_scheduler.AsyncScheduler \
+              --dyn-enable-structural-tag \
               --dyn-tool-call-parser kimi_k3 \
               --reasoning-parser kimi_k3 \
               --dyn-reasoning-parser kimi_k3
