@@ -29,7 +29,14 @@ pytestmark = [
     pytest.mark.vllm,
     pytest.mark.core,
     pytest.mark.framework_agnostic,
+    # Runs in well under a second, but every signal is a subprocess: bound the
+    # whole test so a wedged nvcc, dpkg or pip cannot hang CI.
+    pytest.mark.timeout(60),
 ]
+
+# Per-command bound, so one stuck tool fails fast instead of consuming the
+# test-wide budget.
+COMMAND_TIMEOUT_S = 20
 
 # The CUDA major every signal must report. Bump this when the images migrate to
 # the next major; the scan patterns and the assertion both derive from it.
@@ -37,8 +44,8 @@ EXPECTED_MAJOR = 13
 
 # Majors the scanner recognizes. Keep majors we have already left behind, so a
 # stray package is reported rather than silently unmatched, and add the next one
-# ahead of a migration.
-RECOGNIZED_MAJORS = (12, 13, 14)
+# here when a migration starts (nothing else needs editing).
+RECOGNIZED_MAJORS = (12, 13)
 
 # Optional floor as (major, minor), applied to every signal that carries a minor
 # version. Set to (13, 1) to require CUDA >= 13.1 image-wide. None checks the
@@ -61,6 +68,10 @@ PIP_MAJOR_EXCEPTIONS = {
     # unconditionally; nixl[cu13] narrows nothing.
     "nixl-cu12": "unconditional dependency of the nixl meta package",
 }
+
+# Cap how much of a long signal (dpkg listings) the failure report prints. Only
+# the report is truncated; every line is still scanned.
+MAX_REPORTED_LINES = 50
 
 _MAJORS = "|".join(str(m) for m in RECOGNIZED_MAJORS)
 
@@ -92,21 +103,28 @@ def sh(cmd: str) -> str:
     """
     Run command and return stdout only.
     We intentionally drop stderr to avoid noisy tools (pip warnings, etc.).
+    A timeout is deliberately left to propagate: a signal we cannot read is a
+    failure, not a signal that reports nothing.
     """
     p = subprocess.run(
         ["bash", "-lc", f"{cmd} 2>/dev/null"],
         stdout=subprocess.PIPE,
         text=True,
         check=False,
+        timeout=COMMAND_TIMEOUT_S,
     )
     return (p.stdout or "").strip()
 
 
 def cuda_version_from_text(text: str) -> tuple[int, int | None] | None:
     """
-    Extract a CUDA (major, minor) from arbitrary text. minor is None when the
-    signal carries only a major (e.g. a '-cu13' wheel tag). Returns None when no
-    recognized CUDA version is present.
+    Extract a CUDA (major, minor) from a single line of text. minor is None when
+    the signal carries only a major (e.g. a '-cu13' wheel tag). Returns None when
+    no recognized CUDA version is present.
+
+    Call this per line, never on a multi-line blob: it returns the first match,
+    so scanning combined output would let a stray major hide behind an expected
+    one earlier in the same output.
     """
     if not text:
         return None
@@ -154,53 +172,51 @@ def test_cuda_version_consistency() -> None:
             "dpkg:libcublas/libnccl",
             rf"dpkg -l | grep -E '^(ii|hi)\s+lib(cublas|nccl).*-({_MAJORS})-'",
         ),
-        # pip signal: majors are inferred per line, so one stray wheel is named
-        # rather than averaged away.
         ("pip:selected", PIP_LIST_CMD),
     ]
 
-    # (signal label, what to name in the failure, parsed version)
+    # (signal label, the line to name in a failure, parsed version)
     detected: list[tuple[str, str, tuple[int, int | None]]] = []
     excused: list[tuple[str, tuple[int, int | None], str]] = []
     report: list[str] = [f"CUDA version signals (expected major {EXPECTED_MAJOR}):"]
 
     for label, cmd in signals:
-        out = sh(cmd)
-        lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+        lines = [ln.strip() for ln in sh(cmd).splitlines() if ln.strip()]
+        report.append(f"  {label}")
 
-        if label.startswith("pip:"):
-            report.append(f"      {label}")
-            for line in lines:
-                version = cuda_version_from_text(line)
-                reason = PIP_MAJOR_EXCEPTIONS.get(pip_distribution_name(line))
-                note = ""
-                if version is not None and reason is not None:
-                    excused.append((line, version, reason))
-                    note = f"   (allowed: {reason})"
-                elif version is not None:
-                    detected.append((label, line, version))
-                report.append(f"        {format_version(version):>5}  {line}{note}")
-            if not lines:
-                report.append("        <no output>")
+        if not lines:
+            report.append("        <no output>")
             continue
 
-        version = cuda_version_from_text(out)
-        if version is not None:
-            detected.append((label, label, version))
-        report.append(f"  {format_version(version):>5}  {label}")
-        for line in lines[:50] or ["<no output>"]:
-            report.append(f"        {line}")
-        if len(lines) > 50:
-            report.append(f"        ... ({len(lines) - 50} more lines)")
+        for index, line in enumerate(lines):
+            version = cuda_version_from_text(line)
+            reason = (
+                PIP_MAJOR_EXCEPTIONS.get(pip_distribution_name(line))
+                if label.startswith("pip:")
+                else None
+            )
+
+            note = ""
+            if version is not None and reason is not None:
+                excused.append((line, version, reason))
+                note = f"   (allowed: {reason})"
+            elif version is not None:
+                detected.append((label, line, version))
+
+            if index < MAX_REPORTED_LINES:
+                report.append(f"        {format_version(version):>5}  {line}{note}")
+
+        if len(lines) > MAX_REPORTED_LINES:
+            report.append(f"        ... ({len(lines) - MAX_REPORTED_LINES} more lines)")
 
     if not detected and not excused:
         pytest.skip("No CUDA version detected from any signal.")
 
     violations: list[str] = []
-    for label, detail, (major, minor) in detected:
+    for label, line, (major, minor) in detected:
         if major != EXPECTED_MAJOR:
             violations.append(
-                f"  {label}: {detail} reports CUDA {format_version((major, minor))}, "
+                f"  {label}: {line} reports CUDA {format_version((major, minor))}, "
                 f"expected major {EXPECTED_MAJOR}"
             )
         elif (
@@ -209,10 +225,10 @@ def test_cuda_version_consistency() -> None:
             and (major, minor) < MIN_VERSION
         ):
             violations.append(
-                f"  {label}: {detail} reports CUDA {format_version((major, minor))}, "
+                f"  {label}: {line} reports CUDA {format_version((major, minor))}, "
                 f"below the required minimum {MIN_VERSION[0]}.{MIN_VERSION[1]}"
             )
 
     assert not violations, "\n".join(
-        report + ["", "Unexpected CUDA versions:"] + violations
+        [*report, "", "Unexpected CUDA versions:", *violations]
     )
