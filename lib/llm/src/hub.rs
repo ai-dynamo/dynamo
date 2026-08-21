@@ -5,7 +5,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use hf_hub::{Cache, Repo, RepoType, api::tokio::ApiBuilder};
+use hf_hub::Cache;
 use modelexpress_client::{
     Client as MxClient, ClientConfig as MxClientConfig, ModelProvider as MxModelProvider,
 };
@@ -204,6 +204,19 @@ fn is_no_shared_storage() -> bool {
     dynamo_runtime::config::env_is_truthy(env_model::model_express::MODEL_EXPRESS_NO_SHARED_STORAGE)
 }
 
+/// Build the ModelExpress client config shared by `from_hf` and `from_hf_at_revision`
+/// from the same environment variables.
+fn mx_client_config() -> MxClientConfig {
+    let mut config: MxClientConfig = MxClientConfig::default();
+    if let Ok(endpoint) = env::var(env_model::model_express::MODEL_EXPRESS_URL) {
+        config = config.with_endpoint(endpoint);
+    }
+    if is_no_shared_storage() {
+        config.cache.shared_storage = false;
+    }
+    config
+}
+
 /// Download a model using ModelExpress client. The client first requests for the model
 /// from the server and fallbacks to direct download in case of server failure.
 /// If ignore_weights is true, model weight files will be skipped
@@ -227,31 +240,31 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
         );
     }
 
-    let mut config: MxClientConfig = MxClientConfig::default();
-    if let Ok(endpoint) = env::var(env_model::model_express::MODEL_EXPRESS_URL) {
-        config = config.with_endpoint(endpoint);
-    }
-    if is_no_shared_storage() {
-        config.cache.shared_storage = false;
-    }
+    let config = mx_client_config();
 
     let result = match MxClient::new(config).await {
         Ok(mut client) => {
             tracing::info!("Successfully connected to ModelExpress server");
             match client
-                .request_model_with_provider_and_fallback(
+                .request_model_revision(
                     &model_name,
                     MxModelProvider::HuggingFace,
                     ignore_weights,
+                    None,
                 )
                 .await
             {
-                Ok(()) => {
+                Ok(result) => {
                     tracing::info!("Server download succeeded for model: {model_name}");
-                    match client
-                        .get_model_path(&model_name, MxModelProvider::HuggingFace)
-                        .await
-                    {
+                    let resolved = match result.path {
+                        Some(path) => Ok(path),
+                        None => {
+                            client
+                                .get_model_path(&model_name, MxModelProvider::HuggingFace)
+                                .await
+                        }
+                    };
+                    match resolved {
                         Ok(path) => Ok(path),
                         Err(e) => {
                             tracing::warn!(
@@ -290,9 +303,10 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
 
 /// Like `from_hf`, but resolves a specific commit SHA instead of latest.
 /// If the snapshot is already on disk at that revision, returns it immediately.
-/// Otherwise downloads just that revision directly from HuggingFace (bypassing
-/// ModelExpress, which has no concept of pinned revisions) into the shared
-/// cache directory.
+/// Otherwise downloads that revision through ModelExpress, which resolves and
+/// fetches pinned branches/tags/commit SHAs natively (falling back to a direct
+/// HuggingFace download of the same pinned revision if the server is
+/// unreachable).
 pub async fn from_hf_at_revision(
     name: impl AsRef<Path>,
     revision: &str,
@@ -312,90 +326,39 @@ pub async fn from_hf_at_revision(
         return Ok(cached);
     }
 
-    if !ignore_weights {
-        anyhow::bail!(
-            "from_hf_at_revision does not support downloading weights for a pinned \
-            revision yet (ignore_weights=false); only tokenizer/config metadata \
-            download is implemented."
-        );
+    let result = MxClient::request_model_with_smart_fallback_revision(
+        &model_name,
+        MxModelProvider::HuggingFace,
+        mx_client_config(),
+        ignore_weights,
+        Some(revision),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))
+    .with_context(|| format!("downloading {model_name}@{revision} via ModelExpress"))?;
+
+    if let Some(path) = result.path {
+        return Ok(path);
     }
 
-    let token = env::var(env_model::huggingface::HF_TOKEN).ok();
-    let api = ApiBuilder::from_env()
-        .with_cache_dir(get_model_express_cache_dir())
-        .with_token(token)
-        .build()
-        .context("building HuggingFace API client for pinned-revision download")?;
-
-    let repo = api.repo(Repo::with_revision(
-        model_name.clone(),
-        RepoType::Model,
-        revision.to_string(),
-    ));
-
-    let config_path = if let Some(files) = required_files {
-        // Caller knows exactly which files this MDC needs - fetch precisely
-        // those instead of guessing from a hardcoded list, so arbitrary
-        // worker-harvested siblings (added_tokens.json, merges.txt, ...)
-        // are actually downloaded instead of silently missing later.
-        let mut config_path = None;
-        for f in files {
-            let path = repo
-                .get(f)
-                .await
-                .with_context(|| format!("downloading {f} for {model_name}@{revision}"))?;
-            if f == "config.json" {
-                config_path = Some(path);
-            }
-        }
-        config_path.context("MDC required_files did not include config.json")?
-    } else {
-        let config_path = repo
-            .get("config.json")
-            .await
-            .with_context(|| format!("downloading config.json for {model_name}@{revision}"))?;
-
-        if repo.get("tokenizer.json").await.is_err() && repo.get("tiktoken.model").await.is_err() {
-            let info = repo
-                .info()
-                .await
-                .with_context(|| format!("listing files for {model_name}@{revision}"))?;
-            let tiktoken_file = info
-                .siblings
-                .iter()
-                .map(|s| s.rfilename.as_str())
-                .find(|f| f.ends_with(".tiktoken"));
-            match tiktoken_file {
-                Some(f) => {
-                    repo.get(f)
-                        .await
-                        .with_context(|| format!("downloading {f}"))?;
-                }
-                None => anyhow::bail!("no tokenizer file found for {model_name}@{revision}"),
-            }
-        }
-
-        for extra in [
-            "tokenizer_config.json",
-            "generation_config.json",
-            "chat_template.jinja",
-            "chat_template.json",
-            "preprocessor_config.json",
-            "special_tokens_map.json",
-        ] {
-            if let Err(e) = repo.get(extra).await {
-                tracing::debug!(
-                    "optional file {extra} not available for {model_name}@{revision}: {e}"
-                );
-            }
-        }
-        config_path
-    };
-
-    Ok(config_path
-        .parent()
-        .context("config.json path has no parent directory")?
-        .to_path_buf())
+    // The client-reported path is best-effort (e.g. a streaming install with no
+    // locally discoverable cache config) — fall back to the same on-disk lookup
+    // the cache-first check above uses, keyed on the SHA the server actually
+    // resolved the request to.
+    let resolved_revision = result.resolved_revision.as_deref().unwrap_or(revision);
+    get_cached_model_path_at_revision(
+        &model_name,
+        resolved_revision,
+        ignore_weights,
+        required_files,
+        get_model_express_cache_dir(),
+    )
+    .with_context(|| {
+        format!(
+            "ModelExpress download for {model_name}@{revision} (resolved to \
+            {resolved_revision}) succeeded but the snapshot could not be located on disk"
+        )
+    })
 }
 
 // Direct download using the ModelExpress client.
@@ -673,34 +636,29 @@ mod tests {
         assert_eq!(hf_repo_from_snapshot_path(&local_checkpoint), None);
     }
 
-    #[tokio::test]
-    async fn test_from_hf_at_revision_rejects_weights_on_cache_miss() {
+    #[test]
+    fn test_get_cached_model_path_at_revision_finds_pinned_snapshot_with_weights() {
+        // ignore_weights=false is satisfied once weight files are on disk at the
+        // pinned revision — from_hf_at_revision no longer special-cases this to an
+        // error; it now goes through ModelExpress's own pinned-revision download
+        // for full-weight fetches, same as any other cache miss.
         let temp = TempDir::new().unwrap();
-        // Empty cache dir — guarantees a cache miss, so we hit the new guard
-        // before any network call would happen.
-        let result = temp_env::async_with_vars(
-            [(
-                env_model::huggingface::HF_HUB_CACHE,
-                Some(temp.path().to_str().unwrap()),
-            )],
-            async {
-                from_hf_at_revision(
-                    PathBuf::from("test-org/some-model"),
-                    "deadbeef",
-                    None,
-                    /* ignore_weights = */ false,
-                )
-                .await
-            },
-        )
-        .await;
-
-        let err = result.expect_err("ignore_weights=false must be rejected on cache miss");
-        assert!(
-            err.to_string()
-                .contains("does not support downloading weights"),
-            "unexpected error: {err}"
+        let model = "test-org/my-model";
+        let snapshot = build_hf_cache(
+            temp.path(),
+            model,
+            &["config.json", "tokenizer.json", "model.safetensors"],
         );
+
+        let result = get_cached_model_path_at_revision(
+            model,
+            "0000000000000000000000000000000000000000",
+            false,
+            None,
+            temp.path().to_path_buf(),
+        );
+
+        assert_eq!(result.as_deref(), Some(snapshot.as_path()));
     }
 
     #[serial_test::serial]

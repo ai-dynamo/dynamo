@@ -111,8 +111,14 @@ hf-hub = { version = "0.4.2", default-features = false, features = [
 ] }
 
 # ModelExpress for model downloading
-modelexpress-client = { version = "0.3.0" }
-modelexpress-common = { version = "0.3.0" }
+#
+# Pinned to a `main` commit rather than a crates.io release: this commit carries
+# ai-dynamo/modelexpress#598 (pinned-revision downloads), which `from_hf_at_revision`
+# in lib/llm/src/hub.rs depends on and which has not shipped in a release yet
+# (crates.io tops out at v0.5.1, cut from a release branch that diverged before #598
+# merged). Switch back to a `version = "..."` pin once a release includes it.
+modelexpress-client = { git = "https://github.com/ai-dynamo/modelexpress.git", rev = "3db6bdc4e64a5df2d44bb688d6a895581dc3399f" }
+modelexpress-common = { git = "https://github.com/ai-dynamo/modelexpress.git", rev = "3db6bdc4e64a5df2d44bb688d6a895581dc3399f" }
 
 humantime = { version = "2.2.0" }
 indexmap = { version = "2" }
