@@ -2428,6 +2428,7 @@ dependencies = [
  "clap",
  "dynamo-llm",
  "dynamo-protocols",
+ "dynamo-rl",
  "dynamo-runtime",
  "futures",
  "opentelemetry",
@@ -2915,6 +2916,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -3167,7 +3169,6 @@ dependencies = [
  "tonic-build 0.13.1",
  "tonic-health",
  "tracing",
- "url",
 ]
 
 [[package]]
