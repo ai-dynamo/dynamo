@@ -40,6 +40,21 @@ pub struct WorkerRegistration {
     pub max_num_batched_tokens: Option<u64>,
 }
 
+/// Error from [`Selector::select_and_reserve`].
+///
+/// Distinguishes client-input validation failures (which should surface as 400)
+/// from internal scheduler failures (which should surface as retryable 503).
+#[derive(Debug, thiserror::Error)]
+pub enum SelectorError {
+    /// The request carries an invalid routing/scheduling hint, such as an
+    /// unsupported `policy_class`.
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
+    /// An internal error from the embedded selection service.
+    #[error("routing failed: {0}")]
+    Internal(String),
+}
+
 /// A worker-selection request.
 #[derive(Debug, Clone)]
 pub struct SelectRequest {
@@ -51,6 +66,8 @@ pub struct SelectRequest {
     pub allowed_worker_ids: Option<HashSet<u64>>,
     pub priority_jump: Option<f64>,
     pub strict_priority: Option<u32>,
+    pub expected_output_tokens: Option<u32>,
+    pub policy_class: Option<String>,
 }
 
 /// Observability overlap summary (matched token counts).
@@ -85,6 +102,9 @@ pub struct Selector {
     /// disabled (single replica, always ready), or `Some(flag)` that latches
     /// `true` once the initial peer-set sync completes. ANDed into EPP health.
     peer_ready: Option<Arc<AtomicBool>>,
+    /// Configured scheduling policy class names for this model. Used to reject
+    /// unsupported `policy_class` values before they affect scheduling.
+    valid_policy_classes: HashSet<String>,
 }
 
 /// Local bookkeeping for desired-state reconciliation.
@@ -173,6 +193,9 @@ impl Selector {
             .queueing_enabled(&cfg.model_name)
             .map_err(|e| anyhow!("resolving router policy for model {}: {e}", cfg.model_name))?;
         Self::validate_queueing_requirements(cfg, queueing_enabled)?;
+        let valid_policy_classes = service
+            .policy_classes(&cfg.model_name)
+            .map_err(|e| anyhow!("resolving policy classes for model {}: {e}", cfg.model_name))?;
         let replication = match &cfg.peer_service {
             Some(name) => Some((
                 name.clone(),
@@ -184,7 +207,7 @@ impl Selector {
             )),
             None => None,
         };
-        Self::from_service_with_replication(cfg, service, replication).await
+        Self::from_service_with_replication(cfg, service, replication, valid_policy_classes).await
     }
 
     async fn replication(cfg: &EppStandaloneConfig) -> Result<Option<(String, u16)>> {
@@ -201,6 +224,7 @@ impl Selector {
         cfg: &EppStandaloneConfig,
         service: Arc<SelectionService>,
         replication: Option<(String, u16)>,
+        valid_policy_classes: HashSet<String>,
     ) -> Result<Self> {
         let cancel = CancellationToken::new();
 
@@ -242,6 +266,7 @@ impl Selector {
             cancel,
             reconcile_state: Mutex::new(ReconcileState::default()),
             peer_ready,
+            valid_policy_classes,
         })
     }
 
@@ -334,7 +359,19 @@ impl Selector {
     /// Select a worker for a prompt and book its load in one operation. Takes the
     /// request by value so per-request fields are moved into the core request
     /// rather than cloned on the hot path.
-    pub async fn select_and_reserve(&self, req: SelectRequest) -> Result<SelectResponse> {
+    pub async fn select_and_reserve(
+        &self,
+        req: SelectRequest,
+    ) -> Result<SelectResponse, SelectorError> {
+        if let Some(ref policy_class) = req.policy_class
+            && !self.valid_policy_classes.contains(policy_class)
+        {
+            return Err(SelectorError::InvalidRequest(format!(
+                "unsupported policy_class {policy_class:?}; configured classes are: {:?}",
+                self.valid_policy_classes
+            )));
+        }
+
         let reservation_id = req.reservation_id;
         let core_req = CoreSelectAndReserveRequest {
             model_name: req.model_name,
@@ -348,7 +385,7 @@ impl Selector {
                 ..Default::default()
             },
             router_config_override: None,
-            expected_output_tokens: None,
+            expected_output_tokens: req.expected_output_tokens,
             session_id: None,
             priority_jump: req.priority_jump,
             strict_priority: req.strict_priority,
@@ -358,9 +395,9 @@ impl Selector {
         };
         let resp = self
             .service
-            .select_and_reserve(core_req)
+            .select_and_reserve_with_policy_class(core_req, req.policy_class)
             .await
-            .map_err(|e| anyhow!("select_and_reserve failed: {e}"))?;
+            .map_err(|e| SelectorError::Internal(format!("select_and_reserve failed: {e}")))?;
         Ok(SelectResponse {
             reservation_id,
             worker_id: resp.worker_id,
@@ -414,6 +451,8 @@ impl Drop for Selector {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use dynamo_kv_router::{
         WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
         WorkerSelectionPolicyError,
@@ -422,6 +461,31 @@ mod tests {
     use super::*;
 
     struct FirstEligiblePicker;
+
+    /// Custom picker that records the expected output length observed in the
+    /// worker-selection context so tests can assert the value propagated from
+    /// the EPP request into the scheduling policy.
+    #[derive(Clone)]
+    struct ExpectedOutputRecorder(Arc<Mutex<Option<u32>>>);
+
+    impl ExpectedOutputRecorder {
+        fn new() -> (Self, Arc<Mutex<Option<u32>>>) {
+            let inner = Arc::new(Mutex::new(None));
+            (Self(inner.clone()), inner)
+        }
+    }
+
+    impl WorkerPicker for ExpectedOutputRecorder {
+        fn pick(
+            &mut self,
+            context: &WorkerSelectionContext<'_>,
+            input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            *self.0.lock().unwrap() = context.expected_output_tokens();
+            assert!(!input.candidates().is_empty());
+            Ok(0)
+        }
+    }
 
     impl WorkerPicker for FirstEligiblePicker {
         fn pick(
@@ -460,6 +524,8 @@ models:
       - name: direct
         policy_family: standard
         cache_bucket: all
+        quantum: 1
+      - name: express
         quantum: 1
 "#,
         )
@@ -547,6 +613,8 @@ models:
             allowed_worker_ids: None,
             priority_jump: None,
             strict_priority: None,
+            expected_output_tokens: None,
+            policy_class: None,
         }
     }
 
@@ -917,5 +985,118 @@ models:
             .expect_err("duplicate IDs must be rejected");
         assert!(error.to_string().contains("duplicate worker_id 1"));
         assert!(selector.service.list_workers(None, None).is_empty());
+    }
+
+    /// Regression test for the scheduling-metadata propagation gap: a request
+    /// that carries `expected_output_tokens` must forward the value all the way
+    /// into the worker-selection context, not silently drop it to `None`.
+    #[tokio::test]
+    async fn expected_output_tokens_reaches_worker_selection_context() {
+        let (picker, recorded) = ExpectedOutputRecorder::new();
+        let service = Selector::build_selection_service(
+            &test_config(),
+            KvRouterConfig::default(),
+            Some(Arc::new(move |config, worker_type, _partition| {
+                WorkerSelectionPolicy::new(
+                    config.clone(),
+                    worker_type.as_str(),
+                    Vec::new(),
+                    Box::new(picker.clone()),
+                )
+            })),
+        )
+        .await
+        .expect("custom selection service should build");
+
+        let selector = Selector::from_service(&test_config(), service)
+            .await
+            .expect("selector should accept a prebuilt service");
+        selector
+            .reconcile(&[schedulable_registration(1)])
+            .await
+            .expect("worker should register");
+
+        let mut req = select_request("res-eot");
+        req.expected_output_tokens = Some(128);
+        selector
+            .select_and_reserve(req)
+            .await
+            .expect("reserve should succeed");
+
+        let observed = *recorded.lock().unwrap();
+        assert_eq!(
+            observed,
+            Some(128),
+            "expected_output_tokens must reach the worker-selection policy; got {observed:?}"
+        );
+    }
+
+    /// A configured policy class must be accepted and propagated to the
+    /// scheduler; an unknown class must be rejected before it affects scheduling.
+    #[tokio::test]
+    async fn policy_class_is_validated_and_propagated() {
+        let policy_file = model_policy_file();
+        let mut cfg = test_config();
+        cfg.model_name = "threshold-free-model".to_string();
+        let router_config = router_config_with_policy(&policy_file);
+
+        let selector = Selector::new_with_kv_router_config(&cfg, router_config)
+            .await
+            .expect("selector should build");
+        let mut reg = schedulable_registration(1);
+        reg.model_name = "threshold-free-model".to_string();
+        selector
+            .reconcile(&[reg])
+            .await
+            .expect("worker should register");
+
+        // A requestable policy-family name is accepted.
+        let mut valid_family_req = select_request("res-valid-family");
+        valid_family_req.model_name = "threshold-free-model".to_string();
+        valid_family_req.policy_class = Some("standard".to_string());
+        let valid_family_result = selector.select_and_reserve(valid_family_req).await;
+        assert!(
+            valid_family_result.is_ok(),
+            "requestable policy_family 'standard' should be accepted: {:?}",
+            valid_family_result.err()
+        );
+
+        // An explicit class name is also accepted.
+        let mut valid_explicit_req = select_request("res-valid-explicit");
+        valid_explicit_req.model_name = "threshold-free-model".to_string();
+        valid_explicit_req.policy_class = Some("express".to_string());
+        let valid_explicit_result = selector.select_and_reserve(valid_explicit_req).await;
+        assert!(
+            valid_explicit_result.is_ok(),
+            "requestable explicit class 'express' should be accepted: {:?}",
+            valid_explicit_result.err()
+        );
+
+        // The FamilyBucket class name itself is not requestable; the scheduler
+        // would silently fall back to the default family.
+        let mut ignored_name_req = select_request("res-ignored-name");
+        ignored_name_req.model_name = "threshold-free-model".to_string();
+        ignored_name_req.policy_class = Some("direct".to_string());
+        let err = selector
+            .select_and_reserve(ignored_name_req)
+            .await
+            .expect_err("FamilyBucket class name 'direct' should be rejected");
+        assert!(
+            err.to_string().contains("unsupported policy_class"),
+            "unexpected error: {err}"
+        );
+
+        // A completely unknown name is also rejected.
+        let mut unknown_req = select_request("res-invalid-class");
+        unknown_req.model_name = "threshold-free-model".to_string();
+        unknown_req.policy_class = Some("unknown".to_string());
+        let err = selector
+            .select_and_reserve(unknown_req)
+            .await
+            .expect_err("unknown policy_class should be rejected");
+        assert!(
+            err.to_string().contains("unsupported policy_class"),
+            "unexpected error: {err}"
+        );
     }
 }

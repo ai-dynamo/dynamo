@@ -134,6 +134,11 @@ pub enum PickError {
     NoEndpoints,
     #[error("routing failed: {0}")]
     RoutingFailed(String),
+    /// Malformed client input (unparseable body, a 4xx from the tokenizer, or
+    /// an invalid routing/scheduling hint such as an unsupported `policy_class`)
+    /// → 400.
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
     /// Malformed client input (unparseable body, or a 4xx from the tokenizer) → 400.
     #[error("tokenization failed: {0}")]
     TokenizationFailed(String),

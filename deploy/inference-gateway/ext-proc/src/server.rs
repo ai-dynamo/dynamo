@@ -945,6 +945,10 @@ impl ExtProcError {
                 status_code: StatusCode::ServiceUnavailable,
                 message: msg,
             },
+            PickError::InvalidRequest(msg) => Self {
+                status_code: StatusCode::BadRequest,
+                message: msg,
+            },
             PickError::TokenizationFailed(msg) => Self {
                 status_code: StatusCode::BadRequest,
                 message: msg,
@@ -1591,5 +1595,15 @@ mod tests {
     fn overloaded_pick_error_maps_to_503() {
         let err = ExtProcError::from_pick_error(PickError::Overloaded);
         assert_eq!(err.status_code, StatusCode::ServiceUnavailable);
+    }
+
+    /// An invalid client-supplied scheduling hint (e.g., an unsupported
+    /// `policy_class`) must map to a client 400, not a retryable 503.
+    #[test]
+    fn invalid_policy_class_maps_to_400() {
+        let err = ExtProcError::from_pick_error(PickError::InvalidRequest(
+            "unsupported policy_class \"unknown\"".to_string(),
+        ));
+        assert_eq!(err.status_code, StatusCode::BadRequest);
     }
 }

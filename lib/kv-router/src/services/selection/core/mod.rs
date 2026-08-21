@@ -149,6 +149,15 @@ impl SelectionCore {
         self.kv_router_config.queueing_enabled(Some(model_name))
     }
 
+    /// Return the names callers may supply in `policy_class` for `model_name`.
+    pub(super) fn policy_classes(
+        &self,
+        model_name: &str,
+    ) -> Result<std::collections::HashSet<String>, crate::scheduling::RouterPolicyConfigError> {
+        let profile = self.kv_router_config.policy_profile(Some(model_name))?;
+        Ok(profile.requestable_class_names())
+    }
+
     /// Create an intentionally local selector without replica synchronization
     /// or startup recovery.
     ///

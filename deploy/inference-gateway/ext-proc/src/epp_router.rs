@@ -35,9 +35,14 @@ use serde::Deserialize;
 use crate::epp_standalone_config::EppStandaloneConfig;
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
 use crate::pod_discovery::PodDiscovery;
-use crate::selector::{SelectRequest, Selector};
+use crate::selector::{SelectRequest, Selector, SelectorError};
 use crate::topology_adapter::{RegistrationDefaults, TopologyAdapter};
 use crate::vllm_render_client::{VllmRenderClient, VllmRenderError};
+
+/// Dynamo metadata header used to carry the requested scheduling policy class.
+/// Matches the frontend router's metadata extraction in
+/// `lib/llm/src/http/service/metadata.rs`.
+const POLICY_CLASS_HEADER: &str = "x-dynamo-meta-policy-class";
 
 /// Standalone endpoint picker backed by the standalone selection service.
 pub struct EppRouter {
@@ -150,14 +155,14 @@ impl EppRouter {
     }
 
     /// Tokenize a chat body for routing → `(token_ids, priority_jump,
-    /// strict_priority)`. Priority uses header-over-body precedence via
-    /// [`resolve_request_priority`].
+    /// strict_priority, expected_output_tokens)`. Priority uses header-over-body
+    /// precedence via [`resolve_request_priority`]
     async fn tokenize(
         &self,
         request_body: bytes::Bytes,
         priority_header: Option<String>,
         strict_priority_header: Option<String>,
-    ) -> Result<(Vec<u32>, Option<f64>, Option<u32>), TokenizeError> {
+    ) -> Result<(Vec<u32>, Option<f64>, Option<u32>, Option<u32>), TokenizeError> {
         // Parse only `nvext.agent_hints` for priority — the worker re-parses the
         // full body anyway, so we skip allocating the large `messages`/tools
         // fields. Malformed JSON still fails here (→ 400); a well-formed body that
@@ -169,13 +174,23 @@ impl EppRouter {
             priority_header.as_deref(),
             strict_priority_header.as_deref(),
         );
+        let expected_output_tokens = hints
+            .nvext
+            .as_ref()
+            .and_then(|n| n.agent_hints.as_ref())
+            .and_then(|h| h.osl);
         // Moves the `Bytes` into reqwest (zero-copy) rather than copying.
         let token_ids = self
             .renderer
             .render_chat(request_body)
             .await
             .map_err(TokenizeError::Render)?;
-        Ok((token_ids, resolved.priority_jump, resolved.strict_priority))
+        Ok((
+            token_ids,
+            resolved.priority_jump,
+            resolved.strict_priority,
+            expected_output_tokens,
+        ))
     }
 
     /// Ready workers inside an Envoy `candidate_subset`, resolved in a single index
@@ -322,10 +337,11 @@ impl EndpointPicker for EppRouter {
             first_header(&req.headers, HEADER_REQUEST_PRIORITY).map(str::to_owned);
         let strict_priority_header =
             first_header(&req.headers, HEADER_REQUEST_STRICT_PRIORITY).map(str::to_owned);
-        let (tokens, priority_jump, strict_priority) = self
+        let (tokens, priority_jump, strict_priority, expected_output_tokens) = self
             .tokenize(req.body.clone(), priority_header, strict_priority_header)
             .await
             .map_err(|e| e.into_pick_error(&req.request_id))?;
+        let policy_class = first_header(&req.headers, POLICY_CLASS_HEADER).map(str::to_owned);
 
         // EPP-minted booking key (not the reused `x-request-id`): stays
         // EPP-known/releasable and rides back on `PickResult::reservation_id`,
@@ -350,12 +366,17 @@ impl EndpointPicker for EppRouter {
             // Effective header-over-body values; `None` only when unset everywhere.
             priority_jump,
             strict_priority,
+            expected_output_tokens,
+            policy_class,
         };
 
         // On either error return below the guard (still armed) frees the booking.
+        // Preserve selector validation failures as client-input errors (400); only
+        // internal scheduler failures become retryable routing failures (503).
         let resp = match self.selector.select_and_reserve(select_req).await {
             Ok(resp) => resp,
-            Err(e) => return Err(PickError::RoutingFailed(e.to_string())),
+            Err(SelectorError::InvalidRequest(msg)) => return Err(PickError::InvalidRequest(msg)),
+            Err(SelectorError::Internal(msg)) => return Err(PickError::RoutingFailed(msg)),
         };
 
         // The reflector owns the address + readiness. If it can no longer resolve
