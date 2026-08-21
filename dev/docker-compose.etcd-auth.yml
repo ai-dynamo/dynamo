@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Optional overlay: enable authentication on the etcd control plane.
+#
+# The base dev/docker-compose.yml runs etcd with ALLOW_NONE_AUTHENTICATION=yes
+# (anonymous), which is convenient for local dev but leaves the discovery plane
+# open. Layer this file on top to run etcd with a root password instead:
+#
+#   export ETCD_ROOT_PASSWORD=$(openssl rand -hex 16)
+#   docker compose -f dev/docker-compose.yml -f dev/docker-compose.etcd-auth.yml up
+#
+# This bare compose only runs infra (nats + etcd); Dynamo processes run on the
+# host. Point them at the authenticated etcd by exporting matching credentials
+# in the same shell before launching the frontend/workers:
+#
+#   export ETCD_AUTH_USERNAME=root
+#   export ETCD_AUTH_PASSWORD=$ETCD_ROOT_PASSWORD
+#
+# The dynamo-runtime etcd client consumes ETCD_AUTH_USERNAME/ETCD_AUTH_PASSWORD
+# (see lib/runtime/src/transports/etcd.rs) and connects with password auth. For
+# mutual-TLS instead of a password, set ETCD_AUTH_CA / ETCD_AUTH_CLIENT_CERT /
+# ETCD_AUTH_CLIENT_KEY and mount the certs into the container.
+
+services:
+  etcd-server:
+    environment:
+      # Overrides the base ALLOW_NONE_AUTHENTICATION=yes. Setting
+      # ETCD_ROOT_PASSWORD makes the Bitnami entrypoint create the `root`
+      # user and run `etcdctl auth enable` on first boot. The `:?` guard
+      # fails fast if auth is requested but no password was provided,
+      # rather than silently starting etcd open.
+      - ALLOW_NONE_AUTHENTICATION=no
+      - ETCD_ROOT_PASSWORD=${ETCD_ROOT_PASSWORD:?set ETCD_ROOT_PASSWORD to enable etcd auth}
