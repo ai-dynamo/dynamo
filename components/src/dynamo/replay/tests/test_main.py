@@ -370,3 +370,147 @@ def test_engine_and_dynamo_mains_apply_identical_aic_capacity_lowering(
     assert engine_blocks == dynamo_blocks == 444
     assert len(estimator_calls) == 2
     assert all("nextn" not in call for call in estimator_calls)
+
+
+class _AicSpecArgs:
+    """Only the two attributes `_with_aic_speculation` reads."""
+
+    def __init__(self, aic_nextn=None, aic_nextn_accept_rates=None) -> None:
+        self.aic_nextn = aic_nextn
+        self.aic_nextn_accept_rates = aic_nextn_accept_rates
+
+
+def test_aic_speculation_flags_reach_the_engine_args() -> None:
+    # The flags are routed into AicPerfConfig, which only feeds the router's
+    # prefill-load estimator. The burst sampler reads them off the engine args,
+    # so without this the simulation modelled no speculation at all.
+    merged = replay_main._with_aic_speculation(
+        None, _AicSpecArgs(aic_nextn=5, aic_nextn_accept_rates="1,1,1,1,1")
+    )
+
+    assert merged == {"aic_nextn": 5, "aic_nextn_accept_rates": "1,1,1,1,1"}
+
+
+def test_aic_speculation_does_not_invent_engine_args() -> None:
+    # A run with no engine args and no speculation must keep passing None
+    # rather than an empty dict.
+    assert replay_main._with_aic_speculation(None, _AicSpecArgs()) is None
+
+
+def test_explicit_engine_args_win_over_the_aic_flags() -> None:
+    # --extra-engine-args is the documented per-worker override, so a value
+    # already present there is not overwritten by the CLI default.
+    merged = replay_main._with_aic_speculation(
+        {"aic_nextn": 2, "block_size": 16},
+        _AicSpecArgs(aic_nextn=5, aic_nextn_accept_rates="1,1,1,1,1"),
+    )
+
+    assert merged["aic_nextn"] == 2
+    assert merged["block_size"] == 16
+    assert merged["aic_nextn_accept_rates"] == "1,1,1,1,1"
+
+
+def test_zero_accept_rate_is_not_treated_as_unset() -> None:
+    # "--aic-nextn 1 --aic-nextn-accept-rates 0" is a meaningful configuration
+    # (draft never accepted); a falsy check would silently drop it.
+    merged = replay_main._with_aic_speculation(
+        None, _AicSpecArgs(aic_nextn=1, aic_nextn_accept_rates="0")
+    )
+
+    assert merged == {"aic_nextn": 1, "aic_nextn_accept_rates": "0"}
+
+
+def test_disagg_run_keeps_the_aggregated_engine_args_empty(
+    monkeypatch, tmp_path
+) -> None:
+    # validate_replay_args_mode rejects extra_engine_args combined with
+    # prefill/decode args, so defaulting the speculation flags into the
+    # aggregated slot would abort a disaggregated run instead of simulating it.
+    seen: dict = {}
+    _stub_cli_dependencies(monkeypatch, seen)
+
+    def run_synthetic(*args, **kwargs):
+        seen["native_kwargs"] = kwargs
+        return ReplayReport(
+            summary={"completed_requests": 1}, per_request=[], coverage={}, planner=None
+        )
+
+    monkeypatch.setattr(replay_main, "run_synthetic_trace_replay", run_synthetic)
+
+    assert (
+        replay_main.main(
+            [
+                "--input-tokens",
+                "8",
+                "--output-tokens",
+                "4",
+                "--request-count",
+                "1",
+                "--replay-concurrency",
+                "1",
+                "--prefill-engine-args",
+                json.dumps({"engine_type": "vllm"}),
+                "--decode-engine-args",
+                json.dumps({"engine_type": "vllm"}),
+                "--aic-nextn",
+                "5",
+                "--aic-nextn-accept-rates",
+                "1,1,1,1,1",
+            ]
+        )
+        == 0
+    )
+
+    assert seen["native_kwargs"]["extra_engine_args"] is None
+    # The decode worker is where the burst sampler reads them.
+    assert '"aic_nextn": 5' in seen["native_kwargs"]["decode_engine_args"]
+    assert "aic_nextn" not in seen["native_kwargs"]["prefill_engine_args"]
+
+
+def test_accept_rates_without_nextn_is_a_usage_error(monkeypatch) -> None:
+    # The engine args validator rejects the pair, but it raises from
+    # MockEngineArgs.from_json, outside the handling that produces a usage
+    # message, so the user would see a traceback instead.
+    seen: dict = {}
+    _stub_cli_dependencies(monkeypatch, seen)
+
+    with pytest.raises(SystemExit):
+        replay_main.main(
+            [
+                "--input-tokens",
+                "8",
+                "--output-tokens",
+                "4",
+                "--request-count",
+                "1",
+                "--replay-concurrency",
+                "1",
+                "--aic-nextn-accept-rates",
+                "1,1",
+            ]
+        )
+
+
+@pytest.mark.parametrize("nextn", ["0", "6"])
+def test_out_of_range_nextn_is_a_usage_error(monkeypatch, nextn) -> None:
+    # normalize_conditional_accept_rates already rejects anything outside
+    # 1..=5, but defaulting the flag into the engine args moves that error
+    # ahead of the handling that turns it into a usage message.
+    seen: dict = {}
+    _stub_cli_dependencies(monkeypatch, seen)
+
+    with pytest.raises(SystemExit):
+        replay_main.main(
+            [
+                "--input-tokens",
+                "8",
+                "--output-tokens",
+                "4",
+                "--request-count",
+                "1",
+                "--replay-concurrency",
+                "1",
+                "--aic-nextn",
+                nextn,
+            ]
+        )
