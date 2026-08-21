@@ -253,13 +253,62 @@ def _read_nixl_rx_bytes(pod) -> tuple[str, float | None]:
     return ("ok", total) if found else ("absent", None)
 
 
+def _parse_prometheus_labels(label_block: str) -> dict:
+    """Parse a Prometheus label block into a dict.
+
+    Naive on commas inside label values, which node_amazonefa_* never has --
+    device names are PCI-derived (rdmap<bus>s<slot>) and port is numeric.
+    """
+    out = {}
+    for part in label_block.split(","):
+        key, sep, value = part.partition("=")
+        if sep:
+            out[key.strip()] = value.strip().strip('"')
+    return out
+
+
+def parse_efa_device_metrics(metrics_lines, dev: str) -> dict:
+    """Return ``{metric_name: value}`` for exactly the device ``dev``.
+
+    Matches the ``device`` label by equality rather than by substring. A node
+    publishes one series per metric per NIC, and the result here is keyed only by
+    metric name, so a loose match would let a second NIC's sample overwrite the
+    assigned one -- attributing another adapter's traffic to this worker and
+    passing the load-bearing gate in assert_efa_device_traffic on evidence from
+    the wrong NIC. Device names can nest (rdmap16s2 is a prefix of rdmap16s27),
+    so substring matching is not safe even though the current p5 fleet happens
+    to name every EFA device rdmap<bus>s0.
+    """
+    out = {}
+    for line in metrics_lines:
+        line = line.strip()
+        if not line.startswith("node_amazonefa_"):
+            continue
+        name, sep, rest = line.partition("{")
+        if not sep:
+            # No label block at all, so the sample cannot be attributed to a NIC.
+            continue
+        label_block, sep, value = rest.rpartition("}")
+        if not sep:
+            continue
+        if _parse_prometheus_labels(label_block).get("device") != dev:
+            continue
+        try:
+            out[name] = float(value.split()[0])
+        except (ValueError, IndexError):
+            continue
+    return out
+
+
 def read_efa_device_counters(pod) -> dict:
     """Read this pod's OWN EFA NIC counters from the node exporter.
 
     Resolves the assigned device (the pod sees all 32 NICs in sysfs but is given
-    exactly one ``/dev/infiniband/uverbs*``), maps it to its ibdev name, and
-    returns only that device's ``node_amazonefa_*`` series. Returns {} if the
-    exporter is unreachable, so callers can capability-gate.
+    exactly one ``/dev/infiniband/uverbs*``) and maps it to its ibdev name. The
+    in-pod snippet only fetches and coarse-filters to node_amazonefa_* lines;
+    device attribution happens in parse_efa_device_metrics above, so the part
+    that has to be exact is ordinary local code with unit tests rather than a
+    string executed over kubectl exec.
     """
     snippet = (
         "import glob,os,json,urllib.request\n"
@@ -268,13 +317,8 @@ def read_efa_device_counters(pod) -> dict:
         "dev=open('/sys/class/infiniband_verbs/%s/ibdev'%u[0]).read().strip()\n"
         "ip=os.environ.get('EFA_EXPORTER_HOST','')\n"
         f"t=urllib.request.urlopen('http://%s:{EFA_EXPORTER_PORT}/metrics'%ip,timeout=10).read().decode()\n"
-        "o={'_ibdev':dev}\n"
-        "for ln in t.splitlines():\n"
-        "    ln=ln.strip()\n"
-        "    if not ln.startswith('node_amazonefa_') or dev not in ln: continue\n"
-        "    try: o[ln.split('{')[0]]=float(ln.rsplit(maxsplit=1)[1])\n"
-        "    except Exception: pass\n"
-        "print(json.dumps(o))"
+        "lines=[l for l in t.splitlines() if l.startswith('node_amazonefa_')]\n"
+        "print(json.dumps({'_ibdev':dev,'_lines':lines}))"
     )
     try:
         host = pod.raw["status"]["hostIP"]
@@ -283,10 +327,16 @@ def read_efa_device_counters(pod) -> dict:
         )
         for line in result.stdout.decode().splitlines():
             line = line.strip()
-            if line.startswith("{"):
-                parsed = json.loads(line)
-                parsed["_status"] = "ok"
-                return parsed
+            if not line.startswith("{"):
+                continue
+            payload = json.loads(line)
+            dev = payload.get("_ibdev")
+            if not dev:
+                break
+            parsed = parse_efa_device_metrics(payload.get("_lines", []), dev)
+            parsed["_ibdev"] = dev
+            parsed["_status"] = "ok"
+            return parsed
     except Exception as e:  # noqa: BLE001 - classified as a scrape failure below
         logger.warning("EFA device counters unavailable for %s: %s", pod.name, e)
         return {"_status": "scrape_failed"}
@@ -538,3 +588,58 @@ async def test_efa_deployment(
             EFA_MODEL_NAME,
             namespace,
         )
+
+
+# Real exporter output, trimmed. Device names are nested on purpose: rdmap16s2
+# is a prefix of rdmap16s27, and rdmap16s27 of rdmap16s270. A substring match on
+# the device name -- which is what this parser used to do -- attributes the wrong
+# NIC's counters to the worker, and because the result is keyed only by metric
+# name the last match silently wins.
+_COLLIDING_METRICS = """\
+# HELP node_amazonefa_rdma_read_bytes The number of bytes read with RDMA
+# TYPE node_amazonefa_rdma_read_bytes gauge
+node_amazonefa_rdma_read_bytes{device="rdmap16s2",port="1"} 100
+node_amazonefa_rdma_read_bytes{device="rdmap16s27",port="1"} 200
+node_amazonefa_rdma_read_bytes{device="rdmap16s270",port="1"} 300
+node_amazonefa_rdma_read_resp_bytes{device="rdmap16s27",port="1"} 400
+node_amazonefa_tx_bytes{device="rdmap16s270",port="1"} 500
+node_cpu_seconds_total{cpu="0",mode="idle"} 999
+""".splitlines()
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.gpu_0
+def test_parse_efa_device_metrics_matches_device_exactly() -> None:
+    """Each device gets only its own samples, never a longer name's."""
+    assert parse_efa_device_metrics(_COLLIDING_METRICS, "rdmap16s2") == {
+        "node_amazonefa_rdma_read_bytes": 100.0
+    }
+    assert parse_efa_device_metrics(_COLLIDING_METRICS, "rdmap16s27") == {
+        "node_amazonefa_rdma_read_bytes": 200.0,
+        "node_amazonefa_rdma_read_resp_bytes": 400.0,
+    }
+    assert parse_efa_device_metrics(_COLLIDING_METRICS, "rdmap16s270") == {
+        "node_amazonefa_rdma_read_bytes": 300.0,
+        "node_amazonefa_tx_bytes": 500.0,
+    }
+    # An absent device yields nothing rather than borrowing a neighbour's series,
+    # so assert_efa_device_traffic fails closed on its "counter missing" branch.
+    assert parse_efa_device_metrics(_COLLIDING_METRICS, "rdmap99s0") == {}
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.gpu_0
+def test_parse_efa_device_metrics_ignores_unattributable_samples() -> None:
+    """Non-EFA series, unlabelled samples and junk values are skipped."""
+    lines = [
+        'node_cpu_seconds_total{cpu="0"} 1',  # not an EFA metric
+        "node_amazonefa_rdma_read_bytes 7",  # no label block -> no device
+        'node_amazonefa_rdma_read_bytes{port="1"} 8',  # labelled, but no device
+        'node_amazonefa_tx_bytes{device="rdmap0s0",port="1"} not_a_number',
+        'node_amazonefa_rx_bytes{device="rdmap0s0",port="1"} 9',
+    ]
+    assert parse_efa_device_metrics(lines, "rdmap0s0") == {
+        "node_amazonefa_rx_bytes": 9.0
+    }

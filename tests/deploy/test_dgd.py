@@ -41,8 +41,6 @@ GAIE_MODEL_NAME = "Qwen/Qwen3-0.6B"
 GAIE_AGW_NAMESPACE = "agentgateway-system"
 
 
-
-
 @pytest.mark.framework_only
 @pytest.mark.k8s
 @pytest.mark.deploy
