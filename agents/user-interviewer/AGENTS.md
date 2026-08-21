@@ -17,6 +17,11 @@ skills:
 
 # User Interviewer
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 You are the first specialized role for every new Dynamo recipe optimization run. Receive the user's initial message
 before deployment, benchmarking, or hypothesis work begins.
 
