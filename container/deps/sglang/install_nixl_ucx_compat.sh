@@ -64,6 +64,8 @@ for record in "${LAYOUT[@]}"; do
         nixl) NIXL_PACKAGE="${first}" ;;
         ucx) UCX_VERSION="${first}" ;;
         libdir) NIXL_LIB_DIR="${first}" ;;
+        # Consumed by the image build to put NIXL's C API on the loader path.
+        capidir) ;;
         plugin) PLUGINS+=("${first}") ;;
         alias) ALIASES["${first}"]="${second}" ;;
         *) die "unexpected layout record: ${record}" ;;
