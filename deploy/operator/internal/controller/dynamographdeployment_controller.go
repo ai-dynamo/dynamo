@@ -71,6 +71,9 @@ type rbacManager interface {
 // DynamoGraphDeploymentReconciler reconciles a DynamoGraphDeployment object
 type DynamoGraphDeploymentReconciler struct {
 	client.Client
+	// APIReader is an uncached reader for objects this controller does not watch (e.g. Pods),
+	// which the cached Client cannot serve.
+	APIReader             client.Reader
 	Config                *configv1alpha1.OperatorConfiguration
 	RuntimeConfig         *commoncontroller.RuntimeConfig
 	RestConfig            *rest.Config
