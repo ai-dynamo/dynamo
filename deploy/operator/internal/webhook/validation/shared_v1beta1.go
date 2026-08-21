@@ -20,13 +20,17 @@ package validation
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	corev1 "k8s.io/api/core/v1"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	k8sptr "k8s.io/utils/ptr"
@@ -52,22 +56,56 @@ func (v *sharedValidation) warnf(format string, args ...any) {
 	v.warn(fmt.Sprintf(format, args...))
 }
 
+type dynamoComponentDeploymentSharedSpecValidationOptions struct {
+	grovePathway                      bool
+	validateInferencePoolAvailability bool
+	providerOverridesSupported        bool
+	workloadProvider                  string
+}
+
 // validateDynamoComponentDeploymentSharedSpec validates spec. spec and fldPath must not be nil.
-// grovePathway and validateInferencePoolAvailability are supplied by the owning resource.
+// Options are supplied by the owning resource.
 func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
-	grovePathway bool,
-	validateInferencePoolAvailability bool,
+	options dynamoComponentDeploymentSharedSpecValidationOptions,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 
-	if spec.MinAvailable != nil && !grovePathway {
+	// Validate the provider-native fragment in this component context.
+	if spec.ProviderOverride != nil {
+		allErrs = append(allErrs, v.validateProviderOverride(
+			spec.ProviderOverride,
+			fldPath.Child("providerOverride"),
+			providerOverrideValidationOptions{
+				supported:        options.providerOverridesSupported,
+				workloadProvider: options.workloadProvider,
+				scope:            provideroverride.ScopeComponent,
+				component:        spec,
+			},
+		)...)
+	}
+
+	// Enforce Grove-only availability semantics before validating later fields.
+	if spec.MinAvailable != nil && !options.grovePathway {
 		allErrs = append(allErrs, field.Forbidden(
 			fldPath.Child("minAvailable"),
 			"is currently supported only for Grove-backed DynamoGraphDeployment components",
 		))
 	}
+
+	// Validate explicit multinode role configuration in API declaration order.
+	if spec.Multinode != nil {
+		allErrs = append(allErrs, v.validateMultinodeSpec(
+			spec.Multinode,
+			fldPath.Child("multinode"),
+			options.providerOverridesSupported,
+			options.workloadProvider,
+			spec,
+		)...)
+	}
+
+	// Reject invalid shared-memory quantities before resource-specific validation.
 	if spec.SharedMemorySize != nil && spec.SharedMemorySize.Sign() < 0 {
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("sharedMemorySize"),
@@ -77,7 +115,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	}
 
 	if spec.ComponentType == nvidiacomv1beta1.ComponentTypeEPP {
-		if validateInferencePoolAvailability {
+		if options.validateInferencePoolAvailability {
 			if err := inferencePoolAvailabilityError(v.ctx, v.mgr); err != nil {
 				allErrs = append(allErrs, field.Forbidden(fldPath.Child("type"), fmt.Sprintf("cannot deploy EPP component: %v", err)))
 			}
@@ -126,7 +164,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 				componentType: spec.ComponentType,
 				resources:     dynamo.GetMainContainerResources(spec),
 				containers:    podTemplateContainers(spec.PodTemplate),
-				grovePathway:  grovePathway,
+				grovePathway:  options.grovePathway,
 			},
 		)...)
 	}
@@ -146,6 +184,172 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	}
 
 	return allErrs
+}
+
+type providerOverrideValidationOptions struct {
+	supported        bool
+	workloadProvider string
+	scope            provideroverride.Scope
+	component        *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+}
+
+// validateProviderOverride validates override. override and fldPath must not be nil.
+// options.component is nil only for the root DGD provider context.
+func (v *sharedValidation) validateProviderOverride(
+	override *nvidiacomv1beta1.ProviderOverride,
+	fldPath *field.Path,
+	options providerOverrideValidationOptions,
+) field.ErrorList {
+	// Reject provider fragments in API contexts that cannot lower them.
+	if !options.supported {
+		return field.ErrorList{field.Forbidden(
+			fldPath,
+			"provider overrides are supported only for components embedded in a DynamoGraphDeployment",
+		)}
+	}
+
+	// Require the durable provider selection before interpreting the fragment.
+	if options.workloadProvider == "" {
+		return field.ErrorList{field.Forbidden(
+			fldPath,
+			fmt.Sprintf(
+				"requires controller-owned annotation %q to be materialized; wait for controller adoption and retry",
+				consts.KubeAnnotationWorkloadProvider,
+			),
+		)}
+	}
+
+	// Provider-native overrides currently target only Grove schemas.
+	if options.workloadProvider != consts.WorkloadProviderGrove {
+		return field.ErrorList{field.Forbidden(
+			fldPath,
+			fmt.Sprintf("requires workload provider %q, but %q is selected", consts.WorkloadProviderGrove, options.workloadProvider),
+		)}
+	}
+
+	// Validate the explicit provider schema version before resolving its target.
+	if override.APIVersion == "" {
+		return field.ErrorList{field.Required(fldPath.Child("apiVersion"), "is required")}
+	}
+	if override.APIVersion != provideroverride.GroveAPIVersion {
+		return field.ErrorList{field.NotSupported(
+			fldPath.Child("apiVersion"),
+			override.APIVersion,
+			[]string{provideroverride.GroveAPIVersion},
+		)}
+	}
+
+	// Resolve the only target valid for this provider context and component shape.
+	expectedTarget, err := provideroverride.ExpectedTarget(
+		options.workloadProvider,
+		override.APIVersion,
+		options.scope,
+		options.component,
+	)
+	if err != nil {
+		return field.ErrorList{field.Forbidden(fldPath, err.Error())}
+	}
+	if override.Target == "" {
+		return field.ErrorList{field.Required(
+			fldPath.Child("target"),
+			"must be defaulted from the provider context",
+		)}
+	}
+	if override.Target != expectedTarget {
+		return field.ErrorList{field.Invalid(
+			fldPath.Child("target"),
+			override.Target,
+			fmt.Sprintf("must match the provider-context target %q", expectedTarget),
+		)}
+	}
+
+	// Map provider ownership and shape errors to exact Kubernetes field paths.
+	valuePath := fldPath.Child("value")
+	allErrs := field.ErrorList{}
+	for _, valueErr := range provideroverride.ValidateValue(override.Target, override.Value.Raw) {
+		errPath := valuePath
+		if valueErr.Path != "" {
+			parts := strings.Split(valueErr.Path, ".")
+			errPath = valuePath.Child(parts[0], parts[1:]...)
+		}
+		if valueErr.OwnershipViolation {
+			allErrs = append(allErrs, field.Forbidden(errPath, valueErr.Detail))
+			continue
+		}
+		allErrs = append(allErrs, field.Invalid(errPath, nil, valueErr.Detail))
+	}
+	return allErrs
+}
+
+// validateMultinodeSpec validates multinode. multinode, component, and fldPath must not be nil.
+func (v *sharedValidation) validateMultinodeSpec(
+	multinode *nvidiacomv1beta1.MultinodeSpec,
+	fldPath *field.Path,
+	providerOverridesSupported bool,
+	workloadProvider string,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	// Validate the optional leader provider context.
+	if multinode.Leader != nil {
+		allErrs = append(allErrs, v.validateMultinodeRoleSpec(
+			multinode.Leader,
+			fldPath.Child("leader"),
+			multinodeRoleSpecValidationOptions{
+				providerOverridesSupported: providerOverridesSupported,
+				workloadProvider:           workloadProvider,
+				scope:                      provideroverride.ScopeMultinodeLeader,
+				component:                  component,
+			},
+		)...)
+	}
+
+	// Validate the optional worker provider context.
+	if multinode.Worker != nil {
+		allErrs = append(allErrs, v.validateMultinodeRoleSpec(
+			multinode.Worker,
+			fldPath.Child("worker"),
+			multinodeRoleSpecValidationOptions{
+				providerOverridesSupported: providerOverridesSupported,
+				workloadProvider:           workloadProvider,
+				scope:                      provideroverride.ScopeMultinodeWorker,
+				component:                  component,
+			},
+		)...)
+	}
+	return allErrs
+}
+
+type multinodeRoleSpecValidationOptions struct {
+	providerOverridesSupported bool
+	workloadProvider           string
+	scope                      provideroverride.Scope
+	component                  *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+}
+
+// validateMultinodeRoleSpec validates role. role and fldPath must not be nil;
+// the optional provider override may be nil.
+func (v *sharedValidation) validateMultinodeRoleSpec(
+	role *nvidiacomv1beta1.MultinodeRoleSpec,
+	fldPath *field.Path,
+	options multinodeRoleSpecValidationOptions,
+) field.ErrorList {
+	if role.ProviderOverride == nil {
+		return nil
+	}
+
+	// Validate the provider fragment against this exact multinode role.
+	return v.validateProviderOverride(
+		role.ProviderOverride,
+		fldPath.Child("providerOverride"),
+		providerOverrideValidationOptions{
+			supported:        options.providerOverridesSupported,
+			workloadProvider: options.workloadProvider,
+			scope:            options.scope,
+			component:        options.component,
+		},
+	)
 }
 
 // validateEPPConfig validates config. config and fldPath must not be nil.
@@ -428,19 +632,40 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 	validateGPUMemoryServiceNewState bool,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
-	if (newComponent.ScalingAdapter != nil || oldComponent.ScalingAdapter != nil) && !canModifyReplicas &&
-		k8sptr.Deref(newComponent.Replicas, int32(1)) != k8sptr.Deref(oldComponent.Replicas, int32(1)) {
-		allErrs = append(allErrs, field.Forbidden(
-			fldPath.Child("replicas"),
-			"cannot be modified directly when scaling adapter is enabled; scale or update the related DynamoGraphDeploymentScalingAdapter instead",
-		))
+
+	// Keep an existing component-level provider identity stable across updates.
+	if newComponent.ProviderOverride != nil && oldComponent.ProviderOverride != nil {
+		allErrs = append(allErrs, validateProviderOverrideUpdate(
+			newComponent.ProviderOverride,
+			oldComponent.ProviderOverride,
+			fldPath.Child("providerOverride"),
+		)...)
 	}
 
+	// Keep the component's multinode shape and nested provider identities stable.
 	if newComponent.IsMultinode() != oldComponent.IsMultinode() {
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("multinode"),
 			newComponent.Multinode,
 			"cannot change node topology between single-node and multi-node after creation",
+		))
+	}
+
+	// Keep existing multinode role provider identities stable across updates.
+	if newComponent.Multinode != nil && oldComponent.Multinode != nil {
+		allErrs = append(allErrs, validateMultinodeSpecUpdate(
+			newComponent.Multinode,
+			oldComponent.Multinode,
+			fldPath.Child("multinode"),
+		)...)
+	}
+
+	// Protect replica ownership when a scaling adapter is present in either state.
+	if (newComponent.ScalingAdapter != nil || oldComponent.ScalingAdapter != nil) && !canModifyReplicas &&
+		k8sptr.Deref(newComponent.Replicas, int32(1)) != k8sptr.Deref(oldComponent.Replicas, int32(1)) {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath.Child("replicas"),
+			"cannot be modified directly when scaling adapter is enabled; scale or update the related DynamoGraphDeploymentScalingAdapter instead",
 		))
 	}
 
@@ -513,6 +738,81 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 				runtimeVersionOverrideRequiredMessage,
 			))
 		}
+	}
+	return allErrs
+}
+
+// validateMultinodeSpecUpdate validates a multinode update. newMultinode, oldMultinode, and fldPath must not be nil.
+func validateMultinodeSpecUpdate(
+	newMultinode *nvidiacomv1beta1.MultinodeSpec,
+	oldMultinode *nvidiacomv1beta1.MultinodeSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	// Keep an existing leader provider identity stable across updates.
+	if newMultinode.Leader != nil && oldMultinode.Leader != nil {
+		allErrs = append(allErrs, validateMultinodeRoleSpecUpdate(
+			newMultinode.Leader,
+			oldMultinode.Leader,
+			fldPath.Child("leader"),
+		)...)
+	}
+
+	// Keep an existing worker provider identity stable across updates.
+	if newMultinode.Worker != nil && oldMultinode.Worker != nil {
+		allErrs = append(allErrs, validateMultinodeRoleSpecUpdate(
+			newMultinode.Worker,
+			oldMultinode.Worker,
+			fldPath.Child("worker"),
+		)...)
+	}
+	return allErrs
+}
+
+// validateMultinodeRoleSpecUpdate validates a role update. newRole, oldRole,
+// and fldPath must not be nil; either optional provider override may be nil.
+func validateMultinodeRoleSpecUpdate(
+	newRole *nvidiacomv1beta1.MultinodeRoleSpec,
+	oldRole *nvidiacomv1beta1.MultinodeRoleSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	if newRole.ProviderOverride == nil || oldRole.ProviderOverride == nil {
+		return nil
+	}
+
+	// Keep an existing role-level provider identity stable across updates.
+	return validateProviderOverrideUpdate(
+		newRole.ProviderOverride,
+		oldRole.ProviderOverride,
+		fldPath.Child("providerOverride"),
+	)
+}
+
+// validateProviderOverrideUpdate validates an override update. newOverride, oldOverride, and fldPath must not be nil.
+func validateProviderOverrideUpdate(
+	newOverride *nvidiacomv1beta1.ProviderOverride,
+	oldOverride *nvidiacomv1beta1.ProviderOverride,
+	fldPath *field.Path,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	// Keep the persisted provider schema version immutable.
+	if newOverride.APIVersion != oldOverride.APIVersion {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("apiVersion"),
+			newOverride.APIVersion,
+			apivalidation.FieldImmutableErrorMsg,
+		))
+	}
+
+	// Keep the persisted lowering target immutable.
+	if newOverride.Target != oldOverride.Target {
+		allErrs = append(allErrs, field.Invalid(
+			fldPath.Child("target"),
+			newOverride.Target,
+			apivalidation.FieldImmutableErrorMsg,
+		))
 	}
 	return allErrs
 }
