@@ -233,6 +233,51 @@ struct DeviceAwareCandidates {
     request_cache_keys: usize,
 }
 
+/// Request-specific DeviceAware data prepared before caller-owned admission.
+///
+/// The LLM routing host serializes selection and slot reservation. Building this snapshot can
+/// call request-provided cache-key extraction and cache indexing, so it must happen before that
+/// host-level lock. The selector still rebuilds the candidate list from the latest routable set.
+pub struct DeviceAwareSelectionMetadata {
+    device_by_worker: HashMap<u64, RouteDevice>,
+    cache_hits_by_worker: HashMap<u64, usize>,
+    cache_matched_workers: HashSet<u64>,
+    context: RouteContext,
+    request_cache_keys: usize,
+}
+
+impl DeviceAwareSelectionMetadata {
+    fn candidates(&self, instance_ids: &[u64]) -> DeviceAwareCandidates {
+        let candidates = instance_ids
+            .iter()
+            .map(|worker_id| RouteCandidate {
+                target: RouteTarget::worker(*worker_id),
+                device: self
+                    .device_by_worker
+                    .get(worker_id)
+                    .copied()
+                    .unwrap_or_default(),
+                cache_hits: self
+                    .cache_hits_by_worker
+                    .get(worker_id)
+                    .copied()
+                    .unwrap_or_default(),
+            })
+            .collect::<Vec<_>>();
+        let embedding_cache_hit = candidates.iter().any(|candidate| {
+            self.cache_matched_workers
+                .contains(&candidate.target.worker_id)
+        });
+
+        DeviceAwareCandidates {
+            candidates,
+            context: self.context,
+            embedding_cache_hit,
+            request_cache_keys: self.request_cache_keys,
+        }
+    }
+}
+
 impl RouterMode {
     pub fn is_kv_routing(&self) -> bool {
         *self == RouterMode::KV
@@ -1094,7 +1139,10 @@ where
         // Apply a unified policy for all endpoints.
         let endpoint_id = self.client.endpoint.id();
 
-        let selection = self.device_aware_candidates(Some(request.content()), instance_ids);
+        let metadata = self
+            .prepare_device_aware_selection(Some(request.content()))
+            .expect("device-aware dispatch requires DeviceAwareWeighted routing");
+        let selection = metadata.candidates(instance_ids);
 
         // Only full cache hits bypass weighted accounting; partial hits still follow the
         // device-aware ratio because some image encoding remains for this request.
@@ -1127,12 +1175,21 @@ where
             .await
     }
 
-    fn device_aware_candidates(
+    /// Prepare request-specific DeviceAware data before any caller-owned selection lock.
+    ///
+    /// `select_target_with_prepared_load` still reads the current routable workers and load
+    /// under that lock. This snapshot contains only cache and device metadata that is safe to
+    /// compute before that admission boundary.
+    pub fn prepare_device_aware_selection(
         &self,
         request: Option<&T>,
-        instance_ids: &[u64],
-    ) -> DeviceAwareCandidates {
-        let device_type_map = self
+    ) -> Option<DeviceAwareSelectionMetadata> {
+        (self.router_mode == RouterMode::DeviceAwareWeighted)
+            .then(|| self.device_aware_selection_metadata(request))
+    }
+
+    fn device_aware_selection_metadata(&self, request: Option<&T>) -> DeviceAwareSelectionMetadata {
+        let device_by_worker = self
             .client
             .instances()
             .iter()
@@ -1151,49 +1208,44 @@ where
             .filter(|value| *value >= 1)
             .unwrap_or(8);
 
-        let (request_cache_keys, cache_matched_candidates) =
+        let (request_cache_keys, cache_matched_workers, cache_hits_by_worker) =
             if let (Some(request), Some(indexer), Some(extractor)) = (
                 request,
                 self.multimodal_cache_indexer.as_ref(),
                 self.multimodal_cache_key_extractor.as_ref(),
             ) {
                 let request_cache_keys = extractor(request);
-                let matched = if request_cache_keys.is_empty() {
+                let cache_matches = if request_cache_keys.is_empty() {
                     Vec::new()
                 } else {
-                    let mut matched = indexer.workers_with_cache_key_hits(&request_cache_keys);
-                    matched.retain(|(id, _)| instance_ids.contains(id));
-                    matched
+                    indexer.workers_with_cache_key_hits(&request_cache_keys)
                 };
-                (request_cache_keys, matched)
+                let cache_matched_workers = cache_matches
+                    .iter()
+                    .map(|(worker_id, _)| *worker_id)
+                    .collect::<HashSet<_>>();
+                let cache_hits_by_worker = cache_matches.into_iter().collect::<HashMap<_, _>>();
+                (
+                    request_cache_keys,
+                    cache_matched_workers,
+                    cache_hits_by_worker,
+                )
             } else {
-                (Vec::new(), Vec::new())
+                (Vec::new(), HashSet::new(), HashMap::new())
             };
 
-        let embedding_cache_hit = !cache_matched_candidates.is_empty();
-        let cache_hits = cache_matched_candidates
-            .into_iter()
-            .collect::<HashMap<_, _>>();
         let request_cache_key_count = request_cache_keys
             .iter()
             .collect::<std::collections::HashSet<_>>()
             .len();
-        let candidates = instance_ids
-            .iter()
-            .map(|worker_id| RouteCandidate {
-                target: RouteTarget::worker(*worker_id),
-                device: device_type_map.get(worker_id).copied().unwrap_or_default(),
-                cache_hits: cache_hits.get(worker_id).copied().unwrap_or_default(),
-            })
-            .collect::<Vec<_>>();
-
-        DeviceAwareCandidates {
-            candidates,
+        DeviceAwareSelectionMetadata {
+            device_by_worker,
+            cache_hits_by_worker,
+            cache_matched_workers,
             context: RouteContext {
                 required_cache_hits: request_cache_key_count,
                 non_cpu_to_cpu_ratio: cuda_to_cpu_ratio,
             },
-            embedding_cache_hit,
             request_cache_keys: request_cache_keys.len(),
         }
     }
@@ -1394,6 +1446,27 @@ where
         is_load_eligible: impl Fn(u64) -> bool,
         load: impl Fn(u64) -> u64,
     ) -> anyhow::Result<u64> {
+        let device_aware = self.prepare_device_aware_selection(request);
+        self.select_target_with_prepared_load(
+            device_aware.as_ref(),
+            pinned_worker,
+            is_load_eligible,
+            load,
+        )
+    }
+
+    /// Select one worker using caller-owned load and precomputed DeviceAware metadata.
+    ///
+    /// Call [`Self::prepare_device_aware_selection`] before a caller-owned selection lock. This
+    /// method keeps only current worker eligibility, policy choice, and load selection in that
+    /// critical section.
+    pub fn select_target_with_prepared_load(
+        &self,
+        device_aware: Option<&DeviceAwareSelectionMetadata>,
+        pinned_worker: Option<u64>,
+        is_load_eligible: impl Fn(u64) -> bool,
+        load: impl Fn(u64) -> u64,
+    ) -> anyhow::Result<u64> {
         if !matches!(
             self.router_mode,
             RouterMode::PowerOfTwoChoices
@@ -1437,7 +1510,12 @@ where
                 load,
             ),
             RouterMode::DeviceAwareWeighted => {
-                let selection = self.device_aware_candidates(request, &candidates);
+                let metadata = device_aware.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "DeviceAwareWeighted routing requires prepared request metadata"
+                    )
+                })?;
+                let selection = metadata.candidates(&candidates);
                 self.picker()?.select(
                     CandidateView::DeviceAware(&selection.candidates),
                     selection.context,
@@ -1529,7 +1607,10 @@ where
                         )
                         .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?,
                     RouterMode::DeviceAwareWeighted => {
-                        let selection = self.device_aware_candidates(Some(request), instance_ids);
+                        let metadata = self
+                            .prepare_device_aware_selection(Some(request))
+                            .expect("device-aware selection requires DeviceAwareWeighted routing");
+                        let selection = metadata.candidates(instance_ids);
                         state
                             .select_and_admit(
                                 self.picker()?,
