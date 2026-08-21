@@ -917,6 +917,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     /// Publish the router's ordered completion fallback independently of the local mutation.
+    /// This is a no-op when the request no longer has a live worker booking.
     pub(crate) fn publish_prefill_completed(&self, request_id: &RequestId) {
         let Some(worker) = self.request_index.worker_for(request_id) else {
             return;

@@ -514,6 +514,9 @@ where
         let outcome = self
             .slots
             .mark_prefill_completed(&request_id, Instant::now())?;
+        if worker.is_none() && !outcome.is_applied() {
+            return Err(SequenceError::RequestNotFound { request_id });
+        }
         self.slots.publish_prefill_completed(&request_id);
         if outcome.is_applied() {
             match worker {
@@ -528,6 +531,9 @@ where
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);
         let outcome = self.slots.free(&request_id, Instant::now())?;
+        if worker.is_none() && !outcome.is_applied() {
+            return Err(SequenceError::RequestNotFound { request_id });
+        }
         if outcome.is_applied() {
             match worker {
                 Some(worker) => self.queue.update_worker(worker).await,
