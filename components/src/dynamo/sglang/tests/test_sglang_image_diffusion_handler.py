@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 from PIL import Image
 
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.request_handlers.image_diffusion.image_diffusion_handler import (
     ImageDiffusionWorkerHandler,
 )
@@ -117,6 +118,13 @@ class TestImageDiffusionWorkerHandler:
         width, height = handler._parse_size("512x768")
         assert width == 512
         assert height == 768
+
+    @pytest.mark.parametrize("bad_size", ["1024", "axb", "1024x768x3", "x", ""])
+    def test_parse_size_invalid_raises_invalid_argument(self, handler, bad_size):
+        """Malformed size strings must raise InvalidArgument (HTTP 400),
+        not an unhandled ValueError (sanitized HTTP 500)."""
+        with pytest.raises(InvalidArgument, match="size must be"):
+            handler._parse_size(bad_size)
 
     def test_encode_base64(self, handler):
         """Test _encode_base64 method."""
@@ -239,9 +247,15 @@ class TestImageDiffusionWorkerHandler:
         )
 
     @pytest.mark.asyncio
-    async def test_generate_error_handling(self, handler, mock_context):
-        """Test error handling in generate method."""
-        # Mock generator to raise an exception
+    async def test_generate_error_propagates(self, handler, mock_context):
+        """Generation failures must raise, not be swallowed.
+
+        The runtime converts a raised exception into an error event on the
+        response stream, which the frontend surfaces as a non-200 HTTP error.
+        The previous behavior (yielding {"data": [], "error": ...}) resulted
+        in an HTTP 200 with empty data and no error message, because the
+        OpenAI ImagesResponse schema has no `error` field.
+        """
         handler.generator.generate = Mock(side_effect=RuntimeError("Generation failed"))
 
         request = {
@@ -258,17 +272,46 @@ class TestImageDiffusionWorkerHandler:
             },
         }
 
-        # Execute generation
-        results = []
-        async for result in handler.generate(request, mock_context):
-            results.append(result)
+        with pytest.raises(RuntimeError, match="Generation failed"):
+            async for _ in handler.generate(request, mock_context):
+                pass
 
-        # Verify error response
-        assert len(results) == 1
-        response = results[0]
-        assert "error" in response
-        assert "Generation failed" in response["error"]
-        assert response["data"] == []
+    @pytest.mark.asyncio
+    async def test_generate_blank_input_reference_raises_invalid_argument(
+        self, handler, mock_context
+    ):
+        """A blank input_reference must raise InvalidArgument (HTTP 400)."""
+        request = {
+            "prompt": "Transform this image",
+            "model": "test-model",
+            "size": "256x256",
+            "response_format": "b64_json",
+            "input_reference": "   ",
+        }
+
+        with pytest.raises(InvalidArgument, match="input_reference"):
+            async for _ in handler.generate(request, mock_context):
+                pass
+
+        handler.generator.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_generate_invalid_size_raises_invalid_argument(
+        self, handler, mock_context
+    ):
+        """A malformed size must raise InvalidArgument before generation."""
+        request = {
+            "prompt": "A red square",
+            "model": "test-model",
+            "size": "not-a-size",
+            "response_format": "b64_json",
+        }
+
+        with pytest.raises(InvalidArgument, match="size must be"):
+            async for _ in handler.generate(request, mock_context):
+                pass
+
+        handler.generator.generate.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_upload_to_fs(self, handler):

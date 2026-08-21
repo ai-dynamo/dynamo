@@ -4252,7 +4252,14 @@ async fn images(
         .await
         .map_err(|e| {
             tracing::error!("Failed to fold images stream for {}: {:?}", request_id, e);
-            let err_response = ErrorMessage::internal_server_error("Failed to fold images stream");
+            // Route the stream error through from_anyhow so typed errors keep
+            // their semantics: an InvalidArgument raised by the worker (e.g.
+            // request validation) surfaces as HTTP 400 with its message,
+            // while internal errors remain sanitized 500s. Previously every
+            // stream error collapsed into a generic 500 and the worker's
+            // message was only visible in server logs.
+            let err_response =
+                ErrorMessage::from_anyhow(anyhow::Error::new(e), "Failed to generate images");
             inflight.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;

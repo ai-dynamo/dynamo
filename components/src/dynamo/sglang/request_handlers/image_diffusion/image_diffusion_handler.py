@@ -16,6 +16,7 @@ from PIL import Image
 from dynamo._core import Context
 from dynamo.common.protocols.image_protocol import ImageNvExt
 from dynamo.common.storage import upload_to_fs
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import CreateImageRequest, ImageData, ImagesResponse
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -144,13 +145,15 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             yield response.model_dump()
 
         except Exception as e:
+            # Let the exception propagate: the runtime converts a raised
+            # exception into an error event on the response stream
+            # (Annotated::from_err), which the frontend folds into a non-200
+            # HTTP error. Yielding a {"data": [], "error": ...} dict instead
+            # produced an HTTP 200 with empty data and no error, because the
+            # OpenAI ImagesResponse schema has no `error` field and the
+            # message was silently dropped during deserialization.
             logger.error(f"Error in diffusion generation: {e}", exc_info=True)
-            error_response = {
-                "created": int(time.time()),
-                "data": [],
-                "error": str(e),
-            }
-            yield error_response
+            raise
 
     async def _generate_images(
         self,
@@ -178,7 +181,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         # Add image_path for I2I/TI2I if provided
         if input_reference is not None:
             if not input_reference.strip():
-                raise ValueError("input_reference must be a non-empty string")
+                raise InvalidArgument("input_reference must be a non-empty string")
             args["image_path"] = input_reference
 
         result = await asyncio.to_thread(
@@ -228,8 +231,15 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         if size_str is None:
             return 1024, 1024
 
-        w, h = size_str.split("x")
-        return int(w), int(h)
+        try:
+            w, h = size_str.split("x")
+            return int(w), int(h)
+        except ValueError as e:
+            # InvalidArgument maps to HTTP 400 with the message visible to
+            # the client, instead of a sanitized 500.
+            raise InvalidArgument(
+                f"size must be '<width>x<height>', got {size_str!r}"
+            ) from e
 
     async def _upload_to_fs(
         self, image_bytes: bytes, user_id: str, request_id: str
