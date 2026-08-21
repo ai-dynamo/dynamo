@@ -10,19 +10,8 @@ import uuid
 from types import MappingProxyType
 from typing import Any, AsyncIterator, Mapping, Protocol
 
-from dynamo.experimental.workflow.plan import REMOTE_VALUE_TYPES
-from dynamo.experimental.workflow.runtime import (
-    StageContext,
-    StageRunner,
-    WorkflowExecutionError,
-    _validate_value,
-)
-from dynamo.experimental.workflow.types import (
-    StageContract,
-    WorkflowValidationError,
-    _require_value_spec,
-    validate_name,
-)
+from dynamo.experimental.workflow.runtime import StageContext, StageRunner, WorkflowExecutionError
+from dynamo.experimental.workflow.types import StageContract, WorkflowValidationError, validate_name
 
 
 class _DynamoClient(Protocol):
@@ -66,9 +55,16 @@ class RemoteStageClient:
                 )
             transport_context = detach(context.invocation_id)
 
-        stream = await self._client.round_robin(
-            dict(inputs), annotated=False, context=transport_context
-        )
+        try:
+            stream = await self._client.round_robin(
+                dict(inputs), annotated=False, context=transport_context
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            raise WorkflowExecutionError(
+                f"{stage_label} request failed at the transport boundary"
+            ) from error
         try:
             try:
                 response = await stream.__anext__()
@@ -88,12 +84,18 @@ class RemoteStageClient:
                 raise WorkflowExecutionError(
                     f"{stage_label} returned a non-mapping response"
                 )
-        except BaseException:
+        except BaseException as error:
             if transport_context is not None:
                 transport_context.stop_generating()
             close = getattr(stream, "aclose", None)
             if callable(close):
                 await close()
+            if isinstance(error, (asyncio.CancelledError, WorkflowExecutionError)):
+                raise
+            if isinstance(error, Exception):
+                raise WorkflowExecutionError(
+                    f"{stage_label} response failed at the transport boundary"
+                ) from error
             raise
         return dict(response)
 
@@ -111,24 +113,6 @@ class RemoteStageServer:
         validate_name(stage_id, "remote stage id")
         if not isinstance(runner, StageRunner):
             raise WorkflowValidationError("remote runner must implement StageRunner")
-        unsupported_ports = sorted(
-            f"{direction}.{name}:{value_spec.type}"
-            for direction, ports in (
-                ("inputs", runner.contract.inputs),
-                ("outputs", runner.contract.outputs),
-            )
-            for name, spec in ports.items()
-            if (
-                value_spec := _require_value_spec(
-                    spec, f"remote stage {stage_id!r} {direction}.{name}"
-                )
-            ).type
-            not in REMOTE_VALUE_TYPES
-        )
-        if unsupported_ports:
-            raise WorkflowValidationError(
-                "remote stage server does not support ports " f"{unsupported_ports}"
-            )
         self._stage_id = stage_id
         self._runner = runner
 
@@ -148,13 +132,6 @@ class RemoteStageServer:
                 f"missing={sorted(expected_inputs - actual_inputs)}, "
                 f"extra={sorted(actual_inputs - expected_inputs)}"
             )
-        for name, spec in self._runner.contract.inputs.items():
-            _validate_value(
-                spec,
-                inputs[name],
-                f"remote stage {self._stage_id!r} input {name!r}",
-            )
-
         request_id = uuid.uuid4().hex
         if transport_context is not None:
             get_request_id = getattr(transport_context, "id", None)
@@ -230,10 +207,4 @@ class RemoteStageServer:
                 f"extra={sorted(actual_outputs - expected_outputs)}"
             )
         outputs = dict(result)
-        for name, spec in self._runner.contract.outputs.items():
-            _validate_value(
-                spec,
-                outputs[name],
-                f"remote stage {self._stage_id!r} output {name!r}",
-            )
         yield outputs
