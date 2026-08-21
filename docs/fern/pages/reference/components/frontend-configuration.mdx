@@ -607,8 +607,21 @@ See the [Frontend Guide](../../developer-guide/knowledge-base/modular-components
 ## Host memory allocator
 
 The frontend performs per-request host-memory allocations. Under high CPU load, allocator
-contention can cap frontend throughput before the GPU workers saturate. Dynamo runtime containers
-include jemalloc, but the frontend does not preload it by default.
+contention can cap frontend throughput before the GPU workers saturate. The frontend does not
+preload jemalloc by default.
+
+<Note>
+Whether the container image ships jemalloc depends on how the image is built. Images built with
+`dynamo_runtime.Dockerfile` without an inference backend (`--framework dynamo`, the `dev` /
+`local-dev` / `runtime` targets used for development containers and backend-less components)
+include `libjemalloc2` since v1.3.0. The released vLLM, SGLang, and TensorRT-LLM images (runtime and
+dev targets), as well as the standalone frontend entrypoint image do not. Verify with
+`dpkg -L libjemalloc2 | grep 'libjemalloc.so'`; if the library is missing, either build a custom
+frontend image that includes it, or install it from an initContainer into a shared volume mounted
+by both containers and point `LD_PRELOAD` at the copied library path. Pointing `LD_PRELOAD` at a
+path that does not exist only prints a loader warning, and the process continues with the default
+glibc allocator.
+</Note>
 
 <ParamField path="LD_PRELOAD" type="string" default="unset">
   Preload jemalloc for the frontend process. The library path depends on the container architecture:
@@ -626,6 +639,16 @@ include jemalloc, but the frontend does not preload it by default.
   layout.
 </ParamField>
 
+<Warning>
+The TensorRT-LLM image bakes its own `LD_PRELOAD` (`/opt/dynamo/libstdc++.so.6` and TensorRT-LLM's
+bundled `libnixl.so`). Assigning `LD_PRELOAD` as shown above replaces that value. On TensorRT-LLM images, prepend the jemalloc
+library instead:
+
+```bash
+export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+```
+</Warning>
+
 <ParamField path="MALLOC_CONF" type="string" default="jemalloc defaults">
   Configure jemalloc when it is preloaded. The best values depend on the request workload and CPU
   allocation. This is an empirical starting point, not a production default:
@@ -635,7 +658,8 @@ include jemalloc, but the frontend does not preload it by default.
   ```
 
   Validate allocator changes with the same AIPerf workload before and after enabling them. See
-  [Advanced Performance Tuning](../../kubernetes/operations/performance-tuning.md).
+  [Bound frontend host memory growth](../../kubernetes/operations/performance-tuning.md#bound-frontend-host-memory-growth)
+  for the symptom this addresses and how to measure the effect.
 </ParamField>
 
 ## HTTP endpoints
