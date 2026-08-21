@@ -4,7 +4,7 @@
 #[cfg(feature = "bench")]
 use std::time::Instant;
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
@@ -90,7 +90,7 @@ fn apply_routing_decision_with_prune_tracking(
             seq_position: idx,
         })
         .collect();
-    pm.insert_block_entries(block_entries);
+    pm.insert_block_entries(block_entries, routing_req.ttl_override);
 }
 
 fn apply_prune_removes(trie: &mut RadixTree, entries: Vec<BlockEntry>, event_id_counter: &mut u64) {
@@ -697,12 +697,18 @@ impl KvIndexerInterface for KvIndexer {
         &self,
         tokens_with_hashes: &mut TokensWithHashes,
         worker: WorkerWithDpRank,
+        ttl_override: Option<Duration>,
     ) -> Result<(), KvRouterError> {
         let local_hashes = tokens_with_hashes.get_or_compute_block_hashes().to_vec();
         let sequence_hashes = tokens_with_hashes.get_or_compute_seq_hashes().to_vec();
 
-        self.process_routing_decision_with_hashes(worker, local_hashes, sequence_hashes)
-            .await
+        self.process_routing_decision_with_hashes(
+            worker,
+            local_hashes,
+            sequence_hashes,
+            ttl_override,
+        )
+        .await
     }
     async fn flush(&self) -> usize {
         match self.flush_and_wait().await {
@@ -741,12 +747,14 @@ impl KvIndexer {
         worker: WorkerWithDpRank,
         local_hashes: Vec<LocalBlockHash>,
         sequence_hashes: Vec<SequenceHash>,
+        ttl_override: Option<Duration>,
     ) -> Result<(), KvRouterError> {
         self.routing_tx
             .send(RoutingDecisionRequest {
                 worker,
                 local_hashes,
                 sequence_hashes,
+                ttl_override,
             })
             .await
             .map_err(|_| KvRouterError::IndexerDroppedRequest)?;

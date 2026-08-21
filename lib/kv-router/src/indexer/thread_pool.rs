@@ -8,6 +8,7 @@ use std::{
         atomic::{AtomicU64, AtomicUsize},
     },
     thread::JoinHandle,
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -856,6 +857,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         worker: WorkerWithDpRank,
         local_hashes: &[LocalBlockHash],
         sequence_hashes: &[SequenceHash],
+        ttl_override: Option<Duration>,
     ) -> Result<(), KvRouterError> {
         if local_hashes.len() != sequence_hashes.len() {
             tracing::warn!(
@@ -893,7 +895,7 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
             .await
             .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
         if applied {
-            prune_manager.insert_worker_block_entries(worker, prune_entries);
+            prune_manager.insert_worker_block_entries(worker, prune_entries, ttl_override);
         }
 
         Ok(())
@@ -904,8 +906,9 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         worker: WorkerWithDpRank,
         local_hashes: Vec<LocalBlockHash>,
         sequence_hashes: Vec<SequenceHash>,
+        ttl_override: Option<Duration>,
     ) -> Result<(), KvRouterError> {
-        self.record_routing_decision_hashes(worker, &local_hashes, &sequence_hashes)
+        self.record_routing_decision_hashes(worker, &local_hashes, &sequence_hashes, ttl_override)
             .await
     }
 
@@ -914,8 +917,9 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         worker: WorkerWithDpRank,
         local_hashes: &[LocalBlockHash],
         sequence_hashes: &[SequenceHash],
+        ttl_override: Option<Duration>,
     ) -> Result<(), KvRouterError> {
-        self.record_routing_decision_hashes(worker, local_hashes, sequence_hashes)
+        self.record_routing_decision_hashes(worker, local_hashes, sequence_hashes, ttl_override)
             .await
     }
 }
@@ -1217,6 +1221,7 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         &self,
         tokens_with_hashes: &mut TokensWithHashes,
         worker: WorkerWithDpRank,
+        ttl_override: Option<Duration>,
     ) -> Result<(), KvRouterError> {
         tokens_with_hashes.get_or_compute_seq_hashes();
         let local_hashes = tokens_with_hashes
@@ -1225,7 +1230,7 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         let sequence_hashes = tokens_with_hashes
             .seq_hashes()
             .expect("sequence hashes missing after computing sequence hashes");
-        self.record_routing_decision_hashes(worker, local_hashes, sequence_hashes)
+        self.record_routing_decision_hashes(worker, local_hashes, sequence_hashes, ttl_override)
             .await
     }
 

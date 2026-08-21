@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::time::Duration;
 #[cfg(feature = "bench")]
 use std::time::Instant;
 
@@ -385,6 +386,8 @@ pub struct IndexerRecordRoutingDecisionRequest {
     pub local_hashes: Vec<LocalBlockHash>,
     /// Locally-computed rolling sequence hashes for the routed request.
     pub sequence_hashes: Vec<SequenceHash>,
+    /// Optional pruning TTL for this routing decision.
+    pub ttl_override: Option<Duration>,
 }
 
 /// Precomputed hashes for recording a route-time indexer update.
@@ -650,4 +653,5 @@ pub(super) struct RoutingDecisionRequest {
     pub(super) worker: WorkerWithDpRank,
     pub(super) local_hashes: Vec<LocalBlockHash>,
     pub(super) sequence_hashes: Vec<SequenceHash>,
+    pub(super) ttl_override: Option<Duration>,
 }

@@ -753,7 +753,7 @@ async fn route_approx_writes(
     for (worker, tokens) in writes {
         let mut tokens_with_hashes = TokensWithHashes::new(tokens, BLOCK_SIZE);
         indexer
-            .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
+            .process_routing_decision_for_request(&mut tokens_with_hashes, worker, None)
             .await?;
     }
 
