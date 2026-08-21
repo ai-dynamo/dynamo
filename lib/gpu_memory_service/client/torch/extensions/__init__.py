@@ -5,7 +5,7 @@
 
 These extensions are built at install time using setuptools.
 
-- _allocator_ext: CUDAPluggableAllocator backend (my_malloc/my_free)
+- _allocator_ext: Pluggable allocator backend — device-agnostic (my_malloc/my_free)
 """
 
 # Built by setup.py build_ext --inplace
