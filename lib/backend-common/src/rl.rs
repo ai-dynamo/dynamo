@@ -221,6 +221,8 @@ mod tests {
         assert!(RlWorkerMetadata::new(0, None).is_err());
         for admin_base_url in [
             "   ",
+            "worker:8120",
+            "ftp://worker:8120",
             "https://user:token@worker.example.com/admin",
             "https://worker.example.com/admin?token=secret",
             "https://worker.example.com/admin#fragment",
