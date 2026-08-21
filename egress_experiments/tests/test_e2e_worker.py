@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import sys
 import threading
+from types import SimpleNamespace
 
 import pytest
 
 import egress_experiments.e2e_worker as e2e_worker
 from egress_experiments.costs import Costs
+from egress_experiments.dynamo_sim.probes import LoopProbe
 from egress_experiments.e2e_worker import (
     RuntimeRustEgressWorkerHandler,
     RuntimeTrtllmWorkerHandler,
@@ -28,6 +31,8 @@ from egress_experiments.fake_trtllm.engine import (
     EngineConfig,
 )
 from egress_experiments.fake_trtllm.llm import FakeLLM
+from egress_experiments.fake_trtllm.llm import _build_native_event
+from egress_experiments.fake_trtllm.result import Response, ResultPayload
 
 pytestmark = [
     pytest.mark.unit,
@@ -102,32 +107,62 @@ def test_response_path_costs_do_not_change_request_path_work():
     assert control.engine_submit_us == baseline.engine_submit_us
 
 
-def test_validate_push_runtime_requires_push_mode(monkeypatch):
-    monkeypatch.delenv("DYN_TRTLLM_PUSH_EGRESS", raising=False)
+def test_loop_probe_reset_starts_a_fresh_measurement_window():
+    probe = LoopProbe()
+    probe.lag.add(1_000_000, probe.cap)
+    probe.callbacks["response"].add(2_000_000, probe.cap)
+    probe.enqueues = 3
 
-    with pytest.raises(RuntimeError, match="must be 1"):
-        _validate_push_runtime()
+    probe.reset()
+
+    assert probe.report()["lag"]["n"] == 0
+    assert probe.report()["callbacks"] == {}
+    assert probe.report()["enqueues"] == 0
+
+
+def test_native_event_rejects_a_stale_engine_generation():
+    result = SimpleNamespace(
+        response_request_key=SimpleNamespace(generation=2), response_sequence=0
+    )
+    response = Response(
+        client_id=7,
+        generation=1,
+        result=ResultPayload(new_token_ids=[[11]]),
+    )
+
+    assert _build_native_event(result, response) is None
+    assert result.response_sequence == 0
 
 
 def test_validate_push_runtime_requires_real_decorator(monkeypatch):
-    monkeypatch.setenv("DYN_TRTLLM_PUSH_EGRESS", "1")
     monkeypatch.setattr(e2e_worker, "USING_REAL_PUSH_EGRESS", False)
 
     with pytest.raises(RuntimeError, match="real push_egress_capable"):
         _validate_push_runtime()
 
 
-def test_validate_rust_runtime_requires_owned_processor_binding():
-    class CoreWithoutOwnedProcessor:
+def test_validate_rust_runtime_requires_native_processor_binding():
+    class CoreWithoutNativeProcessor:
         pass
 
-    with pytest.raises(RuntimeError, match="OwnedTokenEgress"):
-        _validate_rust_runtime(CoreWithoutOwnedProcessor)
+    with pytest.raises(RuntimeError, match="NativeResponseEgress"):
+        _validate_rust_runtime(CoreWithoutNativeProcessor)
 
 
 def test_sigterm_interrupts_worker_for_graceful_cleanup():
     with pytest.raises(KeyboardInterrupt):
         _interrupt_for_shutdown(signal.SIGTERM, None)
+
+
+def test_main_treats_sigterm_interrupt_as_clean_shutdown(monkeypatch):
+    def run(coroutine):
+        coroutine.close()
+        raise KeyboardInterrupt
+
+    monkeypatch.setitem(sys.modules, "uvloop", SimpleNamespace(run=run))
+    monkeypatch.setattr(signal, "signal", lambda *_args: signal.SIG_DFL)
+
+    e2e_worker.main([])
 
 
 def test_stats_sampler_reports_rates_batching_and_backlog():
@@ -218,29 +253,32 @@ def test_rust_handler_processes_batches_off_loop_and_wakes_once_per_request():
             prompt_tokens,
             num_choices,
             response_sender,
-            calibrated_work_us,
         ):
+            key = SimpleNamespace(client_id=client_id, generation=1)
             self.registrations.append(
                 (
                     client_id,
                     prompt_tokens,
                     num_choices,
                     response_sender,
-                    calibrated_work_us,
                 )
             )
+            return key
 
-        def process_mock_batch(self, responses):
+        def process_batch(self, responses):
             self.batches.append(responses)
             self.responses_processed += len(responses)
-            self.frames_sent += sum(len(response["new_token_ids"]) for response in responses)
+            self.frames_sent += sum(len(response["outputs"]) for response in responses)
             return [
-                response["client_id"]
+                SimpleNamespace(
+                    client_id=response["client_id"],
+                    generation=response["generation"],
+                )
                 for response in responses
                 if response["is_final"] or response.get("error_msg")
             ]
 
-        def cancel(self, _client_id):
+        def cancel(self, _request_key):
             return False
 
     async def run():
@@ -279,6 +317,16 @@ def test_rust_handler_processes_batches_off_loop_and_wakes_once_per_request():
     assert chunks == []
     assert len(processor.registrations) == 1
     assert processor.registrations[0][3] is sender
+    assert [event["sequence"] for batch in processor.batches for event in batch] == [
+        0,
+        1,
+        2,
+    ]
+    assert all(
+        event["generation"] == 1
+        for batch in processor.batches
+        for event in batch
+    )
     assert processor.responses_processed == llm.responses_dispatched == 3
     assert handler.responses_yielded == processor.frames_sent == 3
     assert llm.notify_many_calls == 0
@@ -289,6 +337,108 @@ def test_rust_handler_processes_batches_off_loop_and_wakes_once_per_request():
         for thread_name in result.handle_response_threads
     }
     assert result_threads == set()
+
+
+def test_rust_handler_propagates_native_batch_failure_without_hanging():
+    class FailingProcessor:
+        frames_sent = 0
+
+        def register(self, client_id, *_args):
+            return SimpleNamespace(client_id=client_id, generation=1)
+
+        def process_batch(self, _responses):
+            raise ValueError("malformed native response")
+
+        def cancel(self, _request_key):
+            return True
+
+    class RecordingSender:
+        def __init__(self):
+            self.errors = []
+
+        def close_with_error(self, message):
+            self.errors.append(message)
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        llm = FakeLLM(
+            EngineConfig(
+                batch=BatchConfig(total=1),
+                iteration=ConstantIteration(1.0),
+                max_tokens=1,
+            ),
+            costs=Costs().with_scale(0.0),
+        )
+        processor = FailingProcessor()
+        handler = RuntimeRustEgressWorkerHandler(llm, processor=processor)
+        sender = RecordingSender()
+        llm.start(loop)
+        try:
+            stream = handler.generate(
+                {
+                    "token_ids": [11],
+                    "stop_conditions": {"max_tokens": 1},
+                    "sampling_options": {"n": 1},
+                },
+                context=None,
+                response_sender=sender,
+            )
+            with pytest.raises(RuntimeError, match="malformed native response"):
+                await asyncio.wait_for(anext(stream), timeout=1.0)
+            return sender
+        finally:
+            llm.shutdown()
+
+    sender = asyncio.run(run())
+    assert sender.errors == ["native response processing failed: malformed native response"]
+
+
+def test_native_shutdown_resolves_inflight_registration():
+    class RecordingProcessor:
+        def __init__(self):
+            self.cancelled = []
+
+        def register(self, client_id, *_args):
+            return SimpleNamespace(client_id=client_id, generation=1)
+
+        def cancel(self, request_key):
+            self.cancelled.append(request_key)
+            return True
+
+    class RecordingSender:
+        def __init__(self):
+            self.errors = []
+
+        def close_with_error(self, message):
+            self.errors.append(message)
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        llm = FakeLLM(
+            EngineConfig(
+                batch=BatchConfig(total=1),
+                iteration=ConstantIteration(100.0),
+                max_tokens=100,
+            ),
+            costs=Costs().with_scale(0.0),
+        )
+        processor = RecordingProcessor()
+        sender = RecordingSender()
+        llm.start(loop)
+        result = llm.generate_async(
+            sampling_params=SimpleNamespace(max_tokens=100, n=1),
+            response_processor=processor,
+            response_sender=sender,
+        )
+        llm.shutdown()
+        with pytest.raises(RuntimeError, match="shut down"):
+            await asyncio.wait_for(result.wait_native(), timeout=0.1)
+        return llm, processor, sender
+
+    llm, processor, sender = asyncio.run(run())
+    assert len(processor.cancelled) == 1
+    assert sender.errors == ["native response processing stopped: worker shut down"]
+    assert llm._results == {}
 
 
 def test_rust_handler_cancellation_removes_native_request_state():
@@ -304,15 +454,16 @@ def test_rust_handler_cancellation_removes_native_request_state():
             prompt_tokens,
             num_choices,
             response_sender,
-            calibrated_work_us,
         ):
-            self.registered.append(client_id)
+            key = SimpleNamespace(client_id=client_id, generation=1)
+            self.registered.append(key)
+            return key
 
-        def process_mock_batch(self, _responses):
+        def process_batch(self, _responses):
             return []
 
-        def cancel(self, client_id):
-            self.cancelled.append(client_id)
+        def cancel(self, request_key):
+            self.cancelled.append(request_key)
             return True
 
     async def run():
@@ -345,12 +496,12 @@ def test_rust_handler_cancellation_removes_native_request_state():
             with pytest.raises(asyncio.CancelledError):
                 await pending
 
-            client_id = processor.registered[0]
-            return client_id, processor.cancelled, dict(llm._results)
+            request_key = processor.registered[0]
+            return request_key, processor.cancelled, dict(llm._results)
         finally:
             llm.shutdown()
 
-    client_id, cancelled, remaining_results = asyncio.run(run())
+    request_key, cancelled, remaining_results = asyncio.run(run())
 
-    assert cancelled == [client_id]
+    assert cancelled == [request_key]
     assert remaining_results == {}

@@ -1,28 +1,54 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Third-party Python dependencies for the trtllm runtime image. Installed
-# with --no-deps so upstream nvcr.io/nvidia/tensorrt-llm/release's solve
-# stays intact. Sorted alphabetically per pre-commit requirements-txt-fixer.
+# Third-party Python dependencies for the trtllm runtime image. Installed with
+# --no-deps, so pip does not re-resolve upstream
+# nvcr.io/nvidia/tensorrt-llm/release's dependency graph. That does not leave
+# the base image untouched: any package named here is installed over the copy
+# it bundles, which is exactly what the version floors below are for.
+# Sorted alphabetically per pre-commit requirements-txt-fixer.
 
 # Force a source install of imageio-ffmpeg. The PyPI wheel bundles a prebuilt,
 # GPL-encumbered ffmpeg binary that has CVE exposure; we point imageio at the
 # in-tree LGPL ffmpeg CLI via IMAGEIO_FFMPEG_EXE instead.
 --no-binary imageio-ffmpeg
+# The upstream tensorrt-llm/release image bundles the JupyterLab developer stack
+# (jupyterlab/notebook -> jupyter-server -> tornado; nbconvert -> mistune;
+# beautifulsoup4 -> soupsieve) at older releases than PyPI currently publishes.
+# Floor them so the --no-deps install refreshes the bundled copies in place to
+# the current patch releases (see also mistune/soupsieve/tornado below).
+aiohttp>=3.14.3
+gitpython>=3.1.58
 
 # Used by the trtllm video_diffusion handler to encode generated frames to MP4.
 # Upstream tensorrt-llm/release does not ship them.
 imageio>=2.37.0
 imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file
+jupyter-server>=2.20.0
+jupyterlab>=4.5.10
+mistune>=3.3.0  # JupyterLab stack; see note above jupyter-server
 # Required by ai_dynamo_runtime + gpu_memory_service. Upstream tensorrt-llm/release
 # does not ship them; vllm/vllm-openai does (which is why DYN-2204's vllm path
 # does not need this).
 msgspec>=0.19.0
-# KVBM uses `import nixl` to load libnixl.so via DT_RPATH (matching its
-# nixl-sys ABI). Upstream's NIXL at /opt/nvidia/nvda_nixl coexists
-# unused because Dynamo's --connector kvbm bypasses TRT-LLM's native NIXL
-# transceiver. The nixl-cu13 wheel is harmless if KVBM is disabled.
-nixl==1.0.1
-nixl-cu13==1.0.1
+# NIXL is unpinned here; trtllm_runtime.Dockerfile installs it from NIXL_REF.
+# Bundled by the upstream image at an older patch release; floor keeps it on
+# the current patch line.
+pillow>=12.3.0
+# NVDEC hardware decode for H.264/H.265 video input (dynamo common.multimodal.
+# nvdec_decoder). Pin >=2.2.0: it bundles only libavutil + libavformat (container
+# demux, no software codec); everything below 2.2.0 -- 2.1.0 included, not just
+# the 2.0.x line -- bundles a full FFmpeg whose libavcodec the codec gate
+# rejects on presence. Links libnvcuvid at runtime. Requires
+# NVIDIA_DRIVER_CAPABILITIES to include "video" (set in
+# trtllm_runtime.Dockerfile) or it cannot import.
+#
+# As of 1.3.0rc24 the upstream tensorrt-llm/release image DOES bundle this
+# package, at 2.1.0, in system site-packages. This floor governs only the
+# /opt/dynamo/venv copy; trtllm_runtime.Dockerfile raises the system one to the
+# same floor. Keep the two specifiers in step.
+PyNvVideoCodec>=2.2.0
+soupsieve>=2.8.4  # JupyterLab stack; see note above jupyter-server
+tornado>=6.5.6  # JupyterLab stack; see note above jupyter-server
 # Required by ai_dynamo_runtime (companion to msgspec above).
 uvloop>=0.21.0

@@ -34,17 +34,14 @@ import (
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/client-go/discovery/cached/memory"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
-	"k8s.io/client-go/restmapper"
-	"k8s.io/client-go/scale"
 	k8sCache "k8s.io/client-go/tools/cache"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -66,21 +63,19 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	internalcert "github.com/ai-dynamo/dynamo/deploy/operator/internal/cert"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/crdmigrator"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/namespace_scope"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/podcache"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/rbac"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secrets"
-	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
-	webhookdefaulting "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
-	webhookmutation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/mutation"
-	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
+	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	//+kubebuilder:scaffold:imports
@@ -114,34 +109,6 @@ func LoadAndValidateOperatorConfig(path string) (*configv1alpha1.OperatorConfigu
 	return cfg, nil
 }
 
-func createScalesGetter(mgr ctrl.Manager) (scale.ScalesGetter, error) {
-	config := mgr.GetConfig()
-
-	// Create kubernetes client for discovery
-	kubeClient, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, err
-	}
-
-	// Create cached discovery client
-	cachedDiscovery := memory.NewMemCacheClient(kubeClient.Discovery())
-
-	// Create REST mapper
-	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(cachedDiscovery)
-
-	scalesGetter, err := scale.NewForConfig(
-		config,
-		restMapper,
-		dynamic.LegacyAPIPathResolverFunc,
-		scale.NewDiscoveryScaleKindResolver(cachedDiscovery),
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return scalesGetter, nil
-}
-
 func initCRDSchemes() {
 	utilruntime.Must(clientgoscheme.AddToScheme(crdScheme))
 
@@ -154,6 +121,10 @@ func initCRDSchemes() {
 	utilruntime.Must(volcanoscheme.AddToScheme(crdScheme))
 
 	utilruntime.Must(grovev1alpha1.AddToScheme(crdScheme))
+
+	// PodSnapshot/PodSnapshotContent are owned by github.com/ai-dynamo/snapshot; the
+	// operator only consumes them (creates/reads), it does not reconcile them.
+	utilruntime.Must(snapshotv1alpha1.AddToScheme(crdScheme))
 
 	utilruntime.Must(apiextensionsv1.AddToScheme(crdScheme))
 
@@ -182,6 +153,7 @@ func main() {
 	var operatorVersion string
 	var operatorImage string
 	var operatorImagePullPolicy string
+	var dgdrDefaultImage string
 	flag.StringVar(&configFile, "config", "", "Path to operator configuration file (required)")
 	flag.StringVar(&operatorVersion, "operator-version", "unknown",
 		"Version of the operator (used in lease holder identity)")
@@ -193,6 +165,8 @@ func main() {
 	)
 	flag.StringVar(&operatorImagePullPolicy, "operator-image-pull-policy", string(corev1.PullIfNotPresent),
 		"Image pull policy for operator helper init containers")
+	flag.StringVar(&dgdrDefaultImage, "dgdr-default-image", "",
+		"Default DGDR profiler image, put into DGDR spec.image when unset; empty derives dynamo-planner:<operator-version>")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -277,28 +251,26 @@ func main() {
 	}
 
 	restrictedNamespace := operatorCfg.Namespace.Restricted
+	isClusterWide := restrictedNamespace == ""
 	if restrictedNamespace != "" {
 		mgrOpts.Cache.DefaultNamespaces = map[string]cache.Config{
 			restrictedNamespace: {},
-		}
-		// PodSnapshotContent is cluster-scoped, so DefaultNamespaces does not cover it.
-		// Register it cluster-wide explicitly so the PodSnapshotReconciler can watch it.
-		mgrOpts.Cache.ByObject = map[client.Object]cache.ByObject{
-			&nvidiacomv1alpha1.PodSnapshotContent{}: {},
 		}
 		setupLog.Info("Restricted namespace configured, launching in restricted mode", "namespace", restrictedNamespace)
 
 		banner := strings.Repeat("=", 80)
 		setupLog.Error(nil, banner)
-		setupLog.Error(nil, "DEPRECATION WARNING: Namespace-restricted mode is deprecated "+
-			"and will be removed in a future release.")
+		setupLog.Error(nil, "DEVELOPMENT AND TESTING ONLY: Namespace-restricted mode is not supported for production.")
 		setupLog.Error(nil, "The operator is running in namespace-restricted mode",
 			"namespace", restrictedNamespace)
-		setupLog.Error(nil, "Please migrate to cluster-wide mode "+
-			"by removing the namespaceRestriction configuration.")
+		setupLog.Error(nil, "Use cluster-wide mode for production deployments.")
 		setupLog.Error(nil, banner)
 	} else {
 		setupLog.Info("No restricted namespace configured, launching in cluster-wide mode")
+	}
+	if err := podcache.Configure(&mgrOpts.Cache); err != nil {
+		setupLog.Error(err, "unable to configure Pod cache")
+		os.Exit(1)
 	}
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOpts)
 	if err != nil {
@@ -413,135 +385,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Detect orchestrators availability using discovery client.
-	// Config overrides (*bool) take precedence over auto-detection:
-	//   nil   = auto-detect (backward compatible default)
-	//   false = forcibly disabled regardless of API availability
-	//   true  = forcibly enabled; hard exit if API is not available (misconfiguration)
-	setupLog.Info("Detecting Grove availability...")
-	groveDetected := commonController.DetectGroveAvailability(mainCtx, mgr)
-	switch {
-	case operatorCfg.Orchestrators.Grove.Enabled == nil:
-		runtimeConfig.GroveEnabled = groveDetected
-	case *operatorCfg.Orchestrators.Grove.Enabled:
-		if !groveDetected {
-			setupLog.Error(nil, "Grove is explicitly enabled in config but the Grove API group was not detected in the cluster")
-			os.Exit(1)
-		}
-		runtimeConfig.GroveEnabled = true
-	default:
-		setupLog.Info("Grove is explicitly disabled via config override")
-		runtimeConfig.GroveEnabled = false
+	gates, err := features.New(mainCtx, mgr, operatorCfg)
+	if err != nil {
+		setupLog.Error(err, "unable to resolve operator feature gates")
+		os.Exit(1)
 	}
-
-	setupLog.Info("Detecting LWS availability...")
-	lwsDetected := commonController.DetectLWSAvailability(mainCtx, mgr)
-	setupLog.Info("Detecting Volcano availability...")
-	volcanoDetected := commonController.DetectVolcanoAvailability(mainCtx, mgr)
-	// LWS for multinode deployment usage depends on both LWS and Volcano availability
-	switch {
-	case operatorCfg.Orchestrators.LWS.Enabled == nil:
-		runtimeConfig.LWSEnabled = lwsDetected && volcanoDetected
-	case *operatorCfg.Orchestrators.LWS.Enabled:
-		if !lwsDetected {
-			setupLog.Error(nil, "LWS is explicitly enabled in config but the LWS API group was not detected in the cluster")
-			os.Exit(1)
-		}
-		if !volcanoDetected {
-			setupLog.Error(nil, "LWS is explicitly enabled in config but the Volcano API group was not detected in the cluster")
-			os.Exit(1)
-		}
-		runtimeConfig.LWSEnabled = true
-	default:
-		setupLog.Info("LWS is explicitly disabled via config override")
-		runtimeConfig.LWSEnabled = false
-	}
-
-	switch {
-	case operatorCfg.Orchestrators.VolcanoScheduler.Enabled == nil:
-		runtimeConfig.VolcanoSchedulerEnabled = false
-	case *operatorCfg.Orchestrators.VolcanoScheduler.Enabled:
-		if !volcanoDetected {
-			setupLog.Error(nil,
-				"Volcano scheduler integration is explicitly enabled in config but "+
-					"the Volcano API group was not detected in the cluster",
-			)
-			os.Exit(1)
-		}
-		runtimeConfig.VolcanoSchedulerEnabled = true
-	default:
-		setupLog.Info("Volcano scheduler integration is explicitly disabled via config override")
-		runtimeConfig.VolcanoSchedulerEnabled = false
-	}
-
-	// Detect Kai-scheduler availability using discovery client
-	setupLog.Info("Detecting Kai-scheduler availability...")
-	kaiSchedulerDetected := commonController.DetectKaiSchedulerAvailability(mainCtx, mgr)
-	switch {
-	case operatorCfg.Orchestrators.KaiScheduler.Enabled == nil:
-		runtimeConfig.KaiSchedulerEnabled = kaiSchedulerDetected
-	case *operatorCfg.Orchestrators.KaiScheduler.Enabled:
-		if !kaiSchedulerDetected {
-			setupLog.Error(nil,
-				"Kai-scheduler is explicitly enabled in config but the scheduling.run.ai API group was not detected in the cluster",
-			)
-			os.Exit(1)
-		}
-		runtimeConfig.KaiSchedulerEnabled = true
-	default:
-		setupLog.Info("Kai-scheduler is explicitly disabled via config override")
-		runtimeConfig.KaiSchedulerEnabled = false
-	}
-
-	setupLog.Info("Detecting DRA (Dynamic Resource Allocation) availability...")
-	draDetected := commonController.DetectDRAAvailability(mainCtx, mgr)
-	switch {
-	case operatorCfg.DRA.Enabled == nil:
-		runtimeConfig.DRAEnabled = draDetected
-	case *operatorCfg.DRA.Enabled:
-		if !draDetected {
-			setupLog.Error(nil,
-				"DRA is explicitly enabled in config but the resource.k8s.io/v1 API"+
-					" was not detected in the cluster (requires Kubernetes 1.34+)",
-			)
-			os.Exit(1)
-		}
-		runtimeConfig.DRAEnabled = true
-	default:
-		setupLog.Info("DRA is explicitly disabled via config override")
-		runtimeConfig.DRAEnabled = false
-	}
-
-	setupLog.Info("Detecting Istio availability...")
-	switch {
-	case operatorCfg.ServiceMesh.Enabled == nil:
-		setupLog.Info("Auto-detecting Istio availability")
-		runtimeConfig.IstioEnabled = commonController.DetectIstioDestinationRuleAvailability(mainCtx, mgr)
-	case *operatorCfg.ServiceMesh.Enabled:
-		setupLog.Info("Istio service mesh is explicitly enabled; verifying availability")
-		istioDetected := commonController.DetectIstioDestinationRuleAvailability(mainCtx, mgr)
-		if !istioDetected {
-			setupLog.Error(nil,
-				"Service mesh is explicitly enabled but the networking.istio.io"+
-					" DestinationRule API group was not detected in the cluster",
-			)
-			os.Exit(1)
-		}
-		runtimeConfig.IstioEnabled = true
-	default:
-		setupLog.Info("Istio service mesh is explicitly disabled via config override")
-		runtimeConfig.IstioEnabled = false
-	}
-
-	setupLog.Info("Detected orchestrators availability",
-		"grove", runtimeConfig.GroveEnabled,
-		"lws", runtimeConfig.LWSEnabled,
-		"volcano", volcanoDetected,
-		"volcano-scheduler", runtimeConfig.VolcanoSchedulerEnabled,
-		"kai-scheduler", runtimeConfig.KaiSchedulerEnabled,
-		"dra", runtimeConfig.DRAEnabled,
-		"istio", runtimeConfig.IstioEnabled,
-	)
+	runtimeConfig.Gate = gates
 
 	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetAPIReader(), restrictedNamespace)
 	// refresh whenever a secret is created/deleted/updated
@@ -634,7 +483,7 @@ func main() {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+	if err := mgr.AddReadyzCheck("webhook-server", webhookServer.StartedChecker()); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
@@ -650,27 +499,32 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := registerWebhookHandlers(mgr, operatorCfg, runtimeConfig, operatorVersion); err != nil {
+	if err := registerWebhookHandlers(
+		mgr, operatorCfg, runtimeConfig, operatorVersion, dgdrDefaultImage, gates,
+	); err != nil {
 		setupLog.Error(err, "failed to register webhooks")
 		os.Exit(1)
 	}
 
-	// CertManager.SetupAndRunOnce has already bootstrapped auto-mode TLS
-	// secrets before this point. Auto mode can therefore patch admission and
-	// conversion CAs immediately; manual mode waits for externally provided
-	// ca.crt and only patches conversion, leaving admission CA management
-	// out-of-band.
+	// CertManager.SetupAndRunOnce has already bootstrapped auto-mode TLS secrets.
+	// Auto mode patches admission and, for cluster-wide operators, conversion CAs.
+	// Manual mode patches only cluster-wide conversion CAs; admission stays out-of-band.
 	caInjector, err := internalcert.NewCABundleInjector(directClient, operatorCfg)
 	if err != nil {
 		setupLog.Error(err, "unable to create CA bundle injector")
 		os.Exit(1)
 	}
 	if operatorCfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
-		if err := caInjector.InjectAll(mainCtx); err != nil {
+		if isClusterWide {
+			err = caInjector.InjectAll(mainCtx)
+		} else {
+			err = caInjector.InjectAdmission(mainCtx)
+		}
+		if err != nil {
 			setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
 			os.Exit(1)
 		}
-	} else {
+	} else if isClusterWide {
 		// Manual mode gets webhook CA material out-of-band. Missing ca.crt
 		// blocks startup instead of running with unauthenticated conversion.
 		if err := caInjector.InjectCRDConversionCA(mainCtx); err != nil {
@@ -707,107 +561,100 @@ func registerControllers(
 	operatorImage string,
 	operatorPullPolicy corev1.PullPolicy,
 ) error {
-	if err := (&controller.DynamoComponentDeploymentReconciler{
-		Client:                mgr.GetClient(),
-		Recorder:              mgr.GetEventRecorderFor("dynamocomponentdeployment"),
-		Config:                operatorCfg,
-		RuntimeConfig:         runtimeConfig,
-		DockerSecretRetriever: dockerSecretRetriever,
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create DynamoComponentDeployment controller: %w", err)
+	if operatorCfg.Namespace.Restricted == "" {
+		// The cluster-wide manager cache covers all namespaces. ExcludedNamespaces only filters
+		// business-controller events and does not narrow the cache used by the migrator.
+		migrator := &crdmigrator.CRDMigrator{
+			Client:    mgr.GetClient(),
+			APIReader: mgr.GetAPIReader(),
+			Config: map[client.Object]crdmigrator.ByObjectConfig{
+				&nvidiacomv1beta1.DynamoComponentDeployment{}: {
+					UseCache:                            true,
+					UseStatusForStorageVersionMigration: true,
+				},
+				&nvidiacomv1beta1.DynamoGraphDeployment{}: {
+					UseCache:                            true,
+					UseStatusForStorageVersionMigration: true,
+				},
+				&nvidiacomv1beta1.DynamoGraphDeploymentRequest{}: {
+					UseCache:                            true,
+					UseStatusForStorageVersionMigration: true,
+				},
+				&nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{}: {
+					UseCache:                            true,
+					UseStatusForStorageVersionMigration: true,
+				},
+			},
+		}
+		if err := migrator.SetupWithManager(mgr, ctrlcontroller.Options{MaxConcurrentReconciles: 1}); err != nil {
+			return fmt.Errorf("unable to create CRD migrator controller: %w", err)
+		}
 	}
 
-	scaleClient, err := createScalesGetter(mgr)
-	if err != nil {
-		return fmt.Errorf("unable to create scale client: %w", err)
+	setupOptions := controller.SetupOptions{
+		Config:        operatorCfg,
+		RuntimeConfig: runtimeConfig,
+	}
+
+	if err := controller.SetupDynamoComponentDeployment(mgr, controller.DynamoComponentDeploymentSetupOptions{
+		SetupOptions:          setupOptions,
+		DockerSecretRetriever: dockerSecretRetriever,
+	}); err != nil {
+		return err
 	}
 
 	rbacManager := rbac.NewManager(mgr.GetClient())
 
-	if err = (&controller.DynamoGraphDeploymentReconciler{
-		Client:                mgr.GetClient(),
-		Recorder:              mgr.GetEventRecorderFor("dynamographdeployment"),
-		Config:                operatorCfg,
-		RuntimeConfig:         runtimeConfig,
-		RestConfig:            mgr.GetConfig(),
+	if err := controller.SetupDynamoGraphDeployment(mgr, controller.DynamoGraphDeploymentSetupOptions{
+		SetupOptions:          setupOptions,
 		DockerSecretRetriever: dockerSecretRetriever,
-		ScaleClient:           scaleClient,
-		SSHKeyManager:         sshKeyManager,
 		RBACManager:           rbacManager,
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create DynamoGraphDeployment controller: %w", err)
+		SSHKeyManager:         sshKeyManager,
+	}); err != nil {
+		return err
 	}
-
-	if err = (&controller.DynamoGraphDeploymentScalingAdapterReconciler{
-		Client:        mgr.GetClient(),
-		Scheme:        mgr.GetScheme(),
-		Recorder:      mgr.GetEventRecorderFor("dgdscalingadapter"),
-		Config:        operatorCfg,
-		RuntimeConfig: runtimeConfig,
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create DGDScalingAdapter controller: %w", err)
+	if err := controller.SetupDynamoGraphDeploymentScalingAdapter(mgr, setupOptions); err != nil {
+		return err
 	}
-
-	if err = (&controller.DynamoGraphDeploymentRequestReconciler{
-		Client:                  mgr.GetClient(),
-		APIReader:               mgr.GetAPIReader(),
-		Recorder:                mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
-		Config:                  operatorCfg,
-		RuntimeConfig:           runtimeConfig,
-		GPUDiscoveryCache:       gpu.NewGPUDiscoveryCache(),
-		GPUDiscovery:            gpu.NewGPUDiscovery(gpu.ScrapeMetricsEndpoint),
+	if err := controller.SetupDynamoGraphDeploymentRequest(mgr, controller.DynamoGraphDeploymentRequestSetupOptions{
+		SetupOptions:            setupOptions,
+		RBACManager:             rbacManager,
 		OperatorImage:           operatorImage,
 		OperatorImagePullPolicy: operatorPullPolicy,
-		RBACManager:             rbacManager,
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create DynamoGraphDeploymentRequest controller: %w", err)
+	}); err != nil {
+		return err
 	}
-
-	if err = (&controller.DynamoModelReconciler{
-		Client:         mgr.GetClient(),
-		Recorder:       mgr.GetEventRecorderFor("dynamomodel"),
-		EndpointClient: modelendpoint.NewClient(),
-		Config:         operatorCfg,
-		RuntimeConfig:  runtimeConfig,
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create DynamoModel controller: %w", err)
+	if err := controller.SetupDynamoModel(mgr, controller.DynamoModelSetupOptions{
+		SetupOptions: setupOptions,
+	}); err != nil {
+		return err
 	}
-
-	if err = (&controller.CheckpointReconciler{
-		Client:        mgr.GetClient(),
-		Config:        operatorCfg,
-		RuntimeConfig: runtimeConfig,
-		Recorder:      mgr.GetEventRecorderFor("checkpoint"),
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create DynamoCheckpoint controller: %w", err)
+	// A disabled gate omits the external watch while retaining finalizer cleanup reconciliation.
+	if !runtimeConfig.Gate.Enabled(features.Checkpoint) {
+		setupLog.Info(
+			"Registering DynamoCheckpoint controller without PodSnapshot watch",
+			"reason", "checkpoint feature gate is disabled",
+		)
 	}
-
-	if err = (&controller.PodSnapshotReconciler{
-		Client:        mgr.GetClient(),
-		Config:        operatorCfg,
-		RuntimeConfig: runtimeConfig,
-		Recorder:      mgr.GetEventRecorderFor("snapshot"),
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create PodSnapshot controller: %w", err)
+	if err := controller.SetupDynamoCheckpoint(mgr, setupOptions); err != nil {
+		return err
 	}
+	// PodSnapshot/PodSnapshotContent reconciliation is owned by the external
+	// Snapshot operator (github.com/ai-dynamo/snapshot).
 
-	if runtimeConfig.GroveEnabled {
-		if err = controller.NewFailoverCascadeReconciler(
-			mgr.GetClient(),
-			mgr.GetEventRecorderFor("gms-failover-cascade"),
-		).SetupWithManager(mgr); err != nil {
-			return fmt.Errorf("unable to create GMS FailoverCascade controller: %w", err)
+	if runtimeConfig.Gate.Enabled(features.Grove) {
+		if err := controller.SetupFailoverCascade(mgr); err != nil {
+			return err
 		}
 	}
 
-	if err = (&controller.TopologyLabelReconciler{
-		Client:        mgr.GetClient(),
-		NodeReader:    mgr.GetAPIReader(),
-		Config:        operatorCfg,
-		RuntimeConfig: runtimeConfig,
-		Recorder:      mgr.GetEventRecorderFor("topology-label"),
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create TopologyLabel controller: %w", err)
+	if runtimeConfig.Gate.Enabled(features.Checkpoint) {
+		if err := controller.SetupGMSPodReplacement(mgr, setupOptions); err != nil {
+			return err
+		}
+	}
+	if err := controller.SetupTopologyLabel(mgr, setupOptions); err != nil {
+		return err
 	}
 
 	setupLog.Info("Controllers registered successfully")
@@ -819,17 +666,9 @@ func registerWebhookHandlers(
 	operatorCfg *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commonController.RuntimeConfig,
 	operatorVersion string,
+	dgdrDefaultImage string,
+	gate features.Gate,
 ) error {
-	isClusterWide := operatorCfg.Namespace.Restricted == ""
-	if isClusterWide {
-		setupLog.Info("Configuring webhooks with lease-based namespace exclusion for cluster-wide mode")
-		internalwebhook.SetExcludedNamespaces(runtimeConfig.ExcludedNamespaces)
-	} else {
-		setupLog.Info("Configuring webhooks for namespace-restricted mode (no lease checking)",
-			"restrictedNamespace", operatorCfg.Namespace.Restricted)
-		internalwebhook.SetExcludedNamespaces(nil)
-	}
-
 	var operatorPrincipal string
 	if sa, ns := os.Getenv("POD_SERVICE_ACCOUNT"), os.Getenv("POD_NAMESPACE"); sa != "" && ns != "" {
 		operatorPrincipal = fmt.Sprintf("system:serviceaccount:%s:%s", ns, sa)
@@ -838,85 +677,15 @@ func registerWebhookHandlers(
 		setupLog.Info("POD_SERVICE_ACCOUNT/POD_NAMESPACE not set; operator SA self-identification disabled")
 	}
 
-	// Temporary internal gate for GMS + Snapshot.
-	if os.Getenv(consts.DynamoOperatorAllowGMSSnapshotEnvVar) == "1" {
-		setupLog.Info(
-			"INTERNAL OVERRIDE: GMS + Snapshot admission rule disabled via env var; do NOT enable in production",
-			"envVar", consts.DynamoOperatorAllowGMSSnapshotEnvVar,
-		)
-	}
-
-	setupLog.Info("Registering validation webhooks")
-
-	dcdHandler := webhookvalidation.NewDynamoComponentDeploymentHandler()
-	if err := dcdHandler.RegisterWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to register DynamoComponentDeployment webhook: %w", err)
-	}
-
-	dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr, operatorPrincipal, runtimeConfig.GroveEnabled)
-	if err := dgdHandler.RegisterWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to register DynamoGraphDeployment webhook: %w", err)
-	}
-
-	dckptHandler := webhookvalidation.NewDynamoCheckpointHandler()
-	if err := dckptHandler.RegisterWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to register DynamoCheckpoint webhook: %w", err)
-	}
-
-	dmHandler := webhookvalidation.NewDynamoModelHandler()
-	if err := dmHandler.RegisterWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to register DynamoModel webhook: %w", err)
-	}
-
-	dgdrHandler := webhookvalidation.NewDynamoGraphDeploymentRequestHandler(
-		isClusterWide, ptr.Deref(operatorCfg.GPU.DiscoveryEnabled, true),
-	)
-	if err := dgdrHandler.RegisterWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest webhook: %w", err)
-	}
-
-	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}).
-		Complete(); err != nil {
-		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest conversion webhook: %w", err)
-	}
-
-	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeployment{}).
-		Complete(); err != nil {
-		return fmt.Errorf("unable to register DynamoGraphDeployment conversion webhook: %w", err)
-	}
-
-	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoComponentDeployment{}).
-		Complete(); err != nil {
-		return fmt.Errorf("unable to register DynamoComponentDeployment conversion webhook: %w", err)
-	}
-
-	if err := ctrl.NewWebhookManagedBy(mgr, &nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{}).
-		Complete(); err != nil {
-		return fmt.Errorf("unable to register DynamoGraphDeploymentScalingAdapter conversion webhook: %w", err)
-	}
-
-	setupLog.Info("Registering defaulting webhooks")
-
-	dcdDefaulter := webhookdefaulting.NewDCDDefaulter()
-	if err := dcdDefaulter.RegisterWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to register DynamoComponentDeployment defaulting webhook: %w", err)
-	}
-
-	dgdDefaulter := webhookdefaulting.NewDGDDefaulter(operatorVersion, runtimeConfig.GroveEnabled)
-	if err := dgdDefaulter.RegisterWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to register DynamoGraphDeployment defaulting webhook: %w", err)
-	}
-
-	dgdrDefaulter := webhookdefaulting.NewDGDRDefaulter(operatorVersion)
-	if err := dgdrDefaulter.RegisterWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to register DynamoGraphDeploymentRequest defaulting webhook: %w", err)
-	}
-
-	setupLog.Info("Registering mutation webhooks")
-
-	podCheckpointRestoreMutator := webhookmutation.NewPodCheckpointRestoreMutator(mgr.GetClient(), operatorCfg)
-	if err := podCheckpointRestoreMutator.RegisterWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to register Pod checkpoint restore mutating webhook: %w", err)
+	if err := webhooksetup.Setup(mgr, webhooksetup.Options{
+		Config:            operatorCfg,
+		RuntimeConfig:     runtimeConfig,
+		OperatorVersion:   operatorVersion,
+		DGDRDefaultImage:  dgdrDefaultImage,
+		OperatorPrincipal: operatorPrincipal,
+		Gate:              gate,
+	}); err != nil {
+		return err
 	}
 
 	setupLog.Info("Webhooks registered successfully")

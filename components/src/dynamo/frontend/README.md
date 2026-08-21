@@ -5,4 +5,4 @@
 
 The API gateway for serving LLM inference requests with OpenAI-compatible HTTP and KServe gRPC endpoints.
 
-See [docs/components/frontend/](../../../../docs/components/frontend/) for documentation.
+See [docs/components/frontend/](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/frontend/overview.md) for documentation.

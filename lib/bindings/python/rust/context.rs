@@ -25,7 +25,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Process-wide guard: once-per-process WARN when telemetry calls hit a
 /// parent `engine.generate` span that has no OTel context (i.e., the
-/// `tracing-opentelemetry` layer isn't installed — non-JSONL deployments).
+/// `tracing-opentelemetry` layer isn't installed).
 /// One log line is enough to surface the configuration issue; rate-limiting
 /// to once avoids flooding logs in high-QPS workers.
 ///
@@ -40,7 +40,8 @@ fn warn_bridge_missing_once(method: &str) {
         tracing::warn!(
             method,
             "telemetry call is a no-op: OTel bridge layer not installed \
-             (needs DYN_LOGGING_JSONL=1 + OTEL_EXPORT_ENABLED=1). \
+             (enable OTEL_EXPORT_ENABLED=1, DYN_LOGGING_CONSOLE_FORMAT=jsonl, \
+             or the legacy DYN_LOGGING_JSONL=1 switch). \
              Engine telemetry attributes / events / child spans are NOT \
              being recorded. Further no-ops in this process are silent."
         );
@@ -68,14 +69,6 @@ pub struct Context {
     /// contexts (where no parent span was plumbed in) — `current_span` /
     /// `start_span` return a no-op `SpanProxy` in that case.
     span: Option<tracing::Span>,
-    /// Rust response sink for the flag-gated push egress path
-    /// (`DYN_TRTLLM_PUSH_EGRESS`, see `push_egress.rs`). The `Context` is the
-    /// delivery vehicle because it is the one per-request object every handler
-    /// already receives — passing the sender as an extra parameter would
-    /// require the bridge to introspect the handler's signature, which
-    /// `functools.wraps` on the Python side makes unreliable.
-    /// `None` on the default pull path.
-    response_sender: Option<Py<crate::push_egress::ResponseSender>>,
 }
 
 #[derive(Clone)]
@@ -192,15 +185,7 @@ impl Context {
             first_token,
             metadata: Arc::new(Mutex::new(metadata)),
             span: None,
-            response_sender: None,
         }
-    }
-
-    /// Attach this request's push-egress response sink. Only the push path
-    /// (`push_egress.rs`) calls this; the pull path leaves it `None`.
-    pub fn with_response_sender(mut self, sender: Py<crate::push_egress::ResponseSender>) -> Self {
-        self.response_sender = Some(sender);
-        self
     }
 
     /// Attach the `engine.generate` span. Called by `PyLLMEngine::generate`
@@ -274,18 +259,7 @@ impl Context {
             first_token: None,
             metadata: Arc::new(Mutex::new(metadata.unwrap_or_default())),
             span: None,
-            response_sender: None,
         }
-    }
-
-    /// This request's push-egress response sink, or `None` on the default pull
-    /// path. Python handlers use its presence to decide whether to push
-    /// responses or yield them.
-    #[getter]
-    fn response_sender(&self, py: Python<'_>) -> Option<Py<crate::push_egress::ResponseSender>> {
-        self.response_sender
-            .as_ref()
-            .map(|sender| sender.clone_ref(py))
     }
 
     /// Create a context with a fresh cancellation controller and request id.
@@ -302,9 +276,6 @@ impl Context {
             first_token: None,
             metadata: Arc::new(Mutex::new(self.metadata_snapshot())),
             span: self.span.clone(),
-            // A detached context owns a fresh request: it must not be able to
-            // push into the originating request's response stream.
-            response_sender: None,
         }
     }
 
@@ -455,8 +426,8 @@ impl Context {
     /// bridge is installed, so downstream engine internals (vLLM scheduler,
     /// TRT-LLM forward, SGLang KV transfer) nest UNDER `engine.generate`.
     /// Falls back to the inbound `DistributedTraceContext` for legacy
-    /// callers, Python-instantiated test contexts, and non-JSONL deployments
-    /// without the bridge.
+    /// callers, Python-instantiated test contexts, and deployments without
+    /// the bridge.
     ///
     /// Always emits `traceparent`. Also emits `tracestate`, `x-request-id`,
     /// and `request-id` when the upstream propagated them.

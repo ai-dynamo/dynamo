@@ -1,12 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for production GMS process and listener topology."""
+"""Tests for GMS process topology."""
 
 from __future__ import annotations
 
 import asyncio
-import sys
 
 import pytest
 from _deps import HAS_GMS
@@ -17,9 +16,8 @@ if not HAS_GMS:
         allow_module_level=True,
     )
 
-from gpu_memory_service.cli import args as cli_args
 from gpu_memory_service.cli import runner, server
-from gpu_memory_service.cli.args import parse_args
+from gpu_memory_service.v1 import device as v1_device
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -29,14 +27,12 @@ pytestmark = [
 ]
 
 
-def test_child_command_launches_default_multi_tag_runner():
-    assert server._child_command(3) == [
-        sys.executable,
-        "-m",
-        "gpu_memory_service",
-        "--device",
-        "3",
-    ]
+def test_v1_socket_path_rejects_af_unix_overflow(monkeypatch):
+    monkeypatch.setenv("GMS_SOCKET_DIR", "/" + "s" * 200)
+    monkeypatch.setattr(v1_device, "get_device_uuid", lambda _device: "GPU-0")
+
+    with pytest.raises(ValueError, match="too long for AF_UNIX"):
+        v1_device.get_socket_path(0, "weights")
 
 
 class _Process:
@@ -59,83 +55,8 @@ def test_supervisor_terminates_siblings_when_child_exits():
 
     # A clean exit (poll() returning 0) is an exit, not "still running".
     clean = [_Process(exit_code=0), _Process()]
-    assert server._supervise(clean) == 0
+    assert server._supervise(clean) == 1
     assert clean[1].terminated
-
-
-def test_parse_args_defaults_to_one_config_per_production_tag(monkeypatch):
-    # get_socket_path queries the GPU UUID through NVML; stub the hardware.
-    monkeypatch.setattr(
-        cli_args,
-        "get_socket_path",
-        lambda device, tag: f"/sockets/{device}-{tag}.sock",
-    )
-
-    configs = parse_args(["--device", "3"])
-
-    assert [config.tag for config in configs] == ["weights", "kv_cache"]
-    assert [config.socket_path for config in configs] == [
-        "/sockets/3-weights.sock",
-        "/sockets/3-kv_cache.sock",
-    ]
-    assert all(config.device == 3 for config in configs)
-
-    (config,) = parse_args(["--device", "3", "--tag", "kv_cache"])
-    assert config.tag == "kv_cache"
-
-
-def test_parse_args_single_tag_honors_explicit_socket_path():
-    (config,) = parse_args(
-        ["--device", "3", "--tag", "weights", "--socket-path", "/run/gms.sock"]
-    )
-
-    assert config.socket_path == "/run/gms.sock"
-
-
-@pytest.mark.parametrize(
-    "argv",
-    [
-        ["--device", "3", "--tag", "weight"],
-        ["--device", "3", "--tag", "weights", "--tag", "bogus"],
-    ],
-)
-def test_parse_args_rejects_unknown_tags(argv, capsys):
-    with pytest.raises(SystemExit):
-        parse_args(argv)
-
-    assert "invalid choice" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize(
-    "argv",
-    [
-        # Default tags: one socket path cannot serve both listeners.
-        ["--device", "3", "--socket-path", "/run/gms.sock"],
-        # Explicit multiple tags with one socket path.
-        [
-            "--device",
-            "3",
-            "--tag",
-            "weights",
-            "--tag",
-            "kv_cache",
-            "--socket-path",
-            "/run/gms.sock",
-        ],
-    ],
-)
-def test_parse_args_rejects_socket_path_for_multiple_tags(argv, capsys):
-    with pytest.raises(SystemExit):
-        parse_args(argv)
-
-    assert "requires exactly one --tag" in capsys.readouterr().err
-
-
-def test_parse_args_rejects_duplicate_tags(capsys):
-    with pytest.raises(SystemExit):
-        parse_args(["--device", "3", "--tag", "weights", "--tag", "weights"])
-
-    assert "must be unique" in capsys.readouterr().err
 
 
 @pytest.mark.timeout(10)

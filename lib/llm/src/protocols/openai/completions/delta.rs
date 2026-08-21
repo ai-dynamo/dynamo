@@ -244,7 +244,16 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
             delta.top_logprobs,
         );
 
-        let finish_reason = delta.finish_reason.map(Into::into);
+        // Backend errors are response errors, not successful OpenAI stop reasons.
+        // Keep completions aligned with the chat-completions delta generator.
+        let finish_reason = match delta.finish_reason {
+            Some(common::FinishReason::Error(err_msg)) => {
+                self.tracker.record_finish();
+                return Err(anyhow::anyhow!(err_msg));
+            }
+            Some(reason) => Some(reason.into()),
+            None => None,
+        };
         let stop_reason = delta.stop_reason.clone();
 
         // create choice
@@ -436,6 +445,24 @@ mod tests {
             .expect("choice generation");
 
         assert!(response.nvext.is_none());
+    }
+
+    #[test]
+    fn test_backend_error_is_not_converted_to_stop() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-backend-error".to_string());
+        let mut output = final_backend_output();
+        output.finish_reason = Some(common::FinishReason::Error(
+            "invalid prompt embeddings".to_string(),
+        ));
+        assert!(generator.tracker().total_time_ms().is_none());
+
+        let error = generator
+            .choice_from_postprocessor(output)
+            .expect_err("backend error must fail the response");
+
+        assert_eq!(error.to_string(), "invalid prompt embeddings");
+        assert!(generator.tracker().total_time_ms().is_some());
     }
 
     #[test]

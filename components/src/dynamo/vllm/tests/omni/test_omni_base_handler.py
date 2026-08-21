@@ -4,14 +4,12 @@
 """Tests that every DiffusionParallelConfig field is either exposed in Dynamo or intentionally skipped."""
 
 import dataclasses
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 try:
     from vllm_omni.diffusion.data import DiffusionParallelConfig
-    from vllm_omni.engine.arg_utils import OmniEngineArgs
 
     from dynamo.vllm.omni.args import OmniDiffusionKwargs, OmniParallelKwargs
     from dynamo.vllm.omni.base_handler import BaseOmniHandler
@@ -33,16 +31,17 @@ _SKIP_FIELDS = {
     "mask_sp_padding",
 }
 
+# DiffusionParallelConfig fields deliberately sourced from vLLM's shared
+# engine arguments rather than Dynamo's Omni-only parallel argument group.
+_ENGINE_ARG_PARALLEL_FIELDS = {
+    "tensor_parallel_size",
+    "pipeline_parallel_size",
+    "data_parallel_size",
+}
+
 
 def _diffusion_parallel_fields() -> set:
     return {f.name for f in dataclasses.fields(DiffusionParallelConfig)}
-
-
-def _engine_args_fields() -> set:
-    fields: set = set()
-    for cls in OmniEngineArgs.__mro__:
-        fields |= set(getattr(cls, "__annotations__", {}).keys())
-    return fields
 
 
 def _make_config(**parallel_overrides):
@@ -51,6 +50,12 @@ def _make_config(**parallel_overrides):
     cfg.stage_configs_path = None
     cfg.output_modalities = None
     cfg.engine_args.trust_remote_code = False
+    cfg.engine_args.enable_lora = False
+    cfg.engine_args.max_cpu_loras = None
+    cfg.engine_args.max_loras = None
+    cfg.engine_args.tensor_parallel_size = 1
+    cfg.engine_args.pipeline_parallel_size = 1
+    cfg.engine_args.data_parallel_size = 1
     cfg.diffusion = OmniDiffusionKwargs()
     cfg.parallel = dataclasses.replace(OmniParallelKwargs(), **parallel_overrides)
     return cfg
@@ -69,31 +74,31 @@ class TestDiffusionParallelConfigCoverage:
         Fix by adding it to OmniParallelKwargs and OmniArgGroup, or to _SKIP_FIELDS
         """
         parallel_kwarg_fields = {f.name for f in dataclasses.fields(OmniParallelKwargs)}
-        engine_fields = _engine_args_fields()
-
         uncovered = [
             f
             for f in _diffusion_parallel_fields()
             if f not in _SKIP_FIELDS
             and f not in parallel_kwarg_fields
-            and f not in engine_fields
+            and f not in _ENGINE_ARG_PARALLEL_FIELDS
         ]
         assert not uncovered, (
             f"DiffusionParallelConfig fields not covered: {uncovered}. "
             f"Add to OmniParallelKwargs and OmniArgGroup, or add to _SKIP_FIELDS with a reason."
         )
 
-    def test_tensor_parallel_size_read_from_engine_args(self):
-        """tensor_parallel_size must come from engine_args (vLLM's --tensor-parallel-size),
-        not from OmniParallelKwargs, so it applies to both LLM encoder and diffusion transformer.
-        """
-        config = _make_config()
+    def test_parallel_fields_forwarded_from_separate_configs(self):
+        """Construct the real vLLM-Omni config from both argument groups."""
+        config = _make_config(text_encoder_tp_size=2)
         config.engine_args.tensor_parallel_size = 4
-        with patch("dynamo.vllm.omni.base_handler.DiffusionParallelConfig") as MockCfg:
-            MockCfg.return_value = SimpleNamespace()
-            _build_kwargs(config)
-            _, kwargs = MockCfg.call_args
-            assert kwargs.get("tensor_parallel_size") == 4
+        config.engine_args.pipeline_parallel_size = 3
+        config.engine_args.data_parallel_size = 5
+
+        parallel_config = _build_kwargs(config)["parallel_config"]
+
+        assert parallel_config.tensor_parallel_size == 4
+        assert parallel_config.pipeline_parallel_size == 3
+        assert parallel_config.data_parallel_size == 5
+        assert parallel_config.text_encoder_tp_size == 2
 
     def test_output_modalities_forwarded_to_async_omni(self):
         config = _make_config()
@@ -102,3 +107,49 @@ class TestDiffusionParallelConfigCoverage:
         kwargs = _build_kwargs(config)
 
         assert kwargs["output_modalities"] == ["image"]
+
+    def test_lora_disabled_resolves_no_capacity(self):
+        config = _make_config()
+        handler = BaseOmniHandler.__new__(BaseOmniHandler)
+
+        assert handler._resolve_lora_capacity(config) is None
+
+    def test_lora_enabled_with_unset_max_loras_resolves_no_capacity_limit(self):
+        config = _make_config()
+        config.engine_args.enable_lora = True
+        handler = BaseOmniHandler.__new__(BaseOmniHandler)
+
+        assert handler._resolve_lora_capacity(config) is None
+
+    def test_lora_enabled_uses_configured_max_cpu_loras(self):
+        config = _make_config()
+        config.engine_args.enable_lora = True
+        config.engine_args.max_cpu_loras = 3
+        handler = BaseOmniHandler.__new__(BaseOmniHandler)
+
+        assert handler._resolve_lora_capacity(config) == 3
+
+    def test_lora_enabled_falls_back_to_max_loras_when_max_cpu_loras_unset(self):
+        config = _make_config()
+        config.engine_args.enable_lora = True
+        config.engine_args.max_cpu_loras = None
+        config.engine_args.max_loras = 2
+        handler = BaseOmniHandler.__new__(BaseOmniHandler)
+
+        assert handler._resolve_lora_capacity(config) == 2
+
+    def test_advertised_gpu_capacity_uses_max_loras_even_when_max_cpu_loras_set(self):
+        config = _make_config()
+        config.engine_args.enable_lora = True
+        config.engine_args.max_cpu_loras = 8
+        config.engine_args.max_loras = 2
+        handler = BaseOmniHandler.__new__(BaseOmniHandler)
+
+        assert handler._resolve_advertised_gpu_lora_capacity(config) == 2
+
+    def test_advertised_gpu_capacity_none_when_lora_disabled(self):
+        config = _make_config()
+        config.engine_args.enable_lora = False
+        handler = BaseOmniHandler.__new__(BaseOmniHandler)
+
+        assert handler._resolve_advertised_gpu_lora_capacity(config) is None

@@ -22,7 +22,6 @@ import itertools
 import json
 import logging
 import math
-import os
 import signal
 import statistics
 import time
@@ -134,9 +133,6 @@ class RuntimeRustEgressWorkerHandler:
             response_processor=self.processor,
             response_sender=response_sender,
             prompt_tokens=prompt_tokens,
-            calibrated_work_us=(
-                self.costs.handle_response_us + self.costs.build_response_us
-            ),
         )
         try:
             await generation_result.wait_native()
@@ -249,12 +245,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--response-path",
         choices=("python", "rust"),
         default="python",
-        help="run response handling on the Python loop or in owned Rust",
+        help="run response handling on the Python loop or in native Rust",
     )
     parser.add_argument("--batch-total", type=_positive_int, default=200)
     parser.add_argument("--iteration-ms", type=_positive_float, default=52.1)
     parser.add_argument("--max-tokens", type=_positive_int, default=89)
     parser.add_argument("--stream-interval", type=_positive_int, default=1)
+    parser.add_argument("--response-shards", type=_positive_int, default=4)
+    parser.add_argument("--response-queue-depth", type=_positive_int, default=2)
     parser.add_argument(
         "--response-cost-scale",
         "--cost-scale",
@@ -269,31 +267,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _validate_push_runtime() -> None:
-    if os.environ.get("DYN_TRTLLM_PUSH_EGRESS") != "1":
-        raise RuntimeError(
-            "DYN_TRTLLM_PUSH_EGRESS must be 1 for the real-runtime "
-            "GIL-path reproduction"
-        )
-
     if not USING_REAL_PUSH_EGRESS:
         raise RuntimeError(
-            "the real push_egress_capable decorator was not loaded; set "
-            "DYN_TRTLLM_PUSH_EGRESS=1 before importing this module"
+            "the real push_egress_capable decorator was not loaded"
         )
 
     import dynamo._core as core
 
     if not hasattr(core, "ResponseSender"):
         raise RuntimeError(
-            "DYN_TRTLLM_PUSH_EGRESS=1 requires bindings built from this "
-            "worker-egress-experiments checkout; ResponseSender is missing"
+            "the runtime requires bindings built from this checkout; "
+            "ResponseSender is missing"
         )
 
 
 def _validate_rust_runtime(core: Any) -> None:
-    if not hasattr(core, "OwnedTokenEgress"):
+    if not hasattr(core, "NativeResponseEgress"):
         raise RuntimeError(
-            "--response-path rust requires bindings with OwnedTokenEgress; "
+            "--response-path rust requires bindings with NativeResponseEgress; "
             "rebuild lib/bindings/python from this checkout"
         )
 
@@ -320,17 +311,34 @@ async def serve(args: argparse.Namespace) -> None:
     probe = None
     runtime = None
     reporter = None
+    probe_reset_installed = False
 
     try:
         llm.start(loop)
         if args.response_path == "rust":
+            benchmark_response_work_us = (
+                costs.handle_response_us + costs.build_response_us
+            )
             handler = RuntimeRustEgressWorkerHandler(
-                llm, processor=core.OwnedTokenEgress(), costs=costs
+                llm,
+                processor=core.NativeResponseEgress(
+                    shards=args.response_shards,
+                    queue_depth=args.response_queue_depth,
+                    benchmark_response_work_us=benchmark_response_work_us,
+                ),
+                costs=costs,
             )
         else:
             handler = RuntimeTrtllmWorkerHandler(llm, costs=costs)
         probe = LoopProbe(lag_ms=args.loop_lag_ms)
         probe.install(loop)
+        if hasattr(signal, "SIGUSR1"):
+            def reset_probe() -> None:
+                probe.reset()
+                logger.info("GIL_PATH_PROBE_RESET")
+
+            loop.add_signal_handler(signal.SIGUSR1, reset_probe)
+            probe_reset_installed = True
         reporter = loop.create_task(
             _report_stats(llm, handler, probe, args.stats_interval)
         )
@@ -370,6 +378,14 @@ async def serve(args: argparse.Namespace) -> None:
             loop_cost,
             demand * loop_cost / 1e4,
         )
+        if args.response_path == "rust":
+            logger.info(
+                "native response configuration: shards=%d, queue_depth=%d, "
+                "response_work_target_us=%.2f",
+                args.response_shards,
+                args.response_queue_depth,
+                benchmark_response_work_us,
+            )
         await endpoint.serve_endpoint(handler.generate)
     finally:
         try:
@@ -379,13 +395,36 @@ async def serve(args: argparse.Namespace) -> None:
         finally:
             try:
                 if probe is not None:
+                    if probe_reset_installed:
+                        loop.remove_signal_handler(signal.SIGUSR1)
                     probe.uninstall()
             finally:
                 try:
                     if runtime is not None:
                         runtime.shutdown()
                 finally:
-                    llm.shutdown()
+                    try:
+                        llm.shutdown()
+                    finally:
+                        if handler is not None and args.response_path == "rust":
+                            logger.info(
+                                "RUST_EGRESS_FINAL %s",
+                                json.dumps(
+                                    {
+                                        "active_requests": (
+                                            handler.processor.active_requests
+                                        ),
+                                        "responses_processed": (
+                                            handler.processor.responses_processed
+                                        ),
+                                        "responses_dropped": (
+                                            handler.processor.responses_dropped
+                                        ),
+                                        "frames_sent": handler.processor.frames_sent,
+                                    },
+                                    sort_keys=True,
+                                ),
+                            )
 
 
 def _interrupt_for_shutdown(_signum: int, _frame: Any) -> None:
@@ -403,7 +442,10 @@ def main(argv: list[str] | None = None) -> None:
 
     previous_sigterm = signal.signal(signal.SIGTERM, _interrupt_for_shutdown)
     try:
-        uvloop.run(serve(args))
+        try:
+            uvloop.run(serve(args))
+        except KeyboardInterrupt:
+            pass
     finally:
         signal.signal(signal.SIGTERM, previous_sigterm)
 

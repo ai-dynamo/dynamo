@@ -16,7 +16,6 @@ use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 
-use dynamo_runtime::dynamo_nvtx_range;
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 pub use dynamo_runtime::{
@@ -83,19 +82,13 @@ where
     G: FnOnce(Python) -> PyResult<Vec<(&'static str, Py<PyAny>)>> + Send + 'static,
 {
     let stream = tokio::task::spawn_blocking(move || {
-        // Covers GIL acquisition plus the Rust->Python crossing that builds the
-        // request object and calls the handler's `generate`. Not token
-        // generation: the generator has not been advanced when this range ends.
-        let _nvtx = dynamo_nvtx_range!("pybridge.invoke_generator");
         Python::with_gil(|py| {
             let python_input = to_python_input(py)?;
 
             // The closure returns the FULL kwarg list rather than just the
-            // context, so a caller that needs several keyword arguments can
-            // build them under one GIL acquisition and share objects between
-            // them. The push-egress path relies on this: it hands the same
-            // `ResponseSender` to the handler both as `response_sender=` and on
-            // `context.response_sender`, and the two must be the same object.
+            // context, so a caller needing several keyword arguments builds
+            // them all under one GIL acquisition. The push-egress path relies
+            // on this to pass `context` and `response_sender` together.
             let gen_result = match to_python_kwargs {
                 Some(to_python_kwargs) => {
                     let kwargs = to_python_kwargs(py)?;
@@ -125,14 +118,9 @@ fn demand_driven_python_stream(
 ) -> PyResult<PyItemStream> {
     let anext = generator.getattr("__anext__")?.unbind();
     let stream = futures::stream::unfold((anext, locals), |(anext, locals)| async move {
-        // Only the GIL-bound `__anext__` call is annotated. The `.await` below is
-        // the Python generator (and, for a worker, the engine) producing the item,
-        // so leaving it outside the range keeps engine time out of the bridge cost.
-        let nvtx_anext = dynamo_nvtx_range!("pybridge.anext_call");
         let next = Python::with_gil(|py| {
             pyo3_async_runtimes::into_future_with_locals(&locals, anext.bind(py).call0()?)
         });
-        drop(nvtx_anext);
         let item = match next {
             Ok(next) => next.await,
             Err(error) => Err(error),
@@ -338,6 +326,41 @@ where
     Ok(ResponseStream::new(response_stream, context.context()))
 }
 
+/// Convert one Python response object into the wire value.
+///
+/// Yields tagged with `_dynamo_annotated: True` are wire `Annotated<R>`
+/// envelopes; everything else is plain data.
+///
+/// Used by the typed pull path via [`process_item`]. The direct request-plane
+/// paths — pull and push alike — instead go through
+/// `python_payload::parse_python_response`, which keeps the payload a
+/// `PythonPayload` so it transcodes straight into the wire codec.
+///
+/// The caller owns the error mapping; the GIL is already held.
+fn depythonize_annotated<Resp>(
+    bound: &Bound<'_, PyAny>,
+) -> Result<Annotated<Resp>, pythonize::PythonizeError>
+where
+    Resp: for<'de> Deserialize<'de>,
+{
+    let is_envelope = bound
+        .downcast::<PyDict>()
+        .ok()
+        .and_then(|d| {
+            d.get_item(pyo3::intern!(bound.py(), "_dynamo_annotated"))
+                .ok()
+                .flatten()
+        })
+        .and_then(|v| v.is_truthy().ok())
+        .unwrap_or(false);
+
+    if is_envelope {
+        depythonize::<Annotated<Resp>>(bound)
+    } else {
+        depythonize::<Resp>(bound).map(Annotated::from_data)
+    }
+}
+
 async fn process_item<Resp>(
     item: Result<Py<PyAny>, PyErr>,
 ) -> Result<Annotated<Resp>, ResponseProcessingError>
@@ -346,25 +369,7 @@ where
 {
     let item = item.map_err(|e| ResponseProcessingError::Dynamo(map_python_exception(e)))?;
     let response = tokio::task::spawn_blocking(move || {
-        // Per-response Python->Rust deserialization: pure Dynamo overhead paid
-        // once per token on the streaming path.
-        let _nvtx = dynamo_nvtx_range!("pybridge.decode_response");
-        Python::with_gil(|py| {
-            let bound = item.into_bound(py);
-            // Yields tagged with `_dynamo_annotated: True` are wire
-            // Annotated<R> envelopes; everything else is plain data.
-            let is_envelope = bound
-                .downcast::<PyDict>()
-                .ok()
-                .and_then(|d| d.get_item("_dynamo_annotated").ok().flatten())
-                .and_then(|v| v.is_truthy().ok())
-                .unwrap_or(false);
-            if is_envelope {
-                depythonize::<Annotated<Resp>>(&bound)
-            } else {
-                depythonize::<Resp>(&bound).map(Annotated::from_data)
-            }
-        })
+        Python::with_gil(|py| depythonize_annotated::<Resp>(&item.into_bound(py)))
     })
     .await
     .map_err(|e| ResponseProcessingError::Offload(e.to_string()))?
@@ -436,7 +441,7 @@ pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
 
 /// Channel depth between the response-forwarding task and the consumer of
 /// the engine's output stream.
-const RESPONSE_CHANNEL_DEPTH: usize = 128;
+pub(crate) const RESPONSE_CHANNEL_DEPTH: usize = 128;
 
 /// Drain the Python response stream on a spawned task, deserialize each item
 /// into `Resp` via [`process_item`], and forward it as an [`Annotated`] frame

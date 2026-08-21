@@ -68,9 +68,49 @@ pub struct KvHints {
     pub evict_session: bool,
 }
 
+/// Causal trigger that produced an incoming agent request.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InputTrigger {
+    /// A new human/user message initiated the turn.
+    UserMessage,
+    /// A tool or function result was fed back, continuing the turn.
+    ToolResult,
+    /// Any request not triggered by a user message or tool result.
+    Other,
+}
+
+/// Metadata for an inference request that creates a compacted session summary.
+///
+/// Fields are optional because harnesses may expose different levels of detail.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentCompaction {
+    /// How the compaction was initiated, such as `manual` or `automatic`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+
+    /// Why the compaction was initiated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+
+    /// Compaction mechanism selected by the harness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implementation: Option<String>,
+
+    /// Position of this inference within the compaction flow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+
+    /// Summary or checkpoint strategy selected by the harness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+}
+
 /// Identity metadata for agentic workloads.
+// Not `deny_unknown_fields`: `AgentContext` is part of the frontend->worker wire
+// format (`PreprocessedRequest.agent_context`), so additive fields must be tolerated
+// across the N-2 mixed-version compatibility window.
 #[derive(Serialize, Deserialize, Builder, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct AgentContext {
     /// Stable reasoning/tool session identifier.
     pub session_id: String,
@@ -85,9 +125,21 @@ pub struct AgentContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_final: Option<bool>,
 
+    /// Present when the current inference creates a compacted session summary.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<AgentCompaction>,
+
     #[builder(default, setter(strip_option))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_hints: Option<KvHints>,
+
+    /// Causal trigger that produced the request, derived from inbound request content.
+    #[builder(default, setter(strip_option))]
+    // Optional for v1.2/v1.3 payloads during the v1.4/v1.5 N-2 window.
+    // TODO(v1.6): Make required after v1.3 falls outside the N-2 window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_trigger: Option<InputTrigger>,
 }
 
 impl AgentContext {
@@ -261,7 +313,9 @@ impl From<AgentContextHeaderValues> for AgentContext {
             session_id: values.session_id,
             parent_session_id: values.parent_session_id,
             session_final: values.session_final,
+            compaction: values.compaction,
             kv_hints,
+            input_trigger: None,
         }
     }
 }
@@ -331,15 +385,16 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         .and_then(|s| s.parse::<u32>().ok());
     let prefill_dp_rank = prefill_dp_rank.filter(|rank| *rank != UNSET_DP_RANK_SENTINEL);
 
-    let priority = headers
+    let priority_header = headers
         .get(HEADER_REQUEST_PRIORITY)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<i32>().ok());
-
-    let strict_priority = headers
+        .and_then(|v| v.to_str().ok());
+    let strict_priority_header = headers
         .get(HEADER_REQUEST_STRICT_PRIORITY)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u32>().ok());
+        .and_then(|v| v.to_str().ok());
+    // Parsed only for the "header present?" gate below; the merge is delegated to
+    // `resolve_request_priority`.
+    let priority = priority_header.and_then(|s| s.trim().parse::<i32>().ok());
+    let strict_priority = strict_priority_header.and_then(|s| s.trim().parse::<u32>().ok());
     let tenant_id = headers
         .get(HEADER_TENANT_ID)
         .and_then(|v| v.to_str().ok())
@@ -372,18 +427,58 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         ext.prefill_dp_rank = Some(rank);
     }
     if priority.is_some() || strict_priority.is_some() {
+        // Bake the effective header-over-body priority into the body.
+        let resolved = resolve_request_priority(
+            ext.agent_hints.as_ref(),
+            priority_header,
+            strict_priority_header,
+        );
         let hints = ext.agent_hints.get_or_insert_with(AgentHints::default);
-        if let Some(priority) = priority {
-            hints.priority = Some(priority);
-        }
-        if let Some(strict_priority) = strict_priority {
-            hints.strict_priority = Some(strict_priority);
-        }
+        hints.priority = resolved.priority;
+        hints.strict_priority = resolved.strict_priority;
     }
     if let Some(salt) = tenant_id {
         ext.cache_salt = Some(salt);
     }
     Some(ext)
+}
+
+/// Priority resolved with header-over-body precedence, per field: a well-formed
+/// header (incl. `0`/negative) wins; a missing/malformed one falls back to the
+/// body; `latency_sensitivity` feeds only `priority_jump`, only when no priority
+/// exists. Transport-neutral — the caller passes header strings from an
+/// `http::HeaderMap` or Envoy `ext_proc` headers, so one policy serves both.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ResolvedPriority {
+    /// Effective `x-dynamo-request-priority`.
+    pub priority: Option<i32>,
+    /// Effective `x-dynamo-request-strict-priority` (queue tier).
+    pub strict_priority: Option<u32>,
+    /// `priority` as `f64`, else deprecated `latency_sensitivity`, else `None`.
+    pub priority_jump: Option<f64>,
+}
+
+/// Resolve request priority from body hints and already-looked-up raw header
+/// values. See [`ResolvedPriority`] for the precedence contract.
+pub fn resolve_request_priority(
+    hints: Option<&AgentHints>,
+    priority_header: Option<&str>,
+    strict_priority_header: Option<&str>,
+) -> ResolvedPriority {
+    let priority = priority_header
+        .and_then(|h| h.trim().parse::<i32>().ok())
+        .or_else(|| hints.and_then(|h| h.priority));
+    let strict_priority = strict_priority_header
+        .and_then(|h| h.trim().parse::<u32>().ok())
+        .or_else(|| hints.and_then(|h| h.strict_priority));
+    let priority_jump = priority
+        .map(|p| p as f64)
+        .or_else(|| hints.and_then(|h| h.latency_sensitivity));
+    ResolvedPriority {
+        priority,
+        strict_priority,
+        priority_jump,
+    }
 }
 
 pub trait NvExtProvider {
@@ -653,9 +748,9 @@ mod tests {
     use super::*;
     use crate::protocols::agents::{
         HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_PARENT_AGENT_ID,
-        HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_SESSION_ID, HEADER_DYNAMO_PARENT_SESSION_ID,
-        HEADER_DYNAMO_SESSION_FINAL, HEADER_DYNAMO_SESSION_ID, HEADER_OPENCODE_PARENT_SESSION_ID,
-        HEADER_OPENCODE_SESSION_ID,
+        HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_PARENT_THREAD_ID, HEADER_CODEX_THREAD_ID,
+        HEADER_CODEX_TURN_METADATA, HEADER_DYNAMO_PARENT_SESSION_ID, HEADER_DYNAMO_SESSION_FINAL,
+        HEADER_DYNAMO_SESSION_ID, HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
     };
 
     #[derive(Default)]
@@ -676,6 +771,24 @@ mod tests {
         fn unsupported_fields(&self) -> Option<&HashMap<String, serde_json::Value>> {
             Some(&self.unsupported_fields)
         }
+    }
+
+    #[test]
+    fn agent_context_accepts_missing_input_trigger() {
+        let context: AgentContext = serde_json::from_str(r#"{"session_id":"root"}"#).unwrap();
+        assert_eq!(context.input_trigger, None);
+    }
+
+    #[test]
+    fn agent_context_accepts_nested_compaction() {
+        let context = serde_json::from_str::<AgentContext>(
+            r#"{"session_id":"root","compaction":{"trigger":"manual"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            context.compaction.and_then(|compaction| compaction.trigger),
+            Some("manual".to_string())
+        );
     }
 
     #[test]
@@ -704,45 +817,6 @@ mod tests {
     }
 
     #[test]
-    fn shared_nvext_builder_default() {
-        let nv_ext = NvExt::builder().build().unwrap();
-        assert_eq!(nv_ext.greed_sampling, None);
-        assert_eq!(nv_ext.use_raw_prompt, None);
-        assert_eq!(nv_ext.annotations, None);
-        assert_eq!(nv_ext.backend_instance_id, None);
-        assert_eq!(nv_ext.token_data, None);
-        assert_eq!(nv_ext.max_thinking_tokens, None);
-        assert_eq!(nv_ext.cache_salt, None);
-        assert_eq!(nv_ext.extra_fields, None);
-        assert_eq!(nv_ext.metadata_upload, None);
-        assert_eq!(nv_ext.prefill_worker_id, None);
-        assert_eq!(nv_ext.decode_worker_id, None);
-        assert_eq!(nv_ext.agent_hints, None);
-        assert_eq!(nv_ext.request_timestamp_ms, None);
-        assert_eq!(nv_ext.routing_constraints, None);
-    }
-
-    #[test]
-    fn shared_nvext_builder_custom() {
-        let nv_ext = NvExt::builder()
-            .greed_sampling(true)
-            .use_raw_prompt(true)
-            .backend_instance_id(42)
-            .token_data(vec![1, 2, 3, 4])
-            .max_thinking_tokens(1024)
-            .extra_fields(vec!["worker_id".to_string()])
-            .build()
-            .unwrap();
-
-        assert_eq!(nv_ext.greed_sampling, Some(true));
-        assert_eq!(nv_ext.use_raw_prompt, Some(true));
-        assert_eq!(nv_ext.backend_instance_id, Some(42));
-        assert_eq!(nv_ext.token_data, Some(vec![1, 2, 3, 4]));
-        assert_eq!(nv_ext.max_thinking_tokens, Some(1024));
-        assert_eq!(nv_ext.extra_fields, Some(vec!["worker_id".to_string()]));
-    }
-
-    #[test]
     fn parse_nvext_rejects_unknown_fields_in_llm_layer() {
         let err = parse_nvext(Some(serde_json::json!({
             "unsupported_future_field": true
@@ -763,18 +837,6 @@ mod tests {
         );
 
         assert!(serde_json::from_str::<AgentHints>(r#"{"strict_priority":-1}"#).is_err());
-    }
-
-    #[test]
-    fn shared_nvext_disagg_worker_ids() {
-        let nv_ext = NvExt::builder()
-            .prefill_worker_id(100)
-            .decode_worker_id(200)
-            .build()
-            .unwrap();
-
-        assert_eq!(nv_ext.prefill_worker_id, Some(100));
-        assert_eq!(nv_ext.decode_worker_id, Some(200));
     }
 
     #[test]
@@ -883,6 +945,60 @@ mod tests {
     }
 
     #[test]
+    fn resolve_request_priority_header_over_body_with_independent_fallback() {
+        let hints = AgentHints {
+            priority: Some(5),
+            strict_priority: Some(2),
+            latency_sensitivity: Some(1.5),
+            ..Default::default()
+        };
+
+        // Valid headers (including negative) override the body, per field.
+        let r = resolve_request_priority(Some(&hints), Some("-3"), Some("7"));
+        assert_eq!(r.priority, Some(-3));
+        assert_eq!(r.strict_priority, Some(7));
+        assert_eq!(r.priority_jump, Some(-3.0));
+
+        // Zero is a valid override, not "absent"; the other field falls back.
+        let r = resolve_request_priority(Some(&hints), Some("0"), None);
+        assert_eq!(r.priority, Some(0));
+        assert_eq!(r.priority_jump, Some(0.0));
+        assert_eq!(r.strict_priority, Some(2));
+
+        // Malformed/missing headers fall back to the body, independently.
+        let r = resolve_request_priority(Some(&hints), Some("abc"), None);
+        assert_eq!(r.priority, Some(5));
+        assert_eq!(r.strict_priority, Some(2));
+        assert_eq!(r.priority_jump, Some(5.0));
+
+        // `latency_sensitivity` drives `priority_jump` only when no priority exists.
+        let ls_only = AgentHints {
+            latency_sensitivity: Some(2.5),
+            ..Default::default()
+        };
+        let r = resolve_request_priority(Some(&ls_only), None, None);
+        assert_eq!(r.priority, None);
+        assert_eq!(r.priority_jump, Some(2.5));
+
+        // A real priority beats the deprecated `latency_sensitivity`.
+        let both = AgentHints {
+            priority: Some(4),
+            latency_sensitivity: Some(9.0),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_request_priority(Some(&both), None, None).priority_jump,
+            Some(4.0)
+        );
+
+        // Nothing set anywhere.
+        assert_eq!(
+            resolve_request_priority(None, None, None),
+            ResolvedPriority::default()
+        );
+    }
+
+    #[test]
     fn apply_header_routing_overrides_sets_cache_salt_from_tenant_header() {
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_TENANT_ID, "tenant-a".parse().unwrap());
@@ -933,13 +1049,7 @@ mod tests {
 
         let cases = [
             (HEADER_CLAUDE_CODE_SESSION_ID, "claude-run-1", None, None),
-            ("Session-ID", "codex-run-1", None, None),
-            (
-                HEADER_CODEX_SESSION_ID,
-                "codex-run-2",
-                Some("opencode-parent"),
-                None,
-            ),
+            (HEADER_CODEX_THREAD_ID, "codex-root", None, None),
             (
                 HEADER_OPENCODE_SESSION_ID,
                 "opencode-run-1",
@@ -971,31 +1081,155 @@ mod tests {
     }
 
     #[test]
-    fn session_affinity_requires_explicit_dynamo_header() {
+    fn agent_context_from_codex_compaction_header_preserves_metadata() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
+        headers.insert(
+            HEADER_CODEX_TURN_METADATA,
+            r#"{"request_kind":"compaction","compaction":{"trigger":"manual","reason":"user_requested","implementation":"responses_compact","phase":"standalone_turn","strategy":"memento"}}"#
+                .parse()
+                .unwrap(),
+        );
+
+        let agent_context = agent_context_from_headers(&headers).unwrap();
+        assert_eq!(
+            agent_context.compaction,
+            Some(AgentCompaction {
+                trigger: Some("manual".to_string()),
+                reason: Some("user_requested".to_string()),
+                implementation: Some("responses_compact".to_string()),
+                phase: Some("standalone_turn".to_string()),
+                strategy: Some("memento".to_string()),
+            })
+        );
+
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "canonical".parse().unwrap());
+        let agent_context = agent_context_from_headers(&headers).unwrap();
+        assert_eq!(agent_context.session_id, "canonical");
+        assert_eq!(
+            agent_context
+                .compaction
+                .and_then(|compaction| compaction.strategy),
+            Some("memento".to_string())
+        );
+    }
+
+    #[test]
+    fn agent_context_ignores_invalid_or_non_compaction_codex_metadata() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
+        headers.insert(HEADER_CODEX_TURN_METADATA, "{".parse().unwrap());
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().compaction,
+            None
+        );
+
+        headers.insert(
+            HEADER_CODEX_TURN_METADATA,
+            r#"{"request_kind":"turn","compaction":{"trigger":"manual"}}"#
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().compaction,
+            None
+        );
+
+        headers.insert(
+            HEADER_CODEX_TURN_METADATA,
+            r#"{"request_kind":"compaction"}"#.parse().unwrap(),
+        );
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().compaction,
+            Some(AgentCompaction::default())
+        );
+    }
+
+    #[test]
+    fn agent_context_from_codex_thread_headers_preserves_subagent_lineage() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_CODEX_THREAD_ID, "codex-child".parse().unwrap());
+        headers.insert(HEADER_CODEX_PARENT_THREAD_ID, "codex-root".parse().unwrap());
+
+        let agent_context = agent_context_from_headers(&headers).unwrap();
+        assert_eq!(agent_context.session_id, "codex-child");
+        assert_eq!(
+            agent_context.parent_session_id.as_deref(),
+            Some("codex-root")
+        );
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "codex-child"
+        );
+    }
+
+    #[test]
+    fn agent_context_ignores_self_parent_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
+        headers.insert(
+            HEADER_CODEX_PARENT_THREAD_ID,
+            "codex-thread".parse().unwrap(),
+        );
+
+        assert_eq!(
+            agent_context_from_headers(&headers)
+                .unwrap()
+                .parent_session_id,
+            None
+        );
+    }
+
+    #[test]
+    fn codex_session_id_is_ignored_without_thread_id() {
+        let mut headers = HeaderMap::new();
+        headers.insert("session-id", "codex-run".parse().unwrap());
+        assert!(agent_context_from_headers(&headers).is_none());
+        assert!(session_affinity_from_headers(&headers).is_none());
+
+        headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().session_id,
+            "codex-thread"
+        );
+    }
+
+    #[test]
+    fn session_affinity_prefers_dynamo_header_over_agent_mappings() {
         let mut headers = HeaderMap::new();
         headers.insert(
             HEADER_CLAUDE_CODE_SESSION_ID,
             "claude-session".parse().unwrap(),
         );
-        headers.insert(HEADER_CODEX_SESSION_ID, "codex-session".parse().unwrap());
+        headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
         headers.insert(
             HEADER_OPENCODE_SESSION_ID,
             "opencode-session".parse().unwrap(),
         );
-        assert!(session_affinity_from_headers(&headers).is_none());
+        // Without a canonical header, affinity falls back to the first matching
+        // agent mapping. Claude precedes Codex and OpenCode in AGENT_HEADER_MAPPINGS.
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "claude-session"
+        );
 
+        // The explicit Dynamo session header always wins over agent mappings.
         headers.insert(HEADER_DYNAMO_SESSION_ID, "canonical".parse().unwrap());
         assert_eq!(
             session_affinity_from_headers(&headers).unwrap().as_str(),
             "canonical"
         );
 
+        // A blank Dynamo header is ignored and affinity falls back to the mapping.
         headers.insert(HEADER_DYNAMO_SESSION_ID, "   ".parse().unwrap());
-        assert!(session_affinity_from_headers(&headers).is_none());
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "claude-session"
+        );
     }
 
     #[test]
-    fn native_agent_session_does_not_enable_affinity() {
+    fn session_affinity_uses_agent_child_session_when_present() {
         let mut headers = HeaderMap::new();
         headers.insert(
             HEADER_CLAUDE_CODE_SESSION_ID,
@@ -1003,10 +1237,16 @@ mod tests {
         );
         headers.insert(HEADER_CLAUDE_CODE_AGENT_ID, "claude-agent".parse().unwrap());
 
+        // Affinity keys on the same id the agent context resolves to: the child
+        // (sub-agent) session when present, not the root session.
         let agent_context = agent_context_from_headers(&headers).unwrap();
         assert_eq!(agent_context.session_id, "claude-agent");
-        assert!(session_affinity_from_headers(&headers).is_none());
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "claude-agent"
+        );
 
+        // The explicit Dynamo session header still takes precedence.
         headers.insert(
             HEADER_DYNAMO_SESSION_ID,
             "affinity-session".parse().unwrap(),
@@ -1017,6 +1257,16 @@ mod tests {
             session_affinity_from_headers(&headers).unwrap().as_str(),
             "affinity-session"
         );
+    }
+
+    #[test]
+    fn session_affinity_absent_without_any_session_header() {
+        let mut headers = HeaderMap::new();
+        assert!(session_affinity_from_headers(&headers).is_none());
+
+        // A blank canonical header with no agent headers yields no affinity.
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "   ".parse().unwrap());
+        assert!(session_affinity_from_headers(&headers).is_none());
     }
 
     #[test]

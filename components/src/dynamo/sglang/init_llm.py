@@ -14,6 +14,7 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
+from dynamo.sglang._compat import override_server_args
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
@@ -33,8 +34,8 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
     """Perform warmup request for prefill engine to reduce initial TTFT.
 
     Raises on failure so the caller can prevent the worker from registering
-    with a broken engine (silent request drops). Shared with the unified
-    backend (`dynamo.sglang.llm_engine`) via `_disagg.warmup_prefill_engine`.
+    with a broken engine (silent request drops). Delegates to
+    `_disagg.warmup_prefill_engine`.
     """
     from dynamo.sglang._disagg import warmup_prefill_engine
 
@@ -71,7 +72,11 @@ async def init_decode(
                 "created before the endpoint existed, so its FPM publisher bound "
                 "a different IPC path than the relay would subscribe to."
             )
-            server_args.enable_forward_pass_metrics = False
+            override_server_args(
+                server_args,
+                "dynamo.snapshot",
+                enable_forward_pass_metrics=False,
+            )
     else:
         set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()
@@ -227,7 +232,11 @@ async def init_prefill(
                 "created before the endpoint existed, so its FPM publisher bound "
                 "a different IPC path than the relay would subscribe to."
             )
-            server_args.enable_forward_pass_metrics = False
+            override_server_args(
+                server_args,
+                "dynamo.snapshot",
+                enable_forward_pass_metrics=False,
+            )
     else:
         set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()

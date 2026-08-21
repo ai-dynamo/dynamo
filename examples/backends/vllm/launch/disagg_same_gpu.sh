@@ -41,10 +41,7 @@ fi
 
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
-# Select legacy vs unified worker entry point. `--unified` routes workers
-# through dynamo.vllm.unified_main (the Rust backend-common Worker, which
-# owns the prefill drain loop); default stays on the legacy main.
-pick_worker_module dynamo.vllm dynamo.vllm.unified_main "$@"
+WORKER_MODULE="dynamo.vllm"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Disaggregated on Same GPU (1 GPU)" "$MODEL" "$HTTP_PORT" \

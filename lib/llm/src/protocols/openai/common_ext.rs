@@ -21,7 +21,8 @@ pub struct CommonExt {
     #[builder(default, setter(strip_option))]
     pub min_tokens: Option<u32>,
 
-    /// Integer that controls the number of top tokens to consider. Set to -1 to consider all tokens.
+    /// Integer that controls the number of top tokens to consider. Set to -1 or 0 to consider all
+    /// tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub top_k: Option<i32>,
@@ -130,76 +131,6 @@ mod tests {
     use serde_json;
 
     #[test]
-    fn test_common_ext_builder_default() {
-        let common_ext = CommonExt::builder().build().unwrap();
-        assert_eq!(common_ext.ignore_eos, None);
-        assert_eq!(common_ext.min_tokens, None);
-        assert_eq!(common_ext.top_k, None);
-        assert_eq!(common_ext.repetition_penalty, None);
-        assert_eq!(common_ext.guided_json, None);
-        assert_eq!(common_ext.guided_regex, None);
-        assert_eq!(common_ext.guided_grammar, None);
-        assert_eq!(common_ext.guided_choice, None);
-        assert_eq!(common_ext.guided_decoding_backend, None);
-        assert_eq!(common_ext.include_stop_str_in_output, None);
-        assert_eq!(common_ext.skip_special_tokens, None);
-    }
-
-    #[test]
-    fn test_common_ext_builder_with_values() {
-        let common_ext = CommonExt::builder()
-            .ignore_eos(true)
-            .min_tokens(10)
-            .top_k(50)
-            .repetition_penalty(1.2)
-            .include_stop_str_in_output(true)
-            .guided_json(serde_json::json!({"key": "value"}))
-            .guided_regex("regex".to_string())
-            .guided_grammar("grammar".to_string())
-            .guided_choice(vec!["choice1".to_string(), "choice2".to_string()])
-            .guided_decoding_backend("backend".to_string())
-            .skip_special_tokens(false)
-            .build()
-            .unwrap();
-
-        assert_eq!(common_ext.ignore_eos, Some(true));
-        assert_eq!(common_ext.min_tokens, Some(10));
-        assert_eq!(common_ext.top_k, Some(50));
-        assert_eq!(common_ext.repetition_penalty, Some(1.2));
-        assert_eq!(common_ext.include_stop_str_in_output, Some(true));
-        assert_eq!(
-            common_ext.guided_json.as_ref(),
-            Some(&serde_json::json!({"key": "value"}))
-        );
-        assert_eq!(common_ext.guided_regex, Some("regex".to_string()));
-        assert_eq!(common_ext.guided_grammar, Some("grammar".to_string()));
-        assert_eq!(
-            common_ext.guided_choice,
-            Some(vec!["choice1".to_string(), "choice2".to_string()])
-        );
-        assert_eq!(
-            common_ext.guided_decoding_backend,
-            Some("backend".to_string())
-        );
-        assert_eq!(common_ext.skip_special_tokens, Some(false));
-    }
-
-    #[test]
-    fn test_common_ext_fields() {
-        // Test that CommonExt fields can be set and retrieved correctly
-        let common_ext = CommonExt::builder()
-            .ignore_eos(false)
-            .min_tokens(5)
-            .include_stop_str_in_output(true)
-            .build()
-            .unwrap();
-
-        assert_eq!(common_ext.ignore_eos, Some(false));
-        assert_eq!(common_ext.min_tokens, Some(5));
-        assert_eq!(common_ext.include_stop_str_in_output, Some(true));
-    }
-
-    #[test]
     fn test_validation_min_tokens() {
         // Test that min_tokens with 0 is valid
         let common_ext = CommonExt {
@@ -219,50 +150,6 @@ mod tests {
             prompt_logprobs: None,
         };
         assert!(common_ext.validate().is_ok());
-    }
-
-    #[test]
-    fn test_common_ext_neither_specified() {
-        // Test that neither ignore_eos nor min_tokens specified works
-        let common_ext = CommonExt::builder().build().unwrap();
-
-        assert_eq!(common_ext.ignore_eos, None);
-        assert_eq!(common_ext.min_tokens, None);
-        assert_eq!(common_ext.top_k, None);
-        assert_eq!(common_ext.repetition_penalty, None);
-        assert_eq!(common_ext.include_stop_str_in_output, None);
-        assert!(common_ext.validate().is_ok());
-    }
-
-    #[test]
-    fn test_common_ext_default() {
-        // Test that Default trait implementation works correctly
-        let common_ext = CommonExt::default();
-
-        assert_eq!(common_ext.ignore_eos, None);
-        assert_eq!(common_ext.min_tokens, None);
-        assert_eq!(common_ext.top_k, None);
-        assert_eq!(common_ext.repetition_penalty, None);
-        assert_eq!(common_ext.include_stop_str_in_output, None);
-        assert!(common_ext.validate().is_ok());
-    }
-
-    #[test]
-    fn test_skip_special_tokens_field() {
-        // Test that skip_special_tokens can be set and retrieved
-        let common_ext = CommonExt::builder()
-            .skip_special_tokens(true)
-            .build()
-            .unwrap();
-
-        assert_eq!(common_ext.skip_special_tokens, Some(true));
-
-        let common_ext = CommonExt::builder()
-            .skip_special_tokens(false)
-            .build()
-            .unwrap();
-
-        assert_eq!(common_ext.skip_special_tokens, Some(false));
     }
 
     #[test]

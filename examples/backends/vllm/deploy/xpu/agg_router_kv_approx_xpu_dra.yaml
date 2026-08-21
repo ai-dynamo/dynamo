@@ -8,13 +8,13 @@
 # locally based on routing decisions with TTL-based expiration and pruning.
 #
 # Benefits:
-# - No NATS or JetStream required
+# - No NATS required
 # - Simpler deployment for lightweight scenarios
 # - Router makes local predictions based on its own routing decisions
 #
 # Requirements:
 # - Intel XPU with DRA (Dynamic Resource Allocation) driver installed
-# - Dynamo Operator with v1alpha1 support
+# - Dynamo Operator with v1beta1 support
 # - XPU-specific vLLM image (nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag)
 
 apiVersion: resource.k8s.io/v1
@@ -30,69 +30,65 @@ spec:
             deviceClassName: gpu.intel.com
             count: 1
 ---
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: xpu-agg-kvap
 spec:
-  services:
-    Frontend:
-      envFromSecret: hf-token-secret
-      componentType: frontend
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - -m
+          - dynamo.frontend
+          - --router-mode
+          - kv
+          - --no-kv-events
+          command:
+          - python3
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           imagePullPolicy: IfNotPresent
+          name: main
+    replicas: 1
+    type: frontend
+  - name: VllmDecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --block-size
+          - "64"
+          - --kv-events-config
+          - '{"enable_kv_cache_events": false}'
+          - --enable-prefix-caching
           command:
-            - python3
-          args:
-            - -m
-            - dynamo.frontend
-            - --router-mode
-            - kv
-            - --no-kv-events
-    VllmDecodeWorker:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      replicas: 2
-      resources:
-        requests:
-          custom:
-            # Increase this value for larger models
-            ephemeral-storage: "2Gi"
-      extraPodSpec:
-        resourceClaims:
-          - name: gpu
-            resourceClaimTemplateName: gpu-template
-        # NOTE: Uncomment if your environment requires specific group access
-        # securityContext:
-        #   runAsUser: 1000
-        #   runAsGroup: 1000
-        #   supplementalGroups:
-        #     - 44   # render group
-        #     - 991  # video group
-        mainContainer:
+          - python3
+          - -m
+          - dynamo.vllm
+          env:
+          - name: VLLM_TARGET_DEVICE
+            value: xpu
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag
           imagePullPolicy: IfNotPresent
+          name: main
           resources:
             claims:
-              - name: gpu
-          env:
-            - name: VLLM_TARGET_DEVICE
-              value: xpu
+            - name: gpu
+            requests:
+              ephemeral-storage: 2Gi
           workingDir: /workspace/examples/backends/vllm
-          command:
-            - python3
-            - -m
-            - dynamo.vllm
-          args:
-            - --model
-            - Qwen/Qwen3-0.6B
-            - --block-size
-            - "64"
-            # Disable KV events - router will use local prediction
-            - --kv-events-config
-            - '{"enable_kv_cache_events": false}'
-            # Enable prefix caching for KV reuse
-            - --enable-prefix-caching
+        resourceClaims:
+        - name: gpu
+          resourceClaimTemplateName: gpu-template
+    replicas: 2
+    type: worker

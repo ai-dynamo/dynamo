@@ -7,7 +7,7 @@
 //! environment variables with the pattern: `DYN_KVBM_NIXL_BACKEND_<backend>_<key>=<value>`
 
 use anyhow::{Result, bail};
-use dynamo_runtime::config::parse_bool;
+use dynamo_runtime::config::parse_bool_opt;
 use std::collections::HashSet;
 
 /// Configuration for NIXL backends.
@@ -66,17 +66,23 @@ impl NixlBackendConfig {
                     );
                 }
 
-                // Simple backend enablement (e.g., DYN_KVBM_NIXL_BACKEND_UCX=true)
+                // Simple backend enablement (e.g., DYN_KVBM_NIXL_BACKEND_UCX=true).
+                // Empty or unrecognized values are rejected rather than treated
+                // as false: silently dropping a backend hides misconfiguration.
                 let backend_name = remainder.to_uppercase();
-                match parse_bool(&value) {
-                    Ok(true) => {
+                match parse_bool_opt(&value) {
+                    Some(true) => {
                         backends.insert(backend_name);
                     }
-                    Ok(false) => {
+                    Some(false) => {
                         // Explicitly disabled, don't add to backends
                         continue;
                     }
-                    Err(e) => bail!("Invalid value for {}: {}", key, e),
+                    None => bail!(
+                        "Invalid value for {}: '{}'. Expected one of: true/false, 1/0, on/off, yes/no",
+                        key,
+                        value
+                    ),
                 }
             }
         }

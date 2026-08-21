@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+source: kustomize/base
+nameTemplate: "${variant}"
+matrix:
+  variant:
+    - name: generic
+      components: []
+    - name: aws-p6-b200.48xlarge
+      components:
+        - ../../../../kustomize/components/aws-efa-p8d8
+    - name: gcp-roce
+      components:
+        - ../../../../kustomize/components/disagg-workers/gke-roce
+    - name: nscale-ib
+      components:
+        - ../../../../kustomize/components/disagg-workers/nscale-ib

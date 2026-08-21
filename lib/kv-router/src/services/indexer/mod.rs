@@ -9,6 +9,12 @@
 //! a ZMQ listener that ingests its KV events into a per-(model, routing group)
 //! [`backend::Indexer`].
 //!
+//! [`RoutingPartitionId`](crate::identity::RoutingPartitionId) remains this service's sole registry
+//! authority for `(model_name, routing_group)`.
+//! Resolving it to `IndexerDomainId` is intentionally deferred until registration can carry
+//! authoritative explicit identity material; hashing local defaults here would create a second
+//! authority without enabling safe cross-service identity.
+//!
 //! ## Multi-tier responses
 //!
 //! `/query` and `/query_by_hash` return both:
@@ -18,7 +24,7 @@
 //!   `disk`, per-`dp_rank` device counts, and `longest_matched`.
 //!
 //! The `instances` shape is intended to align with Mooncake's
-//! "[RFC]: KV-Store Indexer API Standardization"
+//! "\[RFC\]: KV-Store Indexer API Standardization"
 //! (<https://github.com/kvcache-ai/Mooncake/issues/1403>).
 //! Tier counts are CUMULATIVE through each tier's walk — see the doc on the
 //! response struct in [`server`] for the exact semantics.

@@ -21,7 +21,7 @@ from typing import Any
 
 import yaml
 from aiconfigurator.generator.enumerate import check_model_hardware_support
-from aiconfigurator.sdk.utils import get_model_config_from_model_path
+from aiconfigurator_core.sdk.utils import get_model_config_from_model_path
 
 from deploy.utils.dynamo_deployment import cleanup_remaining_deployments
 from dynamo.profiler.interpolation import run_interpolation
@@ -30,6 +30,7 @@ from dynamo.profiler.thorough import run_thorough
 from dynamo.profiler.utils.config_modifiers.parallelization_mapping import (
     PickedParallelConfig,
 )
+from dynamo.profiler.utils.config_modifiers.trtllm import enable_trtllm_chunked_prefill
 from dynamo.profiler.utils.defaults import SearchStrategy
 from dynamo.profiler.utils.dgd_generation import (
     assemble_final_config,
@@ -288,9 +289,10 @@ def _validate_dgd_service_name_lengths(
     dgdr: DynamoGraphDeploymentRequestSpec,
     final_config: Any,
 ) -> None:
-    """Raise ValueError if any DGD name + service name would exceed the 45-char pod-naming limit."""
+    """Reject DGD and component names that exceed the pod-name limit."""
     dgdr_name = os.environ.get("DGDR_NAME", "")
     dgd_spec = final_config[-1] if isinstance(final_config, list) else final_config
+    dgd_name_is_overridden = False
 
     if dgdr_name:
         # Operator path: compute the DGD name exactly as the Go controller does.
@@ -301,6 +303,7 @@ def _validate_dgd_service_name_lengths(
                 override_name = metadata.get("name", "")
                 if override_name:
                     dgd_name = override_name
+                    dgd_name_is_overridden = True
     else:
         # Non-operator path (e.g. standalone CLI): fall back to the name already
         # embedded in the generated config. These template names ("vllm-disagg",
@@ -310,23 +313,29 @@ def _validate_dgd_service_name_lengths(
         if not dgd_name:
             logger.debug(
                 "DGDR_NAME unset and no metadata.name in config; "
-                "skipping DGD service name length validation."
+                "skipping DGD component name length validation."
             )
             return
-    services = dgd_spec.get("spec", {}).get("services", {})
+    components = dgd_spec.get("spec", {}).get("components", [])
     violations = []
-    for svc_name in services:
-        combined = len(dgd_name) + len(svc_name)
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        component_name = component.get("name", "")
+        combined = len(dgd_name) + len(component_name)
         if combined > _MAX_COMBINED_RESOURCE_NAME_LENGTH:
             violations.append(
-                f"'{svc_name}' ({len(svc_name)}): combined length {combined}"
+                f"'{component_name}' ({len(component_name)}): combined length {combined}"
             )
 
     if violations:
+        use_dgd_name_in_error = dgd_name_is_overridden or not dgdr_name
+        name_kind = "DGD" if use_dgd_name_in_error else "DGDR"
+        name_to_shorten = dgd_name if use_dgd_name_in_error else dgdr_name
         raise ValueError(
-            f"DGD name '{dgd_name}' (length {len(dgd_name)}) combined with service "
-            f"name(s) exceeds the {_MAX_COMBINED_RESOURCE_NAME_LENGTH}-character "
-            f"pod-naming limit. Shorten the DGDR name '{dgdr_name}'. "
+            f"DGD name '{dgd_name}' (length {len(dgd_name)}) combined with "
+            f"component name(s) exceeds the {_MAX_COMBINED_RESOURCE_NAME_LENGTH}-character "
+            f"pod-naming limit. Shorten the {name_kind} name '{name_to_shorten}'. "
             f"Violations: {'; '.join(violations)}"
         )
 
@@ -465,7 +474,11 @@ async def run_profile(
                     purpose=DGDMaterializationPurpose.INTERPOLATION,
                     override=dgd_override,
                     tolerations=job_tolerations,
+                    runtime_backend=resolved_backend,
+                    model_name_or_path=resolve_model_path(dgdr),
                 )
+                if resolved_backend == "trtllm":
+                    enable_trtllm_chunked_prefill(interpolation_dgd_config)
                 await run_interpolation(
                     dgdr,
                     ops,

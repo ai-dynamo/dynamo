@@ -34,12 +34,7 @@ export MODALITY=${MODALITY:-"text"}
 
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
-# Select legacy vs unified worker entry point. `--unified` routes workers
-# through dynamo.trtllm.unified_main (the Rust backend-common Worker, which
-# owns the prefill drain loop); default stays on the legacy main. Strip it
-# before the option loop below.
-pick_worker_module dynamo.trtllm dynamo.trtllm.unified_main "$@"
-set -- "${REMAINING_ARGS[@]}"
+WORKER_MODULE="dynamo.trtllm"
 
 ENABLE_OTEL=false
 while [[ $# -gt 0 ]]; do

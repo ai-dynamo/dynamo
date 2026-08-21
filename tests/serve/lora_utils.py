@@ -21,8 +21,10 @@ from typing import TYPE_CHECKING, Optional
 import boto3
 import pytest
 import requests
+from boto3.exceptions import S3UploadFailedError
+from boto3.s3.transfer import TransferConfig
 from botocore.client import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from huggingface_hub import snapshot_download
 
 if TYPE_CHECKING:
@@ -52,6 +54,9 @@ MINIO_SECRET_KEY = "minioadmin"
 MINIO_BUCKET = "my-loras"
 DEFAULT_LORA_REPO = "codelion/Qwen3-0.6B-accuracy-recovery-lora"
 DEFAULT_LORA_NAME = "codelion/Qwen3-0.6B-accuracy-recovery-lora"
+
+# The CRT transfer client can ignore the configured MinIO endpoint.
+MINIO_TRANSFER_CONFIG = TransferConfig(preferred_transfer_client="classic")
 
 
 @dataclass
@@ -136,11 +141,8 @@ class MinioService:
         """
         Connect to MinIO service, starting a container if necessary.
 
-        Skips the test (pytest.skip) when neither a running MinIO nor a Docker daemon
-        is available on the runner.
-
         Raises:
-            RuntimeError: If MinIO container startup itself fails.
+            RuntimeError: If MinIO cannot be started or connected to.
         """
         self._logger.info("Connecting to MinIO...")
 
@@ -150,15 +152,11 @@ class MinioService:
             self._owns_container = False
             return
 
-        # Neither a pre-started MinIO nor a Docker daemon is available on this runner
-        # (e.g. Slurm/enroot CI executors have no Docker), so LoRA tests needing
-        # S3-compatible storage cannot run here. Skip rather than error, so the suite
-        # passes on Docker-less runners -- consistent with this module's contract of
-        # "pre-started MinIO in CI / auto-start Docker locally".
+        # Try to start Docker container
         if not self._is_docker_available():
-            pytest.skip(
-                "MinIO not available and Docker not accessible on this runner; "
-                "skipping LoRA tests that require S3-compatible storage. To run locally:\n"
+            raise RuntimeError(
+                "MinIO is not available and Docker is not accessible.\n"
+                "Start MinIO manually:\n"
                 "  docker run -d -p 9000:9000 -p 9001:9001 "
                 "-e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin "
                 f"--name {self.CONTAINER_NAME} "
@@ -298,9 +296,17 @@ class MinioService:
             s3_key = f"{self.config.lora_name}/{relative_path}"
 
             try:
-                s3_client.upload_file(str(file_path), self.config.bucket, s3_key)
-            except ClientError as e:
-                raise RuntimeError(f"Failed to upload {file_path}: {e}") from e
+                s3_client.upload_file(
+                    str(file_path),
+                    self.config.bucket,
+                    s3_key,
+                    Config=MINIO_TRANSFER_CONFIG,
+                )
+            except (ClientError, S3UploadFailedError, BotoCoreError) as e:
+                raise RuntimeError(
+                    f"Failed to upload {file_path} to "
+                    f"{self.config.endpoint}/{self.config.bucket}/{s3_key}: {e}"
+                ) from e
 
         self._logger.info("LoRA upload completed")
 

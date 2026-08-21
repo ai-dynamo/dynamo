@@ -18,6 +18,10 @@ inputs:
     description: 'Container registry hostname (e.g. myregistry.azurecr.io). When empty, the Helm chart default image (nvcr.io/nvidia/ai-dynamo/kubernetes-operator) is used.'
     required: false
     default: ''
+  repository:
+    description: 'Container repository path. Required when registry is set.'
+    required: false
+    default: ''
   operator_tag:
     description: 'Operator image tag. Required when registry is set.'
     required: false
@@ -26,6 +30,18 @@ inputs:
     description: 'HuggingFace token for model access'
     required: false
     default: ''
+  model_cache_server:
+    description: 'Server/host of a shared model cache endpoint. When set (with model_cache_path), a PV + PVC is created in the vCluster default namespace so deploy tests mount it instead of downloading from HuggingFace.'
+    required: false
+    default: ''
+  model_cache_path:
+    description: 'Path of the shared model cache endpoint (used with model_cache_server).'
+    required: false
+    default: ''
+  model_cache_pvc:
+    description: 'Name of the model cache PVC to create in the vCluster default namespace.'
+    required: false
+    default: 'model-cache'
   dockerhub_username:
     description: 'Docker Hub username for helm registry login'
     required: false
@@ -34,14 +50,17 @@ inputs:
     description: 'Docker Hub password for helm registry login'
     required: false
     default: ''
-  vcluster_k8s_version:
-    description: 'Kubernetes version for the vCluster control plane (must be supported by kr8s)'
-    required: false
-    default: 'v1.32.13'
   vcluster_host_priority_class:
     description: 'Host PriorityClass to set on pods synced from the vCluster. Use auto to set ci-nightly-high-priority only when the active kube context targets aws-dev-01 or aws-dev-02; use an empty value to disable.'
     required: false
     default: 'auto'
+  reset_existing:
+    description: >-
+      Delete an existing vCluster of the same name before creating it. Only safe from a
+      bootstrap path that is the sole writer of this vCluster name; recovery paths that
+      can run concurrently for one name must leave this false.
+    required: false
+    default: 'false'
   checkpoint_enabled:
     description: 'Enable operator checkpoint/restore injection'
     required: false
@@ -116,6 +135,9 @@ runs:
           BRANCH_SANITIZED="${BRANCH_SANITIZED/pull-request/pr}"
           BRANCH_SANITIZED="${BRANCH_SANITIZED//./-}"
           BRANCH_SANITIZED="${BRANCH_SANITIZED:0:10}"
+          while [[ "${BRANCH_SANITIZED}" =~ [^[:alnum:]]$ ]]; do
+            BRANCH_SANITIZED="${BRANCH_SANITIZED%?}"
+          done
           echo "namespace=gh-id-${{ github.run_id }}-${BRANCH_SANITIZED}-dt" >> "$GITHUB_OUTPUT"
           echo "namespace_suffix=${BRANCH_SANITIZED}" >> "$GITHUB_OUTPUT"
         fi
@@ -133,7 +155,11 @@ runs:
         echo "::group::Create host namespace $NAMESPACE"
         set -euo pipefail
         set -x
-        kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
+        # Client-side apply is a GET followed by a POST, so concurrent callers
+        # both create and the loser fails. Server-side apply is one atomic
+        # create-or-update request.
+        kubectl create namespace "${NAMESPACE}" --dry-run=client -o yaml \
+          | kubectl apply --server-side --force-conflicts --field-manager=ci-setup -f -
         LABELS=(
           ngc-api=enabled
           nvcr-imagepull=enabled
@@ -152,6 +178,7 @@ runs:
         echo "::endgroup::"
 
     - name: Delete existing vCluster for this run
+      if: inputs.reset_existing == 'true'
       shell: bash
       env:
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
@@ -159,13 +186,31 @@ runs:
       run: |
         echo "Checking for existing vCluster ${VCLUSTER_NAME} in ${NAMESPACE}"
         # github.run_id is stable across re-runs, so this catches leftovers from
-        # a failed or canceled attempt of the same workflow run.
-        if kubectl get statefulset "${VCLUSTER_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+        # a failed or canceled attempt of the same workflow run. Gated on
+        # reset_existing: a concurrent caller's cluster is indistinguishable from
+        # a leftover here, so only a sole-writer bootstrap may delete.
+        if kubectl get statefulset "${VCLUSTER_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1 \
+           || helm status "${VCLUSTER_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
           echo "Deleting existing vCluster: ${VCLUSTER_NAME}"
           vcluster delete "${VCLUSTER_NAME}" --namespace "${NAMESPACE}" 2>&1 || \
             kubectl delete statefulset "${VCLUSTER_NAME}" -n "${NAMESPACE}" --ignore-not-found 2>&1 || true
+          # A partial install leaves the release record behind with no StatefulSet,
+          # which vcluster delete does not always clear.
+          helm uninstall "${VCLUSTER_NAME}" -n "${NAMESPACE}" 2>/dev/null || true
           kubectl wait "statefulset/${VCLUSTER_NAME}" -n "${NAMESPACE}" \
             --for=delete --timeout=120s 2>/dev/null || true
+          # Cascading deletion drops the StatefulSet before its pod, and the
+          # replacement reuses the same name and labels. Wait the old pod out so
+          # the readiness check cannot select one that is still terminating.
+          DEADLINE=$(( SECONDS + 120 ))
+          while kubectl get pod -l "app=vcluster,release=${VCLUSTER_NAME}" \
+                  -n "${NAMESPACE}" -o name 2>/dev/null | grep -q .; do
+            if [ "${SECONDS}" -ge "${DEADLINE}" ]; then
+              echo "::error::vCluster pod for ${VCLUSTER_NAME} still terminating 120s after delete"
+              exit 1
+            fi
+            sleep 5
+          done
         else
           echo "No existing vCluster named ${VCLUSTER_NAME} found."
         fi
@@ -206,7 +251,10 @@ runs:
         VCLUSTER_NAME: ${{ steps.resolve-names.outputs.vcluster_name }}
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
         VCLUSTER_HOST_PRIORITY_CLASS: ${{ steps.resolve-vcluster-priority.outputs.priority_class }}
+        RESET_EXISTING: ${{ inputs.reset_existing }}
         CHECKPOINT_ENABLED: ${{ inputs.checkpoint_enabled }}
+        MODEL_CACHE_SERVER: ${{ inputs.model_cache_server }}
+        MODEL_CACHE_PATH: ${{ inputs.model_cache_path }}
       run: |
         echo "::group::Create vCluster ${VCLUSTER_NAME} in ${NAMESPACE}"
         set -euo pipefail
@@ -214,6 +262,10 @@ runs:
         VCLUSTER_HELM_ARGS=()
         if [ -n "${VCLUSTER_HOST_PRIORITY_CLASS}" ]; then
           VCLUSTER_HELM_ARGS+=(--set "sync.toHost.pods.priorityClassName=${VCLUSTER_HOST_PRIORITY_CLASS}")
+        fi
+        # Sync the model-cache PV to the host so its mount options are honored.
+        if [ -n "${MODEL_CACHE_SERVER}" ] && [ -n "${MODEL_CACHE_PATH}" ]; then
+          VCLUSTER_HELM_ARGS+=(--set "sync.toHost.persistentVolumes.enabled=true")
         fi
         if [[ "${CHECKPOINT_ENABLED}" == "true" ]]; then
           VCLUSTER_CHECKPOINT_VALUES="$(mktemp)"
@@ -232,15 +284,46 @@ runs:
           VCLUSTER_HELM_ARGS+=(--values "${VCLUSTER_CHECKPOINT_VALUES}")
         fi
 
-        # The K8s version must be supported by the kr8s Python library used in deploy tests.
-        # This is independent of the host cluster version.
-        vcluster create "${VCLUSTER_NAME}" \
-          --namespace "${NAMESPACE}" \
-          --connect=false \
-          --upgrade \
-          --set controlPlane.distro.k8s.enabled=true \
-          --set controlPlane.distro.k8s.version=${{ inputs.vcluster_k8s_version }} \
-          "${VCLUSTER_HELM_ARGS[@]}"
+        HOST_K8S_GIT_VERSION=$(kubectl version --output=json | jq -r '.serverVersion.gitVersion // empty')
+        if [[ ! "${HOST_K8S_GIT_VERSION}" =~ ^(v[0-9]+\.[0-9]+\.[0-9]+) ]]; then
+          echo "::error::Unable to resolve the host Kubernetes version from '${HOST_K8S_GIT_VERSION}'"
+          exit 1
+        fi
+        VCLUSTER_K8S_VERSION="${BASH_REMATCH[1]}"
+
+        # vCluster distro tags use upstream versions, so strip provider suffixes.
+        # Guest/host skew can break Pod status sync (loft-sh/vcluster#3578).
+        echo "Using host Kubernetes ${HOST_K8S_GIT_VERSION}; pinning vCluster guest to ${VCLUSTER_K8S_VERSION}"
+        # A recovery caller does not own this vCluster name -- a sibling job may be
+        # provisioning it right now. Adopt what that job produces rather than racing
+        # helm for the same release: `vcluster create` is `helm upgrade --install`, so
+        # a second pass would either collide with the in-flight install or upgrade a
+        # control plane another job is already testing against. A reset_existing
+        # caller has just cleared the name, so there every failure is real.
+        if [ "${RESET_EXISTING}" != "true" ] \
+           && helm status "${VCLUSTER_NAME}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+          echo "vCluster ${VCLUSTER_NAME} is already being provisioned elsewhere; adopting it"
+        else
+          CREATE_LOG="$(mktemp)"
+          if ! vcluster create "${VCLUSTER_NAME}" \
+               --namespace "${NAMESPACE}" \
+               --connect=false \
+               --upgrade \
+               --set controlPlane.distro.k8s.enabled=true \
+               --set controlPlane.distro.k8s.version="${VCLUSTER_K8S_VERSION}" \
+               "${VCLUSTER_HELM_ARGS[@]}" 2>&1 | tee "${CREATE_LOG}"; then
+            # A sibling can still commit the release between the check above and this
+            # call. helm names that collision differently depending on whether its
+            # install has finished.
+            if [ "${RESET_EXISTING}" != "true" ] && grep -qE \
+                 'release: already exists|another operation \(install/upgrade/rollback\) is in progress' \
+                 "${CREATE_LOG}"; then
+              echo "vCluster ${VCLUSTER_NAME} was created concurrently; adopting it"
+            else
+              exit 1
+            fi
+          fi
+        fi
         echo "::endgroup::"
 
     - name: Wait for vCluster pod to be ready
@@ -250,8 +333,17 @@ runs:
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
       run: |
         echo "::group::Wait for vCluster pod"
-        # Give the API server a moment to register the new pod
-        sleep 20
+        # kubectl wait fails immediately on a selector matching nothing, and when the
+        # cluster was adopted the owning job may not have applied its pod yet.
+        DEADLINE=$(( SECONDS + 300 ))
+        until kubectl get pod -l app=vcluster,release=${VCLUSTER_NAME} \
+                -n ${NAMESPACE} -o name 2>/dev/null | grep -q .; do
+          if [ "${SECONDS}" -ge "${DEADLINE}" ]; then
+            echo "::error::No vCluster pod for ${VCLUSTER_NAME} appeared within 300s"
+            exit 1
+          fi
+          sleep 5
+        done
         kubectl wait --for=condition=ready pod \
           -l app=vcluster,release=${VCLUSTER_NAME} \
           -n ${NAMESPACE} \
@@ -276,14 +368,25 @@ runs:
           - operator: Exists
         EOF
 
-        helm upgrade --install vcluster-hpm vcluster-hpm \
-          --repo https://charts.loft.sh \
-          --namespace "${NAMESPACE}" \
-          --wait \
-          --timeout 10m \
-          --set VclusterReleaseName="${VCLUSTER_NAME}" \
-          --values "${HPM_VALUES}" \
-          --debug
+        # helm reads release history before writing it, so concurrent callers
+        # both choose install and the loser collides. The rollout wait below
+        # synchronizes on whichever caller won.
+        HPM_LOG="$(mktemp)"
+        if ! helm upgrade --install vcluster-hpm vcluster-hpm \
+             --repo https://charts.loft.sh \
+             --namespace "${NAMESPACE}" \
+             --wait \
+             --timeout 10m \
+             --set VclusterReleaseName="${VCLUSTER_NAME}" \
+             --values "${HPM_VALUES}" \
+             --debug 2>&1 | tee "${HPM_LOG}"; then
+          if grep -qE 'release: already exists|another operation \(install/upgrade/rollback\) is in progress' \
+               "${HPM_LOG}"; then
+            echo "vcluster-hpm was installed concurrently; adopting it"
+          else
+            exit 1
+          fi
+        fi
 
         kubectl rollout status daemonset/vcluster-hpm-hostpath-mapper \
           -n "${NAMESPACE}" \
@@ -305,10 +408,57 @@ runs:
         HF_TOKEN: ${{ inputs.hf_token }}
       run: |
         echo "::group::Create HF token secret inside vCluster"
+        set -euo pipefail
         kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
           create secret generic hf-token-secret \
-          --from-literal=HF_TOKEN=${HF_TOKEN} \
-          -n default || true
+          --from-literal=HF_TOKEN="${HF_TOKEN}" \
+          -n default --dry-run=client -o yaml \
+          | kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+              apply --server-side --force-conflicts --field-manager=ci-setup -f -
+        echo "::endgroup::"
+
+    - name: Create shared model cache PV/PVC
+      if: inputs.model_cache_server != '' && inputs.model_cache_path != ''
+      shell: bash
+      env:
+        CACHE_SERVER: ${{ inputs.model_cache_server }}
+        CACHE_PATH: ${{ inputs.model_cache_path }}
+        PVC_NAME: ${{ inputs.model_cache_pvc }}
+      run: |
+        echo "::group::Create shared model cache PV/PVC inside vCluster"
+        set -euo pipefail
+        # Static PV + bound PVC in the default namespace; deploy tests reference
+        # the PVC by name via --model-cache-pvc. Capacity is nominal (not enforced).
+        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
+          apply --server-side --force-conflicts --field-manager=ci-setup -f - <<EOF
+        apiVersion: v1
+        kind: PersistentVolume
+        metadata:
+          name: ${PVC_NAME}
+        spec:
+          capacity:
+            storage: 1024Gi
+          accessModes: [ReadWriteMany]
+          persistentVolumeReclaimPolicy: Retain
+          storageClassName: ""
+          mountOptions: [vers=4, minorversion=1, sec=sys, nconnect=4, rsize=1048576, wsize=1048576, hard]
+          nfs:
+            server: ${CACHE_SERVER}
+            path: ${CACHE_PATH}
+        ---
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: ${PVC_NAME}
+          namespace: default
+        spec:
+          accessModes: [ReadWriteMany]
+          storageClassName: ""
+          volumeName: ${PVC_NAME}
+          resources:
+            requests:
+              storage: 1024Gi
+        EOF
         echo "::endgroup::"
 
     - name: Login to Docker Hub for Helm
@@ -320,10 +470,34 @@ runs:
       run: |
         echo "${DOCKERHUB_PASS}" | helm registry login registry-1.docker.io -u "${DOCKERHUB_USER}" --password-stdin
 
+    # The operator refuses to start when checkpoint is enabled unless the
+    # PodSnapshot API exists. Snapshot-agent (which owns that CRD) is installed
+    # in a later job, so apply the CRDs first and let that later job adopt them.
+    - name: Install snapshot CRDs for checkpoint
+      if: inputs.checkpoint_enabled == 'true'
+      shell: bash
+      env:
+        # Keep in lockstep with .github/actions/setup-snapshot-agent/action.yml.
+        SNAPSHOT_CHART_VERSION: 0.1.0-alpha.1
+      run: |
+        echo "::group::Install snapshot CRDs before operator start"
+        set -euo pipefail
+        VKUBECONFIG="${{ github.workspace }}/.kubeconfig-vcluster"
+        helm show crds oci://ghcr.io/ai-dynamo/snapshot/snapshot \
+          --version "${SNAPSHOT_CHART_VERSION}" \
+          | kubectl --kubeconfig="${VKUBECONFIG}" \
+              apply --server-side --force-conflicts --field-manager=ci-setup -f -
+        kubectl --kubeconfig="${VKUBECONFIG}" wait --for=condition=established \
+          crd/podsnapshots.nvidia.com \
+          crd/podsnapshotcontents.nvidia.com \
+          --timeout=120s
+        echo "::endgroup::"
+
     - name: Install Dynamo platform via Helm
       shell: bash
       env:
         REGISTRY: ${{ inputs.registry }}
+        REPOSITORY: ${{ inputs.repository }}
         OPERATOR_TAG: ${{ inputs.operator_tag }}
         CHECKPOINT_ENABLED: ${{ inputs.checkpoint_enabled }}
         CHECKPOINT_STORAGE_PVC_NAME: ${{ inputs.checkpoint_storage_pvc_name }}
@@ -340,11 +514,11 @@ runs:
 
         IMAGE_ARGS=()
         if [ -n "${REGISTRY}" ]; then
-          if [ -z "${OPERATOR_TAG}" ]; then
-            echo "::error::operator_tag is required when registry is set"
+          if [ -z "${REPOSITORY}" ] || [ -z "${OPERATOR_TAG}" ]; then
+            echo "::error::repository and operator_tag are required when registry is set"
             exit 1
           fi
-          OPERATOR_REPO="${REGISTRY}/ai-dynamo/dynamo"
+          OPERATOR_REPO="${REGISTRY}/${REPOSITORY}"
           echo "Using operator image: ${OPERATOR_REPO}:${OPERATOR_TAG}"
           # Automated CI passes a commit-scoped tag so the chart, CRDs,
           # and manager binary stay in sync. Manual workflows may still pass a
@@ -373,72 +547,106 @@ runs:
           )
         fi
 
-        KUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster \
-        helm upgrade --install dynamo-platform . --namespace default \
-          "${IMAGE_ARGS[@]}" \
-          --set dynamo-operator.gpuDiscovery.enabled=false \
-          "${CHECKPOINT_HELM_ARGS[@]}" \
-          --set global.grove.install=true \
-          --set global.kai-scheduler.install=false \
-          --set 'nats.container.merge.resources.requests.cpu=100m' \
-          --set 'nats.container.merge.resources.requests.memory=128Mi' \
-          --set 'nats.container.merge.resources.limits.cpu=500m' \
-          --set 'nats.container.merge.resources.limits.memory=512Mi' \
-          --set 'nats.reloader.merge.resources.requests.cpu=10m' \
-          --set 'nats.reloader.merge.resources.requests.memory=32Mi' \
-          --set 'nats.reloader.merge.resources.limits.cpu=100m' \
-          --set 'nats.reloader.merge.resources.limits.memory=64Mi' \
-          --debug
+        # helm reads release history before writing it, so concurrent bootstrap
+        # callers both choose install and the loser collides on the same release.
+        HELM_LOG="$(mktemp)"
+        if ! KUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster \
+             helm upgrade --install dynamo-platform . --namespace default \
+               "${IMAGE_ARGS[@]}" \
+               --set dynamo-operator.gpuDiscovery.enabled=false \
+               "${CHECKPOINT_HELM_ARGS[@]}" \
+               --set global.grove.install=true \
+               --set global.kai-scheduler.install=false \
+               --set 'nats.container.merge.resources.requests.cpu=100m' \
+               --set 'nats.container.merge.resources.requests.memory=128Mi' \
+               --set 'nats.container.merge.resources.limits.cpu=500m' \
+               --set 'nats.container.merge.resources.limits.memory=512Mi' \
+               --set 'nats.reloader.merge.resources.requests.cpu=10m' \
+               --set 'nats.reloader.merge.resources.requests.memory=32Mi' \
+               --set 'nats.reloader.merge.resources.limits.cpu=100m' \
+               --set 'nats.reloader.merge.resources.limits.memory=64Mi' \
+               --debug 2>&1 | tee "${HELM_LOG}"; then
+          if grep -qE 'release: already exists|another operation \(install/upgrade/rollback\) is in progress' \
+               "${HELM_LOG}"; then
+            echo "dynamo-platform was installed concurrently; adopting it"
+          else
+            exit 1
+          fi
+        fi
+
+        # An adopted release can still be mid-install; the CRD and container
+        # waits below assume its manifests are committed.
+        DEADLINE=$(( SECONDS + 600 ))
+        until [ "$(KUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster \
+                   helm status dynamo-platform -n default -o json 2>/dev/null \
+                   | jq -r '.info.status // empty')" = "deployed" ]; do
+          if [ "${SECONDS}" -ge "${DEADLINE}" ]; then
+            echo "::error::dynamo-platform did not reach status=deployed within 600s"
+            exit 1
+          fi
+          sleep 5
+        done
         echo "::endgroup::"
 
     - name: Wait for operator CRDs to be established
       shell: bash
       run: |
         echo "::group::Wait for Dynamo operator CRDs inside vCluster"
-        # CRDs live in the chart's crds/ directory so Helm installs them before any pod
-        # starts. Waiting for Established is independent of vCluster syncer pod-Ready
-        # latency, which is unreliable on some clusters (e.g. AWS with LimitRange QoS mismatch).
-        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
-          wait --for=condition=established \
-          crd/dynamographdeployments.nvidia.com \
-          --timeout=1800s
+        # The crd-apply init container installs CRDs asynchronously after Helm returns.
+        # Poll for the resource because a condition wait fails if it does not exist yet.
+        VKUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster
+        for CRD in dynamographdeployments.nvidia.com podcliquesets.grove.io; do
+          end=$((SECONDS + 1800))
+          until kubectl --kubeconfig="${VKUBECONFIG}" get "crd/${CRD}" >/dev/null 2>&1; do
+            if [ $SECONDS -ge $end ]; then
+              echo "::error::CRD ${CRD} was not created after 1800s"
+              exit 1
+            fi
+            sleep 5
+          done
+          kubectl --kubeconfig="${VKUBECONFIG}" \
+            wait --for=condition=established \
+            "crd/${CRD}" \
+            --timeout=120s
+        done
         echo "::endgroup::"
 
-    - name: Wait for operator pod to be ready
+    - name: Wait for operator containers to be ready
       shell: bash
       env:
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
       run: |
-        echo "::group::Wait for operator pod Ready (host namespace)"
-        # Poll the host namespace instead of the vCluster API. The vCluster syncer
-        # on AWS stalls pod-Ready propagation due to a NATS qosClass reconciliation
-        # loop, so kubectl wait against the virtual cluster never returns. The host
-        # pod status is always accurate.
+        echo "::group::Wait for operator container readiness (host namespace)"
+        # Poll the host namespace instead of the vCluster API because Pod status
+        # propagation can lag in either direction. The READY column confirms
+        # container readiness reported by each webhook-aware probe; the
+        # admission smoke tests below are the authoritative end-to-end gate.
         end=$((SECONDS + 1800))
         while true; do
-          STATUS=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null \
-            | grep 'dynamo-platform-dynamo-operator-controller-manager' \
-            | awk '{print $2}' | head -1)
-          if [ "${STATUS}" = "1/1" ]; then
-            echo "Operator pod Ready"
+          POD_STATUSES=()
+          mapfile -t POD_STATUSES < <(
+            kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null \
+              | awk '
+                  $1 ~ /^dynamo-platform-dynamo-operator-controller-manager-/ ||
+                  $1 ~ /^grove-operator-/ {
+                    print $1 "=" $2
+                  }
+                '
+          )
+          if [ "${#POD_STATUSES[@]}" -eq 2 ] \
+            && [ "${POD_STATUSES[0]#*=}" = "1/1" ] \
+            && [ "${POD_STATUSES[1]#*=}" = "1/1" ]; then
+            echo "Dynamo and Grove operator containers ready (${POD_STATUSES[*]})"
             break
           fi
-          if [ $SECONDS -ge $end ]; then
-            echo "::error::Operator pod not Ready after 1800s (last status: ${STATUS:-not found})"
+          if [ "${SECONDS}" -ge "${end}" ]; then
+            echo "::error::Expected two ready 1/1 operator Pods after 1800s (last status: ${POD_STATUSES[*]:-not found})"
             exit 1
           fi
-          echo "Waiting for operator pod... status=${STATUS:-not found}"
+          echo "Waiting for two ready 1/1 operator Pods... status=${POD_STATUSES[*]:-not found}"
           sleep 15
         done
         echo "::endgroup::"
-
-    - name: Wait for CRDs to be established
-      shell: bash
-      run: |
-        kubectl --kubeconfig=${{ github.workspace }}/.kubeconfig-vcluster \
-          wait --for=condition=established \
-          crd/dynamographdeployments.nvidia.com \
-          --timeout=120s
 
     - name: Verify operator image and admission webhooks
       shell: bash
@@ -452,7 +660,7 @@ runs:
           | grep 'dynamo-platform-dynamo-operator-controller-manager' \
           | head -1 || true)
         if [ -z "${OPERATOR_POD}" ]; then
-          echo "::error::Ready operator pod disappeared before verification"
+          echo "::error::Operator Pod disappeared after manager container readiness"
           exit 1
         fi
 
@@ -461,7 +669,7 @@ runs:
           -o jsonpath='{range .status.initContainerStatuses[*]}initContainer={.name} image={.image} imageID={.imageID}{"\n"}{end}{range .status.containerStatuses[*]}container={.name} image={.image} imageID={.imageID}{"\n"}{end}'
         echo "::endgroup::"
 
-        echo "::group::DynamoGraphDeployment admission smoke tests"
+        echo "::group::Admission webhook smoke tests"
         smoke_v1alpha1() {
           kubectl --kubeconfig="${VKUBECONFIG}" --request-timeout=15s \
             create --namespace=default --dry-run=server \
@@ -476,6 +684,9 @@ runs:
             Smoke:
               componentType: worker
               replicas: 0
+              extraPodSpec:
+                mainContainer:
+                  image: registry.example/runtime:1.1.0
         EOF
         }
 
@@ -493,26 +704,91 @@ runs:
           - name: Smoke
             type: worker
             replicas: 0
+            podTemplate:
+              spec:
+                containers:
+                  - name: main
+                    image: registry.example/runtime:1.1.0
         EOF
         }
 
-        run_admission_smoke_test() {
-          local version="$1"
+        smoke_grove() {
+          kubectl --kubeconfig="${VKUBECONFIG}" --request-timeout=15s \
+            create --namespace=default --dry-run=server \
+            -o json \
+            -f - <<'EOF'
+        apiVersion: grove.io/v1alpha1
+        kind: PodCliqueSet
+        metadata:
+          name: ci-grove-webhook-smoke
+        spec:
+          replicas: 1
+          template:
+            cliques:
+            - name: smoke
+              spec:
+                roleName: smoke
+                replicas: 1
+                minAvailable: 1
+                podSpec:
+                  containers:
+                  - name: smoke
+                    image: registry.k8s.io/pause:3.10
+        EOF
+        }
+
+        webhook_restarted=false
+
+        restart_operator_for_webhook() {
+          local old_pod
+          local ready_pod
+          local restart_deadline
+
+          old_pod=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null \
+            | awk '$1 ~ /dynamo-platform-dynamo-operator-controller-manager/ {print $1; exit}' || true)
+          if [ -z "${old_pod}" ]; then
+            echo "::error::Operator pod disappeared before webhook recovery"
+            return 1
+          fi
+
+          # The certificate secret can be created after the optional volume was
+          # mounted. Restart once so kubelet projects the completed secret.
+          kubectl --kubeconfig="${VKUBECONFIG}" -n default \
+            get secret webhook-server-cert >/dev/null
+          echo "::warning::Admission webhook stayed unreachable; restarting operator once to remount its certificate"
+          kubectl --kubeconfig="${VKUBECONFIG}" -n default rollout restart \
+            deployment/dynamo-platform-dynamo-operator-controller-manager
+
+          restart_deadline=$((SECONDS + 300))
+          while true; do
+            ready_pod=$(kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null \
+              | awk -v old="${old_pod}" \
+                '$1 != old && $1 ~ /dynamo-platform-dynamo-operator-controller-manager/ && $2 == "1/1" {print $1; exit}' \
+              || true)
+            if [ -n "${ready_pod}" ]; then
+              echo "Replacement operator pod Ready: ${ready_pod}"
+              return 0
+            fi
+            if [ "${SECONDS}" -ge "${restart_deadline}" ]; then
+              echo "::error::Replacement operator pod not Ready after 300s"
+              return 1
+            fi
+            sleep 5
+          done
+        }
+
+        SMOKE_OUTPUT=
+        run_webhook_smoke_test() {
+          local endpoint="$1"
+          local recover_operator="$2"
           local output
-          local origin_version
-          local deadline=$((SECONDS + 120))
+          local smoke_deadline=$((SECONDS + 120))
           local attempt=1
-          shift
+          shift 2
 
           while true; do
             if output=$("$@" 2>&1); then
-              origin_version=$(sed -n 's/.*"nvidia\.com\/dynamo-operator-origin-version":[[:space:]]*"\([^"]*\)".*/\1/p' <<<"${output}" | tail -1)
-              if [ -z "${origin_version}" ]; then
-                echo "::error::${version} request succeeded without the operator origin-version mutation"
-                printf '%s\n' "${output}" >&2
-                return 1
-              fi
-              echo "${version} admission succeeded (operator origin version: ${origin_version})"
+              SMOKE_OUTPUT="${output}"
               return 0
             fi
 
@@ -523,20 +799,79 @@ runs:
               return 1
             fi
 
-            if [ "${SECONDS}" -ge "${deadline}" ]; then
-              echo "::error::${version} admission smoke test did not become reachable within 120s"
+            if [ "${SECONDS}" -ge "${smoke_deadline}" ]; then
+              if [ "${recover_operator}" = true ] && [ "${webhook_restarted}" = false ]; then
+                restart_operator_for_webhook
+                webhook_restarted=true
+                smoke_deadline=$((SECONDS + 120))
+                attempt=1
+                continue
+              fi
+
+              echo "::error::${endpoint} admission smoke test did not become reachable within 120s"
               printf '%s\n' "${output}" >&2
               return 1
             fi
 
-            echo "::warning::${version} admission endpoint not ready (attempt ${attempt}); retrying in 2s"
+            echo "::warning::${endpoint} admission endpoint not ready (attempt ${attempt}); retrying in 2s"
             attempt=$((attempt + 1))
             sleep 2
           done
         }
 
-        run_admission_smoke_test v1alpha1 smoke_v1alpha1
-        run_admission_smoke_test v1beta1 smoke_v1beta1
+        verify_dynamo_admission() {
+          local version="$1"
+          local smoke_function="$2"
+          local origin_version
+
+          run_webhook_smoke_test "${version}" true "${smoke_function}"
+          origin_version=$(sed -n 's/.*"nvidia\.com\/dynamo-operator-origin-version":[[:space:]]*"\([^"]*\)".*/\1/p' <<<"${SMOKE_OUTPUT}" | tail -1)
+          if [ -z "${origin_version}" ]; then
+            echo "::error::${version} request succeeded without the operator origin-version mutation"
+            printf '%s\n' "${SMOKE_OUTPUT}" >&2
+            return 1
+          fi
+          echo "${version} admission succeeded (operator origin version: ${origin_version})"
+        }
+
+        verify_grove_webhook_configuration() {
+          local resource_kind="$1"
+          local configuration_name="$2"
+          local webhook_name="$3"
+          local configuration
+
+          configuration=$(kubectl --kubeconfig="${VKUBECONFIG}" \
+            get "${resource_kind}/${configuration_name}" \
+            -o json)
+          if ! jq -e --arg webhook_name "${webhook_name}" '
+            any(.webhooks[];
+              .name == $webhook_name
+              and .failurePolicy == "Fail"
+              and any(.rules[];
+                (.apiGroups | index("grove.io")) != null
+                and (.apiVersions | index("v1alpha1")) != null
+                and (.resources | index("podcliquesets")) != null
+                and (.operations | index("CREATE")) != null
+              )
+            )
+          ' <<<"${configuration}" >/dev/null; then
+            echo "::error::${configuration_name} does not fail closed for grove.io/v1alpha1 PodCliqueSet creation"
+            return 1
+          fi
+        }
+
+        verify_dynamo_admission v1alpha1 smoke_v1alpha1
+        verify_dynamo_admission v1beta1 smoke_v1beta1
+        verify_grove_webhook_configuration \
+          mutatingwebhookconfiguration \
+          podcliqueset-defaulting-webhook \
+          pcs.defaulting.webhooks.grove.io
+        verify_grove_webhook_configuration \
+          validatingwebhookconfiguration \
+          podcliqueset-validating-webhook \
+          pcs.validating.webhooks.grove.io
+        run_webhook_smoke_test 'Grove PodCliqueSet' false smoke_grove
+        echo "Grove PodCliqueSet defaulting and validation webhooks are installed and healthy"
         echo "::endgroup::"
 
     - name: Debug deployment failure
@@ -544,6 +879,7 @@ runs:
       shell: bash
       env:
         NAMESPACE: ${{ steps.resolve-names.outputs.namespace }}
+        VCLUSTER_NAME: ${{ steps.resolve-names.outputs.vcluster_name }}
       run: |
         set +eo pipefail
         VKUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster
@@ -562,6 +898,56 @@ runs:
         kubectl describe pods -n ${NAMESPACE} 2>&1 || true
         echo "::endgroup::"
 
+        OPERATOR_POD=$(kubectl get pods -n "${NAMESPACE}" \
+          -l control-plane=controller-manager \
+          -o name 2>/dev/null | head -1)
+        if [ -n "${OPERATOR_POD}" ]; then
+          echo "::group::Operator Pod YAML (host namespace)"
+          kubectl get "${OPERATOR_POD}" -n "${NAMESPACE}" -o yaml 2>&1 || true
+          echo "::endgroup::"
+
+          echo "::group::Operator logs (host namespace)"
+          kubectl logs "${OPERATOR_POD}" -n "${NAMESPACE}" \
+            --all-containers --tail=200 --prefix=true 2>&1 || true
+          echo "::endgroup::"
+        fi
+
+        HOST_WEBHOOK_SERVICE=$(kubectl get services -n "${NAMESPACE}" \
+          -l app.kubernetes.io/component=webhook \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+        if [ -n "${HOST_WEBHOOK_SERVICE}" ]; then
+          echo "::group::Webhook Service and endpoints (host namespace)"
+          kubectl get service "${HOST_WEBHOOK_SERVICE}" -n "${NAMESPACE}" -o yaml 2>&1 || true
+          kubectl get endpoints "${HOST_WEBHOOK_SERVICE}" -n "${NAMESPACE}" -o yaml 2>&1 || true
+          kubectl get endpointslices -n "${NAMESPACE}" \
+            -l "kubernetes.io/service-name=${HOST_WEBHOOK_SERVICE}" \
+            -o yaml 2>&1 || true
+          echo "::endgroup::"
+        else
+          echo "::warning::Host webhook Service not found"
+        fi
+
+        HOST_GROVE_SERVICE=$(kubectl get services -n "${NAMESPACE}" \
+          -l "vcluster.loft.sh/managed-by=${VCLUSTER_NAME},vcluster.loft.sh/namespace=default,app.kubernetes.io/name=grove-operator" \
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+        if [ -n "${HOST_GROVE_SERVICE}" ]; then
+          echo "::group::Grove webhook Service and endpoints (host namespace)"
+          kubectl get service "${HOST_GROVE_SERVICE}" -n "${NAMESPACE}" -o yaml 2>&1 || true
+          kubectl get endpoints "${HOST_GROVE_SERVICE}" -n "${NAMESPACE}" -o yaml 2>&1 || true
+          kubectl get endpointslices -n "${NAMESPACE}" \
+            -l "kubernetes.io/service-name=${HOST_GROVE_SERVICE}" \
+            -o yaml 2>&1 || true
+          echo "::endgroup::"
+        else
+          echo "::warning::Host Grove webhook Service not found"
+        fi
+
+        echo "::group::vCluster syncer logs (host namespace)"
+        kubectl logs -n "${NAMESPACE}" \
+          -l "app=vcluster,release=${VCLUSTER_NAME}" \
+          --all-containers --tail=300 --prefix=true 2>&1 || true
+        echo "::endgroup::"
+
         if [ ! -f "${VKUBECONFIG}" ]; then
           echo "::warning::vCluster kubeconfig not found — vCluster never connected successfully"
           echo "- **vCluster kubeconfig missing** — connect-vcluster step failed before writing .kubeconfig-vcluster" >> $GITHUB_STEP_SUMMARY
@@ -570,6 +956,17 @@ runs:
 
         echo "::group::Pod status (vCluster)"
         kubectl --kubeconfig=${VKUBECONFIG} get pods -A -o wide 2>&1 || true
+        echo "::endgroup::"
+
+        echo "::group::Operator Pods and webhook Services YAML (vCluster)"
+        kubectl --kubeconfig="${VKUBECONFIG}" get pods -n default \
+          -l control-plane=controller-manager -o yaml 2>&1 || true
+        kubectl --kubeconfig="${VKUBECONFIG}" get services -n default \
+          -l app.kubernetes.io/component=webhook -o yaml 2>&1 || true
+        kubectl --kubeconfig="${VKUBECONFIG}" get pods -n default \
+          -l app.kubernetes.io/name=grove-operator -o yaml 2>&1 || true
+        kubectl --kubeconfig="${VKUBECONFIG}" get service grove-operator \
+          -n default -o yaml 2>&1 || true
         echo "::endgroup::"
 
         NOT_READY=$(kubectl --kubeconfig=${VKUBECONFIG} get pods -n default --no-headers 2>/dev/null \

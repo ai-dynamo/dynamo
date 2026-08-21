@@ -287,8 +287,9 @@ def engine_main(request_link: Link, result_link: Link, cfg: EngineConfig) -> Non
     reader.daemon = True
     reader.start()
 
-    # client_id -> [tokens still to generate, tokens buffered since last stream]
+    # client_id -> [tokens left, tokens buffered since last stream]
     active: Dict[int, List[int]] = {}
+    active_generations: Dict[int, Optional[int]] = {}
     waiting: Deque[dict] = collections.deque()
     max_batch = cfg.batch.total_batch
     stream_interval = cfg.stream_interval
@@ -303,6 +304,7 @@ def engine_main(request_link: Link, result_link: Link, cfg: EngineConfig) -> Non
                     int(req.get("max_tokens", cfg.max_tokens)),
                     0,
                 ]
+                active_generations[req["client_id"]] = req.get("generation")
 
             if not active:
                 # Idle: nothing in flight, so no iteration to run.
@@ -336,6 +338,7 @@ def engine_main(request_link: Link, result_link: Link, cfg: EngineConfig) -> Non
                 rsp_batch.append(
                     Response(
                         client_id=client_id,
+                        generation=active_generations[client_id],
                         result=ResultPayload(
                             new_token_ids=[
                                 [
@@ -353,6 +356,7 @@ def engine_main(request_link: Link, result_link: Link, cfg: EngineConfig) -> Non
                     finished.append(client_id)
             for client_id in finished:
                 active.pop(client_id, None)
+                active_generations.pop(client_id, None)
 
             if not rsp_batch:
                 # Nothing crossed this iteration -- at stream_interval > 1 that

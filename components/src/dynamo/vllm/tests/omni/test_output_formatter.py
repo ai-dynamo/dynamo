@@ -20,7 +20,7 @@ except ImportError:
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
-    pytest.mark.gpu_1,
+    pytest.mark.gpu_0,
     pytest.mark.xpu_1,
     pytest.mark.pre_merge,
     pytest.mark.profiled_vram_gib(0),
@@ -31,7 +31,9 @@ pytestmark = [
 # ── TextFormatter ──────────────────────────────────────────
 
 
-def _make_request_output(text="hello world", finish_reason=None):
+def _make_request_output(
+    text="hello world", finish_reason=None, num_cached_tokens=None
+):
     output = MagicMock()
     output.text = text
     output.finish_reason = finish_reason
@@ -45,6 +47,7 @@ def _make_request_output(text="hello world", finish_reason=None):
         40,
         50,
     ]  # 5 prompt tokens (different from completion)
+    ro.num_cached_tokens = num_cached_tokens
     return ro
 
 
@@ -246,6 +249,23 @@ class TestBuildCompletionUsage:
         usage = _build_completion_usage(ro)
         assert usage["prompt_tokens"] is None
         assert usage["total_tokens"] is None
+
+    @pytest.mark.parametrize(
+        ("num_cached_tokens", "expected_prompt_tokens_details"),
+        [
+            (None, None),
+            (0, {"cached_tokens": 0}),
+            (3, {"cached_tokens": 3}),
+        ],
+    )
+    def test_cached_token_details(
+        self, num_cached_tokens, expected_prompt_tokens_details
+    ):
+        ro = _make_request_output(num_cached_tokens=num_cached_tokens)
+
+        usage = _build_completion_usage(ro)
+
+        assert usage["prompt_tokens_details"] == expected_prompt_tokens_details
 
 
 # ── AudioFormatter ─────────────────────────────────────────
@@ -513,7 +533,14 @@ class TestDiffusionFormatterVideoOutputFormat:
                 "dynamo.vllm.omni.output_formatter.normalize_video_frames",
                 return_value=[MagicMock()],
             ),
-            _patch("dynamo.vllm.omni.output_formatter.export_to_video"),
+            _patch(
+                "dynamo.vllm.omni.output_formatter.frames_to_numpy",
+                return_value=MagicMock(),
+            ),
+            _patch(
+                "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+                return_value=b"video-bytes",
+            ),
             _patch(
                 "dynamo.vllm.omni.output_formatter.upload_to_fs",
                 return_value="http://x/v.mp4",
@@ -533,8 +560,8 @@ class TestDiffusionFormatterVideoOutputFormat:
         stage = MagicMock()
         stage.images = [MagicMock()]
 
-        p1, p2, p3, p4 = self._patches()
-        with p1, p2, p3 as mock_upload, p4:
+        p1, p2, p3, p4, p5 = self._patches()
+        with p1, p2, p3, p4 as mock_upload, p5:
             result = await f.format(
                 stage,
                 "r5",
@@ -560,8 +587,8 @@ class TestDiffusionFormatterVideoOutputFormat:
         stage = MagicMock()
         stage.images = [MagicMock()]
 
-        p1, p2, p3, p4 = self._patches()
-        with p1, p2, p3 as mock_upload, p4:
+        p1, p2, p3, p4, p5 = self._patches()
+        with p1, p2, p3, p4 as mock_upload, p5:
             result = await f.format(
                 stage,
                 "r6",
@@ -587,8 +614,8 @@ class TestDiffusionFormatterVideoOutputFormat:
         stage = MagicMock()
         stage.images = [MagicMock()]
 
-        p1, p2, p3, p4 = self._patches()
-        with p1, p2, p3 as mock_upload, p4:
+        p1, p2, p3, p4, p5 = self._patches()
+        with p1, p2, p3, p4 as mock_upload, p5:
             result = await f.format(
                 stage, "r7", request_type=RequestType.VIDEO_GENERATION, fps=16
             )

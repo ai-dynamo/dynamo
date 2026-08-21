@@ -31,7 +31,7 @@
 # 'managed_state'`.
 
 {{- if .Values.dev.enabled }}
-{{- include "power-agent.validateTerminationGracePeriod" . -}}
+{{- include "power-agent.validateTerminationGracePeriod" . }}
 apiVersion: v1
 kind: Pod
 metadata:

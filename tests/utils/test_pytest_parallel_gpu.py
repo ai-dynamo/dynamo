@@ -189,7 +189,7 @@ def test_blocked_test_launches_once_occupant_frees():
 # --------------------------------------------------------------------------- #
 # makespan simulation: new ordering vs legacy timeout-sorted first-fit
 # --------------------------------------------------------------------------- #
-# (name, profiled_gib, real_runtime_s, timeout_s) for the 26 VRAM tests observed
+# (name, profiled_gib, real_runtime_s, timeout_s) for the 23 VRAM tests observed
 # in job-log.txt, plus 213 zero-VRAM "needs vllm container, no GPU memory" unit
 # tests that each pay ~27 s of interpreter/import startup in their own subprocess.
 _GPU_TESTS = [
@@ -200,10 +200,7 @@ _GPU_TESTS = [
     ("serve_mm_agg_video", 8.2, 131, 600),
     ("self_benchmark", 3.8, 73, 600),
     ("serve_aggregated", 3.8, 168, 480),
-    ("serve_aggregated_unified", 3.8, 170, 480),
     ("serve_mm_agg_router_qwen3", 13.0, 98, 400),
-    ("router_unified_kv_basic", 6.9, 110, 360),
-    ("router_unified_decisions", 6.9, 85, 360),
     ("router_kv_basic", 6.9, 76, 360),
     ("router_kv_without_block", 6.9, 75, 360),
     ("router_decisions", 6.9, 79, 360),

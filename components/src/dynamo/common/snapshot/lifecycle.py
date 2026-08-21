@@ -90,10 +90,11 @@ class SnapshotConfig:
             await asyncio.sleep(SENTINEL_POLL_INTERVAL_SEC)
 
     def _cleanup_ready_and_sentinels(self) -> None:
+        # Keep restore-complete for the kubelet startup probe; the snapshot agent
+        # removes it before restoring the next container incarnation.
         for name in (
             READY_FOR_SNAPSHOT_FILE,
             SNAPSHOT_COMPLETE_FILE,
-            RESTORE_COMPLETE_FILE,
         ):
             path = os.path.join(self.control_dir, name)
             try:
@@ -113,15 +114,6 @@ def configure_snapshot_capture_env() -> None:
             nccl_cumem_enable,
         )
     os.environ["NCCL_CUMEM_ENABLE"] = "0"
-
-    nccl_p2p_disable = os.environ.get("NCCL_P2P_DISABLE")
-    if nccl_p2p_disable and nccl_p2p_disable != "0":
-        logger.warning(
-            "Overriding NCCL_P2P_DISABLE=%r with '0' for snapshot mode "
-            "to keep NCCL on GPU P2P transport when topology allows it",
-            nccl_p2p_disable,
-        )
-    os.environ["NCCL_P2P_DISABLE"] = "0"
 
     nccl_nvls_enable = os.environ.get("NCCL_NVLS_ENABLE")
     if nccl_nvls_enable and nccl_nvls_enable != "0":

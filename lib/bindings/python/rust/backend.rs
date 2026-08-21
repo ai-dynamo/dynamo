@@ -51,6 +51,7 @@ use crate::to_pyerr;
 pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
     let m = PyModule::new(py, "backend")?;
+    m.add_function(wrap_pyfunction!(_run_sglang_sidecar, &m)?)?;
     m.add_class::<DisaggregationMode>()?;
     m.add_class::<EngineConfig>()?;
     m.add_class::<LlmRegistration>()?;
@@ -65,6 +66,34 @@ pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
         .getattr("modules")?
         .set_item("dynamo._core.backend", &m)?;
     Ok(())
+}
+
+const SGLANG_SIDECAR_PROGRAM_NAME: &str = "dynamo-sglang-sidecar";
+
+fn sglang_sidecar_argv(argv: Vec<String>) -> Vec<String> {
+    let mut cli_argv = Vec::with_capacity(argv.len() + 1);
+    cli_argv.push(SGLANG_SIDECAR_PROGRAM_NAME.to_string());
+    cli_argv.extend(argv);
+    cli_argv
+}
+
+/// Run the native SGLang sidecar in the current process.
+///
+/// SGLang's sidecar module contract passes only option arguments, while clap's
+/// `try_parse_from` expects the program name at index zero. Add that stable
+/// name here so Python callers use ordinary `sys.argv[1:]` semantics.
+#[pyfunction]
+#[pyo3(signature = (argv=None))]
+fn _run_sglang_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
+    let cli_argv = sglang_sidecar_argv(argv.unwrap_or_default());
+    let (engine, config) = py
+        .allow_threads(move || {
+            dynamo_sglang_sidecar::SglangSidecarEngine::from_args(Some(cli_argv))
+        })
+        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+
+    py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
+        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -105,7 +134,7 @@ impl From<DisaggregationMode> for RsDisaggregationMode {
 // EngineConfig — mirror of `dynamo_backend_common::EngineConfig`.
 //
 // Engines may return either this pyclass or any object with the canonical
-// attributes `model` / `served_model_name` / `runtime_data` / `llm`; the
+// attributes `model` / `served_model_name` / `model_aliases` / `runtime_data` / `llm`; the
 // bridge's `start()` extraction accepts both. Note `llm` is a nested record
 // (LlmRegistration), NOT flat fields — an object exposing flat `context_length`
 // etc. (the pre-split shape) registers with `llm=None`, i.e. no KV/DP/bootstrap
@@ -207,12 +236,13 @@ pub struct EngineConfig {
 #[pymethods]
 impl EngineConfig {
     #[new]
-    #[pyo3(signature = (model, served_model_name = None, runtime_data = None, llm = None))]
+    #[pyo3(signature = (model, served_model_name = None, runtime_data = None, llm = None, model_aliases = None))]
     fn new(
         model: String,
         served_model_name: Option<String>,
         runtime_data: Option<&Bound<'_, PyDict>>,
         llm: Option<LlmRegistration>,
+        model_aliases: Option<Vec<String>>,
     ) -> PyResult<Self> {
         let runtime_data = runtime_data
             .map(|dict| depythonize::<HashMap<String, serde_json::Value>>(dict))
@@ -224,6 +254,7 @@ impl EngineConfig {
             inner: RsEngineConfig {
                 model,
                 served_model_name,
+                model_aliases: model_aliases.unwrap_or_default(),
                 runtime_data,
                 llm: llm.map(|l| l.inner),
             },
@@ -237,6 +268,10 @@ impl EngineConfig {
     #[getter]
     fn served_model_name(&self) -> Option<&str> {
         self.inner.served_model_name.as_deref()
+    }
+    #[getter]
+    fn model_aliases(&self) -> &[String] {
+        &self.inner.model_aliases
     }
     #[getter]
     fn llm(&self) -> Option<LlmRegistration> {
@@ -319,6 +354,8 @@ impl WorkerConfig {
         route_to_encoder = false,
         media_decoder = None,
         media_fetcher = None,
+        kv_state_endpoint = None,
+        default_thinking_mode = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -346,6 +383,8 @@ impl WorkerConfig {
         route_to_encoder: bool,
         media_decoder: Option<MediaDecoder>,
         media_fetcher: Option<MediaFetcher>,
+        kv_state_endpoint: Option<String>,
+        default_thinking_mode: Option<String>,
     ) -> PyResult<Self> {
         // Delegating to the same conversion used by `register_model`.
         let model_input_rs = match model_input {
@@ -405,6 +444,9 @@ impl WorkerConfig {
                 namespace,
                 component,
                 endpoint,
+                kv_state_endpoint: kv_state_endpoint
+                    .as_deref()
+                    .map(dynamo_runtime::protocols::EndpointId::from),
                 model_name,
                 served_model_name,
                 model_input: model_input_rs,
@@ -412,6 +454,7 @@ impl WorkerConfig {
                 custom_jinja_template: custom_jinja_template.map(PathBuf::from),
                 tool_call_parser,
                 reasoning_parser,
+                default_thinking_mode,
                 exclude_tools_when_tool_choice_none,
                 enable_local_indexer,
                 enable_kv_routing,
@@ -423,6 +466,9 @@ impl WorkerConfig {
                 structural_tag_schema: st_schema,
                 runtime: runtime.map(|r| r.inner).unwrap_or_default(),
                 route_to_encoder,
+                // Python vLLM owns and serves its existing `.rl` endpoint.
+                // The shared Rust endpoint is opt-in for Rust sidecars only.
+                enable_rl: false,
                 media_decoder: media_decoder.map(|decoder| decoder.inner),
                 media_fetcher: media_fetcher.map(|fetcher| fetcher.inner),
             },
@@ -447,8 +493,8 @@ pub struct Worker {
     /// Single-shot guard — flipped to `true` on the first `run()` call.
     /// The Rust `Worker` underneath consumes `self`; calling `run()`
     /// twice from Python would build a second `RsWorker` and call
-    /// `engine.start()` again, which most engines (vLLM, sglang, trtllm)
-    /// don't tolerate. We surface a clear `RuntimeError` instead.
+    /// `engine.start()` again, which engine implementations generally do not
+    /// tolerate. We surface a clear `RuntimeError` instead.
     consumed: AtomicBool,
     /// `true` when `engine` is a `DiffusionEngine` (raw media pipeline).
     /// Set by the Python `Worker` shim via `isinstance`. Selects the raw
@@ -825,6 +871,7 @@ impl PyEngineCore {
             Ok(RsEngineConfig {
                 model: bound.getattr("model")?.extract()?,
                 served_model_name: opt_attr::<String>(bound, "served_model_name")?,
+                model_aliases: opt_attr::<Vec<String>>(bound, "model_aliases")?.unwrap_or_default(),
                 runtime_data: match bound.getattr("runtime_data") {
                     Ok(value) if !value.is_none() => depythonize(&value).map_err(to_pyerr)?,
                     Ok(_) => HashMap::new(),

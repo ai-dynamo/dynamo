@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# EXPERIMENTAL. Aggregated vLLM deployment using the Rust sidecar.
+#
+# The worker pod has two containers:
+#   - main: the Dynamo worker (dynamo-vllm-sidecar). No GPU. Handles registration
+#     and talks to the engine over gRPC on 127.0.0.1. The operator adds discovery
+#     env and health probes here, so it must be named "main".
+#   - vllm-engine: the stock vLLM image (ships `vllm-rs`, vLLM's native gRPC
+#     server). Holds the GPU. Runs as a native sidecar; see the initContainers
+#     block below.
+#
+# The engine's gRPC has no auth and no TLS. It is only safe because vllm-rs binds
+# 127.0.0.1 (--host below), keeping it on pod loopback.
+#
+# There is no published vLLM sidecar image yet: build your own from
+# lib/sidecar/vllm/Dockerfile and set <your-registry> below (see README).
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-sidecar-agg
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        # Dynamo frontend. No vLLM needed. The operator adds the command.
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
+  - name: VLLMWorker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        # vllm-engine as a native sidecar (initContainer, restartPolicy: Always):
+        # it starts before `main` and stops after it. Stock multi-arch vLLM image
+        # (v0.26.0 ships vllm-rs; its gRPC matches the sidecar's vendored proto).
+        initContainers:
+        - name: vllm-engine
+          image: vllm/vllm-openai:v0.26.0
+          restartPolicy: Always
+          # These lightweight lifecycle probes confirm that the loopback listener
+          # accepts connections. The Dynamo sidecar independently waits for both
+          # services through the standard gRPC health API before registration.
+          startupProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import socket; socket.create_connection(('127.0.0.1', 50051), 2).close()
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60   # ~5 min for model load; raise for big models
+          readinessProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import socket; socket.create_connection(('127.0.0.1', 50051), 2).close()
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              # Increase this value for larger models.
+              ephemeral-storage: 2Gi
+          # vllm-rs is not on PATH; resolve it from the installed vllm package.
+          # --host 127.0.0.1 keeps the unauthenticated gRPC on pod loopback.
+          command:
+          - /bin/sh
+          - -c
+          - >-
+            exec "$(python3 -c 'import os,vllm; print(os.path.join(os.path.dirname(vllm.__file__), "vllm-rs"))')"
+            serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051
+        containers:
+        # The sidecar worker. No published image yet, so build your own from
+        # lib/sidecar/vllm/Dockerfile and set <your-registry> below (see README).
+        # Add imagePullSecrets if private.
+        # Must be named "main": the operator injects discovery env + probes by name.
+        - name: main
+          image: <your-registry>/dynamo-vllm-sidecar:1.3.0
+          command:
+          - dynamo-vllm-sidecar
+          args:
+          - --vllm-endpoint
+          - 127.0.0.1:50051
+          envFrom:
+          - secretRef:
+              name: hf-token-secret

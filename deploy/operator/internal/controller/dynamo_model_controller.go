@@ -27,7 +27,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -69,7 +69,7 @@ const (
 // DynamoModelReconciler reconciles a DynamoModel object
 type DynamoModelReconciler struct {
 	client.Client
-	Recorder       record.EventRecorder
+	Recorder       events.EventRecorder
 	EndpointClient *modelendpoint.Client
 	Config         *configv1alpha1.OperatorConfiguration
 	RuntimeConfig  *commoncontroller.RuntimeConfig
@@ -78,6 +78,7 @@ type DynamoModelReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamomodels,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamomodels/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamomodels/finalizers,verbs=update
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch
 // +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 
@@ -120,12 +121,13 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if len(candidates) == 0 {
 		msg := fmt.Sprintf("No endpoint slices found for base model %s", model.Spec.BaseModelName)
 		logs.Info(msg)
-		r.Recorder.Event(model, corev1.EventTypeWarning, "NoEndpointsFound", msg)
+		r.Recorder.Eventf(model, nil, corev1.EventTypeWarning, "NoEndpointsFound", "Get", "%s", msg)
 		r.updateCondition(model, ConditionTypeServicesFound, metav1.ConditionFalse, ReasonNoServicesFound, msg)
 		r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionFalse, ReasonNoEndpoints, msg)
 		model.Status.Endpoints = nil
 		model.Status.TotalEndpoints = 0
 		model.Status.ReadyEndpoints = 0
+		model.Status.LoRAFallbackCoveredEndpoints = 0
 		if err := r.Status().Update(ctx, model); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -137,17 +139,18 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	allEndpoints, probeErr := r.EndpointClient.LoadLoRA(ctx, candidates, model)
 
 	// Determine if we need to requeue based on model type
-	// For LoRA models: requeue if there were probe errors OR if not all endpoints are ready
+	// For LoRA models: requeue if there were probe errors OR if not all endpoints
+	// are directly ready or covered by a capable prefill during a rolling upgrade.
 	// For base models: only requeue if there were probe errors (Ready is expected to be false)
 	hasFailures := probeErr != nil
 	if model.IsLoRA() {
-		hasFailures = hasFailures || countReadyEndpoints(allEndpoints) < len(allEndpoints)
+		hasFailures = hasFailures || countServingEndpoints(allEndpoints) < len(allEndpoints)
 	}
 
 	if probeErr != nil {
 		logs.Error(probeErr, "Some endpoints failed during probing")
-		r.Recorder.Event(model, corev1.EventTypeWarning, "PartialEndpointFailure",
-			fmt.Sprintf("Some endpoints failed to load LoRA: %v", probeErr))
+		r.Recorder.Eventf(model, nil, corev1.EventTypeWarning, "PartialEndpointFailure", "Update",
+			"Some endpoints failed to load LoRA: %v", probeErr)
 	}
 
 	// Update service found condition based on whether we found any services
@@ -163,19 +166,22 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	model.Status.Endpoints = allEndpoints
 	model.Status.TotalEndpoints = len(allEndpoints)
 	model.Status.ReadyEndpoints = countReadyEndpoints(allEndpoints)
+	model.Status.LoRAFallbackCoveredEndpoints = countLoRAFallbackCoveredEndpoints(allEndpoints)
 
 	// Update conditions based on model type
 	if model.IsLoRA() {
-		// For LoRA models, check readiness - condition is True only when ALL endpoints are ready
-		if model.Status.ReadyEndpoints == model.Status.TotalEndpoints && model.Status.TotalEndpoints > 0 {
+		// For LoRA models, the model is ready only when every endpoint is
+		// directly ready or a legacy prefill is covered by a capable peer. Keep
+		// ReadyEndpoints truthful: it counts only endpoints that serve directly.
+		if countServingEndpoints(allEndpoints) == model.Status.TotalEndpoints && model.Status.TotalEndpoints > 0 {
 			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionTrue, ReasonAllEndpointsReady,
-				fmt.Sprintf("All %d endpoint(s) are ready", model.Status.TotalEndpoints))
-			r.Recorder.Eventf(model, corev1.EventTypeNormal, "EndpointsReady",
-				"All %d endpoints ready for base model %s", model.Status.TotalEndpoints, model.Spec.BaseModelName)
+				fmt.Sprintf("All %d endpoint(s) are ready or covered by a capable prefill", model.Status.TotalEndpoints))
+			r.Recorder.Eventf(model, nil, corev1.EventTypeNormal, "EndpointsReady", "Update",
+				"All %d endpoints ready or fallback-covered for base model %s", model.Status.TotalEndpoints, model.Spec.BaseModelName)
 		} else if model.Status.TotalEndpoints > 0 {
 			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionFalse, ReasonNotReady,
-				fmt.Sprintf("Found %d ready endpoint(s) out of %d total", model.Status.ReadyEndpoints, model.Status.TotalEndpoints))
-			r.Recorder.Eventf(model, corev1.EventTypeWarning, "NotReady",
+				fmt.Sprintf("Found %d ready endpoint(s) and %d fallback-covered endpoint(s) out of %d total", model.Status.ReadyEndpoints, model.Status.LoRAFallbackCoveredEndpoints, model.Status.TotalEndpoints))
+			r.Recorder.Eventf(model, nil, corev1.EventTypeWarning, "NotReady", "Update",
 				"Only %d of %d endpoints ready for base model %s", model.Status.ReadyEndpoints, model.Status.TotalEndpoints, model.Spec.BaseModelName)
 		} else {
 			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionFalse, ReasonNoEndpoints, "No endpoints found")
@@ -185,7 +191,7 @@ func (r *DynamoModelReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		if model.Status.TotalEndpoints > 0 {
 			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionTrue, ReasonEndpointsDiscovered,
 				fmt.Sprintf("Found %d endpoint(s) for base model", model.Status.TotalEndpoints))
-			r.Recorder.Eventf(model, corev1.EventTypeNormal, "EndpointsDiscovered",
+			r.Recorder.Eventf(model, nil, corev1.EventTypeNormal, "EndpointsDiscovered", "Get",
 				"Discovered %d endpoints for base model %s", model.Status.TotalEndpoints, model.Spec.BaseModelName)
 		} else {
 			r.updateCondition(model, ConditionTypeEndpointsReady, metav1.ConditionFalse, ReasonNoEndpoints, "No endpoints found")
@@ -221,6 +227,76 @@ func countReadyEndpoints(endpoints []v1alpha1.EndpointInfo) int {
 		}
 	}
 	return count
+}
+
+// countLoRAFallbackCoveredEndpoints counts legacy prefill endpoints covered by
+// a capable prefill during a rolling upgrade. These are intentionally separate
+// from ready endpoints because they do not serve the adapter themselves.
+func countLoRAFallbackCoveredEndpoints(endpoints []v1alpha1.EndpointInfo) int {
+	count := 0
+	for _, ep := range endpoints {
+		if ep.LoRAFallbackCovered {
+			count++
+		}
+	}
+	return count
+}
+
+// countServingEndpoints counts endpoints ready to serve directly plus legacy
+// prefill endpoints covered by a capable prefill in the same topology.
+func countServingEndpoints(endpoints []v1alpha1.EndpointInfo) int {
+	return countReadyEndpoints(endpoints) + countLoRAFallbackCoveredEndpoints(endpoints)
+}
+
+func withPodIdentity(candidate modelendpoint.Candidate, pod *corev1.Pod) modelendpoint.Candidate {
+	identified := candidate
+	identified.KubernetesReady = false
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			identified.KubernetesReady = condition.Status == corev1.ConditionTrue
+			break
+		}
+	}
+	identified.WorkloadName = ""
+	if graphName := pod.Labels[consts.KubeLabelDynamoGraphDeploymentName]; graphName != "" {
+		identified.GraphDeploymentName = graphName
+	}
+	if componentDeployment := pod.Labels[consts.KubeLabelDynamoSelector]; componentDeployment != "" {
+		identified.WorkloadName = componentDeployment
+	} else {
+		for _, owner := range pod.OwnerReferences {
+			if owner.Controller != nil && *owner.Controller {
+				identified.WorkloadName = owner.Name
+				break
+			}
+		}
+	}
+
+	componentType := pod.Labels[consts.KubeLabelDynamoComponentType]
+	if componentType == consts.ComponentTypeWorker {
+		componentType = pod.Labels[consts.KubeLabelDynamoSubComponentType]
+	}
+	if componentType != consts.ComponentTypePrefill {
+		return identified
+	}
+	for i := range pod.Spec.Containers {
+		container := &pod.Spec.Containers[i]
+		if container.Name != consts.MainContainerName {
+			continue
+		}
+		backend, err := dynamo.DetectBackendFrameworkFromArgs(container.Command, container.Args)
+		if err != nil || backend != dynamo.BackendFrameworkVLLM {
+			return identified
+		}
+		if identified.GraphDeploymentName != "" {
+			identified.LoRAFallbackGroup = "graph:" + identified.GraphDeploymentName
+		} else if identified.WorkloadName != "" {
+			identified.LoRAFallbackGroup = "workload:" + identified.WorkloadName
+		}
+		identified.AllowLoRAManagementUnavailable = identified.LoRAFallbackGroup != ""
+		return identified
+	}
+	return identified
 }
 
 // updateCondition updates or adds a condition to the model's status
@@ -312,7 +388,7 @@ func (r *DynamoModelReconciler) FinalizeResource(ctx context.Context, model *v1a
 		if err != nil {
 			logs.Info("Failed to get endpoints during deletion, continuing with resource deletion",
 				"error", err.Error())
-			r.Recorder.Event(model, corev1.EventTypeWarning, "CleanupFailed", err.Error())
+			r.Recorder.Eventf(model, nil, corev1.EventTypeWarning, "CleanupFailed", "Cleanup", "%s", err.Error())
 			// Continue with deletion even if we can't get endpoints
 		} else if len(candidates) > 0 {
 			logs.Info("Unloading LoRA from endpoints", "endpointCount", len(candidates))
@@ -323,13 +399,13 @@ func (r *DynamoModelReconciler) FinalizeResource(ctx context.Context, model *v1a
 				// Detailed failure information is already logged by the prober
 				logs.Info("Some endpoints failed to unload LoRA, continuing with deletion",
 					"error", err.Error())
-				r.Recorder.Event(model, corev1.EventTypeWarning, "LoRAUnloadFailed",
-					fmt.Sprintf("Failed to unload LoRA from some endpoints: %v", err))
+				r.Recorder.Eventf(model, nil, corev1.EventTypeWarning, "LoRAUnloadFailed", "Cleanup",
+					"Failed to unload LoRA from some endpoints: %v", err)
 				// Continue with deletion even if unload fails
 			} else {
 				logs.Info("Successfully unloaded LoRA from all endpoints")
-				r.Recorder.Event(model, corev1.EventTypeNormal, "LoRAUnloaded",
-					fmt.Sprintf("Unloaded LoRA from %d endpoint(s)", len(candidates)))
+				r.Recorder.Eventf(model, nil, corev1.EventTypeNormal, "LoRAUnloaded", "Cleanup",
+					"Unloaded LoRA from %d endpoint(s)", len(candidates))
 			}
 		} else {
 			logs.Info("No endpoints found for cleanup")
@@ -361,7 +437,7 @@ func (r *DynamoModelReconciler) getEndpointCandidates(
 		client.MatchingLabels{consts.KubeLabelDynamoBaseModelHash: modelHash},
 	); err != nil {
 		logs.Error(err, "Failed to list endpoint slices for model")
-		r.Recorder.Event(model, corev1.EventTypeWarning, "EndpointDiscoveryFailed", err.Error())
+		r.Recorder.Eventf(model, nil, corev1.EventTypeWarning, "EndpointDiscoveryFailed", "Get", "%s", err.Error())
 		return nil, nil, err
 	}
 
@@ -373,6 +449,20 @@ func (r *DynamoModelReconciler) getEndpointCandidates(
 
 	// Extract pod-ready endpoint candidates from all EndpointSlices
 	candidates, serviceNames := modelendpoint.ExtractCandidates(endpointSlices, int32(consts.DynamoSystemPort))
+	if model.IsLoRA() && len(candidates) > 0 {
+		for i := range candidates {
+			pod := &corev1.Pod{}
+			if err := r.Get(ctx, client.ObjectKey{Namespace: model.Namespace, Name: candidates[i].PodName}, pod); err != nil {
+				if k8serrors.IsNotFound(err) {
+					candidates[i].KubernetesReady = false
+					continue
+				}
+				logs.Error(err, "Failed to get endpoint pod for LoRA lifecycle classification", "podName", candidates[i].PodName)
+				return nil, nil, err
+			}
+			candidates[i] = withPodIdentity(candidates[i], pod)
+		}
+	}
 
 	return candidates, serviceNames, nil
 }

@@ -8,9 +8,18 @@ Unit tests for vLLM backend arguments.
 need to add more tests to cover different code paths of DynamoVllmConfig.
 """
 
+import argparse
+import json
+from types import SimpleNamespace
+
 import pytest
 
-from dynamo.vllm.backend_args import DisaggregationMode, DynamoVllmConfig
+from dynamo.vllm.backend_args import (
+    DisaggregationMode,
+    DynamoVllmArgGroup,
+    DynamoVllmConfig,
+    _reject_removed_multimodal_env_vars,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -28,15 +37,12 @@ def create_config() -> DynamoVllmConfig:
     so we need to create a config with default values manually if not using
     from_cli_args() method.
 
-    All multimodal flags are False, disaggregation mode is None.
+    Multimodal is disabled and disaggregation mode is unset.
     Returns:
         DynamoVllmConfig: A config with default values.
     """
     config = DynamoVllmConfig()
     config.disaggregation_mode = None
-    config.multimodal_worker = False
-    config.multimodal_encode_worker = False
-    config.multimodal_decode_worker = False
     config.enable_multimodal = False
     config.embedding_worker = False
     config.benchmark_mode = None
@@ -45,95 +51,120 @@ def create_config() -> DynamoVllmConfig:
     return config
 
 
-class TestResolveDisaggregationModeFromLegacyMultimodalFlags:
-    """
-    Test suite for resolving disaggregation mode when legacy multimodal flags are set.
-    """
+def write_benchmark_points(tmp_path):
+    path = tmp_path / "points.json"
+    points = {
+        "schema_version": 1,
+        "prefill": [
+            {
+                "total_prefill_tokens": 8,
+                "total_kv_read_tokens": 0,
+                "batch_size": 1,
+            }
+        ],
+        "decode": [{"total_kv_read_tokens": 32, "batch_size": 2}],
+    }
+    path.write_text(json.dumps(points), encoding="utf-8")
+    return path, points
 
+
+class TestExplicitBenchmarkPoints:
+    def test_file_is_loaded_before_workers_start(self, tmp_path):
+        path, points = write_benchmark_points(tmp_path)
+        config = create_config()
+        config.benchmark_mode = "agg"
+        config.benchmark_points_file = str(path)
+
+        config._load_explicit_benchmark_points()
+
+        assert config._benchmark_points is not None
+        # exclude_none: the v3 optional fields (partition, rows) are absent
+        # from a v1 file and must not appear in what it round-trips to.
+        assert (
+            config._benchmark_points.model_dump(mode="json", exclude_none=True)
+            == points
+        )
+
+    def test_file_requires_benchmark_mode(self, tmp_path):
+        path, _ = write_benchmark_points(tmp_path)
+        config = create_config()
+        config.benchmark_points_file = str(path)
+
+        with pytest.raises(ValueError, match="requires --benchmark-mode"):
+            config._load_explicit_benchmark_points()
+
+    def test_file_overrides_grid_controls(self, tmp_path):
+        path, points = write_benchmark_points(tmp_path)
+        config = create_config()
+        config.benchmark_mode = "agg"
+        config.benchmark_points_file = str(path)
+        config.prefill_max_new_token_samples = 1
+        config.prefill_max_new_token_samples_explicit = True
+        config.benchmark_decode_length_granularity = 0
+
+        config._load_explicit_benchmark_points()
+        config._resolve_legacy_benchmark_sampling()
+        config._validate_benchmark_sampling()
+
+        assert config._benchmark_points is not None
+        # exclude_none: the v3 optional fields (partition, rows) are absent
+        # from a v1 file and must not appear in what it round-trips to.
+        assert (
+            config._benchmark_points.model_dump(mode="json", exclude_none=True)
+            == points
+        )
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--multimodal-encode-worker",
+        "--multimodal-worker",
+        "--multimodal-decode-worker",
+    ],
+)
+def test_removed_multimodal_role_flags_are_not_registered(flag):
+    parser = argparse.ArgumentParser()
+    DynamoVllmArgGroup().add_arguments(parser)
+
+    with pytest.raises(SystemExit):
+        parser.parse_args([flag])
+
+
+@pytest.mark.parametrize(
+    "env_var",
+    [
+        "DYN_VLLM_MULTIMODAL_ENCODE_WORKER",
+        "DYN_VLLM_MULTIMODAL_WORKER",
+        "DYN_VLLM_MULTIMODAL_DECODE_WORKER",
+    ],
+)
+def test_removed_multimodal_env_vars_are_rejected(env_var, monkeypatch):
+    # The removed role flags fail at argparse, but a leftover env var would be
+    # silently ignored and start the worker in the wrong role — validate()
+    # rejects it with the migration path instead.
+    monkeypatch.setenv(env_var, "1")
+    config = create_config()
+
+    with pytest.raises(ValueError, match="no longer supported"):
+        config.validate()
+
+
+def test_removed_multimodal_env_var_falsy_value_is_ignored(monkeypatch):
+    # A falsy value was a no-op with the old flags too; keep it harmless.
+    monkeypatch.setenv("DYN_VLLM_MULTIMODAL_WORKER", "false")
+
+    _reject_removed_multimodal_env_vars()
+
+
+class TestResolveDisaggregationMode:
     def test_pd_alias_resolves_to_aggregated(self):
         config = create_config()
         config.disaggregation_mode = "pd"
-        config.is_prefill_worker = False
-        config.is_decode_worker = False
 
         config._resolve_disaggregation_mode()
 
         assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
-
-    @pytest.mark.parametrize(
-        "mode",
-        [
-            None,  # Not specified
-            DisaggregationMode.AGGREGATED,
-            # DisaggregationMode.PREFILL, # test in 'test_prefill_worker' below
-            DisaggregationMode.DECODE,
-            DisaggregationMode.ENCODE,
-        ],
-    )
-    def test_agg_worker(self, mode):
-        config = create_config()
-        config.disaggregation_mode = mode
-        config.multimodal_worker = True
-        with pytest.warns(DeprecationWarning):
-            if mode is None or mode == DisaggregationMode.AGGREGATED:
-                config._resolve_disaggregation_model_from_legacy_multimodal_flags()
-                assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
-            else:
-                with pytest.raises(ValueError):
-                    config._resolve_disaggregation_model_from_legacy_multimodal_flags()
-
-    # special case of 'test_agg_worker' above, test the prefill worker case
-    def test_prefill_worker(self):
-        config = create_config()
-        config.disaggregation_mode = DisaggregationMode.PREFILL
-        config.multimodal_worker = True
-        with pytest.warns(DeprecationWarning):
-            config._resolve_disaggregation_model_from_legacy_multimodal_flags()
-            assert config.disaggregation_mode == DisaggregationMode.PREFILL
-
-    @pytest.mark.parametrize(
-        "mode",
-        [
-            None,  # Not specified
-            DisaggregationMode.AGGREGATED,
-            DisaggregationMode.PREFILL,
-            DisaggregationMode.DECODE,
-            DisaggregationMode.ENCODE,
-        ],
-    )
-    def test_encode_worker(self, mode):
-        config = create_config()
-        config.disaggregation_mode = mode
-        config.multimodal_encode_worker = True
-        with pytest.warns(DeprecationWarning):
-            if mode is None or mode == DisaggregationMode.ENCODE:
-                config._resolve_disaggregation_model_from_legacy_multimodal_flags()
-                assert config.disaggregation_mode == DisaggregationMode.ENCODE
-            else:
-                with pytest.raises(ValueError):
-                    config._resolve_disaggregation_model_from_legacy_multimodal_flags()
-
-    @pytest.mark.parametrize(
-        "mode",
-        [
-            None,  # Not specified
-            DisaggregationMode.AGGREGATED,
-            DisaggregationMode.PREFILL,
-            DisaggregationMode.DECODE,
-            DisaggregationMode.ENCODE,
-        ],
-    )
-    def test_decode_worker(self, mode):
-        config = create_config()
-        config.disaggregation_mode = mode
-        config.multimodal_decode_worker = True
-        with pytest.warns(DeprecationWarning):
-            if mode is None or mode == DisaggregationMode.DECODE:
-                config._resolve_disaggregation_model_from_legacy_multimodal_flags()
-                assert config.disaggregation_mode == DisaggregationMode.DECODE
-            else:
-                with pytest.raises(ValueError):
-                    config._resolve_disaggregation_model_from_legacy_multimodal_flags()
 
 
 class TestEmbeddingWorkerExclusivity:
@@ -191,6 +222,168 @@ class TestEmbeddingWorkerExclusivity:
         config._validate_embedding_worker_exclusivity()
 
 
+class TestRealtimeWorkerExclusivity:
+    def test_baseline_aggregated_is_accepted(self):
+        config = create_config()
+        config.realtime = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config._validate_realtime_worker_exclusivity()
+
+    @pytest.mark.parametrize(
+        "mode",
+        [
+            DisaggregationMode.PREFILL,
+            DisaggregationMode.DECODE,
+            DisaggregationMode.ENCODE,
+        ],
+    )
+    def test_non_aggregated_disagg_rejected(self, mode):
+        config = create_config()
+        config.realtime = True
+        config.disaggregation_mode = mode
+        with pytest.raises(ValueError, match="disaggregation-mode=agg"):
+            config._validate_realtime_worker_exclusivity()
+
+    def test_embedding_combination_rejected(self):
+        config = create_config()
+        config.realtime = True
+        config.embedding_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        with pytest.raises(ValueError, match="embedding-worker"):
+            config._validate_realtime_worker_exclusivity()
+
+    def test_classify_combination_rejected(self):
+        config = create_config()
+        config.realtime = True
+        config.classify_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        with pytest.raises(ValueError, match="classify-worker"):
+            config._validate_realtime_worker_exclusivity()
+
+    def test_multimodal_combination_rejected(self):
+        config = create_config()
+        config.realtime = True
+        config.enable_multimodal = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        with pytest.raises(ValueError, match="multimodal"):
+            config._validate_realtime_worker_exclusivity()
+
+    def test_benchmark_mode_rejected(self):
+        config = create_config()
+        config.realtime = True
+        config.benchmark_mode = "agg"
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        with pytest.raises(ValueError, match="benchmark-mode"):
+            config._validate_realtime_worker_exclusivity()
+
+    def test_lora_rejected(self):
+        config = create_config()
+        config.realtime = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.engine_args = SimpleNamespace(enable_lora=True)
+        with pytest.raises(ValueError, match="enable-lora"):
+            config._validate_realtime_worker_exclusivity()
+
+    @pytest.mark.parametrize(
+        "attribute, value, option",
+        [
+            ("custom_encoder_class", "my_pkg.MyEncoder", "custom-encoder-class"),
+            ("gms_shadow_mode", True, "gms-shadow-mode"),
+            ("enable_rl", True, "enable-rl"),
+            ("headless", True, "headless"),
+        ],
+    )
+    def test_unsupported_worker_options_rejected(self, attribute, value, option):
+        config = create_config()
+        config.realtime = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        setattr(config, attribute, value)
+
+        with pytest.raises(ValueError, match=option):
+            config._validate_realtime_worker_exclusivity()
+
+
+class TestClassifyWorkerExclusivity:
+    """--classify-worker mirrors the embedding-worker constraints (both are
+    pooling roles) and is additionally exclusive with --embedding-worker.
+    """
+
+    def test_baseline_aggregated_is_accepted(self):
+        config = create_config()
+        config.classify_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        # Must not raise.
+        config._validate_classify_worker_exclusivity()
+
+    def test_embedding_worker_combination_rejected(self):
+        config = create_config()
+        config.classify_worker = True
+        config.embedding_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            config._validate_classify_worker_exclusivity()
+
+    @pytest.mark.parametrize(
+        "mode",
+        [
+            DisaggregationMode.PREFILL,
+            DisaggregationMode.DECODE,
+            DisaggregationMode.ENCODE,
+        ],
+    )
+    def test_non_aggregated_disagg_rejected(self, mode):
+        config = create_config()
+        config.classify_worker = True
+        config.disaggregation_mode = mode
+        with pytest.raises(ValueError, match="disaggregation-mode=agg"):
+            config._validate_classify_worker_exclusivity()
+
+    def test_multimodal_combination_rejected(self):
+        config = create_config()
+        config.classify_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.enable_multimodal = True
+        with pytest.raises(ValueError, match="multimodal"):
+            config._validate_classify_worker_exclusivity()
+
+    def test_benchmark_mode_rejected(self):
+        config = create_config()
+        config.classify_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.benchmark_mode = "agg"
+        with pytest.raises(ValueError, match="benchmark-mode"):
+            config._validate_classify_worker_exclusivity()
+
+    def test_headless_combination_rejected(self):
+        """Headless returns from main.worker() before WorkerFactory.create(),
+        so the classify/pooling endpoint would never register — the process
+        would come up healthy and serve nothing."""
+        config = create_config()
+        config.classify_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.headless = True
+        with pytest.raises(ValueError, match="headless"):
+            config._validate_classify_worker_exclusivity()
+
+    def test_enable_lora_combination_rejected(self):
+        """The pooling-family handler never forwards lora_request to
+        engine_client.encode(), so an adapter-targeted request would silently
+        run against the base model."""
+        config = create_config()
+        config.classify_worker = True
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.engine_args = SimpleNamespace(enable_lora=True)
+        with pytest.raises(ValueError, match="enable-lora"):
+            config._validate_classify_worker_exclusivity()
+
+    def test_no_op_when_classify_worker_disabled(self):
+        config = create_config()
+        config.classify_worker = False
+        config.benchmark_mode = "agg"
+        config.headless = True
+        config._validate_classify_worker_exclusivity()
+
+
 class TestValidateCustomEncoder:
     """--custom-encoder-class is an in-process, aggregated-only multimodal
     component, so validation must require --enable-multimodal and reject any
@@ -235,27 +428,6 @@ class TestValidateCustomEncoder:
         with pytest.raises(ValueError, match="use-vllm-tokenizer"):
             config._validate_custom_encoder()
 
-    @pytest.mark.parametrize(
-        "role_flag",
-        [
-            "multimodal_worker",
-            "multimodal_encode_worker",
-            "multimodal_decode_worker",
-        ],
-    )
-    def test_legacy_multimodal_role_rejected(self, role_flag):
-        # The custom encoder is its own aggregated multimodal path; combining it
-        # with a legacy multimodal role flag sets up two conflicting multimodal
-        # paths (and --multimodal-worker resolves to agg, slipping past the
-        # disaggregation-mode check), so reject the combination up front.
-        config = create_config()
-        config.custom_encoder_class = "my_pkg.MyEncoder"
-        config.enable_multimodal = True
-        config.disaggregation_mode = DisaggregationMode.AGGREGATED
-        setattr(config, role_flag, True)
-        with pytest.raises(ValueError, match="legacy multimodal role flags"):
-            config._validate_custom_encoder()
-
     def test_frontend_decoding_rejected(self):
         # --frontend-decoding pre-decodes images to tensors; the custom encoder
         # consumes URLs, so the decoded inputs would fail extraction. Reject it.
@@ -281,42 +453,3 @@ class TestValidateCustomEncoder:
         config.custom_encoder_class = None
         config.enable_multimodal = False
         config._validate_custom_encoder()
-
-
-class TestValidateBenchmarkConfig:
-    @pytest.mark.parametrize(
-        "axis",
-        [
-            "benchmark_prefill_kv_read_granularity",
-            "benchmark_prefill_batch_granularity",
-        ],
-    )
-    @pytest.mark.parametrize("value", [0, -1, 1025])
-    def test_rejects_out_of_range_grid_axis(self, axis, value):
-        config = create_config()
-        config.benchmark_mode = "prefill"
-        setattr(config, axis, value)
-
-        with pytest.raises(ValueError, match="must be between 1 and 1024"):
-            config._validate_benchmark_config()
-
-    def test_caps_prefill_cartesian_grid(self):
-        config = create_config()
-        config.benchmark_mode = "prefill"
-        config.benchmark_prefill_granularity = 16
-        config.benchmark_prefill_kv_read_granularity = 16
-        config.benchmark_prefill_batch_granularity = 16
-        config._validate_benchmark_config()
-
-        config.benchmark_prefill_batch_granularity = 17
-        with pytest.raises(ValueError, match="requests 4352 grid points"):
-            config._validate_benchmark_config()
-
-    def test_decode_mode_ignores_inactive_prefill_grid(self):
-        config = create_config()
-        config.benchmark_mode = "decode"
-        config.benchmark_prefill_granularity = 1024
-        config.benchmark_prefill_kv_read_granularity = 1024
-        config.benchmark_prefill_batch_granularity = 1024
-
-        config._validate_benchmark_config()

@@ -9,7 +9,7 @@ from dynamo._core import Context
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
-from dynamo.common.utils import nvtx_utils as _nvtx
+from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.encode_helper import EncodeHelper
 from dynamo.trtllm.multimodal.embedding_fetcher import fetch_embeddings_from_encoder
@@ -68,14 +68,13 @@ class EncodeHandler(HandlerBase):
             self.model_type = self.multimodal_processor.model_type
             self.tokenizer = self.multimodal_processor.tokenizer
 
-    # push_egress_capable must stay OUTERMOST: the Rust push opt-in check
-    # inspects this signature for `response_sender`, and range_decorator
-    # needs to wrap a real async-generator function. See push_egress.py.
+    # Must stay outermost -- see push_egress.py.
     @push_egress_capable
-    @_nvtx.range_decorator("trtllm:encode:generate", color="green")
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
+        # EncodeHelper bypasses HandlerBase input preparation.
+        reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
         logging.debug(f"New Request ID: {context.id()}")
         if self.multimodal_processor is None:
             logging.error("encode handler: no multimodal_processor configured")
@@ -107,7 +106,6 @@ class PrefillHandler(HandlerBase):
         super().__init__(config)
         self._encoder_cache = encoder_cache
 
-    @_nvtx.range_decorator("trtllm:prefill:remote_encode_nixl", color="magenta")
     async def remote_encode_with_nixl(self, request: dict, context=None):
         """
         Call encode worker for NIXL flow to load embeddings and unpack the response.
@@ -137,11 +135,8 @@ class PrefillHandler(HandlerBase):
             encode_response, self.connector
         )
 
-    # push_egress_capable must stay OUTERMOST: the Rust push opt-in check
-    # inspects this signature for `response_sender`, and range_decorator
-    # needs to wrap a real async-generator function. See push_egress.py.
+    # Must stay outermost -- see push_egress.py.
     @push_egress_capable
-    @_nvtx.range_decorator("trtllm:prefill:generate", color="green")
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
@@ -149,6 +144,9 @@ class PrefillHandler(HandlerBase):
         Prefill worker: process prompt and return disaggregated_params.
         Frontend routes to decode workers automatically.
         """
+        # Reject before optional remote encoder/cache work. HandlerBase keeps a
+        # second guard as a backstop for paths without these early side effects.
+        reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
         logging.debug(f"Prefill Request ID: {context.id()}")
         request_token_ids = request.get("token_ids")
         logging.debug(
@@ -226,11 +224,8 @@ class DecodeHandler(HandlerBase):
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
 
-    # push_egress_capable must stay OUTERMOST: the Rust push opt-in check
-    # inspects this signature for `response_sender`, and range_decorator
-    # needs to wrap a real async-generator function. See push_egress.py.
+    # Must stay outermost -- see push_egress.py.
     @push_egress_capable
-    @_nvtx.range_decorator("trtllm:decode:generate", color="green")
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:

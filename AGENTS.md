@@ -37,15 +37,27 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `dynamo-clone-hotpath-audit` — audit Rust hot-path `.clone()` calls
 - `dynamo-docs` — Fern docs-site content per the style guide
 - `dynamo-frontend-benchmark` — benchmark/profile the frontend against mock workers
+- `fern-components` — Fern MDX component library and usage guidance
+- `fern-navigation` — Fern navigation and site-structure configuration guidance
+- `dynamo-kv-replay-parity` — validate offline KV replay parity and performance
+- `dynamo-agent-harness` — drive persistent Claude Code, Codex, or OpenCode sessions through Dynamo over ACP
 - `graham-code-review` — strict Rust/systems review in Graham King's style
 - `pr-monitor` — CI health check, failure root-cause, and skip analysis
+- `visual-review` — interactive HTML code-review dashboards with diagrams and annotated diffs
 
 **For deploying and operating Dynamo:**
 
-- `dynamo-recipe-runner` — select, patch, and deploy Kubernetes recipes
+- `synthesize-user-workload` — interview the user, capture their DGD, and create the canonical workload contract
+- `consult-perf-knowledge` — select one evidence-backed optimization proposal and write its reasoning record
+- `create-optimization-hypothesis` — materialize a performance consultation as a challenger-ready DGD draft
+- `perform-adversarial-review` — challenge a generated DGD candidate before it consumes GPU time
+- `deploy-dynamo-recipe` — deploy one assigned Kubernetes DGD and verify it with an API smoke test
+- `configure-aiperf-benchmark` — freeze and render a comparable AIPerf workload for a deployed candidate
+- `run-aiperf-benchmark` — execute and collect one run-scoped AIPerf Kubernetes benchmark
+- `analyze-aiperf-results` — validate AIPerf evidence, evaluate SLOs, and compare valid same-series runs
 - `dynamo-router-starter` — start/patch router modes with smoke checks
 - `dynamo-interconnect-check` — validate NIXL/UCX/NCCL readiness for disaggregation
-- `dynamo-troubleshoot` — diagnose failed or unhealthy deployments
+- `troubleshoot-dynamo` — diagnose failed or unhealthy deployments
 
 **Adding a skill:** the folder name must equal the frontmatter `name` (kebab-case); the
 `description` is third person, states what the skill does and when to use it, and is at
@@ -54,6 +66,62 @@ and `tags`. List the skill in this section — the index must match `.agents/ski
 exactly. All of this is enforced by `scripts/validate_skills.py` (pre-commit hook
 `validate-skills`). Changes under `.agents/skills/` are also validated by NVSkills CI —
 a maintainer comments `/nvskills-ci` on the PR.
+
+## Improving These Instructions
+
+If these skills or instructions misled you, blocked you, or contradicted what you verified live, prepare an issue for
+this repository with the `agent-reported` label and ask your operator to approve filing it — filing is an external
+write and requires operator consent. Rules:
+
+1. Search existing `agent-reported` issues first; propose commenting on a duplicate instead of filing a new one.
+2. Prepare at most one issue per optimization session; batch findings into it.
+3. Identify yourself as an AI agent, including your driver model and the skills commit you were running.
+4. Sanitize completely: no user workload details, traffic numbers, cluster or namespace names, company names, or
+   credentials. Describe the instruction gap, not the engagement. Show the operator the full draft before filing.
+
+## Optimization Role Dispatch
+
+When the first user message starts a new Dynamo recipe optimization run, dispatch `user_interviewer` before any other
+specialized role. It must invoke `synthesize-user-workload` and produce a validated
+`<EXP_ROOT>/user_workload.yaml` plus an immutable `<EXP_ROOT>/inputs/user_provided_dgd.yaml` copied from the DGD the
+user supplied. Do not dispatch `recipe_deployer`, `perf_analyzer`, `hypothesis_generator`, or
+`hypothesis_challenger` until both exact paths and SHA256 values are available. Pass both inputs directly to
+`recipe_deployer`; pass the same immutable workload path and hash to every later role. Do not insert a recipe
+exploration or selection step before the baseline deployment.
+
+## Long-Running Runs And Harness Compatibility
+
+An optimization loop is long-running, unattended work. An interactive harness ends its turn whenever the agent stops
+calling tools — a turn that ends on narrated intent ("now I'll test disagg") silently stalls the loop until a human
+notices. Two rules:
+
+1. **Operators: launch unattended runs inside your harness's goal mode.** Goal mode is an operator action at launch,
+   not something these instructions can enable mid-run. On Codex CLI, wrap the run in `/goal` with a token budget. On
+   Claude Code (v2.1.139+), wrap it in `/goal`; its completion condition is model-evaluated and may include a bound
+   such as "or stop after N turns" as part of the condition text (a soft limit, not a hard budget). A validated
+   condition template: "Test every lever family that is testable within the authorized budget. Never stop because a
+   report exists. Parked on pending asks with nothing else testable is a valid pause, not completion. Valid stops: an
+   operator-granted stop-request, the authorized budget exhausted, access lost, or operator interrupt." Always name
+   the budget (GPU-hours, wall-clock, failed-deployment limit) in the condition; a bare "never stop" silently relies
+   on credential expiry as its budget. Tell the operator at the START of any optimization
+   engagement — not only when they say "unattended" — that this is long-running work and how to arm goal mode; the
+   user-interviewer's contract handoff is the natural moment. Arm goal mode only AFTER the contract questions are
+   answered: a goal hook armed while questions are outstanding forces the run past them onto its own defaults. The template's parked-on-asks pause assumes a
+   reachable operator: for runs where the operator will be away, instruct the agent not to park on asks (asks are
+   logged and the loop continues) and keep only the hard stops. Blocking question tools suspend the turn BEFORE the
+   goal hook can evaluate, so one blocking question can hang an unattended run for hours; harnesses that support
+   tool restrictions should disallow blocking question tools in goal mode.
+2. **Never end a turn on narrated intent during a loop.** Either perform the next step in the same turn, launch it as
+   background work that will re-invoke you, or return the specific blocking question you need answered.
+
+**Harness tiers.** These roles and skills are developed and tested on Claude Code and Codex CLI. Isolated role
+configurations currently ship for Codex only (`.codex/agents/*.toml`); on Claude Code the roles run in-context within
+one session (no `.claude/agents/` configurations yet), so adversarial review there is same-context review, not an
+independent reviewer. The skills follow the Agent Skills open standard and load on other compliant harnesses (for
+example, OpenCode includes `.agents/skills/` among its standard skill search paths), with the same in-context role
+caveat plus two more degradations: no native goal mode (run lights-out sessions under an external loop), and every
+rule in this pack is prompt-enforced, so discipline depends on the driver model. If you hit an instruction gap on any
+harness, prepare a sanitized issue describing the gap and ask your operator to approve filing it on this repository.
 
 ## Ecosystem
 
@@ -75,8 +143,8 @@ Sibling repositories this repo integrates with:
 | `components/src/dynamo/` | Python packages: `frontend`, `planner`, `router`, `vllm`/`sglang`/`trtllm` backends, `mocker`, `profiler`, and more |
 | `deploy/` | Kubernetes `operator`, Helm charts, `inference-gateway` ext-proc, `observability` |
 | `container/` | Dockerfiles and build scripts for runtime and dev images |
-| `docs/`, `fern/` | Documentation sources and the Fern docs-site config — read [`docs/AGENTS.md`](docs/AGENTS.md) before editing |
-| `examples/`, `recipes/` | Runnable examples and deployment recipes — also covered by [`docs/AGENTS.md`](docs/AGENTS.md) |
+| `docs/`, `fern/` | Documentation sources and the Fern docs-site config — read [`docs/AGENTS.md`](docs/fern/AGENTS.md) before editing |
+| `examples/`, `recipes/` | Runnable examples and deployment recipes — also covered by [`docs/AGENTS.md`](docs/fern/AGENTS.md) |
 | `benchmarks/`, `tests/` | Benchmark harnesses and the top-level pytest suite |
 | `.ai/` | Agent topic guidelines: `bash-launch-guidelines.md`, `ci-guidelines.md`, `linear-ticket-refs.md`, `pytest-guidelines.md`, `python-guidelines.md`, `test-model-size-guardrails.md` |
 | `.agents/skills/` | Agent skills (see [Skills](#skills)) |
@@ -84,7 +152,7 @@ Sibling repositories this repo integrates with:
 ## Build
 
 System prerequisites (Rust toolchain, `uv`, system libraries) and the VS Code / Cursor
-devcontainer are covered in [`docs/contribution-guide.md`](docs/contribution-guide.md).
+devcontainer are covered in [`docs/contribution-guide.md`](docs/fern/pages/community/contributing/overview.md).
 
 Python dev build (bindings + wheel, editable):
 
@@ -132,19 +200,23 @@ cargo fmt --all && cargo clippy --workspace
   `style`, and `build`.
 - PR descriptions must include `Summary` and `Validation`.
 - Sign every commit with DCO: `git commit -s`.
+- Do not hand-edit the root `CODEOWNERS` — it is generated. To change review
+  routing, edit `.github/codeowners/areas.yaml` and regenerate; CI gates 100%
+  coverage and `CODEOWNERS`↔`areas.yaml` drift. See
+  `.github/codeowners/README.md` (use `who_owns.py` to check who reviews a path).
 - Full CI on a PR runs only after a maintainer comments `/ok to test <sha>` with the short
   SHA of the latest commit; copy-pr-bot then creates the `pull-request/N` branch that
   triggers it. Fix failures before requesting human review.
 - Architecture changes require a Dynamo Enhancement Proposal (DEP), filed as a GitHub
   issue on `ai-dynamo/dynamo` with `dep:*` labels (the `dep-create` skill automates this).
 
-See [`docs/contribution-guide.md`](docs/contribution-guide.md) for the full workflow
+See [`docs/contribution-guide.md`](docs/fern/pages/community/contributing/overview.md) for the full workflow
 (issue sizing, CODEOWNERS, review process).
 
 ## Docs, Examples, Recipes
 
 Any change under `docs/`, `examples/`, or `recipes/` must follow
-[`docs/AGENTS.md`](docs/AGENTS.md) and the
-[documentation style guide](docs/documentation-style-guide.md): SPDX headers, Fern
+[`docs/AGENTS.md`](docs/fern/AGENTS.md) and the
+[documentation style guide](docs/fern/pages/community/contributing/documentation/documentation-style-guide.md): SPDX headers, Fern
 frontmatter (no body `# H1`), GitHub-style admonitions, and backend casing
 (vLLM / SGLang / TensorRT-LLM). The deterministic subset is enforced pre-merge.

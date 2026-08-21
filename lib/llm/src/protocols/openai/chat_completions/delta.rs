@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use super::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
 use crate::{
@@ -52,8 +52,8 @@ pub struct DeltaGenerator {
     service_tier: Option<dynamo_protocols::types::ServiceTierResponse>,
     /// Tracks token usage for the completion request.
     usage: dynamo_protocols::types::CompletionUsage,
-    /// Counter tracking the number of messages issued.
-    msg_counter: u64,
+    /// Choice indices for which the assistant role has already been emitted.
+    emitted_role_choices: HashSet<u32>,
     /// Configuration options for response generation.
     options: DeltaGeneratorOptions,
     /// Request tracker for per-request metrics (shared with PreprocessedRequest).
@@ -71,7 +71,7 @@ impl DeltaGenerator {
             system_fingerprint: None,
             service_tier: None,
             usage,
-            msg_counter: 0,
+            emitted_role_choices: HashSet::new(),
             options,
             tracker,
         }
@@ -128,6 +128,7 @@ impl DeltaGenerator {
                     dynamo_protocols::types::ChatCompletionTokenLogprob {
                         token: token_str.clone(),
                         logprob: lp,
+                        token_id: Some(*tid),
                         bytes: token_to_utf8_bytes(&token_str),
                         top_logprobs: converted,
                     }
@@ -153,11 +154,10 @@ impl DeltaGenerator {
             content: text.map(dynamo_protocols::types::ChatCompletionMessageContent::Text),
             function_call: None,
             tool_calls: None,
-            role: if self.msg_counter == 0 {
-                Some(dynamo_protocols::types::Role::Assistant)
-            } else {
-                None
-            },
+            role: self
+                .emitted_role_choices
+                .insert(index)
+                .then_some(dynamo_protocols::types::Role::Assistant),
             refusal: None,
             reasoning_content: None,
         };
@@ -170,7 +170,6 @@ impl DeltaGenerator {
         };
 
         let choices = vec![choice];
-
         // According to OpenAI spec: when stream_options.include_usage is true,
         // all intermediate chunks should have usage: null
         // The final usage chunk will be sent separately with empty choices
@@ -198,7 +197,7 @@ impl DeltaGenerator {
     /// This should be sent after the last content chunk when stream_options.include_usage is true.
     ///
     /// # Returns
-    /// * A [`CreateChatCompletionStreamResponse`] with empty choices and usage stats.
+    /// * A `CreateChatCompletionStreamResponse` with empty choices and usage stats.
     pub fn create_usage_chunk(&self) -> NvCreateChatCompletionStreamResponse {
         let usage = self.get_usage();
 
@@ -268,6 +267,11 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             // Propagate prompt token details if provided
             if let Some(prompt_details) = completion_usage.prompt_tokens_details.as_ref() {
                 self.usage.prompt_tokens_details = Some(prompt_details.clone());
+            }
+
+            // Propagate completion token details if provided, including reasoning tokens.
+            if let Some(completion_details) = completion_usage.completion_tokens_details.as_ref() {
+                self.usage.completion_tokens_details = Some(completion_details.clone());
             }
         }
 
@@ -381,7 +385,8 @@ mod tests {
     use crate::protocols::openai::DeltaGeneratorExt;
     use dynamo_protocols::types::{
         ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
-        ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
+        ChatCompletionRequestUserMessageContent, CompletionTokensDetails, CompletionUsage,
+        CreateChatCompletionRequest,
     };
 
     fn create_test_request() -> NvCreateChatCompletionRequest {
@@ -475,6 +480,101 @@ mod tests {
             encoder_result: None,
             routing_data: None,
         }
+    }
+
+    #[test]
+    fn test_completion_token_details_are_propagated_from_backend_usage() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-token-details".to_string());
+
+        let mut backend_output = final_backend_output();
+        backend_output.completion_usage = Some(CompletionUsage {
+            prompt_tokens: 5,
+            completion_tokens: 1,
+            total_tokens: 6,
+            prompt_tokens_details: None,
+            completion_tokens_details: Some(CompletionTokensDetails {
+                reasoning_tokens: Some(3),
+                ..Default::default()
+            }),
+        });
+
+        generator
+            .choice_from_postprocessor(backend_output)
+            .expect("choice generation");
+
+        let usage = generator.get_usage();
+        let completion_details = usage
+            .completion_tokens_details
+            .expect("completion token details should be propagated");
+
+        assert_eq!(completion_details.reasoning_tokens, Some(3));
+    }
+
+    #[test]
+    fn test_role_is_emitted_once_per_choice() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-stream-role".to_string());
+
+        let first_choice_zero = generator
+            .choice_from_postprocessor(final_backend_output())
+            .expect("first choice 0 generation");
+
+        let mut choice_one_output = final_backend_output();
+        choice_one_output.index = Some(1);
+        let first_choice_one = generator
+            .choice_from_postprocessor(choice_one_output)
+            .expect("first choice 1 generation");
+
+        let second_choice_zero = generator
+            .choice_from_postprocessor(final_backend_output())
+            .expect("second choice 0 generation");
+
+        let mut choice_one_output = final_backend_output();
+        choice_one_output.index = Some(1);
+        let second_choice_one = generator
+            .choice_from_postprocessor(choice_one_output)
+            .expect("second choice 1 generation");
+
+        assert_eq!(
+            first_choice_zero.inner.choices[0].delta.role,
+            Some(dynamo_protocols::types::Role::Assistant)
+        );
+        assert_eq!(
+            first_choice_one.inner.choices[0].delta.role,
+            Some(dynamo_protocols::types::Role::Assistant)
+        );
+        assert_eq!(second_choice_zero.inner.choices[0].delta.role, None);
+        assert_eq!(second_choice_one.inner.choices[0].delta.role, None);
+    }
+
+    #[test]
+    fn test_chat_logprobs_include_backend_token_id() {
+        let mut request = create_test_request();
+        request.inner.logprobs = Some(true);
+        let mut generator = request.response_generator("req-logprob-token-id".to_string());
+        let mut output = final_backend_output();
+        output.log_probs = Some(vec![-0.5]);
+        output.top_logprobs = Some(vec![vec![]]);
+
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("choice generation");
+
+        let logprob = &response.inner.choices[0]
+            .logprobs
+            .as_ref()
+            .expect("logprobs")
+            .content
+            .as_ref()
+            .expect("logprob content")[0];
+        assert_eq!(logprob.token_id, Some(1));
+
+        let response_json = serde_json::to_value(response).expect("serialize response");
+        assert_eq!(
+            response_json["choices"][0]["logprobs"]["content"][0]["token_id"],
+            1
+        );
     }
 
     fn create_test_request_with_extra_fields(fields: Vec<String>) -> NvCreateChatCompletionRequest {

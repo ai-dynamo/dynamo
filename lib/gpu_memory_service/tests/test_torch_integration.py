@@ -40,6 +40,7 @@ from gpu_memory_service.client.torch.module import (
 )
 from gpu_memory_service.client.torch.tensor import _tensor_from_pointer
 from gpu_memory_service.common.locks import RequestedLockType
+from gpu_memory_service.common.vmm import _reset_vmm_singleton
 from gpu_memory_service.server.rpc import GMSRPCServer
 
 pytestmark = [
@@ -136,6 +137,7 @@ def running_gms(tmp_path):
             raise thread_error
         if os.path.exists(socket_path):
             os.unlink(socket_path)
+        _reset_vmm_singleton()
 
 
 def _make_gms_tensor(
@@ -401,3 +403,32 @@ def test_materialized_module_from_gms_matches_plain_module_forward(running_gms):
     )
 
     reader.close()
+
+
+def test_integration_helper_without_explicit_init_vmm(tmp_path):
+    """Ensure GMSClientMemoryManager works without pre-seeding the VMM singleton.
+
+    Integration paths (vLLM, SGLang, TRTLLM, gms-storage-client) construct
+    GMSClientMemoryManager without calling init_vmm() first. The lazy
+    auto-detection in get_vmm() must initialize transparently based on
+    available hardware.
+    """
+    # Reset singleton to simulate a fresh process that never called init_vmm()
+    _reset_vmm_singleton()
+
+    from gpu_memory_service.common.vmm import (
+        _detect_device_type,
+        get_vmm,
+        get_vmm_device_type,
+    )
+
+    # get_vmm() should lazily auto-detect and initialize without raising
+    vmm = get_vmm()
+    assert vmm is not None
+
+    # device type should match what auto-detection would pick
+    expected = _detect_device_type()
+    assert get_vmm_device_type() == expected
+
+    # Clean up
+    _reset_vmm_singleton()

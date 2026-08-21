@@ -68,6 +68,7 @@ class Response:
     """
 
     client_id: int
+    generation: Optional[int] = None
     result: Optional[ResultPayload] = None
     error_msg: Optional[str] = None
     #: Engine-side timestamp, used to attribute observed latency between the
@@ -108,7 +109,11 @@ class GenerationResult:
         self._aborted = False
         self._error_msg: Optional[str] = None
         self.response_processor = response_processor
+        self.response_request_key: Any = None
+        self.response_sender: Any = None
+        self.response_sequence = 0
         self._native_done = asyncio.Event() if response_processor is not None else None
+        self._native_error: Optional[str] = None
 
         #: Diagnostics for the tests: which thread ran _handle_response, and
         #: how many times. The diagram's claim is that this is the loop thread.
@@ -195,8 +200,16 @@ class GenerationResult:
         if self._native_done is None:
             raise RuntimeError("wait_native requires a native response processor")
         await self._native_done.wait()
+        if self._native_error is not None:
+            raise RuntimeError(self._native_error)
 
     def mark_native_done(self) -> None:
         if self._native_done is None:
             raise RuntimeError("mark_native_done requires a native response processor")
+        self._native_done.set()
+
+    def mark_native_error(self, message: str) -> None:
+        if self._native_done is None:
+            raise RuntimeError("mark_native_error requires a native response processor")
+        self._native_error = message
         self._native_done.set()

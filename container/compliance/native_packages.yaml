@@ -29,45 +29,28 @@
 #                      NOTICES section
 #   images:            list of image names this component ships in;
 #                      --native-image must match one of these
-#                      ("snapshot-agent" today; ucx/libfabric/etc.
-#                      added when framework runtimes wire native in)
+#                      (dynamo-planner, vllm-runtime today; more added as
+#                      framework runtimes wire native in)
 
 packages:
   # --- EFA (Elastic Fabric Adapter) components ---
-  # Installed by container/templates/aws.Dockerfile via the AWS-published
-  # `efa_installer.sh` (efa_version 1.47.0). The installer drops binaries
-  # directly without registering with apt, so dpkg/python/rust/go
-  # generators can't see them. This YAML overlay attributes them.
-  #
-  # Image filter:
-  #   - vllm-runtime-efa: baseline (nvcr.io/nvidia/cuda:X.Y-runtime) has
-  #     no libfabric, so EFA legitimately adds both libs.
-  #   - trtllm-runtime-efa: baseline (cuda-dl-base) already ships
-  #     libfabric-aws@2.1.0amzn5.0, but the EFA installer may install a
-  #     different version; explicit attribution closes the version-skew
-  #     gap defensively.
-  #   - (sglang-runtime-efa intentionally omitted: sglang's upstream
-  #     image already ships libfabric1@1.17.0-3build2; the make_efa
-  #     build is redundant and appears to be dead config.)
   - name: libfabric
-    # AWS fork: shipped by EFA installer 1.47.0 as libfabric1-aws_2.4.0amzn1.0
-    # (Ubuntu 24.04 DEB). The `amzn1.0` suffix indicates an AWS patch set on
-    # top of upstream libfabric 2.4.0; preserved here for OSRB traceability.
-    version: 2.4.0amzn1.0
+    version: 2.4.0amzn5.0
     license: BSD-2-Clause
-    source: https://github.com/ofiwg/libfabric
+    source: https://github.com/aws/libfabric
     images:
       - vllm-runtime-efa
       - trtllm-runtime-efa
+      - sglang-runtime-efa
 
   - name: aws-ofi-nccl
-    # Shipped by EFA installer 1.47.0 as libnccl-ofi_1.18.0-1 (Ubuntu 24.04 DEB).
-    version: 1.18.0
+    version: 1.20.0
     license: Apache-2.0
     source: https://github.com/aws/aws-ofi-nccl
     images:
       - vllm-runtime-efa
       - trtllm-runtime-efa
+      - sglang-runtime-efa
 
   # --- From-source binaries built in wheel_builder / dynamo_base and copied
   # into the runtime images (no apt/pip/cargo metadata, so the python/rust/dpkg
@@ -77,11 +60,11 @@ packages:
   # NOTE: NIXL ships as the `nixl` Python wheel (attributed by the python
   # generator), so it is intentionally NOT duplicated here.
 
-  # LGPL media stack — built --disable-gpl in wheel_builder (h264_nvenc + libvpx)
-  # and copied into vllm/sglang runtime (container/templates/vllm_runtime.Dockerfile
-  # + sglang_runtime.Dockerfile). Replaces the purged GPL apt ffmpeg.
+  # LGPL media stack — built --disable-gpl in wheel_builder with libvpx (VP9) and
+  # no H.264 capability, then copied into the vLLM, SGLang, and TensorRT-LLM
+  # runtimes for the VP9 video-encode path.
   - name: ffmpeg
-    version: "8.1"
+    version: "8.1.2"
     license: LGPL-2.1-or-later
     source: https://ffmpeg.org/
     images:
@@ -89,9 +72,12 @@ packages:
       - vllm-runtime-efa
       - sglang-runtime
       - sglang-runtime-efa
+      - trtllm-runtime
+      - trtllm-runtime-efa
 
   - name: libvpx
-    # VP8/VP9 codec library, ffmpeg's only non-NVIDIA encoder dependency.
+    # VP8/VP9 codec library — the in-tree ffmpeg's only video encoder now that
+    # H.264/NVENC is removed. Shipped in every image that carries the ffmpeg libs.
     version: v1.14.1
     license: BSD-3-Clause
     source: https://chromium.googlesource.com/webm/libvpx
@@ -100,11 +86,13 @@ packages:
       - vllm-runtime-efa
       - sglang-runtime
       - sglang-runtime-efa
+      - trtllm-runtime
+      - trtllm-runtime-efa
 
   # UCX — Unified Communication X, built from source in wheel_builder and used by
   # the NIXL transport. Installed to /usr/local (no dpkg metadata).
   - name: UCX
-    version: v1.20.x
+    version: v1.21.0
     license: BSD-3-Clause
     source: https://github.com/openucx/ucx
     images:
@@ -130,7 +118,7 @@ packages:
   # etcd — coordination store, downloaded as a release binary in dynamo_base and
   # placed at /usr/local/bin (no apt metadata).
   - name: etcd
-    version: v3.5.30
+    version: v3.5.33
     license: Apache-2.0
     source: https://github.com/etcd-io/etcd
     images:
@@ -145,7 +133,7 @@ packages:
   # nats-server — messaging server, downloaded as a .deb in dynamo_base (dpkg -i
   # may not survive into the final runtime layer attribution reliably).
   - name: nats-server
-    version: v2.10.28
+    version: v2.12.14
     license: Apache-2.0
     source: https://github.com/nats-io/nats-server
     images:
@@ -155,4 +143,15 @@ packages:
       - sglang-runtime-efa
       - trtllm-runtime
       - trtllm-runtime-efa
+      - dynamo-planner
+
+  # dash — POSIX shell copied from planner_builder to provide /bin/sh in the
+  # distroless planner (its base ships no shell). The distroless-python planner
+  # no longer scans dpkg, so the shipped binary is attributed here. BSD-3-Clause
+  # is the license of the redistributed binary (Debian copyright Files: *).
+  - name: dash
+    version: 0.5.12-12
+    license: BSD-3-Clause
+    source: http://gondor.apana.org.au/~herbert/dash/
+    images:
       - dynamo-planner

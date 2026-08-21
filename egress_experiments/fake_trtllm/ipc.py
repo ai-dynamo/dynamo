@@ -135,10 +135,9 @@ class _ZmqEndpoint(_Endpoint):
         self._sock.send_pyobj(batch)
 
     def get(self, timeout: Optional[float] = None) -> Optional[List[Any]]:
-        if timeout is not None:
-            if not self._sock.poll(int(timeout * 1000)):
-                return None
         try:
+            if timeout is not None and not self._sock.poll(int(timeout * 1000)):
+                return None
             return self._sock.recv_pyobj()
         except _zmq.ZMQError:
             return None

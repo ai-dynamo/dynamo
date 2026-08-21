@@ -62,6 +62,7 @@ rules:
   verbs:
   - delete
   - patch
+{{- if not .Values.namespaceRestriction.enabled }}
 - apiGroups:
   - admissionregistration.k8s.io
   resources:
@@ -86,6 +87,7 @@ rules:
   - patch
   - update
   - watch
+{{- end }}
 - apiGroups:
   - ""
   resources:
@@ -115,6 +117,40 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - nvidia.com
+  resources:
+  - podsnapshots
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamocheckpoints/finalizers
+  - dynamocomponentdeployments/finalizers
+  - dynamographdeploymentrequests/finalizers
+  - dynamographdeployments/finalizers
+  - dynamomodels/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - nvidia.com
+  resources:
+  - dynamocheckpoints/status
+  - dynamocomponentdeployments/status
+  - dynamographdeploymentrequests/status
+  - dynamographdeployments/status
+  - dynamographdeploymentscalingadapters/status
+  - dynamomodels/status
+  verbs:
+  - get
+  - patch
+  - update
 - apiGroups:
   - nvidia.com
   resources:
@@ -299,57 +335,6 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-deviceclass-reader
-subjects:
-- kind: ServiceAccount
-  name: '{{ include "dynamo-operator.fullname" . }}-controller-manager'
-  namespace: '{{ .Release.Namespace }}'
----
-# Helm keeps PodSnapshotContent access separate because a namespace-restricted Role cannot grant it.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-podsnapshotcontents
-  labels:
-    app.kubernetes.io/component: rbac
-    app.kubernetes.io/created-by: dynamo-operator
-    app.kubernetes.io/part-of: dynamo-operator
-  {{- include "dynamo-operator.labels" . | nindent 4 }}
-rules:
-- apiGroups:
-  - nvidia.com
-  resources:
-  - podsnapshotcontents
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - nvidia.com
-  resources:
-  - podsnapshotcontents/status
-  verbs:
-  - get
-  - patch
-  - update
----
-# Helm binds the separate cluster-scoped PodSnapshotContent grant to the controller ServiceAccount.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-podsnapshotcontents-binding
-  labels:
-    app.kubernetes.io/component: rbac
-    app.kubernetes.io/created-by: dynamo-operator
-    app.kubernetes.io/part-of: dynamo-operator
-  {{- include "dynamo-operator.labels" . | nindent 4 }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: {{ include "dynamo-operator.fullname" . }}-{{ .Release.Namespace }}-podsnapshotcontents
 subjects:
 - kind: ServiceAccount
   name: '{{ include "dynamo-operator.fullname" . }}-controller-manager'

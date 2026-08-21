@@ -150,38 +150,70 @@ impl IngressResponseEncoder<PythonResponseItem> for PythonIngressPayloadAdapter 
     }
 }
 
-/// Response encoder for the flag-gated push egress path (`push_egress.rs`).
+/// Response encoder for the push egress path (`push_egress.rs`).
 ///
-/// The push path converts each response to an owned Rust value on the Python
-/// thread that produced it, so by the time a frame reaches here it holds no
-/// Python object: encoding is pure serde. No GIL, and — unlike the
-/// [`PythonResponseItem`] encoder above — no `spawn_blocking` hop either.
-impl IngressResponseEncoder<Annotated<serde_json::Value>> for PythonIngressPayloadAdapter {
+/// The push path encodes each response all the way to request-plane bytes on
+/// the Python thread that produced it, under the GIL that thread already holds
+/// (`push_egress::PushFrame`). By the time a frame reaches here there is
+/// nothing left to do but forward it: no GIL, no second serde pass, and —
+/// unlike the [`PythonResponseItem`] encoder above — no `spawn_blocking` hop.
+///
+/// The only work left is the terminal complete-final frame, which carries no
+/// Python data at all, and the rare codec re-encode described on
+/// [`push_egress::PushFrame`].
+impl IngressResponseEncoder<crate::push_egress::PushFrame> for PythonIngressPayloadAdapter {
     async fn encode_response(
         &self,
         payload_codec: RequestPlanePayloadCodec,
-        response: Option<Annotated<serde_json::Value>>,
+        response: Option<crate::push_egress::PushFrame>,
         complete_final: bool,
     ) -> Result<EncodedResponseFrame, PipelineError> {
-        let is_error = response
-            .as_ref()
-            .is_some_and(|response| response.err().is_some());
-        let wrapper = NetworkStreamWrapper {
-            data: response,
-            complete_final,
-        };
-        let bytes = payload_codec.encode(&wrapper).map_err(|error| {
-            PipelineError::SerializationError(format!(
-                "Failed serializing {} push-egress response: {error}",
-                payload_codec.name()
-            ))
+        if complete_final {
+            let wrapper = NetworkStreamWrapper::<Annotated<()>> {
+                data: None,
+                complete_final: true,
+            };
+            let bytes = payload_codec.encode(&wrapper).map_err(|error| {
+                PipelineError::SerializationError(format!(
+                    "Failed serializing {} push-egress final response: {error}",
+                    payload_codec.name()
+                ))
+            })?;
+            return Ok(EncodedResponseFrame {
+                bytes: bytes.into(),
+                is_error: false,
+                stop_stream: false,
+            });
+        }
+
+        let frame = response.ok_or_else(|| {
+            PipelineError::SerializationError(
+                "push-egress response item missing before final frame".to_string(),
+            )
         })?;
-        Ok(EncodedResponseFrame {
-            bytes: bytes.into(),
-            is_error,
-            stop_stream: false,
-        })
+        frame.into_encoded(payload_codec)
     }
+}
+
+/// Convert an `Annotated` value into request-plane bytes and the `is_error` flag,
+/// using the canonical non-terminal wrapper shape (`complete_final: false`).
+///
+/// Both the pull path ([`encode_python_response`]) and the push path
+/// ([`crate::push_egress::PushFrame::encode`]) call this, so neither can silently
+/// change the wrapper shape, `is_error` logic, or codec invocation without also
+/// breaking this function — and the tests below that exercise it directly with
+/// concrete non-Python types.
+pub(crate) fn encode_annotated_response<T: Serialize>(
+    codec: RequestPlanePayloadCodec,
+    annotated: Annotated<T>,
+) -> Result<(Vec<u8>, bool), anyhow::Error> {
+    let is_error = annotated.is_error();
+    let wrapper = NetworkStreamWrapper {
+        data: Some(annotated),
+        complete_final: false,
+    };
+    let bytes = codec.encode(&wrapper)?;
+    Ok((bytes, is_error))
 }
 
 fn encode_python_response(
@@ -201,14 +233,9 @@ fn encode_python_response(
         },
         Err(error) => (Annotated::from_err(map_python_exception(error)), true),
     };
-    let is_error = annotated.is_error();
-    let wrapper = NetworkStreamWrapper {
-        data: Some(annotated),
-        complete_final: false,
-    };
 
-    match payload_codec.encode(&wrapper) {
-        Ok(bytes) => Ok(EncodedResponseFrame {
+    match encode_annotated_response(payload_codec, annotated) {
+        Ok((bytes, is_error)) => Ok(EncodedResponseFrame {
             bytes: bytes.into(),
             is_error,
             stop_stream,
@@ -236,7 +263,16 @@ fn encode_python_response(
     }
 }
 
-fn parse_python_response(
+/// Interpret one Python response object as a wire `Annotated<PythonPayload>`.
+///
+/// Shared by both egress paths — pull via [`encode_python_response`], push via
+/// `push_egress::PushFrame::encode` — so the two cannot drift and start
+/// disagreeing about what a given Python object means on the wire. The payload
+/// stays a [`PythonPayload`], which transcodes straight into the request-plane
+/// codec and therefore preserves everything that codec can represent (binary
+/// values, non-finite floats, non-string mapping keys). The GIL is already held
+/// on both paths.
+pub(crate) fn parse_python_response(
     item: Py<PyAny>,
     py: Python<'_>,
 ) -> Result<Annotated<PythonPayload>, String> {
@@ -303,6 +339,84 @@ mod tests {
     // PyO3's `extension-module` feature, so standalone `cargo test` binaries
     // intentionally do not link libpython. Python behavior is covered by
     // tests/test_request_plane_python_payload.py against the built extension.
+
+    use super::{
+        Annotated, NetworkStreamWrapper, RequestPlanePayloadCodec, encode_annotated_response,
+    };
+
+    // ── encode_annotated_response contract ───────────────────────────────────
+    //
+    // Both egress paths (pull via encode_python_response, push via
+    // PushFrame::encode) call encode_annotated_response. These tests pin every
+    // field of the output so that a change to the wrapper shape, is_error
+    // logic, or complete_final flag in either path would be caught here.
+    //
+    // serde_json::Value is used as the concrete payload type because it is
+    // Serialize without touching the Python C API.
+
+    /// `is_error` must reflect `annotated.is_error()` — true when the envelope
+    /// carries `event: "error"`, false otherwise. A swap of the two would let
+    /// error frames be forwarded as healthy responses and vice versa.
+    #[test]
+    fn encode_annotated_response_is_error_true_for_error_annotated() {
+        let (_, is_error) = encode_annotated_response(
+            RequestPlanePayloadCodec::Json,
+            Annotated::<serde_json::Value>::from_error("oops"),
+        )
+        .unwrap();
+        assert!(is_error);
+    }
+
+    #[test]
+    fn encode_annotated_response_is_error_false_for_data_annotated() {
+        let (_, is_error) = encode_annotated_response(
+            RequestPlanePayloadCodec::Json,
+            Annotated::from_data(serde_json::json!({"ok": true})),
+        )
+        .unwrap();
+        assert!(!is_error);
+    }
+
+    /// Non-terminal frames must have `complete_final: false` on the wire.
+    /// A stray `true` would tell the caller the stream has ended even when
+    /// the Python generator is still running.
+    #[test]
+    fn encode_annotated_response_complete_final_is_always_false() {
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            let (bytes, _) =
+                encode_annotated_response(codec, Annotated::from_data(serde_json::json!(null)))
+                    .unwrap();
+            let wrapper: NetworkStreamWrapper<Annotated<serde_json::Value>> =
+                codec.decode(&bytes).unwrap();
+            assert!(!wrapper.complete_final, "codec={}", codec.name());
+        }
+    }
+
+    /// The payload must survive the encode → decode round-trip intact.
+    /// A `data: None` in the wrapper or a wrong serde path would drop it.
+    #[test]
+    fn encode_annotated_response_data_survives_roundtrip() {
+        let payload = serde_json::json!({"text": "hello", "n": 42});
+        let (bytes, is_error) = encode_annotated_response(
+            RequestPlanePayloadCodec::Json,
+            Annotated::from_data(payload.clone()),
+        )
+        .unwrap();
+        assert!(!is_error);
+        let wrapper: NetworkStreamWrapper<Annotated<serde_json::Value>> =
+            RequestPlanePayloadCodec::Json.decode(&bytes).unwrap();
+        let data = wrapper.data.unwrap().data.unwrap();
+        assert_eq!(data, payload);
+    }
+
+    /// Encoding is deterministic: the same `Annotated` value with the same
+    /// codec must produce byte-identical frames from both egress paths.
+    /// Non-determinism would mean the pull and push paths could silently
+    /// diverge on map ordering or float representation.
+
     #[test]
     fn network_ingress_types_do_not_contain_serde_json_value() {
         let unary = std::any::type_name::<crate::PythonServerStreamingIngress>();
@@ -311,6 +425,47 @@ mod tests {
         assert!(
             !bidirectional.contains("serde_json::value::Value"),
             "{bidirectional}"
+        );
+    }
+
+    /// The Python `Client` router path carries requests/responses through the
+    /// request-plane codec as a dynamic value. It uses `rmpv::Value` (not
+    /// `serde_json::Value`) so that a `bytes` field survives the (default)
+    /// msgpack codec as a `Binary` marker instead of erroring — which is what
+    /// lets workers emit raw bytes instead of base64. This pins that property
+    /// at the wire level; the full Python `Client` round-trip is covered by
+    /// `tests/test_request_plane_python_payload.py` against the built extension.
+    #[test]
+    fn rmpv_value_carries_bytes_through_msgpack_request_plane() {
+        use super::{Annotated, NetworkStreamWrapper, RequestPlanePayloadCodec};
+        let payload = rmpv::Value::Map(vec![
+            (
+                rmpv::Value::String("img".into()),
+                rmpv::Value::Binary(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+            ),
+            (rmpv::Value::String("n".into()), rmpv::Value::from(7i64)),
+        ]);
+        let wrapper = NetworkStreamWrapper {
+            data: Some(Annotated::from_data(payload)),
+            complete_final: false,
+        };
+        let wire = RequestPlanePayloadCodec::Msgpack
+            .encode(&wrapper)
+            .expect("encode");
+        let back: NetworkStreamWrapper<Annotated<rmpv::Value>> = RequestPlanePayloadCodec::Msgpack
+            .decode(&wire)
+            .expect("bytes field must not error on decode");
+        let data = back.data.expect("data").data.expect("annotated data");
+        let img = data
+            .as_map()
+            .expect("map")
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("img"))
+            .map(|(_, v)| v)
+            .expect("img field");
+        assert!(
+            matches!(img, rmpv::Value::Binary(b) if b == &[0xDE, 0xAD, 0xBE, 0xEF]),
+            "msgpack must preserve bytes as Binary, got {img:?}"
         );
     }
 }

@@ -176,6 +176,13 @@ class LoopProbe:
 
     # -- reporting ---------------------------------------------------------
 
+    def reset(self) -> None:
+        """Start a fresh measurement window without uninstalling the probe."""
+        with self._lock:
+            self.lag = Bucket()
+            self.callbacks = collections.defaultdict(Bucket)
+            self.enqueues = 0
+
     def report(self) -> Dict[str, object]:
         with self._lock:
             return {

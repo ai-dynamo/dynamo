@@ -41,6 +41,42 @@ from egress_experiments.nvtx_shim import range_
 _perf = time.perf_counter_ns
 
 
+def _build_native_event(
+    result: GenerationResult, response: Response
+) -> Optional[dict[str, Any]]:
+    request_key = result.response_request_key
+    if request_key is None:
+        raise RuntimeError("native response request was not registered")
+    if response.generation != request_key.generation:
+        return None
+
+    payload = response.result
+    token_ids = payload.new_token_ids if payload is not None else []
+    finish_reasons = payload.finish_reasons if payload is not None else None
+    event = {
+        "client_id": response.client_id,
+        "generation": response.generation,
+        "sequence": result.response_sequence,
+        "outputs": [
+            {
+                "index": index,
+                "new_token_ids": choice_tokens,
+                "finish_reason": (
+                    finish_reasons[index]
+                    if finish_reasons is not None and index < len(finish_reasons)
+                    else None
+                ),
+                "stop_reason": None,
+            }
+            for index, choice_tokens in enumerate(token_ids)
+        ],
+        "is_final": payload.is_final if payload is not None else True,
+        "error_msg": response.error_msg,
+    }
+    result.response_sequence += 1
+    return event
+
+
 class FakeLLM:
     """Stands in for ``tensorrt_llm.llmapi.LLM`` at the one method dynamo calls.
 
@@ -110,9 +146,42 @@ class FakeLLM:
         if self._engine is not None:
             self._engine.shutdown()
             self._engine = None
+        dispatch_stopped = True
         if self._dispatch_thread is not None:
             self._dispatch_thread.join(timeout=5.0)
-            self._dispatch_thread = None
+            dispatch_stopped = not self._dispatch_thread.is_alive()
+            if dispatch_stopped:
+                self._dispatch_thread = None
+
+        with self._results_lock:
+            pending = list(self._results.values())
+            self._results.clear()
+        message = "native response processing stopped: worker shut down"
+        native_pending = []
+        for result in pending:
+            if (
+                result.response_processor is None
+                or result.response_request_key is None
+            ):
+                continue
+            result.response_processor.cancel(result.response_request_key)
+            if result.response_sender is not None:
+                result.response_sender.close_with_error(message)
+            native_pending.append(result)
+        if native_pending:
+            def fail_pending() -> None:
+                self._mark_native_error_many(tuple(native_pending), message)
+
+            if (
+                self._loop is not None
+                and self._loop.is_running()
+                and threading.current_thread().name != self.loop_thread_name
+            ):
+                self._loop.call_soon_threadsafe(fail_pending)
+            else:
+                fail_pending()
+        if not dispatch_stopped:
+            raise RuntimeError("response dispatch thread did not stop within 5 seconds")
 
     def cancel_native(self, result: GenerationResult) -> None:
         """Remove native request state before late engine responses arrive."""
@@ -120,8 +189,11 @@ class FakeLLM:
         with self._results_lock:
             if self._results.get(result.client_id) is result:
                 self._results.pop(result.client_id)
-        if result.response_processor is not None:
-            result.response_processor.cancel(result.client_id)
+        if (
+            result.response_processor is not None
+            and result.response_request_key is not None
+        ):
+            result.response_processor.cancel(result.response_request_key)
 
     # -- the boundary ------------------------------------------------------
 
@@ -134,7 +206,6 @@ class FakeLLM:
         response_processor: Any = None,
         response_sender: Any = None,
         prompt_tokens: int = 0,
-        calibrated_work_us: float = 0.0,
         **kwargs: Any,
     ) -> GenerationResult:
         """Submit and return immediately. Called ON the event loop.
@@ -164,12 +235,12 @@ class FakeLLM:
         if response_processor is not None:
             if response_sender is None:
                 raise ValueError("native response processing requires response_sender")
-            response_processor.register(
+            result.response_sender = response_sender
+            result.response_request_key = response_processor.register(
                 client_id,
                 int(prompt_tokens),
                 int(n),
                 response_sender,
-                float(calibrated_work_us),
             )
         # Register BEFORE submitting: the dispatch thread drops responses for
         # unknown client ids (proxy.py:550), so a late registration would lose
@@ -184,6 +255,11 @@ class FakeLLM:
             self._engine.request_link.parent.put(
                 {
                     "client_id": client_id,
+                    "generation": (
+                        result.response_request_key.generation
+                        if result.response_request_key is not None
+                        else None
+                    ),
                     "max_tokens": int(max_tokens),
                     "submitted_ns": _perf(),
                 }
@@ -231,25 +307,14 @@ class FakeLLM:
                 # Late response for an already-finalised request (proxy.py:546).
                 return
             if result.response_processor is not None:
-                payload = response.result
+                event = _build_native_event(result, response)
+                if event is None:
+                    return
                 processor_key = id(result.response_processor)
                 _, native_batch = native_batches.setdefault(
                     processor_key, (result.response_processor, [])
                 )
-                native_batch.append(
-                    {
-                        "client_id": response.client_id,
-                        "new_token_ids": (
-                            payload.new_token_ids if payload is not None else []
-                        ),
-                        "is_final": payload.is_final if payload is not None else True,
-                        "finish_reasons": (
-                            payload.finish_reasons if payload is not None else None
-                        ),
-                        "stop_reasons": None,
-                        "error_msg": response.error_msg,
-                    }
-                )
+                native_batch.append(event)
                 return
             queue = result.queue
             queue.put_nowait(response)  # deque append -- the loop is untouched
@@ -278,10 +343,51 @@ class FakeLLM:
         self.ipc_batch_sizes.append(len(batch))
 
         for processor, native_batch in native_batches.values():
-            completed_client_ids = processor.process_mock_batch(native_batch)
-            for client_id in completed_client_ids:
+            try:
+                completed_requests = processor.process_batch(native_batch)
+            except Exception as error:
+                message = f"native response processing failed: {error}"
+                native_failed: list[GenerationResult] = []
+                for event in native_batch:
+                    client_id = event["client_id"]
+                    generation = event["generation"]
+                    with self._results_lock:
+                        current = self._results.get(client_id)
+                        if (
+                            current is not None
+                            and current.response_request_key is not None
+                            and current.response_request_key.generation == generation
+                        ):
+                            failed = self._results.pop(client_id)
+                        else:
+                            failed = None
+                    if failed is None:
+                        continue
+                    processor.cancel(failed.response_request_key)
+                    if failed.response_sender is not None:
+                        failed.response_sender.close_with_error(message)
+                    native_failed.append(failed)
+                    event_loop = event_loop or failed.queue.loop
+                if native_failed and event_loop is not None and event_loop.is_running():
+                    event_loop.call_soon_threadsafe(
+                        self._mark_native_error_many,
+                        tuple(native_failed),
+                        message,
+                    )
+                continue
+            for request_key in completed_requests:
+                client_id = request_key.client_id
                 with self._results_lock:
-                    completed = self._results.pop(client_id, None)
+                    current = self._results.get(client_id)
+                    if (
+                        current is not None
+                        and current.response_request_key is not None
+                        and current.response_request_key.generation
+                        == request_key.generation
+                    ):
+                        completed = self._results.pop(client_id)
+                    else:
+                        completed = None
                 if completed is not None:
                     self.completed_results.append(completed)
                     native_completed.append(completed)
@@ -311,6 +417,13 @@ class FakeLLM:
     def _mark_native_done_many(results: tuple[GenerationResult, ...]) -> None:
         for result in results:
             result.mark_native_done()
+
+    @staticmethod
+    def _mark_native_error_many(
+        results: tuple[GenerationResult, ...], message: str
+    ) -> None:
+        for result in results:
+            result.mark_native_error(message)
 
     # -- reporting ---------------------------------------------------------
 

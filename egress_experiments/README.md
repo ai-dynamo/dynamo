@@ -52,14 +52,17 @@ Start the calibrated worker in terminal 1. Use a new namespace for every arm and
 ```bash
 export GIL_E2E_NAMESPACE=gil-e2e-cost1-001
 export PYTHONPATH="$PWD/components/src:$PWD/lib/bindings/python/src:$PWD"
-DYN_SYSTEM_PORT=18081 DYN_TRTLLM_PUSH_EGRESS=1 \
+DYN_SYSTEM_PORT=18081 \
 python -m egress_experiments.e2e_worker \
   --endpoint "${GIL_E2E_NAMESPACE}.backend.generate" \
   --batch-total 200 --iteration-ms 20 --max-tokens 64 \
-  --stream-interval 1 --response-cost-scale 1
+  --stream-interval 1 --response-cost-scale 1 &
+export GIL_E2E_WORKER_PID=$!
+echo "worker pid: $GIL_E2E_WORKER_PID"
+wait "$GIL_E2E_WORKER_PID"
 ```
 
-Use `--response-path rust` for the native arm. It preserves the same request admission, engine process, IPC batches, calibrated `handle_response` plus `build_response` work, bounded runtime response channel, frontend, and AIPerf workload. The difference is that the dispatch thread depythonizes one complete engine batch, releases the GIL, updates owned per-request state, builds `Annotated<serde_json::Value>` frames, and sends them directly through the existing Rust response sink. The event loop is woken only for terminal request completion.
+Use `--response-path rust --response-shards 4 --response-queue-depth 2` for the native arm. It preserves the same request admission, engine process, IPC batches, calibrated `handle_response` plus `build_response` work, bounded runtime response channel, frontend, and AIPerf workload. The difference is that the dispatch thread depythonizes one complete engine batch, releases the GIL, shards events by client ID across bounded Rust workers, updates native per-request state, builds `Annotated<serde_json::Value>` frames, and sends them directly through the existing Rust response sink. Each request remains FIFO on one shard while independent requests run concurrently, and the event loop is woken only for batched terminal completion.
 
 Start the real frontend in terminal 2 with the same namespace:
 
@@ -71,33 +74,46 @@ DYN_SYSTEM_PORT=18080 python -m dynamo.frontend \
   --http-port 18000 --router-mode round-robin
 ```
 
-Run AIPerf in terminal 3:
+Run a separate warmup in terminal 3, copy the worker PID printed by terminal 1, reset the loop probe, then run the measured workload:
 
 ```bash
 aiperf profile gil-path-mocker \
   --url http://127.0.0.1:18000 --endpoint-type completions --streaming \
-  --concurrency 200 --request-count 1000 --warmup-request-count 200 \
-  --isl 8 --osl 64 --tokenizer Qwen/Qwen3-0.6B \
-  --use-legacy-max-tokens --output-artifact-dir /tmp/gil-e2e-cost1 \
+  --concurrency 200 --request-count 200 \
+  --isl 8 --isl-stddev 0 --osl 64 --osl-stddev 0 --random-seed 42 \
+  --tokenizer Qwen/Qwen3-0.6B \
+  --use-legacy-max-tokens --output-artifact-dir /tmp/gil-e2e-warmup \
+  --export-level summary
+
+export GIL_E2E_WORKER_PID=12345  # replace with the PID from terminal 1
+kill -USR1 "$GIL_E2E_WORKER_PID"
+
+aiperf profile gil-path-mocker \
+  --url http://127.0.0.1:18000 --endpoint-type completions --streaming \
+  --concurrency 200 --request-count 1000 \
+  --isl 8 --isl-stddev 0 --osl 64 --osl-stddev 0 --random-seed 42 \
+  --tokenizer Qwen/Qwen3-0.6B \
+  --use-legacy-max-tokens --output-artifact-dir /tmp/gil-e2e-measured \
   --export-level records
 ```
 
 Stop both processes, choose another namespace, and repeat with `--response-cost-scale 0` for the control. That control removes only the synthetic calibration padding for `handle_response` and `build_response`; their real code still executes, and the push-egress bridge and all request admission/setup work remain identical in both arms. At 10,000 responses/s, the modeled response-loop load is 10.7% for the control and 85.3% for the calibrated GIL path.
 
-The following AIPerf results are medians from three independent process restarts per arm on 2026-08-20. Trial order was rotated, every arm completed 1,000 measured requests after 200 warmup requests with zero errors, and one low-throughput outlier occurred in each calibrated arm:
+The following results are medians from three independent process restarts per arm on 2026-08-20. Trial order was rotated, every arm completed a separate 200-request warmup followed by 1,000 measured requests with zero errors, and request shape and random seed were fixed across arms. The loop probe was reset after each warmup, but its sample also includes the approximately four-second idle gap before measured traffic begins; loop lag is therefore diagnostic rather than an exact traffic-window percentile. AIPerf decoded the synthetic numeric token stream with a consistent 3.023% output-length mismatch, so the table reports the exact server token-frame rate (`request throughput × 64`) instead of the inflated client token count:
 
 | Metric | Response control | Calibrated Python GIL path | Calibrated Rust path | Rust versus Python |
 | --- | ---: | ---: | ---: | ---: |
-| Request throughput | 144.97 req/s | 142.50 req/s | 144.69 req/s | +1.5% |
-| Output throughput | 9,558 tok/s | 9,396 tok/s | 9,540 tok/s | +1.5% |
-| Average TTFT | 55.14 ms | 77.50 ms | 61.98 ms | -15.52 ms / -20.0% |
-| p99 TTFT | 93.27 ms | 114.00 ms | 103.95 ms | -10.05 ms / -8.8% |
-| Average request latency | 1,364.58 ms | 1,385.06 ms | 1,364.37 ms | -20.69 ms / -1.5% |
-| Inter-token latency | 20.18 ms | 20.15 ms | 20.07 ms | effectively unchanged |
+| Request throughput | 144.24 req/s | 142.78 req/s | 144.99 req/s | +1.55% |
+| Server token-frame throughput | 9,231 frame/s | 9,138 frame/s | 9,279 frame/s | +1.55% |
+| Average TTFT | 53.68 ms | 72.40 ms | 53.01 ms | -19.40 ms / -26.8% |
+| p99 TTFT | 96.30 ms | 104.96 ms | 90.36 ms | -14.60 ms / -13.9% |
+| Average request latency | 1,373.78 ms | 1,379.56 ms | 1,364.21 ms | -15.35 ms / -1.11% |
+| Inter-token latency | 20.35 ms | 20.14 ms | 20.20 ms | effectively unchanged |
+| Post-warmup event-loop lag p99 | 4.56 ms | 17.17 ms | 2.48 ms | large qualitative reduction |
 
-A separate matched loop-instrumented run delivered all 76,800 frames in both calibrated arms. Python response handling reached 16.16 ms p99 loop lag and issued 405 response-batch notifications. Rust response handling reached 1.21 ms p99 loop lag, issued no response-batch notifications, and used 40 batched terminal-completion wakes. This is the direct evidence that the native path removes response construction and egress from the event-loop/GIL critical path rather than merely deleting the modeled work.
+Every measured run delivered all 76,800 warmup-plus-measurement response events. The calibrated Python path issued a median 405 response-batch notifications and reached 17.17 ms median post-warmup p99 loop lag. The native path issued no Python response-batch notifications, processed and sent all 76,800 events with zero drops and zero active requests at shutdown, and reached 2.48 ms median post-warmup p99 loop lag. Because idle samples dilute each arm differently, the loop-lag values establish the qualitative gap but not a precise percentage reduction. The native arm differed from response control by only +0.52% request throughput, -1.25% average TTFT, and -0.70% average request latency. With three unisolated runs, these small effects support practical control parity but do not establish statistical equivalence or improvement over control. This is direct evidence that sharding the same 74.62 microsecond response-work budget outside the GIL restores control-level performance rather than deleting the modeled work.
 
-This reproduces the original failure mode end to end and validates the Rust ownership boundary, but it is not yet the production TensorRT-LLM integration. The mock still creates Python response dictionaries and depythonizes one batch while holding the dispatch thread's GIL; production should decode the engine transport into owned Rust records directly. The current processor is also serial on one dispatch thread. A production implementation should place bounded, client-sharded Rust workers behind the engine adapter so each request remains ordered while independent requests can run concurrently, and it must add backend-specific adapters and parity tests for TensorRT-LLM, vLLM, and SGLang response metadata, logprobs, cancellation, and error semantics.
+This reproduces the original failure mode end to end and validates the bounded, client-sharded Rust execution model, but it is not yet a production backend integration. The mock still creates Python response dictionaries and depythonizes one batch while the dispatch thread holds the GIL; production should decode each engine transport into native Rust records directly. The new processor is a backend-neutral primitive, but TensorRT-LLM, vLLM, and SGLang still need adapters and parity tests for their response metadata, logprobs, cancellation, error, and shutdown semantics before they can select it in production.
 
 ## Reproducing the capture
 

@@ -3,10 +3,8 @@
 
 mod support;
 
-#[cfg(feature = "mocker-kvbm-offload")]
-#[path = "support/mooncake_g2_lower_tier.rs"]
-mod g2_lower_tier;
-
+#[path = "../kv_router/common/dc_ckf_parity.rs"]
+mod dc_ckf_parity;
 #[allow(dead_code)]
 #[path = "../kv_router/mooncake_open_loop.rs"]
 mod mooncake_open_loop;
@@ -19,21 +17,14 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-#[cfg(feature = "mocker-kvbm-offload")]
-use dynamo_bench::kv_router_common::replay::generate_g2_replay_artifacts_with_capacity;
+use dc_ckf_parity::{DirectCkfParityConfig, DirectCkfParityIndexer, DirectCkfParityMatchMode};
 use dynamo_bench::kv_router_common::replay::{
-    WorkerReplayArtifacts, generate_replay_artifacts,
-    generate_replay_artifacts_with_args_and_visibility, process_mooncake_trace,
+    WorkerReplayArtifacts, generate_replay_artifacts, generate_replay_artifacts_with_args,
+    process_mooncake_trace,
 };
 use dynamo_kv_router::LocalBlockHash;
-use dynamo_kv_router::indexer::cuckoo::CkfMatchMode;
 use dynamo_kv_router::indexer::pruning::PruneConfig;
-use dynamo_kv_router::indexer::{
-    KvIndexerInterface, KvIndexerMetrics, METRIC_EVENT_CLEARED, METRIC_EVENT_REMOVED,
-    METRIC_EVENT_STORED, METRIC_STATUS_BLOCK_NOT_FOUND, METRIC_STATUS_CAPACITY_EXHAUSTED,
-    METRIC_STATUS_INDEXER_INVARIANT_VIOLATION, METRIC_STATUS_INVALID_BLOCK,
-    METRIC_STATUS_PARENT_NOT_FOUND,
-};
+use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics};
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
     KvCacheStoredBlockData, OverlapScores, StorageTier, TokensWithHashes, WorkerWithDpRank,
@@ -42,15 +33,15 @@ use dynamo_kv_router::{ConcurrentRadixTreeCompressed, ThreadPoolIndexer};
 use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs, SglangArgs};
 use dynamo_mocker::loadgen::{ReplayRequestHashes, SessionTrace, Trace, TurnTrace};
 use dynamo_mocker::replay::{
-    ReplayKvEventVisibility, ReplayTimedKvEvent, ReplayTimedRequest, ReplayWorkerArtifacts,
+    ReplayTimedKvEvent, ReplayTimedRequest, ReplayWorkerArtifacts, native_g1_parent_chain_artifact,
 };
 use mooncake_open_loop::{
     MooncakeOperationPayload, OpenLoopConfig, PreparedMooncakeCorpus, prepare_mooncake_corpus,
     prepare_open_loop_trial, run_open_loop,
 };
 use mooncake_shared::{
-    MooncakeBenchmarkConfig, MooncakeIndexerConfig, MooncakeIndexerKind, PreparedMooncakeBenchmark,
-    WorkerTraceEntry, merge_worker_traces, prepare_scaled_benchmark,
+    MooncakeBenchmarkConfig, MooncakeIndexerConfig, PreparedMooncakeBenchmark, WorkerTraceEntry,
+    merge_worker_traces, prepare_scaled_benchmark,
 };
 use tempfile::NamedTempFile;
 use uuid::Uuid;
@@ -63,11 +54,6 @@ const BENCHMARK_DURATION_MS: u64 = 2000;
 const NUM_EVENT_WORKERS: usize = 4;
 const PARITY_NUM_GPU_BLOCKS: usize = NUM_GPU_BLOCKS;
 const SGLANG_PARITY_PREFILL_TOKENS: usize = PARITY_NUM_GPU_BLOCKS * BLOCK_SIZE as usize;
-#[cfg(feature = "mocker-kvbm-offload")]
-const G2_TEST_NUM_GPU_BLOCKS: usize = 512;
-#[cfg(feature = "mocker-kvbm-offload")]
-const G2_TEST_NUM_G2_BLOCKS: usize = 16_384;
-
 type NormalizedOverlapScores = BTreeMap<WorkerWithDpRank, u32>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,13 +103,6 @@ impl MockEngineParityKind {
         }
     }
 
-    fn kv_event_visibility_override(self) -> Option<ReplayKvEventVisibility> {
-        match self {
-            Self::Sglang => Some(ReplayKvEventVisibility::PassStart),
-            Self::Vllm | Self::Trtllm => None,
-        }
-    }
-
     fn mock_engine_args(self) -> anyhow::Result<MockEngineArgs> {
         let mut builder = MockEngineArgs::builder()
             .engine_type(self.engine_type())
@@ -145,49 +124,6 @@ impl MockEngineParityKind {
 
         builder.build()?.normalized()
     }
-}
-
-#[cfg(feature = "mocker-kvbm-offload")]
-#[derive(Clone)]
-enum KvEventReplayEntryKind {
-    Request(Vec<LocalBlockHash>),
-    Event {
-        event: KvCacheEvent,
-        storage_tier: StorageTier,
-    },
-}
-
-#[cfg(feature = "mocker-kvbm-offload")]
-#[derive(Clone)]
-struct KvEventReplayEntry {
-    timestamp_us: u64,
-    worker_id: u64,
-    kind_rank: u8,
-    kind: KvEventReplayEntryKind,
-}
-
-#[cfg(feature = "mocker-kvbm-offload")]
-fn collect_kv_event_replay_entries(artifacts: &[WorkerReplayArtifacts]) -> Vec<KvEventReplayEntry> {
-    let mut entries = Vec::new();
-    for (worker_id, artifact) in artifacts.iter().enumerate() {
-        entries.extend(artifact.requests.iter().map(|request| KvEventReplayEntry {
-            timestamp_us: request.timestamp_us,
-            worker_id: worker_id as u64,
-            kind_rank: 0,
-            kind: KvEventReplayEntryKind::Request(request.replay_hashes.local_block_hashes.clone()),
-        }));
-        entries.extend(artifact.kv_events.iter().map(|event| KvEventReplayEntry {
-            timestamp_us: event.timestamp_us,
-            worker_id: worker_id as u64,
-            kind_rank: 1,
-            kind: KvEventReplayEntryKind::Event {
-                event: event.event.clone(),
-                storage_tier: event.storage_tier,
-            },
-        }));
-    }
-    entries.sort_by_key(|entry| (entry.timestamp_us, entry.kind_rank, entry.worker_id));
-    entries
 }
 
 fn count_removed_kv_events(artifacts: &[WorkerReplayArtifacts]) -> usize {
@@ -216,13 +152,8 @@ async fn generate_mock_engine_parity_artifacts(
         MockEngineParityKind::Sglang,
         MockEngineParityKind::Trtllm,
     ] {
-        let artifacts = generate_replay_artifacts_with_args_and_visibility(
-            traces,
-            engine.mock_engine_args()?,
-            None,
-            engine.kv_event_visibility_override(),
-        )
-        .await?;
+        let artifacts =
+            generate_replay_artifacts_with_args(traces, engine.mock_engine_args()?, None).await?;
         assert_no_removed_kv_events(engine.name(), &artifacts);
         artifact_sets.push(MockEngineReplayArtifacts {
             engine_name: engine.name(),
@@ -362,47 +293,59 @@ async fn collect_prepared_corpus_overlap_scores_with_metrics(
     ))
 }
 
-#[cfg(feature = "mocker-kvbm-offload")]
-async fn collect_device_only_overlap_scores(
-    config: &MooncakeIndexerConfig,
+fn collect_direct_ckf_overlap_scores(
     artifacts: &[WorkerReplayArtifacts],
-) -> anyhow::Result<Vec<NormalizedOverlapScores>> {
-    let indexer = config.build(BLOCK_SIZE, Arc::new(KvIndexerMetrics::new_unregistered()))?;
-    let entries = collect_kv_event_replay_entries(artifacts);
+    publish_every_n_events: usize,
+    match_mode: DirectCkfParityMatchMode,
+) -> anyhow::Result<Vec<ComparableOverlapScores>> {
+    let benchmark = MooncakeBenchmarkConfig {
+        benchmark_duration_ms: BENCHMARK_DURATION_MS,
+        inference_worker_duplication_factor: 1,
+    };
+    let merged = merge_worker_traces(artifacts.to_vec(), BLOCK_SIZE)?;
+    let prepared = prepare_scaled_benchmark(merged, benchmark.benchmark_duration_ms);
+    let corpus = prepare_mooncake_corpus(
+        prepared.clone(),
+        benchmark.inference_worker_duplication_factor,
+    )?;
+    let mut indexer = DirectCkfParityIndexer::new(
+        ckf_workers().to_vec(),
+        DirectCkfParityConfig {
+            expected_blocks_per_pool: NUM_GPU_BLOCKS,
+            publish_every_n_events,
+            kv_block_size: BLOCK_SIZE,
+        },
+    )?;
+    let expected_ready = u16::MAX;
     let mut scores = Vec::new();
-    let mut idx = 0;
+    let mut idx = 0usize;
 
-    while idx < entries.len() {
-        let timestamp_us = entries[idx].timestamp_us;
-        while idx < entries.len() && entries[idx].timestamp_us == timestamp_us {
-            match &entries[idx].kind {
-                KvEventReplayEntryKind::Request(request) => {
-                    let overlap = indexer.find_matches(request.clone()).await?;
-                    scores.push(overlap.scores.into_iter().collect());
+    while idx < corpus.operations.len() {
+        let deadline_ns = corpus.operations[idx].deadline_ns;
+        while idx < corpus.operations.len() && corpus.operations[idx].deadline_ns == deadline_ns {
+            let entry = &corpus.operations[idx];
+            match &entry.payload {
+                MooncakeOperationPayload::Query => {
+                    let request = corpus.query_hashes(entry.id)?;
+                    let original = original_prepared_query(
+                        &prepared,
+                        benchmark,
+                        entry.worker_id,
+                        entry.source_ordinal,
+                    )?;
+                    assert_eq!(request, original);
+                    let overlap = indexer.find_matches_with_mode(request, match_mode)?;
+                    scores.push(ComparableOverlapScores::new(overlap, request.len()));
                 }
-                KvEventReplayEntryKind::Event {
-                    event,
-                    storage_tier,
-                } => {
-                    if storage_tier.is_gpu() {
-                        indexer
-                            .apply_event(
-                                dynamo_kv_router::protocols::RouterEvent::with_storage_tier(
-                                    entries[idx].worker_id,
-                                    event.clone(),
-                                    *storage_tier,
-                                ),
-                            )
-                            .await;
-                    }
-                }
+                MooncakeOperationPayload::Event(event) => indexer.submit_event(event.clone())?,
             }
             idx += 1;
         }
-        indexer.flush().await;
+        let drain = indexer.exact_drain()?;
+        assert_eq!(drain.ready_lanes, expected_ready);
     }
 
-    indexer.shutdown();
+    assert_eq!(indexer.ready_lanes(), expected_ready);
     Ok(scores)
 }
 
@@ -680,34 +623,6 @@ fn compare_ckf_scores(
     stats
 }
 
-fn indexer_error_metric_count(metrics: &KvIndexerMetrics) -> u64 {
-    let event_types = [
-        METRIC_EVENT_STORED,
-        METRIC_EVENT_REMOVED,
-        METRIC_EVENT_CLEARED,
-    ];
-    let error_statuses = [
-        METRIC_STATUS_PARENT_NOT_FOUND,
-        METRIC_STATUS_BLOCK_NOT_FOUND,
-        METRIC_STATUS_INVALID_BLOCK,
-        METRIC_STATUS_CAPACITY_EXHAUSTED,
-        METRIC_STATUS_INDEXER_INVARIANT_VIOLATION,
-    ];
-
-    event_types
-        .into_iter()
-        .flat_map(|event_type| {
-            error_statuses.into_iter().map(move |status| {
-                metrics
-                    .kv_cache_events_applied
-                    .get_metric_with_label_values(&[event_type, status])
-                    .map(|counter| counter.get())
-                    .unwrap_or(0)
-            })
-        })
-        .sum()
-}
-
 fn assert_ckf_parity_budget(scope: &str, stats: CkfParityStats, budget: CkfParityBudget) {
     assert_eq!(stats.under_reports, 0, "{scope} CKF under-reported");
     assert_eq!(
@@ -753,21 +668,17 @@ async fn measure_ckf_parity(
     publish_every_n_events: usize,
 ) -> anyhow::Result<CkfParityStats> {
     let exact = MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS);
-    let ckf = MooncakeIndexerConfig::transposed_ckf(NUM_EVENT_WORKERS, NUM_GPU_BLOCKS)
-        .with_publish_every_n_events(publish_every_n_events);
-    let max_depth_ckf = ckf
-        .clone()
-        .with_ckf_match_mode(CkfMatchMode::MaxDepthMatches);
-    assert_eq!(ckf.kind, MooncakeIndexerKind::TransposedCkf);
     let mut global = CkfParityStats::default();
 
     for artifact_set in artifact_sets {
         let expected =
             collect_prepared_corpus_overlap_scores(&exact, &artifact_set.artifacts).await?;
         support::reset_warning_count(warning_count);
-        let (actual, metrics) =
-            collect_prepared_corpus_overlap_scores_with_metrics(&ckf, &artifact_set.artifacts)
-                .await?;
+        let actual = collect_direct_ckf_overlap_scores(
+            &artifact_set.artifacts,
+            publish_every_n_events,
+            DirectCkfParityMatchMode::FullMap,
+        )?;
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         assert_eq!(
@@ -776,42 +687,18 @@ async fn measure_ckf_parity(
             "{} CKF parity replay emitted warning/error logs",
             artifact_set.engine_name
         );
-        assert_eq!(
-            support::duplicate_store_warning_count(metrics.as_ref()),
-            0,
-            "{} CKF parity replay recorded duplicate-store warnings",
-            artifact_set.engine_name
-        );
-        assert_eq!(
-            indexer_error_metric_count(metrics.as_ref()),
-            0,
-            "{} CKF parity replay recorded event errors",
-            artifact_set.engine_name
-        );
 
         support::reset_warning_count(warning_count);
-        let (max_depth, max_depth_metrics) = collect_prepared_corpus_overlap_scores_with_metrics(
-            &max_depth_ckf,
+        let max_depth = collect_direct_ckf_overlap_scores(
             &artifact_set.artifacts,
-        )
-        .await?;
+            publish_every_n_events,
+            DirectCkfParityMatchMode::MaxDepthMatches,
+        )?;
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(
             warning_count.load(Ordering::Relaxed),
             0,
             "{} maximum-depth CKF parity replay emitted warning/error logs",
-            artifact_set.engine_name
-        );
-        assert_eq!(
-            support::duplicate_store_warning_count(max_depth_metrics.as_ref()),
-            0,
-            "{} maximum-depth CKF parity replay recorded duplicate-store warnings",
-            artifact_set.engine_name
-        );
-        assert_eq!(
-            indexer_error_metric_count(max_depth_metrics.as_ref()),
-            0,
-            "{} maximum-depth CKF parity replay recorded event errors",
             artifact_set.engine_name
         );
         assert_max_depth_matches_project_full_ckf(artifact_set.engine_name, &max_depth, &actual);
@@ -873,30 +760,6 @@ async fn route_approx_writes(
     Ok(())
 }
 
-#[cfg(feature = "mocker-kvbm-offload")]
-#[derive(Clone, Copy, Debug, Default)]
-struct HostPinnedEventCounts {
-    stored: usize,
-    removed: usize,
-}
-
-#[cfg(feature = "mocker-kvbm-offload")]
-fn count_host_pinned_events(artifacts: &[WorkerReplayArtifacts]) -> HostPinnedEventCounts {
-    let mut counts = HostPinnedEventCounts::default();
-    for event in artifacts
-        .iter()
-        .flat_map(|artifact| artifact.kv_events.iter())
-        .filter(|event| event.storage_tier == StorageTier::HostPinned)
-    {
-        match &event.event.data {
-            KvCacheEventData::Stored(_) => counts.stored += 1,
-            KvCacheEventData::Removed(_) => counts.removed += 1,
-            KvCacheEventData::Cleared => {}
-        }
-    }
-    counts
-}
-
 #[test]
 fn process_mooncake_trace_expands_and_duplicates_hash_space() -> anyhow::Result<()> {
     let mut file = NamedTempFile::new()?;
@@ -925,7 +788,7 @@ fn process_mooncake_trace_expands_and_duplicates_hash_space() -> anyhow::Result<
         42,
     )?;
 
-    let mut all_hashes: Vec<Vec<u64>> = traces
+    let mut all_hashes: Vec<Vec<u32>> = traces
         .into_iter()
         .flat_map(|worker| worker.sessions.into_iter())
         .flat_map(|session| session.turns.into_iter().map(|turn| turn.hash_ids))
@@ -941,18 +804,18 @@ fn process_mooncake_trace_expands_and_duplicates_hash_space() -> anyhow::Result<
     expected.sort();
     assert_eq!(all_hashes, expected, "hash_ids mismatch");
 
-    let copy0: Vec<&Vec<u64>> = all_hashes.iter().filter(|hashes| hashes[0] == 0).collect();
-    let copy1: Vec<&Vec<u64>> = all_hashes.iter().filter(|hashes| hashes[0] == 10).collect();
+    let copy0: Vec<&Vec<u32>> = all_hashes.iter().filter(|hashes| hashes[0] == 0).collect();
+    let copy1: Vec<&Vec<u32>> = all_hashes.iter().filter(|hashes| hashes[0] == 10).collect();
     assert_eq!(copy0.len(), 2);
     assert_eq!(copy1.len(), 2);
     assert_eq!(copy0[0][..4], copy0[1][..4], "copy 0 shared prefix broken");
     assert_eq!(copy1[0][..4], copy1[1][..4], "copy 1 shared prefix broken");
 
-    let set0: HashSet<u64> = copy0
+    let set0: HashSet<u32> = copy0
         .iter()
         .flat_map(|hashes| hashes.iter().copied())
         .collect();
-    let set1: HashSet<u64> = copy1
+    let set1: HashSet<u32> = copy1
         .iter()
         .flat_map(|hashes| hashes.iter().copied())
         .collect();
@@ -974,6 +837,16 @@ fn removed_legacy_branch_sharded_name_is_rejected() {
 }
 
 #[test]
+fn retired_transposed_ckf_benchmark_name_is_rejected() {
+    let error = MooncakeIndexerConfig::from_short_name("transposed-ckf", 4).unwrap_err();
+    let message = error.to_string();
+
+    assert!(message.contains("Unknown indexer"));
+    let valid_names = message.split("Valid names: ").nth(1).unwrap_or("");
+    assert!(!valid_names.contains("transposed-ckf"));
+}
+
+#[test]
 fn open_loop_preparation_preserves_query_first_ties_and_removed_blocks() -> anyhow::Result<()> {
     let artifacts = vec![ReplayWorkerArtifacts {
         requests: vec![ReplayTimedRequest {
@@ -983,7 +856,7 @@ fn open_loop_preparation_preserves_query_first_ties_and_removed_blocks() -> anyh
             input_length: 2,
             output_length: 1,
             replay_hashes: ReplayRequestHashes {
-                local_block_hashes: vec![LocalBlockHash(1), LocalBlockHash(2)],
+                local_block_hashes: vec![1, 2],
                 sequence_hashes: Vec::new(),
             },
         }],
@@ -1071,7 +944,7 @@ fn mooncake_preparation_normalizes_each_workers_first_entry_before_rescaling() -
                 input_length: 1,
                 output_length: 1,
                 replay_hashes: ReplayRequestHashes {
-                    local_block_hashes: vec![LocalBlockHash(timestamp_us)],
+                    local_block_hashes: vec![timestamp_us],
                     sequence_hashes: Vec::new(),
                 },
             })
@@ -1193,6 +1066,54 @@ async fn mooncake_open_loop_smoke_completes_exact_ids_and_drains() -> anyhow::Re
     );
     assert_eq!(result.queue_depth_at_stop.len(), 2);
     assert!(result.update_scheduled_to_finished.max_ns > 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_g1_parent_chain_replays_across_indexer_variants() -> anyhow::Result<()> {
+    let artifacts = vec![native_g1_parent_chain_artifact(BLOCK_SIZE as usize)];
+    let stored = artifacts[0]
+        .kv_events
+        .iter()
+        .filter_map(|event| match &event.event.data {
+            KvCacheEventData::Stored(stored) => Some(stored),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(stored.len(), 2);
+    assert_eq!(
+        stored.iter().map(|event| event.blocks.len()).sum::<usize>(),
+        3,
+        "fixture must publish two prefix blocks plus the promoted tail"
+    );
+
+    let variants = [
+        MooncakeIndexerConfig::radix_tree(),
+        MooncakeIndexerConfig::nested_map(8, NUM_EVENT_WORKERS),
+        MooncakeIndexerConfig::concurrent_radix_tree(NUM_EVENT_WORKERS),
+        MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS),
+        MooncakeIndexerConfig::branch_sharded_crtc(2, NUM_EVENT_WORKERS, 2),
+    ];
+
+    for config in &variants {
+        let label = config.short_name();
+        let (scores, metrics) =
+            collect_prepared_corpus_overlap_scores_with_metrics(config, &artifacts).await?;
+
+        assert_eq!(
+            support::stored_parent_not_found_count(metrics.as_ref()),
+            0,
+            "{label} rejected a Native G1 Stored event before its parent was visible"
+        );
+        assert_eq!(scores.len(), 1, "{label} should resolve the fixture query");
+        assert_eq!(scores[0].query_len, 3);
+        assert_eq!(
+            scores[0].scores.values().copied().max(),
+            Some(3),
+            "{label} should index the complete three-block parent chain"
+        );
+    }
+
     Ok(())
 }
 
@@ -1347,77 +1268,4 @@ async fn mooncake_trace_branch_sharded_depth4_matches_baseline() -> anyhow::Resu
     ];
 
     assert_overlap_score_parity(&variants, &artifact_sets, None).await
-}
-
-#[cfg(feature = "mocker-kvbm-offload")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mooncake_trace_g2_events_replay_through_host_pinned_lower_tier() -> anyhow::Result<()> {
-    let warning_count = support::warning_counter(&["dynamo_kv_router::indexer", "dynamo_mocker"]);
-    support::reset_warning_count(&warning_count);
-
-    let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
-    let traces = process_mooncake_trace(&fixture, BLOCK_SIZE, 1, 1, 1, 42)?;
-    let artifacts = generate_g2_replay_artifacts_with_capacity(
-        &traces,
-        G2_TEST_NUM_GPU_BLOCKS,
-        G2_TEST_NUM_G2_BLOCKS,
-        BLOCK_SIZE,
-        None,
-    )
-    .await?;
-    let counts = count_host_pinned_events(&artifacts);
-
-    assert!(
-        counts.stored > 0,
-        "mooncake G2 artifact generation should capture HostPinned Stored events; counts={counts:?}"
-    );
-    let (reference_scores, crtc_scores, host_pinned_dumped_events) =
-        g2_lower_tier::collect_tiered_replay_scores(&artifacts).await?;
-    let device_only_scores = collect_device_only_overlap_scores(
-        &MooncakeIndexerConfig::concurrent_radix_tree_compressed(NUM_EVENT_WORKERS),
-        &artifacts,
-    )
-    .await?;
-
-    assert!(
-        host_pinned_dumped_events > 0,
-        "HostPinned lower-tier indexer should retain replayed G2 state"
-    );
-    assert_eq!(
-        crtc_scores.len(),
-        reference_scores.len(),
-        "CRTC lower-tier replay produced a different request count than the reference replay"
-    );
-    assert_eq!(
-        crtc_scores.len(),
-        device_only_scores.len(),
-        "tiered replay produced a different request count than device-only replay"
-    );
-    assert!(
-        crtc_scores
-            .iter()
-            .zip(device_only_scores.iter())
-            .any(|(tiered, device_only)| {
-                g2_lower_tier::score_sum(tiered) > g2_lower_tier::score_sum(device_only)
-            }),
-        "HostPinned lower-tier replay should improve at least one mooncake request over device-only replay"
-    );
-
-    for (request_idx, (actual, expected)) in
-        crtc_scores.iter().zip(reference_scores.iter()).enumerate()
-    {
-        assert_eq!(
-            actual, expected,
-            "CRTC lower-tier additive overlap diverged from reference at replay request {request_idx}"
-        );
-    }
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(
-        warning_count.load(Ordering::Relaxed),
-        0,
-        "G2 HostPinned lower-tier replay emitted warn/error logs from dynamo_kv_router::indexer or dynamo_mocker"
-    );
-
-    Ok(())
 }

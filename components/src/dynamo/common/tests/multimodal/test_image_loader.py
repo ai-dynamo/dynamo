@@ -260,6 +260,43 @@ async def test_unsupported_format_batch_url_raises_415(loader: ImageLoader) -> N
         assert exc_info.value.status == 415
 
 
+async def test_uuid_only_image_slots_preserve_batch_alignment(
+    loader: ImageLoader,
+) -> None:
+    first = Image.new("RGB", (1, 1), color="red")
+    second = Image.new("RGB", (1, 1), color="blue")
+    loader.load_image = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[first, second]
+    )
+
+    images = await loader.load_image_batch(
+        [
+            {"Url": "https://example.com/first.png"},
+            {"UuidOnly": "cached-image"},
+            {"Url": "https://example.com/second.png"},
+        ],
+        preserve_uuid_slots=True,
+    )
+
+    assert images == [first, None, second]
+
+
+async def test_uuid_only_image_slots_require_opt_in(loader: ImageLoader) -> None:
+    with pytest.raises(ValueError, match="preserve_uuid_slots=True"):
+        await loader.load_image_batch([{"UuidOnly": "cached-image"}])
+
+
+async def test_batch_propagates_cancellation(loader: ImageLoader) -> None:
+    loader.load_image = AsyncMock(  # type: ignore[method-assign]
+        side_effect=asyncio.CancelledError
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await loader.load_image_batch(
+            [{URL_VARIANT_KEY: "https://example.com/image.png"}]
+        )
+
+
 async def test_unsupported_format_batch_data_url_raises_415(
     loader: ImageLoader,
 ) -> None:

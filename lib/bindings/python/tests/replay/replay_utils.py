@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 
 import numpy as np
@@ -47,6 +48,16 @@ AIC_PARITY_BACKENDS = [
 ]
 
 
+def _require_aisimulate_distribution(*, allow_module_level: bool = False) -> None:
+    try:
+        distribution("aisimulate")
+    except PackageNotFoundError:
+        pytest.skip(
+            "Dynamo replay integration tests require the optional AISimulate distribution",
+            allow_module_level=allow_module_level,
+        )
+
+
 def _vllm_args_payload():
     return {
         "block_size": 64,
@@ -74,14 +85,11 @@ def _router_config_payload():
         "router_temperature": 0.0,
         "overlap_score_credit": 1.0,
         "use_kv_events": True,
-        "durable_kv_events": False,
         "router_replica_sync": False,
         "router_track_active_blocks": True,
         "router_track_output_blocks": False,
         "router_assume_kv_reuse": True,
         "router_track_prefill_tokens": True,
-        "router_snapshot_threshold": 1000000,
-        "router_reset_states": False,
         "router_ttl_secs": 120.0,
         "skip_initial_worker_wait": False,
         "use_remote_indexer": False,
@@ -251,7 +259,15 @@ def _partial_router_config():
     )
 
 
+def _report_summary(report):
+    if not isinstance(report, dict):
+        return report.summary
+    summary = report.get("summary")
+    return summary if isinstance(summary, dict) else report
+
+
 def _assert_basic_report_counts(report, *, num_requests, input_tokens, output_tokens):
+    report = _report_summary(report)
     assert report["num_requests"] == num_requests
     assert report["completed_requests"] == num_requests
     assert report["total_input_tokens"] == num_requests * input_tokens
@@ -259,6 +275,7 @@ def _assert_basic_report_counts(report, *, num_requests, input_tokens, output_to
 
 
 def _assert_basic_report_metrics(report):
+    report = _report_summary(report)
     assert report["request_throughput_rps"] > 0
     assert report["output_throughput_tok_s"] > 0
     assert report["duration_ms"] > 0
@@ -345,24 +362,23 @@ def _aic_disagg_replay_args(
 
 
 def _run_aic_static_point(backend_name: str, isl: int, osl: int, batch_size: int):
-    aiconfigurator = pytest.importorskip("aiconfigurator")
+    aic_core = pytest.importorskip("aiconfigurator_core")
 
-    database = aiconfigurator.sdk.perf_database.get_database(
+    database = aic_core.sdk.perf_database.get_database(
         system=AIC_PARITY_SYSTEM,
         backend=backend_name,
         version=AIC_PARITY_VERSIONS[backend_name],
     )
-    backend = aiconfigurator.sdk.backends.factory.get_backend(backend_name)
-    model = aiconfigurator.sdk.models.get_model(
+    backend = aic_core.sdk.backends.factory.get_backend(backend_name)
+    model = aic_core.sdk.models.get_model(
         model_path=AIC_PARITY_MODEL,
-        model_config=aiconfigurator.sdk.config.ModelConfig(tp_size=1),
+        model_config=aic_core.sdk.config.ModelConfig(tp_size=1),
         backend_name=backend_name,
     )
-    session = aiconfigurator.sdk.inference_session.InferenceSession(
-        model, database, backend
-    )
-    summary = session.run_static(
-        runtime_config=aiconfigurator.sdk.config.RuntimeConfig(
+    summary = backend.run_static(
+        model=model,
+        database=database,
+        runtime_config=aic_core.sdk.config.RuntimeConfig(
             batch_size=batch_size,
             beam_width=1,
             isl=isl,

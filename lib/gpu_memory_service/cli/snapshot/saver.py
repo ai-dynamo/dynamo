@@ -16,8 +16,9 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from gpu_memory_service.common import cuda_utils
+from gpu_memory_service.cli.snapshot import run_per_device
 from gpu_memory_service.common.utils import get_socket_path
+from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.snapshot.backends.sharded_ssd import (
     device_sharded_ssd_roots,
     parse_sharded_ssd_roots,
@@ -55,9 +56,11 @@ def _save_device(
         ",".join(shard_roots) or "-",
     )
     t0 = time.monotonic()
-    # This runs on a ThreadPoolExecutor thread; bind its CUDA device before
+    # This runs on a ThreadPoolExecutor thread; bind its device before
     # any device work, mirroring the loader's _load_device.
-    cuda_utils.cuda_runtime_set_device(device)
+    vmm = get_vmm()
+    vmm.ensure_initialized()
+    vmm.runtime_set_device(device)
     GMSStorageClient(
         output_dir,
         socket_path=get_socket_path(device),
@@ -107,12 +110,32 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help="Comma-separated SSD roots for sharded prototype saves.",
     )
+    parser.add_argument(
+        "--device-type",
+        type=str,
+        default=VMMDeviceType.CUDA.value,
+        choices=[d.value for d in VMMDeviceType],
+        help="VMM device type (default: cuda).",
+    )
+    parser.add_argument(
+        "--device",
+        type=int,
+        default=None,
+        help="Device ordinal. Default: every visible GPU.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
+    selector = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    selector.add_argument("--use-v1", action="store_true")
+    options, remaining = selector.parse_known_args(argv)
+    if options.use_v1:
+        run_per_device("gpu_memory_service.v1.snapshot.saver", remaining)
+        return
+
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(remaining)
     if not args.checkpoint_dir:
         parser.error("--checkpoint-dir is required for directory-backed saves")
     checkpoint_dir = args.checkpoint_dir
@@ -122,7 +145,15 @@ def main(argv: list[str] | None = None) -> None:
     shard_size_bytes = args.shard_size_bytes
     sharded_ssd_roots = parse_sharded_ssd_roots(args.sharded_ssd_roots)
 
-    devices = cuda_utils.list_devices()
+    device_type = VMMDeviceType.from_str(args.device_type)
+    init_vmm(device_type)
+    vmm = get_vmm()
+    vmm.ensure_initialized()
+    devices = vmm.list_devices()
+    if args.device is not None:
+        if args.device not in devices:
+            parser.error(f"--device {args.device} is not visible (visible={devices})")
+        devices = [args.device]
     logger.info(
         "Starting GMS save for %d devices lock_timeout_ms=%d sharded_ssd_roots=%s",
         len(devices),

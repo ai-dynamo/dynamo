@@ -258,8 +258,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         // Capture this worker's trace identity once, for stamping on the
-        // first non-empty chunk. Yields None in non-JSONL deployments where
-        // `DistributedTraceIdLayer` is not installed.
+        // first non-empty chunk. Yields None when `DistributedTraceIdLayer`
+        // is not installed.
         let worker_trace_link: Option<dynamo_llm::protocols::common::preprocessor::TraceLink> = {
             let link = span.in_scope(|| {
                 dynamo_runtime::logging::get_distributed_tracing_context().map(|tc| {
@@ -272,7 +272,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             if link.is_none() {
                 tracing::trace!(
                     "worker_trace_link inactive — no DistributedTraceContext on \
-                     engine.generate (requires JSONL mode + OTEL_EXPORT_ENABLED)"
+                     engine.generate (enable OTLP export or JSONL trace context)"
                 );
             }
             link
@@ -300,9 +300,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .await
             .map_err(|e| {
                 span.record("error_kind", "setup_failed");
-                // Short, stable description — full error message is
-                // available via the trace_id-correlated log stream.
                 span.set_status(Status::error("setup_failed"));
+                tracing::debug!(
+                    request_id = ctx.id(),
+                    error = %e,
+                    error_type = ?e.error_type(),
+                    "engine.generate setup failed",
+                );
                 Error::from(e)
             })?;
         let request_start = Instant::now();
@@ -529,6 +533,12 @@ impl AsyncEngine<SingleIn<serde_json::Value>, ManyOut<Annotated<serde_json::Valu
             .map_err(|e| {
                 span.record("error_kind", "setup_failed");
                 span.set_status(Status::error("setup_failed"));
+                tracing::debug!(
+                    request_id = ctx.id(),
+                    error = %e,
+                    error_type = ?e.error_type(),
+                    "raw engine.generate setup failed",
+                );
                 Error::from(e)
             })?;
 

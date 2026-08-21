@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use anyhow::{Context, Result};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -14,12 +15,41 @@ use dynamo_kv_router::zmq_wire::*;
 use crate::kv_router::metrics::kv_publisher_metrics;
 use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
+pub(super) struct DecodedZmqKvBatch {
+    pub(super) source_cursor: u64,
+    pub(super) batch: KvEventBatch,
+}
+
+/// Decode the transport envelope shared by legacy and residency-aware inputs.
+///
+/// Callers retain their own malformed-input and protocol-version policies.
+pub(super) fn decode_zmq_kv_batch(
+    mut frames: crate::utils::zmq::MultipartMessage,
+) -> Result<DecodedZmqKvBatch> {
+    if frames.len() != 3 {
+        anyhow::bail!("expected three ZMQ frames, received {}", frames.len());
+    }
+    let payload = frames.pop().expect("frame count was validated");
+    let sequence = frames.pop().expect("frame count was validated");
+    let sequence: [u8; 8] = sequence.try_into().map_err(|sequence: Vec<u8>| {
+        anyhow::anyhow!(
+            "ZMQ sequence must contain eight bytes, received {}",
+            sequence.len()
+        )
+    })?;
+    let batch = decode_event_batch(&payload).context("failed to decode KV event batch")?;
+    Ok(DecodedZmqKvBatch {
+        source_cursor: u64::from_be_bytes(sequence),
+        batch,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn start_zmq_listener(
     zmq_endpoint: String,
     zmq_topic: String,
     worker_id: WorkerId,
-    tx: mpsc::UnboundedSender<PlacementEvent>,
+    tx: mpsc::UnboundedSender<Vec<PlacementEvent>>,
     cancellation_token: CancellationToken,
     kv_block_size: u32,
     next_event_id: Arc<AtomicU64>,
@@ -66,34 +96,15 @@ pub(super) async fn start_zmq_listener(
                     }
                     None => break 'main String::from("ZMQ stream ended"),
                 };
-                let mut frames = frames;
-
-                if frames.len() != 3 {
-                    tracing::warn!(
-                        "Received unexpected ZMQ frame count: expected 3, actual {}",
-                        frames.len()
-                    );
-                    continue;
-                }
-
-                let payload = frames.pop().unwrap();
-                let seq_bytes = frames.pop().unwrap();
-
-                if seq_bytes.len() != 8 {
-                    tracing::warn!(
-                        "Invalid sequence number byte length: expected 8, actual {}",
-                        seq_bytes.len()
-                    );
-                    continue;
-                }
-
-                let engine_seq = u64::from_be_bytes(seq_bytes.try_into().unwrap());
-
-                let batch_result = decode_event_batch(&payload);
-                let Ok(batch) = batch_result else {
-                    let e = batch_result.unwrap_err();
-                    tracing::warn!("Failed to decode KVEventBatch msgpack: {e}");
-                    continue;
+                let DecodedZmqKvBatch {
+                    source_cursor: engine_seq,
+                    batch,
+                } = match decode_zmq_kv_batch(frames) {
+                    Ok(decoded) => decoded,
+                    Err(error) => {
+                        tracing::warn!(%error, "Failed to decode ZMQ KV batch");
+                        continue;
+                    }
                 };
 
                 tracing::trace!(
@@ -105,6 +116,7 @@ pub(super) async fn start_zmq_listener(
                 );
 
                 let dp_rank = batch.data_parallel_rank.unwrap_or(0).cast_unsigned();
+                let mut events = Vec::with_capacity(batch.events.len());
                 for raw_event in batch.events {
                     let event_type = raw_event.event_type_label();
                     if let Some(metrics) = &metrics {
@@ -137,11 +149,15 @@ pub(super) async fn start_zmq_listener(
                     {
                         metrics.increment_zmq_suspicious_event(event_type, "empty_store_blocks");
                     }
-                    if tx.send(event).is_err() {
+                    events.push(event);
+                }
+                if !events.is_empty() {
+                    let event_count = events.len() as u64;
+                    if tx.send(events).is_err() {
                         tracing::warn!("Failed to send message to channel - receiver dropped");
                         break 'main String::from("channel receiver dropped");
                     }
-                    messages_processed += 1;
+                    messages_processed += event_count;
                 }
             }
         }

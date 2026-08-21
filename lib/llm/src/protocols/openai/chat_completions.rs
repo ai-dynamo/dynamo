@@ -117,7 +117,7 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_io_kwargs: Option<MediaDecoder>,
 
-    /// When true, logprob token fields are returned as "token_id:<id>" instead
+    /// When true, logprob token fields are returned as "token_id:`<id>`" instead
     /// of decoded text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_tokens_as_token_ids: Option<bool>,
@@ -128,8 +128,9 @@ pub struct NvCreateChatCompletionRequest {
 }
 
 impl NvCreateChatCompletionRequest {
-    /// Normalize OpenAI-style DS-V4 reasoning controls into the template kwargs
-    /// consumed by the SGLang/DeepSeek-V4 prompt formatter.
+    /// Resolve the request's reasoning controls into `chat_template_args`.
+    /// Runs once at the HTTP boundary, so every render path reads one answer.
+    /// Model-specific overrides still apply later in the default preprocessor.
     pub fn normalize_reasoning_template_args(&mut self) -> anyhow::Result<()> {
         let thinking_mode = self
             .thinking
@@ -137,40 +138,70 @@ impl NvCreateChatCompletionRequest {
             .map(openai_thinking_mode)
             .transpose()?
             .flatten();
+        // vLLM's order: an explicit top-level grade wins, else the nested one.
         let reasoning_effort = self
             .inner
             .reasoning_effort
             .as_ref()
-            .and_then(|effort| serde_json::to_value(effort).ok());
+            .and_then(|effort| serde_json::to_value(effort).ok())
+            .or_else(|| {
+                self.chat_template_args
+                    .as_ref()
+                    .and_then(|args| args.get("reasoning_effort"))
+                    // `null` means the client set nothing.
+                    .filter(|effort| !effort.is_null())
+                    .cloned()
+            });
 
-        if thinking_mode.is_none() && reasoning_effort.is_none() {
+        let has_template_control = self
+            .chat_template_args
+            .as_ref()
+            .is_some_and(|args| THINKING_KEYS.iter().any(|key| args.contains_key(*key)));
+        if thinking_mode.is_none() && reasoning_effort.is_none() && !has_template_control {
             return Ok(());
         }
 
         let args = self.chat_template_args.get_or_insert_with(HashMap::new);
         if let Some(mode) = thinking_mode {
             match mode {
-                OpenAiThinkingMode::Enabled => {
-                    args.insert("thinking".to_string(), serde_json::Value::Bool(true));
-                    args.insert(
-                        "thinking_mode".to_string(),
-                        serde_json::Value::String("enabled".to_string()),
-                    );
-                }
-                OpenAiThinkingMode::Disabled => {
-                    args.insert("thinking".to_string(), serde_json::Value::Bool(false));
-                    args.insert(
-                        "thinking_mode".to_string(),
-                        serde_json::Value::String("disabled".to_string()),
-                    );
-                }
+                OpenAiThinkingMode::Enabled => set_thinking(args, true),
+                OpenAiThinkingMode::Disabled => set_thinking(args, false),
                 OpenAiThinkingMode::Adaptive => {
+                    // `adaptive` defers to the model, so no toggle may survive.
+                    args.remove("thinking");
+                    args.remove("enable_thinking");
                     args.insert(
                         "thinking_mode".to_string(),
                         serde_json::Value::String("adaptive".to_string()),
                     );
                 }
             }
+        }
+        // Downstream readers compare modes case-insensitively; match them.
+        let mode = args
+            .get("thinking_mode")
+            .and_then(|v| v.as_str())
+            .map(str::to_ascii_lowercase);
+        // Highest wins, then it is stated in every dialect. Restating is the
+        // point: a decision left in one dialect reaches only the families that
+        // read it. A bool here is the client's own, because the root `adaptive`
+        // param cleared both above, so it outranks a nested mode.
+        let decided = THINKING_TOGGLES
+            .iter()
+            .find_map(|key| args.get(*key).and_then(|v| v.as_bool()))
+            .or_else(|| match mode.as_deref() {
+                // The model decides, so nothing is written.
+                Some("adaptive") => None,
+                Some("enabled") => Some(true),
+                Some("disabled") => Some(false),
+                // Only a string is a grade; anything else decides nothing.
+                _ => reasoning_effort
+                    .as_ref()
+                    .and_then(|effort| effort.as_str())
+                    .map(|effort| effort != "none"),
+            });
+        if let Some(on) = decided {
+            set_thinking(args, on);
         }
         if let Some(effort) = reasoning_effort {
             args.insert("reasoning_effort".to_string(), effort);
@@ -182,6 +213,20 @@ impl NvCreateChatCompletionRequest {
         self.thinking = None;
         Ok(())
     }
+}
+
+/// The two boolean dialects, in precedence order. `thinking_mode` carries the
+/// same decision as a string; families split over which one they read.
+const THINKING_TOGGLES: [&str; 2] = ["thinking", "enable_thinking"];
+const THINKING_KEYS: [&str; 3] = ["thinking", "enable_thinking", "thinking_mode"];
+
+fn set_thinking(args: &mut HashMap<String, serde_json::Value>, on: bool) {
+    args.insert("thinking".to_string(), serde_json::Value::Bool(on));
+    args.insert("enable_thinking".to_string(), serde_json::Value::Bool(on));
+    args.insert(
+        "thinking_mode".to_string(),
+        serde_json::Value::String(if on { "enabled" } else { "disabled" }.to_string()),
+    );
 }
 
 enum OpenAiThinkingMode {
@@ -385,8 +430,8 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
                 }
                 ResponseFormat::JsonSchema { json_schema } => {
                     // validate_response_format ensures schema is present when type=json_schema
-                    if let Some(schema) = json_schema.schema.clone() {
-                        return Some(schema);
+                    if !json_schema.schema.is_null() {
+                        return Some(json_schema.schema.clone());
                     }
                 }
             }
@@ -529,6 +574,7 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
 impl ValidateRequest for NvCreateChatCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
+        validate::validate_chat_template_args(self.chat_template_args.as_ref())?;
         validate::validate_messages(&self.inner.messages)?;
         validate::validate_model(&self.inner.model)?;
         // none for store
@@ -538,7 +584,10 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_logit_bias(&self.inner.logit_bias)?;
         // none for logprobs
         validate::validate_top_logprobs(self.inner.top_logprobs)?;
-        // validate::validate_max_tokens(self.inner.max_tokens)?; // warning depricated field
+        // `max_tokens` is deprecated but still accepted as a fallback for
+        // `max_completion_tokens`, so it must be validated too.
+        #[allow(deprecated)]
+        validate::validate_max_tokens(self.inner.max_tokens)?;
         validate::validate_max_completion_tokens(self.inner.max_completion_tokens)?;
         validate::validate_n(self.inner.n)?;
         validate_completion_token_ids_single_choice(
@@ -578,9 +627,54 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
 mod tests {
     use super::*;
     use crate::engines::ValidateRequest;
-    use crate::protocols::common::{OutputOptionsProvider, StopConditionsProvider};
+    use crate::protocols::common::{
+        OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
+    };
     use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolType, FunctionObject};
     use serde_json::json;
+
+    #[test]
+    fn test_top_k_sentinel_contract() {
+        for (top_k, expected) in [(-1, Some(-1)), (0, Some(-1)), (1, Some(1))] {
+            let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "top_k": top_k
+            }))
+            .expect("Failed to deserialize request");
+
+            ValidateRequest::validate(&request).expect("top_k must be valid");
+            assert_eq!(
+                request
+                    .extract_sampling_options()
+                    .expect("Failed to extract sampling options")
+                    .top_k,
+                expected
+            );
+        }
+
+        let null_request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "top_k": null
+        }))
+        .expect("Failed to deserialize request");
+        assert_eq!(
+            null_request
+                .extract_sampling_options()
+                .expect("Failed to extract sampling options")
+                .top_k,
+            None
+        );
+
+        let invalid_request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "top_k": -2
+        }))
+        .expect("Failed to deserialize request");
+        assert!(ValidateRequest::validate(&invalid_request).is_err());
+    }
 
     #[test]
     fn test_skip_special_tokens_none() {
@@ -804,6 +898,48 @@ mod tests {
             err.to_string()
                 .contains("tool named \"search\" in tool_choice is not present in tools")
         );
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_max_tokens() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 0
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request).expect_err("max_tokens: 0 must be rejected");
+        assert!(err.to_string().contains("Max tokens"));
+    }
+
+    #[test]
+    fn test_validate_accepts_max_tokens_at_upper_bound() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 1_048_576
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        assert!(ValidateRequest::validate(&request).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_max_tokens_above_upper_bound() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 1_048_577
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request)
+            .expect_err("max_tokens above the upper bound must be rejected");
+        assert!(err.to_string().contains("must not exceed 1048576"));
     }
 
     #[test]
@@ -1090,6 +1226,44 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_tools_rejects_non_object_parameters() {
+        for parameters in [json!("not-an-object"), json!([]), json!(42), json!(true)] {
+            let tools = vec![ChatCompletionTool {
+                r#type: ChatCompletionToolType::Function,
+                function: FunctionObject {
+                    name: "broken_tool".to_string(),
+                    description: None,
+                    parameters: Some(parameters),
+                    strict: None,
+                },
+            }];
+
+            let error = validate::validate_tools(&Some(&tools))
+                .expect_err("non-object function parameters must be rejected");
+            assert_eq!(
+                error.to_string(),
+                "Function parameters at index 0 for \"broken_tool\" must be a JSON Schema object"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_tools_accepts_omitted_parameters() {
+        let tools = vec![ChatCompletionTool {
+            r#type: ChatCompletionToolType::Function,
+            function: FunctionObject {
+                name: "parameterless_tool".to_string(),
+                description: None,
+                parameters: None,
+                strict: None,
+            },
+        }];
+
+        validate::validate_tools(&Some(&tools))
+            .expect("omitted function parameters should remain valid");
+    }
+
+    #[test]
     fn test_openai_thinking_payload_normalizes_to_template_args() {
         let json_str = json!({
             "model": "deepseek-ai/DeepSeek-V4-Pro",
@@ -1111,6 +1285,7 @@ mod tests {
             .as_ref()
             .expect("chat_template_args should be populated");
         assert_eq!(args.get("thinking"), Some(&json!(true)));
+        assert_eq!(args.get("enable_thinking"), Some(&json!(true)));
         assert_eq!(args.get("thinking_mode"), Some(&json!("enabled")));
         assert_eq!(args.get("reasoning_effort"), Some(&json!("max")));
     }
@@ -1141,6 +1316,42 @@ mod tests {
     }
 
     #[test]
+    fn test_adaptive_param_leaves_no_toggle() {
+        // Whatever the request carried, `adaptive` ends with the mode alone:
+        // a stale client toggle is cleared, and a grade derives none.
+        for extra in [
+            json!({"chat_template_args": {"thinking": true, "enable_thinking": false}}),
+            json!({"reasoning_effort": "none"}),
+            json!({"reasoning_effort": "high"}),
+        ] {
+            let mut payload = json!({
+                "model": "MiniMaxAI/MiniMax-M3",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "thinking": {"type": "adaptive"},
+            });
+            for (key, value) in extra.as_object().expect("object") {
+                payload[key] = value.clone();
+            }
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(payload).expect("request should deserialize");
+
+            request
+                .normalize_reasoning_template_args()
+                .expect("adaptive thinking payload should normalize");
+
+            let args = request
+                .chat_template_args
+                .as_ref()
+                .expect("chat_template_args should be populated");
+            assert_eq!(args.get("thinking_mode"), Some(&json!("adaptive")));
+            assert_eq!(args.get("thinking"), None);
+            assert_eq!(args.get("enable_thinking"), None);
+            // A grade still reaches models that read it.
+            assert_eq!(args.get("reasoning_effort"), extra.get("reasoning_effort"));
+        }
+    }
+
+    #[test]
     fn test_openai_thinking_disabled_normalizes_to_template_mode() {
         let json_str = json!({
             "model": "MiniMaxAI/MiniMax-M3",
@@ -1161,6 +1372,7 @@ mod tests {
             .as_ref()
             .expect("chat_template_args should be populated");
         assert_eq!(args.get("thinking"), Some(&json!(false)));
+        assert_eq!(args.get("enable_thinking"), Some(&json!(false)));
         assert_eq!(args.get("thinking_mode"), Some(&json!("disabled")));
     }
 
@@ -1191,9 +1403,201 @@ mod tests {
             .as_ref()
             .expect("chat_template_args should be populated");
         assert_eq!(args.get("thinking"), Some(&json!(false)));
+        assert_eq!(args.get("enable_thinking"), Some(&json!(false)));
         assert_eq!(args.get("thinking_mode"), Some(&json!("disabled")));
         assert_eq!(args.get("reasoning_effort"), Some(&json!("none")));
         assert!(request.thinking.is_none());
+    }
+
+    #[test]
+    fn test_reasoning_effort_controls_enable_thinking() {
+        // A grade decides the same way wherever the client put it.
+        for (effort, on) in [("none", false), ("low", true), ("high", true)] {
+            for placement in [
+                json!({"reasoning_effort": effort}),
+                json!({"chat_template_args": {"reasoning_effort": effort}}),
+            ] {
+                let mut payload = json!({
+                    "model": "zai-org/GLM-5.2",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                });
+                for (key, value) in placement.as_object().expect("object") {
+                    payload[key] = value.clone();
+                }
+                let mut request: NvCreateChatCompletionRequest =
+                    serde_json::from_value(payload).expect("request should deserialize");
+
+                request
+                    .normalize_reasoning_template_args()
+                    .expect("reasoning effort should normalize");
+
+                // All three dialects, so families reading `thinking` or
+                // `thinking_mode` honor the grade too.
+                let args = request
+                    .chat_template_args
+                    .as_ref()
+                    .expect("chat_template_args should be populated");
+                assert_eq!(args.get("thinking"), Some(&json!(on)));
+                assert_eq!(args.get("enable_thinking"), Some(&json!(on)));
+                assert_eq!(
+                    args.get("thinking_mode"),
+                    Some(&json!(if on { "enabled" } else { "disabled" }))
+                );
+                assert_eq!(args.get("reasoning_effort"), Some(&json!(effort)));
+            }
+        }
+    }
+
+    #[test]
+    fn test_explicit_thinking_bool_overrides_reasoning_effort() {
+        // Each case pairs the client's bool with the grade that contradicts it.
+        // `thinking` outranks `enable_thinking`, matching the renderer's own
+        // read order, so the conflicting pair resolves to `true`.
+        for (client, effort, on) in [
+            (json!({"enable_thinking": true}), "none", true),
+            (json!({"thinking": true}), "none", true),
+            (
+                json!({"thinking": true, "enable_thinking": false}),
+                "none",
+                true,
+            ),
+            (json!({"thinking": false}), "high", false),
+            (json!({"enable_thinking": false}), "high", false),
+        ] {
+            let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                "model": "zai-org/GLM-5.2",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "reasoning_effort": effort,
+                "chat_template_args": client
+            }))
+            .expect("request should deserialize");
+
+            request
+                .normalize_reasoning_template_args()
+                .expect("reasoning effort should normalize");
+
+            let args = request
+                .chat_template_args
+                .as_ref()
+                .expect("chat_template_args should be populated");
+            assert_eq!(args.get("thinking"), Some(&json!(on)));
+            assert_eq!(args.get("enable_thinking"), Some(&json!(on)));
+            assert_eq!(
+                args.get("thinking_mode"),
+                Some(&json!(if on { "enabled" } else { "disabled" }))
+            );
+            assert_eq!(args.get("reasoning_effort"), Some(&json!(effort)));
+        }
+    }
+
+    #[test]
+    fn test_template_only_thinking_control_is_expanded() {
+        // No root param and no grade: the request still carries a decision, so
+        // it must reach the families that read the other dialects.
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "moonshotai/Kimi-K2.6",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "chat_template_args": {"enable_thinking": false}
+        }))
+        .expect("request should deserialize");
+
+        request
+            .normalize_reasoning_template_args()
+            .expect("template-only control should normalize");
+
+        let args = request
+            .chat_template_args
+            .as_ref()
+            .expect("chat_template_args should be populated");
+        assert_eq!(args.get("thinking"), Some(&json!(false)));
+        assert_eq!(args.get("thinking_mode"), Some(&json!("disabled")));
+        assert!(args.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn test_thinking_mode_expands_into_bool_dialects() {
+        // The mode outranks the grade both ways, so each case uses the grade
+        // that contradicts it.
+        for (mode, effort, on, resolved) in [
+            ("enabled", "none", true, "enabled"),
+            ("Enabled", "none", true, "enabled"),
+            ("disabled", "high", false, "disabled"),
+            // Unrecognized dialect: the grade decides, rather than the mode
+            // blocking it and reaching no template at all.
+            ("auto", "none", false, "disabled"),
+        ] {
+            let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                "model": "zai-org/GLM-5.2",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "reasoning_effort": effort,
+                "chat_template_args": {"thinking_mode": mode}
+            }))
+            .expect("request should deserialize");
+
+            request
+                .normalize_reasoning_template_args()
+                .expect("reasoning effort should normalize");
+
+            // GLM reads only `enable_thinking`, so a bare mode that stayed bare
+            // would be dropped and the grade would decide instead.
+            let args = request
+                .chat_template_args
+                .as_ref()
+                .expect("chat_template_args should be populated");
+            assert_eq!(args.get("thinking"), Some(&json!(on)));
+            assert_eq!(args.get("enable_thinking"), Some(&json!(on)));
+            assert_eq!(args.get("thinking_mode"), Some(&json!(resolved)));
+        }
+    }
+
+    #[test]
+    fn test_nested_adaptive_yields_to_client_bool() {
+        // A nested mode sits below the bools. Only the root `thinking` param
+        // outranks them, and it clears them before this runs.
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "MiniMaxAI/MiniMax-M3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "chat_template_args": {"thinking": false, "thinking_mode": "adaptive"}
+        }))
+        .expect("request should deserialize");
+
+        request
+            .normalize_reasoning_template_args()
+            .expect("nested controls should normalize");
+
+        let args = request
+            .chat_template_args
+            .as_ref()
+            .expect("chat_template_args should be populated");
+        assert_eq!(args.get("thinking"), Some(&json!(false)));
+        assert_eq!(args.get("enable_thinking"), Some(&json!(false)));
+        assert_eq!(args.get("thinking_mode"), Some(&json!("disabled")));
+    }
+
+    #[test]
+    fn test_nested_reasoning_effort_decides_only_when_a_string() {
+        // `null` means absent and a non-string is not a grade, so neither may
+        // turn thinking on.
+        for effort in [json!(null), json!(3)] {
+            let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                "model": "zai-org/GLM-5.2",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "chat_template_args": {"reasoning_effort": effort}
+            }))
+            .expect("request should deserialize");
+
+            request
+                .normalize_reasoning_template_args()
+                .expect("nested effort should normalize");
+
+            let args = request
+                .chat_template_args
+                .as_ref()
+                .expect("chat_template_args should be populated");
+            assert!(args.get("thinking").is_none(), "{effort} decided nothing");
+            assert!(args.get("enable_thinking").is_none());
+            assert!(args.get("thinking_mode").is_none());
+        }
     }
 
     #[test]

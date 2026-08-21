@@ -48,7 +48,7 @@ the request. The exact arg name and value varies per family:
 
 - `kimi_k25` — `thinking: false`
 - `nemotron_nano` / `nemotron3` / `nemotron_v3` —
-  `enable_thinking: false` OR `force_nonempty_content: true`
+  `enable_thinking: false`; `force_nonempty_content: true` keeps parsing enabled and defers reasoning until content is known
 - `deepseek_r1` / `deepseek_v4` — `thinking: false` OR
   `thinking_mode: "chat"` (matches V4 formatter's `resolve_thinking_mode`
   convention; keeps parser and prompt synchronized)
@@ -69,22 +69,23 @@ behavior.
 
 When the chat template injects a reasoning start token (e.g. `<think>`)
 into the prompt, the preprocessor sets `prompt_injected_reasoning=true`
-so the parser starts in reasoning mode immediately. Combined with the
-`last_is_tool` gate:
+so the parser starts in reasoning mode immediately.
 
-- `last_is_tool == true` → force-reasoning **off** (current behavior).
-  Rationale: tool-continuation turns produce the final user-facing
-  answer directly from the tool result; force-reasoning would mislabel
-  that final answer as `reasoning_content`. Matches SGLang's observed
-  Kimi K2.5 behavior.
-- `last_is_tool == false` → force-reasoning honored.
+Thinking arguments are normalized to a JSON boolean before prompt
+rendering so the template, SGLang guided-output gate, and postprocessor
+use the same value. The accepted enabled values are `true`, `"true"`, `"1"`,
+`"yes"`, `"on"`, and nonzero numbers. Kimi defaults an omitted value to
+enabled; `thinking=false` and equivalent falsey values disable PRE.2.
 
-**Tension:** DSv4 disagrees with this gate — the V4 formatter *seeds*
-`<think>` into the prompt after a merged tool result, so DSv4 needs
-force-reasoning **on** even when `last_is_tool`. Tracked in
-[#8901](https://github.com/ai-dynamo/dynamo/pull/8901). Resolution
-likely requires per-parser handling of this gate (mirror PRE.2's
-match-on-parser shape) rather than a global behavior.
+Kimi tool-continuation turns therefore honor prompt-injected reasoning
+for both explicit and default-enabled thinking. K2.5 can rarely return a
+marker-free answer despite a thinking prompt; without output buffering,
+that model deviation is classified as reasoning content.
+
+For other parsers, `prompt_injected_reasoning` continues to start the
+configured parser in reasoning mode. This includes DSv4, whose formatter
+can seed `<think>` after a merged tool result; see
+[#8901](https://github.com/ai-dynamo/dynamo/pull/8901).
 
 **Wrong value silently produces:** `</think>` literal leaking into
 `content` (DSv4) or final answer mislabeled as reasoning (Kimi K2.5).
@@ -117,9 +118,7 @@ included here as a baseline reminder that the preprocessor owns this.
 **Function:** `OpenAIPreprocessor::strip_leading_reasoning_start_from_stream`
 
 When PRE.2 disables a Nemotron force-reasoning parser, Dynamo must not
-run the reasoning parser. However, vLLM-compatible Nemotron templates can
-still produce a leading `<think>` in disabled-thinking modes such as
-`force_nonempty_content=true`. The preprocessor strips only that leading
+run the reasoning parser. However, vLLM-compatible Nemotron templates can still produce a leading `<think>` when thinking is explicitly disabled. The preprocessor strips only that leading
 marker, buffers split prefixes like `"<thi"` + `"nk>answer"`, tracks
 state per streamed choice, and emits the remaining bytes as normal
 `content`.
@@ -142,19 +141,21 @@ if you know the answer, fill it in.
 |---|---|---|---|---|---|
 | `harmony` (tool) / `gpt_oss` (reasoning) | **YES** | — | — | — | Channels: `<\|channel\|>analysis<\|message\|>...<\|end\|>`. gpt-oss-20B/120B. |
 | `gemma4` (tool + reasoning) | **YES** | `enable_thinking=false` | — | — | Prompt trigger: `<\|think\|>` in the system turn. Parser-visible reasoning output: `<\|channel>thought\n...<channel\|>`. |
-| `kimi_k25` (reasoning) | ? — markers are `<\|tool_calls_section_*\|>`, likely YES | `thinking=false` | — | OFF when last_is_tool (currently global) | Special-token markers in K2/K2.5/K2.6. |
+| `kimi_k25` (reasoning) | **YES** | normalized `thinking=false` | — | ON when thinking is enabled or omitted; OFF when disabled | `thinking` and `enable_thinking` are normalized before rendering; omitted means enabled. Marker-free K2.5 post-tool answers are a known model deviation. |
 | `deepseek_v3` / `deepseek_v3_1` (tool + reasoning) | ? — Unicode markers (`<｜tool_calls_section_begin｜>`); likely YES | opt in with `thinking=true` | — | — | Force-reasoning aliases use shape-aware guided JSON parsing. |
 | `deepseek_v3_2` / `deepseek_v4` (DSML) | ? — DSML markers (`<｜DSML｜tool_calls>`); likely YES | `thinking=false` / `thinking_mode=chat` | — | **NEEDS ON** even when last_is_tool (V4 formatter seeds `<think>`); see #8901 | DSv3.2 / DSv4 grammar. |
 | `deepseek_r1` (reasoning) | NO (uses plain `<think>`) | `thinking=false` | — | — | DeepSeek-R1. |
 | `nemotron_deci` (tool) | ? | — | — | — | Nemotron tool parser. |
-| `nemotron_nano` / `nemotron3` / `nemotron_v3` (reasoning) | ? | `enable_thinking=false` / `force_nonempty_content=true` | YES when PRE.2 disables reasoning | — | Dynamically distinguish bare guided JSON from `reasoning</think>JSON`; `nemotron_v3` is the vLLM-compatible alias. |
+| `nemotron_nano` / `nemotron3` / `nemotron_v3` (reasoning) | ? | `enable_thinking=false`; `force_nonempty_content=true` keeps parsing enabled | YES when explicit thinking disablement fires PRE.2 | — | Dynamically distinguish bare guided JSON from `reasoning</think>JSON`; `nemotron_v3` is the vLLM-compatible alias. |
 | `llama3_json` (tool) | ? — `<\|python_tag\|>` is a special token, likely YES | — | — | — | Llama 3.x. |
 | `hermes` (tool) | NO | — | — | — | Plain XML `<tool_call>...</tool_call>`. |
 | `qwen3_coder` (tool) | NO | — | — | — | Plain XML `<tool_call><function=...>`. |
 | `pythonic` (tool) | NO | — | — | — | Python list literal. |
 | `mistral` (tool + reasoning) | **YES** for reasoning | disabled unless `reasoning_effort` is present and not `none` | — | — | `[TOOL_CALLS]` tool text; `[THINK]...[/THINK]` reasoning. |
 | `phi4` (tool) | NO | — | — | — | `functools[...]` plain text. |
-| `minimax_m2` (tool) / `minimax_append_think` (reasoning) | NO | — | — | OFF on `tool_choice=required/named` (universal, PRE.4) | XML markers, plain text. |
+| `minimax_m2` (tool + reasoning) | NO | `thinking=false` / `enable_thinking=false` | — | — | Force reasoning with `<think>...</think>`; dynamically distinguishes bare guided JSON from reasoning followed by an XML tool payload. |
+| `minimax_m3` (tool + reasoning) | YES | `thinking_mode=disabled` | — | — | Prompt-prefilled `<mm:think>...</mm:think>` reasoning with MiniMax namespace-token XML tool calls. |
+| `minimax_append_think` (reasoning) | NO | — | — | OFF on `tool_choice=required/named` (universal, PRE.4) | Deprecated legacy MiniMax pass-through; does not populate `reasoning_content`. Use `minimax_m2` for MiniMax M2 tool-calling deployments. |
 | `glm47` (tool) | NO | — | — | — | Plain XML. |
 | `jamba` (tool) | NO | — | — | — | `<tool_calls>` plain text wrapper. |
 | `qwen` (reasoning, basic `<think>`) | NO | — | — | — | Plain `<think>...</think>`. |
@@ -177,9 +178,9 @@ if you know the answer, fill it in.
    leading reasoning marker that should become normal content? If yes,
    add an explicit strip/pass-through case and stream test coverage.
 4. PRE.3: when the previous turn is a tool call, does the model
-   re-enter reasoning (DSv4) or skip straight to answer (Kimi K2.5)?
-   Document explicitly in this table; current code uses a global gate
-   that may need to become parser-specific (see #8901).
+   re-enter reasoning (DSv4 and Kimi K2.6 with `thinking=true`) or skip
+   straight to the answer (legacy Kimi K2.5 behavior)? Document the request
+   controls and parser-specific behavior explicitly in this table.
 5. PRE.4: confirm `tool_choice = required/named` doesn't conflict with
    the parser's behavior. Add shape detection only after proving both bare-JSON
    and reasoning-boundary JSON paths.

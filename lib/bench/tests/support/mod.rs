@@ -6,7 +6,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Context;
-use dynamo_kv_router::indexer::{KvIndexerMetrics, METRIC_WARNING_DUPLICATE_STORE};
+use dynamo_kv_router::indexer::{
+    KvIndexerMetrics, METRIC_EVENT_STORED, METRIC_STATUS_PARENT_NOT_FOUND,
+    METRIC_WARNING_DUPLICATE_STORE,
+};
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::Registry;
 use tracing_subscriber::layer::{Context as LayerContext, Layer};
@@ -74,5 +77,14 @@ pub fn duplicate_store_warning_count(metrics: &KvIndexerMetrics) -> u64 {
         .kv_cache_event_warnings
         .get_metric_with_label_values(&[METRIC_WARNING_DUPLICATE_STORE])
         .expect("duplicate_store warning metric should exist")
+        .get()
+}
+
+#[allow(dead_code)]
+pub fn stored_parent_not_found_count(metrics: &KvIndexerMetrics) -> u64 {
+    metrics
+        .kv_cache_events_applied
+        .get_metric_with_label_values(&[METRIC_EVENT_STORED, METRIC_STATUS_PARENT_NOT_FOUND])
+        .expect("stored parent-not-found metric should exist")
         .get()
 }

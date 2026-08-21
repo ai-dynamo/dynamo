@@ -1,0 +1,146 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Chat Processors
+subtitle: Pick who parses model output — the dynamo default, or vLLM/SGLang engine fallback
+---
+
+Every request to `/v1/chat/completions` is handled by a **chat processor**. It renders the chat template, tokenizes, routes to the worker, assembles the OpenAI-compatible response, and — for the formats it supports — parses tool calls and reasoning out of the model's raw output.
+
+You have three options, selected with the `--dyn-chat-processor` **Frontend** flag (env var `DYN_CHAT_PROCESSOR`):
+
+- **`dynamo` (default)** — Dynamo's framework-agnostic Rust processor. It works on every backend (vLLM, SGLang, TRT-LLM), supports disaggregated serving, and ships built-in parsers for a broad set of model formats. **Use this whenever Dynamo has a parser for your model** — which is most of the time.
+- **`vllm` / `sglang` (engine fallback)** — hand parsing back to the engine's own Python parser. Use these **only** when Dynamo does not ship a parser for your model's format.
+
+All three keep Dynamo's tokenization, routing, and disaggregated serving — the only thing that changes is who runs the parser. Your choice also decides the parser flag names and which component carries them; the tabs below show exactly where they go.
+
+New here? Read the [Overview](overview.mdx) first for how the chat processor relates to the tool-call and reasoning parsers.
+
+## Configuration
+
+<Tabs>
+  <Tab title="dynamo (default)" language="dynamo">
+    **Use this whenever Dynamo has a parser for your model.** Leave `--dyn-chat-processor` unset (it defaults to `dynamo`). Put the parser flags on the **worker** as `--dyn-tool-call-parser` / `--dyn-reasoning-parser`, using names from Dynamo's registry. The same worker flags work on vLLM, SGLang, or TRT-LLM.
+
+    ```yaml
+    apiVersion: nvidia.com/v1beta1
+    kind: DynamoGraphDeployment
+    metadata:
+      name: qwen3-parsers
+    spec:
+      components:
+      - name: Frontend            # defaults to `dynamo` — no chat-processor args needed
+        type: frontend
+        # ...
+      - name: VllmWorker          # worker selects the Dynamo parsers
+        type: worker
+        # ...
+        podTemplate:
+          spec:
+            containers:
+            - name: main
+              # ...
+              command:
+              - python3
+              - -m
+              - dynamo.vllm
+              args:
+              - --model
+              - Qwen/Qwen3-0.6B
+              - --dyn-tool-call-parser   # names from Dynamo's registry
+              - hermes
+              - --dyn-reasoning-parser
+              - qwen3
+    ```
+
+    For the parser names, see [Tool Call Parsing](tool-call-parsing.mdx) and [Reasoning Parsing](reasoning-parsing.md).
+  </Tab>
+  <Tab title="vLLM" language="vllm">
+    vLLM parsing is an **engine fallback** — use it only when Dynamo lacks a parser for your model. Set `--dyn-chat-processor vllm` on the **Frontend**, and put the bare `--tool-call-parser` / `--reasoning-parser` there too — no `--dyn-` prefix, and using **vLLM's** parser names. The worker stays clean.
+
+    <Warning>
+    The parser flags live on the **Frontend**, not the worker. In fallback mode they drop the `--dyn-` prefix and use **vLLM's** registry names, which can differ from Dynamo's (e.g. vLLM `nemotron_v3` vs Dynamo `nemotron3`). See the [vLLM Chat Processor](../../developer-guide/knowledge-base/modular-components/backends/vllm/chat-processor.md) page for the engine names.
+    </Warning>
+
+    ```yaml
+    apiVersion: nvidia.com/v1beta1
+    kind: DynamoGraphDeployment
+    metadata:
+      name: qwen3-vllm-fallback
+    spec:
+      components:
+      - name: Frontend            # frontend carries the engine-fallback parser flags
+        type: frontend
+        # ...
+        podTemplate:
+          spec:
+            containers:
+            - name: main
+              # ...
+              command:
+              - python3
+              - -m
+              - dynamo.frontend
+              args:
+              - --dyn-chat-processor
+              - vllm
+              - --tool-call-parser     # bare flag, vLLM's registry names
+              - hermes
+              - --reasoning-parser
+              - qwen3
+      - name: VllmWorker          # no parser flags on the worker
+        type: worker
+        # ...
+    ```
+  </Tab>
+  <Tab title="SGLang" language="sglang">
+    SGLang parsing is an **engine fallback** — use it only when Dynamo lacks a parser for your model. Set `--dyn-chat-processor sglang` on the **Frontend**, and put the bare `--tool-call-parser` / `--reasoning-parser` there too — no `--dyn-` prefix, and using **SGLang's** parser names. The worker stays clean.
+
+    <Warning>
+    The parser flags live on the **Frontend**, not the worker. In fallback mode they drop the `--dyn-` prefix and use **SGLang's** registry names, which can differ from Dynamo's (e.g. SGLang `deepseekv3` vs Dynamo `deepseek_v3`). See the [SGLang Chat Processor](../../developer-guide/knowledge-base/modular-components/backends/sglang/chat-processor.md) page for the engine names.
+    </Warning>
+
+    ```yaml
+    apiVersion: nvidia.com/v1beta1
+    kind: DynamoGraphDeployment
+    metadata:
+      name: qwen3-sglang-fallback
+    spec:
+      components:
+      - name: Frontend            # frontend carries the engine-fallback parser flags
+        type: frontend
+        # ...
+        podTemplate:
+          spec:
+            containers:
+            - name: main
+              # ...
+              command:
+              - python3
+              - -m
+              - dynamo.frontend
+              args:
+              - --dyn-chat-processor
+              - sglang
+              - --tool-call-parser     # SGLang's name (Dynamo calls it hermes)
+              - qwen25
+              - --reasoning-parser
+              - qwen3
+      - name: SGLangWorker        # no parser flags on the worker
+        type: worker
+        # ...
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+Engine fallback is supported on vLLM and SGLang only. TRT-LLM engine fallback is a work in progress — on a TRT-LLM worker, keep the default `dynamo` chat processor.
+</Warning>
+
+## See Also
+
+- [Overview](overview.mdx) — how the chat processor, tool-call parser, and reasoning parser fit together
+- [Tool Call Parsing](tool-call-parsing.mdx) — Dynamo-native tool-call parser names
+- [Reasoning Parsing](reasoning-parsing.md) — Dynamo-native reasoning parser names
+- [vLLM Chat Processor](../../developer-guide/knowledge-base/modular-components/backends/vllm/chat-processor.md) / [SGLang Chat Processor](../../developer-guide/knowledge-base/modular-components/backends/sglang/chat-processor.md) — engine-fallback processor details and engine parser names
+- [Frontend Configuration Reference](../../reference/components/frontend-configuration.mdx) — full CLI flag reference

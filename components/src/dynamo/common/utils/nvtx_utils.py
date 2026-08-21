@@ -5,11 +5,6 @@ Lightweight NVTX wrappers for Dynamo profiling.
 
 Set DYN_NVTX=1 to enable markers; default is disabled (zero overhead).
 
-Backed by the ``nvtx`` PyPI package, which binds the NVTX **v3** header-only C
-API (``nvtx3/nvToolsExt.h``). Nothing is linked or dlopened at runtime — the v3
-headers bind to the profiler's injection library on first use — so markers work
-on CUDA 13, which removed ``libnvToolsExt.so``.
-
 Usage — same syntax as the bare nvtx module:
 
     from dynamo.common.utils import nvtx_utils as _nvtx
@@ -19,9 +14,6 @@ Usage — same syntax as the bare nvtx module:
     ...
     _nvtx.end_range(rng)
 
-    # Instantaneous marker
-    _nvtx.mark("my:event", color="red")
-
     # Decorator — annotates an entire function or async generator
     @_nvtx.annotate("my:func", color="green")
     def my_func(): ...
@@ -30,19 +22,15 @@ Usage — same syntax as the bare nvtx module:
     async def my_async_gen():
         yield ...
 
-    # Context manager — annotates a SYNCHRONOUS block. It uses the thread's
-    # nested push/pop stack, so do not await inside it: another coroutine
-    # resuming on the same event loop would interleave its push/pop with this
-    # one. Use start_range/end_range (or range_decorator) around awaits.
+    # Context manager — annotates a block (works with await and yield inside)
     with _nvtx.annotate("my:block", color="cyan"):
-        payload = build_payload()
+        result = await some_coroutine()
 
 When enabled, uses a named nvtx.Domain and pre-allocated EventAttributes
 objects (cached lazily by (message, color)) so that repeated calls to
 start_range incur only a single dict lookup — no object allocation
 or domain cache lookups on the hot path.
 """
-
 import functools
 import inspect
 import os
@@ -71,30 +59,15 @@ if ENABLED:
     def end_range(rng) -> None:
         _domain.end_range(rng)
 
-    def mark(message: str, color: str = "white") -> None:
-        """Emit an instantaneous NVTX marker in the "dynamo" domain."""
-        _domain.mark(_get_attr(message, color))
-
     # functools.partial so decorator and context-manager usage both land
     # in the "dynamo" domain, keeping all markers in one nsys row.
     annotate = functools.partial(_nvtx_lib.annotate, domain="dynamo")
 
     def range_decorator(message: str, color: str = "white"):
-        """Decorator that wraps a function in a single NVTX start/end range.
+        """Decorator that wraps an async generator function with an NVTX range.
 
-        Handles all three callable shapes correctly:
-
-        - async generator functions: the range spans the full iteration, not
-          just the synchronous setup before the first yield (which is all
-          annotate() would cover).
-        - coroutine functions: the range spans the awaited body. annotate()
-          would close the range as soon as the coroutine object was
-          constructed, measuring nothing.
-        - plain functions: the range spans the call.
-
-        Start/end ranges (not the thread's nested push/pop stack) are used so
-        the range stays correct when other coroutines interleave on the same
-        event loop.
+        Unlike annotate(), which only covers the synchronous setup before the
+        first yield, this wraps the full generator iteration in a single range.
         """
 
         def decorator(func):
@@ -106,17 +79,6 @@ if ENABLED:
                     try:
                         async for item in func(*args, **kwargs):
                             yield item
-                    finally:
-                        end_range(rng)
-
-                return wrapper
-            elif inspect.iscoroutinefunction(func):
-
-                @functools.wraps(func)
-                async def wrapper(*args, **kwargs):
-                    rng = start_range(message, color)
-                    try:
-                        return await func(*args, **kwargs)
                     finally:
                         end_range(rng)
 
@@ -143,9 +105,6 @@ else:
         return None
 
     def end_range(rng) -> None:  # type: ignore[misc]
-        pass
-
-    def mark(message: str, color: str = "white") -> None:  # type: ignore[misc]
         pass
 
     class _NoOpAnnotate:

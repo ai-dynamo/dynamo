@@ -2,64 +2,26 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::identity::{RoutingPartitionId, default_routing_group};
 use crate::protocols::{
     DpRank, KvTransferEnforcement, RoutingConstraints, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::PotentialLoad;
 use crate::scheduling::config::RouterConfigOverride;
 pub use crate::scheduling::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
-use crate::services::indexer::registry::IndexerKey;
 use crate::services::overlap::MooncakeOverlapSummary;
 
 use super::input::PromptRequest;
 
 const DEFAULT_MODEL_NAME: &str = "default";
-const DEFAULT_ROUTING_GROUP: &str = "default";
 pub(super) const WORKER_TYPE: &str = "select";
 pub(super) const REQUEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
 fn default_model_name() -> String {
     DEFAULT_MODEL_NAME.to_string()
-}
-
-fn default_routing_group() -> String {
-    DEFAULT_ROUTING_GROUP.to_string()
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize)]
-pub struct SelectionKey {
-    pub model_name: String,
-    pub routing_group: String,
-}
-
-impl SelectionKey {
-    pub(super) fn new(model_name: impl Into<String>, routing_group: impl Into<String>) -> Self {
-        Self {
-            model_name: model_name.into(),
-            routing_group: routing_group.into(),
-        }
-    }
-
-    pub(super) fn indexer_key(&self) -> IndexerKey {
-        IndexerKey {
-            model_name: self.model_name.clone(),
-            routing_group: self.routing_group.clone(),
-        }
-    }
-}
-
-impl fmt::Display for SelectionKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "model={} routing_group={}",
-            self.model_name, self.routing_group
-        )
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,8 +149,8 @@ impl WorkerCatalogRecord {
         }
     }
 
-    pub(super) fn key(&self) -> SelectionKey {
-        SelectionKey::new(self.model_name.clone(), self.routing_group.clone())
+    pub(super) fn key(&self) -> RoutingPartitionId {
+        RoutingPartitionId::new(self.model_name.clone(), self.routing_group.clone())
     }
 
     pub(super) fn dp_start(&self) -> u32 {
@@ -266,6 +228,34 @@ impl WorkerCatalogRecord {
         }
 
         missing
+    }
+}
+
+// Implemented manually because `model_name` and `routing_group` have custom
+// default values.
+impl Default for WorkerRequest {
+    fn default() -> Self {
+        Self {
+            worker_id: 0,
+            model_name: default_model_name(),
+            routing_group: default_routing_group(),
+            endpoint: None,
+            kv_events_endpoint: None,
+            kv_events_endpoints: HashMap::new(),
+            replay_endpoint: None,
+            block_size: None,
+            data_parallel_start_rank: None,
+            data_parallel_size: None,
+            max_num_batched_tokens: None,
+            total_kv_blocks: None,
+            stable_routing_id: None,
+            is_eagle: None,
+            taints: HashSet::new(),
+            topology_domains: HashMap::new(),
+            kv_transfer_domain: None,
+            kv_transfer_enforcement: None,
+            kv_transfer_preferred_weight: None,
+        }
     }
 }
 
@@ -435,8 +425,6 @@ pub struct SelectAndReserveRequest {
     pub routing_group: String,
     #[serde(default)]
     pub selection_id: Option<String>,
-    #[serde(default)]
-    pub reservation_id: Option<String>,
     #[serde(flatten)]
     pub prompt: PromptRequest,
     #[serde(default)]
@@ -457,14 +445,22 @@ pub struct SelectAndReserveRequest {
     pub routing_constraints: RoutingConstraints,
 }
 
+/// Booking request: replay the selection cached under `selection_id`, or book
+/// self-contained with `worker_id`. The replay books exactly what `select` captured;
+/// request fields other than the ids and model/routing-group are ignored.
 #[derive(Debug, Deserialize)]
 pub struct ReservationRequest {
     #[serde(default = "default_model_name")]
     pub model_name: String,
     #[serde(default = "default_routing_group")]
     pub routing_group: String,
-    pub reservation_id: String,
-    pub worker_id: WorkerId,
+    /// The single booking id: the cache key to replay and the scheduler request
+    /// id the booking lands under (the `selection_id` from the matching `select`).
+    pub selection_id: String,
+    /// Explicit, self-contained form: books under `selection_id` on this worker
+    /// without a cached select. Omit to replay the cached `selection_id`.
+    #[serde(default)]
+    pub worker_id: Option<WorkerId>,
     #[serde(default)]
     pub dp_rank: Option<DpRank>,
     #[serde(flatten)]
@@ -475,6 +471,8 @@ pub struct ReservationRequest {
     pub expected_output_tokens: Option<u32>,
     #[serde(default)]
     pub effective_prefill_tokens: Option<usize>,
+    #[serde(default)]
+    pub track_prefill_tokens: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -512,7 +510,11 @@ pub struct SelectResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selection_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reservation_id: Option<String>,
+    pub sequence_hashes: Option<Vec<i64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isl_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub track_prefill_tokens: Option<bool>,
     pub model_name: String,
     pub routing_group: String,
     pub worker_id: WorkerId,
@@ -525,7 +527,7 @@ pub struct SelectResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ReservationResponse {
-    pub reservation_id: String,
+    pub selection_id: String,
     pub model_name: String,
     pub routing_group: String,
     pub worker_id: WorkerId,

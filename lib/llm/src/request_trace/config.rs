@@ -21,6 +21,8 @@ const DEFAULT_FILE_PATH: &str = "/tmp/dynamo-request-trace";
 const DEFAULT_NATS_SUBJECT: &str = "dynamo.request_trace.v1";
 const DEFAULT_LEGACY_AUDIT_NATS_SUBJECT: &str = "dynamo.audit.v1";
 const DEFAULT_OTEL_MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+const DEFAULT_S3_ROLL_UNCOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
+const DEFAULT_S3_FLUSH_INTERVAL_MS: u64 = 10_000;
 
 const CAPTURE_UNINITIALIZED: u8 = 0;
 const CAPTURE_ACTIVE: u8 = 1;
@@ -32,6 +34,7 @@ pub enum RequestTraceSinkKind {
     Stderr,
     Nats,
     Otel,
+    S3,
 }
 
 impl RequestTraceSinkKind {
@@ -41,6 +44,7 @@ impl RequestTraceSinkKind {
             Self::Stderr => "stderr",
             Self::Nats => "nats",
             Self::Otel => "otel",
+            Self::S3 => "s3",
         }
     }
 }
@@ -91,8 +95,14 @@ pub struct RequestTracePolicy {
     pub file_roll_lines: Option<u64>,
     pub nats_subject: String,
     pub otel_max_payload_bytes: usize,
+    pub http_header_capture_list: Vec<String>,
     pub tool_events_zmq_endpoint: Option<String>,
     pub tool_events_zmq_topic: Option<String>,
+    pub s3_bucket: Option<String>,
+    pub s3_region: Option<String>,
+    pub s3_prefix: Option<String>,
+    pub s3_roll_uncompressed_bytes: u64,
+    pub s3_flush_interval_ms: u64,
 }
 
 impl RequestTracePolicy {
@@ -184,6 +194,23 @@ fn load_from_env() -> RequestTracePolicy {
     ])
     .filter(|value| *value > 0)
     .unwrap_or(DEFAULT_OTEL_MAX_PAYLOAD_BYTES);
+    let http_header_capture_list =
+        std::env::var(env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST)
+            .ok()
+            .map(|raw| {
+                let mut names = Vec::new();
+                for name in raw
+                    .split(|c: char| c == ',' || c.is_whitespace())
+                    .map(str::to_ascii_lowercase)
+                    .filter(|name| !name.is_empty())
+                {
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+                names
+            })
+            .unwrap_or_default();
     let tool_events_zmq_endpoint =
         std::env::var(env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT)
             .ok()
@@ -196,6 +223,17 @@ fn load_from_env() -> RequestTracePolicy {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| DEFAULT_TOOL_EVENTS_TOPIC.to_string())
     });
+    let s3_bucket = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_S3_BUCKET);
+    let s3_region = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_S3_REGION);
+    let s3_prefix = env_trimmed(env_request_trace::DYN_REQUEST_TRACE_S3_PREFIX);
+    let s3_roll_uncompressed_bytes =
+        env_u64(&[env_request_trace::DYN_REQUEST_TRACE_S3_ROLL_UNCOMPRESSED_BYTES])
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_S3_ROLL_UNCOMPRESSED_BYTES);
+    let s3_flush_interval_ms =
+        env_u64(&[env_request_trace::DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS])
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_S3_FLUSH_INTERVAL_MS);
 
     RequestTracePolicy {
         enabled,
@@ -210,8 +248,14 @@ fn load_from_env() -> RequestTracePolicy {
         file_roll_lines,
         nats_subject,
         otel_max_payload_bytes,
+        http_header_capture_list,
         tool_events_zmq_endpoint,
         tool_events_zmq_topic,
+        s3_bucket,
+        s3_region,
+        s3_prefix,
+        s3_roll_uncompressed_bytes,
+        s3_flush_interval_ms,
     }
 }
 
@@ -295,6 +339,7 @@ fn parse_sink_kind_names(
             "stderr" => push_sink(&mut sinks, RequestTraceSinkKind::Stderr),
             "nats" => push_sink(&mut sinks, RequestTraceSinkKind::Nats),
             "otel" => push_sink(&mut sinks, RequestTraceSinkKind::Otel),
+            "s3" => push_sink(&mut sinks, RequestTraceSinkKind::S3),
             "jsonl" => {
                 legacy_jsonl = true;
                 push_sink(&mut sinks, RequestTraceSinkKind::File);
@@ -409,6 +454,7 @@ mod tests {
         env_request_trace::DYN_REQUEST_TRACE_JSONL_GZ_ROLL_LINES,
         env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
         env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
+        env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST,
         env_audit::DYN_AUDIT_SINKS,
         env_audit::DYN_AUDIT_FORCE_LOGGING,
         env_audit::DYN_AUDIT_CAPACITY,
@@ -492,6 +538,32 @@ mod tests {
                 assert_eq!(policy.file_path.as_deref(), Some(DEFAULT_FILE_PATH));
             },
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn http_header_capture_list_parses_lowercases_and_defaults_empty() {
+        with_request_trace_env(
+            &[
+                (env_request_trace::DYN_REQUEST_TRACE, "1"),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST,
+                    " X-Request-Id, NVCF-Function-Id\tx-tenant ,, x-request-id ",
+                ),
+            ],
+            || {
+                let policy = load_from_env();
+                assert_eq!(
+                    policy.http_header_capture_list,
+                    vec!["x-request-id", "nvcf-function-id", "x-tenant"]
+                );
+            },
+        );
+
+        with_request_trace_env(&[(env_request_trace::DYN_REQUEST_TRACE, "1")], || {
+            let policy = load_from_env();
+            assert!(policy.http_header_capture_list.is_empty());
+        });
     }
 
     #[test]

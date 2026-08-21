@@ -25,8 +25,8 @@ global:
     # -- Whether this chart should install the bundled NATS subchart.
     # When true, deploys NATS and auto-configures the operator with its address.
     # When false, NATS is not deployed. Use dynamo-operator.natsAddr to point at an external instance if you are bringing your own NATS.
-    # Defaults to true (since release 1.1.0) because the Dynamo runtime's event plane (DYN_EVENT_PLANE) defaults to NATS for distributed backends (etcd/kubernetes).
-    install: true
+    # NATS is optional because the default request and event planes use TCP and ZMQ, respectively.
+    install: false
 
   kai-scheduler:
     # -- Whether this chart should install the bundled kai-scheduler subchart.
@@ -57,6 +57,12 @@ global:
     # create PodCliqueSets for multinode deployments.
     enabled: false
 
+  snapshot:
+    # -- Whether this chart should install the bundled Snapshot subchart
+    # (github.com/ai-dynamo/snapshot): its operator, node agent, and CRDs.
+    # NOTE: For production environments, it is recommended to install Snapshot separately.
+    install: false
+
 # Subcharts configuration
 
 # Dynamo operator configuration
@@ -64,14 +70,16 @@ dynamo-operator:
   # -- Whether to enable the Dynamo Kubernetes operator deployment
   enabled: true
 
-  # -- Whether to manage CRDs via a pre-install/pre-upgrade hook Job.
-  # The Job runs the operator image with the crd-apply tool to apply CRDs via server-side apply.
+  # -- Whether the cluster-wide operator applies CRDs from its image through the crd-apply init container.
+  # When false, the chart installs no CRDs; apply them separately before starting a cluster-wide
+  # operator. Namespace-restricted installations must set this to false and use the CRDs managed by
+  # the cluster-wide operator.
   upgradeCRD: true
 
   # Environment variables to pass to operator Deployment.
   env: []
 
-  # -- NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: `nats://hostname:4222`
+  # -- NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222`
   natsAddr: ""
 
   # -- etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379`
@@ -79,22 +87,22 @@ dynamo-operator:
 
   # -- URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true).
   modelExpressURL: ""
-  # -- DEPRECATED: Namespace-restricted mode is deprecated and will be removed in a future release. Use cluster-wide mode (the default) instead. Do not enable this for new deployments.
+  # -- DEVELOPMENT AND TESTING ONLY: Namespace-restricted mode is not supported for production. Use cluster-wide mode for production deployments.
   namespaceRestriction:
-    # -- DEPRECATED: Do not enable for new deployments. Namespace-restricted mode is deprecated.
+    # -- DEVELOPMENT AND TESTING ONLY: Enable namespace-restricted reconciliation and admission. Not supported for production.
     enabled: false
-    # -- DEPRECATED: Only used in namespace-restricted mode, which is deprecated.
+    # -- DEVELOPMENT AND TESTING ONLY: Target namespace. Defaults to the Helm release namespace.
     targetNamespace:
-    # -- DEPRECATED: Only used in namespace-restricted mode, which is deprecated.
+    # -- DEVELOPMENT AND TESTING ONLY: Namespace ownership Lease settings.
     lease:
-      # -- DEPRECATED: Lease duration for namespace-restricted mode, which is deprecated.
+      # -- DEVELOPMENT AND TESTING ONLY: Namespace ownership Lease duration.
       duration: 30s
-      # -- DEPRECATED: Lease renew interval for namespace-restricted mode, which is deprecated.
+      # -- DEVELOPMENT AND TESTING ONLY: Namespace ownership Lease renewal interval.
       renewInterval: 10s
 
-  # -- DEPRECATED: GPU discovery for namespace-scoped operators is deprecated along with namespace-restricted mode.
+  # -- DEVELOPMENT AND TESTING ONLY: GPU discovery settings for namespace-restricted operators.
   gpuDiscovery:
-    # -- DEPRECATED: Only relevant when namespaceRestriction is enabled, which is deprecated.
+    # -- DEVELOPMENT AND TESTING ONLY: Enable GPU discovery in namespace-restricted mode.
     enabled: true
 
   # -- The Dynamo discovery backend to use. Default is "kubernetes" for Kubernetes API service discovery. Set to "etcd" to use ETCD for discovery. --
@@ -227,7 +235,7 @@ dynamo-operator:
     # -- CA bundle (base64 encoded) for webhook validation. Only used when certificateSecret.external=true. For automatic certificate generation or cert-manager integration, leave this empty as it will be injected automatically.
     caBundle: ""
 
-    # -- Webhook failure policy controls how Kubernetes handles requests when the webhook is unavailable. 'Fail' (recommended for production) rejects requests if the webhook cannot be reached, ensuring strict validation. 'Ignore' allows requests through if the webhook is unavailable, providing availability over validation guarantees.
+    # -- Webhook failure policy controls how Kubernetes handles requests when the webhook is unavailable. Keep 'Fail' in every environment so requests cannot bypass Dynamo validation and defaulting. 'Ignore' is an emergency-only, short-lived bypass: pause Dynamo resource writes, restore 'Fail' immediately after recovery, and audit every resource changed during the bypass window.
     failurePolicy: Fail
 
     # -- Failure policy for the Pod CREATE checkpoint-restore mutating webhook. Defaults to Ignore so a webhook outage falls back to cold-start instead of blocking workload Pods.
@@ -236,8 +244,7 @@ dynamo-operator:
     # -- Timeout in seconds for webhook validation calls. If the webhook doesn't respond within this time, the request will be handled according to the failurePolicy.
     timeoutSeconds: 10
 
-    # Namespace selector for webhook scope control
-    # -- Custom namespace selector for webhook validation. Use this to include or exclude specific namespaces from webhook validation. For CLUSTER-WIDE operators, you can exclude namespaces managed by namespace-restricted operators by using: matchExpressions: [{ key: "dynamo-operator", operator: "NotIn", values: ["namespace-restricted"] }]. For NAMESPACE-RESTRICTED operators, leave empty as it will be auto-configured to match only the operator's namespace.
+    # -- Unsupported; must remain empty. Helm configures global admission for the cluster-wide operator and target-namespace admission for restricted operators.
     namespaceSelector: {}
 
     # cert-manager integration for automated certificate lifecycle management
@@ -285,6 +292,12 @@ grove:
   tolerations: []
   # -- Affinity for Grove pods
   affinity: {}
+  config:
+    server:
+      healthProbes:
+        # -- Enable Grove's webhook-aware liveness and readiness probes.
+        # The readiness endpoint stays false until certificates and the webhook server are ready.
+        enable: true
 
 # Kai Scheduler component - advanced workload scheduling
 # Installation is controlled by global.kai-scheduler.install above.

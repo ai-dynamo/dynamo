@@ -3,21 +3,17 @@
 
 import argparse
 import json
-import logging
 import os
 import socket
 
 from dynamo._internal.aic import (
     DEFAULT_GPU_MEMORY_UTILIZATION,
     DEFAULT_MEM_FRACTION_STATIC,
-    AicMemoryEstimatorUnavailableError,
     estimate_num_gpu_blocks,
 )
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import ModelRuntimeConfig
 from dynamo.mocker import MockEngineArgs, ReasoningConfig, SglangArgs, TrtllmArgs
-
-logger = logging.getLogger(__name__)
 
 _DEFAULT_NUM_GPU_BLOCKS = 16384
 _DEFAULT_MAX_NUM_SEQS = 256
@@ -110,44 +106,34 @@ def _estimate_aic_num_gpu_blocks(
     resolved_block_size = _resolve_block_size_for_capacity(
         engine_type, block_size, sglang_page_size
     )
-    try:
-        return estimate_num_gpu_blocks(
-            backend_name=aic_backend,
-            system=aic_system or _DEFAULT_AIC_SYSTEM,
-            model_path=aic_model_path,
-            tp_size=aic_tp_size if aic_tp_size is not None else 1,
-            block_size=resolved_block_size,
-            max_num_batched_tokens=(
-                max_num_batched_tokens
-                if max_num_batched_tokens is not None
-                else _DEFAULT_MAX_NUM_BATCHED_TOKENS
-            ),
-            gpu_memory_utilization=(
-                gpu_memory_utilization
-                if gpu_memory_utilization is not None
-                else DEFAULT_GPU_MEMORY_UTILIZATION
-            ),
-            mem_fraction_static=(
-                mem_fraction_static
-                if mem_fraction_static is not None
-                else DEFAULT_MEM_FRACTION_STATIC
-            ),
-            # None -> aic.py applies the TRT-LLM default (0.9).
-            free_gpu_memory_fraction=free_gpu_memory_fraction,
-            backend_version=aic_backend_version,
-            moe_tp_size=aic_moe_tp_size,
-            moe_ep_size=aic_moe_ep_size,
-            attention_dp_size=aic_attention_dp_size,
-        )
-    except AicMemoryEstimatorUnavailableError as exc:
-        logger.warning(
-            "AIC KV-cache capacity estimation is unavailable: %s. Falling back "
-            "to default num_gpu_blocks=%d; upgrade aiconfigurator or set "
-            "--num-gpu-blocks-override explicitly.",
-            exc,
-            _DEFAULT_NUM_GPU_BLOCKS,
-        )
-        return _DEFAULT_NUM_GPU_BLOCKS
+    return estimate_num_gpu_blocks(
+        backend_name=aic_backend,
+        system=aic_system or _DEFAULT_AIC_SYSTEM,
+        model_path=aic_model_path,
+        tp_size=aic_tp_size if aic_tp_size is not None else 1,
+        block_size=resolved_block_size,
+        max_num_batched_tokens=(
+            max_num_batched_tokens
+            if max_num_batched_tokens is not None
+            else _DEFAULT_MAX_NUM_BATCHED_TOKENS
+        ),
+        gpu_memory_utilization=(
+            gpu_memory_utilization
+            if gpu_memory_utilization is not None
+            else DEFAULT_GPU_MEMORY_UTILIZATION
+        ),
+        mem_fraction_static=(
+            mem_fraction_static
+            if mem_fraction_static is not None
+            else DEFAULT_MEM_FRACTION_STATIC
+        ),
+        # None -> aic.py applies the TRT-LLM default.
+        free_gpu_memory_fraction=free_gpu_memory_fraction,
+        backend_version=aic_backend_version,
+        moe_tp_size=aic_moe_tp_size,
+        moe_ep_size=aic_moe_ep_size,
+        attention_dp_size=aic_attention_dp_size,
+    )
 
 
 def _resolve_num_gpu_blocks(
@@ -309,20 +295,10 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         gpu_memory_utilization=getattr(args, "gpu_memory_utilization", None),
         mem_fraction_static=getattr(args, "mem_fraction_static", None),
         free_gpu_memory_fraction=getattr(args, "free_gpu_memory_fraction", None),
-        enable_local_indexer=not getattr(args, "durable_kv_events", False),
+        enable_local_indexer=True,
         kv_bytes_per_token=getattr(args, "kv_bytes_per_token", None),
         kv_transfer_bandwidth=getattr(args, "kv_transfer_bandwidth", None),
         kv_transfer_timing_mode=getattr(args, "kv_transfer_timing_mode", "full_prompt"),
-        num_g2_blocks=getattr(args, "num_g2_blocks", None),
-        num_g3_blocks=getattr(args, "num_g3_blocks", None),
-        enable_g4_storage=getattr(args, "enable_g4_storage", False),
-        offload_batch_size=getattr(args, "offload_batch_size", None),
-        bandwidth_g1_to_g2_gbps=getattr(args, "bandwidth_g1_to_g2_gbps", None),
-        bandwidth_g2_to_g1_gbps=getattr(args, "bandwidth_g2_to_g1_gbps", None),
-        bandwidth_g2_to_g3_gbps=getattr(args, "bandwidth_g2_to_g3_gbps", None),
-        bandwidth_g3_to_g2_gbps=getattr(args, "bandwidth_g3_to_g2_gbps", None),
-        bandwidth_g2_to_g4_gbps=getattr(args, "bandwidth_g2_to_g4_gbps", None),
-        bandwidth_g4_to_g2_gbps=getattr(args, "bandwidth_g4_to_g2_gbps", None),
         reasoning=_parse_reasoning_config(getattr(args, "reasoning", None)),
         response_replay_trace_path=args.response_replay_trace_path,
         sglang=_build_sglang_args(args),
@@ -376,13 +352,16 @@ def build_runtime_config(
     rc.enable_local_indexer = (
         engine_args.enable_local_indexer and not engine_args.is_decode()
     )
+    rc.kv_event_publishing_enabled = (
+        engine_args.enable_prefix_caching and not engine_args.is_decode()
+    )
     rc.data_parallel_size = engine_args.dp_size
     rc.set_engine_specific("output_replay_consumer", "true")
 
     bootstrap_port = engine_args.bootstrap_port
     if engine_args.is_prefill() and bootstrap_port is not None:
-        host = os.environ.get(
-            "DYN_HTTP_RPC_HOST", socket.gethostbyname(socket.gethostname())
+        host = os.environ.get("DYN_HTTP_RPC_HOST") or socket.gethostbyname(
+            socket.gethostname()
         )
         rc.set_disaggregated_endpoint(
             bootstrap_host=host, bootstrap_port=bootstrap_port
