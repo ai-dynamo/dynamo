@@ -377,7 +377,18 @@ impl DeltaAggregator {
             }
         }
 
-        if let Some(parser) = parsing_options.tool_call_parser.as_deref() {
+        // Muse finalizes through the UNIFIED parser (topology B: raw model text
+        // reaches the frontend un-split). Keyed on EITHER parser name to match the
+        // streaming guard, so a reasoning-only card (`--dyn-reasoning-parser
+        // muse_glimmer`, no tool-call parser) splits its markup here too. Default-on,
+        // so muse never falls into the v1 aggregate-finalize below. The gate is wider
+        // than main's `tool_call_parser.is_some()` for that reason; `parser` is bound
+        // inside the loop, after the muse branch has taken its `continue`.
+        let unified_family = super::tool_parser_v2::unified_family(
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+        );
+        if unified_family.is_some() || parsing_options.tool_call_parser.is_some() {
             for choice in aggregator.choices.values_mut() {
                 if choice
                     .tool_calls
@@ -387,6 +398,41 @@ impl DeltaAggregator {
                 {
                     continue;
                 }
+
+                if let Some(family) = unified_family.as_deref() {
+                    match super::tool_parser_v2::parse_complete_unified(&choice.text, None, family)
+                    {
+                        Ok((calls, reasoning, content)) => {
+                            // Same rule the streaming path applies: `none` still gets the
+                            // reasoning/content split and the marker stripping, but a
+                            // caller that disabled tools must not receive `tool_calls`.
+                            // `experimental_v2_batch_eligible` is set from the request's
+                            // tool_choice by `batch_tool_choice_eligible`, which admits
+                            // unset/auto only, so it is exactly that gate.
+                            if !calls.is_empty() && parsing_options.experimental_v2_batch_eligible {
+                                choice.tool_calls = Some(
+                                    calls
+                                        .into_iter()
+                                        .map(super::tool_call_response_to_protocol)
+                                        .collect(),
+                                );
+                            }
+                            if choice.reasoning_content.is_none() && !reasoning.is_empty() {
+                                choice.reasoning_content = Some(reasoning);
+                            }
+                            choice.text = content;
+                        }
+                        Err(error) => {
+                            tracing::debug!(error = %error, family, "muse unified batch parse failed");
+                        }
+                    }
+                    continue;
+                }
+
+                // Not muse: the loop gate guarantees a tool-call parser is set here.
+                let Some(parser) = parsing_options.tool_call_parser.as_deref() else {
+                    continue;
+                };
 
                 // With DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, supported families use the
                 // v2 parser for batch too (no jail / no aggregate-finalize):
