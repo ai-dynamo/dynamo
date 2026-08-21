@@ -582,7 +582,25 @@ where
         router_mode: RouterMode,
         worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
     ) -> anyhow::Result<Self> {
-        Self::from_client_with_state(client, router_mode, worker_monitor, None, None).await
+        Self::from_client_with_monitor_and_ratio(client, router_mode, worker_monitor, None).await
+    }
+
+    /// Creates a monitored router with an optional device-aware capacity ratio.
+    pub async fn from_client_with_monitor_and_ratio(
+        client: Client,
+        router_mode: RouterMode,
+        worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
+        encoder_cuda_to_cpu_ratio: Option<usize>,
+    ) -> anyhow::Result<Self> {
+        Self::from_client_with_state_and_ratio(
+            client,
+            router_mode,
+            worker_monitor,
+            None,
+            None,
+            encoder_cuda_to_cpu_ratio,
+        )
+        .await
     }
 
     /// Create a new PushRouter with optional load monitoring and multimodal cache indexing.
@@ -592,6 +610,25 @@ where
         worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
         multimodal_cache_indexer: Option<Arc<dyn MultimodalCacheIndex>>,
         multimodal_cache_key_extractor: Option<MultimodalCacheKeyExtractor<T>>,
+    ) -> anyhow::Result<Self> {
+        Self::from_client_with_state_and_ratio(
+            client,
+            router_mode,
+            worker_monitor,
+            multimodal_cache_indexer,
+            multimodal_cache_key_extractor,
+            None,
+        )
+        .await
+    }
+
+    async fn from_client_with_state_and_ratio(
+        client: Client,
+        router_mode: RouterMode,
+        worker_monitor: Option<Arc<dyn WorkerLoadMonitor>>,
+        multimodal_cache_indexer: Option<Arc<dyn MultimodalCacheIndex>>,
+        multimodal_cache_key_extractor: Option<MultimodalCacheKeyExtractor<T>>,
+        encoder_cuda_to_cpu_ratio: Option<usize>,
     ) -> anyhow::Result<Self> {
         let addressed = addressed_router(&client.endpoint).await?;
 
@@ -641,7 +678,7 @@ where
             occupancy_state,
             multimodal_cache_indexer,
             multimodal_cache_key_extractor,
-            non_cpu_to_cpu_ratio: non_cpu_to_cpu_ratio(None),
+            non_cpu_to_cpu_ratio: non_cpu_to_cpu_ratio(encoder_cuda_to_cpu_ratio),
             _phantom: PhantomData,
         };
 

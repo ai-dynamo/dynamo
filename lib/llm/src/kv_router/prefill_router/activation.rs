@@ -81,6 +81,7 @@ impl PrefillRouter<DefaultWorkerSelector> {
             is_eagle,
             worker_monitor,
             None,
+            None,
         )
     }
 }
@@ -104,6 +105,7 @@ where
             model_manager,
             cancel_token: tokio_util::sync::CancellationToken::new(),
             router_mode,
+            encoder_cuda_to_cpu_ratio: None,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
             conditional_disagg_policy: make_conditional_disagg_policy(None),
             conditional_disagg_prefill_busy_threshold: None,
@@ -135,6 +137,7 @@ where
         is_eagle: bool,
         worker_monitor: Option<crate::discovery::KvWorkerMonitor>,
         task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
+        encoder_cuda_to_cpu_ratio: Option<usize>,
     ) -> Arc<Self> {
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let (target_tx, target_rx) = watch::channel(None);
@@ -157,6 +160,7 @@ where
             model_manager: model_manager.clone(),
             cancel_token: cancel_token.clone(),
             router_mode,
+            encoder_cuda_to_cpu_ratio,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
             conditional_disagg_policy,
             conditional_disagg_prefill_busy_threshold,
@@ -288,10 +292,14 @@ where
             let prefill_client = client.clone();
 
             // Build the PushRouter for prefill with KV mode using the shared client
-            let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
+            let push_router = PushRouter::<
+                PreprocessedRequest,
+                Annotated<LLMEngineOutput>,
+            >::from_client_with_monitor_and_ratio(
                 client,
                 RouterMode::KV,
-                None, // worker_monitor
+                None,
+                context.encoder_cuda_to_cpu_ratio,
             )
             .await?;
 
@@ -314,10 +322,14 @@ where
             // Create simple push router with the frontend's router mode
             // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
             // available in KV routing mode where the router has actual bookkeeping.
-            let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
+            let push_router = PushRouter::<
+                PreprocessedRequest,
+                Annotated<LLMEngineOutput>,
+            >::from_client_with_monitor_and_ratio(
                 client,
                 context.router_mode,
-                None, // worker_monitor
+                None,
+                context.encoder_cuda_to_cpu_ratio,
             )
             .await?;
 
@@ -401,6 +413,7 @@ where
             let build_context = PrefillBuildContext {
                 model_manager: router_ref.model_manager.clone(),
                 router_mode: router_ref.router_mode,
+                encoder_cuda_to_cpu_ratio: router_ref.encoder_cuda_to_cpu_ratio,
                 worker_selector_factory: router_ref
                     .worker_selector_factory
                     .clone()
