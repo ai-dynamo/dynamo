@@ -20,7 +20,7 @@ from tests.router.e2e_harness import (
 )
 from tests.router.helper import generate_random_suffix
 from tests.utils.constants import DynamoPortRange
-from tests.utils.gpu_args import build_trtllm_override_args
+from tests.utils.gpu_args import build_trtllm_override_args, map_cuda_visible_devices
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import allocate_ports, deallocate_ports
 
@@ -55,6 +55,14 @@ TRTLLM_ARGS: Dict[str, Any] = {
     "free_gpu_memory_fraction": 0.4,  # Limit VRAM allocation per worker
     "max_seq_len": 1024,  # Limit context length to reduce KV cache size
 }
+
+
+def _trtllm_worker_ready(response) -> bool:
+    """Return whether a TRT-LLM worker has finished engine initialization."""
+    try:
+        return response.status_code == 200 and response.json().get("status") == "ready"
+    except ValueError:
+        return False
 
 
 class TRTLLMProcess(ManagedEngineProcessMixin):
@@ -134,16 +142,20 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
             # Calculate GPU device for this process
             if single_gpu:
                 # Force all processes to GPU 0 (for single-GPU testing)
-                gpu_device = str(gpu_start_index)
+                logical_devices = [gpu_start_index]
             elif enable_attention_dp and tensor_parallel_size:
                 # For attention DP, TRT-LLM spawns tensor_parallel_size internal MPI workers.
                 # So one process = two attention DP ranks = visibility in to both GPUs.
-                gpu_device = ",".join(
-                    str(gpu_start_index + i) for i in range(tensor_parallel_size)
-                )
+                logical_devices = [
+                    gpu_start_index + i for i in range(tensor_parallel_size)
+                ]
             else:
                 # Each worker sees one GPU
-                gpu_device = str(gpu_start_index + worker_idx)
+                logical_devices = [gpu_start_index + worker_idx]
+
+            gpu_device = map_cuda_visible_devices(
+                logical_devices, os.environ.get("CUDA_VISIBLE_DEVICES")
+            )
 
             # Single-node TRT-LLM workers use python3 -m dynamo.trtllm directly
             # (trtllm-llmapi-launch is only needed for multi-node MPI deployments)
@@ -214,7 +226,12 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
                 timeout=180,  # Allow time for model loading (TRT-LLM may take longer)
                 display_output=True,
                 health_check_ports=[],
-                health_check_urls=[],
+                health_check_urls=[
+                    (
+                        f"http://localhost:{system_port}/health",
+                        _trtllm_worker_ready,
+                    )
+                ],
                 log_dir=request.node.name,
                 terminate_all_matching_process_names=False,
             )
