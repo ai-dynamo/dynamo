@@ -389,16 +389,22 @@ func elasticEPFollowerName(leaderName string) string {
 	return NormalizeKubeResourceName(leaderName[:keep] + "-" + suffix + "-" + commonconsts.GroveRoleSuffixFollower)
 }
 
-// ElasticEPComponentIdentity returns the component name that infrastructure keyed by
-// component should be resolved under.
+// ElasticEPComponentIdentity returns the component name that per-component GPU
+// infrastructure should be resolved under.
 //
-// For everything except a synthesized elastic-EP follower that is just the component's
-// own name. The follower is different: it is derived rather than declared, so anything
-// created per declared component -- GMS DRA claim templates, checkpoint info -- exists
-// only under the leader's name. Resolving under the follower's own "<leader>-flw" name
-// finds nothing, which fails loudly for the claim template (an unschedulable pod
-// referencing a template that was never created) and silently for checkpoints (a nil
-// lookup, so no checkpoint config at all).
+// For everything except a synthesized elastic-EP follower that is the component's own
+// name. The follower is derived rather than declared, so the GMS DRA claim template --
+// created only for components in dgd.Spec.Components -- exists solely under the leader's
+// name; resolving under the follower's invented "<leader>-flw" name references a template
+// that was never created, and the pod can never be scheduled. Sharing the leader's
+// template is correct rather than merely convenient: a pod references a
+// ResourceClaimTemplate, and Kubernetes instantiates a separate ResourceClaim per pod
+// from it, so leader and follower still get their own GPUs. The recipe is identical
+// because the follower is a deep copy.
+//
+// Deliberately not used for checkpoint info. That lookup must keep missing for the
+// follower: inheriting the leader's would make it a CRIU restore target for an engine
+// process it never runs, since its command is a bare Ray join.
 func ElasticEPComponentIdentity(component *v1beta1.DynamoComponentDeploymentSharedSpec, componentName string) string {
 	if leader := GetPodTemplateAnnotations(component)[commonconsts.KubeAnnotationElasticEPLeaderComponent]; leader != "" {
 		return leader
