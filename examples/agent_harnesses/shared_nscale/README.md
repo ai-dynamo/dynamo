@@ -1,0 +1,108 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
+# Shared NScale Tier 0 backend
+
+This branch owns the common NScale backend used to qualify the Codex, DeepSeek Harness, and Omnigent well-lit paths. Harness-specific clients and patches stay on their three isolated branches; this shared branch contains only common cluster topology and evidence.
+
+## Safety contract
+
+- Cluster: `dynamo-nscale-dev-cluster`.
+- Namespace: `anish-agent-well-lit-path`, created only for this project.
+- Initial capacity: one NVIDIA DRA GPU on one node. The project hard ceiling remains two nodes and 16 GPUs across every overlapping well-lit-path workload.
+- Never select a node or device UUID, copy another namespace's claim/PVC/secret, tolerate a reservation-specific taint, or mutate labels, taints, cordons, drains, nodes, or another user's resources.
+- Recalculate classic and DRA allocation immediately before every apply. Stop if the only capacity is protected by another user's taint or reservation.
+
+## Frozen Tier 0 tuple
+
+| Artifact | Value |
+| --- | --- |
+| Dynamo source baseline | `a6261680a974ca7c74dcf49592a7376d7de99380` |
+| DGD API | `nvidia.com/v1beta1` |
+| Runtime image | `nvcr.io/nvidia/ai-dynamo/vllm-runtime@sha256:effd250754b8a70517c27eab8f18463b395a7b2a8e868fd919226c3180636939` |
+| Model | `Qwen/Qwen3-0.6B` at revision `c1899de289a04d12100db370d81485cdf75e47ca` |
+| Frontend | CPU, round-robin stock Dynamo, port 8000 |
+| Worker | vLLM, one DRA GPU, `--gpu-memory-utilization 0.70`, `--max-model-len 32768`, `hermes` tool parser, `qwen3` reasoning parser |
+| Model storage | Project-owned 20 GiB RWX VAST PVC |
+
+The runtime image is a cluster-proven baseline, not the frozen source branch image. It predates the branch's native DSH header mapping. DSH cluster tests against this image must either send canonical Dynamo headers through the documented compatibility relay or limit claims to model/tool behavior; native DSH normalization remains a branch-local Rust proof until a branch image is published.
+
+## Apply in guarded phases
+
+First create the namespace and its ingress boundary, then inspect both:
+
+```bash
+kubectl apply -f examples/agent_harnesses/shared_nscale/kubernetes/namespace.yaml
+kubectl apply -f examples/agent_harnesses/shared_nscale/kubernetes/network-policy.yaml
+kubectl get namespace anish-agent-well-lit-path --show-labels
+kubectl get all,configmap,secret,pvc,serviceaccount,role,rolebinding,networkpolicy,resourceclaimtemplate,resourceclaim,dynamographdeployment -n anish-agent-well-lit-path
+```
+
+The ingress policy allows traffic only from pods in this namespace. It preserves the operator-created ClusterIP services and `kubectl port-forward`, but it is a namespace trust boundary rather than request authentication: every pod admitted to this namespace can reach the frontends. Keep the namespace project-exclusive. Validate the policy object with `kubectl describe networkpolicy agent-well-lit-same-namespace-ingress -n anish-agent-well-lit-path`, then bind the port-forward to loopback and validate only through `http://127.0.0.1:8000` as shown below. A live cross-namespace denial test requires creating a probe pod and is intentionally outside this read-only validation.
+
+Then apply the project-owned PVC and one-GPU claim template, followed by the stock graph:
+
+```bash
+kubectl apply -f examples/agent_harnesses/shared_nscale/kubernetes/storage-and-gpu.yaml
+kubectl apply -f examples/agent_harnesses/shared_nscale/kubernetes/stock-dgd.yaml
+kubectl wait -n anish-agent-well-lit-path --for=condition=Ready dynamographdeployment/agent-well-lit-stock --timeout=20m
+```
+
+Inspect the operator-created resources and allocated device before running a client:
+
+```bash
+kubectl get pods,pvc,resourceclaim -n anish-agent-well-lit-path -o wide
+kubectl get resourceclaim -n anish-agent-well-lit-path -o yaml
+kubectl get dynamographdeployment -n anish-agent-well-lit-path agent-well-lit-stock -o yaml
+```
+
+Port-forward the project-owned frontend only:
+
+```bash
+kubectl -n anish-agent-well-lit-path port-forward --address 127.0.0.1 svc/agent-well-lit-stock-frontend 8000:8000
+curl -fsS http://127.0.0.1:8000/v1/models
+```
+
+## ThunderAgent arm
+
+Run the stock and ThunderAgent graphs sequentially. Never create both graphs at once: each declares a one-GPU worker, and an overlapping rollout could transiently exceed the intended Tier 0 allocation or deadlock on the final free device.
+
+After preserving the stock-arm evidence, remove only its graph and wait for the DGD, every project pod, and every ResourceClaim to disappear. Keep the project PVC, claim template, and NetworkPolicy:
+
+```bash
+kubectl delete -f examples/agent_harnesses/shared_nscale/kubernetes/stock-dgd.yaml
+kubectl wait -n anish-agent-well-lit-path --for=delete dynamographdeployment/agent-well-lit-stock --timeout=5m
+kubectl wait -n anish-agent-well-lit-path --for=delete pod -l app.kubernetes.io/part-of=agent-well-lit-path --timeout=5m
+kubectl wait -n anish-agent-well-lit-path --for=delete resourceclaim --all --timeout=5m
+test -z "$(kubectl get pods -n anish-agent-well-lit-path -l app.kubernetes.io/part-of=agent-well-lit-path -o name)"
+kubectl get pods -A -o wide
+kubectl get resourceclaim -A -o wide
+kubectl get resourceslice -o wide
+kubectl get nodes -o custom-columns='NAME:.metadata.name,UNSCHEDULABLE:.spec.unschedulable,TAINTS:.spec.taints'
+kubectl apply --dry-run=server -f examples/agent_harnesses/shared_nscale/kubernetes/thunderagent-dgd.yaml
+kubectl apply -f examples/agent_harnesses/shared_nscale/kubernetes/thunderagent-dgd.yaml
+kubectl wait -n anish-agent-well-lit-path --for=condition=Ready dynamographdeployment/agent-well-lit-thunderagent --timeout=20m
+```
+
+Stop before the ThunderAgent apply until the read-only capacity inventory has been recalculated: the Frontend and ThunderAgentRouter must fit together on one unprotected CPU node, the single DRA claim must fit on one unprotected GPU node, and those two nodes must keep the project at or below its two-node/16-GPU ceiling. Do not use a node protected by another user's reservation or modify any taint, label, cordon, or drain state to make the graph fit.
+
+The ThunderAgentRouter has required pod affinity to the same graph's Frontend, so both CPU components occupy one node while the one-GPU vLLM worker may occupy a second node. The router mounts the project model cache read-only and waits for the pinned snapshot's `config.json` for at most ten minutes before starting. The vLLM worker uses `--endpoint-types none`, so only `dynamo.thunderagent_router` registers the public model surface. This prevents the frontend from bypassing lifecycle handling. The runtime image contains the experimental ThunderAgent entry point; its API and lifecycle contract are not production-stable.
+
+Port-forward `svc/agent-well-lit-thunderagent-frontend`, run lifecycle-qualified Codex and DeepSeek clients with their explicit `--session-final` options, then verify the router logs contain both `path=program` and `path=session_final` for the same normalized session ID. Omnigent does not emit a final signal and is stock-only in this qualification.
+
+Do not delete the namespace until required traces, logs, image/model identities, and route evidence have been copied. Delete the resources authored by this branch directly, then inventory the namespace before the broader namespace deletion:
+
+```bash
+kubectl delete -f examples/agent_harnesses/shared_nscale/kubernetes/stock-dgd.yaml --ignore-not-found
+kubectl delete -f examples/agent_harnesses/shared_nscale/kubernetes/thunderagent-dgd.yaml --ignore-not-found
+kubectl delete -f examples/agent_harnesses/shared_nscale/kubernetes/storage-and-gpu.yaml
+kubectl delete -f examples/agent_harnesses/shared_nscale/kubernetes/network-policy.yaml
+kubectl get all,configmap,secret,pvc,serviceaccount,role,rolebinding,networkpolicy,resourceclaimtemplate,resourceclaim,dynamographdeployment -n anish-agent-well-lit-path -o wide
+kubectl delete -f examples/agent_harnesses/shared_nscale/kubernetes/namespace.yaml
+```
+
+The platform admission layer creates `acr-token-secret` and the `shared-model-cache` PVC in this namespace; Kubernetes also creates namespace-baseline objects such as the default ServiceAccount and root CA ConfigMap. They are not authored or directly deleted by this branch. The final inventory must contain no project pods, graphs, claims, RBAC, or unexpected user objects. Stop and investigate rather than deleting the namespace if anything beyond the documented admission and namespace-baseline objects remains. Namespace deletion is intentionally broader than the direct cleanup above and removes the admission-created secret and PVC along with every other namespaced object.
+
+Deleting `agent-well-lit-model-cache` removes the project-owned model cache, and deleting the namespace removes the admission-created `shared-model-cache` too. Preserve the project cache between stock and ThunderAgent arms when reproducibility and startup cost matter; do not point either arm at another namespace's cache.

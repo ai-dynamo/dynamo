@@ -1,0 +1,181 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: agent-well-lit-thunderagent
+  namespace: anish-agent-well-lit-path
+  labels:
+    app.kubernetes.io/name: agent-well-lit-thunderagent
+    app.kubernetes.io/part-of: agent-well-lit-path
+    dynamo.nvidia.com/branch: agent-well-lit-shared
+    dynamo.nvidia.com/owner: anish-maddipoti
+    dynamo.nvidia.com/router: thunderagent
+spec:
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            app.kubernetes.io/part-of: agent-well-lit-path
+            dynamo.nvidia.com/owner: anish-maddipoti
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime@sha256:effd250754b8a70517c27eab8f18463b395a7b2a8e868fd919226c3180636939
+              command: ["python3", "-m", "dynamo.frontend"]
+              args: ["--router-mode", "round-robin", "--http-port", "8000"]
+              workingDir: /workspace
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: 1Gi
+                limits:
+                  cpu: "2"
+                  memory: 2Gi
+    - name: ThunderAgentRouter
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            app.kubernetes.io/part-of: agent-well-lit-path
+            dynamo.nvidia.com/owner: anish-maddipoti
+        spec:
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      nvidia.com/dynamo-component: Frontend
+                      nvidia.com/dynamo-graph-deployment-name: agent-well-lit-thunderagent
+                  topologyKey: kubernetes.io/hostname
+          initContainers:
+            - name: wait-for-pinned-model
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime@sha256:effd250754b8a70517c27eab8f18463b395a7b2a8e868fd919226c3180636939
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  model_config=/opt/models/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca/config.json
+                  attempt=1
+                  while [ "$attempt" -le 120 ]; do
+                    if [ -f "$model_config" ]; then
+                      exit 0
+                    fi
+                    attempt=$((attempt + 1))
+                    sleep 5
+                  done
+                  echo "Timed out waiting for $model_config" >&2
+                  exit 1
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 250m
+                  memory: 256Mi
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/models
+                  readOnly: true
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime@sha256:effd250754b8a70517c27eab8f18463b395a7b2a8e868fd919226c3180636939
+              command: ["python3", "-m", "dynamo.thunderagent_router"]
+              args:
+                - --endpoint
+                - anish-agent-well-lit-path-agent-well-lit-thunderagent.backend.generate
+                - --model-name
+                - Qwen/Qwen3-0.6B
+                - --model-path
+                - /opt/models/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca
+                - --router-block-size
+                - "16"
+                - --dyn-tool-call-parser
+                - hermes
+                - --dyn-reasoning-parser
+                - qwen3
+              workingDir: /workspace
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: 2Gi
+                limits:
+                  cpu: "2"
+                  memory: 4Gi
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/models
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: agent-well-lit-model-cache
+                readOnly: true
+    - name: VllmDecodeWorker
+      type: worker
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            app.kubernetes.io/part-of: agent-well-lit-path
+            dynamo.nvidia.com/owner: anish-maddipoti
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime@sha256:effd250754b8a70517c27eab8f18463b395a7b2a8e868fd919226c3180636939
+              command: ["python3", "-m", "dynamo.vllm"]
+              args:
+                - --model
+                - Qwen/Qwen3-0.6B
+                - --served-model-name
+                - Qwen/Qwen3-0.6B
+                - --revision
+                - c1899de289a04d12100db370d81485cdf75e47ca
+                - --endpoint-types
+                - none
+                - --gpu-memory-utilization
+                - "0.70"
+                - --max-model-len
+                - "32768"
+                - --kv-events-config
+                - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+                - --dyn-tool-call-parser
+                - hermes
+                - --dyn-reasoning-parser
+                - qwen3
+                - --no-enable-log-requests
+              env:
+                - name: HF_HOME
+                  value: /opt/models
+              workingDir: /workspace/examples/backends/vllm
+              resources:
+                claims:
+                  - name: gpu
+                requests:
+                  cpu: "2"
+                  memory: 8Gi
+                limits:
+                  cpu: "4"
+                  memory: 16Gi
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/models
+          resourceClaims:
+            - name: gpu
+              resourceClaimTemplateName: agent-well-lit-nvidia-1-gpu
+          tolerations:
+            - key: dra
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+            - key: nvidia.com/gpu
+              operator: Exists
+              effect: NoSchedule
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: agent-well-lit-model-cache
