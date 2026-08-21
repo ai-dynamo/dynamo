@@ -366,10 +366,17 @@ def expand_matrix(config: MatrixConfig) -> list[MatrixVariant]:
             raise ValueError(
                 f"variant {name!r} selects the same template more than once"
             )
-        if len({template.output_path for template in templates}) != len(templates):
+        output_paths = tuple(template.output_path for template in templates)
+        if len(set(output_paths)) != len(output_paths):
             raise ValueError(
                 f"variant {name!r} assigns the same local Component path more than once"
             )
+        for first, second in itertools.combinations(output_paths, 2):
+            if first in second.parents or second in first.parents:
+                raise ValueError(
+                    f"variant {name!r} assigns overlapping local Component paths: "
+                    f"{first} and {second}"
+                )
         variant_values: dict[str, Any] = {}
         for value in values:
             for key, template_value in value.values.items():
