@@ -2,7 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 paths:
-  .github/workflows/shared-test.yml:
+  .github/workflows/**/*.{yml,yaml}:
     ignore:
       # actionlint 1.7.12 does not recognize GitHub's self-repository syntax yet.
-      - '^specifying action "\$/\.github/actions/pytest-local" in invalid format because ref is missing\.'
+      - '^specifying action "\$/\.github/(actions|workflows)/[^"]+" in invalid format because ref is missing\.'
+      - '^reusable workflow call "\$/\.github/workflows/[^"]+" at "uses" is not following the format '
+  .github/actions/**/action.{yml,yaml}:
+    ignore:
+      - '^specifying action "\$/\.github/actions/[^"]+" in invalid format because ref is missing\.'
