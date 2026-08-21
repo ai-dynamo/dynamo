@@ -996,6 +996,9 @@ impl KvStateAgent {
     /// Attach a new engine incarnation after the prior attachment has fully detached.
     ///
     /// The API accepts a different WorkerId at the stable slot's global rank.
+    /// Publishing the attachment advertisement commits listener readiness: it
+    /// happens only after the raw event listener is established. Projection is
+    /// separately recovery-gated; do not add another readability phase.
     pub async fn attach(
         &self,
         config: KvStateAgentAttachmentConfig,
