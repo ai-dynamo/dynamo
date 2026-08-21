@@ -30,11 +30,16 @@ instrumentation fails to install, the engine runs exactly as before.
 
 from __future__ import annotations
 
-import logging
 import os
 from time import monotonic
 
-logger = logging.getLogger(__name__)
+from vllm.logger import init_logger
+
+# Must be a "vllm.*" logger. vLLM only attaches handlers to that hierarchy, so a
+# stdlib logging.getLogger(__name__) under gpu_memory_service.* is created fine,
+# wraps fine, and then silently drops every record -- which is exactly what
+# happened: the wrappers installed and ran while emitting nothing at all.
+logger = init_logger("vllm.gpu_memory_service.v1.timing")
 
 ENV_ENABLED = "DYN_GMS_CHECKPOINT_TIMING"
 _installed = False

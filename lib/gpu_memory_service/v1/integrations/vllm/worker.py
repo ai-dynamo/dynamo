@@ -10,11 +10,11 @@ Select explicitly with::
 
 from __future__ import annotations
 
-import logging
 from contextlib import AbstractContextManager
 from time import monotonic
 
 from gpu_memory_service.v1.integrations.vllm import checkpoint_timing
+from vllm.logger import init_logger
 from gpu_memory_service.v1.integrations.vllm.backend import BACKEND_NAME
 from vllm.v1.worker.gpu_worker import Worker
 
@@ -22,7 +22,8 @@ from vllm.v1.worker.gpu_worker import Worker
 # the first collective_rpc. Inert unless DYN_GMS_CHECKPOINT_TIMING is set.
 checkpoint_timing.install()
 
-logger = logging.getLogger(__name__)
+# See checkpoint_timing.py: this must be a "vllm.*" logger or nothing is emitted.
+logger = init_logger("vllm.gpu_memory_service.v1.timing")
 
 
 class GMSV1Worker(Worker):
