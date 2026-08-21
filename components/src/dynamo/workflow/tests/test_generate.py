@@ -12,7 +12,6 @@ from dynamo.workflow import (
     GenerateEndpointBinding,
     StageContext,
     StageContract,
-    ValueSpec,
     Workflow,
     WorkflowExecutionError,
     WorkflowValidationError,
@@ -31,20 +30,22 @@ pytestmark = [
 
 GENERATOR = StageContract(
     id="generator",
-    inputs={"request": ValueSpec(type="json")},
-    outputs={"completion": ValueSpec(type="json")},
+    inputs={"request"},
+    outputs={"completion"},
 )
 
 
 def _workflow(generator_contract: StageContract = GENERATOR) -> Workflow:
     workflow = Workflow("request-generator")
-    request = workflow.input("request", ValueSpec(type="json"))
+    request = workflow.input("request")
     generator = workflow.stage(
         "generator",
         generator_contract,
         request=request,
     )
-    workflow.output("completion", generator.completion)
+    workflow.output(
+        "completion", generator.output(sorted(generator_contract.outputs)[0])
+    )
     return workflow
 
 
@@ -66,7 +67,7 @@ def test_generate_binding_rejects_a_non_generate_stage_contract() -> None:
     incompatible = StageContract(
         id="generator",
         inputs=GENERATOR.inputs,
-        outputs={"completion": ValueSpec(type="text")},
+        outputs={"chunk"},
     )
 
     with pytest.raises(WorkflowValidationError, match="stage output"):
