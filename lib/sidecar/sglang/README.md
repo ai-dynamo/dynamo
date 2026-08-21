@@ -61,8 +61,8 @@ There is no published sidecar image yet, so you build and push your own from
 
 > [!NOTE]
 > The engine image must be a stock SGLang **v0.5.16+** build: the native gRPC
-> server (`--grpc-port`) landed there, and Dynamo's `sglang-runtime` pins an
-> older SGLang without it. `deploy/agg.yaml` uses `lmsysorg/sglang:v0.5.16`.
+> server (`--grpc-port`) landed there. The deployment examples use
+> `lmsysorg/sglang:v0.5.17`, matching Dynamo main's SGLang pin.
 
 ### Prerequisites
 

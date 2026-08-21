@@ -2807,6 +2807,10 @@ class KvDcRelay:
     async def shutdown(self) -> None:
         ...
 
+    async def wait_for_shutdown(self) -> None:
+        """Resolve once the relay has stopped, whether by shutdown() or a terminal host failure."""
+        ...
+
 class KvStateAgentHost:
     def __init__(self, endpoint: Endpoint, max_slots: int = 8) -> None:
         ...
@@ -2830,11 +2834,6 @@ class KvStateAttachmentOwner:
         ...
 
     async def start(self) -> None:
-        ...
-
-    async def set_cache_readable(
-        self, global_dp_rank: int, readable: bool
-    ) -> None:
         ...
 
     async def close(self) -> None:

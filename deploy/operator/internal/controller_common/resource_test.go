@@ -18,15 +18,20 @@
 package controller_common
 
 import (
+	"context"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
 
 	"github.com/bsm/gomega"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func TestGetSpecChangeResult(t *testing.T) {
@@ -731,6 +736,39 @@ func TestCopySpec(t *testing.T) {
 	g.Expect(dst).To(gomega.Equal(expected))
 }
 
+func TestCopySpecPreservesUnstructuredFields(t *testing.T) {
+	t.Log("Build live and desired unstructured specs with an opaque future field")
+	src := &unstructured.Unstructured{Object: map[string]interface{}{
+		"spec": map[string]interface{}{
+			"known":  "value",
+			"future": map[string]interface{}{"enabled": true},
+		},
+	}}
+	dst := &unstructured.Unstructured{Object: map[string]interface{}{
+		"metadata": map[string]interface{}{"name": "resource"},
+		"spec":     map[string]interface{}{"known": "old"},
+	}}
+
+	t.Log("Copy the desired spec without decoding it through registered Go types")
+	if err := CopySpec(src, dst); err != nil {
+		t.Fatalf("CopySpec() error = %v", err)
+	}
+
+	t.Log("Verify the opaque field and its value were preserved")
+	want := map[string]interface{}{
+		"known":  "value",
+		"future": map[string]interface{}{"enabled": true},
+	}
+	got, found, err := unstructured.NestedMap(dst.Object, "spec")
+	if err != nil {
+		t.Fatalf("read copied spec: %v", err)
+	}
+	if !found {
+		t.Fatal("copied spec was not found")
+	}
+	gomega.NewWithT(t).Expect(got).To(gomega.Equal(want))
+}
+
 func TestAppendUniqueImagePullSecrets(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -914,4 +952,62 @@ func TestGetSpecChangeResult_ConfigMap(t *testing.T) {
 			g.Expect(result.NeedsUpdate).To(gomega.Equal(tt.needsUpdate))
 		})
 	}
+}
+
+type observedResourceTestReconciler struct {
+	client.Client
+	recorder events.EventRecorder
+}
+
+func (r observedResourceTestReconciler) GetRecorder() events.EventRecorder {
+	return r.recorder
+}
+
+func TestSyncObservedResourceUsesProvidedObservation(t *testing.T) {
+	t.Log("Build an observed ConfigMap and record client reads")
+	ctx := context.Background()
+	g := gomega.NewGomegaWithT(t)
+	scheme := runtime.NewScheme()
+	g.Expect(corev1.AddToScheme(scheme)).To(gomega.Succeed())
+
+	existing := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "config", Namespace: "default"},
+		Data:       map[string]string{"value": "before"},
+	}
+	getCalls := 0
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(existing).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(
+				ctx context.Context,
+				reader client.WithWatch,
+				key client.ObjectKey,
+				object client.Object,
+				options ...client.GetOption,
+			) error {
+				getCalls++
+				return reader.Get(ctx, key, object, options...)
+			},
+		}).
+		Build()
+	reconciler := observedResourceTestReconciler{
+		Client:   kubeClient,
+		recorder: events.NewFakeRecorder(10),
+	}
+
+	observed := &corev1.ConfigMap{}
+	g.Expect(kubeClient.Get(ctx, client.ObjectKeyFromObject(existing), observed)).To(gomega.Succeed())
+	desired := observed.DeepCopy()
+	desired.Data["value"] = "after"
+
+	t.Log("Sync the desired ConfigMap from the exact caller observation")
+	modified, synced, err := SyncObservedResource(ctx, reconciler, nil, observed, desired)
+
+	t.Log("Verify sync did not reread or mutate the supplied observation")
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(modified).To(gomega.BeTrue())
+	g.Expect(getCalls).To(gomega.Equal(1), "sync must use the caller's exact observation")
+	g.Expect(observed.Data["value"]).To(gomega.Equal("before"), "sync must not mutate the caller's observation")
+	g.Expect(synced.Data["value"]).To(gomega.Equal("after"))
 }

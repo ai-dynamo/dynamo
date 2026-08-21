@@ -33,6 +33,7 @@ import (
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -662,19 +663,96 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		assert.Empty(t, jobs.Items)
 	})
 
-	t.Run("disabled checkpoint gate does not block deletion", func(t *testing.T) {
-		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhasePending)
-		ckpt.DeletionTimestamp = ptr.To(metav1.Now())
-		commonController.AddFinalizer(ckpt)
-		r := makeCheckpointReconciler(s, ckpt)
+	t.Run("Creating checkpoint is paused without the PodSnapshot API when checkpoint gate is disabled", func(t *testing.T) {
+		t.Log("Create a fake client whose scheme intentionally omits the external snapshot API")
+		schemeWithoutSnapshot := runtime.NewScheme()
+		require.NoError(t, nvidiacomv1alpha1.AddToScheme(schemeWithoutSnapshot))
+		require.NoError(t, batchv1.AddToScheme(schemeWithoutSnapshot))
+		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseCreating)
+		ckpt.Status.JobName = defaultCheckpointJobName
+		r := makeCheckpointReconciler(schemeWithoutSnapshot, ckpt)
 		r.RuntimeConfig = &commonController.RuntimeConfig{Gate: features.Gates{}}
 
+		t.Log("Reconcile the Creating checkpoint with no checkpoint Job present")
 		result, err := r.Reconcile(ctx, ctrl.Request{
 			NamespacedName: types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace},
 		})
 		require.NoError(t, err)
 		assert.Equal(t, ctrl.Result{}, result)
 
+		t.Log("Verify reconciliation paused before accessing PodSnapshot resources")
+		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace}, updated))
+		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
+		assert.Equal(t, checkpointDisabledMessage, updated.Status.Message)
+	})
+
+	t.Run("disabled checkpoint gate completes automatic checkpoint cleanup before deletion", func(t *testing.T) {
+		t.Log("Create an automatic checkpoint, snapshot-agent storage, and a completed cleanup Job")
+		cfg := &configv1alpha1.OperatorConfiguration{}
+		snapshotAgent := &appsv1.DaemonSet{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "snapshot-agent",
+				Namespace: testNamespace,
+				Labels: map[string]string{
+					snapshotprotocol.SnapshotAgentLabelKey: snapshotprotocol.SnapshotAgentLabelValue,
+				},
+			},
+			Spec: appsv1.DaemonSetSpec{
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name: snapshotprotocol.SnapshotAgentContainerName,
+							VolumeMounts: []corev1.VolumeMount{{
+								Name:      snapshotprotocol.SnapshotAgentVolumeName,
+								MountPath: "/checkpoints",
+							}},
+						}},
+						Volumes: []corev1.Volume{{
+							Name: snapshotprotocol.SnapshotAgentVolumeName,
+							VolumeSource: corev1.VolumeSource{
+								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+									ClaimName: "snapshot-pvc",
+								},
+							},
+						}},
+					},
+				},
+			},
+		}
+		ckpt := makeTestCheckpoint(nvidiacomv1alpha1.DynamoCheckpointPhaseReady)
+		ckpt.UID = types.UID("ckpt-uid")
+		ckpt.Annotations = map[string]string{
+			consts.CheckpointAutoAnnotation: consts.KubeLabelValueTrue,
+		}
+		ckpt.DeletionTimestamp = ptr.To(metav1.Now())
+		commonController.AddFinalizer(ckpt)
+		job, err := buildCheckpointCleanupJob(cfg, ckpt, testHash, snapshotprotocol.Storage{
+			Type:     snapshotprotocol.StorageTypePVC,
+			PVCName:  "snapshot-pvc",
+			BasePath: "/checkpoints",
+		})
+		require.NoError(t, err)
+		job.Status.Conditions = []batchv1.JobCondition{{
+			Type:   batchv1.JobComplete,
+			Status: corev1.ConditionTrue,
+		}}
+		require.NoError(t, appsv1.AddToScheme(s))
+		r := makeCheckpointReconciler(s, ckpt, job, snapshotAgent)
+		r.Config = cfg
+		r.RuntimeConfig = &commonController.RuntimeConfig{Gate: features.Gates{}}
+
+		t.Log("Reconcile deletion while the checkpoint gate is disabled")
+		result, err := r.Reconcile(ctx, ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, ctrl.Result{}, result)
+
+		t.Log("Verify artifact cleanup completed before the checkpoint finalizer was removed")
+		currentJob := &batchv1.Job{}
+		err = r.Get(ctx, types.NamespacedName{Name: job.Name, Namespace: job.Namespace}, currentJob)
+		require.True(t, apierrors.IsNotFound(err), "expected completed cleanup job to be removed, got %v", err)
 		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
 		err = r.Get(ctx, types.NamespacedName{Name: ckpt.Name, Namespace: testNamespace}, updated)
 		if !apierrors.IsNotFound(err) {
@@ -991,7 +1069,6 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		snap := ownedSnapshot(ckpt, snapshotv1alpha1.PodSnapshotConditionReady)
 
 		r := makeCheckpointReconciler(s, ckpt, job, snap, newOwnedPod(podNameFromJob(job.Name), job))
-		r.RuntimeConfig = &commonController.RuntimeConfig{Gate: features.Gates{}}
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
