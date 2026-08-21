@@ -80,11 +80,11 @@ def test_remote_plan_records_remote_binding() -> None:
 def test_mixed_placement_records_each_stage_binding() -> None:
     contract = StageContract(
         id="text-stage",
-        inputs={"text": ValueSpec(type="text")},
-        outputs={"text": ValueSpec(type="text")},
+        inputs={"text"},
+        outputs={"text"},
     )
     workflow = Workflow("mixed-placement")
-    value = workflow.input("text", ValueSpec(type="text"))
+    value = workflow.input("text")
     first = workflow.stage("first", contract, text=value)
     second = workflow.stage("second", contract, text=first.text)
     workflow.output("text", second.text)
@@ -105,33 +105,23 @@ def test_mixed_placement_records_each_stage_binding() -> None:
     }
 
 
-@pytest.mark.parametrize(
-    "value_spec",
-    [
-        ValueSpec(type="tensor"),
-        ValueSpec(type="image"),
-        ValueSpec(type="object", class_id="opaque.Value"),
-    ],
-    ids=["tensor", "image", "object"],
-)
-def test_remote_rich_value_cannot_cross_a_process_boundary(
-    value_spec: ValueSpec,
-) -> None:
+def test_remote_planning_does_not_assume_a_runtime_value_type() -> None:
     contract = StageContract(
-        id="rich-stage",
-        inputs={"value": value_spec},
-        outputs={"result": ValueSpec(type="json")},
+        id="opaque-stage",
+        inputs={"value"},
+        outputs={"result"},
     )
-    workflow = Workflow("remote-rich-value")
-    value = workflow.input("value", value_spec)
+    workflow = Workflow("remote-opaque-value")
+    value = workflow.input("value")
     result = workflow.stage("stage", contract, value=value)
     workflow.output("result", result.result)
 
-    with pytest.raises(WorkflowValidationError, match="cannot cross a process boundary"):
-        compile_workflow(
-            workflow,
-            DeploymentSpec.remote(stage="workflows.stage.generate"),
-        )
+    plan = compile_workflow(
+        workflow,
+        DeploymentSpec.remote(stage="workflows.stage.generate"),
+    )
+
+    assert plan.bindings == {"stage": RemoteBinding("workflows.stage.generate")}
 
 
 def test_remote_endpoint_id_is_a_stable_discovery_identity() -> None:
