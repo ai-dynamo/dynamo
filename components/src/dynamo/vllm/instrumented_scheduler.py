@@ -79,6 +79,7 @@ from __future__ import annotations
 
 import enum
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -133,6 +134,7 @@ DEFAULT_FPM_PORT = 20380
 ENV_FPM_PORT = "DYN_FORWARDPASS_METRIC_PORT"
 ENV_FPM_WORKER_ID = "DYN_FPM_WORKER_ID"
 ENV_FPM_BENCHMARK_OUTPUT_PATH = "DYN_FPM_BENCHMARK_OUTPUT_PATH"
+ENV_FPM_BENCH_COLLECT_IMBALANCED = "DYN_FPM_BENCH_COLLECT_IMBALANCED"
 
 
 def _utc_now_rfc3339() -> str:
@@ -155,6 +157,37 @@ class BenchmarkConfig:
     decode_max_kv_read_token_samples: int = 128
     decode_max_batch_size_samples: int = 128
     prefix_max_batch_size_samples: int = 3
+    # Measure the manifest's imbalanced prefill points (explicit rows, or a
+    # partition) as well as its uniform ones. Those points come from an
+    # explicit --benchmark-points-file; see the flag's comment in backend_args
+    # for why this defaults off.
+    collect_imbalanced: bool = False
+
+
+def _bench_point_is_imbalanced(candidate: PrefillPointCandidate) -> bool:
+    """Whether this point spreads work unevenly across the batch.
+
+    Carrying explicit rows is not the test: a work-delta manifest writes the
+    uniform reference batch as rows too, and that batch is the subtrahend every
+    imbalanced label is measured against. Dropping it would leave the spread
+    points with nothing to be a difference from.
+    """
+    if candidate.partition is not None:
+        return True
+    if candidate.rows is None:
+        return False
+    return len({tuple(row) for row in candidate.rows}) > 1
+
+
+def _bench_origin_reason(generated: bool) -> str:
+    """The sample reason that records where a manifest point came from.
+
+    ``explicit`` is load-bearing downstream: it means the operator asked for
+    this exact point, so an infeasible one is an error and a run-time failure
+    aborts rather than skips. A point this class planned itself carries no such
+    request and must not borrow that promise.
+    """
+    return "imbalance" if generated else "explicit"
 
 
 class _BenchPhase(enum.Enum):
@@ -176,6 +209,14 @@ class BenchmarkPoint:
     expected_capture_size: int | None = None
     padding_tokens: int | None = None
     sample_reasons: list[str] = field(default_factory=list)
+    # None -> equal split (the historical behaviour). Set only by explicit
+    # schema-v2 manifests; the generated grid never populates it.
+    partition: dict | None = None
+    # Explicit per-request ``[new_tokens, kv_read_tokens]``, from a schema-v3
+    # manifest. Takes precedence over ``partition``: regime calibration solves
+    # its rows from an inequality on every request and no shape parameter can
+    # reproduce them.
+    rows: list[list[int]] | None = None
 
 
 @dataclass
@@ -194,6 +235,88 @@ class SkippedBenchmarkPoint:
 class _BenchmarkGroupResult:
     rank_results: list[dict]
     stop_requested: bool
+
+
+@dataclass(frozen=True)
+class _BenchmarkCapacityEnvelope:
+    """Rank-local limits that affect synthetic benchmark grid feasibility."""
+
+    max_model_len: int
+    max_num_scheduled_tokens: int
+    max_num_running_reqs: int
+    usable_blocks_without_watermark: int
+    usable_blocks_with_watermark: int
+    grid_invariants_digest: str
+
+    @classmethod
+    def from_dict(cls, payload: object) -> _BenchmarkCapacityEnvelope:
+        if not isinstance(payload, dict):
+            raise RuntimeError("attention-DP benchmark capacity must be an object")
+        positive_fields = (
+            "max_model_len",
+            "max_num_scheduled_tokens",
+            "max_num_running_reqs",
+        )
+        nonnegative_fields = (
+            "usable_blocks_without_watermark",
+            "usable_blocks_with_watermark",
+        )
+        values: dict[str, int] = {}
+        for name in positive_fields:
+            value = payload.get(name)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+                raise RuntimeError(
+                    f"attention-DP benchmark capacity has invalid {name}={value!r}"
+                )
+            values[name] = value
+        for name in nonnegative_fields:
+            value = payload.get(name)
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise RuntimeError(
+                    f"attention-DP benchmark capacity has invalid {name}={value!r}"
+                )
+            values[name] = value
+        digest = payload.get("grid_invariants_digest")
+        if not isinstance(digest, str) or len(digest) != 64:
+            raise RuntimeError(
+                "attention-DP benchmark capacity has invalid grid invariants digest"
+            )
+        return cls(
+            max_model_len=values["max_model_len"],
+            max_num_scheduled_tokens=values["max_num_scheduled_tokens"],
+            max_num_running_reqs=values["max_num_running_reqs"],
+            usable_blocks_without_watermark=values["usable_blocks_without_watermark"],
+            usable_blocks_with_watermark=values["usable_blocks_with_watermark"],
+            grid_invariants_digest=digest,
+        )
+
+    @classmethod
+    def common(
+        cls, capacities: Sequence[_BenchmarkCapacityEnvelope]
+    ) -> _BenchmarkCapacityEnvelope:
+        if not capacities:
+            raise RuntimeError("attention-DP benchmark has no capacity reports")
+        invariant_digests = {capacity.grid_invariants_digest for capacity in capacities}
+        if len(invariant_digests) != 1:
+            raise RuntimeError(
+                "attention-DP benchmark grid invariants differ across ranks"
+            )
+        return cls(
+            max_model_len=min(capacity.max_model_len for capacity in capacities),
+            max_num_scheduled_tokens=min(
+                capacity.max_num_scheduled_tokens for capacity in capacities
+            ),
+            max_num_running_reqs=min(
+                capacity.max_num_running_reqs for capacity in capacities
+            ),
+            usable_blocks_without_watermark=min(
+                capacity.usable_blocks_without_watermark for capacity in capacities
+            ),
+            usable_blocks_with_watermark=min(
+                capacity.usable_blocks_with_watermark for capacity in capacities
+            ),
+            grid_invariants_digest=capacities[0].grid_invariants_digest,
+        )
 
 
 def _benchmark_point_digest(point: BenchmarkPoint) -> str:
@@ -230,6 +353,66 @@ def _balanced_partition(
         (minimum_units + quotient + int(index < remainder)) * unit
         for index in range(count)
     ]
+
+
+def _imbalanced_partition(
+    total: int,
+    count: int,
+    *,
+    unit: int = 1,
+    minimum_units: int = 0,
+    high_count: int,
+    fraction: float,
+) -> list[int]:
+    """Split an exact total UNEVENLY, conserving the total exactly.
+
+    ``_balanced_partition``'s counterpart. ``high_count`` requests are raised
+    to ``mean * (1 + fraction)`` and the remainder absorb the deficit, so the
+    sum is bit-for-bit the same as the balanced split of the same total. That
+    exactness is the point: intra-batch work-delta modelling subtracts the
+    equal-length batch with the SAME totals, and any drift in the conserved
+    sum would show up as signal.
+
+    ``unit`` and ``minimum_units`` carry the same meaning as in
+    ``_balanced_partition`` -- KV read lengths must stay block-aligned for the
+    prefix cache to hit, so the perturbation is applied in whole units.
+
+    Raises ValueError when the requested split cannot be realised (fraction
+    too large for the mean, or the low group would fall below the minimum).
+    """
+    if count < 1:
+        raise ValueError("count must be positive")
+    if unit < 1:
+        raise ValueError("unit must be positive")
+    if total < 0 or total % unit != 0:
+        raise ValueError("total must be a non-negative multiple of unit")
+    if not 0 < high_count < count:
+        raise ValueError("high_count must be strictly between 0 and count")
+    if not 0.0 < fraction < 1.0:
+        raise ValueError("fraction must lie in (0, 1)")
+
+    total_units = total // unit
+    low_count = count - high_count
+    if total_units < count * minimum_units:
+        raise ValueError("total is too small for the requested minimum")
+
+    mean_units = total_units / count
+    high_units = int(round(mean_units * (1.0 + fraction)))
+    high_units = max(high_units, minimum_units)
+    # Conservation fixes the low group once the high group is chosen.
+    low_total_units = total_units - high_units * high_count
+    if low_total_units < low_count * minimum_units:
+        raise ValueError("fraction too large: low group would fall below the minimum")
+
+    quotient, remainder = divmod(low_total_units, low_count)
+    if quotient < minimum_units:
+        raise ValueError("fraction too large: low group would fall below the minimum")
+
+    units = [high_units] * high_count
+    units.extend(quotient + int(index < remainder) for index in range(low_count))
+    if sum(units) != total_units:
+        raise ValueError("imbalanced partition failed to conserve the total")
+    return [value * unit for value in units]
 
 
 def _powers_of_two_up_to(limit: int) -> list[int]:
@@ -406,6 +589,67 @@ class _BenchmarkSynchronizer:
         )
         self._socket.close(linger=linger)
 
+    def negotiate_capacity(
+        self, local_capacity: _BenchmarkCapacityEnvelope
+    ) -> _BenchmarkCapacityEnvelope:
+        """Agree on the minimum capacity that every attention-DP rank can run."""
+        message = {
+            "type": "capacity",
+            "benchmark_id": 0,
+            "dp_rank": self.dp_rank,
+            "capacity": asdict(local_capacity),
+        }
+        if self.dp_rank == 0:
+            return self._coordinate_capacity(message)
+
+        deadline = time.monotonic() + self.timeout_seconds
+        self._socket.send_json(message)
+        reply = self._recv_follower(deadline, 0, "capacity_result")
+        common_capacity = _BenchmarkCapacityEnvelope.from_dict(reply.get("capacity"))
+        self._socket.send_json(
+            {
+                "type": "capacity_ack",
+                "benchmark_id": 0,
+                "dp_rank": self.dp_rank,
+            }
+        )
+        deadline = time.monotonic() + self.timeout_seconds
+        self._recv_follower(deadline, 0, "capacity_commit")
+        return common_capacity
+
+    def synchronize_grid(
+        self,
+        *,
+        grid_digest: str,
+        expected_points: int,
+        missing_phases: Sequence[str],
+    ) -> None:
+        """Verify that all ranks built the same complete grid before warmup."""
+        message = {
+            "type": "grid",
+            "benchmark_id": 0,
+            "dp_rank": self.dp_rank,
+            "grid_digest": grid_digest,
+            "expected_points": expected_points,
+            "missing_phases": list(missing_phases),
+        }
+        if self.dp_rank == 0:
+            self._coordinate_grid(message)
+            return
+
+        deadline = time.monotonic() + self.timeout_seconds
+        self._socket.send_json(message)
+        self._recv_follower(deadline, 0, "grid_prepare")
+        self._socket.send_json(
+            {
+                "type": "grid_ack",
+                "benchmark_id": 0,
+                "dp_rank": self.dp_rank,
+            }
+        )
+        deadline = time.monotonic() + self.timeout_seconds
+        self._recv_follower(deadline, 0, "grid_commit")
+
     def synchronize(
         self,
         point: BenchmarkPoint,
@@ -442,6 +686,114 @@ class _BenchmarkSynchronizer:
             )
         self._run_id = run_id
         return run_id
+
+    def _coordinate_capacity(self, local_message: dict) -> _BenchmarkCapacityEnvelope:
+        capacities = [
+            _BenchmarkCapacityEnvelope.from_dict(local_message.get("capacity"))
+        ]
+        identities: dict[int, bytes] = {}
+        seen_identities: set[bytes] = set()
+        deadline = time.monotonic() + self.timeout_seconds
+        try:
+            while len(identities) < self.dp_size - 1:
+                identity, message = self._recv_router(deadline, 0)
+                seen_identities.add(identity)
+                rank = message.get("dp_rank")
+                if (
+                    message.get("type") != "capacity"
+                    or not isinstance(rank, int)
+                    or not 1 <= rank < self.dp_size
+                    or rank in identities
+                    or identity != str(rank).encode()
+                ):
+                    raise RuntimeError(
+                        f"invalid attention-DP benchmark capacity: {message}"
+                    )
+                capacities.append(
+                    _BenchmarkCapacityEnvelope.from_dict(message.get("capacity"))
+                )
+                identities[rank] = identity
+
+            common_capacity = _BenchmarkCapacityEnvelope.common(capacities)
+            self._send_to_all(
+                identities,
+                {
+                    "type": "capacity_result",
+                    "benchmark_id": 0,
+                    "capacity": asdict(common_capacity),
+                },
+            )
+            self._coordinate_phase(
+                identities,
+                time.monotonic() + self.timeout_seconds,
+                benchmark_id=0,
+                expected_type="capacity_ack",
+            )
+            self._send_to_all(
+                identities,
+                {"type": "capacity_commit", "benchmark_id": 0},
+            )
+            return common_capacity
+        except Exception as error:
+            self._notify_error(seen_identities, str(error))
+            raise
+
+    def _coordinate_grid(self, local_message: dict) -> None:
+        expected = {
+            "grid_digest": local_message.get("grid_digest"),
+            "expected_points": local_message.get("expected_points"),
+            "missing_phases": local_message.get("missing_phases"),
+        }
+        identities: dict[int, bytes] = {}
+        seen_identities: set[bytes] = set()
+        mismatches: list[str] = []
+        deadline = time.monotonic() + self.timeout_seconds
+        try:
+            while len(identities) < self.dp_size - 1:
+                identity, message = self._recv_router(deadline, 0)
+                seen_identities.add(identity)
+                rank = message.get("dp_rank")
+                if (
+                    message.get("type") != "grid"
+                    or not isinstance(rank, int)
+                    or not 1 <= rank < self.dp_size
+                    or rank in identities
+                    or identity != str(rank).encode()
+                ):
+                    raise RuntimeError(
+                        f"invalid attention-DP benchmark grid report: {message}"
+                    )
+                actual = {
+                    "grid_digest": message.get("grid_digest"),
+                    "expected_points": message.get("expected_points"),
+                    "missing_phases": message.get("missing_phases"),
+                }
+                if actual != expected:
+                    mismatches.append(
+                        "attention-DP benchmark grid mismatch on "
+                        f"rank {rank}: rank0={expected} rank{rank}={actual}"
+                    )
+                identities[rank] = identity
+
+            if mismatches:
+                raise RuntimeError("; ".join(mismatches))
+            self._send_to_all(
+                identities,
+                {"type": "grid_prepare", "benchmark_id": 0},
+            )
+            self._coordinate_phase(
+                identities,
+                time.monotonic() + self.timeout_seconds,
+                benchmark_id=0,
+                expected_type="grid_ack",
+            )
+            self._send_to_all(
+                identities,
+                {"type": "grid_commit", "benchmark_id": 0},
+            )
+        except Exception as error:
+            self._notify_error(seen_identities, str(error))
+            raise
 
     def collect_result(
         self,
@@ -813,8 +1165,7 @@ class _BenchmarkSynchronizer:
                 rank_stop_requested = message.get("stop_requested")
                 if not isinstance(rank_stop_requested, bool):
                     raise RuntimeError(
-                        f"attention-DP benchmark rank {rank} sent invalid "
-                        "stop decision"
+                        f"attention-DP benchmark rank {rank} sent invalid stop decision"
                     )
                 stop_requested = stop_requested or rank_stop_requested
                 identities[rank] = identity
@@ -1194,6 +1545,11 @@ class _FpmPublisherThread:
 # ---------------------------------------------------------------------------
 
 
+_BASE_SCHEDULE_TAKES_THROTTLE = (
+    "throttle_prefills" in inspect.signature(AsyncScheduler.schedule).parameters
+)
+
+
 class InstrumentedScheduler(AsyncScheduler):
     def __init__(
         self,
@@ -1344,7 +1700,13 @@ class InstrumentedScheduler(AsyncScheduler):
     def _schedule_and_record_time(
         self, throttle_prefills: bool = False
     ) -> SchedulerOutput:
-        output = super().schedule(throttle_prefills)
+        # vLLM added `throttle_prefills` to Scheduler.schedule() after some of
+        # the runtime images were built; pass it only when the base accepts it
+        # so one overlay works across both.
+        if _BASE_SCHEDULE_TAKES_THROTTLE:
+            output = super().schedule(throttle_prefills)
+        else:
+            output = super().schedule()
         if output.total_num_scheduled_tokens > 0:
             if self._bench_active:
                 try:
@@ -1683,6 +2045,15 @@ class InstrumentedScheduler(AsyncScheduler):
         for k in _INT_FIELDS:
             if k in cfg and not isinstance(cfg[k], int):
                 cfg[k] = int(cfg[k])
+        # A bool that arrives as JSON text: "false" is a non-empty string and
+        # would otherwise turn the collection on.
+        if "collect_imbalanced" in cfg and isinstance(cfg["collect_imbalanced"], str):
+            cfg["collect_imbalanced"] = cfg["collect_imbalanced"].strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
         known = {f.name for f in BenchmarkConfig.__dataclass_fields__.values()}
         config_values = {k: v for k, v in cfg.items() if k in known}
         config_values["mode"] = mode
@@ -1712,6 +2083,19 @@ class InstrumentedScheduler(AsyncScheduler):
             ENV_FPM_BENCHMARK_OUTPUT_PATH,
             self._bench_config.output_path,
         )
+        imbalanced_override = os.environ.get(ENV_FPM_BENCH_COLLECT_IMBALANCED)
+        if imbalanced_override is not None:
+            flag = imbalanced_override.strip().lower()
+            truthy, falsy = {"1", "true", "yes", "on"}, {"0", "false", "no", "off"}
+            if flag not in truthy | falsy:
+                # Silently reading a typo as "off" would turn a deliberately
+                # enabled run back into an ordinary sweep, and the results file
+                # looks the same either way.
+                raise ValueError(
+                    f"{ENV_FPM_BENCH_COLLECT_IMBALANCED}={imbalanced_override!r} "
+                    f"is not a boolean"
+                )
+            self._bench_config.collect_imbalanced = flag in truthy
 
         if (
             self._bench_config.mode in {"decode", "agg"}
@@ -1811,6 +2195,8 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_prefix_cache_cleared = False
         self._bench_grid_error: str | None = None
         self._bench_grid_digest: str | None = None
+        self._bench_local_capacity: _BenchmarkCapacityEnvelope | None = None
+        self._bench_negotiated_capacity: _BenchmarkCapacityEnvelope | None = None
         self._bench_started_at: str | None = None
         self._bench_completed_at: str | None = None
         self._bench_start_monotonic: float | None = None
@@ -1878,10 +2264,134 @@ class InstrumentedScheduler(AsyncScheduler):
 
     # -- Grid generation ------------------------------------------------
 
+    def _bench_grid_invariants_digest(self) -> str:
+        coordinator = getattr(
+            getattr(self, "kv_cache_manager", None), "coordinator", None
+        )
+        managers = getattr(coordinator, "single_type_managers", ())
+        manager_layout = []
+        for manager in managers:
+            manager_layout.append(
+                {
+                    "type": (
+                        f"{type(manager).__module__}.{type(manager).__qualname__}"
+                    ),
+                    "block_size": getattr(manager, "block_size", None),
+                    "admission_cap": getattr(
+                        manager, "_max_admission_blocks_per_request", None
+                    ),
+                    "mamba_cache_mode": getattr(manager, "mamba_cache_mode", None),
+                    "num_speculative_blocks": getattr(
+                        manager, "num_speculative_blocks", 0
+                    ),
+                    "cross_attention": isinstance(manager, CrossAttentionManager),
+                }
+            )
+        benchmark_config = {
+            name: getattr(self._bench_config, name)
+            for name in self._bench_config.__dataclass_fields__
+            if name != "output_path"
+        }
+        scheduler_config = getattr(self, "scheduler_config", None)
+        payload = {
+            "benchmark_config": benchmark_config,
+            "block_size": self.block_size,
+            "hash_block_size": self._bench_hash_block_size,
+            "cache_block_size": getattr(self.cache_config, "block_size", None),
+            "enable_prefix_caching": getattr(
+                self.cache_config, "enable_prefix_caching", True
+            ),
+            "num_lookahead_tokens": getattr(self, "num_lookahead_tokens", 0),
+            "long_prefill_token_threshold": getattr(
+                scheduler_config, "long_prefill_token_threshold", 0
+            ),
+            "need_mamba_block_aligned_split": getattr(
+                self, "need_mamba_block_aligned_split", False
+            ),
+            "use_eagle": getattr(
+                getattr(self, "kv_cache_manager", None), "use_eagle", False
+            ),
+            "uses_per_group_cache_lookup": self._bench_uses_per_group_cache_lookup(),
+            "manager_layout": manager_layout,
+            "prefill_cudagraph_mode": self._bench_prefill_cudagraph_mode,
+            "decode_cudagraph_mode": self._bench_decode_cudagraph_mode,
+            "prefill_capture_sizes": self._bench_prefill_capture_sizes,
+            # ``_bench_decode_capture_sizes`` is filtered by
+            # ``max_num_running_reqs`` — a negotiable capacity value that may
+            # legitimately differ across ranks — so hash the unfiltered
+            # configuration and re-filter after negotiation.
+            "decode_capture_sizes": (
+                list(self._bench_cudagraph_capture_sizes)
+                if self._bench_decode_cudagraph_mode != "NONE"
+                else []
+            ),
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(encoded).hexdigest()
+
+    def _bench_make_local_capacity(self) -> _BenchmarkCapacityEnvelope:
+        available_blocks = self._bench_available_blocks()
+        watermark_blocks = max(
+            0,
+            int(
+                getattr(getattr(self, "kv_cache_manager", None), "watermark_blocks", 0)
+            ),
+        )
+        return _BenchmarkCapacityEnvelope(
+            max_model_len=int(self.max_model_len),
+            max_num_scheduled_tokens=int(self.max_num_scheduled_tokens),
+            max_num_running_reqs=int(self.max_num_running_reqs),
+            usable_blocks_without_watermark=available_blocks,
+            usable_blocks_with_watermark=max(0, available_blocks - watermark_blocks),
+            grid_invariants_digest=self._bench_grid_invariants_digest(),
+        )
+
+    def _bench_capacity_limit(self, name: str) -> int:
+        capacity = getattr(self, "_bench_negotiated_capacity", None)
+        if capacity is not None:
+            return int(getattr(capacity, name))
+        return int(getattr(self, name))
+
+    def _bench_grid_usable_blocks(
+        self, batch_size: int, *, reserve_watermark: bool = False
+    ) -> int:
+        capacity = getattr(self, "_bench_negotiated_capacity", None)
+        if capacity is None:
+            return self._bench_usable_blocks(
+                batch_size, reserve_watermark=reserve_watermark
+            )
+        if reserve_watermark or batch_size > 1:
+            return capacity.usable_blocks_with_watermark
+        return capacity.usable_blocks_without_watermark
+
     def _bench_build_grid(self) -> None:
         """Generate the sweep grid once scheduler limits are known."""
         if self._bench_grid_built:
             return
+
+        local_capacity = self._bench_make_local_capacity()
+        self._bench_local_capacity = local_capacity
+        synchronizer = getattr(self, "_bench_synchronizer", None)
+        if synchronizer is not None:
+            common_capacity = synchronizer.negotiate_capacity(local_capacity)
+        else:
+            common_capacity = local_capacity
+        self._bench_negotiated_capacity = common_capacity
+        logger.info(
+            "Benchmark capacity: rank=%d local=%s common=%s",
+            getattr(self, "_fpm_dp_rank", 0),
+            asdict(local_capacity),
+            asdict(common_capacity),
+        )
+        # The activation-time filter used the local request limit; re-filter
+        # with the negotiated one so every rank builds the decode grid from
+        # the same capture list.
+        self._bench_decode_capture_sizes = [
+            size
+            for size in self._bench_decode_capture_sizes
+            if size <= common_capacity.max_num_running_reqs
+        ]
+
         self._bench_grid_built = True
         mode = self._bench_config.mode
         explicit_points = self._bench_explicit_points
@@ -1909,29 +2419,86 @@ class InstrumentedScheduler(AsyncScheduler):
             separators=(",", ":"),
         ).encode()
         self._bench_grid_digest = hashlib.sha256(grid_payload).hexdigest()
+        if synchronizer is not None:
+            synchronizer.synchronize_grid(
+                grid_digest=self._bench_grid_digest,
+                expected_points=self._bench_expected_points,
+                missing_phases=self._bench_missing_phases,
+            )
         logger.info("Benchmark grid: %d points (%s mode)", len(self._bench_grid), mode)
 
-    def _bench_build_explicit_grid(self, points: BenchmarkPoints) -> None:
+    def _bench_build_explicit_grid(
+        self, points: BenchmarkPoints, *, generated: bool = False
+    ) -> None:
+        """Materialize a manifest into grid points.
+
+        ``generated`` marks a manifest this class planned itself rather than one
+        the operator wrote. The distinction is not cosmetic: an explicit point
+        is a request, so an infeasible one is an error and a failure at run time
+        aborts, whereas a planned point is this code's own guess at what the
+        scheduler will accept. The planner does not model every scheduler limit,
+        so it can emit a point this scheduler rejects -- and with no user
+        manifest that would stop engine startup on a run the ordinary generated
+        grid would have completed by skipping the same point.
+        """
         mode = self._bench_config.mode
         if mode in ("prefill", "agg"):
-            self._bench_grid.extend(
+            prefill_points = list(enumerate(points.prefill))
+            if not self._bench_config.collect_imbalanced:
+                kept = [
+                    (index, candidate)
+                    for index, candidate in prefill_points
+                    if not _bench_point_is_imbalanced(candidate)
+                ]
+                skipped = len(prefill_points) - len(kept)
+                if skipped:
+                    # Say what was dropped. A manifest that silently measures
+                    # half its points reads as a complete run in the results
+                    # file, and the missing coordinates only surface much later
+                    # as unexplained holes in the fit.
+                    logger.info(
+                        "benchmark: skipping %d/%d imbalanced prefill points "
+                        "(enable with --benchmark-collect-imbalanced or %s=1)",
+                        skipped,
+                        len(prefill_points),
+                        ENV_FPM_BENCH_COLLECT_IMBALANCED,
+                    )
+                prefill_points = kept
+            materialized = [
                 self._bench_materialize_prefill_candidate(
-                    candidate, f"prefill[{index}]"
+                    candidate, f"prefill[{index}]", generated=generated
                 )
-                for index, candidate in enumerate(points.prefill)
+                for index, candidate in prefill_points
+            ]
+            dropped = sum(1 for point in materialized if point is None)
+            if dropped:
+                # Only reachable on a planned manifest; an explicit one raises.
+                logger.warning(
+                    "benchmark: %d/%d planned prefill points are infeasible for "
+                    "this scheduler and were skipped",
+                    dropped,
+                    len(materialized),
+                )
+            self._bench_grid.extend(
+                point for point in materialized if point is not None
             )
         if mode in ("decode", "agg"):
             self._bench_feasible_max_decode_batch_size = (
                 self._bench_decode_feasible_max_batch_size()
             )
-            self._bench_grid.extend(
-                self._bench_materialize_decode_candidate(candidate, f"decode[{index}]")
+            decode_points = [
+                self._bench_materialize_decode_candidate(
+                    candidate, f"decode[{index}]", generated=generated
+                )
                 for index, candidate in enumerate(points.decode)
+            ]
+            self._bench_grid.extend(
+                point for point in decode_points if point is not None
             )
 
     def _bench_materialize_prefill_candidate(
-        self, candidate: PrefillPointCandidate, path: str
-    ) -> BenchmarkPoint:
+        self, candidate: PrefillPointCandidate, path: str, *, generated: bool = False
+    ) -> BenchmarkPoint | None:
         if (
             candidate.total_kv_read_tokens > 0
             and not self.cache_config.enable_prefix_caching
@@ -1941,13 +2508,19 @@ class InstrumentedScheduler(AsyncScheduler):
             candidate.total_prefill_tokens,
             candidate.batch_size,
             candidate.total_kv_read_tokens,
+            candidate.partition.model_dump()
+            if candidate.partition is not None
+            else None,
+            candidate.rows,
         ):
+            if generated:
+                return None
             self._bench_raise_explicit_infeasible(path, candidate)
 
         capture_size, padding_tokens, reasons = self._bench_cudagraph_metadata(
             candidate.total_prefill_tokens,
             self._bench_prefill_capture_sizes,
-            self.max_num_scheduled_tokens,
+            self._bench_capacity_limit("max_num_scheduled_tokens"),
         )
         return BenchmarkPoint(
             point_type="prefill",
@@ -1961,18 +2534,26 @@ class InstrumentedScheduler(AsyncScheduler):
             ),
             expected_capture_size=capture_size,
             padding_tokens=padding_tokens,
-            sample_reasons=["explicit", *reasons],
+            partition=(
+                candidate.partition.model_dump()
+                if candidate.partition is not None
+                else None
+            ),
+            rows=candidate.rows,
+            sample_reasons=[_bench_origin_reason(generated), *reasons],
         )
 
     def _bench_materialize_decode_candidate(
-        self, candidate: DecodePointCandidate, path: str
-    ) -> BenchmarkPoint:
+        self, candidate: DecodePointCandidate, path: str, *, generated: bool = False
+    ) -> BenchmarkPoint | None:
         if (
             candidate.batch_size > self._bench_feasible_max_decode_batch_size
             or not self._bench_decode_point_feasible(
                 candidate.batch_size, candidate.total_kv_read_tokens
             )
         ):
+            if generated:
+                return None
             self._bench_raise_explicit_infeasible(path, candidate)
 
         capture_size, padding_tokens, reasons = self._bench_cudagraph_metadata(
@@ -1991,7 +2572,7 @@ class InstrumentedScheduler(AsyncScheduler):
             ),
             expected_capture_size=capture_size,
             padding_tokens=padding_tokens,
-            sample_reasons=["explicit", *reasons],
+            sample_reasons=[_bench_origin_reason(generated), *reasons],
         )
 
     def _bench_raise_explicit_infeasible(
@@ -2011,7 +2592,7 @@ class InstrumentedScheduler(AsyncScheduler):
         )
 
     def _bench_generate_prefill_grid(self) -> None:
-        max_tokens = self.max_num_scheduled_tokens
+        max_tokens = self._bench_capacity_limit("max_num_scheduled_tokens")
         if max_tokens < 1:
             logger.warning(
                 "max_num_scheduled_tokens=%d too small, skipping prefill grid",
@@ -2072,8 +2653,8 @@ class InstrumentedScheduler(AsyncScheduler):
         """Return the smallest configured presets from the legal batch axis."""
         upper_bound = min(
             total_tokens,
-            self.max_num_running_reqs,
-            self.max_num_scheduled_tokens,
+            self._bench_capacity_limit("max_num_running_reqs"),
+            self._bench_capacity_limit("max_num_scheduled_tokens"),
         )
         legal_batches = [
             batch_size
@@ -2151,8 +2732,21 @@ class InstrumentedScheduler(AsyncScheduler):
 
     @staticmethod
     def _bench_prefill_new_token_lengths(
-        total_prefill_tokens: int, batch_size: int
+        total_prefill_tokens: int,
+        batch_size: int,
+        partition: dict | None = None,
+        rows: list[list[int]] | None = None,
     ) -> list[int]:
+        if rows is not None:
+            return [int(new_tokens) for new_tokens, _ in rows]
+        if partition is not None and partition.get("axis") in ("new", "both"):
+            return _imbalanced_partition(
+                total_prefill_tokens,
+                batch_size,
+                minimum_units=1,
+                high_count=int(partition["high_count"]),
+                fraction=float(partition["fraction"]),
+            )
         return _balanced_partition(
             total_prefill_tokens,
             batch_size,
@@ -2160,14 +2754,41 @@ class InstrumentedScheduler(AsyncScheduler):
         )
 
     def _bench_prefill_kv_read_lengths(
-        self, total_kv_read_tokens: int, batch_size: int
+        self,
+        total_kv_read_tokens: int,
+        batch_size: int,
+        partition: dict | None = None,
+        rows: list[list[int]] | None = None,
     ) -> list[int]:
+        unit = max(1, self._bench_hash_block_size)
+        if rows is not None:
+            kv_read_lengths = [int(kv_read) for _, kv_read in rows]
+            # Prefix cache hits are looked up per block, so a request whose KV
+            # read is not a whole number of blocks would be served a different
+            # length than the manifest asked for, and the label would be a
+            # measurement of some other batch.
+            ragged = [n for n in kv_read_lengths if n % unit]
+            if ragged:
+                raise ValueError(
+                    f"explicit kv read lengths {ragged} are not multiples of the "
+                    f"hash block size {unit}"
+                )
+            return kv_read_lengths
         if total_kv_read_tokens == 0:
             return [0] * batch_size
+        if partition is not None and partition.get("axis") in ("kv", "both"):
+            return _imbalanced_partition(
+                total_kv_read_tokens,
+                batch_size,
+                unit=unit,
+                minimum_units=1,
+                high_count=int(partition["high_count"]),
+                fraction=float(partition["fraction"]),
+            )
         return _balanced_partition(
             total_kv_read_tokens,
             batch_size,
-            unit=max(1, self._bench_hash_block_size),
+            unit=unit,
             minimum_units=1,
         )
 
@@ -2176,42 +2797,62 @@ class InstrumentedScheduler(AsyncScheduler):
         total_prefill_tokens: int,
         batch_size: int,
         total_kv_read_tokens: int,
+        partition: dict | None = None,
+        rows: list[list[int]] | None = None,
     ) -> bool:
         if (
             total_prefill_tokens < 1
-            or total_prefill_tokens > self.max_num_scheduled_tokens
+            or total_prefill_tokens
+            > self._bench_capacity_limit("max_num_scheduled_tokens")
             or batch_size < 1
-            or batch_size > self.max_num_running_reqs
+            or batch_size > self._bench_capacity_limit("max_num_running_reqs")
         ):
             return False
         try:
             new_token_lengths = self._bench_prefill_new_token_lengths(
-                total_prefill_tokens, batch_size
+                total_prefill_tokens, batch_size, partition, rows
             )
             kv_read_lengths = self._bench_prefill_kv_read_lengths(
-                total_kv_read_tokens, batch_size
+                total_kv_read_tokens, batch_size, partition, rows
             )
         except ValueError:
             return False
 
+        eagle_cache_drop_tokens = self._bench_eagle_cache_drop_tokens()
+        if eagle_cache_drop_tokens and any(
+            kv_read_tokens > 0 and new_tokens <= eagle_cache_drop_tokens
+            for new_tokens, kv_read_tokens in zip(
+                new_token_lengths, kv_read_lengths, strict=True
+            )
+        ):
+            # EAGLE recomputes the last matched cache block. A request needs
+            # more than that block's tokens to reach the extra seeded block
+            # while preserving both benchmark axes.
+            return False
+
         prompt_lengths = [
             new_tokens + kv_read_tokens
-            for new_tokens, kv_read_tokens in zip(new_token_lengths, kv_read_lengths)
+            for new_tokens, kv_read_tokens in zip(
+                new_token_lengths, kv_read_lengths, strict=True
+            )
         ]
-        if any(prompt_len + 1 > self.max_model_len for prompt_len in prompt_lengths):
+        max_model_len = self._bench_capacity_limit("max_model_len")
+        if any(prompt_len + 1 > max_model_len for prompt_len in prompt_lengths):
             return False
         if any(
             self._bench_prefill_scheduled_tokens_per_req(prompt_len, kv_read_tokens)
             != new_tokens
             for prompt_len, kv_read_tokens, new_tokens in zip(
-                prompt_lengths, kv_read_lengths, new_token_lengths
+                prompt_lengths, kv_read_lengths, new_token_lengths, strict=True
             )
         ):
             return False
 
         required_blocks = sum(
             self._bench_prefill_blocks_per_req(prompt_len, kv_read_tokens)
-            for prompt_len, kv_read_tokens in zip(prompt_lengths, kv_read_lengths)
+            for prompt_len, kv_read_tokens in zip(
+                prompt_lengths, kv_read_lengths, strict=True
+            )
         )
         if total_kv_read_tokens > 0:
             seed_prompt_lengths = [
@@ -2219,8 +2860,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 for kv_read_tokens in kv_read_lengths
             ]
             if any(
-                prompt_len + 1 > self.max_model_len
-                for prompt_len in seed_prompt_lengths
+                prompt_len + 1 > max_model_len for prompt_len in seed_prompt_lengths
             ):
                 return False
             seed_required_blocks = sum(
@@ -2232,7 +2872,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 for prompt_len in seed_prompt_lengths
             )
             required_blocks = max(required_blocks, seed_required_blocks)
-        return required_blocks <= self._bench_usable_blocks(batch_size)
+        return required_blocks <= self._bench_grid_usable_blocks(batch_size)
 
     def _bench_prefill_blocks_per_req(self, isl: int, kv_read_tokens: int) -> int:
         tokens_with_lookahead = isl + getattr(self, "num_lookahead_tokens", 0)
@@ -2354,7 +2994,11 @@ class InstrumentedScheduler(AsyncScheduler):
 
         hash_block_size = max(1, self._bench_hash_block_size)
         max_blocks = sum(
-            max(0, self.max_model_len - new_tokens - 1) // hash_block_size
+            max(
+                0,
+                self._bench_capacity_limit("max_model_len") - new_tokens - 1,
+            )
+            // hash_block_size
             for new_tokens in new_token_lengths
         )
         if max_blocks < batch_size:
@@ -2379,7 +3023,13 @@ class InstrumentedScheduler(AsyncScheduler):
         kv_cache_manager = getattr(self, "kv_cache_manager", None)
         if self._bench_uses_per_group_cache_lookup():
             return 0
-        return self.block_size if getattr(kv_cache_manager, "use_eagle", False) else 0
+        if not getattr(kv_cache_manager, "use_eagle", False):
+            return 0
+        coordinator = getattr(kv_cache_manager, "coordinator", None)
+        if getattr(coordinator, "enable_partial_hash_hits", False):
+            # Hybrid align-mode cache lookup drops one fine-grained hash unit.
+            return self._bench_hash_block_size
+        return self.block_size
 
     def _bench_seed_prompt_len(self, kv_read_tokens: int) -> int:
         # EAGLE/MTP deliberately drops the last matched cache block. Seed one
@@ -2410,7 +3060,8 @@ class InstrumentedScheduler(AsyncScheduler):
         return cached_tokens
 
     def _bench_generate_decode_grid(self) -> None:
-        if self.max_model_len < 3:
+        max_model_len = self._bench_capacity_limit("max_model_len")
+        if max_model_len < 3:
             logger.warning("max_model_len too small for decode grid, skipping")
             return
 
@@ -2464,22 +3115,30 @@ class InstrumentedScheduler(AsyncScheduler):
                 )
 
     def _bench_decode_feasible_max_batch_size(self) -> int:
-        if self.max_model_len < 3:
+        max_model_len = self._bench_capacity_limit("max_model_len")
+        max_num_running_reqs = self._bench_capacity_limit("max_num_running_reqs")
+        max_num_scheduled_tokens = self._bench_capacity_limit(
+            "max_num_scheduled_tokens"
+        )
+        if max_model_len < 3:
             return 0
         min_blocks_per_request = self._bench_blocks_per_req(2)
         if min_blocks_per_request < 1:
-            feasible_max_batch = self.max_num_running_reqs
+            feasible_max_batch = max_num_running_reqs
         else:
             feasible_max_batch = (
-                self._bench_usable_blocks(
-                    self.max_num_running_reqs, reserve_watermark=True
+                self._bench_grid_usable_blocks(
+                    max_num_running_reqs, reserve_watermark=True
                 )
                 // min_blocks_per_request
             )
-        return min(
-            self.max_num_running_reqs,
-            self.max_num_scheduled_tokens,
-            feasible_max_batch,
+        return max(
+            0,
+            min(
+                max_num_running_reqs,
+                max_num_scheduled_tokens,
+                feasible_max_batch,
+            ),
         )
 
     @staticmethod
@@ -2511,7 +3170,9 @@ class InstrumentedScheduler(AsyncScheduler):
     def _bench_decode_point_feasible(
         self, batch_size: int, total_kv_read_tokens: int
     ) -> bool:
-        if batch_size < 1 or batch_size > self.max_num_running_reqs:
+        if batch_size < 1 or batch_size > self._bench_capacity_limit(
+            "max_num_running_reqs"
+        ):
             return False
         try:
             context_lengths = self._bench_decode_context_lengths(
@@ -2522,25 +3183,26 @@ class InstrumentedScheduler(AsyncScheduler):
         # A decode point admits at max(1, ctx-1) and measures its steady step
         # one position later, so a request occupies max(ctx, 2) + 1 slots and
         # the runner's post-step bookkeeping writes through slot
-        # max(ctx, 2) + 2, which must stay within max_model_len (ctx + 2 for
-        # the ordinary ctx >= 2 case; one extra slot for clamped ctx = 1
-        # entries, which run one token deeper than their nominal coordinate).
+        # max(ctx, 2) + 2, which must stay within the negotiated
+        # max_model_len (ctx + 2 for the ordinary ctx >= 2 case; one extra
+        # slot for clamped ctx = 1 entries, which run one token deeper than
+        # their nominal coordinate).
+        max_model_len = self._bench_capacity_limit("max_model_len")
         if any(
-            max(context_len, 2) + 2 > self.max_model_len
-            for context_len in context_lengths
+            max(context_len, 2) + 2 > max_model_len for context_len in context_lengths
         ):
             return False
         required_blocks = sum(
             self._bench_blocks_per_req(max(context_len, 2) + 1)
             for context_len in context_lengths
         )
-        return required_blocks <= self._bench_usable_blocks(
+        return required_blocks <= self._bench_grid_usable_blocks(
             batch_size, reserve_watermark=True
         )
 
     def _bench_max_decode_kv_read_tokens(self, batch_size: int) -> int:
         low = batch_size
-        high = batch_size * (self.max_model_len - 2)
+        high = batch_size * (self._bench_capacity_limit("max_model_len") - 2)
         best = 0
         while low <= high:
             mid = (low + high) // 2
@@ -2614,8 +3276,18 @@ class InstrumentedScheduler(AsyncScheduler):
         allocation_failed = False
         try:
             for index, (prefix_tokens, cache_salt) in enumerate(
-                zip(prefix_lengths, cache_salts)
+                zip(prefix_lengths, cache_salts, strict=True)
             ):
+                # A request that reads no cached prefix has nothing to seed, and
+                # seeding it would mean handing vLLM an empty prompt, which it
+                # rejects outright. The balanced split never produces a zero
+                # while the point's total is positive, so this only arises for a
+                # mixed calibration batch, where the short rows carry the whole
+                # spread by holding no prefix at all. Its salt stays unused, so
+                # the measured request finds no hit and reads the zero it asked
+                # for.
+                if prefix_tokens <= 0:
+                    continue
                 req = Request(
                     request_id=f"__bench_fake_prefix_{self._bench_seq + index}",
                     prompt_token_ids=[0] * prefix_tokens,
@@ -2649,7 +3321,10 @@ class InstrumentedScheduler(AsyncScheduler):
         except Exception:
             rollback()
             raise
-        self._bench_seq += len(seed_requests)
+        # Advance by the full batch, not by the number seeded: the request
+        # ids above are derived from the enumerate index, so skipping one
+        # must not let the next point reuse an id.
+        self._bench_seq += len(prefix_lengths)
         return True
 
     def _bench_inject_prefill(
@@ -2948,8 +3623,7 @@ class InstrumentedScheduler(AsyncScheduler):
         except Exception as prefix_error:
             cleanup_error = prefix_error
             self._bench_grid_error = (
-                f"{self._bench_grid_error}; prefix-cache cleanup failed: "
-                f"{prefix_error}"
+                f"{self._bench_grid_error}; prefix-cache cleanup failed: {prefix_error}"
             )
         try:
             self._bench_write_results()
@@ -3140,10 +3814,10 @@ class InstrumentedScheduler(AsyncScheduler):
 
         self._bench_current_fpms = []
         new_token_lengths = self._bench_prefill_new_token_lengths(
-            point.total_prefill_tokens, point.batch_size
+            point.total_prefill_tokens, point.batch_size, point.partition, point.rows
         )
         kv_read_lengths = self._bench_prefill_kv_read_lengths(
-            point.total_kv_read_tokens, point.batch_size
+            point.total_kv_read_tokens, point.batch_size, point.partition, point.rows
         )
         if point.total_kv_read_tokens > 0:
             cache_salts = [
@@ -3177,7 +3851,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 prompt_lens=[
                     new_tokens + kv_read_tokens
                     for new_tokens, kv_read_tokens in zip(
-                        new_token_lengths, kv_read_lengths
+                        new_token_lengths, kv_read_lengths, strict=True
                     )
                 ],
                 max_tokens=1,
@@ -3621,6 +4295,18 @@ class InstrumentedScheduler(AsyncScheduler):
             "measurement_policy": {
                 "decode": "steady_state_second_step",
                 "prefill": "single_step",
+            },
+            "capacity": {
+                "common": (
+                    asdict(negotiated_capacity)
+                    if (
+                        negotiated_capacity := getattr(
+                            self, "_bench_negotiated_capacity", None
+                        )
+                    )
+                    is not None
+                    else None
+                ),
             },
             "cudagraph": {
                 "mode": getattr(self, "_bench_cudagraph_mode", "NONE"),

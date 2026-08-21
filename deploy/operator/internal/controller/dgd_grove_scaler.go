@@ -29,16 +29,16 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/scale"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 type groveScaler struct {
-	scaleClient scale.ScalesGetter
+	client client.Client
 }
 
-func newGroveScaler(scaleClient scale.ScalesGetter) *groveScaler {
-	return &groveScaler{scaleClient: scaleClient}
+func newGroveScaler(kubeClient client.Client) *groveScaler {
+	return &groveScaler{client: kubeClient}
 }
 
 // Reconcile applies component replica changes to the Grove resources created
@@ -70,7 +70,7 @@ func (s *groveScaler) Reconcile(
 			replicas = 0
 		}
 
-		usesPCSG := component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled()
+		usesPCSG := component.UsesPCSG()
 		resourceName := dynamo.GroveComponentResourceName(dgd, componentName)
 		resourceKind := "PodClique"
 		gvr := consts.PodCliqueGVR
@@ -108,7 +108,7 @@ func (s *groveScaler) scaleResource(
 	namespace string,
 	newReplicas int32,
 ) error {
-	err := commoncontroller.ScaleResource(ctx, s.scaleClient, gvr, namespace, resourceName, newReplicas)
+	err := commoncontroller.ScaleResource(ctx, s.client, gvr, namespace, resourceName, newReplicas)
 	if apierrors.IsNotFound(err) {
 		// Grove creates these resources asynchronously after the PodCliqueSet.
 		// A later reconciliation retries the scale once the child exists.

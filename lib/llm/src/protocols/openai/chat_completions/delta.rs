@@ -128,6 +128,7 @@ impl DeltaGenerator {
                     dynamo_protocols::types::ChatCompletionTokenLogprob {
                         token: token_str.clone(),
                         logprob: lp,
+                        token_id: Some(*tid),
                         bytes: token_to_utf8_bytes(&token_str),
                         top_logprobs: converted,
                     }
@@ -196,7 +197,7 @@ impl DeltaGenerator {
     /// This should be sent after the last content chunk when stream_options.include_usage is true.
     ///
     /// # Returns
-    /// * A [`CreateChatCompletionStreamResponse`] with empty choices and usage stats.
+    /// * A `CreateChatCompletionStreamResponse` with empty choices and usage stats.
     pub fn create_usage_chunk(&self) -> NvCreateChatCompletionStreamResponse {
         let usage = self.get_usage();
 
@@ -545,6 +546,35 @@ mod tests {
         );
         assert_eq!(second_choice_zero.inner.choices[0].delta.role, None);
         assert_eq!(second_choice_one.inner.choices[0].delta.role, None);
+    }
+
+    #[test]
+    fn test_chat_logprobs_include_backend_token_id() {
+        let mut request = create_test_request();
+        request.inner.logprobs = Some(true);
+        let mut generator = request.response_generator("req-logprob-token-id".to_string());
+        let mut output = final_backend_output();
+        output.log_probs = Some(vec![-0.5]);
+        output.top_logprobs = Some(vec![vec![]]);
+
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("choice generation");
+
+        let logprob = &response.inner.choices[0]
+            .logprobs
+            .as_ref()
+            .expect("logprobs")
+            .content
+            .as_ref()
+            .expect("logprob content")[0];
+        assert_eq!(logprob.token_id, Some(1));
+
+        let response_json = serde_json::to_value(response).expect("serialize response");
+        assert_eq!(
+            response_json["choices"][0]["logprobs"]["content"][0]["token_id"],
+            1
+        );
     }
 
     fn create_test_request_with_extra_fields(fields: Vec<String>) -> NvCreateChatCompletionRequest {

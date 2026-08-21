@@ -18,6 +18,11 @@ except ImportError:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from dynamo.common.config_dump import register_encoder
+from dynamo.common.configuration.groups.router_args import (
+    WorkerRouterConfig,
+    parse_worker_router_config,
+    register_worker_router_help,
+)
 from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeArgGroup,
     DynamoRuntimeConfig,
@@ -41,7 +46,13 @@ class Config(DynamoRuntimeConfig, DynamoVllmConfig):
     request_plane: str
     event_plane: Optional[str] = None
     enable_local_indexer: bool = True
+    # Whether this worker publishes KV events. Distinct from the router-side
+    # `use_kv_events` on `router_advertisement`, which means the router
+    # subscribes to them -- the reason the two live on separate objects.
     use_kv_events: bool
+    # Routing this worker set advertises in its model card; None inherits the
+    # frontend's configuration.
+    router_advertisement: Optional[WorkerRouterConfig] = None
 
     # GMS configuration
     gms_shadow_mode: bool = False
@@ -64,16 +75,11 @@ def _preprocess_for_encode_config(config: Config) -> Dict[str, Any]:
     return config.__dict__
 
 
-def parse_args(
-    argv: list[str] | None = None, *, fpm_trace_relay_supported: bool = True
-) -> Config:
+def parse_args(argv: list[str] | None = None) -> Config:
     """Parse command-line arguments for the vLLM backend.
 
     Args:
         argv: Command-line arguments.  ``None`` means ``sys.argv[1:]``.
-        fpm_trace_relay_supported: Whether this entry point constructs the
-            Dynamo relay required for trace-based FPM activation.
-
     Returns:
         Config: Parsed configuration object.
     """
@@ -102,8 +108,17 @@ def parse_args(
             continue
         vg._group_actions.append(action)
 
+    # Router advertisement flags are parsed into their own config object rather
+    # than flattened onto Config: the router's --router-kv-events lands on
+    # `use_kv_events`, which Config already uses for "this worker publishes KV
+    # events". Registered here for --help only; parsed below.
+    register_worker_router_help(parser)
+
     args, unknown = parser.parse_known_args(argv)
     dynamo_config = Config.from_cli_args(args)
+
+    # Consume the router flags before the engine parser sees the remainder.
+    dynamo_config.router_advertisement, unknown = parse_worker_router_config(unknown)
 
     # Validate arguments
     dynamo_config.validate()
@@ -119,13 +134,12 @@ def parse_args(
 
     cross_validate_config(dynamo_config, engine_config)
     update_dynamo_config_with_engine(dynamo_config, engine_config)
-    update_engine_config_with_dynamo(
-        dynamo_config,
-        engine_config,
-        fpm_trace_relay_supported=fpm_trace_relay_supported,
-    )
+    update_engine_config_with_dynamo(dynamo_config, engine_config)
 
     dynamo_config.engine_args = engine_config
+    from .state_agent import validate_state_agent_worker
+
+    validate_state_agent_worker(dynamo_config)
     return dynamo_config
 
 
@@ -238,6 +252,8 @@ def _unsupported_fpm_trace_role(dynamo_config: Config) -> Optional[str]:
     """Return the worker role when trace-based FPM activation is unsupported."""
     if dynamo_config.embedding_worker:
         return "embedding"
+    if dynamo_config.classify_worker:
+        return "classify"
     if dynamo_config.headless:
         return "headless"
     if dynamo_config.disaggregation_mode == DisaggregationMode.ENCODE:
@@ -245,9 +261,7 @@ def _unsupported_fpm_trace_role(dynamo_config: Config) -> Optional[str]:
     return None
 
 
-def _forward_pass_metrics_enabled(
-    dynamo_config: Config, *, fpm_trace_relay_supported: bool = True
-) -> bool:
+def _forward_pass_metrics_enabled(dynamo_config: Config) -> bool:
     """Resolve FPM activation without changing the legacy explicit-port path."""
     if envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
         return True
@@ -255,8 +269,6 @@ def _forward_pass_metrics_enabled(
         return False
 
     unsupported_role = _unsupported_fpm_trace_role(dynamo_config)
-    if unsupported_role is None and not fpm_trace_relay_supported:
-        unsupported_role = "unified backend"
     if unsupported_role is None:
         return True
 
@@ -271,16 +283,26 @@ def _forward_pass_metrics_enabled(
 def update_engine_config_with_dynamo(
     dynamo_config: Config,
     engine_config: AsyncEngineArgs,
-    *,
-    fpm_trace_relay_supported: bool = True,
 ) -> None:
     """Update engine config based on Dynamo config."""
     if engine_config.enable_prefix_caching is None:
-        logger.debug(
-            "--enable-prefix-caching or --no-enable-prefix-caching not specified. "
-            "Defaulting to True (vLLM v1 default behavior)"
-        )
-        engine_config.enable_prefix_caching = True
+        if dynamo_config.embedding_worker or dynamo_config.classify_worker:
+            # Pooling engines never decode, so prefix caching buys nothing —
+            # and force-enabling it crashes models vLLM itself would leave it
+            # off for (e.g. ModernBERT's hybrid local/global attention dies
+            # with "HybridKVCacheCoordinator requires at least two attention
+            # groups"). Match bare `vllm serve`, which does not enable prefix
+            # caching for pooling runners.
+            logger.debug(
+                "Pooling-family worker: defaulting --enable-prefix-caching to False"
+            )
+            engine_config.enable_prefix_caching = False
+        else:
+            logger.debug(
+                "--enable-prefix-caching or --no-enable-prefix-caching not specified. "
+                "Defaulting to True (vLLM v1 default behavior)"
+            )
+            engine_config.enable_prefix_caching = True
 
     if getattr(engine_config, "block_size", None) is None:
         logger.debug(
@@ -312,10 +334,7 @@ def update_engine_config_with_dynamo(
         f"(use_kv_events={dynamo_config.use_kv_events})"
     )
 
-    fpm_enabled = _forward_pass_metrics_enabled(
-        dynamo_config,
-        fpm_trace_relay_supported=fpm_trace_relay_supported,
-    )
+    fpm_enabled = _forward_pass_metrics_enabled(dynamo_config)
     if fpm_enabled:
         existing_cls = getattr(engine_config, "scheduler_cls", None)
         if existing_cls is None:
@@ -364,10 +383,17 @@ def update_engine_config_with_dynamo(
             "warmup_iterations": dynamo_config.benchmark_warmup_iterations,
             "output_path": dynamo_config.benchmark_output_path,
             "timeout": dynamo_config.benchmark_timeout,
+            "collect_imbalanced": dynamo_config.benchmark_collect_imbalanced,
         }
         explicit_points = dynamo_config._benchmark_points
         if explicit_points is not None:
-            benchmark_config["points"] = explicit_points.model_dump(mode="json")
+            # exclude_none so a v1 manifest round-trips as itself: the v3
+            # optional fields (partition, rows) would otherwise be dumped as
+            # nulls the operator never wrote, into a config the scheduler
+            # re-parses and a test compares against the file it read.
+            benchmark_config["points"] = explicit_points.model_dump(
+                mode="json", exclude_none=True
+            )
         else:
             benchmark_config.update(
                 {

@@ -22,8 +22,7 @@ import (
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -70,7 +69,6 @@ func ResolveCheckpointForService(
 	c client.Reader,
 	namespace string,
 	config *nvidiacomv1alpha1.ServiceCheckpointConfig,
-	gate features.Gate,
 ) (*CheckpointInfo, error) {
 	startupPolicy := nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
 	if config != nil && config.StartupPolicy != "" {
@@ -90,9 +88,6 @@ func ResolveCheckpointForService(
 
 		info, err := checkpointInfoFromObject(ckpt)
 		if err != nil {
-			return nil, err
-		}
-		if err := validateResolvedGMSSnapshotGate(info, gate); err != nil {
 			return nil, err
 		}
 		if config.TargetContainerName != "" {
@@ -128,19 +123,9 @@ func ResolveCheckpointForService(
 	if err != nil {
 		return nil, err
 	}
-	if err := validateResolvedGMSSnapshotGate(info, gate); err != nil {
-		return nil, err
-	}
 	if config.TargetContainerName != "" {
 		info.RestoreTargetContainers = []string{config.TargetContainerName}
 	}
 	info.StartupPolicy = startupPolicy
 	return info, nil
-}
-
-func validateResolvedGMSSnapshotGate(info *CheckpointInfo, gate features.Gate) error {
-	if info == nil {
-		return nil
-	}
-	return ValidateGMSSnapshotGate("checkpoint.gpuMemoryService", info.Enabled, info.GPUMemoryService, gate)
 }

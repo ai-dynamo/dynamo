@@ -50,9 +50,9 @@ on:
     tags:
       # Match only clean semver tags: vX.Y.Z
       - 'v[0-9]+.[0-9]+.[0-9]+'
-  schedule:
-    # Refresh the Home page from the public Google Calendar.
-    - cron: '0 */6 * * *'
+  # The Home page calendar refresh used to run here on a six-hour `schedule:`.
+  # It now lives in community-events-refresh.yml, which commits the regenerated
+  # events to main — and that push comes back through the `push:` trigger above.
   workflow_dispatch:
     inputs:
       tag:
@@ -74,9 +74,14 @@ jobs:
   changed-files:
     runs-on: ubuntu-latest
     # Skip for tag pushes - version release doesn't need changed-files check
-    if: github.ref_type != 'tag' && github.event_name != 'schedule'
+    if: github.ref_type != 'tag'
     outputs:
       docs: ${{ steps.changes.outputs.docs }}
+      # api_docs also matches the Python/Rust source trees. The publish job
+      # keys on it for main pushes: the API reference pages generate from
+      # source at publish time, so a code-only merge that changes a
+      # documented symbol must republish or the live pages go stale.
+      api_docs: ${{ steps.changes.outputs.api_docs }}
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -96,10 +101,18 @@ jobs:
   preview-or-publish-docs:
     name: Preview or publish docs
     needs: changed-files
+    # api_docs is scoped to main pushes: on gated preview branches a code-only
+    # change would otherwise build (and comment) a preview per source PR, while
+    # on main a documented-symbol change must republish the generated API
+    # reference pages or the live site shows the previous code.
     if: |
       always() &&
       github.ref_type != 'tag' &&
-      (github.event_name == 'schedule' || needs.changed-files.outputs.docs == 'true' || github.event_name == 'workflow_dispatch') &&
+      (
+        needs.changed-files.outputs.docs == 'true' ||
+        (github.ref == 'refs/heads/main' && needs.changed-files.outputs.api_docs == 'true') ||
+        github.event_name == 'workflow_dispatch'
+      ) &&
       (github.event.inputs.tag == '' || github.event.inputs.tag == null)
     runs-on: ubuntu-latest
     steps:
@@ -118,6 +131,25 @@ jobs:
           path: source-checkout
           fetch-depth: 1
 
+      - name: Setup Python for API reference generation
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.13'
+
+      - name: Generate API references
+        # The Python/Rust reference pages are publish-time artifacts:
+        # gitignored in the source tree and generated here against the exact
+        # ref being published, so source PRs never carry (or review) the
+        # regenerated MDX. Generation must precede the pages-dev sync below,
+        # which rsyncs whatever sits under docs/fern/pages/. The Kubernetes
+        # reference regenerates from a docs-owned source file and stays
+        # committed, so it keeps the freshness check.
+        run: |
+          python3 -m pip install 'griffe==2.1.0'
+          python3 source-checkout/docs/fern/scripts/gen_python_api.py
+          python3 source-checkout/docs/fern/scripts/gen_rust_api.py
+          python3 source-checkout/docs/fern/scripts/gen_kubernetes_api.py --check
+
       - name: Checkout docs-website branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -131,15 +163,9 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Fetch community events from Google Calendar
-        run: |
-          # Install the pinned generator deps from the committed lockfile rather than
-          # a floating `npm install` — reproducible and offline-cache-friendly.
-          npm ci --prefix source-checkout/.github/scripts/events
-          # generate-events.js lives at .github/scripts/ and `require('node-ical')`s,
-          # so point Node at the events node_modules (npm --prefix installs there).
-          NODE_PATH=source-checkout/.github/scripts/events/node_modules \
-            node source-checkout/.github/scripts/generate-events.js
+      # Community events are no longer fetched here. events.generated.ts is
+      # committed to main by community-events-refresh.yml and syncs below with
+      # the rest of components/, so this job publishes exactly what main holds.
 
       - name: Sync dev content from main
         run: |
@@ -213,14 +239,6 @@ jobs:
           cp source-checkout/docs/fern/pages/home/index.mdx docs-checkout/fern/index.mdx
           sed -i 's|\.\./\.\./assets/|./assets/|g' docs-checkout/fern/index.mdx
 
-          # Sync root-level assets/ (docs.yml logos/fonts and index.mdx reference
-          # ./assets/ relative to the Fern root, not pages-dev). Merge-copy without
-          # deleting so assets still referenced by older versioned pages survive.
-          if [ -d source-checkout/docs/fern/assets ]; then
-            echo "Syncing assets/ to docs-website branch..."
-            cp -r source-checkout/docs/fern/assets/. docs-checkout/fern/assets/
-          fi
-
           # Sync legacy Digest asset mirror
           if [ -d source-checkout/docs/fern/pages/blog/_assets ]; then
             echo "Syncing Blog assets to the legacy digest/ compatibility path..."
@@ -269,6 +287,132 @@ jobs:
               fi
             done
           fi
+
+      - name: Generate, validate, and sync release assets
+        env:
+          IS_MAIN: ${{ steps.ctx.outputs.is_main }}
+        run: |
+          set -euo pipefail
+
+          # Sync assets/ into docs-checkout; force-add the generated pair
+          # because the synced fern/.gitignore ignores them, and an ignored
+          # bootstrap copy would be silently skipped by the commit step's
+          # `git add -A`, leaving the published raw URL 404 permanently.
+          sync_assets() {
+            if [ -d source-checkout/docs/fern/assets ]; then
+              echo "Syncing assets/ to docs-website branch..."
+              mkdir -p docs-checkout/fern/assets
+              cp -r source-checkout/docs/fern/assets/. docs-checkout/fern/assets/
+              for asset in releases.json releases-atom.xml; do
+                if [ -f "docs-checkout/fern/assets/$asset" ]; then
+                  git -C docs-checkout add -f "fern/assets/$asset"
+                fi
+              done
+            fi
+          }
+
+          # Older maintained branches may carry a gen_llms_tables.py without
+          # --assets-only (or no generator at all); their previews still sync
+          # whatever assets they commit. Main must always be able to generate.
+          gen_script="source-checkout/docs/fern/scripts/gen_llms_tables.py"
+          if ! { [ -f "$gen_script" ] && python3 "$gen_script" --help 2>/dev/null | grep -q -- '--assets-only'; }; then
+            if [ "${IS_MAIN:-false}" = "true" ]; then
+              echo "::error::gen_llms_tables.py with --assets-only support is required to generate release assets on main"
+              exit 1
+            fi
+            echo "::notice::Source tree lacks gen_llms_tables.py --assets-only; skipping release-asset generation"
+            sync_assets
+            exit 0
+          fi
+          python3 "$gen_script" --assets-only
+
+          generated_json="source-checkout/docs/fern/assets/releases.json"
+          generated_atom="source-checkout/docs/fern/assets/releases-atom.xml"
+          for asset in "$generated_json" "$generated_atom"; do
+            if [ ! -s "$asset" ]; then
+              echo "::error::$asset is missing or empty after release-asset generation"
+              exit 1
+            fi
+          done
+
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          source_root = Path("source-checkout/docs/fern")
+          generated_path = source_root / "assets/releases.json"
+          published_path = Path("docs-checkout/fern/assets/releases.json")
+
+
+          def fail(message: str) -> None:
+              print(f"::error::{message}", file=sys.stderr)
+              raise SystemExit(1)
+
+
+          def load_json(path: Path, label: str) -> dict:
+              try:
+                  payload = json.loads(path.read_text(encoding="utf-8"))
+              except (OSError, json.JSONDecodeError) as exc:
+                  fail(f"{label} is not valid readable JSON: {exc}")
+              if not isinstance(payload, dict):
+                  fail(f"{label} must contain a JSON object")
+              return payload
+
+
+          generated = load_json(generated_path, "generated releases.json")
+          releases = generated.get("releases")
+          if not isinstance(releases, list) or not releases:
+              fail("generated releases.json must contain a non-empty releases array")
+
+          if os.environ.get("IS_MAIN") != "true":
+              # Preview builds can lag main by a release; only a main publish
+              # is held to non-regression against the published copy.
+              print(
+                  "::notice::Preview build; entry-count regression check skipped"
+              )
+          elif published_path.exists():
+              published = load_json(published_path, "previously published releases.json")
+              published_releases = published.get("releases")
+              if not isinstance(published_releases, list):
+                  fail("previously published releases.json must contain a releases array")
+              if len(releases) < len(published_releases):
+                  fail(
+                      "generated releases.json has fewer entries than the previously "
+                      f"published copy ({len(releases)} < {len(published_releases)})"
+                  )
+          else:
+              print(
+                  "::notice::No previously published releases.json exists; "
+                  "entry-count regression check skipped"
+              )
+
+          sys.path.insert(0, str(source_root / "scripts"))
+          import gen_llms_tables  # noqa: E402
+
+          try:
+              current_version = gen_llms_tables.parse_data_module(
+                  source_root / "components/releases.data.ts"
+              )["CURRENT_VERSION"]
+          except (KeyError, OSError, gen_llms_tables.TSParseError) as exc:
+              fail(f"could not read CURRENT_VERSION from releases.data.ts: {exc}")
+
+          # Membership, not position: RELEASES may be headed by a platform-preview
+          # or model-build entry while CURRENT_VERSION stays on the prior stable
+          # (components resolve it with .find(), never [0]).
+          versions = [r.get("version") for r in releases if isinstance(r, dict)]
+          if current_version not in versions:
+              fail(
+                  "generated releases.json does not contain CURRENT_VERSION "
+                  f"from releases.data.ts ({current_version!r})"
+              )
+          PY
+
+          # Sync root-level assets/ (docs.yml logos/fonts and index.mdx reference
+          # ./assets/ relative to the Fern root, not pages-dev). Merge-copy without
+          # deleting so assets still referenced by older versioned pages survive.
+          sync_assets
 
       - name: Transform paths in dev.yml for docs-website layout
         run: |
@@ -385,6 +529,12 @@ jobs:
           # The refactored source uses standalone top-level versioning rather than
           # a product switcher. Restore the release history in that native shape.
           yq -i '.versions = load("/tmp/preserved_versions.yml")' docs.yml
+
+          # Fern resolves a versioned site's bare URL through the default
+          # version's first page instead of the top-level landing-page. Legacy
+          # release snapshots predate the Home tab, so add the shared Home entry
+          # to the default version before publishing.
+          ../../source-checkout/docs/fern/scripts/ensure_default_version_home.sh .
 
           # Inject the private NVIDIA global theme for production builds only.
           # It is intentionally absent from the source repo's docs.yml so that
@@ -520,6 +670,10 @@ jobs:
 
   release-version:
     name: Release Version to docs-website
+    # This job does not touch fern/assets/: releases.json and releases-atom.xml
+    # on docs-website are whatever the last main-sync generated. A release lands
+    # its releases.data.ts bump on main before the tag, so that copy is current
+    # by the time this job runs; a tag-only rerun republishes it unchanged.
     # Run on tag push OR manual dispatch with a tag specified
     if: |
       github.ref_type == 'tag' ||
@@ -589,6 +743,39 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Setup Python for API reference generation
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.13'
+
+      - name: Generate API references at the tag
+        # Tags cut after the Python/Rust references became publish-time
+        # artifacts carry no committed pages, so the snapshot below must
+        # generate them from the tagged source. Two classes of older tag are
+        # left untouched: tags that predate the generators, and tags that
+        # still COMMIT their pages -- a tag freezes its docs, and write-mode
+        # regeneration would overwrite (or via orphan removal, delete) pages
+        # the tag shipped with, while turning a generator error at the old
+        # ref into a hard release failure. Tracked pages are the signal:
+        # generation runs only when the tagged tree commits none.
+        run: |
+          set -euo pipefail
+          gen_py="source-checkout/docs/fern/scripts/gen_python_api.py"
+          gen_rs="source-checkout/docs/fern/scripts/gen_rust_api.py"
+          if [ ! -f "$gen_py" ] || [ ! -f "$gen_rs" ]; then
+            echo "::notice::Tagged tree lacks the API reference generators; snapshotting committed pages as-is"
+            exit 0
+          fi
+          tracked="$(git -C source-checkout ls-files -- \
+            docs/fern/pages/reference/api/python docs/fern/pages/reference/api/rust)"
+          if [ -n "$tracked" ]; then
+            echo "::notice::Tagged tree commits its API reference pages; snapshotting them as-is"
+            exit 0
+          fi
+          python3 -m pip install 'griffe==2.1.0'
+          python3 "$gen_py"
+          python3 "$gen_rs"
 
       - name: Build versioned pages from tagged commit
         run: |

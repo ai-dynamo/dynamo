@@ -806,6 +806,7 @@ mod cached_multimodal_uuid {
 }
 
 mod context_length_validation {
+    use dynamo_llm::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
     use dynamo_llm::model_card::ModelDeploymentCard;
     use dynamo_llm::preprocessor::OpenAIPreprocessor;
     use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
@@ -815,13 +816,34 @@ mod context_length_validation {
     const MODEL_PATH: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
 
     fn make_chat_request(message: &str, model: &str) -> NvCreateChatCompletionRequest {
+        make_chat_request_with_token_limits(message, model, None, None)
+    }
+
+    fn make_chat_request_with_max_tokens(
+        message: &str,
+        model: &str,
+        max_tokens: Option<u32>,
+    ) -> NvCreateChatCompletionRequest {
+        make_chat_request_with_token_limits(message, model, max_tokens, None)
+    }
+
+    fn make_chat_request_with_token_limits(
+        message: &str,
+        model: &str,
+        max_tokens: Option<u32>,
+        max_completion_tokens: Option<u32>,
+    ) -> NvCreateChatCompletionRequest {
         let messages: Vec<dynamo_protocols::types::ChatCompletionRequestMessage> =
             serde_json::from_str(message).unwrap();
-        let inner = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
-            .model(model)
-            .messages(messages)
-            .build()
-            .unwrap();
+        let mut builder = dynamo_protocols::types::CreateChatCompletionRequestArgs::default();
+        builder.model(model).messages(messages);
+        if let Some(max_tokens) = max_tokens {
+            builder.max_tokens(max_tokens);
+        }
+        if let Some(max_completion_tokens) = max_completion_tokens {
+            builder.max_completion_tokens(max_completion_tokens);
+        }
+        let inner = builder.build().unwrap();
         NvCreateChatCompletionRequest {
             inner,
             common: Default::default(),
@@ -834,11 +856,46 @@ mod context_length_validation {
         }
     }
 
-    #[tokio::test]
-    async fn test_prompt_exceeding_context_length_returns_400() {
+    async fn model_card_and_prompt_len(message: &str) -> (ModelDeploymentCard, u32) {
         let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
-        // Set a very small context length so even a short prompt exceeds it
-        mdc.runtime_config.context_length = Some(5);
+        mdc.runtime_config.context_length = Some(131072);
+        let preprocessor = OpenAIPreprocessor::new(mdc.clone()).unwrap();
+        let request = make_chat_request(message, "test-model");
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
+
+        (mdc, preprocessed.token_ids.len() as u32)
+    }
+
+    fn set_token_budget(
+        mdc: &mut ModelDeploymentCard,
+        combined_limit: u32,
+        reject_prompt_overflow: bool,
+        reject_total_overflow: bool,
+    ) {
+        mdc.runtime_config.context_length = Some(combined_limit);
+        mdc.runtime_config
+            .set_engine_specific(
+                TOKEN_BUDGET_RUNTIME_KEY,
+                TokenBudget {
+                    combined_limit,
+                    reject_prompt_overflow,
+                    reject_total_overflow,
+                },
+            )
+            .unwrap();
+    }
+
+    fn set_rejecting_token_budget(mdc: &mut ModelDeploymentCard, combined_limit: u32) {
+        set_token_budget(mdc, combined_limit, true, true);
+    }
+
+    #[tokio::test]
+    async fn test_prompt_exceeding_advertised_limit_returns_400() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
+        set_rejecting_token_budget(&mut mdc, 5);
 
         let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
         let request = make_chat_request(
@@ -849,7 +906,7 @@ mod context_length_validation {
         let result = preprocessor.preprocess_request(&request, None).await;
 
         // Should fail with a DynamoError with InvalidArgument type
-        let err = result.expect_err("should reject prompt exceeding context_length");
+        let err = result.expect_err("should reject prompt exceeding the advertised limit");
         let dynamo_err = err
             .downcast_ref::<DynamoError>()
             .expect("error should be DynamoError");
@@ -869,7 +926,7 @@ mod context_length_validation {
     }
 
     #[tokio::test]
-    async fn test_prompt_exactly_at_context_length_returns_400() {
+    async fn test_prompt_exactly_at_advertised_limit_returns_400() {
         let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
         // First, preprocess with a large context_length to discover the token count
         mdc.runtime_config.context_length = Some(131072);
@@ -884,8 +941,8 @@ mod context_length_validation {
             .unwrap();
         let token_count = preprocessed.token_ids.len() as u32;
 
-        // Now set context_length to exactly the token count — no room for output
-        mdc.runtime_config.context_length = Some(token_count);
+        // The prompt fills the combined budget, leaving no room for output.
+        set_rejecting_token_budget(&mut mdc, token_count);
         let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
         let request = make_chat_request(
             r#"[{"role": "user", "content": "What is deep learning?"}]"#,
@@ -895,7 +952,7 @@ mod context_length_validation {
         let result = preprocessor.preprocess_request(&request, None).await;
 
         // Should reject: prompt fills entire context, no room for output
-        let err = result.expect_err("should reject prompt that fills entire context_length");
+        let err = result.expect_err("should reject prompt that fills the combined limit");
         let dynamo_err = err
             .downcast_ref::<DynamoError>()
             .expect("error should be DynamoError");
@@ -903,11 +960,10 @@ mod context_length_validation {
     }
 
     #[tokio::test]
-    async fn test_context_length_zero_skips_validation() {
+    async fn test_missing_token_budget_defers_prompt_validation() {
         let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
-        // context_length = 0 means unconfigured, should skip validation
-        mdc.runtime_config.context_length = None;
-        mdc.architectural_max_context_length = None;
+        // Missing capability metadata always delegates validation to the backend.
+        mdc.runtime_config.context_length = Some(1);
 
         let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
         let request = make_chat_request(
@@ -915,7 +971,143 @@ mod context_length_validation {
             "test-model",
         );
 
-        let result = preprocessor.preprocess_request(&request, None).await;
-        assert!(result.is_ok(), "context_length=0 should skip validation");
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .expect("missing token budget should delegate validation");
+        assert!(
+            preprocessed.stop_conditions.max_tokens.is_none(),
+            "delegation should preserve an omitted output limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_requested_tokens_exceeding_context_length_returns_400() {
+        let message = r#"[{"role": "user", "content": "What is deep learning?"}]"#;
+        let (mut mdc, prompt_len) = model_card_and_prompt_len(message).await;
+
+        // Exceed the engine-published total context budget by one token.
+        set_rejecting_token_budget(&mut mdc, prompt_len + 10);
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let request = make_chat_request_with_token_limits(message, "test-model", Some(1), Some(11));
+
+        let err = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .expect_err("should reject input plus output exceeding context_length");
+        let dynamo_err = err
+            .downcast_ref::<DynamoError>()
+            .expect("error should be DynamoError");
+        assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
+        assert!(
+            dynamo_err.message().contains(&format!(
+                "{} input tokens and asks for 11 output tokens",
+                prompt_len
+            )),
+            "error message should state the requested token budget, got: {}",
+            dynamo_err.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_requested_tokens_exactly_at_context_length_succeeds() {
+        let message = r#"[{"role": "user", "content": "What is deep learning?"}]"#;
+        let (mut mdc, prompt_len) = model_card_and_prompt_len(message).await;
+
+        set_rejecting_token_budget(&mut mdc, prompt_len + 10);
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let request =
+            make_chat_request_with_token_limits(message, "test-model", Some(11), Some(10));
+
+        assert!(
+            preprocessor
+                .preprocess_request(&request, None)
+                .await
+                .is_ok(),
+            "input plus output exactly equal to context_length should be accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_omitted_output_budget_uses_engine_limit() {
+        let message = r#"[{"role": "user", "content": "What is deep learning?"}]"#;
+        let (mut mdc, prompt_len) = model_card_and_prompt_len(message).await;
+
+        set_rejecting_token_budget(&mut mdc, prompt_len + 10);
+        // The raw model context is larger because the engine reserves tokens.
+        mdc.runtime_config.context_length = Some(prompt_len + 100);
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let request = make_chat_request(message, "test-model");
+
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap();
+
+        assert_eq!(preprocessed.stop_conditions.max_tokens, Some(10));
+    }
+
+    #[tokio::test]
+    async fn test_missing_token_budget_defers_total_validation() {
+        let message = r#"[{"role": "user", "content": "What is deep learning?"}]"#;
+        let (mut mdc, prompt_len) = model_card_and_prompt_len(message).await;
+
+        mdc.runtime_config.context_length = Some(prompt_len + 10);
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let request = make_chat_request_with_max_tokens(message, "test-model", Some(11));
+
+        assert!(
+            preprocessor
+                .preprocess_request(&request, None)
+                .await
+                .is_ok(),
+            "without a token-budget policy, total-token validation should defer to the backend"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_malformed_token_budget_defers_validation() {
+        let message = r#"[{"role": "user", "content": "What is deep learning?"}]"#;
+        let (mut mdc, prompt_len) = model_card_and_prompt_len(message).await;
+        mdc.runtime_config.context_length = Some(prompt_len + 10);
+        mdc.runtime_config.runtime_data.insert(
+            TOKEN_BUDGET_RUNTIME_KEY.to_string(),
+            serde_json::json!("not-a-token-budget"),
+        );
+
+        let preprocessor = OpenAIPreprocessor::new(mdc)
+            .expect("malformed optional metadata must not fail startup");
+        let request = make_chat_request_with_max_tokens(message, "test-model", Some(11));
+        assert!(
+            preprocessor
+                .preprocess_request(&request, None)
+                .await
+                .is_ok(),
+            "malformed token budget should delegate validation to the backend"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_backend_owned_overflow_defers_without_mutating_request() {
+        let message = r#"[{"role": "user", "content": "What is deep learning?"}]"#;
+        let (mut mdc, prompt_len) = model_card_and_prompt_len(message).await;
+
+        set_token_budget(&mut mdc, prompt_len + 10, true, false);
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let request = make_chat_request_with_max_tokens(message, "test-model", Some(11));
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .expect("output clamping belongs to the backend");
+        assert_eq!(preprocessed.stop_conditions.max_tokens, Some(11));
+
+        let (mut mdc, prompt_len) = model_card_and_prompt_len(message).await;
+        set_token_budget(&mut mdc, prompt_len, false, false);
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(&make_chat_request(message, "test-model"), None)
+            .await
+            .expect("prompt truncation belongs to the backend");
+        assert_eq!(preprocessed.stop_conditions.max_tokens, None);
     }
 }

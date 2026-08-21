@@ -28,6 +28,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -67,6 +68,7 @@ type dynamoGraphDeploymentValidation struct {
 type dynamoGraphDeploymentSpecValidationOptions struct {
 	dgdName                 string
 	generation              int64
+	workloadProvider        string
 	grovePathway            bool
 	grovePathwayRequirement string
 }
@@ -141,9 +143,11 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 
 	groveEnabled := features.MustGateFrom(v.ctx).Enabled(features.Grove)
 	grovePathway, grovePathwayRequirement := grovePathwayForDynamoGraphDeployment(groveEnabled, dgd)
+	workloadProvider := dgd.Annotations[consts.KubeAnnotationWorkloadProvider]
 	specOpts := dynamoGraphDeploymentSpecValidationOptions{
 		dgdName:                 dgd.Name,
 		generation:              dgd.Generation,
+		workloadProvider:        workloadProvider,
 		grovePathway:            grovePathway,
 		grovePathwayRequirement: grovePathwayRequirement,
 	}
@@ -196,6 +200,16 @@ func (v *dynamoGraphDeploymentValidation) validateObjectMeta(
 		))
 	}
 
+	// Restrict the durable workload provider to programs implemented by the controller.
+	if value, exists := objectMeta.Annotations[consts.KubeAnnotationWorkloadProvider]; exists &&
+		value != consts.WorkloadProviderComponent && value != consts.WorkloadProviderGrove {
+		allErrs = append(allErrs, field.NotSupported(
+			annotationsPath.Key(consts.KubeAnnotationWorkloadProvider),
+			value,
+			[]string{consts.WorkloadProviderComponent, consts.WorkloadProviderGrove},
+		))
+	}
+
 	if hasIntraPodFailover && objectMeta.Annotations[consts.KubeAnnotationDynamoKubeDiscoveryMode] != "container" {
 		allErrs = append(allErrs, field.Invalid(
 			annotationsPath.Key(consts.KubeAnnotationDynamoKubeDiscoveryMode),
@@ -216,6 +230,19 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	const validateInferencePoolAvailability = true
 
 	allErrs := field.ErrorList{}
+
+	// Validate the root provider fragment against the selected graph workload program.
+	if spec.ProviderOverride != nil {
+		allErrs = append(allErrs, v.validateProviderOverride(
+			spec.ProviderOverride,
+			fldPath.Child("providerOverride"),
+			providerOverrideValidationOptions{
+				supported:        true,
+				workloadProvider: opts.workloadProvider,
+				scope:            provideroverride.ScopeRoot,
+			},
+		)...)
+	}
 
 	if spec.PriorityClassName != "" && !opts.grovePathway {
 		allErrs = append(allErrs, field.Forbidden(fldPath.Child("priorityClassName"), opts.grovePathwayRequirement))
@@ -270,11 +297,17 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		// Phase-1 power accounting reads scalar GPU resources and cannot account for DRA devices.
 		allErrs = append(allErrs, v.validateDGDComponentPowerAnnotation(component, componentPath)...)
 
+		allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, component, componentPath)...)
+
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 			component,
 			componentPath,
-			opts.grovePathway,
-			validateInferencePoolAvailability,
+			dynamoComponentDeploymentSharedSpecValidationOptions{
+				grovePathway:                      opts.grovePathway,
+				validateInferencePoolAvailability: validateInferencePoolAvailability,
+				providerOverridesSupported:        true,
+				workloadProvider:                  opts.workloadProvider,
+			},
 		)...)
 	}
 
@@ -292,6 +325,11 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	}
 	hasAnyConstraint := spec.TopologyConstraint != nil || hasComponentConstraint
 	if hasAnyConstraint {
+		allErrs = append(allErrs, groveTopologyOverrideCompositionErrors(
+			spec,
+			opts.workloadProvider,
+			fldPath,
+		)...)
 		topologyErrs := field.ErrorList{}
 		if spec.TopologyConstraint == nil {
 			topologyErrs = append(topologyErrs, field.Required(
@@ -356,6 +394,73 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	}
 
 	return allErrs
+}
+
+// groveTopologyOverrideCompositionErrors returns conflicts between the typed
+// and provider-native topology APIs. spec and fldPath must not be nil.
+func groveTopologyOverrideCompositionErrors(
+	spec *nvidiacomv1beta1.DynamoGraphDeploymentSpec,
+	provider string,
+	fldPath *field.Path,
+) field.ErrorList {
+	if provider != consts.WorkloadProviderGrove {
+		return nil
+	}
+	detail := "cannot be combined with spec.topologyConstraint or components[].topologyConstraint; use either the typed topology API or provider-native Grove topology overrides"
+	allErrs := field.ErrorList{}
+	if providerOverrideWritesGroveTopology(spec.ProviderOverride, provider, provideroverride.ScopeRoot, nil) {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("providerOverride", "value"), detail))
+	}
+	componentsPath := fldPath.Child("components")
+	for i := range spec.Components {
+		component := &spec.Components[i]
+		componentPath := componentsPath.Index(i)
+		if providerOverrideWritesGroveTopology(component.ProviderOverride, provider, provideroverride.ScopeComponent, component) {
+			allErrs = append(allErrs, field.Forbidden(componentPath.Child("providerOverride", "value"), detail))
+		}
+		if component.Multinode == nil {
+			continue
+		}
+		if component.Multinode.Leader != nil && providerOverrideWritesGroveTopology(
+			component.Multinode.Leader.ProviderOverride,
+			provider,
+			provideroverride.ScopeMultinodeLeader,
+			component,
+		) {
+			allErrs = append(allErrs, field.Forbidden(componentPath.Child("multinode", "leader", "providerOverride", "value"), detail))
+		}
+		if component.Multinode.Worker != nil && providerOverrideWritesGroveTopology(
+			component.Multinode.Worker.ProviderOverride,
+			provider,
+			provideroverride.ScopeMultinodeWorker,
+			component,
+		) {
+			allErrs = append(allErrs, field.Forbidden(componentPath.Child("multinode", "worker", "providerOverride", "value"), detail))
+		}
+	}
+	return allErrs
+}
+
+// providerOverrideWritesGroveTopology reports whether an optional override
+// writes topology. component may be nil only for ScopeRoot.
+func providerOverrideWritesGroveTopology(
+	override *nvidiacomv1beta1.ProviderOverride,
+	provider string,
+	scope provideroverride.Scope,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) bool {
+	if override == nil {
+		return false
+	}
+	target := override.Target
+	if target == "" {
+		resolved, err := provideroverride.ExpectedTarget(provider, override.APIVersion, scope, component)
+		if err != nil {
+			return false
+		}
+		target = resolved
+	}
+	return provideroverride.WritesGroveTopology(target, override.Value.Raw)
 }
 
 // validateRestart validates restart. restart and fldPath must not be nil.
@@ -497,6 +602,11 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentUpdate(
 	oldDGD *nvidiacomv1beta1.DynamoGraphDeployment,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
+	allErrs = append(allErrs, v.validateObjectMetaUpdate(
+		&newDGD.ObjectMeta,
+		&oldDGD.ObjectMeta,
+		field.NewPath("metadata"),
+	)...)
 	allErrs = append(allErrs, v.validateDynamoGraphDeploymentSpecUpdate(
 		&newDGD.Spec,
 		&oldDGD.Spec,
@@ -520,6 +630,43 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentUpdate(
 	return allErrs
 }
 
+// validateObjectMetaUpdate validates a DGD metadata update.
+// newObjectMeta, oldObjectMeta, and fldPath must not be nil.
+func (v *dynamoGraphDeploymentValidation) validateObjectMetaUpdate(
+	newObjectMeta *metav1.ObjectMeta,
+	oldObjectMeta *metav1.ObjectMeta,
+	fldPath *field.Path,
+) field.ErrorList {
+	allErrs := field.ErrorList{}
+	annotationsPath := fldPath.Child("annotations")
+	newProvider, newProviderExists := newObjectMeta.Annotations[consts.KubeAnnotationWorkloadProvider]
+	oldProvider, oldProviderExists := oldObjectMeta.Annotations[consts.KubeAnnotationWorkloadProvider]
+
+	// Reserve the initial legacy-provider materialization for the configured operator identity.
+	if !oldProviderExists && newProviderExists && v.operatorPrincipal != "" &&
+		(v.userInfo == nil || v.userInfo.Username != v.operatorPrincipal) {
+		allErrs = append(allErrs, field.Forbidden(
+			annotationsPath.Key(consts.KubeAnnotationWorkloadProvider),
+			"may only be materialized by the Dynamo operator",
+		))
+	}
+
+	// Once materialized, the workload provider cannot be replaced or removed.
+	if oldProviderExists && (!newProviderExists || newProvider != oldProvider) {
+		var invalidValue any
+		if newProviderExists {
+			invalidValue = newProvider
+		}
+		allErrs = append(allErrs, field.Invalid(
+			annotationsPath.Key(consts.KubeAnnotationWorkloadProvider),
+			invalidValue,
+			apivalidation.FieldImmutableErrorMsg,
+		))
+	}
+
+	return allErrs
+}
+
 // validateDynamoGraphDeploymentSpecUpdate validates a spec update. newSpec, oldSpec, and fldPath must not be nil.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdate(
 	newSpec *nvidiacomv1beta1.DynamoGraphDeploymentSpec,
@@ -527,6 +674,16 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 	fldPath *field.Path,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
+
+	// Keep an existing root provider identity stable across updates.
+	if newSpec.ProviderOverride != nil && oldSpec.ProviderOverride != nil {
+		allErrs = append(allErrs, validateProviderOverrideUpdate(
+			newSpec.ProviderOverride,
+			oldSpec.ProviderOverride,
+			fldPath.Child("providerOverride"),
+		)...)
+	}
+
 	newComponents := componentsByName(newSpec.Components)
 	oldComponents := componentsByName(oldSpec.Components)
 

@@ -68,6 +68,28 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# Bring base-image OS packages up to the current patch releases published in
+# the distro archives. --only-upgrade skips anything not already installed, so
+# no new packages are added; versions are left unpinned so a cache-busted
+# rebuild picks up the newest patch level (BuildKit reuses this layer otherwise).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update -y \
+    && apt-get install -y --no-install-recommends --only-upgrade \
+        dirmngr \
+        gnupg \
+        gnupg-utils \
+        gnupg2 \
+        gpg \
+        gpg-agent \
+        gpgconf \
+        gpgsm \
+        gpgv \
+        keyboxd \
+        libssl3t64 \
+        openssl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 
 # Create dynamo user with group 0 for OpenShift compatibility
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
@@ -105,8 +127,6 @@ ENV PATH="/opt/dynamo/venv/bin:$PATH"
 COPY --chown=dynamo: --from=dynamo_base /opt/uv/bin/uv /opt/uv/bin/uvx /opt/uv/bin/
 ENV PATH=/opt/uv/bin:${PATH}
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
-COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
-COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 # crick wheel pre-built in the crick_builder stage; see comment near the top.
 COPY --chown=dynamo: --from=crick_builder /wheels/ /opt/dynamo/wheelhouse/extra/
 
@@ -128,17 +148,23 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.frontend.txt
 
-ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
+ARG NIXL_REF
 # In an ideal world, we'd use a mirror of PyPI for much more reliable downloads.
 # UV_FIND_LINKS points at the crick wheel pre-built in the crick_builder stage;
 # uv prefers it over the sdist on arm64 where no manylinux aarch64 wheel exists.
 RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
+    echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_FIND_LINKS=/opt/dynamo/wheelhouse/extra && \
     uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-    /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-    /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
+    # The meta package requires both backends unconditionally (its cu12/cu13
+    # extras are vestigial), so install the backend first and the meta module
+    # --no-deps to keep a single CUDA build and one libnixl_capi.so.
+    uv pip install "nixl-cu13==${NIXL_REF#v}" && \
+    uv pip install --no-deps "nixl==${NIXL_REF#v}" && \
+    uv pip show nixl nixl-cu13 | grep -E '^(Name|Version)' | tee /opt/dynamo/nixl-versions.txt && \
     if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
         GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
         if [ -z "$GMS_WHEEL" ]; then \
@@ -147,21 +173,24 @@ RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home
         fi; \
         uv pip install "$GMS_WHEEL"; \
     fi && \
-    if [ "$ENABLE_KVBM" = "true" ]; then \
-        KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
-        if [ -z "$KVBM_WHEEL" ]; then \
-            echo "ERROR: ENABLE_KVBM is true but no KVBM wheel found in wheelhouse" >&2; \
-            exit 1; \
-        fi; \
-        uv pip install "$KVBM_WHEEL"; \
-    fi && \
     cd /workspace/benchmarks && \
     export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install .
 
 # Setup environment for all users
 USER root
-RUN chmod 755 /opt/dynamo/.launch_screen && \
+# nixl-sys resolves the C API with a bare dlopen("libnixl_capi.so"), and
+# dynamo/_core.abi3.so carries no RPATH, so without this the Rust bindings
+# silently fall back to stub mode while the Python ones work. The wheel keeps
+# its libraries in a private directory; put that on the loader path. NIXL finds
+# the backend plugins beside them on its own (nixl_plugin_manager.cpp's
+# getPluginDir dladdr fallback), so NIXL_PLUGIN_DIR is deliberately left unset.
+RUN NIXL_LIB_DIR="$(/opt/dynamo/venv/bin/python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/.nixl_cu13.mesonpy.libs" && \
+    [ -f "${NIXL_LIB_DIR}/libnixl_capi.so" ] || { echo "missing ${NIXL_LIB_DIR}/libnixl_capi.so; NIXL wheel layout changed" >&2; exit 1; } && \
+    [ -d "${NIXL_LIB_DIR}/plugins" ] || { echo "missing ${NIXL_LIB_DIR}/plugins; NIXL wheel layout changed" >&2; exit 1; } && \
+    echo "${NIXL_LIB_DIR}" > /etc/ld.so.conf.d/nixl.conf && \
+    ldconfig && \
+    chmod 755 /opt/dynamo/.launch_screen && \
     echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
 

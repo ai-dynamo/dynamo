@@ -1,6 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+import importlib
+import json
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -19,12 +25,14 @@ from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
 )
 from dynamo.sglang.request_handlers.multimodal.worker_handler import (
     EmbeddingsProcessor,
+    MultimodalPrefillWorkerHandler,
     _build_mm_items,
 )
 
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
+    pytest.mark.multimodal,
     pytest.mark.gpu_0,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
@@ -32,10 +40,39 @@ pytestmark = [
 ]
 
 
-def test_extract_media_urls_supports_video_urls():
+class _FakeContext:
+    def __init__(self, context_id: str, trace_id: str | None = None):
+        self.trace_id = trace_id
+        self._context_id = context_id
+        self._cancelled = asyncio.Event()
+
+    def id(self) -> str:
+        return self._context_id
+
+    def async_killed_or_stopped(self) -> asyncio.Task[bool]:
+        return asyncio.create_task(self._cancelled.wait())
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+
+
+@asynccontextmanager
+async def _never_cancels(request_id_future, context):
+    task = asyncio.create_task(asyncio.Event().wait())
+    try:
+        yield task
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+def test_extract_media_inputs_supports_video_urls():
     handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
 
-    image_urls, video_urls = handler._extract_media_urls(
+    image_items, video_urls = handler._extract_media_inputs(
         {
             "multi_modal_data": {
                 "video_url": [
@@ -46,14 +83,14 @@ def test_extract_media_urls_supports_video_urls():
         }
     )
 
-    assert image_urls == []
+    assert image_items == []
     assert video_urls == ["https://example.com/clip.mp4", "file:///tmp/local.mp4"]
 
 
-def test_extract_media_urls_supports_mixed_image_and_video():
+def test_extract_media_inputs_supports_mixed_image_and_video():
     handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
 
-    image_urls, video_urls = handler._extract_media_urls(
+    image_items, video_urls = handler._extract_media_inputs(
         {
             "multi_modal_data": {
                 "image_url": [{"Url": "https://example.com/image.png"}],
@@ -62,16 +99,16 @@ def test_extract_media_urls_supports_mixed_image_and_video():
         }
     )
 
-    assert image_urls == ["https://example.com/image.png"]
+    assert image_items == [{"Url": "https://example.com/image.png"}]
     assert video_urls == ["https://example.com/clip.mp4"]
 
 
 @pytest.mark.multimodal
-def test_extract_media_urls_rejects_multimodal_cache_uuid():
+def test_extract_media_inputs_rejects_multimodal_cache_uuid():
     handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
 
     with pytest.raises(ValueError, match="supported only by the vLLM backend"):
-        handler._extract_media_urls(
+        handler._extract_media_inputs(
             {
                 "multi_modal_uuids": {"image_url": ["cached-image"]},
             }
@@ -145,6 +182,239 @@ async def test_build_mm_items_routes_video_to_video_data():
     assert mm_item["video_timestamps"] == [[0.25, 0.75]]
 
 
+@pytest.mark.asyncio
+async def test_multimodal_prefill_starts_before_returning_bootstrap():
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler.bootstrap_host = "prefill-host"
+    handler.bootstrap_port = 1234
+    handler._consume_tasks = set()
+    handler.embeddings_processor = SimpleNamespace(release_embeddings=lambda _: None)
+    events = []
+
+    handler._validate_and_parse_disagg_request = lambda request: request
+    handler._generate_bootstrap_room = lambda: 17
+
+    async def start_prefill(request, bootstrap_room, rid=None, context=None):
+        events.append(("start", bootstrap_room, rid))
+
+        async def results():
+            events.append(("iterate", None))
+            yield {"meta_info": {"id": "request-id"}}
+
+        return results(), None
+
+    async def wait_for_registration(rid):
+        events.append(("registered", rid))
+
+    handler._start_prefill_generation = start_prefill
+    handler._wait_for_request_registration = wait_for_registration
+    handler._cancellation_monitor = _never_cancels
+
+    stream = handler.generate(object(), _FakeContext("request-id"))
+    bootstrap = json.loads(await anext(stream))
+
+    assert events == [
+        ("start", 17, "request-id"),
+        ("registered", "request-id"),
+        ("iterate", None),
+    ]
+    assert bootstrap == {
+        "bootstrap_host": "prefill-host",
+        "bootstrap_port": 1234,
+        "bootstrap_room": 17,
+    }
+
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+    assert events == [
+        ("start", 17, "request-id"),
+        ("registered", "request-id"),
+        ("iterate", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_releases_embeddings_when_submission_fails(
+    monkeypatch,
+):
+    import dynamo.sglang.request_handlers.multimodal.worker_handler as worker_handler
+
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler.bootstrap_host = "prefill-host"
+    handler.bootstrap_port = 1234
+    handler.enable_trace = False
+
+    released = []
+    handler.embeddings_processor = SimpleNamespace(release_embeddings=released.append)
+
+    async def build_mm_items(request, embeddings_processor):
+        return [], [], torch.empty(0), 23
+
+    class FailingEngine:
+        async def async_generate(self, **kwargs):
+            raise RuntimeError("submission failed")
+
+    handler.engine = FailingEngine()
+    monkeypatch.setattr(worker_handler, "_build_mm_items", build_mm_items)
+
+    request = SimpleNamespace(
+        request=SimpleNamespace(request=SimpleNamespace(token_ids=[1, 2, 3])),
+        sampling_params={"max_new_tokens": 1},
+    )
+
+    with pytest.raises(RuntimeError, match="submission failed"):
+        await handler._start_prefill_generation(request, 17)
+
+    assert released == [23]
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_rejects_empty_engine_stream():
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    released = []
+    handler.embeddings_processor = SimpleNamespace(release_embeddings=released.append)
+
+    async def wait_for_registration(rid):
+        return None
+
+    handler._wait_for_request_registration = wait_for_registration
+    handler._cancellation_monitor = _never_cancels
+
+    async def empty_results():
+        if False:
+            yield None
+
+    owns_tensor = asyncio.Event()
+    request_started = asyncio.Event()
+
+    with pytest.raises(RuntimeError, match="ended before producing a result"):
+        await handler._consume_results(
+            empty_results(),
+            23,
+            "request-id",
+            _FakeContext("request-id"),
+            owns_tensor,
+            request_started,
+        )
+
+    assert owns_tensor.is_set()
+    assert request_started.is_set()
+    assert released == [23]
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_cancellation_awaits_consumer_cleanup():
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler.bootstrap_host = "prefill-host"
+    handler.bootstrap_port = 1234
+    handler._consume_tasks = set()
+    released = []
+    handler.embeddings_processor = SimpleNamespace(release_embeddings=released.append)
+
+    handler._validate_and_parse_disagg_request = lambda request: request
+    handler._generate_bootstrap_room = lambda: 17
+    result_stopped = asyncio.Event()
+
+    async def results():
+        try:
+            await asyncio.Event().wait()
+            yield {}
+        finally:
+            result_stopped.set()
+
+    async def start_prefill(request, bootstrap_room, rid=None, context=None):
+        return results(), 23
+
+    async def wait_for_registration(rid):
+        return None
+
+    handler._start_prefill_generation = start_prefill
+    handler._wait_for_request_registration = wait_for_registration
+    handler._cancellation_monitor = _never_cancels
+
+    stream = handler.generate(object(), _FakeContext("request-id"))
+    await anext(stream)
+    await stream.aclose()
+
+    assert result_stopped.is_set()
+    assert released == [23]
+    assert not handler._consume_tasks
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_cancels_registered_rid_before_first_result():
+    rid = "dynamo-request-id"
+    abort_calls = []
+    result_stopped = asyncio.Event()
+
+    class _TokenizerManager:
+        def __init__(self):
+            self.rid_to_state = {}
+
+        def abort_request(self, *, rid, abort_all):
+            abort_calls.append((rid, abort_all))
+
+    tokenizer_manager = _TokenizerManager()
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler.engine = SimpleNamespace(tokenizer_manager=tokenizer_manager)
+    handler.shutdown_event = None
+    handler.embeddings_processor = SimpleNamespace(release_embeddings=lambda _: None)
+
+    async def results():
+        tokenizer_manager.rid_to_state[rid] = object()
+        try:
+            await asyncio.Event().wait()
+            yield {}
+        finally:
+            result_stopped.set()
+
+    owns_tensor = asyncio.Event()
+    request_started = asyncio.Event()
+    context = _FakeContext(rid)
+    consumer = asyncio.create_task(
+        handler._consume_results(
+            results(),
+            None,
+            rid,
+            context,
+            owns_tensor,
+            request_started,
+        )
+    )
+
+    await asyncio.wait_for(request_started.wait(), timeout=1)
+    context.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(consumer, timeout=1)
+
+    assert abort_calls == [(rid, False)]
+    assert result_stopped.is_set()
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_cleanup_awaits_consumers_before_engine_shutdown():
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler.publisher = None
+    events = []
+
+    async def consumer():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            events.append("consumer stopped")
+
+    task = asyncio.create_task(consumer())
+    await asyncio.sleep(0)
+    handler._consume_tasks = {task}
+    handler.engine = SimpleNamespace(shutdown=lambda: events.append("engine shutdown"))
+
+    await handler.cleanup_async()
+
+    assert events == ["consumer stopped", "engine shutdown"]
+    assert not handler._consume_tasks
+
+
 async def test_nvdec_video_metadata_shim_stamps_valid_metadata():
     """The metadata shim gives pre-decoded ndarray frames a valid metadata dict.
 
@@ -186,3 +456,96 @@ async def test_nvdec_video_metadata_shim_stamps_valid_metadata():
         assert meta_none is None
     finally:
         es.preprocess_video = saved
+
+
+# ---------------------------------------------------------------------------
+# Unsupported-codec preflight in _maybe_nvdec_decoder.
+# ---------------------------------------------------------------------------
+
+
+def _bare_handler():
+    """Handler skeleton for exercising _maybe_nvdec_decoder in isolation."""
+    from dynamo.common.http.url_validator import UrlValidationPolicy
+    from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
+        MultimodalEncodeWorkerHandler,
+    )
+
+    handler = object.__new__(MultimodalEncodeWorkerHandler)
+    handler._url_policy = UrlValidationPolicy.from_env()
+    return handler
+
+
+def _selective_import(present: set[str]):
+    """Fake importlib.import_module for the preflight's real-import probe:
+    decoder modules import only when listed in `present` (a broken native
+    install behaves exactly like an absent one -- ImportError either way)."""
+    real = importlib.import_module
+
+    def fake(name, *args, **kwargs):
+        if name in ("torchcodec", "decord"):
+            if name in present:
+                return object()
+            raise ImportError(f"No module named '{name}' (or broken install)")
+        return real(name, *args, **kwargs)
+
+    return fake
+
+
+@pytest.mark.asyncio
+async def test_vp9_without_software_decoder_is_actionable(monkeypatch):
+    """A VP9 request on an image with neither torchcodec nor decord must fail
+    HERE with guidance, not deep inside SGLang with the video payload repr
+    embedded in a bare "No module named 'decord'" (observed on a real image).
+
+    Raising through _maybe_nvdec_decoder also proves the broad fallback
+    except-clause does not swallow the preflight error and pass the bytes on
+    anyway.
+    """
+    import dynamo.sglang.request_handlers.multimodal.encode_worker_handler as ewh
+    from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
+    from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
+
+    async def fake_validate(url, policy):
+        return url
+
+    async def fake_fetch(url, timeout, policy=None):
+        return b"vp9-bytes"
+
+    monkeypatch.setattr(ewh, "validate_media_url", fake_validate)
+    monkeypatch.setattr(ewh, "fetch_bytes", fake_fetch)
+    monkeypatch.setattr(ewh, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(ewh, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(ewh.importlib, "import_module", _selective_import(set()))
+
+    handler = _bare_handler()
+    with pytest.raises(MissingMediaDecoderError) as exc_info:
+        await handler._maybe_nvdec_decoder("https://example.com/clip.webm")
+
+    msg = str(exc_info.value)
+    assert "'vp9'" in msg
+    assert VALIDATED_SPECS["decord2"] in msg
+    assert "install_media_decoders sglang" in msg
+
+
+@pytest.mark.asyncio
+async def test_vp9_with_software_decoder_passes_bytes_through(monkeypatch):
+    """With decord importable the preflight stays silent and the validated
+    bytes are handed to SGLang exactly as before."""
+    import dynamo.sglang.request_handlers.multimodal.encode_worker_handler as ewh
+
+    async def fake_validate(url, policy):
+        return url
+
+    async def fake_fetch(url, timeout, policy=None):
+        return b"vp9-bytes"
+
+    monkeypatch.setattr(ewh, "validate_media_url", fake_validate)
+    monkeypatch.setattr(ewh, "fetch_bytes", fake_fetch)
+    monkeypatch.setattr(ewh, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(ewh, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(ewh.importlib, "import_module", _selective_import({"decord"}))
+
+    handler = _bare_handler()
+    result = await handler._maybe_nvdec_decoder("https://example.com/clip.webm")
+
+    assert result == b"vp9-bytes"

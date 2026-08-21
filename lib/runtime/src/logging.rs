@@ -8,8 +8,10 @@
 //!   2. Optional TOML file pointed to by the `DYN_LOGGING_CONFIG_PATH` environment variable.
 //!   3. `/opt/dynamo/etc/logging.toml`.
 //!
-//! Logging can take two forms: `READABLE` or `JSONL`. The default is `READABLE`. `JSONL`
-//! can be enabled by setting the `DYN_LOGGING_JSONL` environment variable to `1`.
+//! Logging can take two console forms: `READABLE` or `JSONL`. Select one with
+//! `DYN_LOGGING_CONSOLE_FORMAT=readable|jsonl`; the default is `READABLE`.
+//! `DYN_LOGGING_JSONL=1` remains a legacy fallback when the new setting is unset or blank.
+//! Console presentation is independent of OpenTelemetry export.
 //!
 //! To use local timezone for logging timestamps, set the `DYN_LOG_USE_LOCAL_TZ` environment variable to `1`.
 //!
@@ -49,7 +51,8 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{filter::Directive, fmt};
 
 use crate::config::{
-    disable_ansi_logging, env_is_truthy, jsonl_logging_enabled, span_events_enabled,
+    ConsoleLogFormat, console_log_format, disable_ansi_logging, env_is_truthy,
+    legacy_jsonl_logging_enabled, span_events_enabled,
 };
 use async_nats::{HeaderMap, HeaderValue};
 use axum::extract::FromRequestParts;
@@ -315,17 +318,23 @@ fn span_events_for_logging() -> FmtSpan {
     }
 }
 
-fn log_otel_init_status(service_name: &str, endpoint_opt: Option<(OtlpProtocol, String)>) {
+fn log_otel_init_status(
+    service_name: &str,
+    endpoint_opt: Option<(OtlpProtocol, String)>,
+    console_format: ConsoleLogFormat,
+) {
     if let Some((protocol, endpoint)) = endpoint_opt {
         tracing::info!(
             endpoint = %endpoint,
             protocol = %protocol.as_str(),
             service = %service_name,
+            console_format = console_format.as_str(),
             "OpenTelemetry OTLP export enabled (traces and logs)"
         );
     } else {
         tracing::info!(
             service = %service_name,
+            console_format = console_format.as_str(),
             "OpenTelemetry OTLP export disabled, traces local only"
         );
     }
@@ -1274,11 +1283,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
         .with_default(LevelFilter::ERROR)
         .with_target("runtime", LevelFilter::TRACE)
         .with_target("tokio", LevelFilter::TRACE);
-    let l = fmt::layer()
-        .with_ansi(!disable_ansi_logging())
-        .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
-        .with_writer(std::io::stderr)
-        .with_filter(filters(load_config()));
+    let l = console_layer(console_log_format(), FmtSpan::NONE, filters(load_config()));
     tracing_subscriber::registry()
         .with(l)
         .with(tokio_console_layer.with_filter(tokio_console_target))
@@ -1292,10 +1297,21 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let trace_filter_layer = filters(load_config());
     let otel_filter_layer = filters(load_config());
     let otel_logs_filter_layer = filters(load_config());
-    let jsonl_enabled = jsonl_logging_enabled();
+    let console_format = console_log_format();
+    let legacy_jsonl_enabled = legacy_jsonl_logging_enabled();
     let otlp_enabled = otlp_exporter_enabled();
+    // Keep the legacy JSONL switch as a trace-context signal even when the new
+    // setting overrides console presentation. Older deployments rely on it for
+    // downstream trace propagation without OTLP export.
+    let trace_context_enabled =
+        otlp_enabled || legacy_jsonl_enabled || console_format == ConsoleLogFormat::Jsonl;
+    let span_events = if trace_context_enabled {
+        span_events_for_logging()
+    } else {
+        FmtSpan::NONE
+    };
 
-    if jsonl_enabled || otlp_enabled {
+    if trace_context_enabled {
         let service_name = get_service_name();
         let sample_ratio = trace_sample_ratio_from_env();
 
@@ -1399,50 +1415,87 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             .as_ref()
             .map(|lp| OpenTelemetryTracingBridge::new(lp).with_filter(otel_logs_filter_layer));
 
-        macro_rules! init_otel_subscriber {
-            ($fmt_layer:expr) => {
-                tracing_subscriber::registry()
-                    .with(
-                        tracing_opentelemetry::layer()
-                            .with_tracer(tracer)
-                            .with_filter(otel_filter_layer),
-                    )
-                    .with(otel_logs_layer)
-                    .with(DistributedTraceIdLayer.with_filter(trace_filter_layer))
-                    .with($fmt_layer)
-                    .init();
-            };
-        }
+        let l = console_layer(console_format, span_events, fmt_filter_layer);
+        tracing_subscriber::registry()
+            .with(
+                tracing_opentelemetry::layer()
+                    .with_tracer(tracer)
+                    .with_filter(otel_filter_layer),
+            )
+            .with(otel_logs_layer)
+            .with(DistributedTraceIdLayer.with_filter(trace_filter_layer))
+            .with(l)
+            .init();
 
-        if jsonl_enabled {
-            let l = fmt::layer()
-                .with_ansi(false)
-                .with_span_events(span_events_for_logging())
-                .event_format(CustomJsonFormatter::new())
-                .with_writer(std::io::stderr)
-                .with_filter(fmt_filter_layer);
-            init_otel_subscriber!(l);
-        } else {
-            let l = fmt::layer()
-                .with_ansi(!disable_ansi_logging())
-                .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
-                .with_writer(std::io::stderr)
-                .with_filter(fmt_filter_layer);
-            init_otel_subscriber!(l);
-        }
-
-        log_otel_init_status(&service_name, endpoint_opt);
+        log_otel_init_status(&service_name, endpoint_opt, console_format);
     } else {
-        let l = fmt::layer()
-            .with_ansi(!disable_ansi_logging())
-            .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
-            .with_writer(std::io::stderr)
-            .with_filter(fmt_filter_layer);
+        let l = console_layer(console_format, span_events, fmt_filter_layer);
 
         tracing_subscriber::registry().with(l).init();
     }
 
     Ok(())
+}
+
+/// Console (stderr) fmt layer whose event format is selected by
+/// `DYN_LOGGING_CONSOLE_FORMAT`, independent of the OTel export state.
+fn console_layer<S>(
+    format: ConsoleLogFormat,
+    span_events: FmtSpan,
+    filter_layer: LoggingFilter,
+) -> impl Layer<S>
+where
+    S: Subscriber + for<'a> LookupSpan<'a> + 'static,
+{
+    fmt::layer()
+        .with_ansi(format == ConsoleLogFormat::Readable && !disable_ansi_logging())
+        .with_span_events(span_events)
+        .event_format(ConsoleEventFormatter::new(format))
+        .with_writer(std::io::stderr)
+        .with_filter(filter_layer)
+}
+
+type ReadableEventFormatter = tracing_subscriber::fmt::format::Format<
+    tracing_subscriber::fmt::format::Compact,
+    TimeFormatter,
+>;
+
+enum ConsoleEventFormatter {
+    Readable(ReadableEventFormatter),
+    Jsonl(CustomJsonFormatter),
+}
+
+impl ConsoleEventFormatter {
+    fn new(format: ConsoleLogFormat) -> Self {
+        match format {
+            ConsoleLogFormat::Readable => {
+                Self::Readable(fmt::format().compact().with_timer(TimeFormatter::new()))
+            }
+            ConsoleLogFormat::Jsonl => Self::Jsonl(CustomJsonFormatter::new()),
+        }
+    }
+}
+
+impl<S, N> tracing_subscriber::fmt::FormatEvent<S, N> for ConsoleEventFormatter
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> std::fmt::Result {
+        match self {
+            Self::Readable(formatter) => {
+                tracing_subscriber::fmt::FormatEvent::format_event(formatter, ctx, writer, event)
+            }
+            Self::Jsonl(formatter) => {
+                tracing_subscriber::fmt::FormatEvent::format_event(formatter, ctx, writer, event)
+            }
+        }
+    }
 }
 
 #[allow(clippy::large_enum_variant)] // Constructed once during logging initialization.
@@ -2812,6 +2865,7 @@ pub mod tests {
                 "--nocapture",
             ])
             .env("OTEL_EXPORT_ENABLED", "1")
+            .env_remove("DYN_LOGGING_CONSOLE_FORMAT")
             .env_remove("DYN_LOGGING_JSONL")
             .output()
             .expect("Failed to execute subprocess test");
@@ -2962,6 +3016,230 @@ pub mod tests {
         tracing::info!(target: "other_module", "inside other target span");
     }
 
+    #[test]
+    fn test_readable_console_with_otel_export() {
+        use std::process::Command;
+
+        let output = Command::new("cargo")
+            .args([
+                "test",
+                "-p",
+                "dynamo-runtime",
+                "logging::tests::test_readable_console_with_otel_export_subprocess",
+                "--",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("DYN_TEST_LOGGING_READABLE_OTEL", "1")
+            .env("DYN_LOGGING_CONSOLE_FORMAT", "readable")
+            .env("DYN_LOGGING_JSONL", "1")
+            .env("OTEL_EXPORT_ENABLED", "1")
+            .env("DYN_LOG", "info")
+            .env("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", DEFAULT_OTLP_ENDPOINT)
+            .env("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", DEFAULT_OTLP_ENDPOINT)
+            .output()
+            .expect("Failed to execute subprocess test");
+
+        if !output.status.success() {
+            eprintln!(
+                "=== STDOUT ===\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            eprintln!(
+                "=== STDERR ===\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        assert!(
+            output.status.success(),
+            "Subprocess test failed with exit code: {:?}",
+            output.status.code()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_readable_console_with_otel_export_subprocess() -> Result<()> {
+        if std::env::var("DYN_TEST_LOGGING_READABLE_OTEL").is_err() {
+            return Ok(());
+        }
+
+        let tmp_file = NamedTempFile::new().unwrap();
+        let file_name = tmp_file.path().to_str().unwrap();
+        let guard = StderrOverride::from_file(file_name)?;
+        init();
+        tracing::info!("readable console with otel marker");
+        drop(guard);
+
+        let content = std::fs::read_to_string(file_name)?;
+        assert!(
+            content.contains("OpenTelemetry OTLP export enabled"),
+            "expected OTLP init log in captured stderr, got: {content}"
+        );
+        assert!(
+            content.contains("readable console with otel marker"),
+            "expected marker log in captured stderr, got: {content}"
+        );
+
+        for line in content.lines().filter(|line| !line.trim().is_empty()) {
+            assert!(
+                serde_json::from_str::<Value>(line).is_err(),
+                "expected readable log line, got JSON: {line}"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_tokio_console_respects_console_format() {
+        use std::process::Command;
+
+        let output = Command::new("cargo")
+            .args([
+                "test",
+                "-p",
+                "dynamo-runtime",
+                "--features",
+                "tokio-console",
+                "logging::tests::test_tokio_console_respects_console_format_subprocess",
+                "--",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("DYN_TEST_LOGGING_TOKIO_CONSOLE_JSONL", "1")
+            .env("DYN_LOGGING_CONSOLE_FORMAT", "jsonl")
+            .env_remove("DYN_LOGGING_JSONL")
+            .env_remove("OTEL_EXPORT_ENABLED")
+            .env("DYN_LOG", "info")
+            .output()
+            .expect("Failed to execute subprocess test");
+
+        if !output.status.success() {
+            eprintln!(
+                "=== STDOUT ===\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            eprintln!(
+                "=== STDERR ===\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        assert!(
+            output.status.success(),
+            "Subprocess test failed with exit code: {:?}",
+            output.status.code()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tokio_console_respects_console_format_subprocess() -> Result<()> {
+        if std::env::var("DYN_TEST_LOGGING_TOKIO_CONSOLE_JSONL").is_err() {
+            return Ok(());
+        }
+
+        let tmp_file = NamedTempFile::new().unwrap();
+        let file_name = tmp_file.path().to_str().unwrap();
+        let guard = StderrOverride::from_file(file_name)?;
+        init();
+        tracing::info!("tokio console jsonl marker");
+        drop(guard);
+
+        let content = std::fs::read_to_string(file_name)?;
+        let marker_line = content
+            .lines()
+            .find(|line| line.contains("tokio console jsonl marker"))
+            .unwrap_or_else(|| panic!("expected marker log in captured stderr, got: {content}"));
+        serde_json::from_str::<Value>(marker_line)
+            .unwrap_or_else(|error| panic!("expected JSONL marker, got '{marker_line}': {error}"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_readable_console_preserves_legacy_trace_context() {
+        use std::process::Command;
+
+        let output = Command::new("cargo")
+            .args([
+                "test",
+                "-p",
+                "dynamo-runtime",
+                "logging::tests::test_readable_console_preserves_legacy_trace_context_subprocess",
+                "--",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("DYN_TEST_LOGGING_READABLE_LEGACY_TRACE", "1")
+            .env("DYN_LOGGING_CONSOLE_FORMAT", "readable")
+            .env("DYN_LOGGING_JSONL", "1")
+            .env_remove("OTEL_EXPORT_ENABLED")
+            .env("DYN_LOG", "info")
+            .output()
+            .expect("Failed to execute subprocess test");
+
+        if !output.status.success() {
+            eprintln!(
+                "=== STDOUT ===\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            eprintln!(
+                "=== STDERR ===\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        assert!(
+            output.status.success(),
+            "Subprocess test failed with exit code: {:?}",
+            output.status.code()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_readable_console_preserves_legacy_trace_context_subprocess() -> Result<()> {
+        if std::env::var("DYN_TEST_LOGGING_READABLE_LEGACY_TRACE").is_err() {
+            return Ok(());
+        }
+
+        let tmp_file = NamedTempFile::new().unwrap();
+        let file_name = tmp_file.path().to_str().unwrap();
+        let guard = StderrOverride::from_file(file_name)?;
+        init();
+
+        let span = tracing::info_span!("legacy_trace_context");
+        let trace_context = span.in_scope(get_distributed_tracing_context);
+        assert!(
+            trace_context.is_some(),
+            "legacy DYN_LOGGING_JSONL should keep local trace context enabled"
+        );
+
+        let mut headers = HashMap::new();
+        span.in_scope(|| inject_trace_headers_into_map(&mut headers));
+        assert!(
+            headers.contains_key("traceparent"),
+            "legacy trace context should remain available for propagation"
+        );
+
+        tracing::info!("readable console with legacy trace marker");
+        drop(guard);
+
+        let content = std::fs::read_to_string(file_name)?;
+        assert!(
+            content.contains("readable console with legacy trace marker"),
+            "expected marker log in captured stderr, got: {content}"
+        );
+        for line in content.lines().filter(|line| !line.trim().is_empty()) {
+            assert!(
+                serde_json::from_str::<Value>(line).is_err(),
+                "expected readable log line, got JSON: {line}"
+            );
+        }
+
+        Ok(())
+    }
+
     /// Comprehensive test for span events covering:
     /// - SPAN_FIRST_ENTRY and SPAN_CLOSED event emission
     /// - Trace context (trace_id, span_id) in span events
@@ -2982,11 +3260,12 @@ pub mod tests {
                 "test",
                 "-p",
                 "dynamo-runtime",
-                "test_span_events_subprocess",
+                "logging::tests::test_span_events_subprocess",
                 "--",
                 "--exact",
                 "--nocapture",
             ])
+            .env("DYN_LOGGING_CONSOLE_FORMAT", "jsonl")
             .env("DYN_LOGGING_JSONL", "1")
             .env("DYN_LOGGING_SPAN_EVENTS", "1")
             .env("DYN_LOG", "warn,dynamo_runtime::logging::tests=debug")

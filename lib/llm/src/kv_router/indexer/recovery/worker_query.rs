@@ -10,16 +10,16 @@ use std::{
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use dynamo_kv_router::{
-    indexer::WorkerKvQueryResponse, protocols::RouterEvent, recovery::CursorState,
+    indexer::WorkerKvQueryResponse,
+    protocols::{ResetScope, RouterEvent},
+    recovery::CursorState,
 };
 use dynamo_runtime::component::{Component, Instance};
 use rand::Rng;
-use tokio::{
-    sync::{Mutex, Semaphore, watch},
-    task::JoinHandle,
-};
+use tokio::sync::{Mutex, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 
+use super::recovery_lane::{RECOVERY_CONCURRENCY_LIMIT, RecoveryLane};
 use super::target::{IndexerRecoveryTarget, RecoveryResetReason, RecoveryTarget};
 use super::worker_query_state::{LiveEventAction, PendingDrainPlan, RankState, RecoveryKey};
 use super::worker_query_transport::{RuntimeWorkerQueryTransport, WorkerQueryTransport};
@@ -30,21 +30,21 @@ use crate::discovery::{
 
 const RECOVERY_MAX_RETRIES: u32 = 8;
 const RECOVERY_INITIAL_BACKOFF_MS: u64 = 200;
-const RECOVERY_CONCURRENCY_LIMIT: usize = 16;
 pub(crate) const DEFAULT_RECOVERY_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const KV_EVENT_TOPIC: &str = dynamo_kv_router::protocols::KV_EVENT_SUBJECT;
+
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+struct NonAuthoritativeRecoveryError {
+    message: String,
+}
 
 #[derive(Debug)]
 struct SourceBinding {
     source: KvEventSource,
     source_id: KvSourceId,
     lifetime: CancellationToken,
-}
-
-struct RecoveryTask {
-    cancel: CancellationToken,
-    handle: JoinHandle<()>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,8 +108,7 @@ pub(crate) struct WorkerQueryClient<T = IndexerRecoveryTarget> {
     slots: DashMap<RecoveryKey, Arc<Mutex<SourceSlot>>>,
     /// Immutable publisher binding and rank slot lookup performed once per event envelope.
     publisher_bindings: DashMap<PublisherId, ActivePublisherBinding>,
-    recovery_tasks: DashMap<RecoveryKey, RecoveryTask>,
-    recovery_semaphore: Arc<Semaphore>,
+    recovery_lane: RecoveryLane<RecoveryKey>,
     recovery_attempt_timeout: Duration,
     cancellation_token: CancellationToken,
 }
@@ -150,8 +149,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             membership_sync: Mutex::new(()),
             slots: DashMap::new(),
             publisher_bindings: DashMap::new(),
-            recovery_tasks: DashMap::new(),
-            recovery_semaphore,
+            recovery_lane: RecoveryLane::with_semaphore(recovery_semaphore),
             recovery_attempt_timeout,
             cancellation_token,
         });
@@ -190,8 +188,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             membership_sync: Mutex::new(()),
             slots: DashMap::new(),
             publisher_bindings: DashMap::new(),
-            recovery_tasks: DashMap::new(),
-            recovery_semaphore,
+            recovery_lane: RecoveryLane::with_semaphore(recovery_semaphore),
             recovery_attempt_timeout,
             cancellation_token: CancellationToken::new(),
         })
@@ -256,6 +253,19 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             .or_insert_with(|| Arc::new(Mutex::new(SourceSlot::default())))
             .clone();
         let mut slot = slot_handle.lock().await;
+
+        if matches!(status, KvSourceStatus::Suppressed) {
+            let deactivated = self.deactivate_locked(key, &mut slot).await;
+            let reset_source = slot.pending_reset.take().or(deactivated);
+            if let Some(source_id) = reset_source
+                && let Err(error) = self.reset_rank_or_fence(key, &source_id, &mut slot).await
+            {
+                tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to clear legacy KV state while suppressing its source; reset remains pending");
+                return;
+            }
+            slot.rank = RankState::default();
+            return;
+        }
 
         let selected = status.active_source().cloned();
         if let (Some(active), Some(selected)) = (&slot.active, &selected)
@@ -576,6 +586,18 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         };
         let binding = active.binding;
         let expected = binding.source.worker;
+        if matches!(
+            self.membership_rx.borrow().status(&expected),
+            Some(KvSourceStatus::Suppressed)
+        ) {
+            tracing::debug!(
+                publisher_id,
+                worker_id = expected.worker_id,
+                dp_rank = expected.dp_rank,
+                "Dropping legacy KV events for a rank owned by the state-agent source mode"
+            );
+            return;
+        }
         if let Some(event) = events.iter().find(|event| {
             event.worker_id != expected.worker_id || event.event.dp_rank != expected.dp_rank
         }) {
@@ -694,14 +716,10 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
     }
 
     async fn cancel_recovery(&self, key: RecoveryKey) {
-        if let Some((_, task)) = self.recovery_tasks.remove(&key) {
-            task.cancel.cancel();
-            task.handle.abort();
-            if let Err(error) = task.handle.await
-                && !error.is_cancelled()
-            {
-                tracing::warn!(%error, worker_id = key.0, dp_rank = key.1, "KV recovery task failed while joining cancellation");
-            }
+        if let Some(error) = self.recovery_lane.cancel(key).await
+            && !error.is_cancelled()
+        {
+            tracing::warn!(%error, worker_id = key.0, dp_rank = key.1, "KV recovery task failed while joining cancellation");
         }
     }
 
@@ -749,16 +767,15 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             if task_cancel.is_cancelled() {
                 return;
             }
-            client
+            let complete_initial = client
                 .clone()
                 .finish_recovery(key, binding, task_cancel, result)
                 .await;
-            if initial_recovery {
+            if initial_recovery && complete_initial {
                 client.target.complete_initial_recovery(key.0, key.1).await;
             }
         });
-        self.recovery_tasks
-            .insert(key, RecoveryTask { cancel, handle });
+        self.recovery_lane.insert(key, cancel, handle);
     }
 
     fn schedule_recovery_after_current(
@@ -799,12 +816,12 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         binding: Arc<SourceBinding>,
         cancel: CancellationToken,
         result: Result<WorkerKvQueryResponse>,
-    ) {
+    ) -> bool {
         if cancel.is_cancelled() {
-            return;
+            return false;
         }
         let Some(slot) = self.slots.get(&key).map(|entry| entry.clone()) else {
-            return;
+            return false;
         };
         let mut slot = slot.lock().await;
         if cancel.is_cancelled()
@@ -813,7 +830,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 .as_ref()
                 .is_some_and(|active| Arc::ptr_eq(active, &binding))
         {
-            return;
+            return false;
         }
 
         let (recovered_events, recovered_cursor) = match result {
@@ -830,7 +847,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                     );
                     self.fence_corrupt_recovery_locked(key, &binding.source_id, &mut slot)
                         .await;
-                    return;
+                    return true;
                 }
                 (
                     events,
@@ -842,7 +859,18 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             Ok(WorkerKvQueryResponse::TreeDump {
                 events,
                 last_event_id,
+                reset_scope,
             }) => {
+                if reset_scope != ResetScope::All {
+                    tracing::error!(
+                        worker_id = key.0,
+                        dp_rank = key.1,
+                        ?reset_scope,
+                        "Ignoring unsupported domain-scoped recovery snapshot"
+                    );
+                    slot.rank.retry_after_failed_snapshot();
+                    return false;
+                }
                 if !recovery_events_match_source(key, &events) {
                     tracing::error!(
                         worker_id = key.0,
@@ -852,7 +880,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                     );
                     self.fence_corrupt_recovery_locked(key, &binding.source_id, &mut slot)
                         .await;
-                    return;
+                    return true;
                 }
                 if let Err(error) = self
                     .target
@@ -861,7 +889,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 {
                     slot.fence_for_reset(binding.source_id.clone());
                     tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to transactionally replace rank from recovery tree dump; rank remains fenced");
-                    return;
+                    return true;
                 }
                 (Vec::new(), CursorState::Initial.advance_to(last_event_id))
             }
@@ -874,21 +902,10 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                     dp_rank = key.1,
                     last_event_id,
                     %message,
-                    "Worker tree dump failed; applying explicit degraded rank reset"
+                    "Worker tree dump failed; leaving authoritative state and cursor unchanged"
                 );
-                if let Err(error) = self
-                    .reset_rank_for_reason_or_fence(
-                        key,
-                        &binding.source_id,
-                        &mut slot,
-                        RecoveryResetReason::TreeDumpFailed,
-                    )
-                    .await
-                {
-                    tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed degraded rank reset; recovery cursor remains unchanged");
-                    return;
-                }
-                (Vec::new(), CursorState::Initial.advance_to(last_event_id))
+                slot.rank.retry_after_failed_snapshot();
+                return false;
             }
             Ok(response) => {
                 tracing::warn!(
@@ -899,13 +916,18 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 );
                 self.finish_degraded_locked(key, &binding.source_id, &mut slot)
                     .await;
-                return;
+                return true;
+            }
+            Err(error) if error.is::<NonAuthoritativeRecoveryError>() => {
+                tracing::warn!(%error, worker_id = key.0, dp_rank = key.1, publisher_id = binding.source.publisher_id, "Authoritative KV recovery snapshot remained unavailable after bounded retries; leaving state and cursor unchanged");
+                slot.rank.retry_after_failed_snapshot();
+                return false;
             }
             Err(error) => {
                 tracing::warn!(%error, worker_id = key.0, dp_rank = key.1, publisher_id = binding.source.publisher_id, "KV recovery failed; continuing with degraded live events");
                 self.finish_degraded_locked(key, &binding.source_id, &mut slot)
                     .await;
-                return;
+                return true;
             }
         };
 
@@ -929,13 +951,14 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         {
             slot.fence_for_reset(binding.source_id.clone());
             tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "KV indexer rejected a recovery event; rank remains fenced");
-            return;
+            return true;
         }
         slot.rank = rank_after_admission;
         drop(slot);
         if let Some(start_event_id) = next_recovery_start {
             self.schedule_recovery_after_current(key, binding, start_event_id);
         }
+        true
     }
 
     async fn finish_degraded_locked(
@@ -979,13 +1002,14 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         end_event_id: Option<u64>,
     ) -> Result<WorkerKvQueryResponse> {
         let mut last_error = None;
+        let mut saw_non_authoritative_failure = false;
         for attempt in 0..RECOVERY_MAX_RETRIES {
             let result = {
                 // Limit only the in-flight RPC. The shared permit is deliberately released
                 // before retry backoff so unresponsive targets cannot starve unrelated pools.
                 let _permit = self
-                    .recovery_semaphore
-                    .clone()
+                    .recovery_lane
+                    .semaphore()
                     .acquire_owned()
                     .await
                     .context("recovery semaphore closed")?;
@@ -1009,17 +1033,42 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 .and_then(|result| result)
             };
             match result {
+                Ok(WorkerKvQueryResponse::TreeDumpFailed {
+                    last_event_id,
+                    message,
+                }) => {
+                    last_error = Some(anyhow::anyhow!(
+                        "worker tree dump failed at event {last_event_id}: {message}"
+                    ));
+                    saw_non_authoritative_failure = true;
+                }
+                Ok(WorkerKvQueryResponse::TreeDump { reset_scope, .. })
+                    if reset_scope != ResetScope::All =>
+                {
+                    last_error = Some(anyhow::anyhow!(
+                        "worker returned unsupported recovery snapshot scope {reset_scope:?}"
+                    ));
+                    saw_non_authoritative_failure = true;
+                }
                 Ok(response) => return Ok(response),
                 Err(error) => {
                     last_error = Some(error);
-                    if attempt + 1 < RECOVERY_MAX_RETRIES {
-                        let backoff_ms = RECOVERY_INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
-                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                    }
                 }
             }
+            if attempt + 1 < RECOVERY_MAX_RETRIES {
+                let backoff_ms = RECOVERY_INITIAL_BACKOFF_MS * 2_u64.pow(attempt);
+                tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+            }
         }
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("KV recovery returned no response")))
+        let error =
+            last_error.unwrap_or_else(|| anyhow::anyhow!("KV recovery returned no response"));
+        if saw_non_authoritative_failure {
+            return Err(NonAuthoritativeRecoveryError {
+                message: error.to_string(),
+            }
+            .into());
+        }
+        Err(error)
     }
 }
 
@@ -1049,10 +1098,15 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use dynamo_kv_router::{
+        identity::{
+            CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
+            RoutingScopeId, StableDpSlotId,
+        },
         indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, WorkerKvQueryRequest},
         protocols::{
             DpRank, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-            KvCacheStoredBlockData, LocalBlockHash, WorkerId, WorkerWithDpRank,
+            KvCacheStoredBlockData, LocalBlockHash, ResidencyDomain, StorageTier, WorkerId,
+            WorkerWithDpRank,
         },
     };
     use dynamo_runtime::{
@@ -1268,9 +1322,10 @@ mod tests {
                 self.slow_started.notify_one();
                 std::future::pending().await
             } else {
-                Ok(WorkerKvQueryResponse::TreeDumpFailed {
-                    last_event_id: 0,
-                    message: "test".to_string(),
+                Ok(WorkerKvQueryResponse::TooNew {
+                    requested_start: None,
+                    requested_end: None,
+                    newest_available: 0,
                 })
             }
         }
@@ -1329,6 +1384,19 @@ mod tests {
         )
     }
 
+    fn cache_owner_id() -> CacheOwnerId {
+        CacheOwnerId::new(
+            PoolId::new(
+                IndexerDomainId::new(
+                    CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                    RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+                ),
+                DcId::new(3),
+            ),
+            StableDpSlotId::new([4; 16], IdentitySource::Explicit),
+        )
+    }
+
     fn source_for(
         endpoint: &EndpointId,
         worker: WorkerWithDpRank,
@@ -1355,6 +1423,7 @@ mod tests {
                 instance_id: publisher_id,
                 transport: TransportType::Nats(String::new()),
                 device_type: None,
+                request_plane_codec: None,
             }),
         )
     }
@@ -1431,6 +1500,45 @@ mod tests {
             .sync_membership_with_ready_sources(&HashSet::from([ready_source(&source)]))
             .await;
         assert!(client.publisher_bindings.contains_key(&source.publisher_id));
+    }
+
+    #[tokio::test]
+    async fn suppressing_an_active_legacy_source_resets_its_rank() {
+        let serving = EndpointId::from("test.router.generate");
+        let kv_endpoint = EndpointId::from("test.router.kv");
+        let worker = WorkerWithDpRank::new(42, 4);
+        let source = source_for(&kv_endpoint, worker, 100, None);
+        let initial = membership_view(
+            &serving,
+            &kv_endpoint,
+            [(worker, KvSourceStatus::ActiveLiveOnly(source.clone()))],
+        );
+        let (_tx, rx) = watch::channel(initial.clone());
+        let target = RecordingTarget::default();
+        let client = WorkerQueryClient::new_target_for_test(
+            target.clone(),
+            rx,
+            Arc::new(MockTransport::default()),
+        );
+        client.reconcile_view(initial).await;
+        client
+            .handle_live_batch(100, vec![store_for(worker, 1)])
+            .await;
+        target.calls.lock().await.clear();
+
+        client
+            .reconcile_view(membership_view(
+                &serving,
+                &kv_endpoint,
+                [(worker, KvSourceStatus::Suppressed)],
+            ))
+            .await;
+
+        assert_eq!(
+            target.calls.lock().await.as_slice(),
+            &[TargetCall::Reset(100, RecoveryResetReason::Lifecycle)]
+        );
+        assert!(!client.publisher_bindings.contains_key(&100));
     }
 
     #[tokio::test]
@@ -1571,6 +1679,7 @@ mod tests {
             .push(WorkerKvQueryResponse::TreeDump {
                 events: vec![store(100)],
                 last_event_id: 100,
+                reset_scope: ResetScope::All,
             });
 
         client.reconcile_view(initial).await;
@@ -1614,6 +1723,7 @@ mod tests {
                 Ok(WorkerKvQueryResponse::TreeDump {
                     events: vec![store(100)],
                     last_event_id: 100,
+                    reset_scope: ResetScope::All,
                 }),
             )
             .await;
@@ -1714,6 +1824,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discovery_removal_preserves_stable_cache_owner() {
+        let serving = EndpointId::from("test.router.generate");
+        let kv_endpoint = EndpointId::from("test.router.kv");
+        let worker = WorkerWithDpRank::new(42, 4);
+        let initial = membership_view(
+            &serving,
+            &kv_endpoint,
+            [(
+                worker,
+                KvSourceStatus::ActiveLiveOnly(source_for(&kv_endpoint, worker, 100, None)),
+            )],
+        );
+        let (_tx, rx) = watch::channel(initial.clone());
+        let (_primary, indexer) = indexer();
+        let lower_tier = match &indexer {
+            Indexer::KvIndexer { lower_tier, .. } => lower_tier.clone(),
+            _ => unreachable!(),
+        };
+        let client =
+            WorkerQueryClient::new_for_test(indexer, rx, Arc::new(MockTransport::default()));
+
+        client.reconcile_view(initial).await;
+        let domain_store = |event_id, domain| {
+            let event = KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(event_id),
+                        tokens_hash: LocalBlockHash(event_id),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: worker.dp_rank,
+            };
+            match domain {
+                ResidencyDomain::Worker => RouterEvent::with_residency_domain(
+                    worker.worker_id,
+                    event,
+                    StorageTier::HostPinned,
+                    ResidencyDomain::Worker,
+                ),
+                ResidencyDomain::CacheOwner => RouterEvent::with_cache_owner(
+                    worker.worker_id,
+                    event,
+                    StorageTier::HostPinned,
+                    cache_owner_id(),
+                ),
+            }
+        };
+        client
+            .handle_live_batch(
+                100,
+                vec![
+                    domain_store(1, ResidencyDomain::Worker),
+                    domain_store(2, ResidencyDomain::CacheOwner),
+                ],
+            )
+            .await;
+        let host_index = lower_tier.get_or_create(StorageTier::HostPinned);
+        assert_eq!(host_index.dump_events().await.unwrap().len(), 2);
+
+        client
+            .reconcile_view(membership_view(&serving, &kv_endpoint, std::iter::empty()))
+            .await;
+        let retained = host_index.dump_events().await.unwrap();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(
+            retained[0].residency_domain,
+            dynamo_kv_router::protocols::WireResidencyDomain::explicit(ResidencyDomain::CacheOwner)
+        );
+        assert_eq!(retained[0].state_source, Some(cache_owner_id()));
+    }
+
+    #[tokio::test]
     async fn timed_out_recovery_releases_shared_permit_before_backoff() {
         let serving = EndpointId::from("test.router.generate");
         let kv_endpoint = EndpointId::from("test.router.kv");
@@ -1743,11 +1929,72 @@ mod tests {
         .await
         .expect("healthy recovery remained blocked behind another target's retry backoff")
         .unwrap();
+        assert!(matches!(response, WorkerKvQueryResponse::TooNew { .. }));
+        slow.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn explicit_dump_failure_is_retried_before_degraded_fallback() {
+        let serving = EndpointId::from("test.router.generate");
+        let kv_endpoint = EndpointId::from("test.router.kv");
+        let (_tx, rx) = watch::channel(membership_view(&serving, &kv_endpoint, std::iter::empty()));
+        let transport = Arc::new(MockTransport::default());
+        transport.responses.lock().await.extend([
+            WorkerKvQueryResponse::TreeDump {
+                events: Vec::new(),
+                last_event_id: 7,
+                reset_scope: ResetScope::All,
+            },
+            WorkerKvQueryResponse::TreeDumpFailed {
+                last_event_id: 6,
+                message: "snapshot temporarily unavailable".to_string(),
+            },
+        ]);
+        let client =
+            WorkerQueryClient::new_target_for_test(RecordingTarget::default(), rx, transport);
+        let target = source(&kv_endpoint, 1).recovery_target.unwrap();
+
+        let response = client
+            .fetch_recovery_response((1, 0), target, None, None)
+            .await
+            .unwrap();
+
         assert!(matches!(
             response,
-            WorkerKvQueryResponse::TreeDumpFailed { .. }
+            WorkerKvQueryResponse::TreeDump {
+                last_event_id: 7,
+                reset_scope: ResetScope::All,
+                ..
+            }
         ));
-        slow.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exhausted_dump_failures_remain_non_authoritative() {
+        let serving = EndpointId::from("test.router.generate");
+        let kv_endpoint = EndpointId::from("test.router.kv");
+        let (_tx, rx) = watch::channel(membership_view(&serving, &kv_endpoint, std::iter::empty()));
+        let transport = Arc::new(MockTransport::default());
+        transport
+            .responses
+            .lock()
+            .await
+            .extend(
+                (0..RECOVERY_MAX_RETRIES).map(|_| WorkerKvQueryResponse::TreeDumpFailed {
+                    last_event_id: 6,
+                    message: "snapshot unavailable".to_string(),
+                }),
+            );
+        let client =
+            WorkerQueryClient::new_target_for_test(RecordingTarget::default(), rx, transport);
+        let target = source(&kv_endpoint, 1).recovery_target.unwrap();
+
+        let error = client
+            .fetch_recovery_response((1, 0), target, None, None)
+            .await
+            .unwrap_err();
+
+        assert!(error.is::<NonAuthoritativeRecoveryError>());
     }
 
     #[tokio::test]
@@ -2011,7 +2258,7 @@ mod tests {
         client.handle_live_batch(100, vec![store(1)]).await;
         let binding = client.publisher_bindings.get(&100).unwrap().binding.clone();
 
-        client
+        let complete_initial = client
             .clone()
             .finish_recovery(
                 (worker.worker_id, worker.dp_rank),
@@ -2023,6 +2270,7 @@ mod tests {
                 }),
             )
             .await;
+        assert!(complete_initial);
 
         let events = kv_indexer.dump_events().await.unwrap();
         assert!(!contains_block(&events, 1));
@@ -2060,7 +2308,7 @@ mod tests {
         kv_indexer.shutdown();
         kv_indexer.event_sender().closed().await;
 
-        client
+        let complete_initial = client
             .clone()
             .finish_recovery(
                 (worker.worker_id, worker.dp_rank),
@@ -2069,9 +2317,11 @@ mod tests {
                 Ok(WorkerKvQueryResponse::TreeDump {
                     events: vec![clear_for(worker, 2)],
                     last_event_id: 2,
+                    reset_scope: ResetScope::All,
                 }),
             )
             .await;
+        assert!(complete_initial);
 
         let slot = client
             .slots
@@ -2085,7 +2335,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_dump_failure_resets_with_reason_then_drains_newer_events_once() {
+    async fn non_authoritative_dump_failure_leaves_state_and_cursor_unchanged() {
         let serving = EndpointId::from("test.router.generate");
         let kv_endpoint = EndpointId::from("test.router.kv");
         let worker = WorkerWithDpRank::new(42, 4);
@@ -2106,33 +2356,28 @@ mod tests {
         client.handle_live_batch(100, vec![store(2)]).await;
         let binding = client.publisher_bindings.get(&100).unwrap().binding.clone();
 
-        client
+        let complete_initial = client
             .clone()
             .finish_recovery(
                 (worker.worker_id, worker.dp_rank),
                 binding,
                 CancellationToken::new(),
-                Ok(WorkerKvQueryResponse::TreeDumpFailed {
-                    last_event_id: 1,
+                Err(NonAuthoritativeRecoveryError {
                     message: "snapshot unavailable".to_string(),
-                }),
+                }
+                .into()),
             )
             .await;
+        assert!(!complete_initial);
 
-        assert_eq!(
-            *target.calls.lock().await,
-            vec![
-                TargetCall::Reset(100, RecoveryResetReason::TreeDumpFailed),
-                TargetCall::Admit(100, 2),
-            ]
-        );
+        assert!(target.calls.lock().await.is_empty());
         let slot = client
             .slots
             .get(&(worker.worker_id, worker.dp_rank))
             .unwrap()
             .clone();
         let slot = slot.lock().await;
-        assert_eq!(slot.rank.last_admitted_id(), Some(2));
+        assert_eq!(slot.rank.last_admitted_id(), None);
         assert!(!slot.rank.recovery_inflight);
         assert!(slot.pending_reset.is_none());
         drop(slot);
@@ -2170,6 +2415,7 @@ mod tests {
                 Ok(WorkerKvQueryResponse::TreeDump {
                     events: vec![store(1)],
                     last_event_id: 1,
+                    reset_scope: ResetScope::All,
                 }),
             )
             .await;
@@ -2194,6 +2440,7 @@ mod tests {
                 Ok(WorkerKvQueryResponse::TreeDump {
                     events: vec![store(1), store(2)],
                     last_event_id: 2,
+                    reset_scope: ResetScope::All,
                 }),
             )
             .await;
@@ -2204,6 +2451,73 @@ mod tests {
         }
         let slot = slot.lock().await;
         assert_eq!(slot.rank.last_admitted_id(), Some(4));
+        assert!(!slot.rank.recovery_inflight);
+        drop(slot);
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn ahead_tree_dump_and_duplicate_tail_replay_converge() {
+        let serving = EndpointId::from("test.router.generate");
+        let kv_endpoint = EndpointId::from("test.router.kv");
+        let worker = WorkerWithDpRank::new(42, 4);
+        let view = membership_view(
+            &serving,
+            &kv_endpoint,
+            [(
+                worker,
+                KvSourceStatus::ActiveRecoverable(source(&kv_endpoint, 100)),
+            )],
+        );
+        let (_tx, rx) = watch::channel(view.clone());
+        let (kv_indexer, indexer) = indexer();
+        let transport = Arc::new(MockTransport::default());
+        *transport.release.lock().await = Some(Arc::new(Notify::new()));
+        let client = WorkerQueryClient::new_for_test(indexer, rx, transport);
+        client.reconcile_view(view).await;
+        let binding = client.publisher_bindings.get(&100).unwrap().binding.clone();
+
+        // The source captured watermark 1, but its independently advancing index dump already
+        // contains event 2. The complete tail after 1 therefore replays event 2 before event 3.
+        client
+            .handle_live_batch(100, vec![store(2), store(3)])
+            .await;
+        client
+            .clone()
+            .finish_recovery(
+                (worker.worker_id, worker.dp_rank),
+                binding,
+                CancellationToken::new(),
+                Ok(WorkerKvQueryResponse::TreeDump {
+                    events: vec![store(1), store(2)],
+                    last_event_id: 1,
+                    reset_scope: ResetScope::All,
+                }),
+            )
+            .await;
+
+        let events = kv_indexer.dump_events().await.unwrap();
+        for block in 1..=3 {
+            assert!(contains_block(&events, block));
+        }
+        let duplicate_count = events
+            .iter()
+            .filter_map(|event| match &event.event.data {
+                KvCacheEventData::Stored(data) => Some(&data.blocks),
+                _ => None,
+            })
+            .flatten()
+            .filter(|block| block.block_hash == ExternalSequenceBlockHash(2))
+            .count();
+        assert_eq!(duplicate_count, 1);
+
+        let slot = client
+            .slots
+            .get(&(worker.worker_id, worker.dp_rank))
+            .unwrap()
+            .clone();
+        let slot = slot.lock().await;
+        assert_eq!(slot.rank.last_admitted_id(), Some(3));
         assert!(!slot.rank.recovery_inflight);
         drop(slot);
         client.shutdown().await;
@@ -2358,6 +2672,7 @@ mod tests {
                 WorkerKvQueryResponse::TreeDump {
                     events: Vec::new(),
                     last_event_id: 0,
+                    reset_scope: ResetScope::All,
                 }
             } else {
                 let _finished = NotifyOnDrop(&self.delayed_finished);
@@ -2542,6 +2857,7 @@ mod tests {
             endpoint_resolution: KvStateEndpointResolution::Resolved(kv_state_endpoint.clone()),
             sources: statuses,
             kv_event_publishing_enabled: HashMap::new(),
+            kv_event_source_mode: HashMap::new(),
             recovery_expected: HashMap::new(),
         }
     }
@@ -2588,6 +2904,7 @@ mod tests {
                     endpoint: serving_id.name.clone(),
                     transport: TransportType::Tcp("tcp://127.0.0.1:1".to_string()),
                     device_type: None,
+                    request_plane_codec: None,
                 })
                 .await
                 .unwrap();
@@ -2611,7 +2928,9 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let mut configs = runtime_config_watch(&serving).await.unwrap();
+            let mut configs = runtime_config_watch(&serving, CancellationToken::new())
+                .await
+                .unwrap();
             configs
                 .wait_for(|configs| configs.contains_key(&logical_worker_id))
                 .await
@@ -2699,6 +3018,7 @@ mod tests {
                 serving.clone(),
                 indexer,
                 membership_watch,
+                4,
                 "test-model".to_string(),
                 None,
                 crate::kv_router::KvEventSourceRequirement::Unknown,

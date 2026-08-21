@@ -19,6 +19,7 @@ package v1beta1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
@@ -68,6 +69,50 @@ type CompilationCacheConfig struct {
 	MountPath string `json:"mountPath,omitempty"`
 }
 
+// ProviderOverride carries a sparse provider-native fragment for its DGD context.
+// Grove support is restricted as follows:
+//   - apiVersion must be `grove.io/v1alpha1`.
+//   - target is `PodCliqueSet`, `PodCliqueTemplateSpec`, or
+//     `PodCliqueScalingGroupConfig`, according to the field location and
+//     component shape.
+//   - value may set only the target's topologyConstraint subtree.
+//
+// All other providers, versions, targets, and fields are rejected.
+type ProviderOverride struct {
+	// apiVersion is the Kubernetes API group and version of the provider schema.
+	// Grove requires `grove.io/v1alpha1`.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	APIVersion string `json:"apiVersion"`
+
+	// target identifies the provider resource kind or embedded provider schema.
+	// It may be omitted on input when the DGD location has one unambiguous target;
+	// admission resolves and persists it.
+	// +optional
+	Target string `json:"target,omitempty"`
+
+	// value is a sparse fragment of the selected provider schema. For Grove,
+	// PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded
+	// PodCliqueTemplateSpec and PodCliqueScalingGroupConfig targets accept only
+	// `topologyConstraint`.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	Value apiextensionsv1.JSON `json:"value"`
+}
+
+// MultinodeRoleSpec configures one explicit role of a multinode component.
+// Additional role-specific settings can be added here without introducing a
+// polymorphic list keyed by generated provider resource names.
+type MultinodeRoleSpec struct {
+	// providerOverride configures the Grove PCLQ template generated for this
+	// multinode role. It uses apiVersion `grove.io/v1alpha1`, target
+	// `PodCliqueTemplateSpec`, and may set only `topologyConstraint`. It is
+	// supported only for components embedded in a DGD.
+	// +optional
+	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
+}
+
 // MultinodeSpec configures a multinode component.
 type MultinodeSpec struct {
 	// nodeCount is the number of nodes to deploy for the multinode component.
@@ -76,6 +121,14 @@ type MultinodeSpec struct {
 	// +kubebuilder:default=2
 	// +kubebuilder:validation:Minimum=2
 	NodeCount int32 `json:"nodeCount"`
+
+	// leader configures the generated multinode leader unit.
+	// +optional
+	Leader *MultinodeRoleSpec `json:"leader,omitempty"`
+
+	// worker configures the generated multinode worker unit.
+	// +optional
+	Worker *MultinodeRoleSpec `json:"worker,omitempty"`
 }
 
 // ModelReference identifies a model served by a component.
@@ -128,11 +181,11 @@ type RestartStrategy struct {
 	Order []string `json:"order,omitempty"`
 }
 
-// ScalingAdapter opts a component into using the DynamoGraphDeploymentScalingAdapter
-// (DGDSA). When `scalingAdapter` is set on a component (even as an empty
-// object, `scalingAdapter: {}`), the DGDSA is created and owns the `replicas`
-// field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
-// the Scale subresource. Omitting the field opts the component out.
+// ScalingAdapter opts a component into the DynamoGraphDeploymentScalingAdapter (DGDSA).
+// It is a marker struct: setting `scalingAdapter` at all -- even as the empty object
+// `scalingAdapter: {}` -- creates the DGDSA, which owns the `replicas` field so that
+// external autoscalers (HPA/KEDA/Planner) can drive scaling via the Scale subresource.
+// Omit the field to opt out.
 type ScalingAdapter struct{}
 
 // EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
@@ -164,6 +217,22 @@ const (
 	GMSModeInterPod GPUMemoryServiceMode = "InterPod"
 )
 
+// GroveSpec groups experimental Grove-specific rendering options.
+type GroveSpec struct {
+	// forceScalingGroup opts a single-node component into rendering as a
+	// PodCliqueScalingGroup with one single-pod PodClique per replica.
+	// Scaling changes the scaling-group replica count. The first
+	// `minAvailable` replicas join the deployment's base PodGang together
+	// with its other base workloads; each replica beyond `minAvailable`
+	// gets its own PodGang, gang-scheduled separately from the rest of the
+	// deployment. `false` or omitted means automatic selection (multi-node
+	// and inter-pod GMS components use a scaling group, other single-node
+	// components a standalone PodClique), not "force PodClique".
+	// Immutable after creation.
+	// +optional
+	ForceScalingGroup bool `json:"forceScalingGroup,omitempty"`
+}
+
 // ExperimentalSpec groups opt-in preview features whose API shape and behavior
 // may change in breaking ways between v1beta1 releases (including disappearing
 // without a name-preserving graduation path). Fields placed under
@@ -182,6 +251,10 @@ type ExperimentalSpec struct {
 	// match `gpuMemoryService.mode` (enforced by the validation webhook).
 	// +optional
 	Failover *FailoverSpec `json:"failover,omitempty"`
+
+	// grove groups Grove-specific rendering options.
+	// +optional
+	Grove *GroveSpec `json:"grove,omitempty"`
 
 	// checkpoint configures container-image snapshotting and restore for
 	// this component. Set `checkpoint.enabled: true` to opt in. Without
@@ -696,9 +769,9 @@ type ComponentReplicaStatus struct {
 	ComponentNames []string `json:"componentNames,omitempty"`
 
 	// runtimeNamespace is the effective Dynamo runtime namespace for this
-	// component. Worker components may include a generation suffix; non-workers and
-	// Grove-backed workers use the base namespace. During rolling updates, worker
-	// status keeps the old active revision namespace until cutover completes.
+	// component. Worker components may include a generation suffix; non-workers
+	// use the base namespace. During rolling updates, worker status keeps the old
+	// active revision namespace until cutover completes.
 	// +optional
 	RuntimeNamespace string `json:"runtimeNamespace,omitempty"`
 

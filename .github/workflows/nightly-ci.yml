@@ -60,6 +60,7 @@ jobs:
         with:
           builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
           buildkit_worker_addresses: ''
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
           suppress_fallback_warning: 'true'
 
   # ============================================================================
@@ -329,8 +330,8 @@ jobs:
     secrets: inherit
 
   # ============================================================================
-  # OPTIONAL NIGHTLY IMAGES (operator, planner, frontend, snapshot agent,
-  # runtime EFA variants)
+  # OPTIONAL NIGHTLY IMAGES (operator, planner, frontend, runtime EFA
+  # variants)
   # ============================================================================
   # Built HERE — not reused from post-merge — for two reasons:
   #   1. OSRB from the get-go: GitLab's nvbug:attach-compliance resolves
@@ -369,13 +370,15 @@ jobs:
           # independent of the -nightly image-tag suffix.
           artifact_tag: ${{ github.sha }}-operator
           builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
+          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
+          ecr_registry: ${{ vars.ECR_REGISTRY }}
+          ecr_repository: ${{ vars.ECR_REPOSITORY }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           extra_tags: |
-            ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-operator-nightly
+            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ github.sha }}-operator-nightly
           # OSRB CSV diff baseline: previous successful scheduled nightly run
           # (first nightly soft-degrades to baseline_unavailable).
           diff_event_context: nightly
@@ -433,35 +436,6 @@ jobs:
       # nightly wheels and the dynamo-runtime image from dynamo-pipeline.
       dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
     secrets: inherit
-
-  snapshot-build:
-    name: snapshot-agent
-    needs: [create-fresh-builder, resolve-source-sha]
-    runs-on: prod-default-v2
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
-      - name: Build and push snapshot agent (nightly tag)
-        id: build
-        uses: ./.github/actions/build-deploy-component
-        with:
-          component: snapshot
-          image_tag: ${{ github.sha }}-snapshot-agent-nightly
-          # Canonical compliance artifact name — OSRB attach tokens and the
-          # nightly diff-baseline lookup key on compliance-<sha>-snapshot-agent,
-          # independent of the -nightly image-tag suffix.
-          artifact_tag: ${{ github.sha }}-snapshot-agent
-          builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          # OSRB CSV diff baseline: previous successful scheduled nightly run
-          # (first nightly soft-degrades to baseline_unavailable).
-          diff_event_context: nightly
-          gh_token: ${{ secrets.GITHUB_TOKEN }}
 
   vllm-efa-build:
     name: vllm-runtime-efa
@@ -591,9 +565,12 @@ jobs:
         id: setup
         uses: ./.github/actions/setup-dynamo-operator
         with:
+          # Sole writer of this vCluster name; every other caller recovers into it.
+          reset_existing: 'true'
           vcluster_name: nightly-ci-${{ github.run_id }}
           vcluster_namespace: nightly-ci-${{ github.run_id }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          repository: ${{ vars.ACR_REPOSITORY }}
           operator_tag: ${{ needs.operator-build.outputs.operator_default_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
@@ -721,7 +698,7 @@ jobs:
       # Includes elastic_ep, locally validated DP=2->4->2 on H200 GPUs with
       # vLLM 0.24.0. That test remains pytest-skipped because this runner has
       # 24 GiB/GPU, while its unquantized EPLB model needs >=80 GiB/GPU.
-      gpu_test_markers: vllm and (gpu_2 or gpu_4)
+      gpu_test_markers: vllm and (gpu_2 or gpu_4) and not h100
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
@@ -798,7 +775,7 @@ jobs:
       platform: '["amd64"]' # No ARM GPUs available
       enable_coverage: true
       run_sanity_check: false
-      gpu_test_markers: sglang and (gpu_2 or gpu_4)
+      gpu_test_markers: sglang and (gpu_2 or gpu_4) and not h100
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
@@ -874,7 +851,7 @@ jobs:
       platform: '["amd64"]' # No ARM GPUs available
       enable_coverage: true
       run_sanity_check: false
-      gpu_test_markers: trtllm and (gpu_2 or gpu_4)
+      gpu_test_markers: trtllm and (gpu_2 or gpu_4) and not h100
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
@@ -936,8 +913,15 @@ jobs:
       # (e.g. fault_tolerance/deploy/*) that fail in this container-only
       # context. Matches the coverage of the old container-validation-dynamo
       # workflow.
-      cpu_parallel_test_markers: 'pre_merge and parallel and not (vllm or sglang or trtllm) and (gpu_0)'
-      cpu_sequential_test_markers: 'pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0)'
+      # `defaulted` is applied by the repository-root conftest.py to any test that
+      # declared no lifecycle or hardware marker. It is routed here, not to the
+      # sequential job: sequential runs the fault-tolerance suite in one process
+      # and was OOM-killed (exit 137) once every unmarked test landed in it.
+      # NOTE: this job is `-n 0` today (cpu_parallel_mode: 'none'), so `defaulted`
+      # only picks the pod. Before enabling real xdist here, vet these tests for
+      # parallel-safety or split them into their own job -- unlike `parallel`,
+      # `defaulted` is not an author's claim that the test is parallel-safe.
+      cpu_parallel_test_markers: 'pre_merge and (parallel or defaulted) and not (vllm or sglang or trtllm) and (gpu_0)'
       gpu_test_markers: 'pre_merge and none and gpu_1'
       dev_version_suffix: ${{ needs.compute-dev-version.outputs.dev_suffix }}
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
@@ -1036,7 +1020,6 @@ jobs:
       - operator-build
       - planner-build
       - frontend-build
-      - snapshot-build
       - vllm-efa-build
       - sglang-efa-build
       - trtllm-efa-build
@@ -1046,8 +1029,8 @@ jobs:
     # strictly: release.yml copies their -nightly ECR images to NGC and extracts
     # wheels from the dynamo-pipeline image, so a failed build must not publish a
     # partial release. manual-release-approval is `skipped` on cron, `success` on dispatch.
-    # The optional-image builds (operator, planner, frontend, snapshot agent,
-    # EFA variants) are ORDERING-ONLY needs (deliberately absent from the
+    # The optional-image builds (operator, planner, frontend, EFA variants)
+    # are ORDERING-ONLY needs (deliberately absent from the
     # gate below): release.yml copies them fail-soft, so a flake in any of
     # them must not block the runtime nightly — but the copy step has to run
     # after they finish or the crane probe would race the builds.
@@ -1073,7 +1056,6 @@ jobs:
       operator_build_result: ${{ needs.operator-build.result }}
       planner_build_result: ${{ needs.planner-build.result }}
       frontend_build_result: ${{ needs.frontend-build.result }}
-      snapshot_build_result: ${{ needs.snapshot-build.result }}
       vllm_efa_build_result: ${{ needs.vllm-efa-build.result }}
       sglang_efa_build_result: ${{ needs.sglang-efa-build.result }}
       trtllm_efa_build_result: ${{ needs.trtllm-efa-build.result }}
@@ -1290,7 +1272,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, dynamo-pipeline, operator-build, planner-build, frontend-build, snapshot-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, create-fresh-builder]
+    needs: [vllm-build, sglang-build, trtllm-build, dynamo-pipeline, operator-build, planner-build, frontend-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, create-fresh-builder]
     permissions:
       contents: read
     steps:
@@ -1302,6 +1284,7 @@ jobs:
         with:
           builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
           buildkit_worker_addresses: ''
+          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
           skip_bootstrap: 'true'
       - name: Remove K8s builder
         shell: bash

@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Shared Hugging Face cache for Nemotron 3.5 Lightning base and draft models.
+# Edit storageClassName to match your cluster:
+#   kubectl get storageclass
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-model-cache
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 140Gi
+  storageClassName: "your-storage-class-name"

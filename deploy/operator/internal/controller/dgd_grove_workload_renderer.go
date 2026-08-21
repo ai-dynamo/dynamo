@@ -43,14 +43,22 @@ type groveWorkloadRenderer struct {
 	reader                client.Reader
 	config                *configv1alpha1.OperatorConfiguration
 	runtimeConfig         *commoncontroller.RuntimeConfig
-	dockerSecretRetriever dockerSecretRetriever
+	dockerSecretRetriever DockerSecretRetriever
+}
+
+// grovePodCliqueSetRender couples the desired PCS and rendered DGD to the
+// exact observation used to decide compatibility and the worker hash suffix.
+type grovePodCliqueSetRender struct {
+	existing         *grovev1alpha1.PodCliqueSet
+	desired          *grovev1alpha1.PodCliqueSet
+	renderDeployment *nvidiacomv1beta1.DynamoGraphDeployment
 }
 
 func newGroveWorkloadRenderer(
 	reader client.Reader,
 	config *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commoncontroller.RuntimeConfig,
-	dockerSecretRetriever dockerSecretRetriever,
+	dockerSecretRetriever DockerSecretRetriever,
 ) *groveWorkloadRenderer {
 	return &groveWorkloadRenderer{
 		reader:                reader,
@@ -65,7 +73,8 @@ func (r *groveWorkloadRenderer) Render(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
-) (*grovev1alpha1.PodCliqueSet, error) {
+	workerGenerationChanged bool,
+) (*grovePodCliqueSetRender, error) {
 	if dgd == nil {
 		return nil, fmt.Errorf("cannot render Grove PodCliqueSet without a DynamoGraphDeployment")
 	}
@@ -84,8 +93,32 @@ func (r *groveWorkloadRenderer) Render(
 		existingPodCliqueSet = nil
 	}
 
-	renderDeployment := groveRenderDeployment(dgd, existingPodCliqueSet)
-	existingRestartAnnotations := restartAnnotationsFromPodCliqueSet(existingPodCliqueSet)
+	workerHashSuffixNeeded := shouldRenderGroveWorkerHashSuffix(dgd, existingPodCliqueSet, workerGenerationChanged)
+	renderDeployment, err := groveRenderDeployment(dgd, existingPodCliqueSet, workerHashSuffixNeeded)
+	if err != nil {
+		return nil, err
+	}
+	desired, err := r.renderPodCliqueSet(
+		ctx, renderDeployment, existingPodCliqueSet, restartState, checkpointInfos,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &grovePodCliqueSetRender{
+		existing:         existingPodCliqueSet,
+		desired:          desired,
+		renderDeployment: renderDeployment,
+	}, nil
+}
+
+func (r *groveWorkloadRenderer) renderPodCliqueSet(
+	ctx context.Context,
+	renderDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	existing *grovev1alpha1.PodCliqueSet,
+	restartState *dynamo.RestartState,
+	checkpointInfos map[string]*checkpoint.CheckpointInfo,
+) (*grovev1alpha1.PodCliqueSet, error) {
+	existingRestartAnnotations := restartAnnotationsFromPodCliqueSet(existing)
 	desired, err := dynamo.GenerateGrovePodCliqueSet(
 		ctx,
 		renderDeployment,
@@ -101,19 +134,106 @@ func (r *groveWorkloadRenderer) Render(
 		return nil, err
 	}
 
-	prepareGroveTopologyConstraintUpgrade(desired, existingPodCliqueSet)
-	preserveGrovePodCliqueSetOrder(desired, existingPodCliqueSet)
-	preserveGrovePodCliqueSetReplicas(desired, existingPodCliqueSet, checkpointInfos)
+	prepareGroveTopologyConstraintUpgrade(desired, existing)
+	preserveGrovePodCliqueSetOrder(desired, existing)
+	preserveGrovePodCliqueSetReplicas(desired, existing, checkpointInfos)
 	return desired, nil
 }
 
 func groveRenderDeployment(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	pcs *grovev1alpha1.PodCliqueSet,
-) *nvidiacomv1beta1.DynamoGraphDeployment {
+	workerHashSuffix bool,
+) (*nvidiacomv1beta1.DynamoGraphDeployment, error) {
 	renderDeployment := dgd.DeepCopy()
 	applyGroveCompatibility(renderDeployment, pcs)
-	return renderDeployment
+	if !workerHashSuffix {
+		return renderDeployment, nil
+	}
+	if err := applyGroveWorkerHashSuffix(renderDeployment, dgd); err != nil {
+		return nil, err
+	}
+	return renderDeployment, nil
+}
+
+func applyGroveWorkerHashSuffix(
+	renderDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	hashSource *nvidiacomv1beta1.DynamoGraphDeployment,
+) error {
+	workerHash, err := dynamo.ComputeDGDWorkersSpecHash(hashSource)
+	if err != nil {
+		return fmt.Errorf("compute Grove worker hash suffix: %w", err)
+	}
+	for i := range renderDeployment.Spec.Components {
+		component := &renderDeployment.Spec.Components[i]
+		if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
+			continue
+		}
+		if component.PodTemplate == nil {
+			component.PodTemplate = &corev1.PodTemplateSpec{}
+		}
+		if component.PodTemplate.Labels == nil {
+			component.PodTemplate.Labels = make(map[string]string)
+		}
+		component.PodTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
+	}
+	return nil
+}
+
+func shouldRenderGroveWorkerHashSuffix(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	existing *grovev1alpha1.PodCliqueSet,
+	workerGenerationChanged bool,
+) bool {
+	if !dgdHasWorkerComponents(dgd) {
+		return false
+	}
+	if existing == nil || podCliqueSetUsesGroveWorkerHashSuffix(dgd, existing) {
+		return true
+	}
+
+	return workerGenerationChanged
+}
+
+func dgdHasWorkerComponents(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
+	for i := range dgd.Spec.Components {
+		if dynamo.IsWorkerComponent(string(dgd.Spec.Components[i].ComponentType)) {
+			return true
+		}
+	}
+	return false
+}
+
+func podCliqueSetUsesGroveWorkerHashSuffix(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	pcs *grovev1alpha1.PodCliqueSet,
+) bool {
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
+			continue
+		}
+		clique := podCliqueSetCliqueForComponent(pcs, component.ComponentName)
+		if clique == nil || clique.Labels[commonconsts.KubeLabelDynamoWorkerHash] == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func podCliqueSetCliqueForComponent(
+	pcs *grovev1alpha1.PodCliqueSet,
+	componentName string,
+) *grovev1alpha1.PodCliqueTemplateSpec {
+	if pcs == nil {
+		return nil
+	}
+	for _, clique := range pcs.Spec.Template.Cliques {
+		if clique != nil && clique.Labels[commonconsts.KubeLabelDynamoComponent] == componentName {
+			return clique
+		}
+	}
+	return nil
 }
 
 func applyGroveCompatibility(
