@@ -57,7 +57,10 @@ spec:
               image: nvcr.io/nvstaging/williamz/gemma4-trtllm:1.3.0-80ed499b0b
               imagePullPolicy: IfNotPresent
               command:
-                - python3
+                - /bin/bash
+                - -lc
+                - exec python3 "$@"
+                - --
               args:
                 - -m
                 - dynamo.frontend
@@ -118,7 +121,10 @@ spec:
               imagePullPolicy: IfNotPresent
               workingDir: /workspace/
               command:
-                - python3
+                - /bin/bash
+                - -lc
+                - exec python3 "$@"
+                - --
               args:
                 - -m
                 - dynamo.trtllm
