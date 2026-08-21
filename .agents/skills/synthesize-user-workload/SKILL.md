@@ -14,12 +14,12 @@ metadata:
     - optimization
 ---
 
+# Synthesize User Workload
+
 <!--
 SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
-
-# Synthesize User Workload
 
 Create the durable workload contract and user-provided baseline DGD that every later optimization role receives. Do
 not search for or select a recipe, deploy, benchmark, or propose tuning changes.

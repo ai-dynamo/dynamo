@@ -11,12 +11,12 @@ metadata:
     - deployment
 ---
 
+# Deploy Dynamo Recipe
+
 <!--
 SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
-
-# Deploy Dynamo Recipe
 
 ## Purpose
 
