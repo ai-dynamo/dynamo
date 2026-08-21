@@ -122,7 +122,7 @@ The launcher configures KV events on each worker and sets `--router-mode kv` wit
 The Dynamo SGLang image includes both routing prerequisites:
 
 - Dynamo is built with the `mm-routing` Rust feature.
-- SGLang 0.5.13 or later includes `GenerateReqInput.mm_hashes` support. Dynamo currently pins 0.5.17.
+- SGLang 0.5.13 or later includes `GenerateReqInput.mm_hashes` support. Dynamo currently pins 0.5.18.
 
 Custom installations on SGLang 0.5.12 or earlier need the `mm_hashes` change
 from [sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300).
