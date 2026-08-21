@@ -41,9 +41,9 @@ use tokio_stream::{Stream, StreamExt};
 use tokio::sync::mpsc;
 
 use dynamo_runtime::engine::AsyncEngineContext;
+use dynamo_runtime::error::DynamoError;
 #[cfg(not(test))]
 use dynamo_runtime::error::{BackendError, ErrorType};
-use dynamo_runtime::error::DynamoError;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use dynamo_runtime::pipeline::network::{
     EncodedResponseFrame, NetworkStreamWrapper, RequestPlanePayloadCodec,
