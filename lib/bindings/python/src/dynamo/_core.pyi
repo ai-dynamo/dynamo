@@ -68,6 +68,8 @@ class DistributedRuntime:
         enable_nats: Optional[bool] = None,
         *,
         event_plane: Optional[str] = None,
+        nats_tls_ca_cert_path: Optional[str] = None,
+        nats_tls_insecure: Optional[bool] = None,
     ) -> "DistributedRuntime":
         """
         Create a new DistributedRuntime.
@@ -78,6 +80,10 @@ class DistributedRuntime:
             request_plane: Request plane transport ("tcp" or "nats")
             enable_nats: Deprecated; NATS enablement is inferred from runtime config
             event_plane: Event plane transport ("nats" or "zmq")
+            nats_tls_ca_cert_path: Path to PEM CA certificate for verifying the NATS
+                server; overrides the NATS_TLS_CA_CERT_PATH env fallback
+            nats_tls_insecure: Disable NATS TLS certificate verification (dev only);
+                overrides the NATS_TLS_INSECURE env fallback
         """
         ...
 

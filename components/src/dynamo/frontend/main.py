@@ -357,6 +357,8 @@ async def async_main():
         config.discovery_backend,
         config.request_plane,
         event_plane=config.event_plane,
+        nats_tls_ca_cert_path=config.nats_tls_ca_cert_path,
+        nats_tls_insecure=config.nats_tls_insecure,
     )
 
     def signal_handler():
@@ -408,14 +410,6 @@ async def async_main():
         os.environ["DYN_TCP_TLS_KEY_PATH"] = config.tcp_tls_key_path
     if config.tcp_tls_ca_cert_path:
         os.environ["DYN_TCP_TLS_CA_CERT_PATH"] = config.tcp_tls_ca_cert_path
-    if config.nats_tls_ca_cert_path:
-        os.environ["NATS_TLS_CA_CERT_PATH"] = config.nats_tls_ca_cert_path
-    if config.nats_tls_insecure:
-        os.environ["NATS_TLS_INSECURE"] = "1"
-    else:
-        # Clear any inherited NATS_TLS_INSECURE so --no-nats-tls-insecure can
-        # override it before the Rust runtime reads the env var.
-        os.environ.pop("NATS_TLS_INSECURE", None)
     if config.namespace:
         kwargs["namespace"] = config.namespace
     if config.namespace_prefix:
