@@ -10,7 +10,6 @@ areas:
   - components/src/dynamo/frontend/tests/
   - examples/chat_templates/
   - lib/bindings/python/rust/parsers.rs
-  - lib/bindings/python/tests/test_parsers.py
   - lib/llm/src/entrypoint.rs
   - lib/llm/src/entrypoint/
   - lib/llm/src/entrypoint/input.rs
@@ -47,11 +46,11 @@ areas:
   github_team: '@ai-dynamo/dynamo-router-codeowners'
   path_globs:
   - components/src/dynamo/kv_dc_relay/
+  - components/src/dynamo/squeeze_evolve/
   - components/src/dynamo/kv_state_agent/
   - components/src/dynamo/global_router/
   - components/src/dynamo/global_router/tests/
   - components/src/dynamo/router/
-  - components/src/dynamo/squeeze_evolve/
   - components/src/dynamo/thunderagent_router/
   - lib/kv-router/
   - lib/kv-router/src/indexer/
@@ -192,7 +191,6 @@ areas:
   - components/src/dynamo/vllm/omni/
   - lib/llm/src/preprocessor/media.rs
   - lib/llm/src/preprocessor/media/
-  - lib/renderer/
   - tests/benchmarks/multimodal/
   - tests/mm_router/
 - label: diffusion
@@ -364,11 +362,6 @@ areas:
   - .ai/
   - .claude/
   - AGENTS.md
-  - ATTRIBUTIONS-Go.md
-  - ATTRIBUTIONS-Python.md
-  - ATTRIBUTIONS-Rust.md
-  - ATTRIBUTIONS-container-frontend.md
-  - ATTRIBUTIONS.md
   - CLAUDE.md
   - CODEOWNERS
   - CODE_OF_CONDUCT.md
@@ -412,7 +405,6 @@ areas:
   - deploy/operator/internal/discovery/
   - deploy/operator/internal/dra/
   - deploy/operator/internal/dynamo/
-  - deploy/operator/internal/featuregate/
   - deploy/operator/internal/gpu/
   - deploy/operator/internal/modelendpoint/
   - deploy/operator/internal/namespace_scope/
@@ -543,7 +535,57 @@ areas:
   - tests/router/test_router_e2e_with_vllm_xpu.py
   - tests/serve/multimodal_profiles/vllm_xpu.py
   - tests/serve/test_vllm_xpu.py
+required_owners:
+- glob: components/src/dynamo/planner/connectors/clients/kubernetes_api.py
+  owners:
+  - operator
+- glob: deploy/operator/
+  owners:
+  - operator
 shared:
+# CODEOWNERS is a generated artifact, so co-ownership here is about who may
+# approve it, not who reviews its contents. Every area is listed because under
+# "any one approves" any single team satisfies the gate: without this, adding a
+# file in an uncovered location needs an areas.yaml edit (ops) AND the
+# regenerated CODEOWNERS (process), two approvals to land one file. The
+# artifact cannot drift from the reviewed source -- emit_codeowners.py is a
+# pure function of areas.yaml, and the workflow's regenerate-and-diff step
+# fails on any hand-edit -- so widening approval here costs no safety.
+- glob: CODEOWNERS
+  owners:
+  - process
+  - agents
+  - backend-sglang
+  - backend-trtllm
+  - backend-vllm
+  - diffusion
+  - docs
+  - epp
+  - fault-tolerance
+  - frontend
+  - gms
+  - kv-memory
+  - multimodal
+  - observability
+  - operator
+  - ops
+  - performance
+  - planner
+  - rl
+  - router
+  - runtime
+  - tokenspeed
+  - xpu
+# areas.yaml is the routing decision itself, not a generated artifact, so it
+# does not get the wide list above: nothing stops a rule here from re-routing
+# review authority away from a team, and the strict gate only proves coverage,
+# not that the owner is the right one. Ops and process both hold repo-wide
+# process authority, and under "any one approves" either can unblock a routing
+# change without a third team having to weigh in on paths it does not own.
+- glob: .github/codeowners/areas.yaml
+  owners:
+  - ops
+  - process
 - glob: components/src/dynamo/thunderagent_router/
   owners:
   - router
@@ -564,18 +606,23 @@ shared:
   owners:
   - frontend
   - agents
-- glob: docs/fern/agents/
+- glob: docs/fern/pages/use-cases/agents/
   owners:
   - docs
   - agents
-- glob: docs/fern/digest/agentic-inference/
+- glob: docs/fern/pages/blog/2026/agentic-harness-support.mdx
   owners:
   - docs
   - agents
-- glob: docs/fern/backends/sglang/agents.md
+- glob: docs/fern/pages/blog/2026/agentic-inference-optimizations.mdx
   owners:
   - docs
   - agents
+- glob: docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/sglang/agents-on-sglang.md
+  owners:
+  - docs
+  - agents
+  - backend-sglang
 - glob: tests/frontend/agent_smoke_inputs.py
   owners:
   - frontend
@@ -783,6 +830,7 @@ shared:
   - diffusion
 - glob: lib/llm/src/request_trace/
   owners:
+  - runtime
   - agents
   - observability
 - glob: lib/runtime/src/health_check.rs
@@ -865,10 +913,6 @@ shared:
   owners:
   - backend-trtllm
   - multimodal
-- glob: components/src/dynamo/vllm/handlers.py
-  owners:
-  - backend-vllm
-  - rl
 - glob: components/src/dynamo/vllm/main.py
   owners:
   - backend-vllm
@@ -1018,10 +1062,6 @@ shared:
   owners:
   - frontend
   - kv-memory
-- glob: lib/llm/src/http/service/clear_kv_blocks.rs
-  owners:
-  - frontend
-  - kv-memory
 - glob: lib/llm/src/http/service/metrics.rs
   owners:
   - frontend
@@ -1051,10 +1091,6 @@ shared:
   owners:
   - performance
   - backend-sglang
-- glob: lib/mocker/src/replay/planner_handle.rs
-  owners:
-  - performance
-  - planner
 - glob: lib/runtime/src/nvtx.rs
   owners:
   - runtime
@@ -1084,9 +1120,380 @@ shared:
   owners:
   - fault-tolerance
   - observability
-- glob: tests/gpu_memory_service/
+- glob: deploy/operator/internal/checkpoint/
   owners:
   - gms
+  - operator
+- glob: deploy/operator/internal/gms/
+  owners:
+  - gms
+  - operator
+- glob: deploy/operator/internal/observability/
+  owners:
+  - observability
+  - operator
+- glob: deploy/helm/charts/snapshot/
+  owners:
+  - gms
+  - operator
+- glob: deploy/operator/internal/controller/*checkpoint*
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/webhook/**/*checkpoint*
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/api/v1alpha1/*checkpoint*
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/config/**/*checkpoint*
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/samples/**/*gms*
+  owners:
+  - operator
+  - gms
+- glob: deploy/operator/internal/dynamo/backend_sglang*.go
+  owners:
+  - operator
+  - backend-sglang
+- glob: deploy/operator/internal/dynamo/backend_trtllm*.go
+  owners:
+  - operator
+  - backend-trtllm
+- glob: deploy/operator/internal/dynamo/backend_vllm*.go
+  owners:
+  - operator
+  - backend-vllm
+- glob: deploy/inference-gateway/epp/Dockerfile
+  owners:
+  - epp
+  - ops
+  - operator
+- glob: deploy/inference-gateway/epp/Makefile
+  owners:
+  - epp
+  - operator
+  - ops
+- glob: deploy/operator/Dockerfile
+  owners:
+  - operator
+  - ops
+- glob: deploy/snapshot/Dockerfile
+  owners:
+  - gms
+  - ops
+  - operator
+- glob: deploy/inference-gateway/ext-proc/Dockerfile
+  owners:
+  - epp
+  - router
+  - ops
+- glob: deploy/power-agent/Dockerfile
+  owners:
+  - operator
+  - planner
+  - ops
+- glob: .github/actions/build-deploy-component/action.yml
+  owners:
+  - ops
+  - operator
+  - gms
+  - planner
+- glob: .github/actions/check-deploy-component/action.yml
+  owners:
+  - ops
+  - operator
+  - gms
+- glob: .github/actions/setup-dynamo-operator/action.yml
+  owners:
+  - ops
+  - operator
+- glob: .github/actions/teardown-dynamo-operator/action.yml
+  owners:
+  - ops
+  - operator
+- glob: .github/actions/setup-snapshot-agent/action.yml
+  owners:
+  - ops
+  - gms
+- glob: .devcontainer/sglang/
+  owners:
+  - ops
+  - backend-sglang
+- glob: .devcontainer/trtllm/
+  owners:
+  - ops
+  - backend-trtllm
+- glob: .devcontainer/vllm/
+  owners:
+  - ops
+  - backend-vllm
+- glob: container/deps/requirements.benchmark.txt
+  owners:
+  - ops
+  - performance
+- glob: container/deps/requirements.frontend.txt
+  owners:
+  - ops
+  - frontend
+- glob: container/deps/requirements.planner.txt
+  owners:
+  - ops
+  - planner
+- glob: container/deps/requirements.sglang.txt
+  owners:
+  - ops
+  - backend-sglang
+- glob: container/deps/requirements.trtllm.txt
+  owners:
+  - ops
+  - backend-trtllm
+- glob: container/deps/requirements.vllm.txt
+  owners:
+  - ops
+  - backend-vllm
+- glob: container/deps/vllm/
+  owners:
+  - ops
+  - backend-vllm
+- glob: container/templates/frontend.Dockerfile
+  owners:
+  - ops
+  - frontend
+- glob: container/templates/planner.Dockerfile
+  owners:
+  - ops
+  - planner
+- glob: container/templates/sglang_runtime.Dockerfile
+  owners:
+  - ops
+  - backend-sglang
+- glob: container/templates/sglang_xpu_framework.Dockerfile
+  owners:
+  - ops
+  - backend-sglang
+  - xpu
+- glob: container/templates/trtllm_runtime.Dockerfile
+  owners:
+  - ops
+  - backend-trtllm
+- glob: container/templates/vllm_runtime.Dockerfile
+  owners:
+  - ops
+  - backend-vllm
+- glob: examples/backends/tritonserver/Dockerfile
+  owners:
+  - runtime
+  - ops
+- glob: examples/diffusers/Dockerfile
+  owners:
+  - diffusion
+  - ops
+- glob: lib/backend-common/examples/mocker/Dockerfile*
+  owners:
+  - performance
+  - ops
+- glob: tests/fault_tolerance/hardware/fault_injection_service/**/Dockerfile
+  owners:
+  - fault-tolerance
+  - ops
+- glob: components/src/dynamo/common/backend/multimodal.py
+  owners:
+  - runtime
+  - multimodal
+- glob: components/src/dynamo/common/backend/tests/test_multimodal_helpers.py
+  owners:
+  - runtime
+  - multimodal
+- glob: components/src/dynamo/common/backend/sample_diffusion_*
+  owners:
+  - runtime
+  - diffusion
+- glob: components/src/dynamo/common/backend/tests/test_sample_diffusion_engine.py
+  owners:
+  - runtime
+  - diffusion
+- glob: components/src/dynamo/common/tests/multimodal/
+  owners:
+  - runtime
+  - multimodal
+- glob: components/src/dynamo/common/tests/multimodal/test_routing_utils.py
+  owners:
+  - runtime
+  - multimodal
+  - router
+- glob: components/src/dynamo/common/tests/memory/test_multimodal_embedding_cache_manager.py
+  owners:
+  - runtime
+  - multimodal
+- glob: components/src/dynamo/common/tests/test_snapshot_*
+  owners:
+  - runtime
+  - gms
+- glob: components/src/dynamo/common/tests/test_rl_admin.py
+  owners:
+  - runtime
+  - rl
+- glob: components/src/dynamo/vllm/tests/multimodal_utils/
+  owners:
+  - backend-vllm
+  - multimodal
+- glob: components/src/dynamo/vllm/tests/omni/
+  owners:
+  - backend-vllm
+  - multimodal
+- glob: components/src/dynamo/sglang/tests/*multimodal*
+  owners:
+  - backend-sglang
+  - multimodal
+- glob: components/src/dynamo/sglang/tests/*diffusion*
+  owners:
+  - backend-sglang
+  - diffusion
+- glob: components/src/dynamo/trtllm/tests/multimodal/
+  owners:
+  - backend-trtllm
+  - multimodal
+- glob: components/src/dynamo/trtllm/tests/*multimodal*
+  owners:
+  - backend-trtllm
+  - multimodal
+- glob: components/src/dynamo/trtllm/tests/*diffusion*
+  owners:
+  - backend-trtllm
+  - diffusion
+- glob: components/src/dynamo/trtllm/snapshot.py
+  owners:
+  - backend-trtllm
+  - gms
+- glob: components/src/dynamo/trtllm/tests/test_trtllm_snapshot.py
+  owners:
+  - backend-trtllm
+  - gms
+- glob: components/src/dynamo/planner/environment/metrics_provider/
+  owners:
+  - planner
+  - observability
+- glob: components/src/dynamo/planner/tests/unit/test_prometheus_traffic_provider.py
+  owners:
+  - planner
+  - observability
+- glob: components/src/dynamo/common/configuration/groups/*router_args.py
+  owners:
+  - runtime
+  - router
+- glob: components/src/dynamo/common/tests/configuration/test_kv_router_args.py
+  owners:
+  - runtime
+  - router
+- glob: lib/bindings/python/tests/test_kv_router_config.py
+  owners:
+  - runtime
+  - router
+- glob: lib/bindings/python/tests/test_mm_kv_router.py
+  owners:
+  - runtime
+  - router
+  - multimodal
+- glob: tests/serve/trtllm/
+  owners:
+  - runtime
+  - backend-trtllm
+- glob: tests/serve/multimodal_profiles/
+  owners:
+  - runtime
+  - multimodal
+- glob: .github/workflows/pr-xpu.yaml
+  owners:
+  - xpu
+  - ops
+  - backend-vllm
+- glob: .github/workflows/xpu-ci.yaml
+  owners:
+  - xpu
+  - ops
+  - backend-vllm
+- glob: examples/backends/vllm/**/xpu/**
+  owners:
+  - backend-vllm
+  - xpu
+- glob: tests/router/test_router_e2e_with_vllm_xpu.py
+  owners:
+  - router
+  - xpu
+  - backend-vllm
+- glob: tests/serve/test_vllm_xpu.py
+  owners:
+  - runtime
+  - xpu
+  - backend-vllm
+- glob: tests/serve/multimodal_profiles/vllm_xpu.py
+  owners:
+  - runtime
+  - multimodal
+  - xpu
+  - backend-vllm
+- glob: dev/observability/*xpu*
+  owners:
+  - xpu
+  - observability
+- glob: dev/observability/grafana_dashboards/*xpu*
+  owners:
+  - observability
+  - xpu
+- glob: examples/global_planner/*vllm*xpu*
+  owners:
+  - planner
+  - operator
+  - backend-vllm
+  - xpu
+- glob: examples/deployments/**/vllm/**
+  owners:
+  - operator
+  - backend-vllm
+- glob: examples/deployments/**/sglang/**
+  owners:
+  - operator
+  - backend-sglang
+- glob: recipes/**/vllm/**
+  owners:
+  - performance
+  - backend-vllm
+- glob: recipes/**/sglang/**
+  owners:
+  - performance
+  - backend-sglang
+- glob: recipes/**/trtllm/**
+  owners:
+  - performance
+  - backend-trtllm
+- glob: recipes/**/tokenspeed/**
+  owners:
+  - performance
+  - tokenspeed
+- glob: recipes/**/sglang/**/*Dockerfile*
+  owners:
+  - performance
+  - backend-sglang
+  - ops
+- glob: recipes/**/tokenspeed/**/*Dockerfile*
+  owners:
+  - performance
+  - tokenspeed
+  - ops
+- glob: recipes/nemotron-3-nano-omni/Dockerfile
+  owners:
+  - performance
+  - ops
+- glob: recipes/**/vllm/**/*xpu*
+  owners:
+  - performance
+  - backend-vllm
+  - xpu
 classify:
   filetype_rules:
   - pattern: '*Dockerfile*'
