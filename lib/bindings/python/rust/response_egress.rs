@@ -45,6 +45,7 @@ pub(crate) trait ResponseFrameSink: Send + Sync {
 #[derive(Debug)]
 pub(crate) enum FrameSendError {
     Stopped,
+    #[cfg(not(test))]
     Failed(String),
 }
 
@@ -448,6 +449,7 @@ impl ProcessorShared {
                         sink_failed = true;
                         break;
                     }
+                    #[cfg(not(test))]
                     Err(FrameSendError::Failed(error)) => {
                         tracing::debug!(client_id, %error, "native response sink stopped");
                         request.sink.close();
@@ -729,14 +731,17 @@ impl ShardedResponseEgress {
             .len()
     }
 
+    #[cfg(not(test))]
     fn responses_processed(&self) -> usize {
         self.shared.responses_processed.load(Ordering::Relaxed)
     }
 
+    #[cfg(not(test))]
     fn responses_dropped(&self) -> usize {
         self.shared.responses_dropped.load(Ordering::Relaxed)
     }
 
+    #[cfg(not(test))]
     fn frames_sent(&self) -> usize {
         self.shared.frames_sent.load(Ordering::Relaxed)
     }

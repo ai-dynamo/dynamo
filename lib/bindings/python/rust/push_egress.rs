@@ -25,8 +25,10 @@
 //! The sender reaches the handler as the `response_sender` keyword argument,
 //! and only that way — the same parameter the signature check keys on.
 
+#[cfg(not(test))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+#[cfg(not(test))]
 use std::time::Duration;
 
 use anyhow::Error;
@@ -39,7 +41,9 @@ use tokio_stream::{Stream, StreamExt};
 use tokio::sync::mpsc;
 
 use dynamo_runtime::engine::AsyncEngineContext;
-use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+#[cfg(not(test))]
+use dynamo_runtime::error::{BackendError, ErrorType};
+use dynamo_runtime::error::DynamoError;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use dynamo_runtime::pipeline::network::{
     EncodedResponseFrame, NetworkStreamWrapper, RequestPlanePayloadCodec,
@@ -238,6 +242,7 @@ pub(crate) struct ResponseSink {
 }
 
 #[derive(Debug)]
+#[cfg(not(test))]
 pub(crate) enum ResponseSendError {
     Stopped,
     Failed(String),
@@ -312,6 +317,7 @@ impl ResponseSink {
     }
 
     /// Encode and enqueue a response represented entirely in Rust.
+    #[cfg(not(test))]
     pub(crate) fn send_annotated(
         &self,
         annotated: Annotated<serde_json::Value>,
@@ -362,11 +368,13 @@ impl ResponseSink {
         drop(self.take_sender());
     }
 
+    #[cfg(not(test))]
     pub(crate) fn cancel(&self) {
         self.ctx.stop_generating();
         self.close();
     }
 
+    #[cfg(not(test))]
     pub(crate) fn shutdown(&self) {
         self.ctx.stop_generating();
         self.close_with_dynamo_error(
@@ -385,6 +393,7 @@ impl ResponseSink {
         self.send_terminal(tx, PushFrame::error(Annotated::from_error(message)));
     }
 
+    #[cfg(not(test))]
     pub(crate) fn try_close_with_error(&self, message: String) -> bool {
         let Some(tx) = self.take_sender() else {
             return false;
