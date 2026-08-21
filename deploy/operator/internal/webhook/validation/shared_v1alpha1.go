@@ -51,7 +51,7 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecV1alpha1(
 	//nolint:staticcheck // SA1019: Intentionally warning about a deprecated preserved field.
 	if spec.Autoscaling != nil {
 		v.warnf(
-			"%s.autoscaling is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md",
+			"%s.autoscaling is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter with HPA, KEDA, or Planner for autoscaling instead. See https://docs.nvidia.com/dynamo/latest/knowledge-base/kubernetes/kubernetes-operator/autoscaling",
 			fldPath,
 		)
 	}
