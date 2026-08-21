@@ -1460,13 +1460,14 @@ func TestGenerateComponentContext(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := generateComponentContext(
+			ctx, err := generateComponentContext(
 				betaComponent(t, tt.component),
 				tt.parentGraphDeploymentName,
 				tt.namespace,
 				tt.numberOfNodes,
 				DiscoveryContext{Backend: tt.discoveryBackend, Mode: configv1alpha1.KubeDiscoveryModePod},
 			)
+			require.NoError(t, err)
 
 			assert.Equal(t, tt.expectedDynamoNamespace, ctx.DynamoNamespace,
 				"DynamoNamespace should be computed from k8s namespace + DGD name")
@@ -6483,6 +6484,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 				DynamoNamespace: ptr.To("default-test-deployment"), // Namespace set by caller
 				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 					MainContainer: &corev1.Container{
+						Image:   "test-image:1.5.0",
 						Command: []string{"python3"},
 						Args:    []string{"-m", "dynamo.worker"},
 						Env: []corev1.EnvVar{
@@ -6495,6 +6497,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 				Containers: []corev1.Container{
 					{
 						Name:    commonconsts.MainContainerName,
+						Image:   "test-image:1.5.0",
 						Command: []string{"python3"},
 						Args:    []string{"-m", "dynamo.worker"},
 						Env: []corev1.EnvVar{
@@ -6503,7 +6506,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							{Name: commonconsts.DynamoComponentEnvVar, Value: "worker"},
 							{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
 							{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "20380"},
-							{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
+							{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},
 							{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default-test-deployment"},
 							{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-deployment"},
 							{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
@@ -6630,6 +6633,57 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 			if diff != "" {
 				t.Errorf("GenerateBasePodSpec() podSpec = %v, want %v, diff = %v", podSpec, tt.expectedPodSpec, diff)
 			}
+		})
+	}
+}
+
+func TestGenerateBasePodSpec_WorkerPreservesHealthCheckOverride(t *testing.T) {
+	tests := []struct {
+		name           string
+		runtimeVersion string
+		envValue       string
+	}{
+		{name: "disable for new runtime", runtimeVersion: "1.5.0", envValue: "false"},
+		{name: "opt in for old runtime", runtimeVersion: "1.4.9", envValue: "true"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType:   commonconsts.ComponentTypeWorker,
+				DynamoNamespace: ptr.To("default-test-deployment"),
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Image: "test-image:" + tt.runtimeVersion,
+						Env:   []corev1.EnvVar{{Name: "DYN_HEALTH_CHECK_ENABLED", Value: tt.envValue}},
+					},
+				},
+			})
+
+			podSpec, err := GenerateBasePodSpec(
+				component,
+				BackendFrameworkSGLang,
+				&mockSecretsRetriever{},
+				"test-deployment",
+				"default",
+				RoleMain,
+				1,
+				&configv1alpha1.OperatorConfiguration{},
+				commonconsts.MultinodeDeploymentTypeGrove,
+				"test-service",
+				nil,
+				nil,
+				staticContainerGPUCount(0),
+			)
+			require.NoError(t, err)
+
+			for _, env := range podSpec.Containers[0].Env {
+				if env.Name == "DYN_HEALTH_CHECK_ENABLED" {
+					assert.Equal(t, tt.envValue, env.Value)
+					return
+				}
+			}
+			t.Fatal("expected DYN_HEALTH_CHECK_ENABLED in main container")
 		})
 	}
 }
@@ -9474,14 +9528,16 @@ func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
 		ComponentType: commonconsts.ComponentTypeWorker,
 		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"},
 	}
-	compCtx := generateComponentContext(betaComponent(t, component), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
+	compCtx, err := generateComponentContext(betaComponent(t, component), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
+	require.NoError(t, err)
 	assert.Equal(t, "abc123", compCtx.WorkerHashSuffix)
 
 	// Worker without hash label
 	component2 := &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		ComponentType: commonconsts.ComponentTypeWorker,
 	}
-	compCtx2 := generateComponentContext(betaComponent(t, component2), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
+	compCtx2, err := generateComponentContext(betaComponent(t, component2), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
+	require.NoError(t, err)
 	assert.Empty(t, compCtx2.WorkerHashSuffix)
 
 	// Legacy is the active suffix for DCD generations created before managed rolling updates.
@@ -9489,7 +9545,8 @@ func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
 		ComponentType: commonconsts.ComponentTypeWorker,
 		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: commonconsts.LegacyWorkerHash},
 	}
-	compCtxLegacy := generateComponentContext(betaComponent(t, componentLegacy), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
+	compCtxLegacy, err := generateComponentContext(betaComponent(t, componentLegacy), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
+	require.NoError(t, err)
 	assert.Equal(t, commonconsts.LegacyWorkerHash, compCtxLegacy.WorkerHashSuffix)
 
 	// Frontend never gets WorkerHashSuffix, even with the label
@@ -9497,8 +9554,76 @@ func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
 		ComponentType: commonconsts.ComponentTypeFrontend,
 		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"},
 	}
-	compCtx3 := generateComponentContext(betaComponent(t, component3), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
+	compCtx3, err := generateComponentContext(betaComponent(t, component3), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
+	require.NoError(t, err)
 	assert.Empty(t, compCtx3.WorkerHashSuffix)
+}
+
+func TestGenerateComponentContext_RuntimeVersion(t *testing.T) {
+	tests := []struct {
+		name        string
+		image       string
+		override    string
+		wantKnown   bool
+		wantVersion string
+		wantErr     string
+	}{
+		{
+			name:        "semantic image tag",
+			image:       "registry.example/runtime:1.4.0",
+			wantKnown:   true,
+			wantVersion: "1.4.0",
+		},
+		{
+			name:        "override takes precedence",
+			image:       "registry.example/runtime:latest",
+			override:    "1.4.0",
+			wantKnown:   true,
+			wantVersion: "1.4.0",
+		},
+		{
+			name:      "unknown legacy image",
+			image:     "registry.example/runtime:latest",
+			wantKnown: false,
+		},
+		{
+			name:     "invalid explicit override",
+			image:    "registry.example/runtime:1.5.0",
+			override: "not-a-version",
+			wantErr:  "resolve runtime version override",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType:          commonconsts.ComponentTypeWorker,
+				RuntimeVersionOverride: tt.override,
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Name:  commonconsts.MainContainerName,
+						Image: tt.image,
+					},
+				},
+			}
+			ctx, err := generateComponentContext(
+				betaComponent(t, component),
+				"dgd",
+				"ns",
+				1,
+				DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod},
+			)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantKnown, ctx.RuntimeVersion != nil)
+			if tt.wantKnown {
+				assert.Equal(t, tt.wantVersion, ctx.RuntimeVersion.String())
+			}
+		})
+	}
 }
 
 func TestWorkerDefaults_WorkerHashSuffixEnvVar(t *testing.T) {
