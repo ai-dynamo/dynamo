@@ -14,9 +14,11 @@ import pytest
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.worker_factory import (
+    FPM_SET_WORKER_ID_METHOD_NAME,
     EngineSetupResult,
     WorkerFactory,
     _DecodeWorkerLifecycle,
+    _sync_fpm_worker_id,
     _wait_and_load_benchmark,
 )
 
@@ -1158,3 +1160,68 @@ async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
     else:
         assert lifecycle_names.isdisjoint(endpoints)
         assert len(shutdown_endpoints) == 3
+
+
+# ---------------------------------------------------------------------------
+# _sync_fpm_worker_id: parent -> restored EngineCore child
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sync_fpm_worker_id_invokes_engine_core_utility():
+    """The parent reaches the restored child through the EngineCore utility RPC.
+
+    This is the only channel available: the child was created before the
+    runtime existed, so it inherited an environment with no worker id and
+    never re-reads it.
+    """
+    call_utility_async = AsyncMock()
+    engine_client = SimpleNamespace(
+        engine_core=SimpleNamespace(call_utility_async=call_utility_async)
+    )
+
+    await _sync_fpm_worker_id(engine_client, "8465209922961459")
+
+    call_utility_async.assert_awaited_once_with(
+        FPM_SET_WORKER_ID_METHOD_NAME, "8465209922961459"
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_fpm_worker_id_survives_child_failure(caplog):
+    """A child without the patch degrades to a warning, it does not fail startup.
+
+    Checkpoints captured with an older image have no ``set_fpm_worker_id`` on
+    their frozen ``EngineCore``, so vLLM returns a ``failure_message`` and the
+    await raises. FPM stays broken for that worker, but it must still serve.
+    """
+    engine_client = SimpleNamespace(
+        engine_core=SimpleNamespace(
+            call_utility_async=AsyncMock(
+                side_effect=Exception(
+                    "Call to set_fpm_worker_id method failed: 'EngineCoreProc' "
+                    "object has no attribute 'set_fpm_worker_id'"
+                )
+            )
+        )
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await _sync_fpm_worker_id(engine_client, "8465209922961459")
+
+    assert "Failed to set FPM worker_id" in caplog.text
+
+
+def test_fpm_utility_name_matches_the_installed_method():
+    """The caller's method name must match what the scheduler module installs.
+
+    The two sides live in different modules and are linked only by this
+    string. A rename on either side would otherwise fail silently at runtime,
+    surfacing as an ``AttributeError`` folded into the utility's
+    ``failure_message`` long after deploy.
+    """
+    from vllm.v1.engine.core import EngineCore
+
+    import dynamo.vllm.instrumented_scheduler  # noqa: F401  installs the patch
+
+    assert hasattr(EngineCore, FPM_SET_WORKER_ID_METHOD_NAME)

@@ -67,6 +67,20 @@ BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS = 90
 # LLMBackendMetrics registration there.
 EngineSetupResult = tuple[AsyncLLM, VllmConfig, Any, Any, Optional[LLMBackendMetrics]]
 
+# Method name that set the worker id for FPM. Used in snapshot restore where the child process
+# was forked before runtime. This method syncs the newly generated worker_id from the main proc
+# to the child proc.
+FPM_SET_WORKER_ID_METHOD_NAME = "set_fpm_worker_id"
+
+
+async def _sync_fpm_worker_id(engine_client: AsyncLLM, new_worker_id: str) -> None:
+    try:
+        await engine_client.engine_core.call_utility_async(
+            FPM_SET_WORKER_ID_METHOD_NAME, new_worker_id
+        )
+    except Exception:
+        logger.warning("Failed to set FPM worker_id on restored engine", exc_info=True)
+
 
 def _benchmark_rank_path(base_path: Path, dp_rank: int) -> Path:
     if dp_rank == 0:
@@ -725,6 +739,10 @@ class WorkerFactory:
                 component_gauges,
             ) = snapshot_engine
             os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
+
+            # Sync the newly generated worker_id to the child proc
+            await _sync_fpm_worker_id(engine_client, fpm_worker_id)
+
             factory = StatLoggerFactory(
                 endpoint=generate_endpoint,
                 component_gauges=component_gauges,
@@ -1180,6 +1198,10 @@ class WorkerFactory:
                 component_gauges,
             ) = snapshot_engine
             os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
+
+            # Sync the newly generated worker_id to the child proc
+            await _sync_fpm_worker_id(engine_client, fpm_worker_id)
+
             # Factory is created after unpack so component_gauges is available
             factory = StatLoggerFactory(
                 endpoint=generate_endpoint,
@@ -1488,11 +1510,11 @@ class WorkerFactory:
                 prometheus_temp_dir,
                 _component_gauges,
             ) = snapshot_engine
-            # TODO: The scheduler in the child process still has worker_id=""
-            # because the engine was forked before the runtime existed.
-            # Propagating the new ID to the child requires shared memory or
-            # a restart of the EngineCore process.
             os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
+
+            # Sync the newly generated worker_id to the child proc
+            await _sync_fpm_worker_id(engine_client, fpm_worker_id)
+
         else:
             (
                 engine_client,
