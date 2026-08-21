@@ -27,6 +27,32 @@ pub(crate) struct RequestEndTraceState {
     request: RequestTraceRequestEndState,
 }
 
+impl RequestEndTraceState {
+    pub(super) fn new(
+        agent: Option<AgentContextTraceState>,
+        request_tracker: Arc<RequestTracker>,
+        replay_metrics: Arc<RequestReplayMetrics>,
+    ) -> Self {
+        Self {
+            agent,
+            request: RequestTraceRequestEndState {
+                request_tracker,
+                replay_metrics,
+            },
+        }
+    }
+
+    pub(super) fn request_tracker(&self) -> Arc<RequestTracker> {
+        self.request.request_tracker.clone()
+    }
+
+    pub(super) fn finish_reason_metadata(&self) -> Option<SharedFinishReasonMetadata> {
+        self.agent
+            .as_ref()
+            .map(|state| state.finish_reason_metadata.clone())
+    }
+}
+
 fn request_trace_rejection(common_request: &PreprocessedRequest) -> Option<&'static str> {
     if common_request.prompt_embeds.is_some() {
         return Some("prompt embeddings are not supported");
@@ -66,6 +92,20 @@ pub(crate) fn build_request_end_trace_state(
         trace_block_size,
         super::policy().emit_request_end_records(),
     )
+}
+
+pub(crate) fn build_new_request_end_trace_state(
+    common_request: &mut PreprocessedRequest,
+    context: &Context<()>,
+    trace_block_size: usize,
+) -> Option<RequestEndTraceState> {
+    let tracker = Arc::new(RequestTracker::new());
+    tracker.record_isl(common_request.token_ids.len(), None);
+    let tracker_option = Some(tracker.clone());
+    let state =
+        build_request_end_trace_state(common_request, &tracker_option, context, trace_block_size)?;
+    common_request.tracker = tracker_option;
+    Some(state)
 }
 
 fn build_request_end_trace_state_for_policy(
@@ -112,17 +152,14 @@ fn build_request_end_trace_state_for_policy(
             return None;
         }
     };
-
     let agent = has_agent_context
         .then(|| super::build_agent_context_trace_state(common_request, tracker, context))
         .flatten();
-
-    let request = RequestTraceRequestEndState {
+    Some(RequestEndTraceState::new(
+        agent,
         request_tracker,
         replay_metrics,
-    };
-
-    Some(RequestEndTraceState { agent, request })
+    ))
 }
 
 pub(crate) fn finish_reason_metadata_handle(
@@ -130,8 +167,7 @@ pub(crate) fn finish_reason_metadata_handle(
 ) -> Option<SharedFinishReasonMetadata> {
     trace_state
         .as_ref()
-        .and_then(|state| state.agent.as_ref())
-        .map(|state| state.finish_reason_metadata.clone())
+        .and_then(RequestEndTraceState::finish_reason_metadata)
 }
 
 fn wrap_request_end_stream<Resp>(
@@ -149,23 +185,27 @@ where
     let (stream, done) = crate::telemetry::stream::notify_on_completion(stream);
     tokio::spawn(async move {
         done.await;
-        let request_state = trace_state.request;
-        if let Some(agent_state) = trace_state.agent {
-            let (agent_context, mut metrics) =
-                super::request_metrics_from_agent_state(agent_state, request_id.clone());
-            metrics.replay = Some(super::into_owned_replay_metrics(
-                request_state.replay_metrics,
-            ));
-            super::record::emit_agent_request_end(agent_context, metrics);
-        } else {
-            super::record::emit_request_end(
-                request_id.clone(),
-                &request_state.request_tracker,
-                super::into_owned_replay_metrics(request_state.replay_metrics),
-            );
-        }
+        emit_request_end_trace_state(trace_state, request_id);
     });
     stream
+}
+
+pub(super) fn emit_request_end_trace_state(trace_state: RequestEndTraceState, request_id: String) {
+    let request_state = trace_state.request;
+    if let Some(agent_state) = trace_state.agent {
+        let (agent_context, mut metrics) =
+            super::request_metrics_from_agent_state(agent_state, request_id);
+        metrics.replay = Some(super::into_owned_replay_metrics(
+            request_state.replay_metrics,
+        ));
+        super::record::emit_agent_request_end(agent_context, metrics);
+    } else {
+        super::record::emit_request_end(
+            request_id,
+            &request_state.request_tracker,
+            super::into_owned_replay_metrics(request_state.replay_metrics),
+        );
+    }
 }
 
 pub(crate) fn wrap_chat_request_end_stream(

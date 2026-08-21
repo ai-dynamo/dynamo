@@ -565,20 +565,29 @@ where
             let needs_local_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_none();
             let needs_local_completions_pipeline = card.model_type.supports_completions();
-            let tokenizer = if (needs_local_chat_pipeline || needs_local_completions_pipeline)
+            let needs_generate_pipeline =
+                supports_enabled_engine_generate(card, &self.generate_engine_capabilities);
+            // Tool traces need Dynamo to decode token-only SGLang output.
+            let needs_generate_trace_tokenizer = needs_generate_pipeline
+                && crate::request_trace::policy().emit_request_end_records()
+                && card.runtime_config.tool_call_parser.is_some();
+            let tokenizer = if (needs_local_chat_pipeline
+                || needs_local_completions_pipeline
+                || needs_generate_trace_tokenizer)
                 && card.has_tokenizer()
             {
                 Some(card.tokenizer().context("tokenizer")?)
             } else {
                 None
             };
+            if needs_generate_trace_tokenizer {
+                worker_set.generate_trace_tokenizer = tokenizer.clone();
+            }
 
             // Routing is required whenever any pipeline (factory chat or local) will exist.
             // tokenizer.is_some() implies a local chat or completions pipeline will be built.
             let needs_factory_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_some();
-            let needs_generate_pipeline =
-                supports_enabled_engine_generate(card, &self.generate_engine_capabilities);
             let needs_preprocessed_routing =
                 needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
 

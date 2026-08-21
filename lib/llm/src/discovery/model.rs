@@ -30,6 +30,19 @@ use crate::types::{
     },
 };
 
+/// Generate runtime state selected atomically from one worker set.
+pub(crate) struct GenerateWorkerRuntime {
+    pub(crate) engine: GenerateStreamingEngine,
+    pub(crate) trace_config: Option<GenerateTraceConfig>,
+}
+
+/// Generate metadata read only while request-end tracing is active.
+pub(crate) struct GenerateTraceConfig {
+    pub(crate) tool_call_parser: Option<String>,
+    pub(crate) tokenizer: Option<crate::tokenizers::Tokenizer>,
+    pub(crate) kv_cache_block_size: u32,
+}
+
 /// Emit a one-time deprecation warning when serving-readiness falls back to
 /// the legacy path because a namespace still contains a legacy card (a
 /// worker with no declared `worker_type`). Logged once per process to avoid
@@ -667,6 +680,31 @@ impl Model {
                 .supports_runtime_capability(capability)
                 .then(|| worker_set.generate_engine.clone())
                 .flatten()
+        })
+        .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
+    }
+
+    /// Get Generate runtime state from one capable worker set.
+    pub(crate) fn get_generate_worker_runtime_for_capability(
+        &self,
+        capability: &str,
+        include_trace_config: bool,
+    ) -> Result<GenerateWorkerRuntime, ModelManagerError> {
+        self.select_worker_set_with(|worker_set| {
+            if !worker_set.supports_runtime_capability(capability) {
+                return None;
+            }
+            Some(GenerateWorkerRuntime {
+                engine: worker_set.generate_engine.clone()?,
+                trace_config: include_trace_config.then(|| {
+                    let card = worker_set.card();
+                    GenerateTraceConfig {
+                        tool_call_parser: card.runtime_config.tool_call_parser.clone(),
+                        tokenizer: worker_set.generate_trace_tokenizer.clone(),
+                        kv_cache_block_size: card.kv_cache_block_size,
+                    }
+                }),
+            })
         })
         .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
     }
