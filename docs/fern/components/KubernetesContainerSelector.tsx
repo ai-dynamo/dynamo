@@ -123,7 +123,8 @@ function commandFor(
     return [
       `export DYNAMO_VERSION=${CURRENT_TAG}`,
       `export DYNAMO_RUNTIME_VERSION=${runtimeVersionFor(dynamoVersion)}`,
-      'export DYNAMO_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-planner:nightly"',
+      // Nightly planner images are a separate NGC repo, not a tag on dynamo-planner.
+      'export DYNAMO_IMAGE="nvcr.io/nvidia/ai-dynamo/dynamo-planner-nightly:latest"',
     ].join("\n");
   }
 
@@ -184,7 +185,11 @@ export function KubernetesContainerSelector() {
   const [registry, setRegistry] = useState("");
   const [copyLabel, setCopyLabel] = useState("Copy");
 
-  const entries = INSTALL_DATA[backend][channel].filter((candidate) => candidate.commands.container);
+  const entries = INSTALL_DATA[backend][channel]
+    .filter((candidate) => candidate.commands.container)
+    // This quickstart deploys the rolling nightly. Pinning an older nightly means
+    // setting worker images by hand, which the emitted variables do not cover.
+    .filter((candidate) => channel !== "nightly" || candidate.latest);
   const entry = entries[versionIndex] ?? entries[0];
   const command = commandFor(hardware, backend, channel, entry?.dynamo, registry);
   const hardwareLabel = hardware === "nvidia" ? "NVIDIA GPU" : "Intel XPU";
@@ -205,7 +210,7 @@ export function KubernetesContainerSelector() {
         ? "Latest nightly container"
         : "Pinned nightly build"
       : "Intel XPU Kubernetes runtime";
-  const versionRowLabel = channel === "nightly" ? "Dynamo nightly" : `${INSTALL_DATA[backend].label} version`;
+  const versionRowLabel = `${INSTALL_DATA[backend].label} version`;
 
   function chooseHardware(next: Hardware) {
     setHardware(next);
@@ -282,7 +287,7 @@ export function KubernetesContainerSelector() {
             <span className="lqs-label">{versionRowLabel}</span>
             <div className="lqs-options" role="group" aria-label={versionRowLabel}>
               {entries.map((version, index) => {
-                const displayVersion = channel === "nightly" && version.dynamo ? version.dynamo : version.backend_version;
+                const displayVersion = version.backend_version;
                 const displayMeta = version.source
                   ? "from main"
                   : channel === "nightly"
