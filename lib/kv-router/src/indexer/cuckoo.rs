@@ -4,6 +4,7 @@
 mod adapter;
 mod addressing;
 mod bucket;
+mod canonical;
 mod dc;
 mod failure;
 mod global;
@@ -16,9 +17,10 @@ mod search;
 mod tests;
 
 pub use adapter::*;
+pub use canonical::CanonicalSequenceBlockHash;
 pub use dc::{
     DcCkfAggregationStats, DcCkfEventOutcome, DcCkfFormatIdentity, DcCkfMemoryStats,
-    DcCkfPublicationBatch, DcCkfPublicationStats, DcCkfState, DcCkfStats,
+    DcCkfPublicationBatch, DcCkfPublicationStats, DcCkfRankReplacement, DcCkfState, DcCkfStats,
 };
 pub use failure::{
     CkfCommitState, CkfFailureAction, CkfFailureDisposition, CkfFailureDomain, CkfFailurePoint,

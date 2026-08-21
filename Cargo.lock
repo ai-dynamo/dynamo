@@ -32,6 +32,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "aisimulate-core"
+version = "0.1.0-dev.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ec4febc5409e1597811a8ac6abbe2d193eb71bf2f9757c401a3813b48ac715e"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "ddsketchy",
+ "derive_builder",
+ "indicatif 0.18.4",
+ "rand 0.9.4",
+ "rustc-hash 2.1.2",
+ "serde",
+ "serde_json",
+ "slotmap",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "aligned"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -169,12 +191,6 @@ name = "arraydeque"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
-
-[[package]]
-name = "arrayref"
-version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
 
 [[package]]
 name = "arrayvec"
@@ -1230,11 +1246,10 @@ dependencies = [
 
 [[package]]
 name = "blake3"
-version = "1.8.5"
+version = "1.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0aa83c34e62843d924f905e0f5c866eb1dd6545fc4d719e803d9ba6030371fce"
+checksum = "6d9e454fc11f76977dc803893aff6304ed33d6a26efae8696573bea74baa27ae"
 dependencies = [
- "arrayref",
  "arrayvec",
  "cc",
  "cfg-if",
@@ -2405,7 +2420,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamo-backend-common"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2429,7 +2444,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-bench"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2471,7 +2486,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-example-catalog"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "dynamo-custom-policy-example-disagg-filter-score-pick",
  "dynamo-custom-policy-example-simple-filter-score-pick",
@@ -2481,7 +2496,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-example-disagg-filter-score-pick"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "dynamo-kv-router",
  "serde",
@@ -2489,7 +2504,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-example-epp"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "dynamo-custom-policy-example-catalog",
@@ -2500,7 +2515,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-example-simple-filter-score-pick"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "dynamo-kv-router",
  "serde",
@@ -2508,7 +2523,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-example-simple-stacked-score-pick"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "dynamo-kv-router",
  "serde",
@@ -2516,7 +2531,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-data-gen"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "dynamo-kv-hashing",
@@ -2529,7 +2544,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-ext-proc"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "axum 0.8.4",
@@ -2567,7 +2582,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-hashing"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "derive_builder",
  "dynamo-tokens",
@@ -2579,7 +2594,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-router"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2627,7 +2642,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "aligned-vec",
  "anyhow",
@@ -2673,6 +2688,7 @@ dependencies = [
  "futures-util",
  "galil-seiferas",
  "hf-hub 0.4.3",
+ "http-body-util",
  "image",
  "indicatif 0.18.4",
  "insta",
@@ -2738,7 +2754,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -2757,37 +2773,28 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
+ "aisimulate-core",
  "anyhow",
  "blake3",
  "bytes",
  "dashmap",
- "ddsketchy",
- "derive-getters",
  "derive_builder",
  "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
- "dynamo-truthy",
  "futures",
- "indicatif 0.18.4",
- "kvbm-common",
- "kvbm-engine",
- "kvbm-logical",
- "kvbm-physical",
  "ndarray 0.16.1",
  "ndarray-interp",
  "ndarray-npy",
- "rand 0.9.4",
+ "parking_lot",
  "rmp-serde",
  "rstest 0.18.2",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
  "serde_path_to_error",
- "slotmap",
- "smallvec",
  "tempfile",
  "tmq",
  "tokio",
@@ -2796,12 +2803,11 @@ dependencies = [
  "tracing",
  "uuid",
  "validator",
- "velo",
 ]
 
 [[package]]
 name = "dynamo-mocker-backend"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2822,9 +2828,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "7.0.1"
+version = "8.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97cce1ec70f4c4896ff9a4e0bb29cd603f465e599c94bf2085b71872a3a58c70"
+checksum = "1500b56f141d7c5e5f81011abe15ef1c4611c5495f68e4c24d2adf853c1ff5a1"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2897,7 +2903,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-rl"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "axum 0.8.4",
@@ -2911,7 +2917,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2943,6 +2949,7 @@ dependencies = [
  "jsonschema",
  "k8s-openapi",
  "kube",
+ "libc",
  "local-ip-address",
  "log",
  "lru 0.16.4",
@@ -2991,7 +2998,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-sglang-mocker"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3011,7 +3018,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-sglang-sidecar"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3034,7 +3041,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-sidecar-common"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "clap",
  "dynamo-backend-common",
@@ -3070,7 +3077,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -3088,7 +3095,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-trtllm-sidecar"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3109,14 +3116,14 @@ dependencies = [
 
 [[package]]
 name = "dynamo-truthy"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "dynamo-vllm-mocker"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3138,7 +3145,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-vllm-sidecar"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3161,7 +3168,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-worker-selection-policy-catalog"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "dynamo-kv-router",
 ]
@@ -5281,7 +5288,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-common"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "dynamo-tokens",
  "serde",
@@ -5289,7 +5296,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-config"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "dynamo-memory",
@@ -5309,7 +5316,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-consolidator"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "dynamo-kv-hashing",
@@ -5336,7 +5343,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-engine"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-nats 0.49.1",
@@ -5376,7 +5383,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-kernels"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "clap",
  "cudarc",
@@ -5387,7 +5394,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-logical"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -5419,7 +5426,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-physical"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "aligned-vec",
  "anyhow",
@@ -5469,7 +5476,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libdynamo_llm"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-once-cell",

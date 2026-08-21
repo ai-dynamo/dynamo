@@ -467,7 +467,7 @@ impl ModelManager {
     /// reservation first-come and symmetric across namespaces. A later deployment
     /// re-using a name fails loudly rather than silently displacing the owner.
     ///
-    /// Holds [`Self::reservation_lock`] across the reserved-name check and the
+    /// Holds `Self::reservation_lock` across the reserved-name check and the
     /// insert so the claim is atomic against a concurrent `register_alias` for
     /// the same name (a name can never end up both a live primary and an alias).
     /// The lock is always taken before any map access, so it never inverts with a
@@ -539,7 +539,7 @@ impl ModelManager {
     /// refused and logged so operators find the collision in the logs rather
     /// than through silent metric re-attribution.
     ///
-    /// Holds [`Self::reservation_lock`] across the live-primary probe and the
+    /// Holds `Self::reservation_lock` across the live-primary probe and the
     /// entry insert so the claim is atomic against a concurrent `add_worker_set`
     /// for the same name. Within that section the `models` guard is dropped before
     /// touching `alias_to_primary` (via `is_some_and`), and the lock is taken
@@ -1920,8 +1920,9 @@ impl ModelManager {
         .await
     }
 
+    /// Construct a KV chooser with a selector resolved by the router host at startup.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn kv_chooser_for_with_selector<Sel>(
+    pub async fn kv_chooser_for_with_selector<Sel>(
         &self,
         endpoint: &Endpoint,
         kv_cache_block_size: u32,
@@ -2303,7 +2304,9 @@ impl ModelManager {
         // Slow path: create the watch (spawns a background task).
         // If another caller raced us, the entry() below picks up the winner;
         // the loser's background task stops once its receivers are dropped.
-        let rx = runtime_config_watch(endpoint).await?;
+        // This registry is keyed by endpoint and outlives any one WorkerSet, so
+        // the watch is scoped to the process, not to a caller's own lifecycle.
+        let rx = runtime_config_watch(endpoint, endpoint.drt().primary_token()).await?;
         let result = match self.runtime_configs.entry(endpoint_id) {
             Entry::Occupied(e) => e.get().clone(),
             Entry::Vacant(e) => {

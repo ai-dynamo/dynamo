@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     IndexerRecoveryTarget, RecoveryTarget, direct_zmq::run_direct_zmq_supervisor, source_health,
-    worker_query::WorkerQueryClient,
+    start_state_agent_router, worker_query::WorkerQueryClient,
 };
 use crate::{
     discovery::{KvSourceMembershipView, KvSourceMembershipWatch, KvSourceStatus},
@@ -311,6 +311,7 @@ fn source_status_is_mismatch(
 ) -> bool {
     match status {
         KvSourceStatus::Missing | KvSourceStatus::Ambiguous(_) => true,
+        KvSourceStatus::Suppressed => false,
         KvSourceStatus::ActiveLiveOnly(_) => view.recovery_expected(worker).unwrap_or(false),
         KvSourceStatus::ActiveRecoverable(_) => false,
     }
@@ -406,6 +407,7 @@ pub async fn start_subscriber(
     endpoint: Endpoint,
     indexer: Indexer,
     membership_watch: KvSourceMembershipWatch,
+    block_size: u32,
     model: String,
     worker_role: Option<WorkerType>,
     source_requirement: KvEventSourceRequirement,
@@ -417,15 +419,39 @@ pub async fn start_subscriber(
     let direct_zmq = uses_direct_zmq(transport_kind);
     let cancel = cancellation_token.child_token();
     let cancellation_guard = cancel.clone().drop_guard();
+    let state_router = start_state_agent_router(
+        endpoint.component().clone(),
+        indexer.clone(),
+        membership_watch.clone(),
+        block_size,
+        cancel.child_token(),
+    )
+    .await;
+    let (membership_watch, state_completion) = match state_router {
+        Ok(state_router) => state_router.into_parts(),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "State-agent source watcher failed to start; continuing with legacy KV events"
+            );
+            let (completion_tx, completion_rx) = oneshot::channel();
+            let task_cancel = cancel.child_token();
+            runtime.spawn(async move {
+                task_cancel.cancelled().await;
+                let _ = completion_tx.send(());
+            });
+            (membership_watch, completion_rx)
+        }
+    };
     let client = WorkerQueryClient::spawn(
         endpoint.component().clone(),
         IndexerRecoveryTarget::new(indexer),
-        membership_watch.clone(),
+        membership_watch.fork_receiver(),
         cancel.child_token(),
     )
     .await?;
     let health_completion = source_health::spawn(
-        membership_watch.clone(),
+        membership_watch.fork_receiver(),
         model.clone(),
         worker_role,
         source_requirement,
@@ -464,7 +490,7 @@ pub async fn start_subscriber(
         let cancel = cancellation_guard.disarm();
         return Ok(KvEventSubscriptionHandle {
             cancel,
-            completions: vec![completion_rx, health_completion],
+            completions: vec![completion_rx, health_completion, state_completion],
             runtime,
             task_guard: None,
         });
@@ -499,7 +525,7 @@ pub async fn start_subscriber(
     let cancel = cancellation_guard.disarm();
     Ok(KvEventSubscriptionHandle {
         cancel,
-        completions: vec![completion_rx, health_completion],
+        completions: vec![completion_rx, health_completion, state_completion],
         runtime,
         task_guard: None,
     })
@@ -594,6 +620,7 @@ mod tests {
             endpoint_resolution: KvStateEndpointResolution::Resolved(serving_endpoint),
             sources: HashMap::from([(worker, status)]),
             kv_event_publishing_enabled: HashMap::from([(7, capability)]),
+            kv_event_source_mode: HashMap::new(),
             recovery_expected: HashMap::from([(worker, false)]),
         }
     }

@@ -20,11 +20,12 @@ use dynamo_kv_router::indexer::cuckoo::DcCkfStats;
 use dynamo_kv_router::indexer::cuckoo::PublisherEmitOutcome;
 use dynamo_kv_router::indexer::cuckoo::{
     CkfFailureAction, CkfFailureDisposition, CkfFailurePoint, DcCkfDelta, DcCkfDeltaSink,
-    DcCkfPublisher, DcCkfSnapshot, DcCkfState, LaneLease, ProducerIdentity,
+    DcCkfPublisher, DcCkfRankReplacement, DcCkfSnapshot, DcCkfState, LaneLease, ProducerIdentity,
 };
+#[cfg(test)]
+use dynamo_kv_router::protocols::ExternalSequenceBlockHash;
 use dynamo_kv_router::protocols::{
-    DpRank, ExternalSequenceBlockHash, KvCacheEventData, KvCacheEventError, RouterEvent,
-    StorageTier, WorkerId, WorkerWithDpRank,
+    DpRank, KvCacheEventData, KvCacheEventError, RouterEvent, WorkerId, WorkerWithDpRank,
 };
 #[cfg(feature = "ckf-diagnostics")]
 use parking_lot::Mutex;
@@ -462,16 +463,12 @@ impl KvDcRelayHandle {
         Ok(())
     }
 
-    async fn replace_ranks(
+    async fn replace_rank_states(
         &self,
-        replacements: Vec<RankReplacement>,
+        states: HashMap<WorkerWithDpRank, DcCkfRankReplacement>,
+        payload_weight: usize,
     ) -> Result<(), KvDcRelayError> {
-        let weight = replacements
-            .iter()
-            .flat_map(|replacement| &replacement.events)
-            .map(event_payload_weight)
-            .fold(0usize, usize::saturating_add)
-            .min(DEFAULT_PENDING_BLOCK_PERMITS) as u32;
+        let weight = payload_weight.min(DEFAULT_PENDING_BLOCK_PERMITS) as u32;
         let permit = self
             .payload_permits
             .clone()
@@ -479,7 +476,7 @@ impl KvDcRelayHandle {
             .await
             .map_err(|_| KvDcRelayError::ShuttingDown)?;
         self.submit(|response| ActorCommand::ReplaceRanks {
-            replacements,
+            states,
             _payload_permit: permit,
             response,
         })
@@ -489,17 +486,20 @@ impl KvDcRelayHandle {
     #[cfg(test)]
     async fn replace_rank(
         &self,
-        publisher_id: PublisherId,
+        _publisher_id: PublisherId,
         worker_id: WorkerId,
         dp_rank: DpRank,
         events: Vec<RouterEvent>,
     ) -> Result<(), KvDcRelayError> {
-        self.replace_ranks(vec![RankReplacement {
-            publisher_id,
-            worker_id,
-            dp_rank,
-            events,
-        }])
+        let weight = events
+            .iter()
+            .map(event_payload_weight)
+            .fold(0usize, usize::saturating_add);
+        let state = replacement_state(worker_id, dp_rank, events)?;
+        self.replace_rank_states(
+            HashMap::from([(WorkerWithDpRank::new(worker_id, dp_rank), state)]),
+            weight,
+        )
         .await
     }
 
@@ -643,19 +643,88 @@ impl KvDcRelayRecoveryTarget {
             state.flush_scheduled = false;
             std::mem::take(&mut state.pending)
         };
-        let (replacements, responses): (Vec<_>, Vec<_>) = pending
-            .into_iter()
-            .map(|pending| (pending.replacement, pending.response))
-            .unzip();
+        // Replacement states are built off the actor, and a malformed dump stays local to
+        // its rank: only pool-wide failures (allocation, actor invariants) reject the batch.
+        let mut states: HashMap<WorkerWithDpRank, DcCkfRankReplacement> = HashMap::new();
+        let mut waiters = Vec::new();
+        let mut payload_weight = 0usize;
+        let mut pending = pending.into_iter();
+        let mut batch_error: Option<String> = None;
+        if states.try_reserve(pending.len()).is_err() || waiters.try_reserve(pending.len()).is_err()
+        {
+            batch_error = Some(
+                KvDcRelayError::Build(
+                    dynamo_kv_router::indexer::cuckoo::CkfBuildError::AllocationFailed,
+                )
+                .to_string(),
+            );
+        }
+        for item in pending.by_ref() {
+            if batch_error.is_some() {
+                break;
+            }
+            let replacement = item.replacement;
+            let member = WorkerWithDpRank::new(replacement.worker_id, replacement.dp_rank);
+            if states.contains_key(&member) {
+                // A duplicate rank in one window means the earlier entry is already being
+                // installed; failing only the later waiter keeps the anomaly rank-local.
+                let _ = item.response.send(Err(KvDcRelayError::InvalidTreeDump {
+                    worker_id: replacement.worker_id,
+                    dp_rank: replacement.dp_rank,
+                    message: format!(
+                        "replacement batch contains the same rank more than once (publisher {})",
+                        replacement.publisher_id
+                    ),
+                }
+                .to_string()));
+                continue;
+            }
+            let weight = replacement
+                .events
+                .iter()
+                .map(event_payload_weight)
+                .fold(0usize, usize::saturating_add);
+            match replacement_state(
+                replacement.worker_id,
+                replacement.dp_rank,
+                replacement.events,
+            ) {
+                Ok(state) => {
+                    states.insert(member, state);
+                    payload_weight = payload_weight.saturating_add(weight);
+                    waiters.push(item.response);
+                }
+                Err(error @ KvDcRelayError::Build(_)) => {
+                    let error = error.to_string();
+                    let _ = item.response.send(Err(error.clone()));
+                    batch_error = Some(error);
+                }
+                Err(error) => {
+                    let _ = item.response.send(Err(error.to_string()));
+                }
+            }
+        }
+        if let Some(error) = batch_error {
+            for item in pending {
+                let _ = item.response.send(Err(error.clone()));
+            }
+            for response_tx in waiters {
+                let _ = response_tx.send(Err(error.clone()));
+            }
+            return;
+        }
+        if states.is_empty() {
+            return;
+        }
         let batch_result = match self.rebuild_permit.acquire().await {
             Ok(_permit) => self
                 .handle
-                .replace_ranks(replacements)
+                .replace_rank_states(states, payload_weight)
                 .await
                 .map_err(|error| error.to_string()),
             Err(_) => Err(KvDcRelayError::ShuttingDown.to_string()),
         };
-        for response_tx in responses {
+        for response_tx in waiters {
             let response = match &batch_result {
                 Ok(()) => Ok(()),
                 Err(error) => Err(error.clone()),
@@ -834,7 +903,7 @@ enum ActorCommand {
         _payload_permit: OwnedSemaphorePermit,
     },
     ReplaceRanks {
-        replacements: Vec<RankReplacement>,
+        states: HashMap<WorkerWithDpRank, DcCkfRankReplacement>,
         _payload_permit: OwnedSemaphorePermit,
         response: oneshot::Sender<Result<(), KvDcRelayError>>,
     },
@@ -1002,10 +1071,11 @@ async fn run_actor(
                 if let Some(error) = first_error {
                     let disposition = event_failure_point(error).disposition();
                     if disposition.action == CkfFailureAction::ContinueCapacityOmission {
-                        // NOTE: A bounded relocation miss is a pre-commit lossy-index omission.
-                        // Do not turn it into a lifecycle fault: the affected block is unchanged,
-                        // successful sibling blocks remain committed, a later Store may retry, and
-                        // an omitted hash's Remove remains a safe no-op.
+                        // NOTE: A bounded relocation miss is a deterministic physical-index
+                        // omission. Exact source lineage and ownership remain committed, while the
+                        // failed fingerprint is non-resident. Do not turn it into a lifecycle
+                        // fault: successful siblings remain committed, a new owner may retry
+                        // admission, and removal still resolves through source lineage.
                         capacity_omission_events = capacity_omission_events.saturating_add(1);
                         if capacity_omission_events == 1 {
                             tracing::warn!(
@@ -1051,26 +1121,38 @@ async fn run_actor(
                 }
             }
             ActorCommand::ReplaceRanks {
-                replacements,
+                states,
                 _payload_permit: _,
                 response,
             } => {
                 #[cfg(feature = "ckf-diagnostics")]
                 let rebuild_started = Instant::now();
-                let result = replacement_batch_hashes(replacements)
-                    .and_then(|hashes| state.replace_ranks(hashes).map_err(Into::into))
-                    .and_then(|publication| {
-                        if let Some(batch) = publication {
-                            publish_batch(batch, &mut publisher, &diagnostics)?;
-                        } else {
-                            diagnostics.record_no_publication();
-                        }
-                        Ok(())
-                    });
+                let omissions_before = state.lifetime_capacity_omissions();
+                let result =
+                    state
+                        .replace_ranks(states)
+                        .map_err(Into::into)
+                        .and_then(|publication| {
+                            if let Some(batch) = publication {
+                                publish_batch(batch, &mut publisher, &diagnostics)?;
+                            } else {
+                                diagnostics.record_no_publication();
+                            }
+                            Ok(())
+                        });
                 #[cfg(feature = "ckf-diagnostics")]
                 diagnostics.record_rebuild(rebuild_started);
                 // The whole cold-start batch is built off-side. A pre-swap failure leaves every
                 // prior rank unchanged; the strong responses all observe the same atomic result.
+                let replacement_omissions = state
+                    .lifetime_capacity_omissions()
+                    .saturating_sub(omissions_before);
+                if replacement_omissions > 0 {
+                    tracing::warn!(
+                        replacement_omissions,
+                        "KV DC Relay omitted capacity-exhausted blocks while installing rank replacements; service continues"
+                    );
+                }
                 let _ = response.send(result);
             }
             ActorCommand::ResetRank {
@@ -1178,12 +1260,12 @@ async fn run_actor(
     }
 }
 
-fn replacement_hashes(
+fn replacement_state(
     worker_id: WorkerId,
     dp_rank: DpRank,
     events: Vec<RouterEvent>,
-) -> Result<HashSet<ExternalSequenceBlockHash>, KvDcRelayError> {
-    let mut hashes = HashSet::new();
+) -> Result<DcCkfRankReplacement, KvDcRelayError> {
+    let mut replacement = DcCkfRankReplacement::new();
     for event in events {
         if event.worker_id != worker_id || event.event.dp_rank != dp_rank {
             return Err(KvDcRelayError::InvalidTreeDump {
@@ -1192,50 +1274,18 @@ fn replacement_hashes(
                 message: "event identity does not match replacement rank".to_string(),
             });
         }
-        if event.storage_tier != StorageTier::Device {
-            continue;
-        }
-        let KvCacheEventData::Stored(store) = event.event.data else {
-            return Err(KvDcRelayError::InvalidTreeDump {
+        replacement.push_event(event).map_err(|error| match error {
+            KvCacheEventError::AllocationFailed => KvDcRelayError::Build(
+                dynamo_kv_router::indexer::cuckoo::CkfBuildError::AllocationFailed,
+            ),
+            _ => KvDcRelayError::InvalidTreeDump {
                 worker_id,
                 dp_rank,
-                message: "tree dump contains a non-Stored event".to_string(),
-            });
-        };
-        hashes.try_reserve(store.blocks.len()).map_err(|_| {
-            KvDcRelayError::Build(
-                dynamo_kv_router::indexer::cuckoo::CkfBuildError::AllocationFailed,
-            )
+                message: format!("tree dump is not canonical replay order: {error}"),
+            },
         })?;
-        hashes.extend(store.blocks.into_iter().map(|block| block.block_hash));
     }
-    Ok(hashes)
-}
-
-fn replacement_batch_hashes(
-    replacements: Vec<RankReplacement>,
-) -> Result<HashMap<WorkerWithDpRank, HashSet<ExternalSequenceBlockHash>>, KvDcRelayError> {
-    let mut hashes_by_rank = HashMap::new();
-    for replacement in replacements {
-        let member = WorkerWithDpRank::new(replacement.worker_id, replacement.dp_rank);
-        if hashes_by_rank.contains_key(&member) {
-            return Err(KvDcRelayError::InvalidTreeDump {
-                worker_id: replacement.worker_id,
-                dp_rank: replacement.dp_rank,
-                message: format!(
-                    "replacement batch contains the same rank more than once (publisher {})",
-                    replacement.publisher_id
-                ),
-            });
-        }
-        let hashes = replacement_hashes(
-            replacement.worker_id,
-            replacement.dp_rank,
-            replacement.events,
-        )?;
-        hashes_by_rank.insert(member, hashes);
-    }
-    Ok(hashes_by_rank)
+    Ok(replacement)
 }
 
 fn publish_batch(
@@ -1329,6 +1379,8 @@ mod tests {
         }
     }
 
+    const EXTERNAL_MASK: u64 = 0xBADC_0FFE_E0DD_F00D;
+
     fn scope(_name: &str) -> StreamScope {
         let dc_id = DcId::new(2);
         let domain = IndexerDomainId::new(
@@ -1358,7 +1410,7 @@ mod tests {
                         .iter()
                         .copied()
                         .map(|hash| KvCacheStoredBlockData {
-                            block_hash: ExternalSequenceBlockHash(hash),
+                            block_hash: ExternalSequenceBlockHash(hash ^ EXTERNAL_MASK),
                             tokens_hash: LocalBlockHash(hash),
                             mm_extra_info: None,
                         })
@@ -1745,7 +1797,7 @@ mod tests {
             tokio::time::timeout(Duration::from_millis(20), faults.recv())
                 .await
                 .is_err(),
-            "a pre-commit capacity omission must not enter lifecycle fault handling"
+            "a capacity omission commits exact state and must not enter lifecycle fault handling"
         );
 
         handle
@@ -1792,7 +1844,10 @@ mod tests {
         let capacity = event_failure_point(KvCacheEventError::CapacityExhausted).disposition();
         assert_eq!(capacity.action, CkfFailureAction::ContinueCapacityOmission);
         assert_eq!(capacity.domain, CkfFailureDomain::ProducerCore);
-        assert_eq!(capacity.commit, CkfCommitState::KnownUnchanged);
+        assert_eq!(
+            capacity.commit,
+            CkfCommitState::ExactCommittedPhysicalOmitted
+        );
         assert_eq!(capacity.recovery_domain, None);
 
         let allocation = event_failure_point(KvCacheEventError::AllocationFailed).disposition();
@@ -1802,6 +1857,12 @@ mod tests {
         let source = event_failure_point(KvCacheEventError::OwnershipDegreeOverflow).disposition();
         assert_eq!(source.action, CkfFailureAction::RejectSource);
         assert_eq!(source.commit, CkfCommitState::KnownUnchanged);
+
+        let missing_parent =
+            event_failure_point(KvCacheEventError::ParentBlockNotFound).disposition();
+        assert_eq!(missing_parent.action, CkfFailureAction::RejectSource);
+        assert_eq!(missing_parent.domain, CkfFailureDomain::ProducerCore);
+        assert_eq!(missing_parent.commit, CkfCommitState::KnownUnchanged);
 
         let invariant =
             event_failure_point(KvCacheEventError::IndexerInvariantViolation).disposition();
@@ -1829,6 +1890,7 @@ mod tests {
             endpoint_resolution: KvStateEndpointResolution::Resolved(kv_state_endpoint.clone()),
             sources: HashMap::from([(worker, KvSourceStatus::ActiveLiveOnly(source))]),
             kv_event_publishing_enabled: HashMap::new(),
+            kv_event_source_mode: HashMap::new(),
             recovery_expected: HashMap::new(),
         };
 

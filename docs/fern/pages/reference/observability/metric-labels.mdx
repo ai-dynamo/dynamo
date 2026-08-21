@@ -126,9 +126,15 @@ Added by an individual metric family. Each label appears only on the metrics not
 </ParamField>
 
 <ParamField path="migration_type" type="string">
-  `[Shared]` On `dynamo_frontend_model_migration_total` — the category of request migration triggered by worker unavailability.
+  `[Shared]` On request migration counters and the duration histogram — the category of request migration triggered by worker unavailability.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>new_request</Badge> <Badge intent="note" minimal>ongoing_request</Badge></span>
+</ParamField>
+
+<ParamField path="outcome" type="string">
+  `[Shared]` On `dynamo_frontend_model_migration_duration_seconds` — whether the migration recovered on another worker, ended without recovery, or was cancelled.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>success</Badge> <Badge intent="note" minimal>failure</Badge> <Badge intent="note" minimal>cancelled</Badge></span>
 </ParamField>
 
 <ParamField path="request_type" type="string">

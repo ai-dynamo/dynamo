@@ -81,9 +81,8 @@ use route_lookup::{
     TieredLookupOptions, TieredLookupResult, query_tiered_matches, split_retained_block_hashes,
 };
 
-pub(crate) type WorkerSelectorFactory<Sel> = Arc<
-    dyn for<'a> Fn(&KvRouterConfig, &'static str, RoutingPartitionRef<'a>) -> Sel + Send + Sync,
->;
+pub(crate) type WorkerSelectorFactory<Sel> =
+    Arc<dyn for<'a> Fn(&KvRouterConfig, WorkerType, RoutingPartitionRef<'a>) -> Sel + Send + Sync>;
 
 pub(crate) fn to_worker_selection_session_context(
     context: &crate::protocols::common::extensions::AgentContext,
@@ -537,6 +536,7 @@ where
                     endpoint.clone(),
                     indexer.clone(),
                     membership_watch,
+                    block_size,
                     model_name.clone().unwrap_or_else(|| "unknown".to_string()),
                     worker_role,
                     kv_event_source_requirement,

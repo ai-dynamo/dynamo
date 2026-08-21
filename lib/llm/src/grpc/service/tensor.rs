@@ -50,7 +50,7 @@ pub struct ExtendedNvCreateTensorResponse {
 /// Tensor Request Handler
 ///
 /// This method will handle the incoming request for model type tensor. The endpoint is a "source"
-/// for an [`super::OpenAICompletionsStreamingEngine`] and will return a stream of
+/// for an `OpenAICompletionsStreamingEngine` and will return a stream of
 /// responses which will be forward to the client.
 ///
 /// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For

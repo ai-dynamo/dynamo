@@ -507,7 +507,7 @@ impl Model {
     /// Structured per-namespace worker readiness for this model — the data
     /// behind the `GET /v1/models/{model}/ready` observability endpoint.
     ///
-    /// Built on the same [`Self::evaluate_namespace`] facts the serving gate
+    /// Built on the same `Self::evaluate_namespace` facts the serving gate
     /// uses, so the reported `ready`/`missing` can never disagree with routing;
     /// this method only layers display data (per-type counts, reason strings).
     pub fn namespace_readiness(&self) -> ModelReadiness {
@@ -615,7 +615,7 @@ impl Model {
     /// where a `ModelDeploymentCard` is registered before its WorkerSet has
     /// been wired up.
     ///
-    /// Delegates to [`Self::select_worker_set_with`] so readiness reports
+    /// Delegates to `Self::select_worker_set_with` so readiness reports
     /// exactly what request routing would accept — including the namespace
     /// completeness gate. Without that, a live decode-only WorkerSet with a
     /// chat engine but no prefill peer would report ready while every request
