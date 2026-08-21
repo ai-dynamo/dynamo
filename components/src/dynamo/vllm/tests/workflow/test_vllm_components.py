@@ -41,11 +41,16 @@ def _context() -> SimpleNamespace:
 
 def test_dynamo_vllm_stage_matches_generate_endpoint_contract():
     validate_binding_contract(
-        GenerateEndpointBinding("workflows.generator.generate"),
-        DynamoVllmStage.contract,
+        GenerateEndpointBinding("workflows.generator.generate", tensor_carrier="nixl"),
+        DynamoVllmStage.external_encoder_complete_contract,
     )
 
-    assert DynamoVllmStage.contract.id == "dynamo-vllm"
+    assert DynamoVllmStage.request_complete_contract.inputs == {"request"}
+    assert DynamoVllmStage.external_encoder_complete_contract.inputs == {
+        "request",
+        "encoder_features",
+        "encoder_metadata",
+    }
 
 
 async def test_encoder_stage_packs_dynamic_image_rows_and_metadata():

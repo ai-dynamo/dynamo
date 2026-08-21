@@ -70,8 +70,17 @@ def validate_binding_contract(binding: Binding, contract: StageContract) -> None
 
     if not isinstance(binding, GenerateEndpointBinding):
         return
-    if contract.inputs != {"request"}:
-        raise WorkflowValidationError("Generate endpoint stage input must be request")
+    supported_inputs = {"request"}
+    if binding.tensor_carrier == NIXL_CARRIER:
+        supported_inputs = {
+            "request",
+            "encoder_features",
+            "encoder_metadata",
+        }
+    if contract.inputs != supported_inputs:
+        raise WorkflowValidationError(
+            f"Generate endpoint stage inputs must be {sorted(supported_inputs)}"
+        )
     if contract.outputs != {"completion"}:
         raise WorkflowValidationError(
             "Generate endpoint stage output must be completion"

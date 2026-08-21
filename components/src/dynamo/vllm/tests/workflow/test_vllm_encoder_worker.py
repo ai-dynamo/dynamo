@@ -41,6 +41,9 @@ class _Carrier:
     def __init__(self) -> None:
         self.close_calls = 0
 
+    def can_export(self, value: Any) -> bool:
+        return False
+
     async def export_tensor(self, tensor: Any, transfer_id: str) -> Any:
         raise NotImplementedError
 
