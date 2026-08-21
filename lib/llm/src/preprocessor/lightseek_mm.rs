@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Pure-Rust per-image token-count and image-placeholder token-id resolution
-//! via the `llm-multimodal` crate. Compiled only when the `mm-routing`
-//! cargo feature is enabled.
+//! via the `llm-multimodal` crate, with a routing-only compatibility counter
+//! for Kimi-K3. Compiled only when the `mm-routing` cargo feature is enabled.
 
 use std::path::Path;
 use std::sync::LazyLock;
@@ -71,11 +71,88 @@ static REGISTRY: LazyLock<VisionProcessorRegistry> =
     LazyLock::new(VisionProcessorRegistry::with_defaults);
 static MODEL_REGISTRY: LazyLock<ModelRegistry> = LazyLock::new(ModelRegistry::new);
 
+enum ImageTokenCounter {
+    Registered {
+        processor: &'static dyn VisionPreProcessor,
+        config: Box<PreProcessorConfig>,
+    },
+    KimiK3(KimiK3TokenConfig),
+}
+
+/// Routing-only subset of Kimi-K3's nested `media_proc_cfg`.
+///
+/// `llm-multimodal` 1.7 does not register K3. The backend still performs the
+/// actual image preprocessing; the frontend only needs the reference token
+/// count so its expanded routing sequence hashes the same blocks.
+#[derive(Debug, serde::Deserialize)]
+struct KimiK3TokenConfig {
+    patch_size: usize,
+    merge_kernel_size: usize,
+    in_patch_limit: usize,
+    patch_limit_on_one_side: usize,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct KimiK3PreprocessorConfig {
+    media_proc_cfg: KimiK3TokenConfig,
+}
+
+impl KimiK3TokenConfig {
+    fn from_json(json: &str) -> Result<Self> {
+        let config: KimiK3PreprocessorConfig = serde_json::from_str(json)
+            .context("mm-routing: failed to parse Kimi-K3 media_proc_cfg")?;
+        let config = config.media_proc_cfg;
+        if config.patch_size == 0
+            || config.merge_kernel_size == 0
+            || config.in_patch_limit == 0
+            || config.patch_limit_on_one_side == 0
+        {
+            anyhow::bail!("mm-routing: Kimi-K3 media_proc_cfg values must be non-zero");
+        }
+        config
+            .merge_kernel_size
+            .checked_mul(config.patch_size)
+            .context("mm-routing: Kimi-K3 patch alignment overflows usize")?;
+        config
+            .patch_limit_on_one_side
+            .checked_mul(config.patch_size)
+            .context("mm-routing: Kimi-K3 side limit overflows usize")?;
+        Ok(config)
+    }
+
+    /// Match `media_utils.py::navit_resize_image` from the Kimi-K3 checkpoint.
+    fn count_tokens(&self, width: u32, height: u32) -> usize {
+        let patch_size = self.patch_size;
+        let width = width as usize;
+        let height = height as usize;
+        let patches_w = (width / patch_size).max(1) as f64;
+        let patches_h = (height / patch_size).max(1) as f64;
+        let side_limit = self.patch_limit_on_one_side * patch_size;
+        let scale = 1.0_f64
+            .min((self.in_patch_limit as f64 / (patches_w * patches_h)).sqrt())
+            .min(side_limit as f64 / width as f64)
+            .min(side_limit as f64 / height as f64);
+        let new_width = ((width as f64 * scale) as usize).max(1).min(side_limit);
+        let new_height = ((height as f64 * scale) as usize).max(1).min(side_limit);
+        let factor = self.merge_kernel_size * patch_size;
+
+        new_width.div_ceil(factor) * new_height.div_ceil(factor)
+    }
+}
+
+fn is_kimi_k3(model_id: &str, model_type: Option<&str>) -> bool {
+    model_type.is_some_and(|model_type| {
+        model_type.eq_ignore_ascii_case("kimi_k3") || model_type.eq_ignore_ascii_case("kimi-k3")
+    }) || {
+        let id = model_id.to_ascii_lowercase();
+        id.contains("kimi") && id.contains("k3")
+    }
+}
+
 /// Maps `(width, height) → num_image_tokens` for a single model using the
 /// model's HF `preprocessor_config.json`.
 pub struct LightseekMmCounter {
-    processor: &'static dyn VisionPreProcessor,
-    config: PreProcessorConfig,
+    counter: ImageTokenCounter,
     model_id: String,
 }
 
@@ -99,31 +176,47 @@ impl LightseekMmCounter {
                 cfg_path.display()
             )
         })?;
-        let config = PreProcessorConfig::from_json(&json).with_context(|| {
-            format!(
-                "mm-routing: failed to parse preprocessor_config.json at {}",
-                cfg_path.display()
-            )
-        })?;
-
-        let processor = REGISTRY.find(model_id, model_type).ok_or_else(|| {
-            anyhow!(
-                "mm-routing: no image processor registered for model_id={:?} model_type={:?}",
-                model_id,
-                model_type
-            )
-        })?;
+        let counter = if is_kimi_k3(model_id, model_type) {
+            let config = KimiK3TokenConfig::from_json(&json).with_context(|| {
+                format!(
+                    "mm-routing: invalid Kimi-K3 preprocessor config at {}",
+                    cfg_path.display()
+                )
+            })?;
+            ImageTokenCounter::KimiK3(config)
+        } else {
+            let config = PreProcessorConfig::from_json(&json).with_context(|| {
+                format!(
+                    "mm-routing: failed to parse preprocessor_config.json at {}",
+                    cfg_path.display()
+                )
+            })?;
+            let processor = REGISTRY.find(model_id, model_type).ok_or_else(|| {
+                anyhow!(
+                    "mm-routing: no image processor registered for model_id={:?} model_type={:?}",
+                    model_id,
+                    model_type
+                )
+            })?;
+            ImageTokenCounter::Registered {
+                processor,
+                config: Box::new(config),
+            }
+        };
 
         Ok(Self {
-            processor,
-            config,
+            counter,
             model_id: model_id.to_string(),
         })
     }
 
     pub fn count_tokens(&self, width: u32, height: u32) -> usize {
-        self.processor
-            .calculate_num_tokens(width, height, &self.config)
+        match &self.counter {
+            ImageTokenCounter::Registered { processor, config } => {
+                processor.calculate_num_tokens(width, height, config)
+            }
+            ImageTokenCounter::KimiK3(config) => config.count_tokens(width, height),
+        }
     }
 
     pub fn model_id(&self) -> &str {
@@ -134,7 +227,7 @@ impl LightseekMmCounter {
 /// Resolve the image-placeholder token id by delegating to a per-model
 /// `ModelProcessorSpec` from the registry. Each registered model (Qwen3-VL,
 /// Qwen2.5-VL, Qwen2-VL, LLaVA-NeXT, LLaVA-1.5, Llama-4,
-/// Kimi-K2.5) reads the right field of `config.json` (`image_token_id`,
+/// Kimi-K2.5, Kimi-K3) reads the right field of `config.json` (`image_token_id`,
 /// `image_token_index`, `media_placeholder_token_id`) and falls back to the
 /// tokenizer's vocab when only the placeholder string is known.
 ///
@@ -159,6 +252,22 @@ fn resolve_image_token_id_with_config(
     model_dir: &Path,
     config: &serde_json::Value,
 ) -> Option<TokenIdType> {
+    let model_type = config.get("model_type").and_then(|value| value.as_str());
+    if is_kimi_k3(model_id, model_type) {
+        let id = config
+            .get("media_placeholder_token_id")
+            .and_then(|value| value.as_u64())
+            .and_then(|id| u32::try_from(id).ok())?;
+        tracing::debug!(
+            target: "mm_routing",
+            model_id = %model_id,
+            image_token_id = id,
+            spec = "kimi_k3",
+            "resolved image-placeholder token id"
+        );
+        return Some(id);
+    }
+
     // Try the HuggingFace fast tokenizer first; fall back to a no-op
     // tokenizer when `tokenizer.json` is missing (Kimi-K2.5 ships only
     // `tiktoken.model`, for example). Specs that read the placeholder
@@ -385,6 +494,68 @@ mod tests {
         // 640x480 is already aligned to patch_size * merge_size (32).
         // (640 / 16) * (480 / 16) / merge_size² = 300.
         assert_eq!(counter.count_tokens(640, 480), 300);
+    }
+
+    #[test]
+    fn counter_loads_kimi_k3_config_and_uses_k3_patch_budget() {
+        let model_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            model_dir.path().join("preprocessor_config.json"),
+            serde_json::json!({
+                "media_proc_cfg": {
+                    "patch_size": 14,
+                    "merge_kernel_size": 2,
+                    "in_patch_limit": 65_536,
+                    "patch_limit_on_one_side": 512,
+                    "fixed_output_tokens": null
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // The local path has no family hint; model_type must select K3.
+        let counter =
+            LightseekMmCounter::try_new("/model", Some("kimi_k3"), model_dir.path()).unwrap();
+
+        // 4000x3000 stays below K3's pre-merge 65,536-patch budget and is
+        // padded to 143x108 merged tokens. K2.5's 16,384 budget would
+        // downscale this image and produce a much smaller count.
+        assert_eq!(counter.count_tokens(4000, 3000), 143 * 108);
+    }
+
+    #[test]
+    fn kimi_k3_config_rejects_overflowing_patch_alignment() {
+        let json = serde_json::json!({
+            "media_proc_cfg": {
+                "patch_size": usize::MAX,
+                "merge_kernel_size": 2,
+                "in_patch_limit": 65_536,
+                "patch_limit_on_one_side": 1
+            }
+        })
+        .to_string();
+
+        let err = KimiK3TokenConfig::from_json(&json).unwrap_err();
+        assert!(err.to_string().contains("patch alignment overflows usize"));
+    }
+
+    #[test]
+    fn routing_tokens_resolve_kimi_k3_media_placeholder() {
+        let model_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            model_dir.path().join("config.json"),
+            serde_json::json!({
+                "model_type": "kimi_k3",
+                "media_placeholder_token_id": 163_605
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let tokens = resolve_routing_tokens("/model", model_dir.path());
+        assert_eq!(tokens.image_token_id, Some(163_605));
+        assert_eq!(tokens.chat_placeholder_token_id, Some(163_605));
     }
 
     /// Coverage table for the VLM families we claim to support. Each row is
