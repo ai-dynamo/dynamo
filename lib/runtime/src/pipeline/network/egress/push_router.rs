@@ -223,6 +223,7 @@ enum TransportFallback<'a> {
     Allow,
     Deny,
     Within(&'a HashSet<u64>),
+    Matching(&'a (dyn Fn(u64) -> bool + Sync)),
 }
 
 struct DeviceAwareCandidates {
@@ -914,6 +915,47 @@ where
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
+        let fallback = allowed_fallback
+            .map(TransportFallback::Within)
+            .unwrap_or(TransportFallback::Allow);
+        self.direct_prepared_with_fallback(instance_id, request, fallback, prepare)
+            .await
+    }
+
+    /// Like [`Self::direct_within_prepared`], but filters transport fallbacks with a predicate.
+    ///
+    /// The predicate is evaluated only when the originally selected instance disappears before
+    /// dispatch. This lets callers retain their own, potentially live eligibility view.
+    pub async fn direct_matching_prepared<M, F, P>(
+        &self,
+        request: SingleIn<T>,
+        instance_id: u64,
+        is_fallback_allowed: P,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+        P: Fn(u64) -> bool + Sync,
+    {
+        self.direct_prepared_with_fallback(
+            instance_id,
+            request,
+            TransportFallback::Matching(&is_fallback_allowed),
+            prepare,
+        )
+        .await
+    }
+
+    async fn direct_prepared_with_fallback<M, F>(
+        &self,
+        instance_id: u64,
+        request: SingleIn<T>,
+        fallback: TransportFallback<'_>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
         // Fallback-enabled dispatch still honors a selected worker while it remains in
         // discovery. Local inhibition only filters worker selection owned by this router;
         // fallback is considered only if the selected worker disappears after this check.
@@ -933,10 +975,6 @@ where
             worker_id = instance_id,
             "Selected worker"
         );
-
-        let fallback = allowed_fallback
-            .map(TransportFallback::Within)
-            .unwrap_or(TransportFallback::Allow);
         self.generate_with_fault_detection_prepared(instance_id, request, fallback, prepare)
             .await
     }
@@ -1328,6 +1366,59 @@ where
             .unwrap_or(0)
     }
 
+    /// Select one worker using this router's existing load-aware policy and caller-owned load.
+    ///
+    /// The caller remains responsible for admission and request-lifecycle accounting.
+    pub fn select_target_with_load(
+        &self,
+        pinned_worker: Option<u64>,
+        is_load_eligible: impl Fn(u64) -> bool,
+        load: impl Fn(u64) -> u64,
+    ) -> anyhow::Result<u64> {
+        if !matches!(
+            self.router_mode,
+            RouterMode::PowerOfTwoChoices | RouterMode::LeastLoaded
+        ) {
+            anyhow::bail!("{:?} routing does not consume LOAD", self.router_mode);
+        }
+
+        let routing_instances = self.client.routing_instances();
+        if let Some(worker_id) = pinned_worker {
+            if !is_load_eligible(worker_id) {
+                anyhow::bail!(
+                    "instance_id={worker_id} has no caller-owned load configuration for endpoint {}",
+                    self.client.endpoint.id()
+                );
+            }
+            if !routing_instances.routable_ids().contains(&worker_id) {
+                anyhow::bail!(
+                    "instance_id={worker_id} is not routable for endpoint {}",
+                    self.client.endpoint.id()
+                );
+            }
+            return Ok(worker_id);
+        }
+
+        let candidates = routing_instances
+            .free_ids()
+            .iter()
+            .copied()
+            .filter(|worker_id| is_load_eligible(*worker_id))
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Err(self.empty_free_pool_error(&routing_instances));
+        }
+
+        self.picker()?
+            .select(
+                CandidateView::Workers(&candidates),
+                RouteContext::default(),
+                load,
+            )
+            .map(|decision| decision.target.worker_id)
+            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))
+    }
+
     async fn select_exact_target(
         &self,
         request: &T,
@@ -1555,25 +1646,28 @@ where
         if let Some((addr, kind, inst)) = lookup(instance_id) {
             return Ok((instance_id, addr, kind, inst));
         }
-        let allowed_fallback = match fallback {
-            TransportFallback::Allow => None,
-            TransportFallback::Deny => {
-                return Err(DynamoError::builder()
-                    .error_type(ErrorType::CannotConnect)
-                    .message(format!(
-                        "instance_id={instance_id} not found for endpoint {}",
-                        self.client.endpoint.id()
-                    ))
-                    .build()
-                    .into());
-            }
-            TransportFallback::Within(allowed) => Some(allowed),
-        };
+        if matches!(fallback, TransportFallback::Deny) {
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::CannotConnect)
+                .message(format!(
+                    "instance_id={instance_id} not found for endpoint {}",
+                    self.client.endpoint.id()
+                ))
+                .build()
+                .into());
+        }
 
         let routing_instances = self.client.routing_instances();
-        let fallback_id = routing_instances.free_ids().iter().copied().find(|&id| {
-            id != instance_id && allowed_fallback.is_none_or(|allowed| allowed.contains(&id))
-        });
+        let fallback_id = routing_instances
+            .free_ids()
+            .iter()
+            .copied()
+            .find(|&id| match fallback {
+                TransportFallback::Allow => id != instance_id,
+                TransportFallback::Deny => false,
+                TransportFallback::Within(allowed) => id != instance_id && allowed.contains(&id),
+                TransportFallback::Matching(is_allowed) => id != instance_id && is_allowed(id),
+            });
         match fallback_id {
             Some(id) => {
                 tracing::warn!(
@@ -2345,6 +2439,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn caller_owned_load_drives_existing_picker_without_runtime_admission() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_caller_owned_load".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+        let router =
+            PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::LeastLoaded)
+                .await
+                .unwrap();
+        client.override_instance_avail(vec![1, 2, 3]);
+        let selected = router
+            .select_target_with_load(
+                None,
+                |_| true,
+                |worker_id| match worker_id {
+                    1 => 8,
+                    2 => 1,
+                    3 => 4,
+                    _ => unreachable!(),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(selected, 2);
+        assert_eq!(router.occupancy_for_test(2), 0);
+        assert_eq!(
+            router
+                .select_target_with_load(Some(3), |_| true, |_| 0)
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            router
+                .select_target_with_load(
+                    None,
+                    |worker_id| worker_id != 2,
+                    |worker_id| {
+                        match worker_id {
+                            1 => 8,
+                            3 => 4,
+                            _ => unreachable!(),
+                        }
+                    }
+                )
+                .unwrap(),
+            3
+        );
+        let error = router
+            .select_target_with_load(None, |_| false, |_| 0)
+            .unwrap_err();
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::ResourceExhausted],
+            &[]
+        ));
+        rt.shutdown();
+    }
+
+    #[tokio::test]
     async fn exact_selection_releases_occupancy_when_preparation_fails() {
         let rt = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
@@ -2943,6 +3103,20 @@ mod tests {
                 .resolve_transport(stale_id, TransportFallback::Within(&allowed))
                 .is_ok(),
             "constrained dispatch should fall back within the allowed worker set"
+        );
+        let is_allowed = |id| id == real_id;
+        assert!(
+            router
+                .resolve_transport(stale_id, TransportFallback::Matching(&is_allowed))
+                .is_ok(),
+            "predicate-constrained dispatch should fall back to an eligible worker"
+        );
+        let is_rejected = |_| false;
+        assert!(
+            router
+                .resolve_transport(stale_id, TransportFallback::Matching(&is_rejected))
+                .is_err(),
+            "predicate-constrained dispatch should not fall back outside its eligible workers"
         );
         let disallowed = HashSet::new();
         let disallowed_error = router
