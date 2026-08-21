@@ -12,7 +12,7 @@ from typing import Mapping, Optional, Union
 from dynamo.experimental.workflow.builder import Workflow
 from dynamo.experimental.workflow.ir import WorkflowIR
 from dynamo.experimental.workflow.plan import Binding, ExecutionPlan, InlineBinding
-from dynamo.experimental.workflow.types import StreamSpec, WorkflowValidationError, validate_name
+from dynamo.experimental.workflow.types import WorkflowValidationError, validate_name
 
 
 @dataclass(frozen=True)
@@ -55,21 +55,6 @@ def compile_workflow(
     workflow_ir = workflow.build() if isinstance(workflow, Workflow) else workflow
     if not isinstance(workflow_ir, WorkflowIR):
         raise TypeError("workflow must be a Workflow or WorkflowIR")
-    port_specs = [
-        *workflow_ir.inputs.values(),
-        *(
-            spec
-            for stage in workflow_ir.stages
-            for spec in (
-                *stage.contract.inputs.values(),
-                *stage.contract.outputs.values(),
-            )
-        ),
-    ]
-    if any(isinstance(spec, StreamSpec) for spec in port_specs):
-        raise WorkflowValidationError(
-            "stream ports are declarative only; workflow stream execution is not supported"
-        )
     stage_ids = tuple(stage.id for stage in workflow_ir.stages)
     if deployment is None:
         deployment = DeploymentSpec.inline(

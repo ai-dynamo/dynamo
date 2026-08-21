@@ -10,12 +10,7 @@ from types import MappingProxyType
 from typing import Any
 
 from dynamo.experimental.workflow.plan import ExecutionPlan, InlineBinding
-from dynamo.experimental.workflow.runtime import (
-    StageContext,
-    StageRunner,
-    WorkflowExecutionError,
-    _validate_value,
-)
+from dynamo.experimental.workflow.runtime import StageContext, StageRunner, WorkflowExecutionError
 from dynamo.experimental.workflow.types import StageContract, WorkflowValidationError
 
 
@@ -84,11 +79,6 @@ class StageDispatcher:
                 f"missing={sorted(expected_inputs - actual_inputs)}, "
                 f"extra={sorted(actual_inputs - expected_inputs)}"
             )
-        for input_name, spec in contract.inputs.items():
-            _validate_value(
-                spec, inputs[input_name], f"stage {stage_id!r} input {input_name!r}"
-            )
-
         binding = self._plan.bindings[stage_id]
         if not isinstance(binding, InlineBinding):
             raise WorkflowExecutionError(f"unsupported binding for stage {stage_id!r}")
@@ -108,10 +98,4 @@ class StageDispatcher:
                 f"extra={sorted(actual_outputs - expected_outputs)}"
             )
         outputs = dict(result)
-        for output_name, spec in contract.outputs.items():
-            _validate_value(
-                spec,
-                outputs[output_name],
-                f"stage {stage_id!r} output {output_name!r}",
-            )
         return outputs

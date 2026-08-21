@@ -13,14 +13,8 @@ from typing import Any
 
 from dynamo.experimental.workflow.dispatcher import StageDispatcher
 from dynamo.experimental.workflow.plan import ExecutionPlan
-from dynamo.experimental.workflow.runtime import (
-    StageRunner,
-    WorkflowAttempt,
-    WorkflowExecutionError,
-    _validate_value,
-)
+from dynamo.experimental.workflow.runtime import StageRunner, WorkflowAttempt, WorkflowExecutionError
 from dynamo.experimental.workflow.scheduler import GraphScheduler
-from dynamo.experimental.workflow.types import PortSpec
 
 
 class WorkflowOrchestrator:
@@ -67,9 +61,6 @@ class WorkflowOrchestrator:
                 f"missing={sorted(expected_inputs - actual_inputs)}, "
                 f"extra={sorted(actual_inputs - expected_inputs)}"
             )
-        for name, spec in workflow.inputs.items():
-            _validate_value(spec, input_values[name], f"workflow input {name!r}")
-
         loop = asyncio.get_running_loop()
         attempt = WorkflowAttempt(
             attempt_id=attempt_id or uuid.uuid4().hex,
@@ -82,10 +73,7 @@ class WorkflowOrchestrator:
             result = await GraphScheduler(workflow, self._dispatcher).run(
                 MappingProxyType(input_values), attempt
             )
-            output_specs = {
-                name: workflow.output_spec(name) for name in workflow.outputs
-            }
-            return _validate_result(output_specs, result)
+            return _validate_result(set(workflow.outputs), result)
 
         execution = asyncio.create_task(
             execute(), name=f"workflow-attempt:{attempt.attempt_id}"
@@ -102,19 +90,13 @@ class WorkflowOrchestrator:
             raise
 
 
-def _validate_result(
-    specs: Mapping[str, PortSpec], result: Mapping[str, Any]
-) -> dict[str, Any]:
+def _validate_result(expected: set[str], result: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(result, Mapping):
         raise WorkflowExecutionError("workflow returned a non-mapping result")
-    expected = set(specs)
     actual = set(result)
     if actual != expected:
         raise WorkflowExecutionError(
             "workflow outputs differ from its definition; "
             f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
         )
-    outputs = dict(result)
-    for name, spec in specs.items():
-        _validate_value(spec, outputs[name], f"workflow output {name!r}")
-    return outputs
+    return dict(result)
