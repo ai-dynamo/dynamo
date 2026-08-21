@@ -686,8 +686,6 @@ where
                         kv_chooser.clone(),
                         prefill_chooser.clone(),
                         encoder_chooser.clone(),
-                        card.kv_cache_block_size,
-                        router_config.kv_router_config.clone(),
                         uses_multimodal_cache_routing(card),
                         router_config.session_affinity_ttl_secs,
                     )

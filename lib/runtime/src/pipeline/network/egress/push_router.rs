@@ -4,10 +4,7 @@
 use super::{AsyncEngineContextProvider, ResponseStream};
 use crate::error::{BackendError, DynamoError, ErrorType, match_error_chain};
 use crate::{
-    component::{
-        Client, DeviceType, Endpoint, Instance, RoutingInstances, RoutingOccupancyState,
-        get_or_create_routing_occupancy_state,
-    },
+    component::{Client, DeviceType, Endpoint, Instance, RoutingInstances},
     discovery::EndpointInstanceId,
     dynamo_nvtx_range,
     engine::{AsyncEngine, AsyncEngineContext, Data},
@@ -18,8 +15,9 @@ use crate::{
     },
     protocols::{EndpointId, maybe_error::MaybeError},
     routing_policy::{
-        CandidateView, RouteCandidate, RouteContext, RouteDevice, RoutePicker, RoutePolicy,
-        RouteTarget,
+        CandidateView, OccupancyReservation, RouteCandidate, RouteContext, RouteDevice,
+        RoutePicker, RoutePolicy, RouteTarget, RoutingOccupancyState,
+        get_or_create_routing_occupancy_state,
     },
     traits::DistributedRuntimeProvider,
 };
@@ -30,10 +28,7 @@ use std::{
     collections::{HashMap, HashSet},
     marker::PhantomData,
     pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, atomic::AtomicU64},
     task::Poll,
     time::Instant,
 };
@@ -72,16 +67,14 @@ fn response_inactivity_timeout() -> Option<std::time::Duration> {
 /// [`RoutingOccupancyState`]. The counter is incremented at construction; the
 /// matching decrement is emitted on drop (or by [`Self::into_tracked_stream`]).
 struct OccupancyPermit {
-    state: Arc<RoutingOccupancyState>,
-    instance_id: u64,
-    counter: Arc<AtomicU64>,
-    armed: bool,
+    reservation: Option<OccupancyReservation>,
 }
 
 impl OccupancyPermit {
     fn acquire(state: Arc<RoutingOccupancyState>, instance_id: u64) -> Self {
-        let counter = state.increment(instance_id);
-        Self::from_counter(state, instance_id, counter)
+        Self {
+            reservation: Some(state.reserve(instance_id)),
+        }
     }
 
     fn from_counter(
@@ -90,43 +83,30 @@ impl OccupancyPermit {
         counter: Arc<AtomicU64>,
     ) -> Self {
         Self {
-            state,
-            instance_id,
-            counter,
-            armed: true,
+            reservation: Some(OccupancyReservation::from_counter(
+                state,
+                instance_id,
+                counter,
+            )),
         }
     }
 
     fn retarget(&mut self, instance_id: u64) {
-        if self.instance_id == instance_id {
-            return;
-        }
-        let counter = self.state.increment(instance_id);
-        RoutingOccupancyState::decrement_counter(self.counter.as_ref());
-        self.instance_id = instance_id;
-        self.counter = counter;
+        self.reservation
+            .as_mut()
+            .expect("occupancy permit must be armed before stream tracking")
+            .retarget(instance_id);
     }
 
     fn into_tracked_stream<U: Data + MaybeError>(mut self, stream: ManyOut<U>) -> ManyOut<U> {
-        self.armed = false;
         let engine_ctx = stream.context();
         ResponseStream::new(
             Box::pin(OccupancyTrackedStream {
                 inner: stream,
-                instance_id: self.instance_id,
-                counter: self.counter.clone(),
-                released: false,
+                reservation: self.reservation.take(),
             }),
             engine_ctx,
         )
-    }
-}
-
-impl Drop for OccupancyPermit {
-    fn drop(&mut self) {
-        if self.armed {
-            RoutingOccupancyState::decrement_counter(self.counter.as_ref());
-        }
     }
 }
 
@@ -223,7 +203,6 @@ enum TransportFallback<'a> {
     Allow,
     Deny,
     Within(&'a HashSet<u64>),
-    Matching(&'a (dyn Fn(u64) -> bool + Sync)),
 }
 
 struct DeviceAwareCandidates {
@@ -754,6 +733,23 @@ where
             .map(|(worker_id, _)| worker_id)
     }
 
+    /// Snapshot workers currently eligible for a new routing decision.
+    ///
+    /// Selection stays outside `PushRouter`; this is the discovery/admission
+    /// boundary used by routing hosts that own their policy lifecycle.
+    pub fn selectable_worker_ids(&self) -> anyhow::Result<Vec<u64>> {
+        let routing_instances = self.client.routing_instances();
+        if routing_instances.free_ids().is_empty() {
+            return Err(self.empty_free_pool_error(&routing_instances));
+        }
+        Ok(routing_instances.free_ids().to_vec())
+    }
+
+    /// Shared O(1) occupancy capability for load-aware routing hosts.
+    pub fn routing_occupancy_state(&self) -> Option<Arc<RoutingOccupancyState>> {
+        self.occupancy_state.clone()
+    }
+
     /// Reject an exact target that local fault detection has removed from routing.
     pub fn ensure_routable(&self, instance_id: u64) -> anyhow::Result<()> {
         if self
@@ -768,6 +764,20 @@ where
             "instance_id={instance_id} not found for endpoint {}",
             self.client.endpoint.id()
         )
+    }
+
+    fn ensure_discovered_for_dispatch(&self, instance_id: u64) -> anyhow::Result<()> {
+        if self.client.instance_ids().contains(&instance_id) {
+            return Ok(());
+        }
+        Err(DynamoError::builder()
+            .error_type(ErrorType::CannotConnect)
+            .message(format!(
+                "instance_id={instance_id} not found for endpoint {}",
+                self.client.endpoint.id()
+            ))
+            .build()
+            .into())
     }
 
     /// Issue a request to the next available instance in a round-robin fashion
@@ -922,25 +932,24 @@ where
             .await
     }
 
-    /// Like [`Self::direct_within_prepared`], but filters transport fallbacks with a predicate.
+    /// Dispatch a worker already selected by a routing host.
     ///
-    /// The predicate is evaluated only when the originally selected instance disappears before
-    /// dispatch. This lets callers retain their own, potentially live eligibility view.
-    pub async fn direct_matching_prepared<M, F, P>(
+    /// `PushRouter` may still resolve transport fallback if the selected worker
+    /// disappears before dispatch. The callback receives that final worker so
+    /// the caller can retarget its own reservation and telemetry.
+    pub async fn dispatch_preselected_prepared<M, F>(
         &self,
         request: SingleIn<T>,
         instance_id: u64,
-        is_fallback_allowed: P,
         prepare: F,
     ) -> anyhow::Result<(M, ManyOut<U>)>
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
-        P: Fn(u64) -> bool + Sync,
     {
-        self.direct_prepared_with_fallback(
+        self.dispatch_preselected_with_fallback(
             instance_id,
             request,
-            TransportFallback::Matching(&is_fallback_allowed),
+            TransportFallback::Allow,
             prepare,
         )
         .await
@@ -956,25 +965,31 @@ where
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
-        // Fallback-enabled dispatch still honors a selected worker while it remains in
-        // discovery. Local inhibition only filters worker selection owned by this router;
-        // fallback is considered only if the selected worker disappears after this check.
-        if !self.client.instance_ids().contains(&instance_id) {
-            return Err(DynamoError::builder()
-                .error_type(ErrorType::CannotConnect)
-                .message(format!(
-                    "instance_id={instance_id} not found for endpoint {}",
-                    self.client.endpoint.id()
-                ))
-                .build()
-                .into());
-        }
-
+        self.ensure_discovered_for_dispatch(instance_id)?;
         tracing::info!(
             router_mode = "direct",
             worker_id = instance_id,
             "Selected worker"
         );
+        self.generate_with_fault_detection_prepared(instance_id, request, fallback, prepare)
+            .await
+    }
+
+    async fn dispatch_preselected_with_fallback<M, F>(
+        &self,
+        instance_id: u64,
+        request: SingleIn<T>,
+        fallback: TransportFallback<'_>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        // Fallback-enabled dispatch still honors a selected worker while it remains in
+        // discovery. Local inhibition only filters worker selection owned by this router;
+        // fallback is considered only if the selected worker disappears after this check.
+        self.ensure_discovered_for_dispatch(instance_id)?;
+
         self.generate_with_fault_detection_prepared(instance_id, request, fallback, prepare)
             .await
     }
@@ -1366,59 +1381,6 @@ where
             .unwrap_or(0)
     }
 
-    /// Select one worker using this router's existing load-aware policy and caller-owned load.
-    ///
-    /// The caller remains responsible for admission and request-lifecycle accounting.
-    pub fn select_target_with_load(
-        &self,
-        pinned_worker: Option<u64>,
-        is_load_eligible: impl Fn(u64) -> bool,
-        load: impl Fn(u64) -> u64,
-    ) -> anyhow::Result<u64> {
-        if !matches!(
-            self.router_mode,
-            RouterMode::PowerOfTwoChoices | RouterMode::LeastLoaded
-        ) {
-            anyhow::bail!("{:?} routing does not consume LOAD", self.router_mode);
-        }
-
-        let routing_instances = self.client.routing_instances();
-        if let Some(worker_id) = pinned_worker {
-            if !is_load_eligible(worker_id) {
-                anyhow::bail!(
-                    "instance_id={worker_id} has no caller-owned load configuration for endpoint {}",
-                    self.client.endpoint.id()
-                );
-            }
-            if !routing_instances.routable_ids().contains(&worker_id) {
-                anyhow::bail!(
-                    "instance_id={worker_id} is not routable for endpoint {}",
-                    self.client.endpoint.id()
-                );
-            }
-            return Ok(worker_id);
-        }
-
-        let candidates = routing_instances
-            .free_ids()
-            .iter()
-            .copied()
-            .filter(|worker_id| is_load_eligible(*worker_id))
-            .collect::<Vec<_>>();
-        if candidates.is_empty() {
-            return Err(self.empty_free_pool_error(&routing_instances));
-        }
-
-        self.picker()?
-            .select(
-                CandidateView::Workers(&candidates),
-                RouteContext::default(),
-                load,
-            )
-            .map(|decision| decision.target.worker_id)
-            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))
-    }
-
     async fn select_exact_target(
         &self,
         request: &T,
@@ -1646,28 +1608,25 @@ where
         if let Some((addr, kind, inst)) = lookup(instance_id) {
             return Ok((instance_id, addr, kind, inst));
         }
-        if matches!(fallback, TransportFallback::Deny) {
-            return Err(DynamoError::builder()
-                .error_type(ErrorType::CannotConnect)
-                .message(format!(
-                    "instance_id={instance_id} not found for endpoint {}",
-                    self.client.endpoint.id()
-                ))
-                .build()
-                .into());
-        }
+        let allowed_fallback = match fallback {
+            TransportFallback::Allow => None,
+            TransportFallback::Deny => {
+                return Err(DynamoError::builder()
+                    .error_type(ErrorType::CannotConnect)
+                    .message(format!(
+                        "instance_id={instance_id} not found for endpoint {}",
+                        self.client.endpoint.id()
+                    ))
+                    .build()
+                    .into());
+            }
+            TransportFallback::Within(allowed) => Some(allowed),
+        };
 
         let routing_instances = self.client.routing_instances();
-        let fallback_id = routing_instances
-            .free_ids()
-            .iter()
-            .copied()
-            .find(|&id| match fallback {
-                TransportFallback::Allow => id != instance_id,
-                TransportFallback::Deny => false,
-                TransportFallback::Within(allowed) => id != instance_id && allowed.contains(&id),
-                TransportFallback::Matching(is_allowed) => id != instance_id && is_allowed(id),
-            });
+        let fallback_id = routing_instances.free_ids().iter().copied().find(|&id| {
+            id != instance_id && allowed_fallback.is_none_or(|allowed| allowed.contains(&id))
+        });
         match fallback_id {
             Some(id) => {
                 tracing::warn!(
@@ -1909,18 +1868,12 @@ where
 
 struct OccupancyTrackedStream<U: Data + MaybeError> {
     inner: ManyOut<U>,
-    instance_id: u64,
-    counter: Arc<AtomicU64>,
-    released: bool,
+    reservation: Option<OccupancyReservation>,
 }
 
 impl<U: Data + MaybeError> OccupancyTrackedStream<U> {
     fn release(&mut self) {
-        if self.released {
-            return;
-        }
-        RoutingOccupancyState::decrement_counter(self.counter.as_ref());
-        self.released = true;
+        drop(self.reservation.take());
     }
 }
 
@@ -1933,7 +1886,13 @@ impl<U: Data + MaybeError> Drop for OccupancyTrackedStream<U> {
 impl<U: Data + MaybeError> std::fmt::Debug for OccupancyTrackedStream<U> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OccupancyTrackedStream")
-            .field("instance_id", &self.instance_id)
+            .field(
+                "instance_id",
+                &self
+                    .reservation
+                    .as_ref()
+                    .map(OccupancyReservation::worker_id),
+            )
             .finish()
     }
 }
@@ -1966,6 +1925,8 @@ impl<U: Data + MaybeError> crate::engine::AsyncEngineStream<U> for OccupancyTrac
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
+
     use crate::{
         DistributedRuntime, Runtime,
         distributed::DistributedConfig,
@@ -2163,22 +2124,25 @@ mod tests {
     }
 
     #[test]
-    fn old_reservation_cannot_decrement_readded_worker_counter() {
+    fn same_id_readd_keeps_existing_permit_accounting() {
         let state = Arc::new(RoutingOccupancyState::default());
+        state.retain(&[7]);
         let old_counter = state.increment(7);
         let old_permit = OccupancyPermit::from_counter(state.clone(), 7, old_counter);
 
         state.retain(&[]);
-        let new_counter = state.increment(7);
         assert_eq!(state.load(7), 1);
+        state.retain(&[7]);
+        let new_permit = OccupancyPermit::acquire(state.clone(), 7);
+        assert_eq!(state.load(7), 2);
 
         drop(old_permit);
         assert_eq!(
             state.load(7),
             1,
-            "dropping an old incarnation must not touch the replacement counter"
+            "re-added worker must retain the still-live request"
         );
-        RoutingOccupancyState::decrement_counter(new_counter.as_ref());
+        drop(new_permit);
         assert_eq!(state.load(7), 0);
     }
 
@@ -2435,72 +2399,6 @@ mod tests {
             "LeastLoaded peek must return the available worker for disagg bootstrap"
         );
 
-        rt.shutdown();
-    }
-
-    #[tokio::test]
-    async fn caller_owned_load_drives_existing_picker_without_runtime_admission() {
-        let rt = Runtime::from_current().unwrap();
-        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
-            .await
-            .unwrap();
-        let endpoint = drt
-            .namespace("test_caller_owned_load".to_string())
-            .unwrap()
-            .component("test_component".to_string())
-            .unwrap()
-            .endpoint("test_endpoint".to_string());
-        let client = endpoint.client().await.unwrap();
-        let router =
-            PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::LeastLoaded)
-                .await
-                .unwrap();
-        client.override_instance_avail(vec![1, 2, 3]);
-        let selected = router
-            .select_target_with_load(
-                None,
-                |_| true,
-                |worker_id| match worker_id {
-                    1 => 8,
-                    2 => 1,
-                    3 => 4,
-                    _ => unreachable!(),
-                },
-            )
-            .unwrap();
-
-        assert_eq!(selected, 2);
-        assert_eq!(router.occupancy_for_test(2), 0);
-        assert_eq!(
-            router
-                .select_target_with_load(Some(3), |_| true, |_| 0)
-                .unwrap(),
-            3
-        );
-        assert_eq!(
-            router
-                .select_target_with_load(
-                    None,
-                    |worker_id| worker_id != 2,
-                    |worker_id| {
-                        match worker_id {
-                            1 => 8,
-                            3 => 4,
-                            _ => unreachable!(),
-                        }
-                    }
-                )
-                .unwrap(),
-            3
-        );
-        let error = router
-            .select_target_with_load(None, |_| false, |_| 0)
-            .unwrap_err();
-        assert!(match_error_chain(
-            error.as_ref(),
-            &[ErrorType::ResourceExhausted],
-            &[]
-        ));
         rt.shutdown();
     }
 
@@ -3103,20 +3001,6 @@ mod tests {
                 .resolve_transport(stale_id, TransportFallback::Within(&allowed))
                 .is_ok(),
             "constrained dispatch should fall back within the allowed worker set"
-        );
-        let is_allowed = |id| id == real_id;
-        assert!(
-            router
-                .resolve_transport(stale_id, TransportFallback::Matching(&is_allowed))
-                .is_ok(),
-            "predicate-constrained dispatch should fall back to an eligible worker"
-        );
-        let is_rejected = |_| false;
-        assert!(
-            router
-                .resolve_transport(stale_id, TransportFallback::Matching(&is_rejected))
-                .is_err(),
-            "predicate-constrained dispatch should not fall back outside its eligible workers"
         );
         let disallowed = HashSet::new();
         let disallowed_error = router

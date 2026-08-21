@@ -140,10 +140,6 @@ impl WorkerLoadTable {
             .map(|(&worker, slot)| (worker, slot.snapshot()))
     }
 
-    fn get(&self, worker: WorkerWithDpRank) -> Option<WorkerLoadSnapshot> {
-        self.entries.get(&worker).map(WorkerLoadSlot::snapshot)
-    }
-
     fn ensure_worker(&mut self, worker: WorkerWithDpRank) {
         self.entries
             .entry(worker)
@@ -361,29 +357,6 @@ impl PromptRegistry {
             .iter()
             .map(|(worker, load)| (worker, load.active_requests))
             .collect()
-    }
-
-    pub(super) fn active_request_count(&self, worker: WorkerWithDpRank) -> usize {
-        self.loads
-            .read()
-            .get(worker)
-            .map_or(0, |load| load.active_requests)
-    }
-
-    pub(super) fn active_request_count_for_worker(
-        &self,
-        worker_id: u64,
-        start_rank: u32,
-        dp_size: u32,
-    ) -> usize {
-        let loads = self.loads.read();
-        (start_rank..start_rank.saturating_add(dp_size))
-            .map(|dp_rank| {
-                loads
-                    .get(WorkerWithDpRank::new(worker_id, dp_rank))
-                    .map_or(0, |load| load.active_requests)
-            })
-            .sum()
     }
 
     pub(super) fn active_tokens(&self, decay_now: Instant) -> HashMap<WorkerWithDpRank, usize> {
@@ -705,28 +678,5 @@ mod tests {
 
         assert_eq!(actual.0, expected.0);
         assert_eq!(actual.1, expected.1);
-    }
-
-    #[test]
-    fn active_request_point_lookups_aggregate_only_requested_dp_ranks() {
-        let rank_0 = worker(1, 0);
-        let rank_1 = worker(1, 1);
-        let other_worker = worker(2, 0);
-        let registry = PromptRegistry::new([rank_0, rank_1, other_worker]);
-
-        for (worker, active_requests) in [(rank_0, 2), (rank_1, 3), (other_worker, 7)] {
-            registry.replace_worker_load_state(
-                worker,
-                WorkerLoadSnapshot {
-                    active_requests,
-                    ..Default::default()
-                },
-            );
-        }
-
-        assert_eq!(registry.active_request_count(rank_0), 2);
-        assert_eq!(registry.active_request_count_for_worker(1, 0, 2), 5);
-        assert_eq!(registry.active_request_count_for_worker(2, 0, 1), 7);
-        assert_eq!(registry.active_request_count(worker(99, 0)), 0);
     }
 }
