@@ -29,12 +29,12 @@ const HEALTH_SERVICE_NAME: &str = "inference-extension";
 /// connection flood from exhausting fds / memory. Tuned for an inference EPP
 /// where a single Envoy upstream typically holds <100 concurrent streams.
 const MAX_CONCURRENT_CONNECTIONS: usize = 1024;
-/// Grace period after a shutdown signal before the server stops accepting new
-/// connections, so in-flight ext_proc streams can drain (the gateway stops
-/// routing to this EPP as soon as health flips to NOT_SERVING). Configurable
-/// via `DYN_EPP_SHUTDOWN_GRACE_MS`.
-const DEFAULT_SHUTDOWN_GRACE_MS: u64 = 5_000;
-const SHUTDOWN_GRACE_ENV: &str = "DYN_EPP_SHUTDOWN_GRACE_MS";
+/// Propagation window after a shutdown signal before the server stops
+/// accepting new connections. The gateway stops routing to this EPP as soon
+/// as health flips to NOT_SERVING. Configurable via
+/// `DYN_EPP_GRACEFUL_SHUTDOWN_PROPAGATION_SECS`.
+const DEFAULT_GRACEFUL_SHUTDOWN_PROPAGATION_SECS: u64 = 5;
+const GRACEFUL_SHUTDOWN_PROPAGATION_ENV: &str = "DYN_EPP_GRACEFUL_SHUTDOWN_PROPAGATION_SECS";
 /// Max time to wait for the TLS handshake to complete before dropping the
 /// connection. Without this, a client that finishes the TCP connect but
 /// stalls the TLS handshake holds a connection-limit permit indefinitely;
@@ -305,9 +305,15 @@ async fn run_inner(
             // reached `serve` yet, health is already NOT_SERVING and the
             // draining cancellation below makes initialization return.
             draining.cancel();
-            let grace_ms = parse_env(SHUTDOWN_GRACE_ENV, DEFAULT_SHUTDOWN_GRACE_MS);
-            tracing::info!(grace_ms, "EPP health set to NOT_SERVING; draining");
-            tokio::time::sleep(std::time::Duration::from_millis(grace_ms)).await;
+            let propagation_secs = parse_env(
+                GRACEFUL_SHUTDOWN_PROPAGATION_ENV,
+                DEFAULT_GRACEFUL_SHUTDOWN_PROPAGATION_SECS,
+            );
+            tracing::info!(
+                propagation_secs,
+                "EPP health set to NOT_SERVING; allowing endpoint propagation"
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(propagation_secs)).await;
             shutdown.cancel();
             tracing::info!("EPP graceful shutdown complete");
         });
