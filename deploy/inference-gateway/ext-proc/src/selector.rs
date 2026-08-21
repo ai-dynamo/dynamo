@@ -562,9 +562,12 @@ impl Selector {
 
 /// Bounded wait for at least one registered worker before the peer dump, so
 /// the snapshot overlaps the already-buffered live event stream (subscribe-
-/// first). A cold start that never registers a worker in time proceeds anyway:
-/// the peer dump is then the best available state.
-const PEER_RECOVERY_WORKER_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+/// first). This is a best-effort margin for the topology adapter's first
+/// reconcile — in the common restart case workers register within ~1s and the
+/// wait is a no-op. A cold start that never registers a worker in time
+/// proceeds anyway: the peer dump is then the best available state, and a
+/// longer wait cannot improve it.
+const PEER_RECOVERY_WORKER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 async fn wait_for_registered_worker(
     service: &SelectionService,
