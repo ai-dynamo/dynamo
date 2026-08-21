@@ -365,7 +365,7 @@ spec:
             - name: DYN_EPP_MAX_NUM_BATCHED_TOKENS
               value: "8192"
             - name: DYN_EPP_PEER_SERVICE
-              value: dynamo-epp
+              value: dynamo-epp-peer
             - name: POD_IP
               valueFrom:
                 fieldRef:
@@ -378,9 +378,11 @@ configuration.
 The model name, block size, event port, and maximum batched-token values in the example are one
 coherent configuration. Change them together when adapting another model or vLLM deployment.
 
-Create the replacement `dynamo-epp` Service with gRPC port `9002` and, for two replicas, the named
-`replica-agg` and `selection-http` ports. The complete ServiceAccount, RBAC, Deployment, and Service
-definitions are available in the
+Create the replacement request Service `dynamo-epp` with gRPC port `9002`, plus a dedicated peer
+Service `dynamo-epp-peer` that carries the two replica-plane ports (`replica-agg` for lifecycle sync
+and `selection-http` for startup KV-index recovery); the EPP resolves those named ports from
+`dynamo-epp-peer`. The complete ServiceAccount, RBAC, Deployment, and Service definitions are
+available in the
 [`agg.yaml` EPP resources](https://github.com/ai-dynamo/dynamo/blob/main/deploy/inference-gateway/ext-proc/examples/onramp/agg.yaml).
 
 ### Connect the InferencePool
