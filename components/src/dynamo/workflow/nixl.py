@@ -13,7 +13,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Union
 
 from dynamo.workflow.perf import WORKFLOW_PERF_TRACE
 from dynamo.workflow.runtime import WorkflowExecutionError
@@ -214,7 +214,7 @@ class EmbeddingTransferRef:
         )
 
 
-TensorTransferRef = NixlTensorRef | EmbeddingTransferRef
+TensorTransferRef = Union[NixlTensorRef, EmbeddingTransferRef]
 
 
 def tensor_transfer_ref_from_dict(

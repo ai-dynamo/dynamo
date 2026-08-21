@@ -11,7 +11,7 @@ from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
 from dynamo.workflow.generate import GenerateEndpointInvoker
-from dynamo.workflow.nixl import NixlTensorFanout, tensor_transfer_ref_from_dict
+from dynamo.workflow.nixl import NixlTensorFanout
 from dynamo.workflow.plan import (
     NIXL_CARRIER,
     ExecutionPlan,
@@ -208,23 +208,6 @@ class StageDispatcher:
                 f"missing={sorted(expected_inputs - actual_inputs)}, "
                 f"extra={sorted(actual_inputs - expected_inputs)}"
             )
-        binding = self._plan.bindings[stage_id]
-        for input_name, spec in contract.inputs.items():
-            value_spec = _require_value_spec(
-                spec, f"stage {stage_id!r} input {input_name!r}"
-            )
-            value = inputs[input_name]
-            location = f"stage {stage_id!r} input {input_name!r}"
-            if isinstance(binding, RemoteBinding) and value_spec.type == "tensor":
-                reference = tensor_transfer_ref_from_dict(value)
-                _validate_value(
-                    value_spec,
-                    SimpleNamespace(dtype=reference.dtype, shape=reference.shape),
-                    location,
-                )
-            else:
-                _validate_value(value_spec, value, location)
-
         binding = self._plan.bindings[stage_id]
         frozen_inputs = MappingProxyType(dict(inputs))
         if isinstance(binding, InlineBinding):

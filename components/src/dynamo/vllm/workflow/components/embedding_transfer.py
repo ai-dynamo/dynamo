@@ -44,6 +44,11 @@ class NixlWriteTensorCarrier:
         self._sender = sender or NixlWriteEmbeddingSender()
         self._observers: set[asyncio.Task[None]] = set()
 
+    def can_export(self, value: Any) -> bool:
+        """Use WRITE transport only for a complete tensor port value."""
+
+        return isinstance(value, self._torch.Tensor)
+
     async def export_tensor(self, tensor: Any, transfer_id: str) -> Mapping[str, Any]:
         references = await self.export_tensor_fanout(tensor, (transfer_id,))
         return references[transfer_id]
@@ -159,6 +164,12 @@ class NixlWriteTensorReceiverCarrier:
             )
         )
         self._tensor_ids: dict[int, int] = {}
+
+    def can_export(self, value: Any) -> bool:
+        """The decoder-side receive ring never exports workflow values."""
+
+        del value
+        return False
 
     async def export_tensor(self, tensor: Any, transfer_id: str) -> Mapping[str, Any]:
         del tensor, transfer_id

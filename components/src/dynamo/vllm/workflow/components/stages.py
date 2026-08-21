@@ -18,7 +18,7 @@ from dynamo.vllm.multimodal_utils.custom_encoder import (
     AsyncVisionEncoder,
     VisionEncoderBackend,
 )
-from dynamo.workflow import StageContext, StageContract, StreamSpec, ValueSpec
+from dynamo.workflow import StageContext, StageContract
 from dynamo.workflow.perf import WORKFLOW_PERF_TRACE
 
 logger = logging.getLogger(__name__)

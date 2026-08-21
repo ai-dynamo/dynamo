@@ -53,6 +53,9 @@ class _FakeTensorCarrier:
     def __init__(self) -> None:
         self.close_calls = 0
 
+    def can_export(self, value: Any) -> bool:
+        return False
+
     async def export_tensor(self, tensor: Any, transfer_id: str) -> Any:
         raise NotImplementedError
 
@@ -106,24 +109,14 @@ def test_benchmark_control_and_tensor_plans_isolate_classifier_transport():
     metadata_plan = compile_benchmark_workflow("metadata")
     tensor_plan = compile_benchmark_workflow("tensor")
 
-    assert {edge.transfer_id: edge.carrier for edge in metadata_plan.edges} == {
-        "encoder.request": "inline",
-        "classifier.encoder_metadata": "inline",
-        "generator.request": "inline",
-        "generator.encoder_features": "nixl",
-        "generator.encoder_metadata": "inline",
-        "response.completion": "inline",
-        "response.scores": "inline",
-    }
-    assert {edge.transfer_id: edge.carrier for edge in tensor_plan.edges} == {
-        "encoder.request": "inline",
-        "classifier.encoder_features": "nixl",
-        "generator.request": "inline",
-        "generator.encoder_features": "nixl",
-        "generator.encoder_metadata": "inline",
-        "response.completion": "inline",
-        "response.scores": "inline",
-    }
+    assert metadata_plan.bindings["encoder"].tensor_carrier == "nixl"
+    assert metadata_plan.bindings["classifier"].tensor_carrier is None
+    assert metadata_plan.bindings["generator"].tensor_carrier == "nixl"
+    assert tensor_plan.bindings["encoder"].tensor_carrier == "nixl"
+    assert tensor_plan.bindings["classifier"].tensor_carrier == "nixl"
+    assert tensor_plan.bindings["generator"].tensor_carrier == "nixl"
+    assert not hasattr(metadata_plan, "edges")
+    assert not hasattr(tensor_plan, "edges")
 
 
 async def test_frontend_provider_binds_remote_plan_and_inline_response():

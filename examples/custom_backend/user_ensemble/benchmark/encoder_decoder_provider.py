@@ -15,7 +15,6 @@ from dynamo.workflow import (
     GenerateEndpointBinding,
     InlineBinding,
     RemoteBinding,
-    ValueSpec,
     Workflow,
     WorkflowOrchestrator,
     compile_workflow,
@@ -37,7 +36,7 @@ CLASSIFIER_INPUTS = frozenset({"metadata", "tensor"})
 
 def _metadata_classifier_workflow() -> Workflow:
     workflow = Workflow("encoder-metadata-classifier-vllm-qualification")
-    request = workflow.input("request", ValueSpec(type="json"))
+    request = workflow.input("request")
     encoder = workflow.stage("encoder", EncoderStage.contract, request=request)
     classifier = workflow.stage(
         "classifier",
@@ -46,7 +45,7 @@ def _metadata_classifier_workflow() -> Workflow:
     )
     generator = workflow.stage(
         "generator",
-        DynamoVllmStage.complete_contract,
+        DynamoVllmStage.external_encoder_complete_contract,
         request=request,
         encoder_features=encoder.encoder_features,
         encoder_metadata=encoder.encoder_metadata,
@@ -84,7 +83,10 @@ def compile_benchmark_workflow(classifier_input: str) -> ExecutionPlan:
                     CLASSIFIER_ENDPOINT,
                     tensor_carrier=("nixl" if classifier_input == "tensor" else None),
                 ),
-                "generator": GenerateEndpointBinding(GENERATOR_ENDPOINT),
+                "generator": GenerateEndpointBinding(
+                    GENERATOR_ENDPOINT,
+                    tensor_carrier="nixl",
+                ),
                 "response": InlineBinding("response"),
             }
         ),

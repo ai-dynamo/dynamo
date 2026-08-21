@@ -50,8 +50,8 @@ class DummyMetadataClassifier:
 
     contract = StageContract(
         id="metadata-classifier",
-        inputs={"encoder_metadata": ValueSpec(type="json")},
-        outputs={"scores": ValueSpec(type="json")},
+        inputs={"encoder_metadata"},
+        outputs={"scores"},
     )
 
     async def run(

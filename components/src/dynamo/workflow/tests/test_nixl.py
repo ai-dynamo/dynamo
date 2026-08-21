@@ -25,6 +25,7 @@ from dynamo.workflow import (
 from dynamo.workflow.dispatcher import StageDispatcher
 from dynamo.workflow.nixl import EmbeddingTransferRef
 from dynamo.workflow.perf import WorkflowPerfTracer
+from dynamo.workflow.remote import NixlCarriedValue
 
 pytestmark = [
     pytest.mark.unit,
@@ -407,7 +408,6 @@ def test_embedding_transfer_reference_uses_existing_request_shape() -> None:
     )
 
 
-TENSOR = ValueSpec(type="tensor", dtype="float32", shape=("dynamic", 8))
 ENCODER = StageContract(
     id="encoder",
     inputs={"request"},
