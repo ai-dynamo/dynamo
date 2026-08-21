@@ -34,7 +34,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sptr "k8s.io/utils/ptr"
-	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
 
 const (
@@ -1235,21 +1234,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.services[worker].volumeMounts[0].mountPoint: Required value: is required when useAsCompilationCache is false"},
 		},
 		{
-			name: "alpha EPP config sources are mutually exclusive",
-			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				worker := dgd.Spec.Services["worker"]
-				worker.ComponentType = consts.ComponentTypeEPP
-				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp"}},
-					Config: &apixv1alpha1.EndpointPickerConfig{
-						Plugins:            []apixv1alpha1.PluginSpec{},
-						SchedulingProfiles: []apixv1alpha1.SchedulingProfile{},
-					},
-				}
-			}),
-			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Forbidden: exactly one of configMapRef or config is required"},
-		},
-		{
 			name: "alpha intra-pod failover shadow maximum is preserved structurally",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["worker"].Failover = &nvidiacomv1alpha1.FailoverSpec{
@@ -1387,50 +1371,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["worker"].SharedMemory = &nvidiacomv1alpha1.SharedMemorySpec{
 					Size: resource.MustParse("1Gi"),
-				}
-			}),
-		},
-		{
-			name: "v1alpha1 EPP config without a source reaches the webhook without v1beta1 CEL",
-			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				worker := dgd.Spec.Services["worker"]
-				worker.ComponentType = consts.ComponentTypeEPP
-				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{}
-			}),
-			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Forbidden: exactly one of configMapRef or config is required"},
-		},
-		{
-			name: "v1beta1 EPP config without a source is rejected by CEL",
-			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				worker := betaWorkerComponent(dgd)
-				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{}
-			}),
-			wantCELErr: "spec.components[1].eppConfig: Invalid value: exactly one of configMapRef or config must be specified",
-		},
-		{
-			name: "v1beta1 EPP config with both sources is rejected by CEL",
-			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				worker := betaWorkerComponent(dgd)
-				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp"}},
-					Config: &apixv1alpha1.EndpointPickerConfig{
-						Plugins:            []apixv1alpha1.PluginSpec{},
-						SchedulingProfiles: []apixv1alpha1.SchedulingProfile{},
-					},
-				}
-			}),
-			wantCELErr: "spec.components[1].eppConfig: Invalid value: exactly one of configMapRef or config must be specified",
-		},
-		{
-			name: "v1beta1 valid EPP config reaches the webhook",
-			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				worker := betaWorkerComponent(dgd)
-				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-				worker.Replicas = k8sptr.To(int32(1))
-				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp"}},
 				}
 			}),
 		},

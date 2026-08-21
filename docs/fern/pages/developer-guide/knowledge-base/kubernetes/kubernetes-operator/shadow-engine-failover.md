@@ -144,6 +144,20 @@ For the cross-feature backend overview, see [Compatibility](../../../../referenc
   driver restore issues.
 - It is not covered by the normal v1beta1 compatibility guarantees while it
   lives under `experimental`.
+- Gateway API Inference Extension (GAIE) routing through a standalone Rust
+  EPP (`DYN_EPP_MODE=standalone`) does not yet support intra-pod failover —
+  this is deferred, not a permanent restriction. Standalone's pod discovery
+  selects workers from the Pod's aggregate `Ready` condition, which a pod
+  with an intentionally-standby engine container never satisfies, so the EPP
+  fails fast at startup if `DYN_KUBE_DISCOVERY_MODE=container` is set in
+  standalone mode rather than silently excluding the whole pod from routing.
+  Lifting this requires moving standalone's pod discovery from pod-aggregate
+  to per-container readiness (tracked as
+  `TODO(epp-standalone-container-discovery)` in `epp_standalone_config.rs`).
+  A Dynamo-runtime EPP (`DYN_EPP_MODE=dynamo`, the default) already resolves
+  per-container worker identities correctly, provided the worker pod exposes
+  its OpenAI-compatible port on a container the failover engine cloning does
+  not touch (for example a `sidecar-frontend`).
 
 ## API Placement
 

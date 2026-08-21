@@ -1309,8 +1309,11 @@ spec:
                         type: array
                       eppConfig:
                         description: |-
-                          EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.
+                          EPPConfig defines legacy Go-EPP configuration for Endpoint Picker Plugin components.
                           Only applicable when ComponentType is "epp".
+
+                          Deprecated: omit this field for the native Rust EPP. Presence of eppConfig
+                          keeps the Go EPP Pod contract until migration clears it.
                         properties:
                           config:
                             description: |-
@@ -12370,8 +12373,13 @@ spec:
                         type: object
                       eppConfig:
                         description: |-
-                          eppConfig holds EPP-specific configuration for Endpoint Picker Plugin
+                          eppConfig holds legacy Go-EPP configuration for Endpoint Picker Plugin
                           components. Only meaningful when `type` is `epp`.
+
+                          Deprecated: omit this field for the native Rust EPP. Presence of
+                          `eppConfig` selects the legacy Go EPP Pod contract (CLI flags + config
+                          mount) so existing DGDs keep running across operator upgrades until
+                          migration is started by clearing this field.
                         properties:
                           config:
                             description: |-
@@ -21190,8 +21198,6 @@ spec:
                       - name
                     type: object
                     x-kubernetes-validations:
-                      - message: eppConfig may only be set when type is epp
-                        rule: '!has(self.eppConfig) || (has(self.type) && self.type == ''epp'')'
                       - message: minAvailable must be less than or equal to replicas unless replicas is 0
                         rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                       - message: minAvailable is immutable after creation

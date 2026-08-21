@@ -30,7 +30,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sptr "k8s.io/utils/ptr"
-	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
 
 const (
@@ -409,15 +408,6 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				}
 			}),
 			wantCELErr: "spec.experimental.gpuMemoryService: Invalid value: extraClientPods is reserved for inter-pod GMS and is not implemented yet",
-		},
-		{
-			name: "v1beta1 EPP config on a worker is rejected by CEL",
-			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp-config"}},
-				}
-			}),
-			wantCELErr: "spec: Invalid value: eppConfig may only be set when type is epp",
 		},
 		{
 			name: "v1beta1 checkpoint job with checkpointRef is rejected by CEL",
@@ -928,10 +918,12 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeEPP,
 				Multinode:     &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2},
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: "registry.example/dynamo-frontend:1.5.0"},
+				},
 			}),
 			wantWebhookErrs: []string{
 				"spec.multinode: Forbidden: EPP component cannot be multinode",
-				"spec.eppConfig: Required value: is required for EPP components",
 			},
 		},
 		{
@@ -939,99 +931,113 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeEPP,
 				Replicas:      &validMinAvail,
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: "registry.example/dynamo-frontend:1.5.0"},
+				},
 			}),
 			wantWebhookErrs: []string{
 				"spec.replicas: Invalid value: 2: EPP component must have exactly 1 replica",
-				"spec.eppConfig: Required value: is required for EPP components",
 			},
 		},
 		{
-			name: "v1alpha1 EPP requires configuration",
+			name: "v1alpha1 native Rust EPP accepts a 1.5 image without eppConfig",
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeEPP,
-			}),
-			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for EPP components"},
-		},
-		{
-			name: "v1beta1 EPP without configuration reaches and is rejected by the v1beta1 webhook",
-			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-			}),
-			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for EPP components"},
-		},
-		{
-			name: "v1alpha1 empty EPP config reaches and is rejected by the webhook",
-			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeEPP,
-				EPPConfig:     &nvidiacomv1alpha1.EPPConfig{},
-			}),
-			wantWebhookErrs: []string{"spec.eppConfig: Forbidden: exactly one of configMapRef or config is required"},
-		},
-		{
-			name: "v1beta1 empty EPP config is rejected by source CEL",
-			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{}
-			}),
-			wantCELErr: "spec.eppConfig: Invalid value: exactly one of configMapRef or config must be specified",
-		},
-		{
-			name: "v1alpha1 conflicting EPP config reaches and is rejected by the webhook",
-			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeEPP,
-				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp-config"}},
-					Config: &apixv1alpha1.EndpointPickerConfig{
-						Plugins:            []apixv1alpha1.PluginSpec{},
-						SchedulingProfiles: []apixv1alpha1.SchedulingProfile{},
-					},
+				Replicas:      &oneReplica,
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: "registry.example/dynamo-frontend:1.5.0"},
 				},
 			}),
-			wantWebhookErrs: []string{"spec.eppConfig: Forbidden: exactly one of configMapRef or config is required"},
 		},
 		{
-			name: "v1beta1 conflicting EPP config is rejected by source CEL",
+			name: "v1beta1 native Rust EPP accepts a 1.5 image without eppConfig",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
-				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp-config"}},
-					Config: &apixv1alpha1.EndpointPickerConfig{
-						Plugins:            []apixv1alpha1.PluginSpec{},
-						SchedulingProfiles: []apixv1alpha1.SchedulingProfile{},
-					},
-				}
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
 			}),
-			wantCELErr: "spec.eppConfig: Invalid value: exactly one of configMapRef or config must be specified",
 		},
 		{
-			name: "v1alpha1 EPP config map without a name reaches and is rejected by the webhook",
-			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeEPP,
-				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{},
-				},
-			}),
-			wantWebhookErrs: []string{"spec.eppConfig.configMapRef.name: Required value: is required"},
-		},
-		{
-			name: "valid v1alpha1 EPP config reaches the webhook",
+			name: "v1alpha1 legacy Go EPP accepts a 1.4 image with eppConfig",
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeEPP,
 				Replicas:      &oneReplica,
 				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp-config"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				},
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: "registry.example/epp-image:1.4.0"},
 				},
 			}),
 		},
 		{
-			name: "valid v1beta1 EPP config reaches the v1beta1 webhook",
+			name: "v1beta1 legacy Go EPP accepts a 1.4 image with eppConfig",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
 				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
 				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
-					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp-config"}},
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
 				}
 			}),
+		},
+		{
+			name: "v1alpha1 rejects eppConfig with a 1.5 image",
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeEPP,
+				Replicas:      &oneReplica,
+				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				},
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: "registry.example/dynamo-frontend:1.5.0"},
+				},
+			}),
+			wantWebhookErrs: []string{"spec.eppConfig: Forbidden: must be omitted for native Rust EPP images with runtime version 1.5.0 or later"},
+		},
+		{
+			name: "v1beta1 rejects eppConfig with a 1.5 image",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.eppConfig: Forbidden: must be omitted for native Rust EPP images with runtime version 1.5.0 or later"},
+		},
+		{
+			name: "v1alpha1 rejects a 1.4 image without eppConfig",
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeEPP,
+				Replicas:      &oneReplica,
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: "registry.example/epp-image:1.4.0"},
+				},
+			}),
+			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
+		},
+		{
+			name: "v1beta1 rejects a 1.4 image without eppConfig",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+			}),
+			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
 		},
 
 		// Pair shared pod-template validation across both served source versions.

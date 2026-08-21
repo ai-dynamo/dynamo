@@ -29,6 +29,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
@@ -69,7 +70,10 @@ func (r *dgdEPPReconciler) Reconcile(
 	}
 
 	logger.Info("Reconciling EPP resources", "componentName", componentName)
-	if eppService.EPPConfig == nil || eppService.EPPConfig.ConfigMapRef == nil {
+
+	// Legacy Go EPP: reconcile the ConfigMap when eppConfig is set and not a
+	// user-managed ConfigMapRef. Native Rust EPP needs no ConfigMap.
+	if epp.IsLegacyGoEPP(eppService.EPPConfig) && eppService.EPPConfig.ConfigMapRef == nil {
 		configMap, err := epp.GenerateConfigMap(ctx, dgd, componentName, eppService.EPPConfig)
 		if err != nil {
 			logger.Error(err, "Failed to generate EPP ConfigMap")
@@ -83,10 +87,31 @@ func (r *dgdEPPReconciler) Reconcile(
 				return fmt.Errorf("failed to sync EPP ConfigMap: %w", err)
 			}
 		}
+	} else if !epp.IsLegacyGoEPP(eppService.EPPConfig) {
+		// Native Rust EPP: no eppConfig means no user-managed ConfigMapRef
+		// either, so the only ConfigMap that can exist at this deterministic
+		// name is the one the operator generated for a prior Go EPP
+		// configuration (in-place migration). Reconcile it to absence rather
+		// than leaving stale Go EPP config/labels behind until the DGD itself
+		// is deleted. A ConfigMapRef-backed ConfigMap is never touched here:
+		// it stays in the IsLegacyGoEPP branch above regardless of whether
+		// this else-if runs, since IsLegacyGoEPP only depends on eppConfig
+		// being non-nil.
+		if _, _, err := commoncontroller.SyncResource(ctx, r, dgd, func(context.Context) (*corev1.ConfigMap, bool, error) {
+			return &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      epp.GetConfigMapName(dgd.Name),
+					Namespace: dgd.Namespace,
+				},
+			}, true, nil
+		}); err != nil {
+			logger.Error(err, "Failed to delete legacy EPP ConfigMap")
+			return fmt.Errorf("failed to delete legacy EPP ConfigMap: %w", err)
+		}
 	}
 
 	eppServiceName := dynamo.GetDCDResourceName(dgd, componentName, "")
-	inferencePool, err := epp.GenerateInferencePool(dgd, componentName, eppServiceName, eppService.EPPConfig)
+	inferencePool, err := epp.GenerateInferencePool(dgd, componentName, eppServiceName)
 	if err != nil {
 		logger.Error(err, "Failed to generate EPP InferencePool")
 		return fmt.Errorf("failed to generate EPP InferencePool: %w", err)

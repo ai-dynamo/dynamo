@@ -8,13 +8,8 @@
 ##############################################
 FROM ${EPP_IMAGE} AS epp
 
-# NOTE: EPP's Go compliance SBOM (/sbom-go.cdx.json) + harvested license texts are
-# NO LONGER pulled from the EPP image here. compliance.Dockerfile's licenses stage
-# reads them from the build context (.epp-sbom/), populated by the CI EPP-build
-# step's `make sbom-export` while the build cache is warm. This replaced a fragile
-# COPY --from that re-pulled the pushed EPP image (whose runtime layer could miss
-# the files after a BuildKit cache refresh). Only the /epp binary is taken from
-# the EPP image (below).
+# The EPP image is built from deploy/inference-gateway/ext-proc. Only its native
+# Rust binary is copied into the Frontend image.
 
 # Build `crick` as a wheel in an isolated stage so the C toolchain never
 # reaches the final frontend image. aiperf 0.10.0 depends on crick==0.0.8,

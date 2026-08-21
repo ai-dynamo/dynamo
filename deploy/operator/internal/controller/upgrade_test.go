@@ -27,6 +27,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
@@ -999,4 +1000,115 @@ func specHash(t *testing.T, obj client.Object) string {
 	hash, err := controller_common.GetSpecHash(obj)
 	require.NoError(t, err)
 	return hash
+}
+
+func TestLegacyGoEPPUpgradeDoesNotChangePodContract(t *testing.T) {
+	ctx := context.Background()
+
+	t.Log("build a Go-EPP DCD that still carries deprecated eppConfig after operator upgrade")
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "gaie-epp",
+			Namespace: "default",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoComponent:           "epp",
+				commonconsts.KubeLabelDynamoGraphDeploymentName: "gaie",
+				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeEPP,
+			},
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "epp",
+				ComponentType: v1beta1.ComponentTypeEPP,
+				Replicas:      ptr.To(int32(1)),
+				EPPConfig: &v1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "gaie-epp-config"},
+						Key:                  "epp-config-dynamo.yaml",
+					},
+				},
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  commonconsts.MainContainerName,
+							Image: "nvcr.io/nvidia/ai-dynamo/epp-image:1.4.0",
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	t.Log("render the Go-EPP Deployment and Service that the upgraded operator must preserve")
+	reconciler := newUpgradeDCDReconciler(t, dcd)
+	oldDeployment, toDelete, err := reconciler.generateDeployment(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+	oldService, toDelete, err := reconciler.generateService(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+
+	t.Log("assert the Go EPP launch contract (CLI flags + config mount) is still rendered")
+	main := requireMainContainer(t, oldDeployment)
+	require.Contains(t, main.Args, "--config-file")
+	require.Contains(t, main.Args, "--pool-name")
+	require.Contains(t, main.Args, epp.GetConfigFilePath())
+	require.True(t, hasVolumeMount(main.VolumeMounts, "epp-config", "/etc/epp"))
+	require.True(t, hasVolume(oldDeployment.Spec.Template.Spec.Volumes, "epp-config"))
+
+	t.Log("re-render with the same DCD; upgrade alone must not change the Pod template or Service selector")
+	newReconciler := newUpgradeDCDReconciler(t, dcd, oldDeployment.DeepCopy())
+	newDeployment, toDelete, err := newReconciler.generateDeployment(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+	newService, toDelete, err := newReconciler.generateService(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+
+	require.Equal(t, specHash(t, oldDeployment), specHash(t, newDeployment), "Go-EPP Pod template must stay unchanged until migration starts")
+	require.Equal(t, oldService.Spec.Selector, newService.Spec.Selector, "Go-EPP serving endpoint selector must stay unchanged until migration starts")
+	require.Equal(t, oldService.Spec.Ports, newService.Spec.Ports, "Go-EPP Service ports must stay unchanged until migration starts")
+
+	t.Log("clear eppConfig to start explicit Rust-EPP migration and assert the Pod contract switches")
+	migrated := dcd.DeepCopy()
+	migrated.Spec.EPPConfig = nil
+	migrated.Spec.PodTemplate.Spec.Containers[0].Image = "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.5.0"
+	migratedReconciler := newUpgradeDCDReconciler(t, migrated)
+	migratedDeployment, toDelete, err := migratedReconciler.generateDeployment(ctx, generateResourceOption{dynamoComponentDeployment: migrated})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+	migratedMain := requireMainContainer(t, migratedDeployment)
+	require.Empty(t, migratedMain.Args, "Rust EPP takes no CLI flags after explicit migration")
+	require.False(t, hasVolumeMount(migratedMain.VolumeMounts, "epp-config", "/etc/epp"))
+	require.False(t, hasVolume(migratedDeployment.Spec.Template.Spec.Volumes, "epp-config"))
+	require.NotEqual(t, specHash(t, oldDeployment), specHash(t, migratedDeployment), "explicit migration must change the Pod template")
+}
+
+func requireMainContainer(t *testing.T, deployment *appsv1.Deployment) corev1.Container {
+	t.Helper()
+	for _, c := range deployment.Spec.Template.Spec.Containers {
+		if c.Name == commonconsts.MainContainerName {
+			return c
+		}
+	}
+	t.Fatalf("main container not found in deployment %s", deployment.Name)
+	return corev1.Container{}
+}
+
+func hasVolumeMount(mounts []corev1.VolumeMount, name, path string) bool {
+	for _, m := range mounts {
+		if m.Name == name && m.MountPath == path {
+			return true
+		}
+	}
+	return false
+}
+
+func hasVolume(volumes []corev1.Volume, name string) bool {
+	for _, v := range volumes {
+		if v.Name == name {
+			return true
+		}
+	}
+	return false
 }

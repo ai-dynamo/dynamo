@@ -28,6 +28,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	runtimefeatures "github.com/ai-dynamo/dynamo/deploy/operator/internal/features/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -120,6 +121,38 @@ func runtimeVersionOverrideRequired(image, override string) bool {
 	}
 	_, err := runtimeversion.ParseImageVersion(image)
 	return err != nil
+}
+
+// eppRuntimeCompatibilityError returns the cross-field error for an EPP image/config mismatch.
+// Invalid or unavailable runtime versions are reported by the runtime-version validator.
+func eppRuntimeCompatibilityError(
+	image string,
+	override string,
+	hasEPPConfig bool,
+	eppConfigPath *field.Path,
+) *field.Error {
+	version, err := runtimeversion.Resolve(image, override)
+	if err != nil {
+		return nil
+	}
+
+	if runtimefeatures.NativeRustEPP.Enabled(&version) {
+		if hasEPPConfig {
+			return field.Forbidden(
+				eppConfigPath,
+				"must be omitted for native Rust EPP images with runtime version 1.5.0 or later",
+			)
+		}
+		return nil
+	}
+
+	if !hasEPPConfig {
+		return field.Required(
+			eppConfigPath,
+			"is required for legacy Go EPP images with runtime version earlier than 1.5.0",
+		)
+	}
+	return nil
 }
 
 func hasContainerNamed(containers []corev1.Container, name string) bool {
