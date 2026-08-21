@@ -48,11 +48,13 @@ impl OpenAIPreprocessor {
     /// Apply guided decoding for OpenAI tool-choice requests.
     ///
     /// Structural tags are preferred when enabled and supported by the configured
-    /// tool-call parser. Supported K2 forced requests and named K3 requests
-    /// intrinsically use their native structural tags because generic JSON cannot
-    /// represent their tool calls. Other forced choices fall back to the legacy
-    /// JSON-schema constraint when structural tags are not applied, except K3
-    /// required requests, which stay on the prompt-level XTML path.
+    /// tool-call parser. Supported K2 forced requests and K3 auto/named requests
+    /// intrinsically use their native structural tags. K3 auto keeps tool use
+    /// optional while constraining any call the model elects to make; forced K2
+    /// and named K3 calls cannot be represented by the generic JSON fallback.
+    /// Other forced choices fall back to that legacy JSON-schema constraint when
+    /// structural tags are not applied, except K3 required requests, which stay
+    /// on the prompt-level XTML path.
     pub(super) fn apply_tool_choice_guided_decoding(
         &self,
         request: &NvCreateChatCompletionRequest,
