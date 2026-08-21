@@ -39,6 +39,7 @@ use crate::{
     },
     session_affinity::{
         AffinityAcquire, AffinityCoordinator, AffinityTarget, affinity_id, explicit_target,
+        invalid_argument,
     },
 };
 
@@ -783,7 +784,9 @@ where
         let explicit = explicit_target(&request, phase)?;
         let has_affinity_session = self.affinity.is_some() && affinity_id(&request)?.is_some();
         if policy == BuiltinRoutingPolicy::Direct && explicit.is_none() {
-            anyhow::bail!("worker ID required for {phase} request in Direct routing mode");
+            return Err(invalid_argument(format!(
+                "worker ID required for {phase} request in Direct routing mode"
+            )));
         }
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
         let (lora_target, lora_fallback, lora_load) =
@@ -1402,6 +1405,38 @@ mod tests {
         );
         guard.abort().await;
         assert_eq!(load_state.active_request_count_for_test(worker), 0);
+
+        drop(host);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn builtin_direct_without_worker_is_invalid_argument() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("builtin-direct-invalid-argument".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let client = endpoint.client().await.unwrap();
+        let inner = PushRouter::from_client(client, RouterMode::Direct)
+            .await
+            .unwrap();
+        let host =
+            RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(inner, None, None)
+                .unwrap();
+
+        let error = host.generate(Context::new(request())).await.unwrap_err();
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
 
         drop(host);
         runtime.shutdown();
