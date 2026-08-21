@@ -26,10 +26,41 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    /// Returns the endpoint in "ip:port" format.
+    /// Returns the endpoint in "ip:port" format, bracketing IPv6 literals.
     pub fn address_port(&self) -> String {
-        format!("{}:{}", self.address, self.port)
+        join_host_port(&self.address, &self.port)
     }
+}
+
+/// Join a host and a port into socket-address syntax.
+///
+/// An IPv6 literal has to be bracketed or the result is ambiguous: address
+/// `fd00::10` with port `8000` concatenates to `fd00::10:8000`, which reads as
+/// another IPv6 address rather than as a host and a port. Hosts that are
+/// already bracketed are left alone, and IPv4 addresses and DNS names are
+/// unaffected.
+pub fn join_host_port(host: &str, port: &str) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+/// Extract the host from `host:port`, `[v6]:port`, or a bare host.
+///
+/// `split(':').next()` cannot do this: it truncates a bare IPv6 literal at its
+/// first group, so `fd00::10` becomes `fd00`.
+pub fn host_of(addr: &str) -> &str {
+    if let Some(rest) = addr.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    // More than one colon and no brackets means a bare IPv6 literal, which
+    // carries no port to strip.
+    if addr.matches(':').count() > 1 {
+        return addr;
+    }
+    addr.split(':').next().unwrap_or(addr)
 }
 
 /// RequestInfo contains metadata about the incoming HTTP request.
@@ -151,4 +182,45 @@ pub enum PickError {
     /// multiplexing means the connection cap does not bound concurrent requests.
     #[error("endpoint picker overloaded")]
     Overloaded,
+}
+
+#[cfg(test)]
+mod addr_tests {
+    use super::{host_of, join_host_port};
+
+    #[test]
+    fn ipv6_endpoints_are_bracketed() {
+        // Without brackets this is "fd00::10:8000", which reads as another
+        // IPv6 address rather than a host and a port.
+        assert_eq!(join_host_port("fd00::10", "8000"), "[fd00::10]:8000");
+    }
+
+    #[test]
+    fn ipv4_and_hostnames_are_unchanged() {
+        assert_eq!(join_host_port("10.0.0.1", "8000"), "10.0.0.1:8000");
+        assert_eq!(join_host_port("worker.svc", "8000"), "worker.svc:8000");
+    }
+
+    #[test]
+    fn an_already_bracketed_host_is_not_double_bracketed() {
+        assert_eq!(join_host_port("[fd00::10]", "8000"), "[fd00::10]:8000");
+    }
+
+    #[test]
+    fn host_of_handles_every_subset_form() {
+        // The two forms a subset hint can carry for one IPv6 worker.
+        assert_eq!(host_of("[fd00::10]:8000"), "fd00::10");
+        assert_eq!(host_of("fd00::10"), "fd00::10");
+        // And the forms that already worked.
+        assert_eq!(host_of("10.0.0.1:8000"), "10.0.0.1");
+        assert_eq!(host_of("10.0.0.1"), "10.0.0.1");
+        assert_eq!(host_of("worker.svc:8000"), "worker.svc");
+    }
+
+    #[test]
+    fn round_trip_recovers_the_host() {
+        for host in ["fd00::10", "10.0.0.1", "worker.svc"] {
+            assert_eq!(host_of(&join_host_port(host, "8000")), host);
+        }
+    }
 }

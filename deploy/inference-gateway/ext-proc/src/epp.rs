@@ -307,7 +307,7 @@ impl Router {
             let Some(addr_port) = pod_endpoint_address(&pod) else {
                 continue;
             };
-            let ip = addr_port.split(':').next().unwrap_or("");
+            let ip = crate::picker::host_of(&addr_port);
             if candidates.contains(addr_port.as_str()) || candidates.contains(ip) {
                 ids.insert(hash_pod_name(pod_name));
             }
@@ -681,7 +681,7 @@ fn pod_endpoint_address(pod: &k8s_openapi::api::core::v1::Pod) -> Option<String>
         .flatten()
         .find(|p| p.name.as_deref() == Some(DYNAMO_CONTAINER_PORT_NAME))
         .map(|p| p.container_port)?;
-    Some(format!("{ip}:{port}"))
+    Some(crate::picker::join_host_port(ip, &port.to_string()))
 }
 
 /// Start a background pod reflector that watches worker pods matching the
