@@ -1177,6 +1177,9 @@ navigation:
         contents:
           # Keep this archive in reverse chronological order. Publication dates are
           # rendered in each article header and on the custom landing page.
+          - page: "Dynamo Agent Optimization Skills"
+            path: ../pages-dev/blog/2026/agent-optimization-skills.mdx
+            slug: agent-optimization-skills
           - page: "DynoSim Pareto Frontier"
             path: ../pages-dev/blog/2026/dynosim-pareto-frontier.mdx
             slug: dynosim-pareto-frontier
