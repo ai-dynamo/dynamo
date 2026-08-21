@@ -431,6 +431,17 @@ def update_engine_config_with_dynamo(
                 f" Skipping engine_args.{key} (not available in this vLLM version)"
             )
 
+    # DYN_GMS_USE_V1 is operator-injected (env-only, like DYN_SNAPSHOT_CONTROL_DIR).
+    if os.environ.get("DYN_GMS_USE_V1") == "true":
+        if getattr(engine_config, "load_format", None) == "gms":
+            raise ValueError(
+                "DYN_GMS_USE_V1=true cannot be combined with --load-format gms"
+            )
+        engine_config.worker_cls = (
+            "gpu_memory_service.v1.integrations.vllm.worker.GMSV1Worker"
+        )
+        engine_config.enable_sleep_mode = True
+
 
 def create_kv_events_config(
     engine_config: AsyncEngineArgs,

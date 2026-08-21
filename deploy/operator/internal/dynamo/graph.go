@@ -1783,7 +1783,10 @@ func GenerateBasePodSpec(
 		if err := dra.ApplyClaim(&podSpec, claimTemplateName); err != nil {
 			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
 		}
-		gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0])
+		// Snapshot + intra-pod GMS uses V1 for every backend. GMS or
+		// failover without checkpoint stays on the V0 sidecar.
+		useV1 := GetCheckpoint(component) != nil
+		gms.EnsureServerSidecar(&podSpec, &podSpec.Containers[0], useV1)
 		for _, name := range gmsSpec.ExtraClientContainers {
 			var container *corev1.Container
 			for i := range podSpec.Containers {
@@ -1796,6 +1799,9 @@ func GenerateBasePodSpec(
 				return nil, fmt.Errorf("gpuMemoryService extra client container %q disappeared while rendering the pod", name)
 			}
 			gms.EnsureClient(&podSpec, container)
+			if useV1 {
+				gms.EnableV1(container)
+			}
 		}
 	}
 
