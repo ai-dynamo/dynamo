@@ -41,6 +41,7 @@ enum {
     QUERY_ROUTER_ERR_QUERY_FAILED = 4,
     QUERY_ROUTER_ERR_DISAGG_ENFORCED = 5,
     QUERY_ROUTER_ERR_TIMEOUT = 6,
+    QUERY_ROUTER_ERR_BACKPRESSURE = 7,
 };
 
 // opaque handle forward-decl for Router bindings
@@ -66,10 +67,20 @@ query_router_result_t create_routers(const char *namespace_c_str,
                                      bool enforce_disagg,
                                      RouterHandles **out_handle);
 
-query_router_result_t route_prefill_request(RouterHandles *handle,
-                                            const char *request_json,
-                                            const char *pods_json,
-                                            CRoutingResult *out_result);
+query_router_result_t begin_prefill_reservation(RouterHandles *handle,
+                                               const char *reservation_id);
+
+query_router_result_t route_prefill_request_with_reservation(RouterHandles *handle,
+                                                             const char *reservation_id,
+                                                             const char *request_json,
+                                                             const char *pods_json,
+                                                             CRoutingResult *out_result);
+
+query_router_result_t cancel_prefill_reservation(RouterHandles *handle,
+                                                  const char *reservation_id);
+
+query_router_result_t release_prefill_reservation(RouterHandles *handle,
+                                                   const char *reservation_id);
 
 query_router_result_t route_decode_request(RouterHandles *handle,
                                            const char *request_json,
@@ -439,9 +450,40 @@ func extractCacheNamespace(result *C.CRoutingResult) string {
 	return ""
 }
 
-// CallRoutePrefillRequest routes a request to the best prefill worker.
-// It tokenizes the request and queries only the prefill router.
-func CallRoutePrefillRequest(requestJSON string, podsJSON string) (*RoutingResult, error) {
+// CallBeginPrefillReservation records a pending booking before the blocking
+// route call performs request preprocessing. It is fast and safe to call before
+// starting the reservation goroutine.
+func CallBeginPrefillReservation(reservationID string) error {
+	if reservationID == "" {
+		return fmt.Errorf("prefill reservation ID is required")
+	}
+	if !routerInitialized {
+		return fmt.Errorf("dynamo router not initialized")
+	}
+
+	routerHandlesMutex.RLock()
+	router := routerHandles
+	routerHandlesMutex.RUnlock()
+	if router == nil {
+		return fmt.Errorf("dynamo router handles not created")
+	}
+
+	cReservationID := C.CString(reservationID)
+	defer C.free(unsafe.Pointer(cReservationID))
+
+	rc := C.begin_prefill_reservation(router, cReservationID)
+	if rc != C.QUERY_ROUTER_OK {
+		return fmt.Errorf("begin_prefill_reservation failed with code %d", rc)
+	}
+	return nil
+}
+
+// CallRoutePrefillRequestWithReservation atomically selects and books a prefill worker.
+// The caller cancels pending admission through CallCancelPrefillReservation.
+func CallRoutePrefillRequestWithReservation(reservationID string, requestJSON string, podsJSON string) (*RoutingResult, error) {
+	if reservationID == "" {
+		return nil, fmt.Errorf("prefill reservation ID is required")
+	}
 	if !routerInitialized {
 		return nil, fmt.Errorf("dynamo router not initialized")
 	}
@@ -453,6 +495,8 @@ func CallRoutePrefillRequest(requestJSON string, podsJSON string) (*RoutingResul
 		return nil, fmt.Errorf("dynamo router handles not created")
 	}
 
+	cReservationID := C.CString(reservationID)
+	defer C.free(unsafe.Pointer(cReservationID))
 	cRequestJSON := C.CString(requestJSON)
 	defer C.free(unsafe.Pointer(cRequestJSON))
 
@@ -463,9 +507,15 @@ func CallRoutePrefillRequest(requestJSON string, podsJSON string) (*RoutingResul
 	}
 
 	var result C.CRoutingResult
-	rc := C.route_prefill_request(router, cRequestJSON, cPodsJSON, &result)
+	rc := C.route_prefill_request_with_reservation(
+		router,
+		cReservationID,
+		cRequestJSON,
+		cPodsJSON,
+		&result,
+	)
 	if rc != C.QUERY_ROUTER_OK {
-		return nil, fmt.Errorf("route_prefill_request failed with code %d", rc)
+		return nil, fmt.Errorf("route_prefill_request_with_reservation failed with code %d", rc)
 	}
 
 	tokens := extractTokenData(&result)
@@ -482,8 +532,63 @@ func CallRoutePrefillRequest(requestJSON string, podsJSON string) (*RoutingResul
 	}, nil
 }
 
+// CallCancelPrefillReservation cancels a pending prefill reservation without waiting for
+// scheduler cleanup. It is safe to call concurrently with the blocking reservation call.
+func CallCancelPrefillReservation(reservationID string) error {
+	if reservationID == "" {
+		return fmt.Errorf("prefill reservation ID is required")
+	}
+	if !routerInitialized {
+		return fmt.Errorf("dynamo router not initialized")
+	}
+
+	routerHandlesMutex.RLock()
+	router := routerHandles
+	routerHandlesMutex.RUnlock()
+	if router == nil {
+		return fmt.Errorf("dynamo router handles not created")
+	}
+
+	cReservationID := C.CString(reservationID)
+	defer C.free(unsafe.Pointer(cReservationID))
+
+	rc := C.cancel_prefill_reservation(router, cReservationID)
+	if rc != C.QUERY_ROUTER_OK {
+		return fmt.Errorf("cancel_prefill_reservation failed with code %d", rc)
+	}
+	return nil
+}
+
+// CallReleasePrefillReservation releases only the EPP prefill reservation.
+// It does not remove a decode booking that aggregate fallback may have installed.
+func CallReleasePrefillReservation(reservationID string) error {
+	if reservationID == "" {
+		return fmt.Errorf("prefill reservation ID is required")
+	}
+	if !routerInitialized {
+		return fmt.Errorf("dynamo router not initialized")
+	}
+
+	routerHandlesMutex.RLock()
+	router := routerHandles
+	routerHandlesMutex.RUnlock()
+	if router == nil {
+		return fmt.Errorf("dynamo router handles not created")
+	}
+
+	cReservationID := C.CString(reservationID)
+	defer C.free(unsafe.Pointer(cReservationID))
+
+	rc := C.release_prefill_reservation(router, cReservationID)
+	if rc != C.QUERY_ROUTER_OK {
+		return fmt.Errorf("release_prefill_reservation failed with code %d", rc)
+	}
+	return nil
+}
+
 // CallRouteDecodeRequest routes a request to the best decode worker.
 // When isDisaggregated is true, overlap_score_credit=0 is used (KV cache transferred from prefill).
+
 func CallRouteDecodeRequest(requestJSON string, podsJSON string, isDisaggregated bool) (*RoutingResult, error) {
 	if !routerInitialized {
 		return nil, fmt.Errorf("dynamo router not initialized")

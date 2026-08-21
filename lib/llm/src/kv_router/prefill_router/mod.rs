@@ -45,6 +45,9 @@ mod activation;
 mod admission;
 mod conditional_bypass;
 mod query;
+mod reservations;
+
+pub use reservations::EppReservationManager;
 
 use admission::InnerPrefillRouter;
 

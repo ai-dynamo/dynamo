@@ -48,7 +48,10 @@ const SEQUENCE_PUBLISH_FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(30);
 const DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
 
 /// Returns the configured stale active-request cleanup guard.
-fn active_request_expiry_duration() -> Duration {
+///
+/// Consumers that retain router-side lifecycle state should derive their
+/// retention from this value so every router honors the same override.
+pub fn active_request_expiry_duration() -> Duration {
     active_request_expiry_duration_from_lookup(|key| env::var(key).ok())
 }
 
@@ -1367,16 +1370,18 @@ mod tests {
     use crate::sequences::prefill_tracker::PrefillTimeLoadError;
     use crate::test_utils::NoopSequencePublisher;
 
-    /// Verifies that a positive expiry override is accepted.
+    /// Verifies that short and long positive expiry overrides are accepted.
     #[test]
     fn active_request_expiry_duration_override_uses_positive_seconds() {
-        let lookup =
-            |key: &str| (key == DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS).then(|| "3600".to_string());
+        for (raw, expected) in [("30", 30), ("3600", 3600)] {
+            let lookup =
+                |key: &str| (key == DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS).then(|| raw.to_string());
 
-        assert_eq!(
-            active_request_expiry_duration_from_lookup(lookup),
-            Duration::from_secs(3600)
-        );
+            assert_eq!(
+                active_request_expiry_duration_from_lookup(lookup),
+                Duration::from_secs(expected)
+            );
+        }
     }
 
     /// Verifies that absent and invalid expiry overrides use the default.
