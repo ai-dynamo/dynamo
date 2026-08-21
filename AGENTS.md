@@ -82,8 +82,10 @@ write and requires operator consent. Rules:
 
 ## Optimization Role Dispatch
 
-When the first user message starts a new Dynamo recipe optimization run, dispatch `user_interviewer` before any other
-specialized role. It must invoke `synthesize-user-workload` and produce a validated
+When the first user message starts a new Dynamo recipe optimization run, FIRST read
+`agent-docs/guides/optimization/optimize-loop.md` end to end - the individual SKILL.md files are auto-discoverable,
+but the loop's sequencing, state machine, and stopping rules live only in that guide - then dispatch
+`user_interviewer` before any other specialized role. It must invoke `synthesize-user-workload` and produce a validated
 `<EXP_ROOT>/user_workload.yaml` plus an immutable `<EXP_ROOT>/inputs/user_provided_dgd.yaml` copied from the baseline the
 user supplied or explicitly confirmed. Do not dispatch `recipe_deployer`, `perf_analyzer`, `hypothesis_generator`, or
 `hypothesis_challenger` until both exact paths and SHA256 values are available. Pass both inputs directly to
