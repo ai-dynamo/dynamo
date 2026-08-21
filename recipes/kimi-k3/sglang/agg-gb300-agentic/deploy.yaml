@@ -57,7 +57,7 @@ spec:
               effect: NoSchedule
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/alexandrem:sglang-runtime-pr12513-26ea9a09-arm64
+              image: nvcr.io/nvstaging/nim/alexandrem:sglang-runtime-pr12513-f8f9d0b2-arm64
               imagePullPolicy: Always
               command: [python3, -m, dynamo.frontend]
               args:
@@ -138,7 +138,7 @@ spec:
           terminationGracePeriodSeconds: 60
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/alexandrem:sglang-runtime-pr12513-26ea9a09-arm64
+              image: nvcr.io/nvstaging/nim/alexandrem:sglang-runtime-pr12513-f8f9d0b2-arm64
               imagePullPolicy: Always
               command: [python3, -m, dynamo.sglang]
               args:
