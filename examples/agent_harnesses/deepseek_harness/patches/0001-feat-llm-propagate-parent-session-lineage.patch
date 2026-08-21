@@ -1,0 +1,311 @@
+From 7a1b43014058b6f79c9c55fc4a30b2bd9650bc49 Mon Sep 17 00:00:00 2001
+From: athreesh <anish.maddipoti@utexas.edu>
+Date: Thu, 20 Aug 2026 21:57:46 -0700
+Subject: [PATCH] feat(llm): propagate parent session lineage
+
+Signed-off-by: athreesh <anish.maddipoti@utexas.edu>
+---
+ ...-20-model-request-parent-lineage.i18n.yaml |  6 ++++
+ ...2026-08-20-model-request-parent-lineage.md | 29 +++++++++++++++++++
+ ...6-08-20-model-request-parent-lineage.zh.md | 29 +++++++++++++++++++
+ .../compaction-basic/src/summarizer.ts        |  3 ++
+ packages/core/agent-loop/src/agent.ts         |  3 ++
+ .../tests/request-reconstruction.spec.ts      | 20 +++++++++++++
+ .../extensions/tool-cordis/src/api-catalog.ts |  2 +-
+ packages/llm/llm-deepseek/README.i18n.yaml    |  4 +--
+ packages/llm/llm-deepseek/README.md           |  2 +-
+ packages/llm/llm-deepseek/README.zh.md        |  2 +-
+ packages/llm/llm-deepseek/src/adapter.ts      |  3 ++
+ .../llm/llm-deepseek/tests/adapter.spec.ts    |  4 ++-
+ packages/llm/llm/README.i18n.yaml             |  4 +--
+ packages/llm/llm/README.md                    |  2 +-
+ packages/llm/llm/README.zh.md                 |  2 +-
+ packages/llm/llm/src/types.ts                 |  6 ++++
+ 16 files changed, 111 insertions(+), 10 deletions(-)
+ create mode 100644 .agents/notes/implemented/feature/2026-08-20-model-request-parent-lineage.i18n.yaml
+ create mode 100644 .agents/notes/implemented/feature/2026-08-20-model-request-parent-lineage.md
+ create mode 100644 .agents/notes/implemented/feature/2026-08-20-model-request-parent-lineage.zh.md
+
+diff --git a/.agents/notes/implemented/feature/2026-08-20-model-request-parent-lineage.i18n.yaml b/.agents/notes/implemented/feature/2026-08-20-model-request-parent-lineage.i18n.yaml
+new file mode 100644
+index 0000000000..b41ab4a93f
+--- /dev/null
++++ b/.agents/notes/implemented/feature/2026-08-20-model-request-parent-lineage.i18n.yaml
+@@ -0,0 +1,6 @@
++# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
++# side as of the last confirmed-consistent state. Both languages carry equal authority;
++# after editing either side, bring the other along and re-record with:
++#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-20-model-request-parent-lineage.md
++2026-08-20-model-request-parent-lineage.md: ccf8722b7bc0faa89508c269c971f61a584890a4
++2026-08-20-model-request-parent-lineage.zh.md: 29c785b07e5ca18d6cb4750d985efa0463ec9c1d
+diff --git a/.agents/notes/implemented/feature/2026-08-20-model-request-parent-lineage.md b/.agents/notes/implemented/feature/2026-08-20-model-request-parent-lineage.md
+new file mode 100644
+index 0000000000..ccf8722b7b
+--- /dev/null
++++ b/.agents/notes/implemented/feature/2026-08-20-model-request-parent-lineage.md
+@@ -0,0 +1,29 @@
++# Agent Note: Model request parent lineage
++
++Status: implemented
++
++English | [中文](2026-08-20-model-request-parent-lineage.zh.md)
++
++## Problem
++
++Session-backed subagents persist their immediate `parentSession`, but agent-loop model requests previously carried only the child `sessionId`. A gateway could keep each child sticky, yet it could not reconstruct root/child topology or attribute child inference to the owning trajectory without reading harness persistence.
++
++## Decision
++
++`GenerateOptions` carries an optional `parentSessionId` beside `sessionId`. The agent loop derives both values from the same durable Session header on every ordinary request, and compaction-basic does the same for its auxiliary summary request. Root sessions and hand-built direct calls omit parent identity unless their caller supplies it explicitly.
++
++The direct DeepSeek adapter sends the value as model-hidden `x-deepseek-harness-parent-session-id` whenever it is present, alongside the existing `x-deepseek-harness-session-id`. It does not infer lineage, mutate the request body, or read ambient agent state. The receiving gateway remains responsible for deciding whether and how to use this metadata.
++
++## Alternatives considered
++
++- **Infer lineage from session identifiers.** Session ids are opaque and carry no stable hierarchy, so parsing them would create a false contract.
++- **Route every child under the root session id.** This would erase per-child affinity and make concurrent child requests indistinguishable.
++- **Let the adapter query the agent registry.** Direct and auxiliary LLM calls are valid outside an agent loop. Keeping lineage in `GenerateOptions` preserves the adapter boundary and makes the transport fact explicit and testable.
++
++## Verification
++
++Agent-loop coverage creates a session-backed child and pins the exact child and parent ids received by its adapter. DeepSeek adapter coverage pins both native wire headers. Existing root and direct-call tests continue to omit the parent header.
++
++## Consequences
++
++Gateways can reconstruct immediate DSH trajectory lineage without inspecting model-visible content or harness storage, while root and standalone requests retain their old wire shape. `GenerateOptions` gains one transport-metadata field, and adapters other than the direct DeepSeek route may ignore it until they have a concrete host contract.
+diff --git a/.agents/notes/implemented/feature/2026-08-20-model-request-parent-lineage.zh.md b/.agents/notes/implemented/feature/2026-08-20-model-request-parent-lineage.zh.md
+new file mode 100644
+index 0000000000..29c785b07e
+--- /dev/null
++++ b/.agents/notes/implemented/feature/2026-08-20-model-request-parent-lineage.zh.md
+@@ -0,0 +1,29 @@
++# Agent Note: 模型请求的父会话谱系
++
++Status: implemented
++
++[English](2026-08-20-model-request-parent-lineage.md) | 中文
++
++## Problem
++
++会话型子智能体会持久化其直接 `parentSession`，但 agent loop 的模型请求过去只携带子会话 `sessionId`。网关可以让每个子会话保持亲和性，却无法在不读取 harness 持久化数据的情况下重建根／子拓扑，也无法把子会话推理归因到所属轨迹。
++
++## Decision
++
++`GenerateOptions` 在 `sessionId` 旁新增可选的 `parentSessionId`。Agent loop 在每个普通请求中从同一个持久 Session header 推导这两个值，compaction-basic 的辅助摘要请求也采用相同规则。根会话会省略父身份；手工构造的直接调用也会省略，除非调用方显式提供。
++
++DeepSeek 直接适配器会在该值存在时，通过模型不可见的 `x-deepseek-harness-parent-session-id` 发送它，并继续发送已有的 `x-deepseek-harness-session-id`。适配器不会推断谱系、修改请求正文或读取环境中的 agent 状态。接收网关仍负责决定是否以及如何使用这些元数据。
++
++## Alternatives considered
++
++- **从会话标识符推断谱系。** 会话 id 是不透明值，不包含稳定层级；解析它们会制造虚假的契约。
++- **把所有子会话都路由到根会话 id。** 这样会抹去每个子会话的亲和性，并使并发子请求无法区分。
++- **让适配器查询 agent registry。** 直接调用和辅助 LLM 调用在 agent loop 之外也合法。把谱系放入 `GenerateOptions` 可以保留适配器边界，并让传输事实显式且可测试。
++
++## Verification
++
++Agent-loop 测试会创建一个会话型子智能体，并固定其适配器接收到的精确子会话和父会话 id。DeepSeek 适配器测试固定两个原生传输标头。现有根请求和直接调用测试继续验证父会话标头被省略。
++
++## Consequences
++
++网关无需检查模型可见内容或 harness 存储，即可重建直接的 DSH 轨迹谱系；根请求和独立请求仍保持旧的传输形态。`GenerateOptions` 增加一个传输元数据字段，其他适配器可以在获得具体宿主契约前继续忽略它。
+diff --git a/packages/compaction/compaction-basic/src/summarizer.ts b/packages/compaction/compaction-basic/src/summarizer.ts
+index e77d9ec0a0..b8b67acba9 100644
+--- a/packages/compaction/compaction-basic/src/summarizer.ts
++++ b/packages/compaction/compaction-basic/src/summarizer.ts
+@@ -158,6 +158,9 @@ export async function summarizeWithLlm(
+     ...input.tools === undefined ? {} : { tools: [...input.tools] },
+     maxTokens: config.maxTokens,
+     sessionId: agent.session.id,
++    ...agent.session.header.parentSession === undefined
++      ? {}
++      : { parentSessionId: agent.session.header.parentSession },
+     purpose: 'compaction',
+     ...signal === undefined ? {} : { signal },
+   }
+diff --git a/packages/core/agent-loop/src/agent.ts b/packages/core/agent-loop/src/agent.ts
+index 3ef1ec7aa4..d92cb16beb 100644
+--- a/packages/core/agent-loop/src/agent.ts
++++ b/packages/core/agent-loop/src/agent.ts
+@@ -508,6 +508,9 @@ export class ReactLoopAgent implements Agent {
+       ...header.system !== undefined ? { system: header.system } : {},
+       ...header.tools !== undefined ? { tools: header.tools } : {},
+       sessionId: this.session.id,
++      ...this.session.header.parentSession === undefined
++        ? {}
++        : { parentSessionId: this.session.header.parentSession },
+       signal,
+     }))
+     return { request, ...preparedCall === undefined ? {} : { preparedCall } }
+diff --git a/packages/core/agent-loop/tests/request-reconstruction.spec.ts b/packages/core/agent-loop/tests/request-reconstruction.spec.ts
+index 287e73303c..b0d8b7111d 100644
+--- a/packages/core/agent-loop/tests/request-reconstruction.spec.ts
++++ b/packages/core/agent-loop/tests/request-reconstruction.spec.ts
+@@ -111,6 +111,26 @@ describe('request stability across the loop', () => {
+     expectPrefixExtension(adapter.requests[0]!, adapter.requests[1]!)
+   })
+ 
++  it('stamps durable parent lineage on a child request', async () => {
++    const adapter = new MockAdapter([textResponse('done')])
++    const ctx = await harness(adapter)
++    const handle = await ctx.agents.create({
++      sessionId: SessionId('child'),
++      meta: { parentSession: SessionId('parent'), origin: 'subagent' },
++      agentOptions: { provider: 'mock', model: 'mock' },
++    })
++
++    send(handle.agent, 'run')
++    await waitForIdle(ctx, handle.agent)
++
++    expect(adapter.requests[0]).toMatchObject({
++      sessionId: 'child',
++      parentSessionId: 'parent',
++    })
++    await handle.dispose()
++    await ctx.fiber.dispose()
++  })
++
+   it('logs adapter defaults, supports per-turn effort changes, and restores the effective value', async () => {
+     const reasoning = {
+       efforts: [
+diff --git a/packages/extensions/tool-cordis/src/api-catalog.ts b/packages/extensions/tool-cordis/src/api-catalog.ts
+index 449925fc61..6e5f3f1f66 100644
+--- a/packages/extensions/tool-cordis/src/api-catalog.ts
++++ b/packages/extensions/tool-cordis/src/api-catalog.ts
+@@ -3214,7 +3214,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
+   },
+   {
+     name: 'GenerateOptions',
+-    declaration: 'export interface GenerateOptions {\n    provider: string;\n    model: string;\n    reasoningEffort?: ReasoningEffortId;\n    messages: Message[];\n    system?: string;\n    tools?: ToolSchema[];\n    temperature?: number;\n    maxTokens?: number;\n    stop?: string[];\n    signal?: AbortSignal;\n    sessionId?: Branded<\'SessionId\'>;\n    purpose?: \'compaction\' | \'session-title\';\n}',
++    declaration: 'export interface GenerateOptions {\n    provider: string;\n    model: string;\n    reasoningEffort?: ReasoningEffortId;\n    messages: Message[];\n    system?: string;\n    tools?: ToolSchema[];\n    temperature?: number;\n    maxTokens?: number;\n    stop?: string[];\n    signal?: AbortSignal;\n    sessionId?: Branded<\'SessionId\'>;\n    parentSessionId?: Branded<\'SessionId\'>;\n    purpose?: \'compaction\' | \'session-title\';\n}',
+   },
+   {
+     name: 'GenericCallView',
+diff --git a/packages/llm/llm-deepseek/README.i18n.yaml b/packages/llm/llm-deepseek/README.i18n.yaml
+index a654c25dc6..abd1c7a502 100644
+--- a/packages/llm/llm-deepseek/README.i18n.yaml
++++ b/packages/llm/llm-deepseek/README.i18n.yaml
+@@ -2,5 +2,5 @@
+ # side as of the last confirmed-consistent state. Both languages carry equal authority;
+ # after editing either side, bring the other along and re-record with:
+ #   pnpm run verify-translation-pairing --write packages/llm/llm-deepseek/README.md
+-README.md: 1c007d34f329177603305da3858c63960e30a898
+-README.zh.md: 181b30bd034ca27e983d4e7a54b03676fbaaba29
++README.md: 8bb3dc53b23074e7e09b852b135feb9a9e012087
++README.zh.md: 57aeffe71ab101011b4506ffbe8df3579f435488
+diff --git a/packages/llm/llm-deepseek/README.md b/packages/llm/llm-deepseek/README.md
+index 1c007d34f3..8bb3dc53b2 100644
+--- a/packages/llm/llm-deepseek/README.md
++++ b/packages/llm/llm-deepseek/README.md
+@@ -71,7 +71,7 @@ The plugin also declares its route in the configurable-provider directory (`ctx.
+ 
+ Every request carries the shared attribution header from dsh-llm's `attributionHeaders()` - the mandatory `User-Agent` baseline identifying the harness (see [dsh-llm § App attribution](../llm/README.md#app-attribution-attributionts)). Direct DeepSeek requests and OpenAI-compatible gateway requests get no provider-specific app-attribution headers under this adapter contract; OpenRouter app attribution is deferred to a future explicit OpenRouter adapter or mode. A request whose `GenerateOptions.purpose` is `compaction` (dsh-compaction-basic's auxiliary summarization call) additionally carries `x-deepseek-harness-compact: 1`, so the host can separate compaction traffic from conversation requests.
+ 
+-DeepSeek request identity is separate from app attribution. After credential resolution, every provider request carries `x-deepseek-harness-user-id` with the stable anonymous id from [`@deepseek-ai/dsh-anonymous-user-id`](../../identity/anonymous-user-id/README.md); a request carrying `GenerateOptions.sessionId` also sends that exact value as `x-deepseek-harness-session-id`, while a direct call without a session omits the session header. Both headers go to the resolved `baseURL`, including a configured gateway, and remain outside the request body and model-visible content.
++DeepSeek request identity is separate from app attribution. After credential resolution, every provider request carries `x-deepseek-harness-user-id` with the stable anonymous id from [`@deepseek-ai/dsh-anonymous-user-id`](../../identity/anonymous-user-id/README.md); a request carrying `GenerateOptions.sessionId` also sends that exact value as `x-deepseek-harness-session-id`, and a session-backed child carrying `GenerateOptions.parentSessionId` sends `x-deepseek-harness-parent-session-id`. Root and direct calls omit the parent header, while a direct call without a session omits both session headers. These headers go to the resolved `baseURL`, including a configured gateway, and remain outside the request body and model-visible content.
+ 
+ ## Wire-format notes
+ 
+diff --git a/packages/llm/llm-deepseek/README.zh.md b/packages/llm/llm-deepseek/README.zh.md
+index 181b30bd03..57aeffe71a 100644
+--- a/packages/llm/llm-deepseek/README.zh.md
++++ b/packages/llm/llm-deepseek/README.zh.md
+@@ -71,7 +71,7 @@ harness LLM（大语言模型）seam 的 DeepSeek chat-completions 适配器：
+ 
+ 每个请求都携带 dsh-llm `attributionHeaders()` 的共享归因标头，即用于识别 harness 的必需 `User-Agent` 基线（见 [dsh-llm § 应用归因](../llm/README.md#app-attribution-attributionts)）。在该适配器约定（adapter contract）下，直接 DeepSeek 请求与 OpenAI 兼容 gateway 请求都不会获得提供方特定应用归因标头；OpenRouter 应用归因暂缓到未来的显式 OpenRouter 适配器或模式。`GenerateOptions.purpose` 为 `compaction` 的请求（dsh-compaction-basic 的辅助摘要调用）还会携带 `x-deepseek-harness-compact: 1`，让宿主可以将压缩流量与会话请求分开。
+ 
+-DeepSeek 请求身份独立于应用归因。凭据解析成功后，每个提供方请求都会通过 `x-deepseek-harness-user-id` 携带来自 [`@deepseek-ai/dsh-anonymous-user-id`](../../identity/anonymous-user-id/README.md) 的稳定匿名 id；携带 `GenerateOptions.sessionId` 的请求还会通过 `x-deepseek-harness-session-id` 发送该确切值，缺少会话的直接调用则省略会话标头。两个标头都会发送至解析后的 `baseURL`（包括已配置的 gateway），且不会进入请求正文或模型可见内容。
++DeepSeek 请求身份独立于应用归因。凭据解析成功后，每个提供方请求都会通过 `x-deepseek-harness-user-id` 携带来自 [`@deepseek-ai/dsh-anonymous-user-id`](../../identity/anonymous-user-id/README.md) 的稳定匿名 id；携带 `GenerateOptions.sessionId` 的请求还会通过 `x-deepseek-harness-session-id` 发送该确切值，携带 `GenerateOptions.parentSessionId` 的会话型子请求则发送 `x-deepseek-harness-parent-session-id`。根请求和直接调用会省略父会话标头，缺少会话的直接调用会同时省略两个会话标头。这些标头都会发送至解析后的 `baseURL`（包括已配置的 gateway），且不会进入请求正文或模型可见内容。
+ 
+ ## 协议格式说明
+ 
+diff --git a/packages/llm/llm-deepseek/src/adapter.ts b/packages/llm/llm-deepseek/src/adapter.ts
+index 638d555b1e..8d895daaf3 100644
+--- a/packages/llm/llm-deepseek/src/adapter.ts
++++ b/packages/llm/llm-deepseek/src/adapter.ts
+@@ -329,6 +329,9 @@ export class DeepSeekAdapter extends LlmAdapter {
+       ...options.sessionId !== undefined
+         ? { 'x-deepseek-harness-session-id': String(options.sessionId) }
+         : {},
++      ...options.parentSessionId !== undefined
++        ? { 'x-deepseek-harness-parent-session-id': String(options.parentSessionId) }
++        : {},
+       ...options.purpose === 'compaction'
+         ? { 'x-deepseek-harness-compact': '1' }
+         : {},
+diff --git a/packages/llm/llm-deepseek/tests/adapter.spec.ts b/packages/llm/llm-deepseek/tests/adapter.spec.ts
+index 6d86691e5c..bb38bcb01b 100644
+--- a/packages/llm/llm-deepseek/tests/adapter.spec.ts
++++ b/packages/llm/llm-deepseek/tests/adapter.spec.ts
+@@ -216,7 +216,7 @@ describe('DeepSeekAdapter against a mock server', () => {
+     expect(kinds).toEqual(['block-start', 'text-delta', 'block-end', 'usage', 'finish'])
+   })
+ 
+-  it('forwards the harness user and session ids for host-side trajectory routing', async () => {
++  it('forwards harness user and session lineage for host-side trajectory routing', async () => {
+     const server = await mockServer([{ kind: 'sse', events: textEvents }])
+     const ctx = await harness(server.url)
+ 
+@@ -227,9 +227,11 @@ describe('DeepSeekAdapter against a mock server', () => {
+         source: { kind: 'plugin', plugin: 'test' },
+       })],
+       sessionId: SessionId('child-session'),
++      parentSessionId: SessionId('parent-session'),
+     })
+ 
+     expect(server.headers[0]?.['x-deepseek-harness-session-id']).toBe('child-session')
++    expect(server.headers[0]?.['x-deepseek-harness-parent-session-id']).toBe('parent-session')
+     expect(server.headers[0]?.['x-deepseek-harness-user-id']).toBe(getOrCreateAnonymousUserId())
+   })
+ 
+diff --git a/packages/llm/llm/README.i18n.yaml b/packages/llm/llm/README.i18n.yaml
+index 0700b14362..00c483cbb1 100644
+--- a/packages/llm/llm/README.i18n.yaml
++++ b/packages/llm/llm/README.i18n.yaml
+@@ -2,5 +2,5 @@
+ # side as of the last confirmed-consistent state. Both languages carry equal authority;
+ # after editing either side, bring the other along and re-record with:
+ #   pnpm run verify-translation-pairing --write packages/llm/llm/README.md
+-README.md: e6b3c4924ad4e7cf115abdbfb38d22d0f524e377
+-README.zh.md: 51f034af632c19ca91c1d2f91a7c9c22714870e0
++README.md: 448d571e04f8e03491a6d6a83fba07741d5062c1
++README.zh.md: 5cc0edf309697f60f7d24e0801f9fad79d19c4e8
+diff --git a/packages/llm/llm/README.md b/packages/llm/llm/README.md
+index e6b3c4924a..448d571e04 100644
+--- a/packages/llm/llm/README.md
++++ b/packages/llm/llm/README.md
+@@ -102,4 +102,4 @@ Pass-through; the registry preserves the assembled request prefix, while the sel
+ - **Producer-gated variants stay out until produced** — `prefill`, per-tool `strict`, block `cache` hints, and the `agent` message-source variant were pruned as producerless ([Agent Note](../../../.agents/notes/archived/simplification/2026-07-04-prune-producerless-vocabulary-variants.md)).
+ - **`BlockAssembler` handles core block kinds only** — a plugin-added block type whose stream is never closed by `block-end` makes `blocks()` throw.
+ - **`APP_IDENTITY.url` names a repository that does not exist yet** — the public home must be reachable before release.
+-- **`GenerateOptions.sessionId` is a locally-declared brand** — importing dsh-session's `SessionId` would cycle; a future ids-owning package would dissolve the workaround.
++- **`GenerateOptions.sessionId` and `parentSessionId` are locally-declared brands** — importing dsh-session's `SessionId` would cycle; a future ids-owning package would dissolve the workaround.
+diff --git a/packages/llm/llm/README.zh.md b/packages/llm/llm/README.zh.md
+index 51f034af63..5cc0edf309 100644
+--- a/packages/llm/llm/README.zh.md
++++ b/packages/llm/llm/README.zh.md
+@@ -102,4 +102,4 @@
+ - **只有出现实际产生方后，相应变体才会加入**：`prefill`、逐工具 `strict`、内容块 `cache` 提示和 `agent` 消息来源变体，都因当前没有产生方而被移除（见 [Agent Note](../../../.agents/notes/archived/simplification/2026-07-04-prune-producerless-vocabulary-variants.md)）。
+ - **`BlockAssembler` 只处理核心块类型**：如果插件添加块类型的流从未由 `block-end` 关闭，`blocks()` 会抛出异常。
+ - **`APP_IDENTITY.url` 指向一个尚不存在的仓库**：该公开主页必须在发布前可访问。
+-- **`GenerateOptions.sessionId` 是本地声明的品牌类型**：导入 dsh-session 的 `SessionId` 会产生循环；未来拥有 id 的包可以消除该权宜之计。
++- **`GenerateOptions.sessionId` 和 `parentSessionId` 是本地声明的品牌类型**：导入 dsh-session 的 `SessionId` 会产生循环；未来拥有 id 的包可以消除该权宜之计。
+diff --git a/packages/llm/llm/src/types.ts b/packages/llm/llm/src/types.ts
+index 8c5be187dd..a63a2e8915 100644
+--- a/packages/llm/llm/src/types.ts
++++ b/packages/llm/llm/src/types.ts
+@@ -368,6 +368,12 @@ export interface GenerateOptions {
+    * to separate cursors; adapters may map it to model-hidden transport metadata.
+    */
+   sessionId?: Branded<'SessionId'>
++  /**
++   * Immediate parent identity for a session-backed child request. The agent
++   * loop derives it from durable Session metadata; root and direct one-shot
++   * requests leave it unset.
++   */
++  parentSessionId?: Branded<'SessionId'>
+   /**
+    * Provider-neutral classification for an auxiliary model call. Adapters may
+    * map the purpose to model-hidden transport metadata or purpose-specific
+-- 
+2.52.0
+

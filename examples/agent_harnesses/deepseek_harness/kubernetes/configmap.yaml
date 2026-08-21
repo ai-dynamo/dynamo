@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dsh-dynamo-client
+  namespace: anish-agent-well-lit-path
+  labels:
+    app.kubernetes.io/name: dsh-dynamo-client
+    app.kubernetes.io/part-of: agent-well-lit-path
+    dynamo.nvidia.com/harness: deepseek
+data:
+  DYNAMO_BASE_URL: http://REPLACE_WITH_PROJECT_OWNED_FRONTEND:8000
+  DYNAMO_MODEL: Qwen/Qwen3-0.6B
+  DSH_TASK: Use a local shell tool to report the working directory, delegate one bounded verification to a subagent, and report both results.
+  DSH_SESSION_FINAL: "false"
+  DSH_BIN: /usr/local/lib/dsh-bin.js

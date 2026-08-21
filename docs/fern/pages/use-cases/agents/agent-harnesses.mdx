@@ -39,6 +39,23 @@ bash examples/backends/sglang/launch/agg_agent.sh
     Dynamo maps Codex's `thread-id` header to `session_id`. A spawned child thread also sends `x-codex-parent-thread-id`, which Dynamo maps to `parent_session_id`.
 
   </Tab>
+  <Tab title="DeepSeek Harness">
+
+    DeepSeek Harness (DSH) uses Chat Completions. Its shipped headless profile accepts the Dynamo `/v1` endpoint through `DEEPSEEK_BASE_URL`, while its model selection lives in the DSH settings profile. The repository's lifecycle relay pins the package, creates that isolated profile, captures redacted request evidence, and runs one task:
+
+    ```bash
+    node .agents/skills/dynamo-agent-harness/scripts/drive_deepseek_harness.mjs \
+      --base-url http://localhost:8000 \
+      --model Qwen/Qwen3-0.6B \
+      --task 'Use tools to inspect this workspace and report one verified fact.' \
+      --capture dsh-request-trace.jsonl
+    ```
+
+    Dynamo maps DSH's `x-deepseek-harness-session-id` to `session_id`, `x-deepseek-harness-parent-session-id` to `parent_session_id`, and exact `x-deepseek-harness-compact: 1` to compaction metadata. The published basic package carries session and compaction identity; use the separately pinned full recipe under `examples/agent_harnesses/deepseek_harness` when child lineage is required.
+
+    Add `--session-final` only when the target is the native ThunderAgent frontend. The relay waits for DSH to flush, then sends `x-dynamo-session-final: true` after normal or interrupted shutdown. Stock KV has no program lifecycle to close, so leave the option off there.
+
+  </Tab>
   <Tab title="Pi">
 
     Pi uses the Dynamo provider plugin. Build and install it from the [agent-plugins](https://github.com/ai-dynamo/agent-plugins/tree/main/pi-plugin) checkout:
@@ -201,7 +218,7 @@ bash examples/backends/sglang/launch/agg_agent.sh
 
 ## Drive a Harness from Another Agent
 
-Use the repository's `.agents/skills/dynamo-agent-harness` skill when an agent needs to keep a Claude Code, Codex, or OpenCode session open across multiple prompts while Dynamo serves the model. The skill uses Agent Client Protocol (ACP) and injects the provider configuration through the child process environment instead of adding harness configuration files to the delegated worktree.
+Use the repository's `.agents/skills/dynamo-agent-harness` skill when an agent needs to keep a Claude Code, Codex, or OpenCode session open across multiple prompts, or run a one-shot DSH headless task, while Dynamo serves the model. The persistent drivers use Agent Client Protocol (ACP). The DSH driver uses its native Chat Completions transport through a loopback capture relay and an isolated generated profile.
 
 The skill pins the Claude Code and Codex ACP adapters. If a harness release changes the model, endpoint, session header, authentication, or mode configuration, update this page and the skill in the same change after running a persistent two-turn tool smoke test.
 
@@ -212,6 +229,7 @@ An agent harness can compact older conversation history into a summary when its 
 | Harness | Signal recognized by Dynamo | Normalized agent context |
 | --- | --- | --- |
 | Codex | `x-codex-turn-metadata` with `request_kind` set to `compaction` | `agent_context.compaction` |
+| DeepSeek Harness | Exact `x-deepseek-harness-compact: 1` | `agent_context.compaction` |
 | Claude Code | No supported mapping | Unset |
 | OpenCode | No supported mapping | Unset |
 

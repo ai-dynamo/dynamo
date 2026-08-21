@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+FROM node:24.10.0-bookworm-slim@sha256:b8d2197aff9129d16c801a3e3e1b2a873c4946480f5a310f38056df2268c38d9
+
+ARG DSH_PACKAGE_VERSION=0.1.0-rc.8
+ARG PNPM_VERSION=11.7.0
+
+ENV PNPM_HOME=/opt/pnpm
+ENV PATH=/opt/pnpm:${PATH}
+
+RUN corepack pnpm@${PNPM_VERSION} add --global "@deepseek-ai/dsh@${DSH_PACKAGE_VERSION}" && DSH_ROOT="$(corepack pnpm@${PNPM_VERSION} root --global)" && ln -s "${DSH_ROOT}/@deepseek-ai/dsh/lib/bin.js" /usr/local/lib/dsh-bin.js
+COPY .agents/skills/dynamo-agent-harness/scripts/drive_deepseek_harness.mjs /usr/local/bin/drive_deepseek_harness.mjs
+
+ENV DSH_BIN=/usr/local/lib/dsh-bin.js
+USER node
+ENTRYPOINT ["node", "/usr/local/bin/drive_deepseek_harness.mjs"]

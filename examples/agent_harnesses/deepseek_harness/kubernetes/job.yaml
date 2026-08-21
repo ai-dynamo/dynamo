@@ -1,0 +1,84 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: dsh-dynamo-client
+  namespace: anish-agent-well-lit-path
+  labels:
+    app.kubernetes.io/name: dsh-dynamo-client
+    app.kubernetes.io/part-of: agent-well-lit-path
+    dynamo.nvidia.com/branch: dsh-well-lit-path
+    dynamo.nvidia.com/harness: deepseek
+    dynamo.nvidia.com/owner: anish-maddipoti
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1800
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dsh-dynamo-client
+        app.kubernetes.io/part-of: agent-well-lit-path
+        dynamo.nvidia.com/branch: dsh-well-lit-path
+        dynamo.nvidia.com/harness: deepseek
+        dynamo.nvidia.com/owner: anish-maddipoti
+    spec:
+      restartPolicy: Never
+      securityContext:
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: dsh
+          image: REPLACE_WITH_IMMUTABLE_DSH_CLIENT_IMAGE
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-ceu"]
+          args:
+            - |
+              set -- node /usr/local/bin/drive_deepseek_harness.mjs --base-url "$DYNAMO_BASE_URL" --model "$DYNAMO_MODEL" --task "$DSH_TASK" --capture /evidence/dsh-request-trace.jsonl --cwd /workspace --dsh-home /dsh-home --dsh-bin "$DSH_BIN"
+              if [ "$DSH_SESSION_FINAL" = "true" ]; then set -- "$@" --session-final; fi
+              exec "$@"
+          envFrom:
+            - configMapRef:
+                name: dsh-dynamo-client
+          env:
+            - name: DYNAMO_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: dsh-dynamo-api-key
+                  key: api-key
+                  optional: true
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+          volumeMounts:
+            - name: dsh-home
+              mountPath: /dsh-home
+            - name: evidence
+              mountPath: /evidence
+            - name: workspace
+              mountPath: /workspace
+            - name: temporary
+              mountPath: /tmp
+      volumes:
+        - name: dsh-home
+          emptyDir: {}
+        - name: evidence
+          emptyDir: {}
+        - name: workspace
+          emptyDir: {}
+        - name: temporary
+          emptyDir: {}

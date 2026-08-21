@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+FROM node:24.10.0-bookworm-slim@sha256:b8d2197aff9129d16c801a3e3e1b2a873c4946480f5a310f38056df2268c38d9 AS build
+
+ARG DSH_COMMIT=141eb6fef83422698aef7a981029e843e8161534
+
+RUN apt-get update && apt-get install --yes --no-install-recommends ca-certificates git && rm -rf /var/lib/apt/lists/*
+RUN corepack enable
+RUN git clone https://github.com/deepseek-ai/deepseek-harness.git /opt/deepseek-harness && git -C /opt/deepseek-harness checkout "${DSH_COMMIT}"
+COPY examples/agent_harnesses/deepseek_harness/patches/0001-feat-llm-propagate-parent-session-lineage.patch /tmp/lineage.patch
+RUN git -C /opt/deepseek-harness am /tmp/lineage.patch
+RUN corepack pnpm --dir /opt/deepseek-harness install --frozen-lockfile --ignore-scripts
+RUN corepack pnpm --dir /opt/deepseek-harness run build:lib
+
+FROM node:24.10.0-bookworm-slim@sha256:b8d2197aff9129d16c801a3e3e1b2a873c4946480f5a310f38056df2268c38d9
+
+COPY --from=build /opt/deepseek-harness /opt/deepseek-harness
+COPY .agents/skills/dynamo-agent-harness/scripts/drive_deepseek_harness.mjs /usr/local/bin/drive_deepseek_harness.mjs
+
+ENV DSH_BIN=/opt/deepseek-harness/apps/cli/lib/bin.js
+USER node
+ENTRYPOINT ["node", "/usr/local/bin/drive_deepseek_harness.mjs"]
