@@ -147,6 +147,7 @@ class MockerProcess:
         standalone_selector: bool = False,
         model_name: str = "mocker",
         zmq_replay: bool = False,
+        env_overrides: Optional[Dict[str, str]] = None,
     ):
         if standalone_selector and not standalone_indexer:
             raise ValueError("standalone_selector requires standalone_indexer=True")
@@ -172,6 +173,7 @@ class MockerProcess:
         self._store_backend = store_backend
         self._request_plane = request_plane
         self._mocker_args_orig: Dict[str, Any] = (mocker_args or {}).copy()
+        self._env_overrides: Dict[str, str] = dict(env_overrides or {})
         self.worker_id_to_zmq_ports: dict[int, dict[int, str]] = {}
 
         mocker_args = self._mocker_args_orig.copy()
@@ -227,6 +229,7 @@ class MockerProcess:
             )
             env = os.environ.copy()
             env["DYN_REQUEST_PLANE"] = request_plane
+            env.update(env_overrides or {})
             self._process = ManagedProcess(
                 command=command,
                 env=env,
@@ -341,6 +344,7 @@ class MockerProcess:
             )
             env = os.environ.copy()
             env["DYN_REQUEST_PLANE"] = self._request_plane
+            env.update(self._env_overrides)
             proc = ManagedProcess(
                 command=command,
                 env=env,

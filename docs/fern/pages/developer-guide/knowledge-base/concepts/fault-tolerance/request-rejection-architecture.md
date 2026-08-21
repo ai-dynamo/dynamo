@@ -101,12 +101,42 @@ threshold that is simply too high.
 
 ## Worker-Side Request Admission
 
-A worker can impose a hard cap independently of Frontend busy detection. Setting
-`--engine-request-limit N` creates `N` engine slots. Requests that arrive while those slots are full
-enter a small Dynamo overflow queue of size `Q`. When the engine and queue are both full, the worker
-returns `Server overloaded: worker at capacity`; the Frontend maps the resulting
-rejection to the worker-scoped `WorkerOverloaded` error. When request migration is enabled, it can
-retry the request without changing its allowlist or routing constraints.
+A worker process admits through one process-global admission gate. There is a single admission point
+in the runtime, on the shared ingress path both request planes already funnel through, so requests
+arriving over TCP and over NATS compete for the same `N` engine slots and the same FIFO queue of size
+`Q`, whether the backend is implemented in Rust or Python:
+
+```text
+TCP request plane  ─┐
+                    ├─> shared ingress handler ─> gate ─> Rust or Python backend worker
+NATS request plane ─┘
+```
+
+The gate is a property of the process, not of an individual endpoint: every endpoint served over the
+shared ingress path shares one limit and one queue. Generation traffic dominates that budget in a
+worker process, but the same process's control, status, indexer, LoRA-management and KV-management
+endpoints draw on it too, so size `N` with a little headroom above the concurrency you expect the
+engine to sustain. The in-process health-check canary is issued through the local endpoint registry
+and never passes through the gate.
+
+A request takes a free engine slot when one is available, otherwise it joins the FIFO queue, and
+otherwise the worker responds `Server overloaded: worker at capacity` on the response-stream
+prologue. A slot is released when the admitted request finishes, errors, or is cancelled, and passes
+to the oldest queued request. New arrivals never bypass an older waiter, and a request cancelled
+while queued frees its queue slot immediately. The Frontend maps the prologue rejection to the
+worker-scoped `WorkerOverloaded` error. When request migration is enabled, it can retry the request
+without changing its allowlist or routing constraints.
+
+`N` resolves in this order:
+
+1. `DYN_ENGINE_REQUEST_LIMIT` (`--engine-request-limit`), when set to a positive integer.
+2. `ceil(3/2 x max_num_seqs x data_parallel_size)` in integer arithmetic, from a capacity reported by
+   model-card registration.
+3. Exactly `10000`, when neither is available. This is the final limit; the `3/2` factor is never
+   applied to it.
+
+`Q` defaults to `40000` and is overridden independently by `DYN_DYNAMO_REQUEST_QUEUE_LIMIT`. The
+queue holds exactly `Q` requests: no dispatcher holds a hidden `Q + 1`th.
 
 The worker rejection does not add a failed-worker exclusion to the routing request or change the
 standalone router protocol. An in-process router can exclude the failed worker with request-local
@@ -116,21 +146,46 @@ migration is therefore best-effort in that topology. Pool-scoped `ResourceExhaus
 non-migratable because no eligible worker has known capacity. If either overload error reaches the
 client, the Frontend returns the configured overload status, HTTP 529 by default.
 
-The effective maximum is `N + Q` requests. `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` defaults to `16`, is an
-advanced override, must be at least `2`, and is read only when the engine limit is enabled.
+The effective maximum is `N + Q` requests. `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` is an advanced override
+read independently of the engine limit, and defaults to `40000`.
 
-### Overflow Channel Sizing
+### Where The Capacity Hint Comes From
 
-The channel capacity is `Q - 1` because one dispatcher task can hold a request between the queue and
-an engine slot. This produces an exact `N + Q` cap for `Q >= 2`. A value of `1` would still require a
-channel capacity of one and could permit two queued requests, which is why the supported minimum is
-`2`.
+The implemented rule is exactly this: **the first usable capacity report from any non-LoRA base model
+card registered in the process wins.** A report is usable when `max_num_seqs` and
+`data_parallel_size` are both present and non-zero and their scaled product is in range. A later
+conflicting report from any other base card in the same process is logged and ignored, and the
+environment override always wins over any report. LoRA cards report no capacity.
 
-Worker admission exports:
+The gate does not test which kind of component published the card, and nothing in the runtime records
+that distinction. `register_model` is reached by routers as well as engines — `global_router`,
+`vllm.omni.stage_router` and `thunderagent_router` all call it — so a router card carrying a usable
+`max_num_seqs` would size the gate for its own process. In tree those router cards leave
+`max_num_seqs` unset today, so they report nothing usable and the limit falls through to rule 3. That
+is a property of the current router configurations, not a guarantee the runtime enforces: if you add
+a `max_num_seqs` to a router's `ModelRuntimeConfig`, that value becomes that router process's
+admission limit.
+
+Registration can complete after the gate is already admitting requests, so the limit stays adjustable
+rather than being frozen at startup and a component whose metadata resolves late is still sized
+correctly. Raising the limit releases queued work immediately; lowering it never revokes a slot that
+is already held.
+
+### Relationship To The TCP Request Plane
+
+The TCP request plane keeps its own worker pool, sized by `DYN_TCP_WORKER_POOL_SIZE` and
+`DYN_TCP_WORK_QUEUE_SIZE`. That pool bounds TCP-side task execution only; it is independent of the
+gate and no longer changes with the engine-admission settings. The two use the same numeric defaults
+by coincidence, not by sharing constants.
+
+The TCP worker pool exports:
 
 - `dynamo_rejection_request_total`
 - `dynamo_engine_request`
 - `dynamo_request_queue`
+
+These count TCP request-plane pool activity only. The backend admission gate does not yet export
+metrics of its own; its resolved limit, queue length and each shed request appear in the worker log.
 
 See [Cancellation and Rejection](../../../../reference/observability/metrics-catalog.mdx#cancellation-and-rejection)
 for metric types and labels.

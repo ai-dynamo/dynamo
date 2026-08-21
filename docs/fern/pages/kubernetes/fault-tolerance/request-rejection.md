@@ -114,10 +114,13 @@ decision immediately. This endpoint does not enable `--router-mode kv` or
 
 </Step>
 
-<Step title="Add a worker-side hard cap">
+<Step title="Tune the worker-side hard cap">
 
-Optional. A worker can independently cap concurrent engine work and queue only a small burst. Set
-`--engine-request-limit N` (or `DYN_ENGINE_REQUEST_LIMIT`) on the **worker** component:
+Optional. Every worker already caps concurrent work at
+`ceil(3/2 x max_num_seqs x data_parallel_size)`, taken from the first usable capacity reported by a
+base model card registered in that process, or at `10000` when no card reports a usable
+`max_num_seqs`. To pin an explicit value, set `--engine-request-limit N` (or
+`DYN_ENGINE_REQUEST_LIMIT`) on the **worker** component:
 
 ```yaml
 - name: VllmWorker
@@ -136,9 +139,9 @@ Frontend returns HTTP 529 when migration is disabled or its retry attempts do no
 With a positive `--migration-limit`, an unpinned request using in-process KV routing retries on another
 eligible worker first. Split or standalone routing uses global overload and fault state, so its
 retry is best-effort and can select the same worker again.
-`DYN_DYNAMO_REQUEST_QUEUE_LIMIT` controls the advanced overflow-queue size, defaults to `16`, must be
-at least `2`, and has an effect only when the engine limit is set. The effective cap is `N + Q`
-in-flight requests per worker.
+`DYN_DYNAMO_REQUEST_QUEUE_LIMIT` controls the advanced overflow-queue size and defaults to `40000`.
+The effective cap is `N + Q` in-flight requests per worker process, counted across the TCP and NATS
+request planes together and across every endpoint the process serves.
 
 See [Runtime Configuration](../../reference/components/runtime-configuration.mdx#operations) for the exact
 fields and [Worker-Side Request Admission](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md#worker-side-request-admission)
@@ -160,8 +163,10 @@ Generate enough load to exceed the configured threshold, then confirm:
 
 - The client receives HTTP 529.
 - `dynamo_frontend_model_rejection_total` increases for the affected `model` and `endpoint`.
-- Worker-side hard-cap tests increase `dynamo_rejection_request_total` when both the engine and queue
-  are full.
+- For the worker-side hard cap, the worker logs `Worker at capacity (engine limit and queue both
+  full), rejecting request` with the shed request's `request_id`. The backend admission gate exports
+  no counter of its own; `dynamo_rejection_request_total` counts only TCP request-plane pool
+  rejections and does not move when the gate sheds a request.
 
 For all metric fields and labels, see
 [Cancellation and Rejection](../../reference/observability/metrics-catalog.mdx#cancellation-and-rejection).

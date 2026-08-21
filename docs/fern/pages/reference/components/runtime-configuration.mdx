@@ -247,17 +247,23 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 </ParamField>
 
 <ParamField path="--engine-request-limit" type="integer" default="null">
-  Maximum requests handled concurrently by the engine. Setting a positive integer enables worker-side
-  admission control. When the engine slots and the Dynamo overflow queue are full, the worker rejects
-  the request and the Frontend returns the configured overload status, 529 by default.
+  Maximum requests a process admits concurrently, across every endpoint it serves. Setting a positive
+  integer pins that process's admission limit. When unset, the limit is derived from the first usable
+  capacity reported by a non-LoRA base model card registered in the process,
+  `ceil(3/2 x max_num_seqs x data_parallel_size)`, and falls back to exactly `10000` when no card
+  reports a usable `max_num_seqs`. Any component that registers a base card can supply that value,
+  routers included; the runtime does not restrict it to engines. When the slots and the Dynamo
+  overflow queue are full, the process rejects the request and the Frontend returns the configured
+  overload status, 529 by default.
 
   Environment variable: `DYN_ENGINE_REQUEST_LIMIT`
 </ParamField>
 
-<ParamField path="DYN_DYNAMO_REQUEST_QUEUE_LIMIT" type="integer" default="16">
-  Advanced overflow-queue size for requests waiting in Dynamo before entering the engine. Applies only
-  when `--engine-request-limit` or `DYN_ENGINE_REQUEST_LIMIT` is set. Must be at least `2`; the
-  effective per-worker cap is the engine limit plus this queue limit.
+<ParamField path="DYN_DYNAMO_REQUEST_QUEUE_LIMIT" type="integer" default="40000">
+  Advanced overflow-queue size for requests waiting in Dynamo before entering the engine. Applies
+  whether or not the engine limit is set explicitly. The effective per-worker-process cap is the
+  engine limit plus this queue limit, counted across the TCP and NATS request planes together and
+  across every endpoint the process serves.
 </ParamField>
 
 ## Related pages

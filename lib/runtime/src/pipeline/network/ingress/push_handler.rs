@@ -3,6 +3,7 @@
 
 use super::*;
 
+use crate::admission_gate;
 use crate::engine::AsyncEngineContext;
 use crate::metrics::prometheus_names::work_handler;
 use crate::metrics::work_handler_perf::{
@@ -637,6 +638,50 @@ where
             PipelineError::Generic(format!("Failed to create response stream: {e}"))
         })?;
 
+        // The one backend admission point in the runtime. Both request planes
+        // reach it here, after the response stream exists so an overload can be
+        // reported on the stream prologue, and before the engine is asked to do
+        // any work. The permit lives until `pump_response_stream` returns, so it
+        // is released on normal end-of-stream, a generate error, an encode or
+        // publish error, task abort, and cancellation alike.
+        let _admission = {
+            let context = request.context();
+            match admission_gate::global().admit(Some(context.as_ref())).await {
+                admission_gate::Admission::Granted(permit) => permit,
+                admission_gate::Admission::Overloaded => {
+                    tracing::warn!(
+                        request_id = context.id(),
+                        "Worker at capacity (engine limit and queue both full), rejecting request"
+                    );
+                    if let Some(m) = self.metrics() {
+                        m.error_counter
+                            .with_label_values(&[work_handler::error_types::GENERATE])
+                            .inc();
+                    }
+                    let _result = publisher
+                        .send_prologue(Some(admission_gate::OVERLOADED_MESSAGE.to_string()))
+                        .await;
+                    return Err(PipelineError::Generic(
+                        admission_gate::OVERLOADED_MESSAGE.to_string(),
+                    ));
+                }
+                admission_gate::Admission::Cancelled => {
+                    tracing::debug!(
+                        request_id = context.id(),
+                        "Request cancelled while queued for backend admission"
+                    );
+                    let _result = publisher
+                        .send_prologue(Some(
+                            "Request cancelled while queued for backend admission".to_string(),
+                        ))
+                        .await;
+                    return Err(PipelineError::Generic(
+                        "Request cancelled while queued for backend admission".to_string(),
+                    ));
+                }
+            }
+        };
+
         tracing::trace!("calling generate");
         let stream = self
             .segment
@@ -685,6 +730,10 @@ where
 
         self.pump_response_stream(stream, &publisher, payload_codec)
             .await;
+
+        // Hold the backend slot across the whole pump, then release it to the
+        // oldest queued request.
+        drop(_admission);
 
         // Ensure the metrics guard is not dropped until the end of the function.
         // Drop fires "request completed" log via RAII.
