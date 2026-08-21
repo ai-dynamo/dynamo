@@ -30,7 +30,7 @@ use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
@@ -130,10 +130,7 @@ impl WorkerLoadEventSender {
                 pending: Arc::clone(&pending),
                 updated: Arc::clone(&updated),
             },
-            WorkerLoadEventReceiver {
-                pending,
-                updated,
-            },
+            WorkerLoadEventReceiver { pending, updated },
         )
     }
 
