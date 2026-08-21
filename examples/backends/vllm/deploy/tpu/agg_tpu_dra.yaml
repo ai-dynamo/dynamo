@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: tpu-template
+spec:
+  spec:
+    devices:
+      requests:
+        - name: tpus
+          exactly:
+            deviceClassName: tpu.google.com
+            # Grabs every TPU chip exposed on whatever node this claim is
+            # scheduled onto (matches a single-host TPU slice, e.g. a v5e-8
+            # node). Replace with `count: N` to request a specific number of
+            # chips instead.
+            allocationMode: All
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-tpu-dra
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - name: VllmDecodeWorker
+    podTemplate:
+      spec:
+        tolerations:
+        - key: "google.com/tpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --max-model-len
+          - "2048"
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-tpu:my-tag
+          name: main
+          resources:
+            claims:
+            - name: tpus
+            requests:
+              # Increase this value for larger models.
+              ephemeral-storage: 2Gi
+          volumeMounts:
+          - name: dshm
+            mountPath: /dev/shm
+          workingDir: /workspace/examples/backends/vllm
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        resourceClaims:
+        - name: tpus
+          resourceClaimTemplateName: tpu-template
+    replicas: 1
+    type: worker

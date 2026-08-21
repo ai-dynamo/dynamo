@@ -333,6 +333,9 @@ get_options() {
 
     # --device selects accelerator backend. cuda (default) keeps existing behaviour.
     # xpu wires Intel GPU access (/dev/dri + host render group) and disables the NVIDIA runtime.
+    # tpu disables the NVIDIA runtime and adds no device flags: upstream vllm/vllm-tpu
+    # documents running on a TPU VM with `--privileged` rather than explicit --device
+    # mounts, so pass `--privileged TRUE` when running on real TPU hardware.
     DEVICE_FLAGS=""
     case "${DEVICE,,}" in
         cuda|"")
@@ -347,8 +350,13 @@ get_options() {
                 DEVICE_FLAGS+=" --group-add ${RENDER_GID}"
             fi
             ;;
+        tpu)
+            GPUS="none"
+            GPU_STRING=""
+            RUNTIME=""
+            ;;
         *)
-            error 'ERROR: Unknown --device value (expected cuda|xpu): ' "$DEVICE"
+            error 'ERROR: Unknown --device value (expected cuda|xpu|tpu): ' "$DEVICE"
             ;;
     esac
 
@@ -382,7 +390,7 @@ show_help() {
     echo "  [--dry-run print docker commands without running]"
     echo "  [--hf-home|--hf-cache directory to volume mount as the hf home, default is NONE unless mounting workspace]"
     echo "  [--gpus gpus to enable, default is 'all', 'none' disables gpu support]"
-    echo "  [--device accelerator backend: 'cuda' (default) or 'xpu' (Intel GPU via /dev/dri + render group)]"
+    echo "  [--device accelerator backend: 'cuda' (default), 'xpu' (Intel GPU via /dev/dri + render group), or 'tpu' (Google TPU)]"
     echo "  [--use-nixl-gds add volume mounts and capabilities needed for NVIDIA GPUDirect Storage]"
     echo "  [--network network mode for container, default is 'host']"
     echo "           Options: 'host' (default), 'bridge', 'none', 'container:name'"

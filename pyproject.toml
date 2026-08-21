@@ -323,6 +323,7 @@ markers = [
     "gpu_8: marks tests to run on 8GPUs",
     "xpu_1: marks tests to run on XPU",
     "xpu_2: marks tests to run on 2XPUs",
+    "tpu_1: marks tests to run on a single-host TPU slice",
     # These 6 (profiled_vram_gib and requested_*) are used for parallel pytest executions:
     "profiled_vram_gib(N): actual peak VRAM observed by nvidia-smi during profiling. Used for --max-vram-gib filtering and scheduler budget tracking",
     "requested_vllm_kv_cache_bytes(N): exact KV cache bytes for vLLM (skips memory profiling). Sets _PROFILE_PYTEST_KV_CACHE_BYTES. Most deterministic method for parallel execution",

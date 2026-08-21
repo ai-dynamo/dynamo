@@ -28,6 +28,7 @@
 #   router           @ai-dynamo/dynamo-router-codeowners
 #   runtime          @ai-dynamo/dynamo-runtime-codeowners
 #   tokenspeed       @ai-dynamo/dynamo-tokenspeed-codeowners
+#   tpu              @ai-dynamo/dynamo-tpu-codeowners
 #   xpu              @ai-dynamo/dynamo-xpu-codeowners
 #   *                @ai-dynamo/dynamo-runtime-codeowners  (catch-all)
 #
@@ -54,6 +55,7 @@
 #   @ai-dynamo/dynamo-router-codeowners
 #   @ai-dynamo/dynamo-runtime-codeowners
 #   @ai-dynamo/dynamo-tokenspeed-codeowners
+#   @ai-dynamo/dynamo-tpu-codeowners
 #   @ai-dynamo/dynamo-xpu-codeowners
 
 *                                                                            @ai-dynamo/dynamo-runtime-codeowners
@@ -507,6 +509,7 @@
 /lib/llm/src/block_manager.md                                                @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager.rs                                                @ai-dynamo/dynamo-kv-memory-codeowners
 /tests/benchmarks/multimodal/                                                @ai-dynamo/dynamo-multimodal-codeowners
+/tests/serve/test_vllm_tpu.py                                                @ai-dynamo/dynamo-tpu-codeowners
 /tests/serve/test_vllm_xpu.py                                                @ai-dynamo/dynamo-xpu-codeowners
 /.github/workflows/pr-xpu.yaml                                               @ai-dynamo/dynamo-xpu-codeowners
 /.github/workflows/xpu-ci.yaml                                               @ai-dynamo/dynamo-xpu-codeowners
@@ -538,6 +541,8 @@
 /lib/llm/src/block_manager/pool.rs                                           @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/preprocessor/media.rs                                           @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/common/http/                                          @ai-dynamo/dynamo-frontend-codeowners
+/examples/backends/vllm/deploy/tpu/                                          @ai-dynamo/dynamo-tpu-codeowners
+/examples/backends/vllm/launch/tpu/                                          @ai-dynamo/dynamo-tpu-codeowners
 /lib/llm/src/block_manager/block.rs                                          @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager/offload/                                          @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager/state.rs                                          @ai-dynamo/dynamo-kv-memory-codeowners

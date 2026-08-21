@@ -128,6 +128,16 @@ docker build -t dynamo:latest-sglang-xpu-runtime -f container/sglang-runtime-xpu
 container/run.sh --image dynamo:latest-sglang-xpu-runtime --device=xpu -it
 ```
 
+TPU variant (vLLM only, aggregated serving) — pass `--device=tpu` to both `render.py` and `run.sh`. The
+image layers Dynamo's wheels onto the upstream `vllm/vllm-tpu` image (vLLM +
+the [tpu-inference plugin](https://docs.vllm.ai/projects/tpu/en/latest/)); there is no NIXL/KVBM/GPU Memory
+Service support on this path yet, so only aggregated (non-disaggregated) serving is supported:
+```bash
+container/render.py --framework=vllm --device=tpu --target=runtime
+docker build -t dynamo:latest-vllm-tpu-runtime -f container/vllm-runtime-tpu-amd64-rendered.Dockerfile .
+container/run.sh --image dynamo:latest-vllm-tpu-runtime --device=tpu -it
+```
+
 ### 2. test image (layers test deps on top of runtime):
 ```bash
 # Build test image from a runtime image (for running tests locally)
@@ -249,10 +259,15 @@ docker build -t dynamo:latest-trtllm-runtime -f container/rendered.Dockerfile .
 # Build SGLang runtime image for Intel XPU (instead of the default CUDA device)
 container/render.py --framework=sglang --device=xpu --target=runtime
 docker build -t dynamo:latest-sglang-xpu-runtime -f container/sglang-runtime-xpu-amd64-rendered.Dockerfile .
+
+# Build vLLM runtime image for Google TPU (instead of the default CUDA device)
+container/render.py --framework=vllm --device=tpu --target=runtime
+docker build -t dynamo:latest-vllm-tpu-runtime -f container/vllm-runtime-tpu-amd64-rendered.Dockerfile .
 ```
 
 The `--device` flag selects the accelerator backend. It defaults to `cuda`; pass `--device=xpu`
-to produce an Intel XPU image (currently supported for `--framework=sglang`).
+to produce an Intel XPU image (currently supported for `--framework=sglang`), or `--device=tpu`
+for a Google TPU image (currently supported for `--framework=vllm` only, aggregated serving only).
 
 After building, use `run.sh` to launch the container (see [run.sh - Container Runtime Manager](#runsh---container-runtime-manager) below for full options):
 ```bash
@@ -524,6 +539,32 @@ docker build -t dynamo:latest-sglang-xpu-runtime -f container/sglang-runtime-xpu
 # 2. Run as dynamo user with Intel GPU access
 container/run.sh --image dynamo:latest-sglang-xpu-runtime --device=xpu \
   -v $HOME/.cache:/home/dynamo/.cache -p 8000:8000 -it
+```
+
+**TPU variant** (vLLM only, aggregated serving only) — smoke test on a Cloud TPU VM. Replace `--gpus all`
+with `--device=tpu` (no NVIDIA runtime, no extra device flags — TPU device nodes are host-native):
+```bash
+# 1. Build the vLLM TPU runtime image
+container/render.py --framework=vllm --device=tpu --target=runtime
+docker build -t dynamo:latest-vllm-tpu-runtime -f container/vllm-runtime-tpu-amd64-rendered.Dockerfile .
+
+# 2. Run as dynamo user
+container/run.sh --image dynamo:latest-vllm-tpu-runtime --device=tpu \
+  -v $HOME/.cache:/home/dynamo/.cache -p 8000:8000 -it
+
+# From this point forward, commands run inside the container started in step 2.
+
+# 3. Sanity check (no accelerator probe -- vLLM's TPU platform plugin does its own device discovery)
+dev/sanity_check.py --runtime-check --no-gpu-check
+
+# 4. Run inference (requires both frontend and backend)
+python -m dynamo.frontend &
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B --max-model-len 2048 &
+
+# 5. Send a test request
+curl localhost:8000/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"Qwen/Qwen3-0.6B","prompt":"Hello","max_tokens":20}'
 ```
 
 ### Testing Workflow

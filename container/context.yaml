@@ -87,6 +87,15 @@ vllm:
     base_image_tag: 22.04
     runtime_image_tag: v0.27.1
     # baseline_sbom: not yet captured for cpu — runtime build runs without subtraction
+  tpu:
+    # vLLM TPU (https://docs.vllm.ai/projects/tpu/en/latest/) ships as a single
+    # prebuilt image with the tpu-inference plugin baked in (python:3.12-slim-bookworm
+    # base, no venv, no NIXL). base_image is only used for WHEEL_BUILDER_IMAGE.
+    base_image: vllm/vllm-tpu
+    runtime_image: vllm/vllm-tpu
+    base_image_tag: v0.27.0
+    runtime_image_tag: v0.27.0
+    # baseline_sbom: not yet captured for tpu — runtime build runs without subtraction
   vllm_omni_ref: "v0.27.0rc1"
   # vLLM 0.27.1 lacks the Transformers 5.15 heterogeneous Gemma 4 config
   # support that landed upstream after the release. Remove this pin when the
