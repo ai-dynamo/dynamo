@@ -110,11 +110,12 @@ def test_remote_planning_does_not_assume_a_runtime_value_type() -> None:
     result = workflow.stage("stage", contract, value=value)
     workflow.output("result", result.result)
 
-    with pytest.raises(WorkflowValidationError, match="no common declared carrier"):
-        compile_workflow(
-            workflow,
-            DeploymentSpec.remote(stage="workflows.stage.generate"),
-        )
+    plan = compile_workflow(
+        workflow,
+        DeploymentSpec.remote(stage="workflows.stage.generate"),
+    )
+
+    assert plan.bindings == {"stage": RemoteBinding("workflows.stage.generate")}
 
 
 def test_remote_endpoint_id_is_a_stable_discovery_identity() -> None:
@@ -126,25 +127,24 @@ def test_remote_endpoint_id_is_a_stable_discovery_identity() -> None:
         RemoteBinding("component.endpoint")
 
 
-def test_declared_nixl_carrier_lowers_tensor_fanout_per_consumer() -> None:
-    tensor = ValueSpec(type="tensor", dtype="float32", shape=("dynamic", 8))
+def test_nixl_is_an_opt_in_remote_binding_capability() -> None:
     encoder_contract = StageContract(
         id="encoder",
-        inputs={"request": ValueSpec(type="json")},
-        outputs={"embedding": tensor},
+        inputs={"request"},
+        outputs={"embedding"},
     )
     classifier_contract = StageContract(
         id="classifier",
-        inputs={"embedding": tensor},
-        outputs={"scores": ValueSpec(type="json")},
+        inputs={"embedding"},
+        outputs={"scores"},
     )
     generator_contract = StageContract(
         id="generator",
-        inputs={"embedding": tensor},
-        outputs={"text": ValueSpec(type="text")},
+        inputs={"embedding"},
+        outputs={"text"},
     )
     workflow = Workflow("nixl-fanout")
-    request = workflow.input("request", ValueSpec(type="json"))
+    request = workflow.input("request")
     encoder = workflow.stage("encoder", encoder_contract, request=request)
     classifier = workflow.stage(
         "classifier", classifier_contract, embedding=encoder.embedding
@@ -164,28 +164,23 @@ def test_declared_nixl_carrier_lowers_tensor_fanout_per_consumer() -> None:
             generator="workflows.generator.generate",
         ),
     )
-    assert plan.bindings["encoder"].tensor_carrier == "nixl"
-    assert {edge.transfer_id: edge.carrier for edge in plan.edges} == {
-        "encoder.request": "inline",
-        "classifier.embedding": "nixl",
-        "generator.embedding": "nixl",
-    }
+    assert all(binding.tensor_carrier == "nixl" for binding in plan.bindings.values())
+    assert not hasattr(plan, "edges")
 
 
-def test_nixl_does_not_cross_the_orchestrator_process() -> None:
-    tensor = ValueSpec(type="tensor", dtype="float32", shape=("dynamic", 8))
+def test_compilation_keeps_mixed_placement_value_opaque() -> None:
     producer_contract = StageContract(
         id="producer",
-        inputs={"request": ValueSpec(type="json")},
-        outputs={"embedding": tensor},
+        inputs={"request"},
+        outputs={"embedding"},
     )
     consumer_contract = StageContract(
         id="consumer",
-        inputs={"embedding": tensor},
-        outputs={"result": ValueSpec(type="json")},
+        inputs={"embedding"},
+        outputs={"result"},
     )
     workflow = Workflow("unsupported-mixed-tensor")
-    request = workflow.input("request", ValueSpec(type="json"))
+    request = workflow.input("request")
     producer = workflow.stage("producer", producer_contract, request=request)
     consumer = workflow.stage(
         "consumer", consumer_contract, embedding=producer.embedding
@@ -207,5 +202,5 @@ def test_nixl_does_not_cross_the_orchestrator_process() -> None:
         },
     )
     for bindings in placements:
-        with pytest.raises(WorkflowValidationError, match="no common declared carrier"):
-            compile_workflow(workflow, DeploymentSpec(bindings))
+        plan = compile_workflow(workflow, DeploymentSpec(bindings))
+        assert plan.bindings == bindings

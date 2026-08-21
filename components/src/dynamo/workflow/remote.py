@@ -7,161 +7,129 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, AsyncIterator, Awaitable, Mapping, Optional, Protocol, TypeVar
+from typing import Any, AsyncIterator, Mapping, Optional, Protocol
 
 from dynamo.workflow.nixl import NixlTensorFanout, NixlTensorRef
-from dynamo.workflow.plan import INLINE_VALUE_TYPES
+from dynamo.workflow.plan import NIXL_CARRIER
 from dynamo.workflow.runtime import (
     StageContext,
     StageRunner,
     TensorCarrier,
     WorkflowExecutionError,
-    _validate_value,
 )
-from dynamo.workflow.types import (
-    StageContract,
-    WorkflowValidationError,
-    _require_value_spec,
-    validate_name,
-)
+from dynamo.workflow.types import StageContract, WorkflowValidationError, validate_name
 
-STAGE_REQUEST_SCHEMA = "dynamo.workflow.stage_request"
-STAGE_RESPONSE_SCHEMA = "dynamo.workflow.stage_response"
-STAGE_WIRE_VERSION = 2
-
-_T = TypeVar("_T")
+STAGE_REQUEST_SCHEMA = "dynamo.workflow.carrier_request"
+STAGE_RESPONSE_SCHEMA = "dynamo.workflow.carrier_response"
+STAGE_WIRE_VERSION = 1
 
 
 def _check_keys(data: Mapping[str, Any], required: set[str]) -> None:
-    keys = set(data)
-    missing = required - keys
-    unknown = keys - required
+    actual = set(data)
+    missing = required - actual
+    unknown = actual - required
     if missing:
         raise WorkflowExecutionError(
-            f"remote envelope missing fields: {sorted(missing)}"
+            f"remote carrier envelope missing fields: {sorted(missing)}"
         )
     if unknown:
         raise WorkflowExecutionError(
-            f"remote envelope has unknown fields: {sorted(unknown)}"
+            f"remote carrier envelope has unknown fields: {sorted(unknown)}"
         )
 
 
-def _validate_attempt_id(attempt_id: str) -> None:
-    if not isinstance(attempt_id, str) or not attempt_id:
-        raise WorkflowExecutionError("remote attempt id must be a non-empty string")
-    try:
-        attempt_id.encode("utf-8")
-    except UnicodeEncodeError as error:
-        raise WorkflowExecutionError("remote attempt id must be valid UTF-8") from error
-
-
-async def _run_with_stage_lifecycle(
-    operation: Awaitable[_T],
-    context: StageContext,
-    transport_context: Any,
-) -> _T:
-    """Bound all remote-stage work by its deadline and transport lifetime."""
-
-    execution = asyncio.ensure_future(operation)
-    wait_for_transport_stop = (
-        None
-        if transport_context is None
-        else getattr(transport_context, "async_killed_or_stopped", None)
-    )
-    transport_stopped = (
-        asyncio.ensure_future(wait_for_transport_stop())
-        if callable(wait_for_transport_stop)
-        else None
-    )
-    waiters: set[asyncio.Future[Any]] = {execution}
-    if transport_stopped is not None:
-        waiters.add(transport_stopped)
-
-    try:
-        done, _ = await asyncio.wait(
-            waiters,
-            timeout=context.remaining_time(),
-            return_when=asyncio.FIRST_COMPLETED,
+def _validate_header(data: Mapping[str, Any], schema: str) -> None:
+    if data["schema"] != schema:
+        raise WorkflowExecutionError(
+            f"unsupported remote carrier schema {data['schema']!r}"
         )
-        if not done:
-            context._cancelled.set()
-            raise asyncio.TimeoutError
-        if execution in done:
-            return await execution
-        context._cancelled.set()
-        raise asyncio.CancelledError
-    except BaseException:
-        context._cancelled.set()
-        raise
-    finally:
-        for task in waiters:
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(*waiters, return_exceptions=True)
+    version = data["version"]
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise WorkflowExecutionError("remote carrier version must be an integer")
+    if version != STAGE_WIRE_VERSION:
+        raise WorkflowExecutionError(f"unsupported remote carrier version {version!r}")
+
+
+def _freeze_carriers(
+    carriers: Mapping[str, str], values: Mapping[str, Any]
+) -> Mapping[str, str]:
+    if not isinstance(carriers, Mapping):
+        raise WorkflowExecutionError("remote carrier tags must be an object")
+    unknown = set(carriers) - set(values)
+    if unknown:
+        raise WorkflowExecutionError(
+            f"remote carrier tags reference unknown ports {sorted(unknown)}"
+        )
+    normalized: dict[str, str] = {}
+    for name, carrier in carriers.items():
+        validate_name(name, "remote carried port")
+        if carrier != NIXL_CARRIER:
+            raise WorkflowExecutionError(
+                f"unsupported remote value carrier {carrier!r}"
+            )
+        normalized[name] = carrier
+    return MappingProxyType(normalized)
+
+
+@dataclass(frozen=True)
+class NixlCarriedValue:
+    """Internal marker that keeps NIXL metadata distinct from ordinary mappings."""
+
+    value: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.value, Mapping):
+            raise WorkflowExecutionError("NIXL carried value must be an object")
+        object.__setattr__(self, "value", MappingProxyType(dict(self.value)))
 
 
 @dataclass(frozen=True)
 class StageRequestEnvelope:
-    """Versioned request sent from the orchestrator to one stage endpoint."""
+    """Internal carrier metadata sent to one remote stage."""
 
-    workflow_name: str
-    stage_id: str
-    contract_id: str
-    attempt_id: str
-    invocation_id: str
-    timeout_seconds: Optional[float]
     inputs: Mapping[str, Any]
+    input_carriers: Mapping[str, str]
     output_transfers: Mapping[str, tuple[str, ...]]
 
     def __post_init__(self) -> None:
-        validate_name(self.workflow_name, "remote workflow name")
-        validate_name(self.stage_id, "remote stage id")
-        validate_name(self.contract_id, "remote contract id")
-        _validate_attempt_id(self.attempt_id)
-        _validate_attempt_id(self.invocation_id)
-        if self.timeout_seconds is not None and (
-            isinstance(self.timeout_seconds, bool)
-            or not isinstance(self.timeout_seconds, (int, float))
-            or not math.isfinite(self.timeout_seconds)
-            or self.timeout_seconds <= 0
-        ):
-            raise WorkflowExecutionError(
-                "remote timeout_seconds must be a finite positive number"
-            )
         if not isinstance(self.inputs, Mapping):
             raise WorkflowExecutionError("remote stage inputs must be an object")
+        inputs = MappingProxyType(dict(self.inputs))
+        carriers = _freeze_carriers(self.input_carriers, inputs)
         if not isinstance(self.output_transfers, Mapping):
-            raise WorkflowExecutionError("remote output_transfers must be an object")
-        output_transfers: dict[str, tuple[str, ...]] = {}
+            raise WorkflowExecutionError("remote output transfers must be an object")
+        transfers: dict[str, tuple[str, ...]] = {}
         for output_name, transfer_ids in self.output_transfers.items():
             validate_name(output_name, "remote output transfer port")
-            if not isinstance(transfer_ids, (list, tuple)) or any(
+            if not isinstance(transfer_ids, (list, tuple)):
+                raise WorkflowExecutionError(
+                    "remote output transfer ids must be a list or tuple"
+                )
+            normalized = tuple(transfer_ids)
+            if any(
                 not isinstance(transfer_id, str) or not transfer_id
-                for transfer_id in transfer_ids
+                for transfer_id in normalized
             ):
                 raise WorkflowExecutionError(
                     "remote output transfer ids must be non-empty strings"
                 )
-            if len(set(transfer_ids)) != len(transfer_ids):
+            if len(set(normalized)) != len(normalized):
                 raise WorkflowExecutionError(
                     f"remote output {output_name!r} has duplicate transfer ids"
                 )
-            output_transfers[output_name] = tuple(transfer_ids)
-        object.__setattr__(self, "inputs", MappingProxyType(dict(self.inputs)))
-        object.__setattr__(self, "output_transfers", MappingProxyType(output_transfers))
+            transfers[output_name] = normalized
+        object.__setattr__(self, "inputs", inputs)
+        object.__setattr__(self, "input_carriers", carriers)
+        object.__setattr__(self, "output_transfers", MappingProxyType(transfers))
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema": STAGE_REQUEST_SCHEMA,
             "version": STAGE_WIRE_VERSION,
-            "workflow": self.workflow_name,
-            "stage": self.stage_id,
-            "contract": self.contract_id,
-            "attempt": self.attempt_id,
-            "invocation": self.invocation_id,
-            "timeout_seconds": self.timeout_seconds,
             "inputs": dict(self.inputs),
+            "input_carriers": dict(self.input_carriers),
             "output_transfers": {
                 name: list(transfer_ids)
                 for name, transfer_ids in self.output_transfers.items()
@@ -177,68 +145,43 @@ class StageRequestEnvelope:
             {
                 "schema",
                 "version",
-                "workflow",
-                "stage",
-                "contract",
-                "attempt",
-                "invocation",
-                "timeout_seconds",
                 "inputs",
+                "input_carriers",
                 "output_transfers",
             },
         )
-        if data["schema"] != STAGE_REQUEST_SCHEMA:
-            raise WorkflowExecutionError(
-                f"unsupported remote request schema {data['schema']!r}"
-            )
-        if (
-            not isinstance(data["version"], int)
-            or isinstance(data["version"], bool)
-            or data["version"] != STAGE_WIRE_VERSION
-        ):
-            raise WorkflowExecutionError(
-                f"unsupported remote request version {data['version']!r}"
-            )
+        _validate_header(data, STAGE_REQUEST_SCHEMA)
         return cls(
-            workflow_name=data["workflow"],
-            stage_id=data["stage"],
-            contract_id=data["contract"],
-            attempt_id=data["attempt"],
-            invocation_id=data["invocation"],
-            timeout_seconds=data["timeout_seconds"],
             inputs=data["inputs"],
+            input_carriers=data["input_carriers"],
             output_transfers=data["output_transfers"],
         )
 
 
 @dataclass(frozen=True)
 class StageResponseEnvelope:
-    """Versioned terminal response returned by one stage endpoint."""
+    """Internal carrier metadata returned by one remote stage."""
 
-    stage_id: str
-    contract_id: str
-    attempt_id: str
-    invocation_id: str
     outputs: Mapping[str, Any]
+    output_carriers: Mapping[str, str]
 
     def __post_init__(self) -> None:
-        validate_name(self.stage_id, "remote stage id")
-        validate_name(self.contract_id, "remote contract id")
-        _validate_attempt_id(self.attempt_id)
-        _validate_attempt_id(self.invocation_id)
         if not isinstance(self.outputs, Mapping):
             raise WorkflowExecutionError("remote stage outputs must be an object")
-        object.__setattr__(self, "outputs", MappingProxyType(dict(self.outputs)))
+        outputs = MappingProxyType(dict(self.outputs))
+        object.__setattr__(self, "outputs", outputs)
+        object.__setattr__(
+            self,
+            "output_carriers",
+            _freeze_carriers(self.output_carriers, outputs),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema": STAGE_RESPONSE_SCHEMA,
             "version": STAGE_WIRE_VERSION,
-            "stage": self.stage_id,
-            "contract": self.contract_id,
-            "attempt": self.attempt_id,
-            "invocation": self.invocation_id,
             "outputs": dict(self.outputs),
+            "output_carriers": dict(self.output_carriers),
         }
 
     @classmethod
@@ -247,34 +190,12 @@ class StageResponseEnvelope:
             raise WorkflowExecutionError("remote stage response must be an object")
         _check_keys(
             data,
-            {
-                "schema",
-                "version",
-                "stage",
-                "contract",
-                "attempt",
-                "invocation",
-                "outputs",
-            },
+            {"schema", "version", "outputs", "output_carriers"},
         )
-        if data["schema"] != STAGE_RESPONSE_SCHEMA:
-            raise WorkflowExecutionError(
-                f"unsupported remote response schema {data['schema']!r}"
-            )
-        if (
-            not isinstance(data["version"], int)
-            or isinstance(data["version"], bool)
-            or data["version"] != STAGE_WIRE_VERSION
-        ):
-            raise WorkflowExecutionError(
-                f"unsupported remote response version {data['version']!r}"
-            )
+        _validate_header(data, STAGE_RESPONSE_SCHEMA)
         return cls(
-            stage_id=data["stage"],
-            contract_id=data["contract"],
-            attempt_id=data["attempt"],
-            invocation_id=data["invocation"],
             outputs=data["outputs"],
+            output_carriers=data["output_carriers"],
         )
 
 
@@ -290,13 +211,7 @@ class _DynamoClient(Protocol):
 
 
 class RemoteStageClient:
-    """Adapt one unary workflow stage call to Dynamo's streaming client API.
-
-    ``StageDispatcher`` owns this adapter for remote bindings. It sends the
-    stage's contract-shaped input mapping directly and requires exactly one
-    output mapping from the endpoint stream, keeping transport iteration opaque
-    to ``StageRunner`` implementations.
-    """
+    """Adapt a unary workflow call to Dynamo's streaming endpoint API."""
 
     def __init__(self, client: _DynamoClient) -> None:
         self._client = client
@@ -310,16 +225,21 @@ class RemoteStageClient:
         output_transfers: Mapping[str, tuple[str, ...]],
     ) -> Mapping[str, Any]:
         context.raise_if_cancelled()
+        stage_label = f"remote stage {stage_id!r} with contract {contract.id!r}"
+        wire_inputs: dict[str, Any] = {}
+        input_carriers: dict[str, str] = {}
+        for name, value in inputs.items():
+            if isinstance(value, NixlCarriedValue):
+                wire_inputs[name] = dict(value.value)
+                input_carriers[name] = NIXL_CARRIER
+            else:
+                wire_inputs[name] = value
         request = StageRequestEnvelope(
-            workflow_name=context.workflow_name,
-            stage_id=stage_id,
-            contract_id=contract.id,
-            attempt_id=context.attempt_id,
-            invocation_id=context.invocation_id,
-            timeout_seconds=context.remaining_time(),
-            inputs=inputs,
+            inputs=wire_inputs,
+            input_carriers=input_carriers,
             output_transfers=output_transfers,
         )
+
         transport_context = None
         if context.request_context is not None:
             detach = getattr(context.request_context, "detached", None)
@@ -331,7 +251,7 @@ class RemoteStageClient:
 
         try:
             stream = await self._client.round_robin(
-                dict(inputs), annotated=False, context=transport_context
+                request.to_dict(), annotated=False, context=transport_context
             )
         except asyncio.CancelledError:
             raise
@@ -339,6 +259,7 @@ class RemoteStageClient:
             raise WorkflowExecutionError(
                 f"{stage_label} request failed at the transport boundary"
             ) from error
+
         try:
             try:
                 response = await stream.__anext__()
@@ -354,10 +275,7 @@ class RemoteStageClient:
                 raise WorkflowExecutionError(
                     f"{stage_label} returned multiple response mappings"
                 )
-            if not isinstance(response, Mapping):
-                raise WorkflowExecutionError(
-                    f"{stage_label} returned a non-mapping response"
-                )
+            envelope = StageResponseEnvelope.from_dict(response)
         except BaseException as error:
             if transport_context is not None:
                 transport_context.stop_generating()
@@ -371,17 +289,16 @@ class RemoteStageClient:
                     f"{stage_label} response failed at the transport boundary"
                 ) from error
             raise
-        return dict(response)
+
+        outputs: dict[str, Any] = dict(envelope.outputs)
+        for name, carrier in envelope.output_carriers.items():
+            if carrier == NIXL_CARRIER:
+                outputs[name] = NixlCarriedValue(envelope.outputs[name])
+        return outputs
 
 
 class RemoteStageServer:
-    """Adapt a unary ``StageRunner`` to Dynamo's streaming endpoint API.
-
-    Dynamo ``serve_endpoint`` handlers must return an async iterator. This
-    adapter validates the direct input mapping, awaits ``StageRunner.run`` once,
-    validates its output mapping, and yields that mapping as one response frame
-    so stage implementations never write transport-level ``yield``.
-    """
+    """Adapt a unary ``StageRunner`` to Dynamo's streaming endpoint API."""
 
     def __init__(
         self,
@@ -396,25 +313,6 @@ class RemoteStageServer:
             raise WorkflowValidationError(
                 "remote tensor_carrier must implement TensorCarrier"
             )
-        unsupported_ports = sorted(
-            f"{direction}.{name}:{value_spec.type}"
-            for direction, ports in (
-                ("inputs", runner.contract.inputs),
-                ("outputs", runner.contract.outputs),
-            )
-            for name, spec in ports.items()
-            if (
-                value_spec := _require_value_spec(
-                    spec, f"remote stage {stage_id!r} {direction}.{name}"
-                )
-            ).type
-            not in INLINE_VALUE_TYPES
-            and not (value_spec.type == "tensor" and tensor_carrier is not None)
-        )
-        if unsupported_ports:
-            raise WorkflowValidationError(
-                "inline remote server does not support ports " f"{unsupported_ports}"
-            )
         self._stage_id = stage_id
         self._runner = runner
         self._tensor_carrier = tensor_carrier
@@ -422,17 +320,31 @@ class RemoteStageServer:
     async def generate(
         self, request: Mapping[str, Any], context: Any = None
     ) -> AsyncIterator[dict[str, Any]]:
-        if not isinstance(request, Mapping):
-            raise WorkflowExecutionError("remote stage request must be a mapping")
-        inputs = MappingProxyType(dict(request))
-        transport_context = context
-
-        loop = asyncio.get_running_loop()
-        deadline = (
-            None
-            if envelope.timeout_seconds is None
-            else loop.time() + envelope.timeout_seconds
+        envelope = StageRequestEnvelope.from_dict(request)
+        expected_inputs = set(self._runner.contract.inputs)
+        actual_inputs = set(envelope.inputs)
+        if actual_inputs != expected_inputs:
+            raise WorkflowExecutionError(
+                f"remote stage {self._stage_id!r} inputs differ from its contract; "
+                f"missing={sorted(expected_inputs - actual_inputs)}, "
+                f"extra={sorted(actual_inputs - expected_inputs)}"
+            )
+        unknown_transfer_outputs = set(envelope.output_transfers) - set(
+            self._runner.contract.outputs
         )
+        if unknown_transfer_outputs:
+            raise WorkflowExecutionError(
+                f"remote stage {self._stage_id!r} has transfer requests for "
+                f"unknown outputs {sorted(unknown_transfer_outputs)}"
+            )
+
+        request_id = uuid.uuid4().hex
+        if context is not None:
+            get_request_id = getattr(context, "id", None)
+            if callable(get_request_id):
+                candidate = get_request_id()
+                if isinstance(candidate, str) and candidate:
+                    request_id = candidate
         cancelled = asyncio.Event()
         stage_context = StageContext(
             workflow_name=None,
@@ -441,48 +353,23 @@ class RemoteStageServer:
             invocation_id=request_id,
             deadline=None,
             _cancelled=cancelled,
-            request_context=transport_context,
+            request_context=context,
         )
 
-        async def invoke() -> dict[str, Any]:
-            expected_inputs = set(self._runner.contract.inputs)
-            actual_inputs = set(envelope.inputs)
-            if actual_inputs != expected_inputs:
-                raise WorkflowExecutionError(
-                    f"remote stage {self._stage_id!r} inputs differ from its contract; "
-                    f"missing={sorted(expected_inputs - actual_inputs)}, "
-                    f"extra={sorted(actual_inputs - expected_inputs)}"
-                )
-
+        async def invoke() -> tuple[dict[str, Any], dict[str, str]]:
             runner_inputs = dict(envelope.inputs)
-            for name, spec in self._runner.contract.inputs.items():
-                value_spec = _require_value_spec(
-                    spec, f"remote stage {self._stage_id!r} input {name!r}"
-                )
-                if value_spec.type == "tensor":
-                    if self._tensor_carrier is None:
-                        raise WorkflowExecutionError(
-                            f"remote stage {self._stage_id!r} has no NIXL tensor carrier"
-                        )
-                    runner_inputs[name] = await self._tensor_carrier.import_tensor(
-                        envelope.inputs[name]
+            for name in envelope.input_carriers:
+                if self._tensor_carrier is None:
+                    raise WorkflowExecutionError(
+                        f"remote stage {self._stage_id!r} has no NIXL tensor carrier"
                     )
-                _validate_value(
-                    value_spec,
-                    runner_inputs[name],
-                    f"remote stage {self._stage_id!r} input {name!r}",
+                runner_inputs[name] = await self._tensor_carrier.import_tensor(
+                    envelope.inputs[name]
                 )
 
-            unknown_transfer_outputs = set(envelope.output_transfers) - set(
-                self._runner.contract.outputs
+            result = await self._runner.run(
+                MappingProxyType(runner_inputs), stage_context
             )
-            if unknown_transfer_outputs:
-                raise WorkflowExecutionError(
-                    f"remote stage {self._stage_id!r} has transfer requests for "
-                    f"unknown outputs {sorted(unknown_transfer_outputs)}"
-                )
-
-            result = await self._runner.run(MappingProxyType(runner_inputs), context)
             if not isinstance(result, Mapping):
                 raise WorkflowExecutionError(
                     f"remote stage {self._stage_id!r} returned a non-mapping result"
@@ -495,56 +382,72 @@ class RemoteStageServer:
                     f"missing={sorted(expected_outputs - actual_outputs)}, "
                     f"extra={sorted(actual_outputs - expected_outputs)}"
                 )
-            outputs = dict(result)
-            for name, spec in self._runner.contract.outputs.items():
-                _validate_value(
-                    spec,
-                    outputs[name],
-                    f"remote stage {self._stage_id!r} output {name!r}",
-                )
-            wire_outputs: dict[str, Any] = dict(outputs)
-            for name, spec in self._runner.contract.outputs.items():
-                value_spec = _require_value_spec(
-                    spec, f"remote stage {self._stage_id!r} output {name!r}"
-                )
-                transfer_ids = envelope.output_transfers.get(name, ())
-                if value_spec.type != "tensor":
-                    if transfer_ids:
-                        raise WorkflowExecutionError(
-                            f"remote stage {self._stage_id!r} received NIXL transfers "
-                            f"for non-tensor output {name!r}"
-                        )
+
+            wire_outputs = dict(result)
+            output_carriers: dict[str, str] = {}
+            for name, value in result.items():
+                if self._tensor_carrier is None or not self._tensor_carrier.can_export(
+                    value
+                ):
                     continue
-                if self._tensor_carrier is None:
-                    raise WorkflowExecutionError(
-                        f"remote stage {self._stage_id!r} has no NIXL tensor carrier"
-                    )
+                transfer_ids = envelope.output_transfers.get(name, ())
                 if not transfer_ids:
                     raise WorkflowExecutionError(
-                        f"remote tensor output {name!r} has no consumer transfers"
+                        f"remote tensor output {name!r} has no NIXL consumer transfers"
                     )
-                transfers = {}
                 references = await self._tensor_carrier.export_tensor_fanout(
-                    outputs[name], transfer_ids
+                    value, transfer_ids
                 )
                 if set(references) != set(transfer_ids):
                     raise WorkflowExecutionError(
                         f"remote tensor output {name!r} NIXL references differ "
                         "from requested consumer transfers"
                     )
-                for transfer_id, reference in references.items():
-                    transfers[transfer_id] = NixlTensorRef.from_dict(reference)
-                wire_outputs[name] = NixlTensorFanout(transfers).to_dict()
-            return wire_outputs
+                wire_outputs[name] = NixlTensorFanout(
+                    {
+                        transfer_id: NixlTensorRef.from_dict(reference)
+                        for transfer_id, reference in references.items()
+                    }
+                ).to_dict()
+                output_carriers[name] = NIXL_CARRIER
+            return wire_outputs, output_carriers
 
-        wire_outputs = await _run_with_stage_lifecycle(
-            invoke(), context, transport_context
-        )
+        invocation = asyncio.create_task(invoke(), name=f"workflow-remote:{request_id}")
+        transport_task: asyncio.Future[Any] | None = None
+        if context is not None:
+            wait_for_stop = getattr(context, "async_killed_or_stopped", None)
+            if callable(wait_for_stop):
+                transport_task = asyncio.ensure_future(wait_for_stop())
+        try:
+            if transport_task is None:
+                wire_outputs, output_carriers = await invocation
+            else:
+                done, _ = await asyncio.wait(
+                    {invocation, transport_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if invocation in done:
+                    wire_outputs, output_carriers = invocation.result()
+                else:
+                    raise asyncio.CancelledError()
+        except BaseException:
+            cancelled.set()
+            if not invocation.done():
+                invocation.cancel()
+            await asyncio.gather(invocation, return_exceptions=True)
+            raise
+        finally:
+            if transport_task is not None and not transport_task.done():
+                transport_task.cancel()
+                await asyncio.gather(transport_task, return_exceptions=True)
 
+        if context is not None and (
+            bool(getattr(context, "is_stopped", lambda: False)())
+            or bool(getattr(context, "is_killed", lambda: False)())
+        ):
+            cancelled.set()
+            raise asyncio.CancelledError()
         yield StageResponseEnvelope(
-            stage_id=self._stage_id,
-            contract_id=self._runner.contract.id,
-            attempt_id=envelope.attempt_id,
-            invocation_id=envelope.invocation_id,
             outputs=wire_outputs,
+            output_carriers=output_carriers,
         ).to_dict()
