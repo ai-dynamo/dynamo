@@ -8,6 +8,7 @@
 //! [`crate::peer_discovery`].
 
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -85,6 +86,8 @@ pub struct Selector {
     /// Replication-bootstrap readiness: initial peer discovery plus KV-index
     /// recovery, or authoritative no-peer bootstrap. Latched once initialized.
     peer_ready: Option<Arc<AtomicBool>>,
+    /// Deferred peer KV-index recovery parameters (see [`PeerRecovery`]).
+    peer_recovery: Option<PeerRecovery>,
 }
 
 /// Local bookkeeping for desired-state reconciliation.
@@ -102,6 +105,21 @@ struct ReconcileState {
 struct ReplicationConfig {
     service_name: String,
     ports: PeerPorts,
+}
+
+/// Deferred peer KV-index recovery. Parameters are resolved at selector
+/// construction, but the recovery itself is deliberately NOT run there:
+/// workers must register (and their ZMQ KV-event listeners subscribe) first,
+/// so the peer dump merges with already-buffered live events instead of
+/// leaving a gap. The EPP router starts worker registration, then calls
+/// [`Selector::start_peer_recovery`].
+struct PeerRecovery {
+    namespace: String,
+    service_name: String,
+    ports: PeerPorts,
+    self_ip: IpAddr,
+    /// Shared with the `/dump` endpoint: 503 until recovery/bootstrap done.
+    recovered: Arc<AtomicBool>,
 }
 
 struct StartupCancellation {
@@ -225,12 +243,10 @@ impl Selector {
                     "DYN_EPP_PEER_SERVICE requires a prebuilt SelectionService with replica sync enabled"
                 )
             })?;
-            if !service.list_workers(None, None).is_empty() {
-                anyhow::bail!(
-                    "replicated prebuilt SelectionService must have an empty worker catalog before \
-                     KV-index recovery"
-                );
-            }
+            // Workers may already be registered here: recovery runs only after
+            // the topology adapter starts (subscribe-first, see
+            // `start_peer_recovery`), so an empty catalog is no longer a
+            // precondition.
             Some(replica_sync_port)
         } else {
             None
@@ -268,6 +284,7 @@ impl Selector {
         let cancel = CancellationToken::new();
         let mut startup = StartupCancellation::new(cancel.clone());
 
+        let mut peer_recovery = None;
         let peer_ready = if let Some(replication) = replication {
             // In replicated mode, we need to exclude ourselves from the peer set which requires the POD_IP
             let self_ip = std::env::var("POD_IP")
@@ -313,17 +330,18 @@ impl Selector {
                         recovered.clone(),
                     )
                     .await?;
-                    crate::peer_discovery::spawn(
-                        service.clone(),
-                        &cfg.namespace,
-                        &replication.service_name,
-                        replication.ports.replica_sync,
-                        selection_http_port,
-                        self_ip.to_string(),
-                        cancel.clone(),
-                        recovered.clone(),
-                    )
-                    .await?;
+                    // KV-index recovery itself is deferred: worker registration
+                    // (and with it the ZMQ KV-event subscription) must start
+                    // first so the dump overlaps the live event stream instead
+                    // of leaving a gap. `start_peer_recovery` runs it once the
+                    // EPP router has started the topology adapter.
+                    peer_recovery = Some(PeerRecovery {
+                        namespace: cfg.namespace.clone(),
+                        service_name: replication.service_name,
+                        ports: replication.ports,
+                        self_ip,
+                        recovered: recovered.clone(),
+                    });
                     Some(recovered)
                 }
             }
@@ -343,7 +361,44 @@ impl Selector {
             cancel,
             reconcile_state: Mutex::new(ReconcileState::default()),
             peer_ready,
+            peer_recovery,
         })
+    }
+
+    /// Run peer KV-index recovery now that worker registration has started.
+    ///
+    /// Subscribe-first ordering: the topology adapter registers workers (their
+    /// ZMQ KV-event listeners begin buffering) before this runs, so the peer
+    /// dump covers past history and the buffered events cover everything after
+    /// it — only an overlap remains, absorbed idempotently. Blocks until
+    /// recovery succeeds or no peer exists (empty bootstrap). No-op when
+    /// replication is disabled or the Service lacks `selection-http`.
+    pub(crate) async fn start_peer_recovery(&self) -> Result<()> {
+        let Some(recovery) = &self.peer_recovery else {
+            return Ok(());
+        };
+        let selection_http_port = recovery
+            .ports
+            .selection_http
+            .expect("guarded by construction");
+
+        // Give the topology adapter a moment to register workers before the
+        // dump: the snapshot then overlaps the live event stream rather than
+        // racing ahead of it. Bounded — a slow cold start must not hang the
+        // replica forever; the peer dump is still the best available state.
+        wait_for_registered_worker(&self.service, &self.cancel).await?;
+
+        crate::peer_discovery::spawn(
+            self.service.clone(),
+            &recovery.namespace,
+            &recovery.service_name,
+            recovery.ports.replica_sync,
+            selection_http_port,
+            recovery.self_ip.to_string(),
+            self.cancel.clone(),
+            recovery.recovered.clone(),
+        )
+        .await
     }
 
     pub fn peer_ready(&self) -> Option<Arc<AtomicBool>> {
@@ -505,6 +560,48 @@ impl Selector {
     }
 }
 
+/// Bounded wait for at least one registered worker before the peer dump, so
+/// the snapshot overlaps the already-buffered live event stream (subscribe-
+/// first). A cold start that never registers a worker in time proceeds anyway:
+/// the peer dump is then the best available state.
+const PEER_RECOVERY_WORKER_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+async fn wait_for_registered_worker(
+    service: &SelectionService,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    if !service.list_workers(None, None).is_empty() {
+        return Ok(());
+    }
+    tracing::info!(
+        "Waiting up to {PEER_RECOVERY_WORKER_WAIT:?} for a registered worker before peer \
+         KV-index recovery (subscribe-first)"
+    );
+    let deadline = tokio::time::Instant::now() + PEER_RECOVERY_WORKER_WAIT;
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                anyhow::bail!(
+                    "EPP startup cancelled while waiting for workers before peer recovery"
+                )
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                tracing::warn!(
+                    "No worker registered within {PEER_RECOVERY_WORKER_WAIT:?}; proceeding with \
+                     peer KV-index recovery anyway (best effort)"
+                );
+                return Ok(());
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
+                if !service.list_workers(None, None).is_empty() {
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
 impl Drop for Selector {
     fn drop(&mut self) {
         // Stop the peer-discovery watch; the service's own Drop stops the core,
@@ -573,14 +670,6 @@ models:
             router_policy_config: Some(policy_file.path().to_string_lossy().into_owned()),
             ..Default::default()
         }
-    }
-
-    fn free_tcp_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("reserve test port")
-            .local_addr()
-            .expect("read test port")
-            .port()
     }
 
     /// Minimal single-replica config (no peer service, so no cluster access).
@@ -1010,31 +1099,6 @@ models:
             error
                 .to_string()
                 .contains("SelectionService with replica sync enabled"),
-            "{error}"
-        );
-    }
-
-    #[tokio::test]
-    async fn prebuilt_service_rejects_existing_workers_before_recovery() {
-        let service = SelectionServiceBuilder::new(KvRouterConfig::default())
-            .indexer_threads(1)
-            .replica_sync(free_tcp_port(), Vec::new())
-            .build()
-            .await
-            .expect("replica-sync selection service should build");
-        service
-            .upsert_worker(Selector::worker_request(&incomplete_registration(1)))
-            .await
-            .expect("incomplete worker should still enter the catalog");
-
-        let mut cfg = test_config();
-        cfg.peer_service = Some("does-not-exist".to_string());
-        let error = Selector::from_service(&cfg, service)
-            .await
-            .err()
-            .expect("prebuilt service with workers must be rejected");
-        assert!(
-            error.to_string().contains("empty worker catalog"),
             "{error}"
         );
     }
