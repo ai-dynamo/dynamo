@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput,
-    LLMEngineOutputExt, WorkerConfig, usage,
+    LLMEngineOutputExt, RlAdminBaseUrl, WorkerConfig, usage,
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::stream::BoxStream;
@@ -36,23 +36,9 @@ fn cancelled(state: &ResponseState) -> LLMEngineOutput {
     ))
 }
 
-pub(crate) fn validate_http_endpoint(value: &str) -> Result<String, DynamoError> {
-    let value = value.trim();
-    let parsed = url::Url::parse(value).map_err(|error| {
-        client::invalid_argument(format!("invalid --vllm-http-endpoint: {error}"))
-    })?;
-    let has_valid_authority = value
-        .split_once("://")
-        .is_some_and(|(_, authority)| !authority.is_empty() && !authority.starts_with('/'));
-    if !matches!(parsed.scheme(), "http" | "https")
-        || parsed.host_str().is_none()
-        || !has_valid_authority
-    {
-        return Err(client::invalid_argument(
-            "invalid --vllm-http-endpoint: expected an http:// or https:// URL with a host",
-        ));
-    }
-    Ok(value.to_string())
+pub(crate) fn parse_http_endpoint_arg(value: &str) -> Result<RlAdminBaseUrl, DynamoError> {
+    RlAdminBaseUrl::parse(value)
+        .map_err(|error| client::invalid_argument(format!("invalid --vllm-http-endpoint: {error}")))
 }
 
 impl VllmSidecarEngine {
@@ -124,7 +110,7 @@ impl VllmSidecarEngine {
         let vllm_http_url = args
             .vllm_http_endpoint
             .as_deref()
-            .map(validate_http_endpoint)
+            .map(parse_http_endpoint_arg)
             .transpose()?;
         let transport = args.sidecar.grpc.config();
         let bootstrap_deadline = client::startup_deadline(transport.startup_deadline)?;

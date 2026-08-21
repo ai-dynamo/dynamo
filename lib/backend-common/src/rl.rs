@@ -4,6 +4,7 @@
 use std::{num::NonZeroU32, sync::Arc};
 
 use async_trait::async_trait;
+pub use dynamo_rl::RlAdminBaseUrl;
 use dynamo_runtime::component::{Endpoint, StartedEndpoint};
 use dynamo_runtime::engine_routes::EngineRouteRegistry;
 use dynamo_runtime::pipeline::network::Ingress;
@@ -30,22 +31,13 @@ pub(crate) struct RlEndpointConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RlWorkerMetadata {
     world_size: NonZeroU32,
-    admin_base_url: Option<String>,
+    admin_base_url: Option<RlAdminBaseUrl>,
 }
 
 impl RlWorkerMetadata {
-    pub fn new(world_size: u32, admin_base_url: Option<String>) -> anyhow::Result<Self> {
+    pub fn new(world_size: u32, admin_base_url: Option<RlAdminBaseUrl>) -> anyhow::Result<Self> {
         let world_size = NonZeroU32::new(world_size)
             .ok_or_else(|| anyhow::anyhow!("RL worker world size must be positive"))?;
-        let admin_base_url = admin_base_url
-            .map(|value| {
-                let value = value.trim();
-                if value.is_empty() {
-                    anyhow::bail!("RL admin base URL must not be blank");
-                }
-                Ok(value.to_string())
-            })
-            .transpose()?;
         Ok(Self {
             world_size,
             admin_base_url,
@@ -163,7 +155,7 @@ impl RlRouteHandler {
         if let Some(metadata) = &self.metadata {
             response["world_size"] = json!(metadata.world_size.get());
             if let Some(url) = &metadata.admin_base_url {
-                response["admin_base_url"] = json!(url);
+                response["admin_base_url"] = json!(url.as_str());
             }
         }
         response
@@ -197,8 +189,14 @@ mod tests {
             routes,
             system_url: "http://worker:8080".to_string(),
             metadata: Some(
-                RlWorkerMetadata::new(4, Some(" http://worker:8120 ".to_string()))
-                    .expect("valid metadata"),
+                RlWorkerMetadata::new(
+                    4,
+                    Some(
+                        RlAdminBaseUrl::parse(" http://worker:8120 ")
+                            .expect("valid admin base URL"),
+                    ),
+                )
+                .expect("valid metadata"),
             ),
         };
 
@@ -228,7 +226,7 @@ mod tests {
             "https://worker.example.com/admin#fragment",
         ] {
             assert!(
-                RlWorkerMetadata::new(1, Some(admin_base_url.to_string())).is_err(),
+                RlAdminBaseUrl::parse(admin_base_url).is_err(),
                 "accepted invalid admin base URL: {admin_base_url}"
             );
         }

@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use dynamo_backend_common::engine::RoutingHints;
 use dynamo_backend_common::{
     DisaggregationMode, FinishReason, GenerateContext, LLMEngine, MultimodalData, OutputOptions,
-    PrefillResult, PreprocessedRequest, RlWorkerMetadata, SamplingOptions, StopConditions,
+    PrefillResult, PreprocessedRequest, RlAdminBaseUrl, RlWorkerMetadata, SamplingOptions,
+    StopConditions,
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
@@ -24,7 +25,7 @@ use tonic_health::ServingStatus as HealthServingStatus;
 
 use crate::client::{CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
 use crate::convert::{ResponseState, build_generate_request};
-use crate::engine::{VllmSidecarEngine, validate_http_endpoint};
+use crate::engine::{VllmSidecarEngine, parse_http_endpoint_arg};
 use crate::json::{json_to_struct, struct_to_json};
 use crate::model::DiscoveredModel;
 use crate::proto as pb;
@@ -486,7 +487,9 @@ fn http_admin_endpoint_accepts_http_https_and_path_prefixes() {
         "https://worker.example.com/admin/v1",
     ] {
         assert_eq!(
-            validate_http_endpoint(endpoint).expect("valid HTTP admin endpoint"),
+            parse_http_endpoint_arg(endpoint)
+                .expect("valid HTTP admin endpoint")
+                .as_str(),
             endpoint
         );
     }
@@ -495,7 +498,7 @@ fn http_admin_endpoint_accepts_http_https_and_path_prefixes() {
 #[test]
 fn http_admin_endpoint_rejects_invalid_values() {
     for endpoint in ["", "worker:8120", "grpc://worker:8120", "https:///admin"] {
-        let error = validate_http_endpoint(endpoint).unwrap_err();
+        let error = parse_http_endpoint_arg(endpoint).unwrap_err();
         assert!(error.to_string().contains("--vllm-http-endpoint"));
     }
 }
@@ -908,8 +911,11 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     assert_eq!(
         worker.rl_metadata,
         Some(
-            RlWorkerMetadata::new(4, Some("http://worker:8120".to_string()))
-                .expect("valid RL metadata")
+            RlWorkerMetadata::new(
+                4,
+                Some(RlAdminBaseUrl::parse("http://worker:8120").expect("valid admin base URL"),),
+            )
+            .expect("valid RL metadata")
         )
     );
     let config = engine.start(0).await.expect("start");

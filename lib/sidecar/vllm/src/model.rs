@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_backend_common::{DynamoError, EngineConfig, LlmRegistration, RlWorkerMetadata};
+use dynamo_backend_common::{
+    DynamoError, EngineConfig, LlmRegistration, RlAdminBaseUrl, RlWorkerMetadata,
+};
 
 use crate::client;
 use crate::proto as pb;
@@ -103,7 +105,7 @@ impl DiscoveredModel {
 
     pub(crate) fn rl_worker_metadata(
         &self,
-        admin_base_url: Option<String>,
+        admin_base_url: Option<RlAdminBaseUrl>,
     ) -> Result<RlWorkerMetadata, DynamoError> {
         let parallelism = self.server.parallelism.as_ref().ok_or_else(|| {
             client::protocol_error("RL discovery requires vLLM parallelism metadata")
