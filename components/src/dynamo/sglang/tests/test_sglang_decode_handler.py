@@ -1096,13 +1096,11 @@ async def test_process_token_stream_treats_completion_usage_as_optional():
     assert chunks == [
         {
             "index": 0,
-            "raw_finish_reason": {"type": "stop"},
             "finish_reason": "stop",
             "token_ids": [],
         },
         {
             "index": 1,
-            "raw_finish_reason": {"type": "stop"},
             "finish_reason": "stop",
             "token_ids": [],
             "completion_usage": {
@@ -1644,7 +1642,6 @@ async def test_process_token_stream_removes_matched_hidden_stop_token():
     assert chunks == [
         {
             "index": 0,
-            "raw_finish_reason": {"type": "stop", "matched": 128001},
             "finish_reason": "stop",
             "token_ids": [101],
         }
@@ -1678,7 +1675,6 @@ async def test_process_token_stream_removes_plain_stop_token_and_keeps_reason():
     assert chunks == [
         {
             "index": 0,
-            "raw_finish_reason": {"type": "stop", "matched": 576},
             "finish_reason": "stop",
             "stop_reason": 576,
             "token_ids": [101],
@@ -1716,10 +1712,6 @@ async def test_process_token_stream_removes_matched_hidden_stop_token_sequence()
     assert chunks == [
         {
             "index": 0,
-            "raw_finish_reason": {
-                "type": "stop",
-                "matched": [128001, 128009],
-            },
             "finish_reason": "stop",
             "token_ids": [101],
         }
@@ -1762,10 +1754,6 @@ async def test_process_token_stream_buffers_split_hidden_stop_token_sequence():
         {"index": 0, "token_ids": [101]},
         {
             "index": 0,
-            "raw_finish_reason": {
-                "type": "stop",
-                "matched": [128001, 128009],
-            },
             "finish_reason": "stop",
             "token_ids": [],
         },
@@ -1807,7 +1795,6 @@ async def test_process_token_stream_trims_logprobs_for_suppressed_stop_token():
     assert chunks == [
         {
             "index": 0,
-            "raw_finish_reason": {"type": "stop", "matched": 128001},
             "finish_reason": "stop",
             "token_ids": [101],
             "log_probs": [-0.1],
@@ -1845,7 +1832,6 @@ async def test_process_token_stream_keeps_final_stop_when_hidden_token_removed_t
     assert chunks == [
         {
             "index": 0,
-            "raw_finish_reason": {"type": "stop", "matched": 128001},
             "finish_reason": "stop",
             "token_ids": [],
         }
@@ -1878,7 +1864,6 @@ async def test_process_token_stream_keeps_visible_stop_token():
     assert chunks == [
         {
             "index": 0,
-            "raw_finish_reason": {"type": "stop", "matched": 128001},
             "finish_reason": "stop",
             "stop_reason": 128001,
             "token_ids": [101, 128001],
@@ -1913,7 +1898,6 @@ async def test_process_token_stream_keeps_hidden_stop_token_when_match_is_not_ta
     assert chunks == [
         {
             "index": 0,
-            "raw_finish_reason": {"type": "stop", "matched": 128001},
             "finish_reason": "stop",
             "token_ids": [128001, 101],
         }

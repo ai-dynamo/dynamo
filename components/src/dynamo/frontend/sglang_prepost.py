@@ -28,6 +28,8 @@ from sglang.srt.parser.jinja_template_utils import (
 )
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 
+from dynamo.common.utils.engine_response import trailing_stop_prefix_len
+
 from .thinking import apply_default_thinking_mode_to_template_kwargs
 from .utils import PreprocessError, random_call_id
 
@@ -38,17 +40,6 @@ logger = logging.getLogger(__name__)
 # - JsonArrayParser: direct JSON array parsing under constrained decoding
 #   (tool_choice="required" or named function)
 ToolCallParserType: TypeAlias = FunctionCallParser | JsonArrayParser
-
-
-def _trailing_stop_prefix_len(text: str, stop_strings: set[str]) -> int:
-    if not text or not stop_strings:
-        return 0
-    max_len = min(len(text), max(len(stop) for stop in stop_strings))
-    for suffix_len in range(max_len, 0, -1):
-        suffix = text[-suffix_len:]
-        if any(stop.startswith(suffix) for stop in stop_strings):
-            return suffix_len
-    return 0
 
 
 @dataclass
@@ -993,6 +984,8 @@ class SglangStreamingPostProcessor:
         self._eos_token_ids = set(eos_token_ids or [])
         self._stop_strings = stop_strings or set()
         self._pending_stop_text = ""
+        self._locally_finished = False
+        self._local_stop_reason: str | None = None
 
         # Keep a small, known-complete prompt suffix as decode context. Generated
         # tokens are promoted to context only after they decode without a
@@ -1201,64 +1194,81 @@ class SglangStreamingPostProcessor:
             return None
         return {"content": content, "refusal": None}
 
-    def _matched_stop_string(self, raw_finish_reason: Any, text: str) -> str | None:
-        if not isinstance(raw_finish_reason, dict):
-            return None
-        if raw_finish_reason.get("type") != "stop":
-            return None
-        matched = raw_finish_reason.get("matched")
-        if isinstance(matched, str) and matched in self._stop_strings:
-            return matched
-        is_matched_token_id = isinstance(matched, int) and not isinstance(matched, bool)
-        is_matched_token_id_sequence = (
-            isinstance(matched, list)
-            and matched
+    @property
+    def locally_finished(self) -> bool:
+        return self._locally_finished
+
+    @property
+    def local_stop_reason(self) -> str | None:
+        return self._local_stop_reason
+
+    @property
+    def has_pending_stop_text(self) -> bool:
+        return bool(self._pending_stop_text)
+
+    def _matched_stop_string(self, stop_reason: Any) -> str | None:
+        if isinstance(stop_reason, str):
+            return stop_reason if stop_reason in self._stop_strings else None
+
+        if isinstance(stop_reason, int) and not isinstance(stop_reason, bool):
+            matched_ids = [stop_reason]
+        elif (
+            isinstance(stop_reason, list)
+            and stop_reason
             and all(
                 isinstance(token_id, int) and not isinstance(token_id, bool)
-                for token_id in matched
+                for token_id in stop_reason
             )
-        )
-        if is_matched_token_id or is_matched_token_id_sequence:
-            return max(
-                (stop for stop in self._stop_strings if text.endswith(stop)),
-                key=len,
-                default=None,
-            )
-        return None
+        ):
+            matched_ids = stop_reason
+        else:
+            return None
 
-    def _strip_stop_string_suffix(
-        self, text: str, matched_stop_string: str | None
-    ) -> str:
-        if not matched_stop_string or not text:
-            return text
-        # Compatibility guard for tokenizer/text paths that surface the matched
-        # stop string after detokenization while special tokens are preserved for
-        # reasoning/tool parsers.
-        if text.endswith(matched_stop_string):
-            suppressed_count = self._trailing_logprobs_count(matched_stop_string)
-            if suppressed_count:
-                del self._pending_logprobs_content[-suppressed_count:]
-            return text[: -len(matched_stop_string)]
-        return text
+        matched = self.tokenizer.decode(matched_ids, skip_special_tokens=False)
+        return matched if matched in self._stop_strings else None
+
+    def _find_stop_string(self, text: str, stop_reason: Any) -> tuple[int, str] | None:
+        matched = self._matched_stop_string(stop_reason)
+        candidates = self._stop_strings
+        if matched is not None:
+            candidates = {matched, *candidates}
+
+        matches = (
+            (index, stop != matched, -len(stop), stop)
+            for stop in candidates
+            if (index := text.find(stop)) >= 0
+        )
+        first = min(matches, default=None)
+        return (first[0], first[3]) if first is not None else None
 
     def _filter_stop_string_delta(
         self,
         text: str,
         finish_reason: str | None,
-        raw_finish_reason: Any,
-    ) -> str:
+        stop_reason: Any,
+    ) -> tuple[str, bool]:
         text = self._pending_stop_text + text
         self._pending_stop_text = ""
-        matched_stop_string = self._matched_stop_string(raw_finish_reason, text)
-        text = self._strip_stop_string_suffix(text, matched_stop_string)
-        if finish_reason or not text or not self._stop_strings:
-            return text
 
-        pending_len = _trailing_stop_prefix_len(text, self._stop_strings)
+        match = self._find_stop_string(text, stop_reason)
+        if match is not None:
+            match_index, matched_stop_string = match
+            suppressed_text = text[match_index:]
+            suppressed_count = self._trailing_logprobs_count(suppressed_text)
+            if suppressed_count:
+                del self._pending_logprobs_content[-suppressed_count:]
+            self._locally_finished = True
+            self._local_stop_reason = matched_stop_string
+            return text[:match_index], True
+
+        if finish_reason or not text or not self._stop_strings:
+            return text, False
+
+        pending_len = trailing_stop_prefix_len(text, self._stop_strings)
         if pending_len:
             self._pending_stop_text = text[-pending_len:]
-            return text[:-pending_len]
-        return text
+            return text[:-pending_len], False
+        return text, False
 
     def _parse_reasoning_delta(
         self, delta_text: str, finish_reason: str | None
@@ -1319,14 +1329,13 @@ class SglangStreamingPostProcessor:
         Returns:
             OpenAI choice dict or ``None`` if nothing to emit yet.
         """
+        if self._locally_finished:
+            return None
+
         raw_ids = engine_response.get("token_ids")
         token_ids = raw_ids if isinstance(raw_ids, list) else list(raw_ids or [])
-        raw_finish_reason = engine_response.get(
-            "raw_finish_reason", engine_response.get("finish_reason")
-        )
         finish_reason = engine_response.get("finish_reason")
-        if isinstance(finish_reason, dict):
-            finish_reason = finish_reason.get("type")
+        stop_reason = engine_response.get("stop_reason")
         log_probs = engine_response.get("log_probs")
         top_logprobs = engine_response.get("top_logprobs")
         if finish_reason is not None:
@@ -1351,9 +1360,11 @@ class SglangStreamingPostProcessor:
             if openai_logprobs is not None:
                 self._pending_logprobs_content.extend(openai_logprobs["content"])
         self._logprob_context_ids = (self._logprob_context_ids + token_ids)[-4:]
-        delta_text = self._filter_stop_string_delta(
-            delta_text, finish_reason, raw_finish_reason
+        delta_text, locally_finished = self._filter_stop_string_delta(
+            delta_text, finish_reason, stop_reason
         )
+        if locally_finished:
+            finish_reason = "stop"
 
         if self._fast_plain_text:
             if delta_text:
