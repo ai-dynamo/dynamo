@@ -1764,6 +1764,7 @@ class KvRouterConfig:
         router_queue_policy: str = "fcfs",
         use_remote_indexer: bool = False,
         serve_indexer: bool = False,
+        enable_session_prefix_index: bool = False,
         shared_cache_multiplier: float = 0.0,
         shared_cache_type: str = "none",
         router_predicted_ttl_secs: Optional[float] = None,
@@ -1836,6 +1837,10 @@ class KvRouterConfig:
                 "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.
             use_remote_indexer: Query a remote KV indexer served from the worker component (default: False).
             serve_indexer: Serve this router's local indexer from the worker component (default: False).
+            enable_session_prefix_index: Track per-session block lineage in a logical prefix index that outlives engine cache eviction (default: False).
+                Lineage is currently partial: the router feeds the index from routing-lookup matches only. Stored-block KV events carry no session ID, so blocks a session produced but never matched on a later lookup are not recorded.
+                The index neither holds nor restores KV cache, so a match is a routing hint rather than a guarantee that the blocks are still resident.
+                Retention is bounded: a session is released when a request marks it final, and failing that the least recently used session is evicted once the tracked-session cap is reached.
             shared_cache_multiplier: Credit multiplier for shared cache hits beyond the device prefix (default: 0.0).
             shared_cache_type: External shared KV cache type, "none" or "hicache" (default: "none").
             conditional_disagg_enabled: Enable conditional-disagg bypass from prefill to decode (default: False).
