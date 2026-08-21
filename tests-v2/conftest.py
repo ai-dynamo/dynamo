@@ -38,6 +38,16 @@ def pytest_addoption(parser):
     )
     group.addoption("--dynamo-hf-cache", default=None, help="Host HF cache to mount.")
     group.addoption("--dynamo-ready-timeout", type=float, default=900.0)
+    group.addoption(
+        "--dynamo-tool-parser",
+        default=None,
+        help="Worker --dyn-tool-call-parser (e.g. hermes). Enables TOOL_CALLING.",
+    )
+    group.addoption(
+        "--dynamo-reasoning-parser",
+        default=None,
+        help="Worker --dyn-reasoning-parser (e.g. qwen3). Enables REASONING_PARSER.",
+    )
 
 
 def pytest_configure(config):
@@ -55,8 +65,14 @@ def dynamo(request):
         instance = Dynamo.attach(url, model=None)
     else:
         gpus = opt("--dynamo-gpus")
+        worker_args = []
+        if opt("--dynamo-tool-parser"):
+            worker_args += ["--dyn-tool-call-parser", opt("--dynamo-tool-parser")]
+        if opt("--dynamo-reasoning-parser"):
+            worker_args += ["--dyn-reasoning-parser", opt("--dynamo-reasoning-parser")]
         instance = Dynamo.deploy(
             Docker(
+                worker_args=worker_args,
                 image=opt("--dynamo-image") or DEFAULT_IMAGE,
                 model=opt("--dynamo-model"),
                 backend=opt("--dynamo-backend"),

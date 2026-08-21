@@ -19,6 +19,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from .capabilities import Capability, Report, all_unknown, from_worker_flags
+
 # Per-backend differences, kept in one place. vLLM takes --model; the others
 # take --model-path.
 BACKENDS: Dict[str, Dict[str, str]] = {
@@ -52,6 +54,9 @@ class Deployment:
     def logs(self, tail: int = 200) -> str:
         raise NotControllable("no deployment handle; logs are unavailable")
 
+    def capabilities(self) -> Dict[Capability, Report]:  # pragma: no cover
+        raise NotImplementedError
+
 
 @dataclass
 class Attached(Deployment):
@@ -61,6 +66,10 @@ class Attached(Deployment):
 
     def start(self) -> str:
         return self.base_url
+
+    def capabilities(self) -> Dict[Capability, Report]:
+        """We did not launch it, so its flags are not ours to read."""
+        return all_unknown(f"attached:{self.base_url}")
 
 
 @dataclass
@@ -111,6 +120,20 @@ class Docker(Deployment):
             "--discovery-backend file &\n"
             f"exec {shlex.join(worker)}\n"
         )
+
+    def capabilities(self) -> Dict[Capability, Report]:
+        """Derived from the flags this deployment was launched with."""
+        flags: Dict[str, str] = {}
+        args = list(self.worker_args)
+        for i, token in enumerate(args):
+            if token.startswith("--"):
+                value = (
+                    args[i + 1]
+                    if i + 1 < len(args) and not args[i + 1].startswith("--")
+                    else ""
+                )
+                flags[token[2:]] = value
+        return from_worker_flags(flags, f"docker:{self.image}", backend=self.backend)
 
     def _docker(self, *args: str, check: bool = True) -> str:
         proc = subprocess.run(

@@ -52,3 +52,24 @@ class Http:
     def post_json(self, path: str, body: Dict[str, Any]) -> Any:
         raw = self._request(path, json.dumps(body).encode(), "application/json")
         return json.loads(raw)
+
+    def post_sse(self, path: str, body: Dict[str, Any]):
+        """Yield decoded SSE ``data:`` payloads, skipping the [DONE] sentinel."""
+        url = f"{self.base_url}{path}"
+        headers = dict(self.headers)
+        headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(
+            url, data=json.dumps(body).encode(), headers=headers
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                for raw in resp:
+                    line = raw.decode(errors="replace").strip()
+                    if not line.startswith("data: "):
+                        continue
+                    payload = line[6:]
+                    if payload == "[DONE]":
+                        return
+                    yield json.loads(payload)
+        except urllib.error.HTTPError as exc:
+            raise HttpError(exc.code, exc.read().decode(errors="replace"), url) from exc

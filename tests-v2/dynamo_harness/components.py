@@ -10,10 +10,37 @@ A component owns its wire interface *and* the waiting policy for it. Tests call
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .transport import Http, HttpError
+
+
+@dataclass
+class StreamResult:
+    """A streamed chat response, reassembled.
+
+    Tool calls arrive as deltas keyed by index -- id and name in one chunk,
+    argument fragments across many. Reassembling that is protocol detail and
+    belongs here, not in a test.
+    """
+
+    content: str = ""
+    reasoning_content: str = ""
+    tool_calls: List[Dict[str, Any]] = field(default_factory=list)
+    finish_reason: Optional[str] = None
+    model: str = ""
+    chunks: int = 0
+    ttft_ms: float = 0.0
+    raw_chunks: List[Dict[str, Any]] = field(default_factory=list)
+
+    def assistant_message(self) -> Dict[str, Any]:
+        """This turn, shaped for sending back as conversation history."""
+        return {
+            "role": "assistant",
+            "content": self.content or None,
+            "tool_calls": self.tool_calls,
+        }
 
 
 @dataclass
@@ -82,6 +109,86 @@ class Frontend:
         body.update(kw)
         response = self.http.post_json("/v1/completions", body)
         return (response.get("choices") or [{}])[0].get("text", "")
+
+    def stream_chat(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        max_tokens: int = 4096,
+        **kw: Any,
+    ) -> StreamResult:
+        """Stream a chat completion and return the reassembled result."""
+        body: Dict[str, Any] = {
+            "model": kw.pop("model", None) or self._model(),
+            "messages": messages,
+            "stream": True,
+            "max_tokens": max_tokens,
+        }
+        if tools is not None:
+            body["tools"] = tools
+        body.update(kw)
+
+        result = StreamResult()
+        by_index: Dict[int, Dict[str, Any]] = {}
+        started = time.monotonic()
+        content: List[str] = []
+        reasoning: List[str] = []
+
+        for chunk in self.http.post_sse("/v1/chat/completions", body):
+            result.raw_chunks.append(chunk)
+            result.chunks += 1
+            if result.chunks == 1:
+                result.ttft_ms = (time.monotonic() - started) * 1000.0
+            result.model = chunk.get("model") or result.model
+
+            for choice in chunk.get("choices") or []:
+                delta = choice.get("delta") or {}
+                if delta.get("content"):
+                    content.append(delta["content"])
+                if delta.get("reasoning_content"):
+                    reasoning.append(delta["reasoning_content"])
+                for call in delta.get("tool_calls") or []:
+                    self._merge_tool_delta(by_index, call)
+                if choice.get("finish_reason"):
+                    result.finish_reason = choice["finish_reason"]
+
+        result.content = "".join(content)
+        result.reasoning_content = "".join(reasoning)
+        result.tool_calls = [by_index[i] for i in sorted(by_index)]
+        return result
+
+    @staticmethod
+    def _merge_tool_delta(
+        by_index: Dict[int, Dict[str, Any]], call: Dict[str, Any]
+    ) -> None:
+        index = call.get("index", 0)
+        entry = by_index.setdefault(
+            index,
+            {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+        )
+        if call.get("id"):
+            if entry["id"] and entry["id"] != call["id"]:
+                raise AssertionError(
+                    f"tool call id changed within index {index}: "
+                    f"{entry['id']} -> {call['id']}"
+                )
+            entry["id"] = call["id"]
+        if call.get("type"):
+            entry["type"] = call["type"]
+        function = call.get("function") or {}
+        if function.get("name"):
+            if (
+                entry["function"]["name"]
+                and entry["function"]["name"] != function["name"]
+            ):
+                raise AssertionError(
+                    f"tool name changed within index {index}: "
+                    f"{entry['function']['name']} -> {function['name']}"
+                )
+            entry["function"]["name"] = function["name"]
+        if function.get("arguments"):
+            entry["function"]["arguments"] += function["arguments"]
 
     def metrics(self) -> str:
         return self.http.get_text("/metrics")

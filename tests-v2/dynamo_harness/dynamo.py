@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
+from .capabilities import Capability, Report, Verdict, all_unknown
 from .components import Frontend
 from .deployment import Attached, Deployment, NotControllable
 from .transport import Http
@@ -58,6 +59,33 @@ class Dynamo:
         if not self.frontend:
             raise RuntimeError("this Dynamo has no frontend")
         return self.frontend.wait_until_serving(timeout=timeout)
+
+    def capabilities(self) -> Dict[Capability, Report]:
+        if self.deployment is None:
+            return all_unknown("no deployment handle")
+        return self.deployment.capabilities()
+
+    def check(self, capability: Capability) -> Report:
+        """Three-valued: SATISFIED / UNSATISFIED / UNKNOWN, with a reason."""
+        return self.capabilities().get(
+            capability, Report(capability, Verdict.UNKNOWN, "not modelled", "n/a")
+        )
+
+    def require(self, capability: Capability) -> None:
+        """Skip, with attribution, unless the deployment supports this.
+
+        UNKNOWN is reported distinctly from UNSATISFIED so that "we could not
+        tell" is never silently recorded as "not supported" -- and so CI can
+        gate on it (see --on-unknown-requirement).
+        """
+        import pytest  # local: the harness itself does not depend on pytest
+
+        report = self.check(capability)
+        if report.verdict is Verdict.SATISFIED:
+            return
+        if report.verdict is Verdict.UNKNOWN:
+            pytest.skip(f"UNKNOWN requirement: {report}")
+        pytest.skip(f"unsupported: {report}")
 
     def require_deployment(self) -> Deployment:
         """For tests that need to restart or inspect infrastructure."""

@@ -3,7 +3,8 @@
 
 """Minimal component-oriented test harness (DEP 0017 skeleton)."""
 
-from .components import Frontend
+from .capabilities import Capability, Report, Verdict
+from .components import Frontend, StreamResult
 from .deployment import (
     BACKENDS,
     DEFAULT_IMAGE,
@@ -17,6 +18,10 @@ from .transport import Http, HttpError
 
 __all__ = [
     "Attached",
+    "Capability",
+    "Report",
+    "StreamResult",
+    "Verdict",
     "BACKENDS",
     "DEFAULT_IMAGE",
     "Deployment",

@@ -45,7 +45,28 @@ pytest tests-v2 --dynamo-backend sglang \
 ```
 
 Options: `--dynamo-url`, `--dynamo-image`, `--dynamo-backend`, `--dynamo-model`,
-`--dynamo-port`, `--dynamo-gpus`, `--dynamo-hf-cache`, `--dynamo-ready-timeout`.
+`--dynamo-port`, `--dynamo-gpus`, `--dynamo-hf-cache`, `--dynamo-ready-timeout`,
+`--dynamo-tool-parser`, `--dynamo-reasoning-parser`.
+
+Tool-calling tests need a parser configured on the worker:
+
+```bash
+pytest tests-v2/test_tool_calling.py -v \
+  --dynamo-backend sglang \
+  --dynamo-image nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0 \
+  --dynamo-tool-parser hermes --dynamo-reasoning-parser qwen3 \
+  --dynamo-hf-cache "$HOME/.cache/huggingface"
+```
+
+## Capabilities
+
+`dynamo.require(Capability.X)` skips with attribution instead of failing late.
+Capabilities are derived from the flags a deployment was launched with -- never
+probed by sending a request and reading the status code, because a backend
+without a grammar engine accepts `tool_choice: "required"` with HTTP 200 and
+ignores it. Evaluation is three-valued: attach mode cannot read a deployment's
+configuration, so it reports `UNKNOWN` rather than `UNSATISFIED`, and those
+skips are labelled as such.
 
 ## How the container is run
 
