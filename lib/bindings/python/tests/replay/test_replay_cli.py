@@ -1,27 +1,31 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
 import json
 from types import SimpleNamespace
 
 import pytest
-
-import dynamo.replay.main as replay_main
 
 from .replay_utils import (
     _assert_basic_report_counts,
     _assert_basic_report_metrics,
     _assert_replay_cli_outputs,
     _planner_profile_data_dir_path,
+    _require_aisimulate_distribution,
     _run_replay_cli,
     _write_cli_smoke_trace,
     _write_multiturn_trace,
     _write_planner_profile_data_npz,
 )
 
+_require_aisimulate_distribution(allow_module_level=True)
+replay_main = importlib.import_module("dynamo.replay.main")
+
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.parallel,
+    pytest.mark.planner,
     pytest.mark.pre_merge,
     pytest.mark.unit,
 ]

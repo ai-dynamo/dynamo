@@ -869,6 +869,7 @@ class ModelRuntimeConfig:
     data_parallel_size: int
     enable_local_indexer: bool
     kv_event_publishing_enabled: bool | None
+    kv_event_source_mode: str | None
     kv_state_endpoint: str | None
     enable_eagle: bool
     taints: Set[str]
@@ -1967,18 +1968,7 @@ class MockEngineArgs:
         router_queue_policy: Optional[str] = None,
         sglang: Optional[SglangArgs] = None,
         trtllm: Optional[TrtllmArgs] = None,
-        num_g2_blocks: Optional[int] = None,
-        num_g3_blocks: Optional[int] = None,
-        offload_batch_size: Optional[int] = None,
-        bandwidth_g1_to_g2_gbps: Optional[float] = None,
-        bandwidth_g2_to_g1_gbps: Optional[float] = None,
-        bandwidth_g2_to_g3_gbps: Optional[float] = None,
-        bandwidth_g3_to_g2_gbps: Optional[float] = None,
-        enable_g4_storage: bool = False,
-        bandwidth_g2_to_g4_gbps: Optional[float] = None,
-        bandwidth_g4_to_g2_gbps: Optional[float] = None,
         max_model_len: Optional[int] = None,
-        g1_backend: Optional[str] = None,
     ) -> None:
         ...
 
@@ -2013,9 +2003,6 @@ class MockEngineArgs:
     def enable_prefix_caching(self, value: bool) -> None: ...
 
     @property
-    def g1_backend(self) -> str: ...
-
-    @property
     def enable_local_indexer(self) -> bool: ...
 
     @property
@@ -2035,36 +2022,6 @@ class MockEngineArgs:
 
     @property
     def response_replay_trace_path(self) -> Optional[os.PathLike[str]]: ...
-
-    @property
-    def num_g2_blocks(self) -> Optional[int]: ...
-
-    @property
-    def num_g3_blocks(self) -> Optional[int]: ...
-
-    @property
-    def offload_batch_size(self) -> Optional[int]: ...
-
-    @property
-    def bandwidth_g1_to_g2_gbps(self) -> Optional[float]: ...
-
-    @property
-    def bandwidth_g2_to_g1_gbps(self) -> Optional[float]: ...
-
-    @property
-    def bandwidth_g2_to_g3_gbps(self) -> Optional[float]: ...
-
-    @property
-    def bandwidth_g3_to_g2_gbps(self) -> Optional[float]: ...
-
-    @property
-    def enable_g4_storage(self) -> bool: ...
-
-    @property
-    def bandwidth_g2_to_g4_gbps(self) -> Optional[float]: ...
-
-    @property
-    def bandwidth_g4_to_g2_gbps(self) -> Optional[float]: ...
 
     @property
     def aic_backend(self) -> Optional[str]: ...
@@ -2848,6 +2805,38 @@ class KvDcRelay:
         ...
 
     async def shutdown(self) -> None:
+        ...
+
+    async def wait_for_shutdown(self) -> None:
+        """Resolve once the relay has stopped, whether by shutdown() or a terminal host failure."""
+        ...
+
+class KvStateAgentHost:
+    def __init__(self, endpoint: Endpoint, max_slots: int = 8) -> None:
+        ...
+
+    async def start(self) -> None:
+        ...
+
+    async def status(self) -> Dict[str, Any]:
+        ...
+
+    async def shutdown(self) -> None:
+        ...
+
+    async def wait_terminated(self) -> None:
+        ...
+
+class KvStateAttachmentOwner:
+    def __init__(
+        self, endpoint: Endpoint, worker_id: int, descriptors: List[Dict[str, Any]]
+    ) -> None:
+        ...
+
+    async def start(self) -> None:
+        ...
+
+    async def close(self) -> None:
         ...
 
 class KvRouter:

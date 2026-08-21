@@ -5,26 +5,17 @@ title: Sweeper Quickstart
 subtitle: Run a backend-neutral sweep with an injected replay runtime
 ---
 
-<!--
-Generated from `aisimulate/docs/sweeper/quickstart.md` by `docs/fern/scripts/sync_aisimulate_docs.py`.
-Edit the canonical source instead of this Fern copy.
--->
-
 > [!WARNING]
 > **Experimental.** Sweeper is intended for evaluation and feedback, not production capacity
 > planning.
 
-From a source checkout, install AI Simulate and run its neutral example:
+Install AI Simulate:
 
 ```bash
-python -m pip install -e ./aisimulate
-python aisimulate/examples/sweeper/run_sweep.py \
-  --config aisimulate/examples/sweeper/sweep.yaml
+python -m pip install "aisimulate==0.1.0.dev1"
 ```
 
-The example runner returns deterministic metrics so you can inspect orchestration without importing
-an application framework. A production composition supplies a `RunnerFactory` that executes real
-replay:
+Sweeper requires a `RunnerFactory` supplied by the application that owns replay execution:
 
 ```python
 from aisimulate.sweeper import SmartSearchConfig, Sweeper
