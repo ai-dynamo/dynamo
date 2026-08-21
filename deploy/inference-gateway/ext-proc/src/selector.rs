@@ -562,11 +562,18 @@ impl Selector {
 
 /// Bounded wait for at least one registered worker before the peer dump, so
 /// the snapshot overlaps the already-buffered live event stream (subscribe-
-/// first). This is a best-effort margin for the topology adapter's first
-/// reconcile — in the common restart case workers register within ~1s and the
-/// wait is a no-op. A cold start that never registers a worker in time
-/// proceeds anyway: the peer dump is then the best available state, and a
-/// longer wait cannot improve it.
+/// first).
+///
+/// LIMITATION: this is a best-effort timeout, not a correctness guarantee, and
+/// the `5s` value is a magic number — there is no measured basis for how long
+/// the topology adapter's first reconcile takes (in the common restart case
+/// workers register within ~1s and the wait is a no-op). If a worker registers
+/// only after this window, the dump still runs ahead of the live subscription
+/// and leaves a gap; a longer wait would not help because the worker simply
+/// was not there to subscribe to. The precise fix would be to await a
+/// deterministic "first reconcile complete" signal from the topology adapter
+/// instead of a wall-clock timeout; this bound exists only so a slow cold start
+/// does not hang forever.
 const PEER_RECOVERY_WORKER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 async fn wait_for_registered_worker(
