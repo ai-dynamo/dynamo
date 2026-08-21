@@ -379,7 +379,13 @@ class VllmEnginePauseController:
             raise
         self._is_paused = True
         if self._prepare_for_process_checkpoint:
-            await self._engine_client.checkpoint_prepare()
+            t0 = time.monotonic()
+            try:
+                await self._engine_client.checkpoint_prepare()
+            finally:
+                logger.info(
+                    "[Shadow] checkpoint_prepare took %.3fs", time.monotonic() - t0
+                )
         return True
 
     async def resume(self, tags: list[str] | None = None) -> bool:
@@ -387,12 +393,30 @@ class VllmEnginePauseController:
             return False
 
         if self._is_paused:
+            # These two awaits are the whole of promotion's cost and neither
+            # reports anything. Measured by subtraction, a loaded engine spends
+            # ~28 s here against ~0.3 s idle, while the wake half stays at
+            # ~10.7 s in both -- so the difference is checkpoint_restore().
+            # Subtraction is not measurement; time them.
             if self._prepare_for_process_checkpoint:
-                await self._engine_client.checkpoint_restore()
-            if tags is None:
-                await self._engine_client.wake_up()
-            else:
-                await self._engine_client.wake_up(tags)
+                t0 = time.monotonic()
+                try:
+                    await self._engine_client.checkpoint_restore()
+                finally:
+                    logger.info(
+                        "[Shadow] checkpoint_restore took %.3fs",
+                        time.monotonic() - t0,
+                    )
+            t0 = time.monotonic()
+            try:
+                if tags is None:
+                    await self._engine_client.wake_up()
+                else:
+                    await self._engine_client.wake_up(tags)
+            finally:
+                logger.info(
+                    "[Shadow] wake_up(%s) took %.3fs", tags, time.monotonic() - t0
+                )
         if self._generation_paused:
             await self._engine_client.resume_generation()
             self._generation_paused = False

@@ -10,14 +10,51 @@ Select explicitly with::
 
 from __future__ import annotations
 
+import logging
 from contextlib import AbstractContextManager
+from time import monotonic
 
+from gpu_memory_service.v1.integrations.vllm import checkpoint_timing
 from gpu_memory_service.v1.integrations.vllm.backend import BACKEND_NAME
 from vllm.v1.worker.gpu_worker import Worker
+
+# Installed at import so every worker process is wrapped before vLLM dispatches
+# the first collective_rpc. Inert unless DYN_GMS_CHECKPOINT_TIMING is set.
+checkpoint_timing.install()
+
+logger = logging.getLogger(__name__)
 
 
 class GMSV1Worker(Worker):
     """Route vLLM allocator scopes to the selected GMS V1 backend."""
+
+    def checkpoint_restore(self) -> None:
+        """Time the worker-side restore, which is otherwise silent.
+
+        GMS logs its own wake, so the wake half of promotion is visible; this
+        half is not, and under load it is the larger of the two.
+        """
+        t0 = monotonic()
+        try:
+            super().checkpoint_restore()
+        finally:
+            logger.info(
+                "[ckpt-timing] worker.checkpoint_restore rank=%d elapsed=%.3fs",
+                self.rank if hasattr(self, "rank") else -1,
+                monotonic() - t0,
+            )
+
+    def checkpoint_prepare(self) -> None:
+        """Counterpart to the above; never measured, and it runs at capture."""
+        t0 = monotonic()
+        try:
+            super().checkpoint_prepare()
+        finally:
+            logger.info(
+                "[ckpt-timing] worker.checkpoint_prepare rank=%d elapsed=%.3fs",
+                self.rank if hasattr(self, "rank") else -1,
+                monotonic() - t0,
+            )
 
     def init_device(self) -> None:
         model_config = self.vllm_config.model_config
