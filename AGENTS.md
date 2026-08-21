@@ -94,7 +94,11 @@ explicit confirmation, and always before the loop starts.
 
 ## Long-Running Runs And Harness Compatibility
 
-An optimization loop is long-running, unattended work. An interactive harness ends its turn whenever the agent stops
+An optimization loop is long-running, unattended work. Know which harness you are in: in a SINGLE-SHOT harness
+(headless `-p`/print mode, one-turn API calls), background-job completion notifications can never reach you - the
+session is gone when your turn ends. There, poll synchronously with bounded loops and never park the engagement on
+a wake-up you cannot receive; parking is only valid where the harness can re-invoke you (interactive sessions, goal
+mode). An interactive harness ends its turn whenever the agent stops
 calling tools — a turn that ends on narrated intent ("now I'll test disagg") silently stalls the loop until a human
 notices. Two rules:
 
