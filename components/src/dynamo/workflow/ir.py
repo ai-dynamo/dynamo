@@ -30,7 +30,11 @@ class StageIR:
     """One contracted stage instance in a workflow graph."""
 
     id: str
+    # Complete port-name interface for this stage kind. ``contract.inputs``
+    # declares required input ports, while ``contract.outputs`` declares outputs.
     contract: StageContract
+    # Per-instance wiring from every declared ``contract.inputs`` port to the
+    # workflow input or upstream stage output that supplies its value.
     inputs: Mapping[str, ValueRef] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
