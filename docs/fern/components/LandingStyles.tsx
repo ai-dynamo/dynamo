@@ -2032,7 +2032,13 @@ article:has(.dynamo-community-page) { margin-bottom: 0; }
 .dynamo-welcome__community {
   position: absolute;
   top: -20rem;
-  right: calc((100vw - 1200px) / -2 + 1rem);
+  /* Sit 1rem in from the viewport's right edge whatever the content column is
+     doing. The previous form hardcoded the 1200px column width, so it only
+     landed correctly while the column was exactly that wide, and it drifted
+     back inward once the viewport fell below 1200px. 50% is half the
+     containing block (the centred column), so 50% - 50vw is the offset from
+     the column's right edge out to the viewport's. */
+  right: calc(50% - 50vw + 1rem);
   z-index: 30;
   display: flex;
   width: 242px;
@@ -2168,7 +2174,19 @@ article:has(.dynamo-community-page) { margin-bottom: 0; }
   text-transform: uppercase;
 }
 
-@media (max-width: 1360px) {
+/* Below this the rail stops floating and becomes a row under the hero.
+   The cutoff was 1360px, which dropped the cards into flow on every ordinary
+   laptop (1280 and 1366 included) and put them below the Get started button
+   rather than up beside the mark, which is not the intended hero.
+
+   1024px is what the geometry actually calls for. The rail is 242px wide and
+   sits 1rem from the viewport edge, so its left edge is at 100vw - 258px,
+   while the only thing level with it is the 92px centred mark spanning
+   50vw ± 46px. Those do not meet until roughly 610px. The wide centred
+   heading and subtitle sit lower than the rail, so they are not in contention
+   either. 1024px therefore keeps a wide margin and still hands tablets the
+   stacked layout. */
+@media (max-width: 1024px) {
 
   .dynamo-welcome__community {
     position: static;
