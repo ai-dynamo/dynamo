@@ -493,13 +493,11 @@ async def test_ordinary_values_work_on_nixl_capable_remote_bindings() -> None:
 
 
 async def test_tensor_server_imports_input_and_exports_per_consumer() -> None:
-    tensor_spec = ValueSpec(type="tensor", dtype="float32", shape=("dynamic", 4))
-
     class TensorRunner:
         contract = StageContract(
             id="tensor",
-            inputs={"tensor": tensor_spec},
-            outputs={"tensor": tensor_spec},
+            inputs={"tensor"},
+            outputs={"tensor"},
         )
 
         async def run(self, inputs, context):
@@ -509,6 +507,9 @@ async def test_tensor_server_imports_input_and_exports_per_consumer() -> None:
         def __init__(self):
             self.exports = []
             self.released = []
+
+        def can_export(self, value):
+            return isinstance(value, torch.Tensor)
 
         async def import_tensor(self, reference):
             assert reference == {"remote": "reference"}
@@ -539,13 +540,8 @@ async def test_tensor_server_imports_input_and_exports_per_consumer() -> None:
 
     carrier = Carrier()
     request = StageRequestEnvelope(
-        workflow_name="remote-wire",
-        stage_id="tensor",
-        contract_id="tensor",
-        attempt_id="request-1",
-        invocation_id="request-1:tensor",
-        timeout_seconds=None,
         inputs={"tensor": {"remote": "reference"}},
+        input_carriers={"tensor": "nixl"},
         output_transfers={"tensor": ("classifier.tensor", "generator.tensor")},
     )
 
@@ -565,13 +561,11 @@ async def test_tensor_server_imports_input_and_exports_per_consumer() -> None:
 
 
 async def test_tensor_server_releases_borrowed_input_after_runner_failure() -> None:
-    tensor_spec = ValueSpec(type="tensor", dtype="float32", shape=(2, 4))
-
     class FailingRunner:
         contract = StageContract(
             id="tensor",
-            inputs={"tensor": tensor_spec},
-            outputs={"result": ValueSpec(type="json")},
+            inputs={"tensor"},
+            outputs={"result"},
         )
 
         async def run(self, inputs, context):
@@ -581,6 +575,9 @@ async def test_tensor_server_releases_borrowed_input_after_runner_failure() -> N
         def __init__(self):
             self.tensor = torch.ones((2, 4), dtype=torch.float32)
             self.released = []
+
+        def can_export(self, value):
+            return isinstance(value, torch.Tensor)
 
         async def import_tensor(self, reference):
             return self.tensor
@@ -596,13 +593,8 @@ async def test_tensor_server_releases_borrowed_input_after_runner_failure() -> N
 
     carrier = Carrier()
     request = StageRequestEnvelope(
-        workflow_name="remote-wire",
-        stage_id="tensor",
-        contract_id="tensor",
-        attempt_id="request-1",
-        invocation_id="request-1:tensor",
-        timeout_seconds=None,
         inputs={"tensor": {"remote": "reference"}},
+        input_carriers={"tensor": "nixl"},
         output_transfers={},
     )
 
@@ -614,23 +606,27 @@ async def test_tensor_server_releases_borrowed_input_after_runner_failure() -> N
     assert carrier.released == [carrier.tensor]
 
 
-async def test_tensor_import_is_bounded_by_remote_stage_deadline() -> None:
-    tensor_spec = ValueSpec(type="tensor", dtype="float32", shape=("dynamic", 4))
+async def test_tensor_import_is_cancelled_when_transport_stops() -> None:
     import_cancelled = asyncio.Event()
+    import_started = asyncio.Event()
 
     class TensorRunner:
         contract = StageContract(
             id="tensor",
-            inputs={"tensor": tensor_spec},
-            outputs={"result": ValueSpec(type="json")},
+            inputs={"tensor"},
+            outputs={"result"},
         )
 
         async def run(self, inputs, context):
             raise AssertionError("runner must not start before its tensor arrives")
 
     class BlockingCarrier:
+        def can_export(self, value):
+            return False
+
         async def import_tensor(self, reference):
             try:
+                import_started.set()
                 await asyncio.Event().wait()
             finally:
                 import_cancelled.set()
@@ -642,18 +638,19 @@ async def test_tensor_import_is_bounded_by_remote_stage_deadline() -> None:
             raise AssertionError("no tensor output is declared")
 
     request = StageRequestEnvelope(
-        workflow_name="remote-wire",
-        stage_id="tensor",
-        contract_id="tensor",
-        attempt_id="request-1",
-        invocation_id="request-1:tensor",
-        timeout_seconds=0.01,
         inputs={"tensor": {"remote": "reference"}},
+        input_carriers={"tensor": "nixl"},
         output_transfers={},
     )
+    transport_context = _ChildContext("request-1:tensor")
+    response = asyncio.create_task(
+        RemoteStageServer("tensor", TensorRunner(), BlockingCarrier())
+        .generate(request.to_dict(), context=transport_context)
+        .__anext__()
+    )
+    await import_started.wait()
+    transport_context.stop_generating()
 
-    with pytest.raises(asyncio.TimeoutError):
-        await RemoteStageServer("tensor", TensorRunner(), BlockingCarrier()).generate(
-            request.to_dict()
-        ).__anext__()
+    with pytest.raises(asyncio.CancelledError):
+        await response
     assert import_cancelled.is_set()

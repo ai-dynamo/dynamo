@@ -69,6 +69,9 @@ async def test_write_carrier_exports_existing_transfer_requests_per_edge() -> No
     carrier = NixlWriteTensorCarrier(sender=sender, torch_module=torch)
     tensor = torch.ones((3, 8), dtype=torch.bfloat16)
 
+    assert carrier.can_export(tensor)
+    assert not carrier.can_export({"tensor": tensor})
+
     references = await carrier.export_tensor_fanout(
         tensor, ("classifier.embedding", "generator.embedding")
     )
@@ -97,6 +100,8 @@ async def test_write_carrier_exports_existing_transfer_requests_per_edge() -> No
 async def test_write_receiver_carrier_borrows_and_releases_ring_tensor() -> None:
     receiver = _Receiver()
     carrier = NixlWriteTensorReceiverCarrier(receiver=receiver)
+
+    assert not carrier.can_export(receiver.tensor)
 
     tensor = await carrier.import_tensor(
         {
