@@ -500,7 +500,7 @@ async def get_runtime_config(
         runtime_config=runtime_config,
         server_args=server_args,
         extra_config=_parse_hicache_storage_extra_config(
-            server_args.hicache_storage_backend_extra_config
+            getattr(server_args, "hicache_storage_backend_extra_config", None)
         ),
         dp_bounds=local_dp_rank_bounds(server_args),
     )

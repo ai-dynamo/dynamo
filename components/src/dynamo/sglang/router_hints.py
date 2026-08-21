@@ -12,9 +12,9 @@ The only difference from the vLLM version is where the endpoints come from.
 vLLM reads ``kv_transfer_config.kv_connector_extra_config.secondary_tiers[]``;
 SGLang has no secondary tiers, so the equivalent values live in the KVCR
 HiCache storage backend's extra-config JSON
-(``--hicache-storage-backend-extra-config``), whose ``control_host`` /
-``control_port`` / ``control_advertise_host`` fields are what the KVCR store
-binds its ZMQ peer control channel to.
+(``--hicache-storage-backend-extra-config``), whose ``control_advertise_host``
+and ``control_port`` fields describe the ZMQ peer control channel the KVCR store
+binds.
 """
 
 from __future__ import annotations
@@ -91,20 +91,20 @@ def _source_control_endpoint(
     adds its own within-DP-group offset, since the router has no TP concept and
     cannot resolve that half itself.
 
-    A wildcard bind host is not something a peer can dial, so it must be paired
-    with an explicit ``control_advertise_host``. An ephemeral port (0) cannot be
-    advertised either -- the bound port is only known inside the scheduler
-    process, so registration has nothing to publish.
+    Only ``control_advertise_host`` names the address peers dial;
+    ``control_host`` is the bind address and is legitimately a wildcard, so it
+    is not a fallback. An ephemeral port (0) cannot be advertised either -- the
+    bound port is only known inside the scheduler process, so registration has
+    nothing to publish. The offset port is range-checked too, since a base port
+    near the top of the range can carry the last DP rank past 65535.
     """
     try:
         control_port = int(extra_config.get("control_port")) + port_offset
     except (TypeError, ValueError):
         return None
-    if control_port <= 0:
+    if not 0 < control_port <= 65535:
         return None
-    host = extra_config.get("control_advertise_host") or extra_config.get(
-        "control_host"
-    )
+    host = extra_config.get("control_advertise_host")
     if not isinstance(host, str) or not host or host in _UNROUTABLE_HOSTS:
         return None
     return f"tcp://{host}:{control_port}"
@@ -165,9 +165,9 @@ def enable_router_hint_support(
     if endpoints is None:
         raise ValueError(
             "router_hint support requires advertisable source control endpoints "
-            "for all managed DP ranks; set control_advertise_host (or a "
-            "non-wildcard control_host) and a positive control_port in "
-            "--hicache-storage-backend-extra-config"
+            "for all managed DP ranks; set control_advertise_host to a "
+            "peer-reachable address and a control_port that keeps every rank "
+            "within 1..65535 in --hicache-storage-backend-extra-config"
         )
 
     # set_engine_specific expects JSON text; the Rust side accepts a truthy

@@ -209,13 +209,41 @@ def test_no_attention_dp_advertises_the_base_port_unstrided(server_args_override
     ) == {"0": "tcp://worker-a:25000"}
 
 
-def test_advertise_host_overrides_wildcard_bind_host():
+def test_raises_when_striding_carries_a_later_rank_past_the_port_range():
+    """The base port being dialable does not make the whole block dialable.
+
+    Only the last rank's port leaves the range here, and it is the one the
+    router would hand out for that DP rank.
+    """
+    with pytest.raises(ValueError, match="advertisable source control endpoints"):
+        enable_router_hint_support(
+            runtime_config=MagicMock(),
+            server_args=_server_args(
+                enable_dp_attention=True, dp_size=4, tp_size=4, nnodes=1, node_rank=0
+            ),
+            extra_config=_kvcr_config(
+                control_advertise_host="worker-a", control_port=65534
+            ),
+            dp_bounds=(0, 4),
+        )
+
+
+def test_advertises_the_advertise_host_not_the_bind_host():
+    """The bind host is not an address a peer can dial, even when it is routable.
+
+    ``control_host`` names the interface to bind, and a worker commonly binds a
+    wildcard while advertising one reachable address. Reading the bind host
+    would publish whichever of the two happens to be set, which is only right by
+    coincidence.
+    """
     runtime_config = MagicMock()
 
     enable_router_hint_support(
         runtime_config=runtime_config,
         server_args=_server_args(),
-        extra_config=_kvcr_config(control_host="::"),
+        extra_config=_kvcr_config(
+            control_host="10.0.0.1", control_advertise_host="worker-a"
+        ),
         dp_bounds=(0, 1),
     )
 
@@ -223,7 +251,7 @@ def test_advertise_host_overrides_wildcard_bind_host():
         json.loads(
             _published(runtime_config)[ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY]
         )["0"]
-        == "tcp://127.0.0.1:25000"
+        == "tcp://worker-a:25000"
     )
 
 
@@ -259,14 +287,20 @@ def test_publishes_nothing_when_not_a_hint_source(server_args, extra_config):
 @pytest.mark.parametrize(
     "overrides",
     [
-        # A wildcard bind with no advertise host is not dialable by a peer.
-        {"control_advertise_host": None, "control_host": "0.0.0.0"},
-        {"control_advertise_host": None, "control_host": "::"},
-        {"control_advertise_host": None, "control_host": ""},
+        # No advertise host at all: the bind host is not a substitute, however
+        # routable it looks.
+        {"control_advertise_host": None},
+        {"control_advertise_host": None, "control_host": "10.0.0.1"},
+        {"control_advertise_host": ""},
+        # A wildcard is a bind address, so it cannot be advertised either.
+        {"control_advertise_host": "0.0.0.0"},
+        {"control_advertise_host": "::"},
         # An ephemeral port is only known inside the scheduler process.
         {"control_port": 0},
         {"control_port": None},
         {"control_port": "not-a-port"},
+        # Every rank's port has to stay dialable, not just the base.
+        {"control_port": 65536},
     ],
 )
 def test_raises_when_endpoint_is_not_advertisable(overrides):
