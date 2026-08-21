@@ -22,6 +22,8 @@ SPDX-License-Identifier: Apache-2.0
 
 Drive one persistent coding-agent session while Dynamo serves its model requests. Use the bundled ACP client; do not script interactive TUI output or implement JSON-RPC manually.
 
+For the Omnigent meta-harness path, use the pinned helper and compatibility assessment in [OMNIGENT_COMPATIBILITY.md](OMNIGENT_COMPATIBILITY.md). That path invokes Omnigent's wrapped Codex app-server directly rather than ACP and keeps all Omnigent state isolated from user configuration.
+
 Treat the [Agent Harnesses guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/use-cases/agents/agent-harnesses.mdx) as the source of truth for harness configuration. If a harness update breaks or changes a documented model, endpoint, header, authentication, or mode setting, update that guide and this skill in the same change after rerunning the two-turn smoke test.
 
 ## Prerequisites
