@@ -15,7 +15,7 @@ commit_sha="${BUILDKITE_COMMIT:-local}"
 image_tag="${IMAGE_TAG:-dynamo-buildkite-poc:${commit_sha:0:12}-${framework}-${target}}"
 cache_run="${CACHE_RUN:-single}"
 artifact_dir="${BUILDKITE_ARTIFACT_DIR:-artifacts/buildkite/image-build/${cache_run}}"
-venv_dir="${BUILDKITE_BUILD_VENV:-.buildkite/.venv}"
+renderer_image="${RENDERER_IMAGE:-python:3.12-slim}"
 
 case "${framework}" in
   dynamo|vllm|sglang|trtllm) ;;
@@ -41,10 +41,6 @@ mkdir -p "${artifact_dir}"
 BUILDKITE_ARTIFACT_DIR="${artifact_dir}" SKIP_REMOTE_BUILDER_SMOKE=true \
   .buildkite/scripts/verify-remote-builder.sh
 
-python3 -m venv "${venv_dir}"
-"${venv_dir}/bin/python" -m pip install --disable-pip-version-check \
-  --requirement .buildkite/requirements.txt
-
 render_args=(
   "--framework=${framework}"
   "--target=${target}"
@@ -52,7 +48,13 @@ render_args=(
   "--cuda-version=${cuda_version}"
   --output-short-filename
 )
-"${venv_dir}/bin/python" container/render.py "${render_args[@]}"
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --volume "${PWD}:/workspace" \
+  --workdir /workspace \
+  "${renderer_image}" \
+  sh -c 'python -m pip install --disable-pip-version-check --target /tmp/render-deps --requirement .buildkite/requirements.txt >/dev/null && PYTHONPATH=/tmp/render-deps python container/render.py "$@"' \
+  render-dockerfile "${render_args[@]}"
 cp container/rendered.Dockerfile "${artifact_dir}/rendered.Dockerfile"
 
 build_args=(

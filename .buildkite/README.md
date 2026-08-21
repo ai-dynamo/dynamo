@@ -27,6 +27,7 @@ Build parameters are supplied as Buildkite build environment variables:
 | `NO_CACHE` | `false` | Disable BuildKit cache when `true` |
 | `PUSH_IMAGE` | `false` | Push instead of using a cache-only output |
 | `IMAGE_TAG` | generated pilot tag | Required registry tag for a publishing test |
+| `RENDERER_IMAGE` | `python:3.12-slim` | Disposable environment for `container/render.py` |
 | `GITHUB_BASELINE_SECONDS` | empty | Matching GitHub Actions image-build duration |
 | `GITHUB_BASELINE_URL` | empty | URL for the matching GitHub Actions run |
 
