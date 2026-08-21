@@ -15,7 +15,7 @@ Dynamo can add value to RL rollout serving when the rollout plane needs more tha
 |---|---|---|
 | Serve SGLang token-in/token-out rollouts with native request and response shapes | Frontend `POST /generate` or `PUT /generate` | Experimental |
 | Serve rollout generation through an OpenAI-compatible endpoint | Frontend `/v1/completions` and `/v1/chat/completions` | Available |
-| Return token IDs, prompt log probabilities, and selected backend metadata | `nvext.token_data` and `nvext.extra_fields` | Available |
+| Return exact prompt and completion token IDs, prompt log probabilities, and selected backend metadata | `nvext.token_data` and `nvext.extra_fields` | Available |
 | Discover live rollout workers and their direct administration URLs | `/v1/rl/workers` on the frontend RL listener | vLLM only |
 | Pause generation, update weights, and resume a selected worker | Direct `/engine/` routes on the worker system server | vLLM supported; SGLang uses backend-specific routes |
 | Upload large SGLang rollout metadata out-of-band | `nvext.metadata_upload.url` | SGLang only |
@@ -27,6 +27,7 @@ Dynamo can add value to RL rollout serving when the rollout plane needs more tha
 | Engine-native token-in/token-out API | `/inference/v1/generate` | `/generate` | Not supported |
 | Token input through `prompt` token arrays | Supported | Supported | Supported |
 | `nvext.token_data` tokenizer bypass | Supported | Supported | Supported |
+| `prompt_token_ids` response field | Supported | Supported | Supported |
 | `completion_token_ids` response field | Supported | Supported | Supported |
 | `prompt_logprobs` response field | Supported | Supported | Not supported |
 | Routed expert response data | Compatible builds only | Compatible builds only | Not supported |
@@ -55,15 +56,15 @@ The discovery API runs on a dedicated frontend listener. It is not mounted on th
 Use `/generate` for SGLang reinforcement learning clients that send token IDs and consume SGLang streaming responses. Aggregated and prefill/decode deployments accept the same request.
 
 <Steps>
-<Step title="Enable the SGLang-compatible API">
+<Step title="Start the frontend">
 
-Set `DYN_SGLANG_ENABLE_GENERATE=1` on the Dynamo frontend:
+Start the Dynamo frontend:
 
 ```bash
-DYN_SGLANG_ENABLE_GENERATE=1 python -m dynamo.frontend
+python -m dynamo.frontend
 ```
 
-The API uses `/generate` by default. To use a different path, set `DYN_HTTP_SVC_SGLANG_GENERATE_PATH` on the frontend.
+Workers that support native SGLang generation advertise `/generate` automatically. To use a different path, set `DYN_HTTP_SVC_SGLANG_GENERATE_PATH` on the frontend.
 
 </Step>
 <Step title="Start a SGLang worker">
@@ -193,6 +194,7 @@ The OpenAI-compatible completion routes provide a cross-backend token-in/token-o
 | Feature | Request | Response | Notes |
 |---|---|---|---|
 | Token input | Set `prompt` to an integer array on `/v1/completions`, or set `nvext.token_data` on a chat or completion request. | Standard completion response | `nvext.token_data` bypasses frontend tokenization. |
+| Prompt token IDs | Add `"prompt_token_ids"` to `nvext.extra_fields`. | `nvext.prompt_token_ids` on the final response | Returns the exact token IDs produced by the frontend preprocessor. Requires one prompt. |
 | Completion token IDs | Add `"completion_token_ids"` to `nvext.extra_fields`. | `nvext.completion_token_ids` | Requires one prompt and one generated choice. Streaming responses contain token deltas; non-streaming responses contain the concatenated IDs. |
 | Completion log probabilities | Set `logprobs` on `/v1/completions`, or set `logprobs: true` and `top_logprobs` on `/v1/chat/completions`. | Standard `choices[].logprobs` | The selected engine must support the requested log probability mode. |
 | Prompt log probabilities | Set top-level `prompt_logprobs` and add `"prompt_logprobs"` to `nvext.extra_fields`. | `nvext.prompt_logprobs` on the final response | The first prompt position is `null` because it has no preceding-token probability. |
@@ -224,7 +226,7 @@ curl http://localhost:8000/v1/completions \
     "prompt_logprobs": 5,
     "nvext": {
       "token_data": [151644, 8948, 198],
-      "extra_fields": ["completion_token_ids", "prompt_logprobs"]
+      "extra_fields": ["prompt_token_ids", "completion_token_ids", "prompt_logprobs"]
     }
   }'
 ```
@@ -241,6 +243,7 @@ The relevant response fields have this shape:
     }
   ],
   "nvext": {
+    "prompt_token_ids": [151644, 8948, 198],
     "completion_token_ids": [9707, 11],
     "prompt_logprobs": [
       null,
@@ -274,7 +277,7 @@ The payload format is backend-specific:
 - SGLang builds whose `async_generate` API supports `return_routed_experts` return the engine's base64 string. Start SGLang with `--enable-return-routed-experts` to request capture. Builds that omit this engine argument do not return the field.
 - TensorRT-LLM does not currently return routed-expert data through this frontend extension.
 
-Use `nvext.engine_data` only when the orchestrator must consume other backend-specific data. The named `completion_token_ids`, `prompt_logprobs`, and `routed_experts` fields provide more stable contracts.
+Use `nvext.engine_data` only when the orchestrator must consume other backend-specific data. The named `prompt_token_ids`, `completion_token_ids`, `prompt_logprobs`, and `routed_experts` fields provide more stable contracts.
 
 ## Upload SGLang Metadata
 

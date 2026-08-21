@@ -179,6 +179,11 @@ pub struct RequestTracker {
     /// re-tokenizing. Lives here rather than on `routing_data` because the preprocessor
     /// drains `routing_data` before the delta generator runs. First-write-wins.
     external_query_token_ids: OnceLock<Vec<u32>>,
+
+    /// Frontend-rendered prompt tokens retained only for an explicit
+    /// `nvext.extra_fields=["prompt_token_ids"]` response request.
+    /// First-write-wins because one response generator owns one prompt.
+    prompt_token_ids: OnceLock<Vec<u32>>,
 }
 
 /// Data a standalone router (running the `PushRouter` bindings in its own process)
@@ -238,6 +243,7 @@ impl RequestTracker {
             prefill_complete_time: OnceLock::new(),
             external_timing: OnceLock::new(),
             external_query_token_ids: OnceLock::new(),
+            prompt_token_ids: OnceLock::new(),
         }
     }
 
@@ -633,6 +639,12 @@ impl RequestTracker {
         let _ = self.external_query_token_ids.set(token_ids);
     }
 
+    /// Retain the frontend's authoritative rendered prompt token sequence for
+    /// opt-in response emission. First-write-wins.
+    pub fn set_prompt_token_ids(&self, token_ids: Vec<u32>) {
+        let _ = self.prompt_token_ids.set(token_ids);
+    }
+
     /// Overlay worker attribution forwarded by a standalone router (on the first chunk's
     /// `routing_data.worker_id`) onto this tracker so `get_worker_info`, the metrics
     /// annotation, and `build_response_nvext` surface it on the split-router path.
@@ -655,6 +667,11 @@ impl RequestTracker {
     /// The query-only tokenized prompt forwarded from a standalone router, if any.
     pub fn query_token_ids(&self) -> Option<&[u32]> {
         self.external_query_token_ids.get().map(Vec::as_slice)
+    }
+
+    /// The frontend-rendered prompt token sequence, when explicitly retained.
+    pub fn prompt_token_ids(&self) -> Option<&[u32]> {
+        self.prompt_token_ids.get().map(Vec::as_slice)
     }
 
     /// Per-request timing. Starts from this process's own measurements; in the split-router
@@ -890,6 +907,19 @@ mod tests {
         // First-write-wins: a later forward does not clobber.
         tracker.set_external_query_token_ids(vec![44, 55]);
         assert_eq!(tracker.query_token_ids(), Some(&[11u32, 22, 33][..]));
+    }
+
+    #[test]
+    fn test_prompt_token_ids_round_trip() {
+        let tracker = RequestTracker::new();
+        assert!(tracker.prompt_token_ids().is_none());
+
+        tracker.set_prompt_token_ids(vec![101, 102, 103]);
+        assert_eq!(tracker.prompt_token_ids(), Some(&[101u32, 102, 103][..]));
+
+        // One request has one authoritative rendered prompt.
+        tracker.set_prompt_token_ids(vec![999]);
+        assert_eq!(tracker.prompt_token_ids(), Some(&[101u32, 102, 103][..]));
     }
 
     #[test]
