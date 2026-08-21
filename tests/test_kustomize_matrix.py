@@ -521,7 +521,7 @@ def test_expand_matrix_rejects_overlapping_template_paths(tmp_path):
         kustomize_matrix.expand_matrix(config)
 
 
-def test_unfold_rebases_external_component_paths(tmp_path, monkeypatch):
+def test_unfold_rebases_external_template_references(tmp_path, monkeypatch):
     recipe = tmp_path / "recipe"
     base = recipe / "kustomize/base"
     write_kustomization(base, "resources:\n  - deployment.yaml\n")
@@ -550,6 +550,11 @@ def test_unfold_rebases_external_component_paths(tmp_path, monkeypatch):
         "        labels:\n"
         "          from-external-component: applies\n",
     )
+    external_resource = recipe / "external.yaml"
+    external_resource.write_text(
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: external\n",
+        encoding="utf-8",
+    )
     template_root = recipe / "templates/provider"
     write_template(
         template_root,
@@ -557,7 +562,9 @@ def test_unfold_rebases_external_component_paths(tmp_path, monkeypatch):
         "kind: Component\n"
         "# This comment remains in the generated Component.\n"
         "components:\n"
-        "  - ../../shared-component\n",
+        "  - ../../shared-component\n"
+        "resources:\n"
+        "  - ../../external.yaml\n",
     )
     template = template_root / "instance"
     template.mkdir()
@@ -591,6 +598,7 @@ def test_unfold_rebases_external_component_paths(tmp_path, monkeypatch):
     assert "# This comment remains in the generated Component." in rendered_component
     parsed_component = yaml.safe_load(rendered_component)
     assert parsed_component["components"] == ["../../../../../shared-component"]
+    assert parsed_component["resources"] == ["../../../../../external.yaml"]
 
 
 def test_render_uses_leaf_component_and_preserves_source_comments(

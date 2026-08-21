@@ -37,8 +37,9 @@ SPDX-License-Identifier: Apache-2.0
   Use `base.<lowercase-kind> | only` only when exactly one such resource is
   required. Templates render one Component. `unfold` materializes the complete
   effective files at its selected path under the generated overlay. Files ending
-  in `*.j2` are rendered without that suffix. A template may select shared
-  Components; `unfold` rebases those external paths for the generated location.
+  in `*.j2` are rendered without that suffix. A template may reference shared
+  Components or resources; `unfold` rebases those external paths for the
+  generated location.
   Kustomize is both the authoring model and recipe documentation: the base and
   Components explain settings, public overlay `kustomization.yaml` files
   document a concrete variant, and `deploy-*.yaml` files are the fully
