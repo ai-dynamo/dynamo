@@ -95,7 +95,7 @@ pytest tests/fault_tolerance/cancellation/test_trtllm.py::test_request_cancellat
 
 | Test | Mode | Cancellation Phase | Request Type | Setup | Notes |
 |------|------|-------------------|--------------|-------|-------|
-| `test_request_cancellation_sglang_aggregated` | Aggregated | During generation | 3 scenarios: completion, chat, streaming chat (1 response read) | 1 worker | ⚠️ Flaky: SGLang prefill cancellation issues |
+| `test_request_cancellation_sglang_aggregated` | Aggregated | During generation | 3 scenarios: completion, chat, streaming chat (1 response read) | 1 worker | Nightly NATS and TCP coverage; cancellation occurs after request-ID assignment |
 | `test_request_cancellation_sglang_decode_cancel` | Disaggregated | Remote decode | Streaming chat (1 response read) | Decode + Prefill workers | Requires 2 GPUs |
 
 **Run examples:**
