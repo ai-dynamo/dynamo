@@ -511,6 +511,15 @@ The standalone path currently targets aggregated vLLM serving with data-parallel
 does not provide the DGD/operator lifecycle, Dynamo runtime discovery, disaggregated prefill/decode
 orchestration, request migration, topology-aware routing, or full operator-managed observability.
 
+<Warning>
+This on-ramp does not work with vanilla SGLang workers yet. `DYN_EPP_TOKENIZER_PROTOCOL` accepts only
+`vllm-render`, so the EPP has no SGLang tokenizer to call and exits at startup. Track
+[ai-dynamo/dynamo#13390](https://github.com/ai-dynamo/dynamo/issues/13390) and
+[sgl-project/sglang#28669](https://github.com/sgl-project/sglang/issues/28669). Once those land, the
+`InferencePool`, `HTTPRoute`, and EPP resources carry over under your own SGLang names. The worker
+flags do not: SGLang spells them differently, starting with `--page-size` for `--block-size`.
+</Warning>
+
 Use [GAIE with Dynamo](gateway-api.mdx) when you want the supported
 operator-managed lifecycle, Dynamo workers, or disaggregated serving. Use
 [Gateway API Routing Reference](../../reference/components/gateway-api-routing.mdx) for the DGD and
