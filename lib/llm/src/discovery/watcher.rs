@@ -60,6 +60,7 @@ use crate::{
     worker_type::WorkerType,
 };
 
+use super::readiness::normalize_legacy_prefill_topology;
 use super::{
     ModelManager,
     controller::{ControllerHost, DesiredInstance, GroupKey, GroupSpec, ModelDiscoveryController},
@@ -153,23 +154,6 @@ fn supports_enabled_engine_generate(card: &ModelDeploymentCard, capabilities: &[
 
 // Generate's opaque request state is not yet verified for migration replay.
 const GENERATE_MIGRATION_LIMIT: u32 = 0;
-
-/// Project the topology implicit in a pre-`worker_type` prefill card into the
-/// explicit contract used by current workers.
-///
-/// TODO(v1.5): Remove this projection together with the missing-role fallback
-/// in `effective_worker_type` and the legacy readiness bypass after the v1.2
-/// MDC compatibility window expires.
-fn normalize_legacy_prefill_topology(card: &mut ModelDeploymentCard) {
-    if card.worker_type.is_some() || !card.model_type.supports_prefill() {
-        return;
-    }
-
-    card.worker_type = Some(WorkerType::Prefill);
-    if card.needs.is_empty() {
-        card.needs = vec![vec![WorkerType::Decode]];
-    }
-}
 
 /// Resolve the effective [`WorkerType`] for a card during the
 /// cross-version rollout.
