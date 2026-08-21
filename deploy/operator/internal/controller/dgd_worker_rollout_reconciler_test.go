@@ -22,6 +22,7 @@ import (
 	"errors"
 	"sort"
 	"testing"
+	"time"
 
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
@@ -600,6 +601,289 @@ func TestActiveWorkerHashCandidatesV2Only(t *testing.T) {
 
 	t.Log("Verify candidate lookup cannot fall back to an empty legacy hash")
 	assert.Equal(t, []string{"v2"}, activeWorkerHashCandidates(dgd, workerGenerationHashes{v2: "v2"}))
+}
+
+// hashRecoveryWorkerDCD builds a worker DCD carrying only what recoverWorkerHashes reads:
+// the generation label, the available replica count and the creation time.
+func hashRecoveryWorkerDCD(name, hash string, available int32, createdAt metav1.Time) nvidiacomv1beta1.DynamoComponentDeployment {
+	return nvidiacomv1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         "default",
+			CreationTimestamp: createdAt,
+			Labels:            map[string]string{consts.KubeLabelDynamoWorkerHash: hash},
+		},
+		Status: nvidiacomv1beta1.DynamoComponentDeploymentStatus{
+			Component: &nvidiacomv1beta1.ComponentReplicaStatus{
+				Replicas:          1,
+				AvailableReplicas: ptr.To(available),
+			},
+		},
+	}
+}
+
+func TestRecoverWorkerHashes(t *testing.T) {
+	desired := workerGenerationHashes{v1: "desired-v1", v2: "desired-v2"}
+	// The recovery path only runs when the annotations are empty, and desiredWorkerHashes
+	// then reports the canonical hash in both slots.
+	canonical := workerGenerationHashes{v1: "canonical", v2: "canonical"}
+	const legacyHash = "legacy-alpha"
+	base := metav1.NewTime(metav1.Now().Add(-time.Hour))
+	dcd := hashRecoveryWorkerDCD
+
+	tests := []struct {
+		name      string
+		dcds      []nvidiacomv1beta1.DynamoComponentDeployment
+		desired   workerGenerationHashes
+		want      workerGenerationHashes
+		wantFound bool
+	}{
+		{
+			name:      "no worker DCDs is a first deploy",
+			wantFound: false,
+		},
+		{
+			name:      "a pre-dual generation labelled with the legacy alpha hash is current, recorded as v1 beside the canonical v2",
+			dcds:      []nvidiacomv1beta1.DynamoComponentDeployment{dcd("cur", legacyHash, 1, base)},
+			desired:   canonical,
+			want:      workerGenerationHashes{v1: legacyHash, v2: "canonical"},
+			wantFound: true,
+		},
+		{
+			name:      "a generation still labelled with the legacy sentinel is recorded as the sentinel",
+			dcds:      []nvidiacomv1beta1.DynamoComponentDeployment{dcd("cur", consts.LegacyWorkerHash, 1, base)},
+			desired:   canonical,
+			want:      workerGenerationHashes{v1: consts.LegacyWorkerHash},
+			wantFound: true,
+		},
+		{
+			name: "a serving old generation beside the legacy alpha generation is the active one",
+			dcds: []nvidiacomv1beta1.DynamoComponentDeployment{
+				dcd("old", "old-hash", 1, base),
+				dcd("alpha", legacyHash, 0, metav1.NewTime(base.Add(time.Minute))),
+			},
+			desired:   canonical,
+			want:      workerGenerationHashes{v2: "old-hash"},
+			wantFound: true,
+		},
+		{
+			name:      "unlabelled DCDs do not count",
+			dcds:      []nvidiacomv1beta1.DynamoComponentDeployment{dcd("legacy", "", 1, base)},
+			wantFound: false,
+		},
+		{
+			name:      "only the desired v2 generation exists",
+			dcds:      []nvidiacomv1beta1.DynamoComponentDeployment{dcd("cur", "desired-v2", 1, base)},
+			want:      workerGenerationHashes{v2: "desired-v2"},
+			wantFound: true,
+		},
+		{
+			name:      "only the desired v1 generation exists",
+			dcds:      []nvidiacomv1beta1.DynamoComponentDeployment{dcd("cur", "desired-v1", 1, base)},
+			want:      desired,
+			wantFound: true,
+		},
+		{
+			name: "a serving old generation beside a pending desired one is the active generation",
+			dcds: []nvidiacomv1beta1.DynamoComponentDeployment{
+				dcd("old", "old-hash", 1, base),
+				dcd("new", "desired-v2", 0, metav1.NewTime(base.Add(time.Minute))),
+			},
+			want:      workerGenerationHashes{v2: "old-hash"},
+			wantFound: true,
+		},
+		{
+			name: "among old generations the one with available replicas wins",
+			dcds: []nvidiacomv1beta1.DynamoComponentDeployment{
+				dcd("serving", "serving-hash", 1, base),
+				dcd("superseded", "superseded-hash", 0, metav1.NewTime(base.Add(time.Minute))),
+			},
+			want:      workerGenerationHashes{v2: "serving-hash"},
+			wantFound: true,
+		},
+		{
+			name: "on equal availability the newest old generation wins",
+			dcds: []nvidiacomv1beta1.DynamoComponentDeployment{
+				dcd("older", "older-hash", 0, base),
+				dcd("newer", "newer-hash", 0, metav1.NewTime(base.Add(time.Minute))),
+			},
+			want:      workerGenerationHashes{v2: "newer-hash"},
+			wantFound: true,
+		},
+		{
+			name: "availability is summed per generation across its DCDs",
+			dcds: []nvidiacomv1beta1.DynamoComponentDeployment{
+				dcd("a-prefill", "a-hash", 1, base),
+				dcd("a-decode", "a-hash", 1, base),
+				dcd("b-prefill", "b-hash", 1, metav1.NewTime(base.Add(time.Minute))),
+			},
+			want:      workerGenerationHashes{v2: "a-hash"},
+			wantFound: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := tt.desired
+			if d.empty() {
+				d = desired
+			}
+
+			t.Log("recover the active generation from the observed DCDs")
+			got, found := recoverWorkerHashes(tt.dcds, d, legacyHash)
+
+			t.Log("check the recovered generation and whether any DCD was found")
+			assert.Equal(t, tt.wantFound, found)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestInitializeWorkerHashIfNeeded_RecoversFromExistingWorkerDCDs(t *testing.T) {
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: consts.ComponentTypeWorker,
+			Envs:          []corev1.EnvVar{{Name: "FOO", Value: "bar"}},
+		},
+	})
+	desiredV2Hash := betaDGDWorkersSpecHash(t, dgd)
+
+	t.Log("a serving worker DCD from an older generation exists, but the DGD carries no hash annotations")
+	servingDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd-worker-oldhash",
+			Namespace: "default",
+			Labels: map[string]string{
+				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+				consts.KubeLabelDynamoWorkerHash:          testOldWorkerHash,
+			},
+		},
+		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Replicas:      ptr.To(int32(1)),
+			},
+		},
+	})
+	servingDCD.Status.Component = &nvidiacomv1beta1.ComponentReplicaStatus{
+		Replicas:          1,
+		ReadyReplicas:     ptr.To(int32(1)),
+		AvailableReplicas: ptr.To(int32(1)),
+	}
+
+	r := createTestReconcilerWithStatus(dgd, withObjects(servingDCD))
+	ctx := context.Background()
+
+	t.Log("initialize the missing annotations from the existing DCD")
+	require.NoError(t, r.initializeWorkerHashIfNeeded(ctx, dgd))
+
+	t.Log("the running generation is recorded as current, not the desired one")
+	assert.Equal(t, testOldWorkerHash, r.getCurrentWorkerHashV2(dgd))
+	assert.NotContains(t, dgd.Annotations, consts.AnnotationCurrentWorkerHash)
+
+	persisted := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	require.NoError(t, r.Get(ctx, types.NamespacedName{Name: "test-dgd", Namespace: "default"}, persisted))
+	assert.Equal(t, testOldWorkerHash, persisted.Annotations[consts.AnnotationCurrentWorkerHashV2])
+
+	t.Log("the pending spec change rolls from the recovered generation to the desired one")
+	trigger, err := r.shouldTriggerRollingUpdate(dgd)
+	require.NoError(t, err)
+	assert.True(t, trigger)
+
+	rollingCtx, err := r.buildRollingUpdateContext(ctx, dgd)
+	require.NoError(t, err)
+	assert.Equal(t, desiredV2Hash, rollingCtx.NewWorkerHash)
+
+	oldDCDs, err := r.listOldWorkerDCDs(ctx, dgd, rollingCtx.NewWorkerHash)
+	require.NoError(t, err)
+	require.Len(t, oldDCDs, 1)
+	assert.Equal(t, "test-dgd-worker-oldhash", oldDCDs[0].Name)
+}
+
+func TestInitializeWorkerHashIfNeeded_RecoversLegacyAlphaGenerationWithoutRolling(t *testing.T) {
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: consts.ComponentTypeWorker,
+			Envs:          []corev1.EnvVar{{Name: "FOO", Value: "bar"}},
+			Resources: &nvidiacomv1alpha1.Resources{
+				Requests: &nvidiacomv1alpha1.ResourceItem{CPU: "1"},
+			},
+		},
+	})
+	legacyHash, err := dynamo.ComputeLegacyAlphaDGDWorkersSpecHash(dgd)
+	require.NoError(t, err)
+	v2Hash := betaDGDWorkersSpecHash(t, dgd)
+	require.NotEqual(t, legacyHash, v2Hash)
+
+	t.Log("workers created by a pre-dual operator carry the legacy alpha hash; the annotations are gone")
+	alphaDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd-worker-alpha",
+			Namespace: "default",
+			Labels: map[string]string{
+				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+				consts.KubeLabelDynamoWorkerHash:          legacyHash,
+			},
+		},
+		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+			},
+		},
+	})
+
+	r := createTestReconcilerWithStatus(dgd, withObjects(alphaDCD))
+
+	t.Log("initialize the missing annotations from the existing DCD")
+	require.NoError(t, r.initializeWorkerHashIfNeeded(context.Background(), dgd))
+
+	t.Log("recorded like the annotation path leaves a pre-dual generation, and nothing rolls")
+	assert.Equal(t, legacyHash, r.getCurrentWorkerHash(dgd))
+	assert.Equal(t, v2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
+	trigger, err := r.shouldTriggerRollingUpdate(dgd)
+	require.NoError(t, err)
+	assert.False(t, trigger)
+	rollingCtx, err := r.buildRollingUpdateContext(context.Background(), dgd)
+	require.NoError(t, err)
+	assert.Equal(t, legacyHash, rollingCtx.NewWorkerHash)
+	assert.False(t, rollingCtx.InProgress())
+}
+
+func TestInitializeWorkerHashIfNeeded_ExistingDesiredGenerationDoesNotRoll(t *testing.T) {
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: consts.ComponentTypeWorker,
+			Envs:          []corev1.EnvVar{{Name: "FOO", Value: "bar"}},
+		},
+	})
+	desiredV2Hash := betaDGDWorkersSpecHash(t, dgd)
+
+	t.Log("the only worker DCD already carries the desired hash")
+	currentDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd-worker-current",
+			Namespace: "default",
+			Labels: map[string]string{
+				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+				consts.KubeLabelDynamoWorkerHash:          desiredV2Hash,
+			},
+		},
+		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+			},
+		},
+	})
+
+	r := createTestReconcilerWithStatus(dgd, withObjects(currentDCD))
+
+	t.Log("initialize the missing annotations from the existing DCD")
+	require.NoError(t, r.initializeWorkerHashIfNeeded(context.Background(), dgd))
+
+	t.Log("the desired generation is recorded and no rollout is triggered")
+	assert.Equal(t, desiredV2Hash, r.getCurrentWorkerHashV2(dgd))
+	trigger, err := r.shouldTriggerRollingUpdate(dgd)
+	require.NoError(t, err)
+	assert.False(t, trigger)
 }
 
 func TestInitializeWorkerHashIfNeeded_PreservesLegacyAlphaHash(t *testing.T) {
