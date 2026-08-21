@@ -27,7 +27,7 @@ Hardware-specific deployment templates for Intel XPU GPUs using Kubernetes Dynam
 3. **Custom XPU runtime image** built with Intel XPU support:
    ```bash
    python container/render.py --framework=vllm --device=xpu --target=runtime
-   docker build -t nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:1.4.0 \
+   docker build -t nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:1.4.1 \
      -f container/vllm-runtime-xpu-amd64-rendered.Dockerfile .
    ```
    See [container/README.md](../../../../../container/README.md) for complete build instructions.
