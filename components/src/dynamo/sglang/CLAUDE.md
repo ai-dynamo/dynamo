@@ -20,7 +20,7 @@ support the current version plus 1 version back (N and N-1). The pattern:
    enough surface area to cover what Dynamo actually calls.
 4. Each fallback branch in `_compat.py` MUST have a comment noting which SGLang
    version it supports and when it can be removed, e.g.:
-   `# Fallback for sglang <= 0.5.12. Remove when min supported version is 0.5.14+`
+   `# Fallback for sglang <= 0.5.16. Remove when min supported version is 0.5.18+`
 5. When a new SGLang version is released and the old N-1 falls outside the support
    window, delete the corresponding fallback branches and polyfills from `_compat.py`.
    If `_compat.py` becomes trivial re-exports, inline the imports and delete the file.
@@ -69,6 +69,11 @@ Worker dispatch (main.py:60-132):
    (args.py:350-366) with only the fields needed for `DiffGenerator`. The stub does NOT
    have `max_running_requests`, `dllm_algorithm_config`, or other LLM-specific fields.
    Use `getattr()` when accessing fields that may not exist on the stub.
+
+SGLang 0.5.17 makes a resolved `ServerArgs` unconditionally read-only. Apply Dynamo's
+post-resolution startup overrides through `_compat.override_server_args()`; control-plane
+updates after engine creation should use the tokenizer manager's update API instead of
+assigning fields on `server_args`.
 
 **DynamoConfig** combines `DynamoRuntimeConfig` (common flags like `--namespace`,
 `--output-modalities`, `--media-output-fs-url`) with `DynamoSGLangConfig` (sglang-specific
@@ -258,9 +263,9 @@ override once upstream batches `detokenize_top_logprobs_tokens`.
 **Streaming behavior** (`_extract_logprobs`):
 
 Dynamo forces `stream_output=True` (args.py:374), making `output_ids` disjoint per chunk.
-However, SGLang's `meta_info["output_token_logprobs"]` and `meta_info["output_top_logprobs"]`
-are always **cumulative** — they grow with each chunk. The handler tracks
-`num_output_logprobs_so_far` to slice out only new entries per chunk.
+The pinned SGLang release and its N-1 predecessor align
+`meta_info["output_token_logprobs"]` and `meta_info["output_top_logprobs"]`
+with those incremental chunks, so the handler forwards each array directly.
 
 SGLang logprob format: `(logprob, token_id, text_or_None)` tuples.
 Dynamo output format: `log_probs` = list of floats, `top_logprobs` = list of lists of
@@ -308,9 +313,9 @@ text-to-video-diffusion.sh  # 1-2 GPUs - Text-to-video (Wan2.1)
 - **output_modalities default**: Global default is `["text"]`. Image/video diffusion
   workers must override to `["image"]`/`["video"]` or the Rust registration path tries
   to load `config.json` (which doesn't exist for diffusers models).
-- **Cumulative logprobs in streaming**: SGLang's `output_token_logprobs`/`output_top_logprobs`
-  in `meta_info` are cumulative even though `output_ids` are disjoint (stream_output=True).
-  Always slice with an offset, don't assume per-chunk logprobs.
+- **Incremental logprobs in streaming**: SGLang's `output_token_logprobs` and
+  `output_top_logprobs` align with each disjoint `output_ids` chunk. Keep the
+  metadata arrays positionally aligned when adapting the response.
 - **Zombie GPU processes**: `sgl_diffusion::scheduler` spawns a child process that
   survives parent kill. Always check `nvidia-smi` after teardown.
 - **Session identity**: SGLang 0.5.15 supports passive session-aware radix
@@ -355,7 +360,7 @@ Checklist for adding a new worker (e.g., a new modality or serving mode):
 - **Check nvidia-smi**: If a launch OOMs, check for orphaned GPU processes from prior runs.
 - **SimpleNamespace stubs**: When touching args.py or code that reads server_args, always
   use `getattr(server_args, field, default)` -- image/video workers don't have full ServerArgs.
-- **engine can be None**: Encode-only workers (multimodal-encode-worker)
+- **engine can be None**: Encode-only workers (--disaggregation-mode=encode)
   pass engine=None. Guard any engine access in shared base class code.
 - **Rebuild after Rust changes**: If changing registration (register.py interacts with Rust
   bindings), rebuild: `cd lib/bindings/python && maturin develop --uv && cd <root> && uv pip install -e .`

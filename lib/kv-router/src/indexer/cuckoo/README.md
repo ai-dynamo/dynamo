@@ -18,7 +18,7 @@ full-hash ownership to interpret removals. The consumer needs compact, concurren
 across DCs and stores only the lossy CKF projection.
 
 For the higher-level Relay and recovery model, see
-[Multi-DC KV Routing and the DC Relay](https://github.com/ai-dynamo/dynamo/blob/main/docs/components/router/multi-dc-kv-routing.md).
+[Multi-DC KV Routing and the DC Relay](../../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md).
 
 ## Core concepts
 
@@ -37,15 +37,19 @@ therefore a distinct DC within that domain.
 
 `DcCkfState` keeps the exact state needed to make mutation decisions:
 
-- `member_blocks[(worker, dp_rank)]` records exact full-hash ownership.
-- `dc_refcounts[full_hash]` equals the number of members that own the hash.
-- A full hash contributes one physical fingerprint to the CKF while its refcount is nonzero.
-- Additional owners change the refcount without inserting another CKF copy.
-- Different full hashes that map to the same representation contribute separate physical copies.
-- An unknown `(member, full_hash)` removal is an idempotent no-op. It never deletes by fingerprint.
+- `source_lineage[(worker, dp_rank)]` maps each source's engine-specific external block id to
+  the canonical Dynamo sequence hash derived from its `tokens_hash` chain. Engine vocabulary
+  never crosses this boundary: only canonical hashes reach ownership, residency, or the filter.
+- `canonical_owners[canonical]` carries the owner count together with a residency flag.
+- A canonical hash contributes one physical fingerprint to the CKF while it is resident.
+- Additional owners (or same-source external aliases) change the count without inserting
+  another CKF copy, so identical content deduplicates across sources.
+- An unknown `(member, external)` removal is an idempotent no-op. It never deletes by
+  fingerprint, and removals resolve through source lineage because `Removed` events carry only
+  external ids.
 
-The CKF is a lossy projection, not the authority. A packed fingerprint has no full-hash identity,
-so exact ownership and refcounts must remain on the producer side.
+The CKF is a lossy projection, not the authority. A packed fingerprint has no canonical-hash
+identity, so exact lineage and ownership must remain on the producer side.
 
 Store and remove transitions are consequently:
 
@@ -71,11 +75,11 @@ locking. Cuckoo insertion may relocate resident fingerprints with bounded forwar
 those writes back if no path succeeds. `max_kicks` is a bounded-search limit; reaching it does not
 prove that the table is full.
 
-Capacity exhaustion is an observable, pre-commit omission for the affected block. It does not add
-an exact ownership edge, change a refcount, dirty a bucket, fence the pool, or retire the consumer
-lane. Service continues, a later remove is an unknown no-op, and a later store may retry after
-occupancy changes. This permits stable false negatives relative to the source cache without
-corrupting tracked producer state.
+Capacity exhaustion omits only the physical admission: exact lineage and ownership still commit
+(`CkfCommitState::ExactCommittedPhysicalOmitted`), so a later remove resolves normally and a
+repeated store re-offers the block on a relocation-free path once occupancy changes. It does not
+dirty a bucket, fence the pool, or retire the consumer lane. This permits stable false negatives
+relative to the source cache without corrupting tracked producer state.
 
 ## Publication protocol
 
@@ -150,7 +154,7 @@ Recovery targets the state whose commit became uncertain:
 - Suspect exact producer state requires a producer-generation rebuild.
 - A trustworthy producer with an uncertain publication stream needs a new lease and snapshot.
 - An uncertain consumer lane needs lane retirement and a new snapshot, not producer recovery.
-- Ordinary pre-commit capacity exhaustion is an omission and requires no recovery.
+- Ordinary capacity exhaustion omits only physical admission and requires no recovery.
 
 The in-process `LocalCkfAdapter` exercises this complete boundary today. Non-local transport can
 carry the same snapshot/delta protocol without moving exact full-hash ownership into the global

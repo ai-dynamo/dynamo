@@ -9,19 +9,23 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 | Filter | Triggers |
 |--------|----------|
 | `core` | Main test suite (vLLM, SGLang, TRT-LLM containers) |
+| `dev_images` | dev / local-dev image builds only (no runtime or GPU jobs) |
 | `operator` | Kubernetes operator tests |
-| `snapshot` | Snapshot Agent tests |
+| `snapshot` | Checkpoint-placeholder image + all-framework DynamoCheckpoint deploy tests (github.com/ai-dynamo/snapshot is external; this covers Dynamo's own integration surface) |
+| `snapshot_vllm` / `snapshot_sglang` / `snapshot_trtllm` | That framework's DynamoCheckpoint deploy suite |
 | `deploy` | Deploy-specific tests |
 | `vllm` / `sglang` / `trtllm` | Backend-specific tests |
+| `sidecar` | Nothing directly; sidecar source and proto files also match `rust` |
 | `benchmarks` | Dynamo runtime pipeline (runs `tests/benchmarks/**` pytest suite) |
 | `sample` | Sample-backend unified test (piggybacks on vllm image) |
 | `efa` | EFA runtime image builds for vLLM, SGLang, TRT-LLM (`container/templates/aws.Dockerfile` change) |
 | `docs` | Nothing (classification only) |
-| `examples` | Nothing (classification only) |
+| `fern_components` | Parse custom MDX components (a step inside Fern Configuration Check) |
+| `examples` | Recipe Kustomize generation and unit checks |
 | `ignore` | Nothing (classification only) |
 | `rust` | Rust pre merge checks |
 
-> **Note:** `docs`, `examples`, and `ignore` don't trigger any CI jobs. They exist to satisfy coverage requirements - every file must match at least one filter.
+> **Note:** `docs`, `ignore`, and `sidecar` don't directly trigger CI jobs. They exist to satisfy coverage requirements - every file must match at least one filter. Sidecar source and proto files also match `rust`, which runs the workspace Rust checks.
 
 ## Fixing "Uncovered Files" Errors
 
@@ -33,7 +37,7 @@ ERROR: The following files are not covered by any CI filter
 Add patterns to `filters.yaml`:
 
 1. **New source files** → Add to `core` or relevant backend filter
-2. **New examples/recipes** → Add to `examples`
+2. **New examples, recipes, and recipe validation helpers** → Add to `examples`
 3. **Documentation** → Add to `docs`
 4. **Config files that don't need CI** → Add to `ignore`
 

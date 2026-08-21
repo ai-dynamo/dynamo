@@ -55,6 +55,28 @@ func mustComputeBetaDGDWorkersSpecHash(t testing.TB, dgd *v1beta1.DynamoGraphDep
 	return hash
 }
 
+func betaDGDWithRuntimeVersion(t testing.TB, image, override string) *v1beta1.DynamoGraphDeployment {
+	t.Helper()
+
+	// Convert the standard worker fixture to the current API version.
+	dgd := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
+	}))
+
+	// Configure the inputs used to resolve the worker runtime version.
+	dgd.Spec.Components[0].RuntimeVersionOverride = override
+	dgd.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  commonconsts.MainContainerName,
+				Image: image,
+			}},
+		},
+	}
+
+	return dgd
+}
+
 func TestComputeBetaDGDWorkersSpecHash_Deterministic(t *testing.T) {
 	dgd := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 		"prefill": {ComponentType: commonconsts.ComponentTypePrefill, Replicas: ptr.To(int32(2))},
@@ -64,72 +86,6 @@ func TestComputeBetaDGDWorkersSpecHash_Deterministic(t *testing.T) {
 	h2 := mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, dgd))
 	assert.Equal(t, h1, h2)
 	assert.Len(t, h1, 8)
-}
-
-func TestComputeLegacyAlphaDGDWorkersSpecHash_MatchesV1Alpha1Hash(t *testing.T) {
-	alpha := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {
-			ComponentType: commonconsts.ComponentTypeWorker,
-			Envs:          []corev1.EnvVar{{Name: "FOO", Value: "bar"}},
-			Resources: &v1alpha1.Resources{
-				Requests: &v1alpha1.ResourceItem{CPU: "1", Memory: "1Gi"},
-			},
-			Labels:      map[string]string{"resource-label": "ignored-by-legacy-hash"},
-			Annotations: map[string]string{"resource-annotation": "ignored-by-legacy-hash"},
-		},
-	})
-	alpha.Annotations = map[string]string{"nvidia.com/current-worker-hash": "old-alpha-hash"}
-	beta := &v1beta1.DynamoGraphDeployment{}
-	assert.NoError(t, alpha.ConvertTo(beta))
-
-	legacyHash, err := ComputeLegacyAlphaDGDWorkersSpecHash(beta)
-	assert.NoError(t, err)
-	expectedLegacyHash, err := v1alpha1.ComputeDGDWorkersSpecHash(alpha)
-	assert.NoError(t, err)
-	assert.Equal(t, expectedLegacyHash, legacyHash)
-	assert.NotEqual(t, mustComputeBetaDGDWorkersSpecHash(t, beta), legacyHash)
-}
-
-func TestComputeLegacyAlphaDGDWorkersSpecHash_RecoversNameOnlyMainContainerHash(t *testing.T) {
-	alpha := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {
-			ComponentType: commonconsts.ComponentTypeWorker,
-			ExtraPodSpec: &v1alpha1.ExtraPodSpec{
-				MainContainer: &corev1.Container{Name: commonconsts.MainContainerName},
-			},
-		},
-	})
-	directAlphaHash, err := v1alpha1.ComputeDGDWorkersSpecHash(alpha)
-	assert.NoError(t, err)
-	assert.Equal(t, "0c322ce0", directAlphaHash)
-
-	beta := &v1beta1.DynamoGraphDeployment{}
-	assert.NoError(t, alpha.ConvertTo(beta))
-	recomputedHash, err := ComputeLegacyAlphaDGDWorkersSpecHash(beta)
-	assert.NoError(t, err)
-
-	assert.Equal(t, directAlphaHash, recomputedHash)
-}
-
-func TestComputeLegacyAlphaDGDWorkersSpecHash_RecoversMultipleCompilationCacheVolumeMounts(t *testing.T) {
-	alpha := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {
-			ComponentType: commonconsts.ComponentTypeWorker,
-			VolumeMounts: []v1alpha1.VolumeMount{
-				{Name: "model-cache", MountPoint: "/models", UseAsCompilationCache: true},
-				{Name: "compile-cache", MountPoint: "/compile", UseAsCompilationCache: true},
-			},
-		},
-	})
-	directAlphaHash, err := v1alpha1.ComputeDGDWorkersSpecHash(alpha)
-	assert.NoError(t, err)
-
-	beta := &v1beta1.DynamoGraphDeployment{}
-	assert.NoError(t, alpha.ConvertTo(beta))
-	recomputedHash, err := ComputeLegacyAlphaDGDWorkersSpecHash(beta)
-	assert.NoError(t, err)
-
-	assert.Equal(t, directAlphaHash, recomputedHash)
 }
 
 func TestComputeBetaDGDWorkersSpecHash_IgnoresNonWorkers(t *testing.T) {
@@ -294,6 +250,62 @@ func TestComputeBetaDGDWorkersSpecHash_IgnoresNonRolloutFields(t *testing.T) {
 	disabledScalingAdapter := base()
 	disabledScalingAdapter.Spec.Services["worker"].ScalingAdapter = &v1alpha1.ScalingAdapter{}
 	assert.Equal(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, disabledScalingAdapter)))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_UsesResolvedRuntimeVersion(t *testing.T) {
+	t.Log("define resolved-runtime-version hash comparisons")
+	tests := []struct {
+		name          string
+		leftImage     string
+		leftOverride  string
+		rightImage    string
+		rightOverride string
+		wantEqual     bool
+	}{
+		{
+			name:          "omits resolved versions before 1.5",
+			leftImage:     "registry.example/runtime:custom",
+			rightImage:    "registry.example/runtime:custom",
+			rightOverride: "1.4.9",
+			wantEqual:     true,
+		},
+		{
+			name:          "canonicalizes equivalent implicit and explicit versions",
+			leftImage:     "nvcr.io/nvidia/ai-dynamo/runtime:v1.5.0-cuda13",
+			rightImage:    "nvcr.io/nvidia/ai-dynamo/runtime:v1.5.0-cuda13",
+			rightOverride: "1.5.0",
+			wantEqual:     true,
+		},
+		{
+			name:          "changes at the 1.5 boundary",
+			leftImage:     "registry.example/runtime:custom",
+			leftOverride:  "1.4.9",
+			rightImage:    "registry.example/runtime:custom",
+			rightOverride: "1.5.0",
+		},
+		{
+			name:          "tracks override changes after 1.5",
+			leftImage:     "registry.example/runtime:custom",
+			leftOverride:  "1.5.0",
+			rightImage:    "registry.example/runtime:custom",
+			rightOverride: "1.5.1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("compute worker hashes for the compared runtime versions")
+			left := mustComputeBetaDGDWorkersSpecHash(t, betaDGDWithRuntimeVersion(t, tt.leftImage, tt.leftOverride))
+			right := mustComputeBetaDGDWorkersSpecHash(t, betaDGDWithRuntimeVersion(t, tt.rightImage, tt.rightOverride))
+
+			t.Log("assert whether the resolved versions share a worker generation")
+			if tt.wantEqual {
+				assert.Equal(t, left, right)
+			} else {
+				assert.NotEqual(t, left, right)
+			}
+		})
+	}
 }
 
 func TestComputeBetaDGDWorkersSpecHash_TracksPreservedAlphaResourceMetadata(t *testing.T) {

@@ -138,6 +138,12 @@ type DynamoComponentDeploymentSharedSpecConversionContext struct {
 // ConvertFromDynamoComponentDeploymentSharedSpec converts the shared spec from
 // v1alpha1 to v1beta1.
 func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeploymentSharedSpec, dst *v1beta1.DynamoComponentDeploymentSharedSpec, restored *v1beta1.DynamoComponentDeploymentSharedSpec, save *DynamoComponentDeploymentSharedSpec, ctx DynamoComponentDeploymentSharedSpecConversionContext) error {
+	// Convert the component provider context before the remaining shared fields.
+	if src.ProviderOverride != nil {
+		dst.ProviderOverride = &v1beta1.ProviderOverride{}
+		ConvertFromProviderOverride(src.ProviderOverride, dst.ProviderOverride)
+	}
+
 	// ComponentType: v1beta1 promotes the legacy v1alpha1 worker subcomponent
 	// values to first-class component types.
 	dst.ComponentType = sharedComponentTypeToHub(src)
@@ -149,6 +155,7 @@ func ConvertFromDynamoComponentDeploymentSharedSpec(src *DynamoComponentDeployme
 	// source of truth on v1alpha1); for standalone DCDs the caller falls
 	// back to ObjectMeta.Name when src.ServiceName is empty.
 	dst.ComponentName = src.ServiceName
+	dst.RuntimeVersionOverride = src.RuntimeVersionOverride
 
 	dst.GlobalDynamoNamespace = src.GlobalDynamoNamespace
 	dst.Replicas = src.Replicas
@@ -258,9 +265,13 @@ func restoreSharedAlphaOnlyPodFields(dst *DynamoComponentDeploymentSharedSpec, p
 	if dst.ExtraPodMetadata == nil && extraPodMetadataNeedsPreservation(preserved.ExtraPodMetadata) {
 		dst.ExtraPodMetadata = preserved.ExtraPodMetadata.DeepCopy()
 	}
-	if dst.ExtraPodSpec == nil && shouldRestorePreservedExtraPodSpec(dst, preserved) {
-		cp := *preserved.ExtraPodSpec.DeepCopy()
-		dst.ExtraPodSpec = &cp
+	if shouldRestorePreservedExtraPodSpec(dst, preserved) {
+		if dst.ExtraPodSpec == nil {
+			cp := *preserved.ExtraPodSpec.DeepCopy()
+			dst.ExtraPodSpec = &cp
+		} else {
+			restorePreservedFrontendSidecarConflict(dst.ExtraPodSpec, preserved.ExtraPodSpec)
+		}
 	}
 	restoreMainContainerFieldOrigins(dst, preserved, mainContainerPresent)
 	if dst.ExtraPodSpec != nil && dst.ExtraPodSpec.MainContainer != nil &&
@@ -268,6 +279,23 @@ func restoreSharedAlphaOnlyPodFields(dst *DynamoComponentDeploymentSharedSpec, p
 		preserved.ExtraPodSpec != nil && preserved.ExtraPodSpec.MainContainer != nil {
 		dst.ExtraPodSpec.MainContainer.Name = preserved.ExtraPodSpec.MainContainer.Name
 	}
+}
+
+func restorePreservedFrontendSidecarConflict(dst, preserved *ExtraPodSpec) {
+	if dst == nil || preserved == nil || preserved.PodSpec == nil {
+		return
+	}
+	container, found := findContainerByName(preserved.PodSpec.Containers, defaultFrontendSidecarContainerName)
+	if !found {
+		return
+	}
+	if dst.PodSpec == nil {
+		dst.PodSpec = &corev1.PodSpec{}
+	}
+	if _, found := findContainerByName(dst.PodSpec.Containers, defaultFrontendSidecarContainerName); found {
+		return
+	}
+	dst.PodSpec.Containers = append(dst.PodSpec.Containers, container)
 }
 
 func restoreSharedAlphaOnlyDisabledFeatures(dst *DynamoComponentDeploymentSharedSpec, preserved *DynamoComponentDeploymentSharedSpec) {
@@ -498,6 +526,12 @@ func extraPodMetadataNeedsPreservation(src *ExtraPodMetadata) bool {
 // ConvertToDynamoComponentDeploymentSharedSpec converts the shared spec from
 // v1beta1 to v1alpha1.
 func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDeploymentSharedSpec, dst *DynamoComponentDeploymentSharedSpec, restored *DynamoComponentDeploymentSharedSpec, save *v1beta1.DynamoComponentDeploymentSharedSpec) error {
+	// Convert the component provider context before the remaining shared fields.
+	if src.ProviderOverride != nil {
+		dst.ProviderOverride = &ProviderOverride{}
+		ConvertToProviderOverride(src.ProviderOverride, dst.ProviderOverride)
+	}
+
 	dst.ComponentType, dst.SubComponentType = sharedComponentTypeFromHub(src.ComponentType)
 	dst.GlobalDynamoNamespace = src.GlobalDynamoNamespace
 	dst.Replicas = src.Replicas
@@ -520,6 +554,7 @@ func ConvertToDynamoComponentDeploymentSharedSpec(src *v1beta1.DynamoComponentDe
 		ConvertToEPPConfig(src.EPPConfig, dst.EPPConfig)
 	}
 
+	dst.RuntimeVersionOverride = src.RuntimeVersionOverride
 	dst.ServiceName = src.ComponentName
 
 	// sharedMemorySize -> SharedMemorySpec.
@@ -573,6 +608,10 @@ func saveSharedHubOnlySpec(src *v1beta1.DynamoComponentDeploymentSharedSpec, con
 	}
 	if experimentalIsHubOnlyShape(src.Experimental) {
 		save.Experimental = src.Experimental.DeepCopy()
+	} else if src.Experimental != nil && src.Experimental.Grove != nil {
+		// The grove block has no v1alpha1 representation; preserve it sparsely
+		// when the rest of the experimental block converts to alpha fields.
+		save.Experimental = &v1beta1.ExperimentalSpec{Grove: src.Experimental.Grove.DeepCopy()}
 	}
 	return nil
 }
@@ -787,16 +826,81 @@ func sharedHubSpecSaveIsZero(save *v1beta1.DynamoComponentDeploymentSharedSpec) 
 // Simple shared-spec structs
 // ---------------------------------------------------------------------------
 
+// ConvertFromProviderOverride converts a provider-native override from
+// v1alpha1 to v1beta1 without interpreting its raw value. src and dst must not
+// be nil.
+func ConvertFromProviderOverride(src *ProviderOverride, dst *v1beta1.ProviderOverride) {
+	*dst = v1beta1.ProviderOverride{
+		APIVersion: src.APIVersion,
+		Target:     src.Target,
+		Value:      src.Value,
+	}
+}
+
+// ConvertToProviderOverride converts a provider-native override from v1beta1
+// to v1alpha1 without interpreting its raw value. src and dst must not be nil.
+func ConvertToProviderOverride(src *v1beta1.ProviderOverride, dst *ProviderOverride) {
+	*dst = ProviderOverride{
+		APIVersion: src.APIVersion,
+		Target:     src.Target,
+		Value:      src.Value,
+	}
+}
+
 // ConvertFromMultinodeSpec converts multinode settings from v1alpha1 to
-// v1beta1.
+// v1beta1. src and dst must not be nil.
 func ConvertFromMultinodeSpec(src *MultinodeSpec, dst *v1beta1.MultinodeSpec) {
 	*dst = v1beta1.MultinodeSpec{NodeCount: src.NodeCount}
+
+	// Convert each explicit role independently to preserve its provider context.
+	if src.Leader != nil {
+		dst.Leader = &v1beta1.MultinodeRoleSpec{}
+		ConvertFromMultinodeRoleSpec(src.Leader, dst.Leader)
+	}
+	if src.Worker != nil {
+		dst.Worker = &v1beta1.MultinodeRoleSpec{}
+		ConvertFromMultinodeRoleSpec(src.Worker, dst.Worker)
+	}
 }
 
 // ConvertToMultinodeSpec converts multinode settings from v1beta1 to
-// v1alpha1.
+// v1alpha1. src and dst must not be nil.
 func ConvertToMultinodeSpec(src *v1beta1.MultinodeSpec, dst *MultinodeSpec) {
 	*dst = MultinodeSpec{NodeCount: src.NodeCount}
+
+	// Convert each explicit role independently to preserve its provider context.
+	if src.Leader != nil {
+		dst.Leader = &MultinodeRoleSpec{}
+		ConvertToMultinodeRoleSpec(src.Leader, dst.Leader)
+	}
+	if src.Worker != nil {
+		dst.Worker = &MultinodeRoleSpec{}
+		ConvertToMultinodeRoleSpec(src.Worker, dst.Worker)
+	}
+}
+
+// ConvertFromMultinodeRoleSpec converts one explicit multinode role. src and
+// dst must not be nil.
+func ConvertFromMultinodeRoleSpec(src *MultinodeRoleSpec, dst *v1beta1.MultinodeRoleSpec) {
+	*dst = v1beta1.MultinodeRoleSpec{}
+
+	// Preserve the role-level provider schema and sparse value verbatim.
+	if src.ProviderOverride != nil {
+		dst.ProviderOverride = &v1beta1.ProviderOverride{}
+		ConvertFromProviderOverride(src.ProviderOverride, dst.ProviderOverride)
+	}
+}
+
+// ConvertToMultinodeRoleSpec converts one explicit multinode role. src and dst
+// must not be nil.
+func ConvertToMultinodeRoleSpec(src *v1beta1.MultinodeRoleSpec, dst *MultinodeRoleSpec) {
+	*dst = MultinodeRoleSpec{}
+
+	// Preserve the role-level provider schema and sparse value verbatim.
+	if src.ProviderOverride != nil {
+		dst.ProviderOverride = &ProviderOverride{}
+		ConvertToProviderOverride(src.ProviderOverride, dst.ProviderOverride)
+	}
 }
 
 // ConvertFromModelReference converts model references from v1alpha1 to
@@ -1595,6 +1699,11 @@ func restoreSharedHubOnlyFields(dst, preserved *v1beta1.DynamoComponentDeploymen
 	restoreSharedHubOnlyFrontendSidecar(dst, preserved)
 	if dst.Experimental == nil && experimentalIsHubOnlyShape(preserved.Experimental) {
 		dst.Experimental = preserved.Experimental.DeepCopy()
+	} else if dst.Experimental != nil && preserved.Experimental != nil &&
+		dst.Experimental.Grove == nil && preserved.Experimental.Grove != nil {
+		// The experimental block was rebuilt from alpha fields (GMS, failover,
+		// checkpoint); merge back the sparsely preserved hub-only grove block.
+		dst.Experimental.Grove = preserved.Experimental.Grove.DeepCopy()
 	}
 	return nil
 }

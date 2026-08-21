@@ -13,10 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
 import json
 import logging
-import os
 import uuid
+from collections.abc import Callable
 from typing import Any, Optional
 
 import numpy as np
@@ -37,20 +38,44 @@ from dynamo.planner.config.planner_config import (
     PlannerConfig,
     PlannerPreDeploymentSweepMode,
 )
-from dynamo.profiler.utils.config import DgdPlannerServiceConfig, set_argument_value
+from dynamo.profiler.utils.config import (
+    DgdPlannerComponentConfig,
+    get_component_dict,
+    get_main_container,
+    get_main_container_dict,
+    set_argument_value,
+)
 from dynamo.profiler.utils.config_modifiers.trtllm import enable_trtllm_chunked_prefill
+from dynamo.profiler.utils.dgd_template import load_dgd_template
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     derive_planner_image,
     is_mocker_enabled,
     is_planner_enabled,
+    needs_mocker_aic_perf_model,
     needs_profile_data,
 )
+from dynamo.profiler.utils.replay_optimize.constants import AIC_BACKEND_VERSIONS
 
 logger = logging.getLogger(__name__)
 
-# Path to mocker disagg config relative to workspace
-MOCKER_DISAGG_CONFIG_PATH = "examples/backends/mocker/deploy/disagg.yaml"
+_MOCKER_AIC_BACKEND_VERSIONS = {
+    **AIC_BACKEND_VERSIONS,
+    "trtllm": "1.3.0rc10",
+}
+
+
+def _load_latest_database_version() -> Optional[Callable[..., Optional[str]]]:
+    try:
+        perf_database = importlib.import_module("aiconfigurator_core.sdk.perf_database")
+    except ModuleNotFoundError as e:
+        if e.name != "aiconfigurator_core":
+            raise
+        return None
+    return perf_database.get_latest_database_version
+
+
+get_latest_database_version = _load_latest_database_version()
 
 # ConfigMap name prefixes (a 4-char UUID suffix is appended at runtime
 # so that multiple deployments in the same namespace don't collide)
@@ -92,7 +117,7 @@ def assemble_final_config(
        priority 1 of its bootstrap chain, superseding AIC and files.
     4. **Planner** — inject the Planner service + planner-config ConfigMap.
        When ``aic_perf_model`` is given, it is embedded so the planner can
-       initialize the Rust perf shim with native AIC identity. When
+       initialize its direct AIC core model with native identity. When
        ``aic_spec`` is given (rapid mode), it is embedded so the planner can
        run AIC interpolation at bootstrap if the endpoint is unavailable.
     5. **Profile data** — attach interpolation-data ConfigMap when mocker
@@ -113,6 +138,7 @@ def assemble_final_config(
         enable_trtllm_chunked_prefill(dgd_config)
 
     if not mocker and not planner:
+        apply_runtime_version_override(dgdr, dgd_config)
         return dgd_config
 
     # Save picked config for auditing
@@ -156,13 +182,28 @@ def assemble_final_config(
         if profile_cm:
             config_maps.append(profile_cm)
 
+    apply_runtime_version_override(dgdr, base)
     if config_maps:
         return config_maps + [base]
     return base
 
 
+def apply_runtime_version_override(dgdr, config_dict: dict) -> None:
+    """Apply the DGDR runtime version to every generated DGD component."""
+    override = dgdr.runtimeVersionOverride
+    if not override:
+        return
+
+    components = config_dict.get("spec", {}).get("components", [])
+    if not isinstance(components, list):
+        return
+    for component in components:
+        if isinstance(component, dict):
+            component["runtimeVersionOverride"] = override
+
+
 def _vllm_worker_roles() -> dict[str, str]:
-    """Canonical DGD service name → DYN_BENCHMARK_MODE role.
+    """Canonical DGD component name → DYN_BENCHMARK_MODE role.
 
     Sourced from :class:`VllmComponentName` so we stay in sync with the
     rest of the planner/profiler if the k8s service names are ever
@@ -178,23 +219,42 @@ def _vllm_worker_roles() -> dict[str, str]:
 def enable_vllm_benchmark_mode(config_dict: dict) -> None:
     """Set ``DYN_BENCHMARK_MODE`` on every vLLM worker in *config_dict*.
 
-    Mutates ``config_dict`` in place. Each recognised worker service
+    Mutates ``config_dict`` in place. Each recognised worker component
     (``VllmPrefillWorker`` / ``VllmDecodeWorker`` / ``VllmWorker``) gets the
     mode matching its role so its startup self-benchmark publishes
     ForwardPassMetrics via the ``get_perf_metrics`` endpoint.
 
     Idempotent: if ``DYN_BENCHMARK_MODE`` is already set (e.g. via user
     overrides) the existing entry is replaced with the role-correct value.
+
+    A single generic ``type: worker`` component is aggregate even when its
+    planner-facing name is ``VllmDecodeWorker``.
     """
-    services = config_dict.get("spec", {}).get("services", {})
-    for svc_name, mode in _vllm_worker_roles().items():
-        svc = services.get(svc_name)
-        if svc is None:
+    worker_roles = _vllm_worker_roles()
+    components = config_dict.get("spec", {}).get("components", [])
+    if not isinstance(components, list):
+        components = []
+    generic_workers = [
+        component
+        for component in components
+        if isinstance(component, dict)
+        and component.get("type") == "worker"
+        and component.get("name") in worker_roles
+    ]
+    aggregate_worker_name = (
+        generic_workers[0].get("name") if len(generic_workers) == 1 else None
+    )
+
+    for component_name, canonical_mode in worker_roles.items():
+        component = get_component_dict(config_dict, component_name)
+        if component is None:
             continue
-        main_container = svc.setdefault("extraPodSpec", {}).setdefault(
-            "mainContainer", {}
-        )
-        env_list = main_container.setdefault("env", [])
+        mode = "agg" if component_name == aggregate_worker_name else canonical_mode
+        main_container = get_main_container_dict(component)
+        if main_container is None:
+            continue
+        env_list = main_container.get("env") or []
+        main_container["env"] = env_list
         # Strip any existing DYN_BENCHMARK_MODE; append canonical value.
         env_list[:] = [
             e
@@ -203,8 +263,8 @@ def enable_vllm_benchmark_mode(config_dict: dict) -> None:
         ]
         env_list.append({"name": "DYN_BENCHMARK_MODE", "value": mode})
         logger.info(
-            "Enabled vLLM self-benchmark on service %s (DYN_BENCHMARK_MODE=%s)",
-            svc_name,
+            "Enabled vLLM self-benchmark on component %s (DYN_BENCHMARK_MODE=%s)",
+            component_name,
             mode,
         )
 
@@ -222,32 +282,26 @@ def generate_mocker_config(
     Returns:
         The mocker DGD config dict (no planner, no ConfigMaps).
     """
-    workspace_dir = get_workspace_dir()
-    mocker_config_path = os.path.join(workspace_dir, MOCKER_DISAGG_CONFIG_PATH)
-
-    with open(mocker_config_path, "r") as f:
-        mocker_config = yaml.safe_load(f)
+    mocker_config = load_dgd_template("mocker", "disagg")
 
     image = dgdr.image
     if image:
-        for service_config in (
-            mocker_config.get("spec", {}).get("services", {}).values()
-        ):
-            if service_config.get("extraPodSpec") and service_config[
-                "extraPodSpec"
-            ].get("mainContainer"):
-                service_config["extraPodSpec"]["mainContainer"]["image"] = image
+        components = mocker_config.get("spec", {}).get("components", [])
+        for component in components:
+            if not isinstance(component, dict):
+                continue
+            main_container = get_main_container_dict(component)
+            if main_container is not None:
+                main_container["image"] = image
 
     model = dgdr.model
     aic_workers = _mocker_aic_worker_picks(aic_spec)
     for worker_name in _mocker_worker_names():
-        service_config = (
-            mocker_config.get("spec", {}).get("services", {}).get(worker_name)
-        )
-        if service_config:
-            main_container = service_config.get("extraPodSpec", {}).get(
-                "mainContainer", {}
-            )
+        component = get_component_dict(mocker_config, worker_name)
+        if component:
+            main_container = get_main_container_dict(component)
+            if main_container is None:
+                continue
             args_list = main_container.get("args", [])
             args_list = set_argument_value(args_list, "--model-path", model)
             args_list = set_argument_value(args_list, "--model-name", model)
@@ -262,67 +316,61 @@ def generate_mocker_config(
 def enable_planner_worker_scaling_adapters(
     config_dict: dict, planner_config: PlannerConfig
 ) -> None:
-    """Opt worker services into DGDSA when non-advisory Planner manages replicas."""
+    """Opt worker components into DGDSA when Planner manages replicas."""
     if planner_config.advisory:
         return
 
-    services = config_dict.get("spec", {}).get("services", {})
-    if not isinstance(services, dict):
+    components = config_dict.get("spec", {}).get("components", [])
+    if not isinstance(components, list):
         return
 
     target_subcomponents = _planner_scaling_subcomponents(planner_config.mode)
     untyped_worker_count = sum(
         1
-        for service_name, service_config in services.items()
-        if isinstance(service_config, dict)
-        and service_config.get("componentType") == "worker"
-        and not service_config.get("subComponentType")
-        and _infer_subcomponent_from_service_name(service_name) is None
+        for component in components
+        if isinstance(component, dict)
+        and component.get("type") == "worker"
+        and _infer_subcomponent_from_component_name(component.get("name", "")) is None
     )
 
-    for service_name, service_config in services.items():
-        if not isinstance(service_config, dict):
+    for component in components:
+        if not isinstance(component, dict):
             continue
-        if not _is_planner_scalable_worker_service(
-            service_name,
-            service_config,
+        if not _is_planner_scalable_worker_component(
+            component,
             target_subcomponents,
             planner_config.mode,
             untyped_worker_count,
         ):
             continue
-        scaling_adapter = service_config.setdefault("scalingAdapter", {})
+        scaling_adapter = component.setdefault("scalingAdapter", {})
         if not isinstance(scaling_adapter, dict):
-            service_config["scalingAdapter"] = {"enabled": True}
+            component["scalingAdapter"] = {"enabled": True}
             continue
         scaling_adapter["enabled"] = True
 
 
-def _is_planner_scalable_worker_service(
-    service_name: str,
-    service_config: dict,
+def _is_planner_scalable_worker_component(
+    component: dict,
     target_subcomponents: set[str],
     planner_mode: str,
     untyped_worker_count: int,
 ) -> bool:
-    if service_config.get("componentType") != "worker":
+    component_type = component.get("type")
+    if component_type in target_subcomponents:
+        return True
+    if component_type != "worker":
         return False
 
-    sub_component_type = service_config.get("subComponentType")
-    if sub_component_type:
-        return sub_component_type in target_subcomponents
-
-    inferred_type = _infer_subcomponent_from_service_name(service_name)
+    inferred_type = _infer_subcomponent_from_component_name(component.get("name", ""))
     if inferred_type is not None:
         if inferred_type in target_subcomponents:
-            service_config["subComponentType"] = inferred_type
+            component["type"] = inferred_type
             return True
         return False
 
-    # Some agg templates have one generic worker name and no subComponentType.
-    # Mark it as decode so the Kubernetes planner can rediscover the target.
     if planner_mode == "agg" and untyped_worker_count == 1:
-        service_config["subComponentType"] = "decode"
+        component["type"] = "decode"
         return True
 
     return False
@@ -338,8 +386,8 @@ def _planner_scaling_subcomponents(planner_mode: str) -> set[str]:
     return set()
 
 
-def _infer_subcomponent_from_service_name(service_name: str) -> Optional[str]:
-    normalized = service_name.lower()
+def _infer_subcomponent_from_component_name(component_name: str) -> Optional[str]:
+    normalized = component_name.lower()
     if "prefill" in normalized:
         return "prefill"
     if "decode" in normalized:
@@ -373,6 +421,11 @@ def _inject_mocker_aic_args(
     if "--aic-perf-model" not in args_list:
         args_list.append("--aic-perf-model")
     args_list = set_argument_value(args_list, "--aic-backend", aic_spec.backend)
+    backend_version = _MOCKER_AIC_BACKEND_VERSIONS.get(aic_spec.backend)
+    if backend_version is not None:
+        args_list = set_argument_value(
+            args_list, "--aic-backend-version", backend_version
+        )
     args_list = set_argument_value(args_list, "--aic-system", aic_spec.system)
     args_list = set_argument_value(args_list, "--aic-tp-size", str(kwargs["tp_size"]))
     args_list = set_argument_value(
@@ -397,7 +450,7 @@ def add_planner_to_config(
     aic_spec: Optional[AICInterpolationSpec] = None,
     aic_perf_model: Optional[AICPerfModelSpec] = None,
 ) -> dict:
-    """Add a Planner service and its planner-config ConfigMap to *config_dict*.
+    """Add a Planner component and its planner-config ConfigMap to *config_dict*.
 
     The planner's ``profile_results_dir`` is always set to the well-known
     mount path so the pod knows where to look when profile data is
@@ -411,7 +464,7 @@ def add_planner_to_config(
         aic_spec: AIC interpolation spec (rapid mode). When set, the planner
             runs AIC in-process at bootstrap instead of reading NPZ files.
         aic_perf_model: Native AIC forward-pass perf model identity for
-            real-time Rust shim queries.
+            real-time Planner engine queries.
 
     Returns:
         The ``planner_config_cm`` ConfigMap dict.
@@ -425,13 +478,11 @@ def add_planner_to_config(
     )
     planner_cfg.profile_results_dir = PROFILE_DATA_MOUNT
 
-    planner_service = DgdPlannerServiceConfig()
-    if planner_service.extraPodSpec.mainContainer and dgdr.image:
-        planner_service.extraPodSpec.mainContainer.image = derive_planner_image(
-            dgdr.image
-        )
+    planner_component = DgdPlannerComponentConfig()
+    if dgdr.image:
+        get_main_container(planner_component).image = derive_planner_image(dgdr.image)
 
-    planner_dict = planner_service.model_dump(exclude_unset=False)
+    planner_dict = planner_component.model_dump(exclude_unset=False)
 
     planner_config_cm_name = _make_cm_name(PLANNER_CONFIG_PREFIX)
 
@@ -445,14 +496,15 @@ def add_planner_to_config(
         },
     }
 
-    # --- Mount planner-config ConfigMap into the planner service ---
-    planner_volumes = planner_dict.setdefault("extraPodSpec", {}).setdefault(
-        "volumes", []
-    )
-    mc_dict = planner_dict.setdefault("extraPodSpec", {}).setdefault(
-        "mainContainer", {}
-    )
-    mc_mounts = mc_dict.setdefault("volumeMounts", [])
+    # --- Mount planner-config ConfigMap into the planner component ---
+    pod_spec = planner_dict.setdefault("podTemplate", {}).setdefault("spec", {})
+    planner_volumes = pod_spec.get("volumes") or []
+    pod_spec["volumes"] = planner_volumes
+    mc_dict = get_main_container_dict(planner_dict)
+    if mc_dict is None:
+        raise ValueError("Generated Planner component has no main container")
+    mc_mounts = mc_dict.get("volumeMounts") or []
+    mc_dict["volumeMounts"] = mc_mounts
 
     planner_volumes.append(
         {
@@ -468,10 +520,17 @@ def add_planner_to_config(
         }
     )
 
-    mc_args = mc_dict.setdefault("args", [])
+    mc_args = mc_dict.get("args") or []
+    mc_dict["args"] = mc_args
     mc_args.extend(["--config", f"{PLANNER_CONFIG_MOUNT}/planner_config.json"])
 
-    config_dict["spec"]["services"]["Planner"] = planner_dict
+    components = config_dict["spec"].setdefault("components", [])
+    components[:] = [
+        component
+        for component in components
+        if not (isinstance(component, dict) and component.get("name") == "Planner")
+    ]
+    components.append(planner_dict)
 
     return planner_config_cm
 
@@ -484,7 +543,7 @@ def add_profile_data_to_config(
     """Create a profile-data ConfigMap and mount it into consumers in *config_dict*.
 
     Consumers are auto-detected:
-    - The **Planner** service (if present) gets the volume mounted.
+    - The **Planner** component (if present) gets the volume mounted.
     - **Mocker workers** (when *mocker_enabled*) get the volume mounted and
       ``--planner-profile-data`` set.
 
@@ -519,31 +578,29 @@ def add_profile_data_to_config(
         "data": profile_cm_data,
     }
 
-    # Mount into Planner service if it exists
-    planner_svc = config_dict.get("spec", {}).get("services", {}).get("Planner")
-    if planner_svc is not None:
-        _mount_volume_into_service(
-            planner_svc, profile_data_cm_name, PROFILE_DATA_MOUNT
+    planner_component = get_component_dict(config_dict, "Planner")
+    if planner_component is not None:
+        _mount_volume_into_component(
+            planner_component, profile_data_cm_name, PROFILE_DATA_MOUNT
         )
 
     # Mount into mocker workers only when the mocker backend is active.
     # Non-mocker backends (vllm, sglang, trtllm) share the same service
     # names ("prefill", "decode") but do not accept --planner-profile-data.
     if mocker_enabled:
-        services = config_dict.get("spec", {}).get("services", {})
         for worker_name in _mocker_worker_names():
-            worker_svc = services.get(worker_name)
-            if worker_svc is not None:
-                main_container = worker_svc.get("extraPodSpec", {}).get(
-                    "mainContainer", {}
-                )
+            worker_component = get_component_dict(config_dict, worker_name)
+            if worker_component is not None:
+                main_container = get_main_container_dict(worker_component)
+                if main_container is None:
+                    continue
                 args_list = main_container.get("args", [])
                 args_list = set_argument_value(
                     args_list, "--planner-profile-data", PROFILE_DATA_MOUNT
                 )
                 main_container["args"] = args_list
-                _mount_volume_into_service(
-                    worker_svc, profile_data_cm_name, PROFILE_DATA_MOUNT
+                _mount_volume_into_component(
+                    worker_component, profile_data_cm_name, PROFILE_DATA_MOUNT
                 )
 
     return profile_data_cm
@@ -561,20 +618,24 @@ def _mocker_worker_names() -> list[str]:
     ]
 
 
-def _mount_volume_into_service(
-    service_dict: dict, cm_name: str, mount_path: str
+def _mount_volume_into_component(
+    component: dict, cm_name: str, mount_path: str
 ) -> None:
-    """Add a ConfigMap volume + volumeMount to a service's extraPodSpec."""
-    extra_pod_spec = service_dict.setdefault("extraPodSpec", {})
-    volumes = extra_pod_spec.setdefault("volumes", [])
+    """Add a ConfigMap volume and main-container mount to a component."""
+    pod_spec = component.setdefault("podTemplate", {}).setdefault("spec", {})
+    volumes = pod_spec.get("volumes") or []
+    pod_spec["volumes"] = volumes
     volumes.append(
         {
             "name": cm_name,
             "configMap": {"name": cm_name},
         }
     )
-    main_container = extra_pod_spec.setdefault("mainContainer", {})
-    volume_mounts = main_container.setdefault("volumeMounts", [])
+    main_container = get_main_container_dict(component)
+    if main_container is None:
+        raise ValueError(f"Component {component.get('name')!r} has no main container")
+    volume_mounts = main_container.get("volumeMounts") or []
+    main_container["volumeMounts"] = volume_mounts
     volume_mounts.append(
         {
             "name": cm_name,
@@ -645,10 +706,10 @@ def build_aic_perf_model_spec(
     resolved_backend: str,
     system: str,
 ) -> Optional[AICPerfModelSpec]:
-    """Build native AIC identity for the planner's Rust perf shim.
+    """Build native AIC identity for the Planner's AIC core integration.
 
     This is intentionally independent from AIC interpolation. It does not
-    request a sweep; it only gives the shim enough identity and parallelism
+    request a sweep; it only gives the Planner enough identity and parallelism
     data to try native forward-pass estimation before falling back to
     observed-FPM regression.
     """
@@ -672,10 +733,31 @@ def build_aic_perf_model_spec(
     if mode in ("decode", "agg", "disagg") and best_decode_pick is None:
         return None
 
+    if get_latest_database_version is None:
+        logger.warning(
+            "aiconfigurator-core is unavailable; Planner will use FPM regression "
+            "instead of native AIC estimates."
+        )
+        return None
+
+    backend_version = get_latest_database_version(
+        system=system,
+        backend=resolved_backend,
+    )
+    if backend_version is None:
+        logger.warning(
+            "No AIC performance database is available for system=%s, backend=%s; "
+            "Planner will use FPM regression instead of native AIC estimates.",
+            system,
+            resolved_backend,
+        )
+        return None
+
     return AICPerfModelSpec(
         hf_id=dgdr.model,
         system=system,
         backend=resolved_backend,
+        backend_version=backend_version,
         prefill_pick=best_prefill_pick,
         decode_pick=best_decode_pick,
     )
@@ -699,9 +781,8 @@ def build_aic_interpolation_spec(
     the mocker (via ``--aic-perf-model`` flags injected into worker args).
     Returns ``None`` when any of the following hold:
 
-    * no AIC consumer needs it — planner is disabled or has
-      ``enable_throughput_scaling=False``, **and** mocker is disabled
-    * ``pre_deployment_sweeping_mode`` is not ``Rapid``
+    * neither a throughput-scaling Planner with a rapid sweep nor a mocker in
+      rapid mode needs it
     * picks are missing
     * ``resolved_backend`` is not one AIC supports
 
@@ -723,16 +804,14 @@ def build_aic_interpolation_spec(
         if dgdr.features is not None and dgdr.features.planner is not None
         else None
     )
-    mocker_enabled = is_mocker_enabled(dgdr)
+    mocker_needs_aic = needs_mocker_aic_perf_model(dgdr)
     planner_needs_aic = (
         is_planner_enabled(dgdr)
         and planner is not None
         and planner.enable_throughput_scaling
+        and planner.pre_deployment_sweeping_mode == PlannerPreDeploymentSweepMode.Rapid
     )
-    if not planner_needs_aic and not mocker_enabled:
-        return None
-    sweep_mode = planner.pre_deployment_sweeping_mode if planner is not None else None
-    if sweep_mode != PlannerPreDeploymentSweepMode.Rapid:
+    if not planner_needs_aic and not mocker_needs_aic:
         return None
     if best_prefill_pick is None or best_decode_pick is None:
         logger.info(

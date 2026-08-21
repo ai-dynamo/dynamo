@@ -5,7 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 {{- if .Values.daemonset.enabled }}
-{{- include "power-agent.validateTerminationGracePeriod" . -}}
+{{- include "power-agent.validateTerminationGracePeriod" . }}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:

@@ -10,8 +10,6 @@ import json
 import logging
 import os
 import time
-from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
@@ -19,9 +17,8 @@ from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.protocol.messages import GetAllocationResponse
 from gpu_memory_service.snapshot.disk import (
-    DeviceToFileWriter,
     load_manifest_and_metadata,
-    plan_shard_layout,
+    write_device_shards,
 )
 from gpu_memory_service.snapshot.model import AllocationEntry, SaveManifest
 from gpu_memory_service.snapshot.transfer import (
@@ -157,53 +154,38 @@ class GMSStorageClient:
         max_workers: int,
         use_absolute_shard_paths: bool = False,
     ) -> list[AllocationEntry]:
-        layout = plan_shard_layout(allocations_info, self._shard_size)
-        shard_groups: Dict[int, list[Tuple[int, int]]] = defaultdict(list)
-        for index, (shard_idx, byte_offset) in enumerate(layout):
-            shard_groups[shard_idx].append((index, byte_offset))
-
-        entries: list[Optional[AllocationEntry]] = [None] * len(allocations_info)
-
-        def _write_one_shard(
-            shard_idx: int, alloc_pairs: list[Tuple[int, int]]
-        ) -> None:
-            filename = f"shard_{shard_idx:04d}.bin"
-            shards_dir = shard_dirs[shard_idx % len(shard_dirs)]
-            abs_path = os.path.join(shards_dir, filename)
-            rel_path = os.path.join("shards", filename)
-            tensor_file = abs_path if use_absolute_shard_paths else rel_path
-            with DeviceToFileWriter(abs_path, device=self.device) as writer:
-                for index, byte_offset in alloc_pairs:
-                    alloc = allocations_info[index]
-                    writer.write_device(va_list[index], alloc.aligned_size)
-                    entries[index] = AllocationEntry(
-                        allocation_id=alloc.allocation_id,
-                        size=alloc.size,
-                        aligned_size=alloc.aligned_size,
-                        tag=alloc.tag,
-                        tensor_file=tensor_file,
-                        tensor_offset=byte_offset,
-                    )
-
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {
-                pool.submit(_write_one_shard, shard_idx, alloc_pairs): shard_idx
-                for shard_idx, alloc_pairs in shard_groups.items()
-            }
-            for future in as_completed(futures):
-                future.result()
-
-        missing = sum(1 for entry in entries if entry is None)
-        if missing:
-            raise RuntimeError(
-                f"BUG: {missing} allocation(s) missing after shard writers completed"
+        placements = write_device_shards(
+            [
+                (va, allocation.aligned_size)
+                for allocation, va in zip(allocations_info, va_list, strict=True)
+            ],
+            shard_dirs,
+            device=self.device,
+            shard_size_bytes=self._shard_size,
+            max_workers=max_workers,
+            relative_to=None if use_absolute_shard_paths else self.output_dir,
+        )
+        entries = [
+            AllocationEntry(
+                allocation_id=allocation.allocation_id,
+                size=allocation.size,
+                aligned_size=allocation.aligned_size,
+                tag=allocation.tag,
+                tensor_file=placement[0],
+                tensor_offset=placement[1],
             )
+            for allocation, placement in zip(
+                allocations_info,
+                placements,
+                strict=True,
+            )
+        ]
         logger.info(
             "Wrote %d snapshot shard(s) across %d shard root(s)",
-            len(shard_groups),
+            len({path for path, _offset in placements}),
             len(shard_dirs),
         )
-        return [entry for entry in entries if entry is not None]
+        return entries
 
     def _allocate_restore_targets(
         self,

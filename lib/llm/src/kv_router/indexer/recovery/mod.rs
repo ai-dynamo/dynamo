@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod direct_zmq;
+mod recovery_lane;
+mod source_health;
+mod state_agent;
 mod subscriber;
 mod target;
 mod worker_query;
@@ -9,12 +12,20 @@ mod worker_query_endpoint;
 mod worker_query_state;
 mod worker_query_transport;
 
+pub(crate) use state_agent::start_state_agent_router;
 pub(crate) use subscriber::{
     KvEventSubscriptionHandle, RecoverySupervisor, start_subscriber, start_target_subscriber,
 };
-pub(crate) use target::{IndexerRecoveryTarget, RecoveryResetReason, RecoveryTarget, SourceEpoch};
+pub(crate) use target::{IndexerRecoveryTarget, RecoveryResetReason, RecoveryTarget};
 pub(crate) use worker_query::DEFAULT_RECOVERY_ATTEMPT_TIMEOUT;
 pub(crate) use worker_query::TargetFaultDisposition;
+#[cfg(test)]
+pub(crate) use worker_query::WorkerQueryClient;
 #[cfg(feature = "ckf-diagnostics")]
 pub(crate) use worker_query::WorkerQueryHealthSnapshot;
-pub(crate) use worker_query_endpoint::start_worker_kv_query_endpoint;
+pub(crate) use worker_query_endpoint::{
+    start_worker_kv_query_endpoint, start_worker_kv_query_endpoint_with_status,
+};
+pub(crate) use worker_query_transport::RuntimeWorkerQueryTransport;
+#[cfg(test)]
+pub(crate) use worker_query_transport::WorkerQueryTransport;

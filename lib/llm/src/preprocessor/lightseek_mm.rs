@@ -359,6 +359,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn counter_loads_hf_config_and_counts_known_qwen3_vl_dimensions() {
+        let model_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            model_dir.path().join("preprocessor_config.json"),
+            serde_json::json!({
+                "patch_size": 16,
+                "merge_size": 2,
+                "min_pixels": 3136,
+                "max_pixels": 12_845_056,
+                "temporal_patch_size": 2
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let counter = LightseekMmCounter::try_new(
+            "Qwen/Qwen3-VL-2B-Instruct",
+            Some("qwen3_vl"),
+            model_dir.path(),
+        )
+        .unwrap();
+
+        // 640x480 is already aligned to patch_size * merge_size (32).
+        // (640 / 16) * (480 / 16) / merge_size² = 300.
+        assert_eq!(counter.count_tokens(640, 480), 300);
+    }
+
     /// Coverage table for the VLM families we claim to support. Each row is
     /// a `(family_label, hf_id, model_type)` triple. A row "passes" when the
     /// upstream registry can match it via either the HF id substring OR the
@@ -383,6 +411,11 @@ mod tests {
             ),
             ("LLaVA-1.5", "llava-hf/llava-1.5-7b-hf", "llava"),
             ("Llama-4", "meta-llama/Llama-4-Scout-17B-16E", "llama4"),
+            (
+                "Phi-3 Vision",
+                "microsoft/Phi-3-vision-128k-instruct",
+                "phi3_v",
+            ),
             ("Kimi-K2.5", "moonshotai/Kimi-K2.5-Instruct", "kimi_k2_5"),
             ("Kimi-K2.6", "moonshotai/Kimi-K2.6-Instruct", "kimi_k2_6"),
             ("Qwen3.5", "Qwen/Qwen3.5-0.8B", "qwen3_5"),

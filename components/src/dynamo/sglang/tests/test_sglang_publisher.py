@@ -3,6 +3,7 @@
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -50,11 +51,25 @@ def test_get_local_dp_rank_range_respects_multinode_dp_attention():
 
 
 def test_set_forward_pass_metrics_worker_id_uses_endpoint_identity():
-    server_args = SimpleNamespace(enable_forward_pass_metrics=True)
+    class ReadOnlyServerArgs:
+        def __init__(self):
+            object.__setattr__(self, "enable_forward_pass_metrics", True)
+            object.__setattr__(self, "override_source", None)
+
+        def __setattr__(self, name, value):
+            raise AttributeError("server args are read-only")
+
+        def override(self, source, **fields):
+            object.__setattr__(self, "override_source", source)
+            for name, value in fields.items():
+                object.__setattr__(self, name, value)
+
+    server_args = ReadOnlyServerArgs()
     endpoint = SimpleNamespace(connection_id=lambda: "endpoint-9")
 
     set_forward_pass_metrics_worker_id(server_args, endpoint)
 
+    assert server_args.override_source == "dynamo.forward_pass_metrics"
     assert server_args.forward_pass_metrics_worker_id == "endpoint-9"
     assert server_args.forward_pass_metrics_ipc_name.startswith("ipc://")
 
@@ -246,6 +261,8 @@ async def test_handle_non_leader_node_resolves_worker_before_kv_publish(monkeypa
             return FakeClient()
 
     server_args = SimpleNamespace(
+        dp_size=2,
+        enable_dp_attention=True,
         nnodes=2,
         node_rank=1,
         dist_timeout=5,
@@ -256,6 +273,7 @@ async def test_handle_non_leader_node_resolves_worker_before_kv_publish(monkeypa
         def __init__(self):
             self.generate_endpoint = FakeEndpoint()
             self.server_args = server_args
+            self.dynamo_args = SimpleNamespace(use_kv_events=True)
             self.kv_worker_id = None
 
         def init_kv_event_publish(self):
@@ -289,6 +307,55 @@ async def test_handle_non_leader_node_resolves_worker_before_kv_publish(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_handle_non_leader_node_skips_tp_only_kv_event_setup(monkeypatch):
+    resolve_leader = AsyncMock(return_value=1234)
+    kv_event_publisher = Mock()
+    monkeypatch.setattr(
+        publisher_mod,
+        "_resolve_multinode_leader_worker_id",
+        resolve_leader,
+    )
+    monkeypatch.setattr(publisher_mod, "KvEventPublisher", kv_event_publisher)
+
+    server_args = SimpleNamespace(
+        dp_size=1,
+        enable_dp_attention=False,
+        nnodes=2,
+        node_rank=1,
+    )
+    cleanup = Mock()
+    publisher = SimpleNamespace(
+        server_args=server_args,
+        dynamo_args=SimpleNamespace(
+            use_kv_events=True,
+        ),
+        generate_endpoint=SimpleNamespace(),
+        init_kv_event_publish=lambda: publisher_mod.KvEventPublisher(),
+        cleanup=cleanup,
+    )
+    metrics_task = asyncio.create_task(asyncio.Event().wait())
+    task = asyncio.create_task(
+        handle_non_leader_node(
+            SimpleNamespace(server_args=server_args),
+            publisher,
+            metrics_task,
+        )
+    )
+
+    await asyncio.sleep(0)
+
+    resolve_leader.assert_not_awaited()
+    kv_event_publisher.assert_not_called()
+    assert not task.done()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    cleanup.assert_called_once_with()
+    assert metrics_task.cancelled()
+
+
+@pytest.mark.asyncio
 async def test_handle_non_leader_node_skips_kv_publish_without_resolved_worker(
     monkeypatch,
 ):
@@ -303,6 +370,7 @@ async def test_handle_non_leader_node_skips_kv_publish_without_resolved_worker(
     class FakePublisher:
         generate_endpoint = object()
         server_args = SimpleNamespace(kv_events_config='{"endpoint": "tcp://*:5557"}')
+        dynamo_args = SimpleNamespace(use_kv_events=True)
         kv_worker_id = None
 
         def init_kv_event_publish(self):
@@ -348,6 +416,7 @@ async def test_handle_non_leader_node_cleans_up_when_resolution_fails(monkeypatc
     class FakePublisher:
         generate_endpoint = object()
         server_args = SimpleNamespace(kv_events_config='{"endpoint": "tcp://*:5557"}')
+        dynamo_args = SimpleNamespace(use_kv_events=True)
 
         def cleanup(self):
             cleanup_called.set()
@@ -397,6 +466,7 @@ def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     server_args = SimpleNamespace(
         kv_events_config='{"endpoint": "tcp://*:5557"}',
         page_size=16,
+        dcp_size=2,
         dp_size=8,
         enable_dp_attention=True,
         nnodes=2,
@@ -404,7 +474,11 @@ def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     )
     config = SimpleNamespace(
         server_args=server_args,
-        dynamo_args=SimpleNamespace(enable_local_indexer=True, kv_state_endpoint=None),
+        dynamo_args=SimpleNamespace(
+            enable_local_indexer=True,
+            kv_state_endpoint=None,
+            use_kv_events=True,
+        ),
     )
     publisher = DynamoSglangPublisher(
         engine=SimpleNamespace(),
@@ -419,6 +493,26 @@ def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     assert len(publishers) == 4
     assert [call["dp_rank"] for call in calls] == [4, 5, 6, 7]
     assert {call["worker_id"] for call in calls} == {1234}
+    assert {call["kv_block_size"] for call in calls} == {32}
+
+
+def test_init_kv_event_publish_uses_effective_kv_event_setting():
+    server_args = SimpleNamespace(
+        kv_events_config='{"publisher": "null", "endpoint": "tcp://*:5557"}',
+        node_rank=1,
+    )
+    config = SimpleNamespace(
+        server_args=server_args,
+        dynamo_args=SimpleNamespace(use_kv_events=False),
+    )
+    publisher = DynamoSglangPublisher(
+        engine=SimpleNamespace(),
+        config=config,
+        generate_endpoint=SimpleNamespace(),
+        component_gauges=SimpleNamespace(),
+    )
+
+    assert publisher.init_kv_event_publish() == []
 
 
 def test_init_kv_event_publish_allows_zero_worker_id_override(monkeypatch):
@@ -461,7 +555,11 @@ def test_init_kv_event_publish_allows_zero_worker_id_override(monkeypatch):
     )
     config = SimpleNamespace(
         server_args=server_args,
-        dynamo_args=SimpleNamespace(enable_local_indexer=True, kv_state_endpoint=None),
+        dynamo_args=SimpleNamespace(
+            enable_local_indexer=True,
+            kv_state_endpoint=None,
+            use_kv_events=True,
+        ),
     )
     publisher = DynamoSglangPublisher(
         engine=SimpleNamespace(
@@ -618,6 +716,7 @@ async def test_setup_sgl_metrics_returns_publisher_for_chat_worker(monkeypatch):
         dynamo_args=SimpleNamespace(
             embedding_worker=False,
             component="sglang-decode",
+            use_kv_events=False,
         ),
         server_args=engine.server_args,
     )

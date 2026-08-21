@@ -5,6 +5,7 @@ use futures::Stream;
 
 use crate::protocols::openai::stream_aggregator::{StreamAggregable, aggregate_stream};
 use crate::types::Annotated;
+use dynamo_runtime::error::DynamoError;
 
 use super::NvImagesResponse;
 
@@ -22,7 +23,7 @@ impl NvImagesResponse {
     /// Aggregates an annotated stream of image responses into a final response.
     pub async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvImagesResponse>>,
-    ) -> Result<NvImagesResponse, String> {
+    ) -> Result<NvImagesResponse, DynamoError> {
         aggregate_stream(stream).await
     }
 }

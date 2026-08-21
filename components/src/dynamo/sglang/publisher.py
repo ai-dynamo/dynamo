@@ -24,9 +24,15 @@ from dynamo.common.utils.prometheus import (
 )
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 from dynamo.runtime import Endpoint
+from dynamo.sglang._compat import override_server_args
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import Config
-from dynamo.sglang.capacity import kv_metrics_block_values, local_dp_rank_bounds
+from dynamo.sglang.capacity import (
+    kv_event_block_size,
+    kv_metrics_block_values,
+    local_dp_rank_bounds,
+    publishes_kv_events,
+)
 
 
 def get_local_dp_rank_range(server_args) -> range:
@@ -44,9 +50,13 @@ def set_forward_pass_metrics_worker_id(
 
     import tempfile
 
-    server_args.forward_pass_metrics_worker_id = str(generate_endpoint.connection_id())
     ipc_path = tempfile.NamedTemporaryFile(delete=False).name
-    server_args.forward_pass_metrics_ipc_name = f"ipc://{ipc_path}"
+    override_server_args(
+        server_args,
+        "dynamo.forward_pass_metrics",
+        forward_pass_metrics_worker_id=str(generate_endpoint.connection_id()),
+        forward_pass_metrics_ipc_name=f"ipc://{ipc_path}",
+    )
 
 
 async def _resolve_multinode_leader_worker_id(
@@ -171,6 +181,7 @@ class DynamoSglangPublisher:
 
         self._running = True
         self.kv_publishers: List[KvEventPublisher] = []
+        self.kv_publisher: Optional[KvEventPublisher] = None
         self.fpm_relays: list = []
 
         # ZMQ setup for receiving scheduler metrics (leader node only)
@@ -217,6 +228,8 @@ class DynamoSglangPublisher:
                     if kv_metrics.data_parallel_rank is not None
                     else self.dp_rank
                 )
+                # These token counts are per DCP rank; the physical page size
+                # therefore converts them to widened logical-block counts.
                 active_decode_blocks, total_blocks = kv_metrics_block_values(
                     kv_metrics, self.server_args.page_size
                 )
@@ -292,10 +305,17 @@ class DynamoSglangPublisher:
         - NATS handles cross-node event distribution
 
         Returns:
-            List of KvEventPublisher instances if kv_events_config is set,
+            List of KvEventPublisher instances if KV event publishing is enabled,
             empty list otherwise.
         """
-        if self.server_args.kv_events_config:
+        if self.dynamo_args.use_kv_events and not publishes_kv_events(self.server_args):
+            logging.info(
+                "Non-leader node (node_rank=%s) shares the leader's single KV "
+                "rank slice; skipping KV event publishing so the router sees "
+                "exactly one source per (worker_id, dp_rank).",
+                getattr(self.server_args, "node_rank", 0) or 0,
+            )
+        elif self.dynamo_args.use_kv_events:
             kv_events = json.loads(self.server_args.kv_events_config)
             base_ep = kv_events.get("endpoint")
             if not base_ep:
@@ -333,7 +353,7 @@ class DynamoSglangPublisher:
                 publisher = KvEventPublisher(
                     endpoint=self.generate_endpoint,
                     worker_id=self.kv_worker_id,
-                    kv_block_size=self.server_args.page_size,
+                    kv_block_size=kv_event_block_size(self.server_args),
                     zmq_endpoint=zmq_ep,
                     zmq_topic="",
                     enable_local_indexer=self.dynamo_args.enable_local_indexer,
@@ -535,7 +555,7 @@ async def setup_sgl_metrics(
 
     publisher.init_engine_metrics_publish()
     node_rank = getattr(config.server_args, "node_rank", 0) or 0
-    if node_rank <= 0:
+    if node_rank <= 0 and config.dynamo_args.use_kv_events:
         publisher.init_kv_event_publish()
     publisher.init_fpm_relay()
 
@@ -564,7 +584,9 @@ async def handle_non_leader_node(
     )
 
     try:
-        if publisher.server_args.kv_events_config:
+        if publisher.dynamo_args.use_kv_events and publishes_kv_events(
+            publisher.server_args
+        ):
             kv_worker_id = await _resolve_multinode_leader_worker_id(
                 publisher.generate_endpoint,
                 publisher.server_args,

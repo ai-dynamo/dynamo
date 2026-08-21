@@ -785,11 +785,12 @@ pub unsafe extern "C" fn create_routers(
 
         // Create decode router
         let decode_router = match model_manager
-            .kv_chooser_for(
+            .kv_chooser_for_with_worker_role(
                 &endpoint,
                 block_size,
                 Some(kv_router_config.clone()),
                 None,
+                card.worker_type,
                 WORKER_TYPE_DECODE,
                 Some(model_name.clone()),
                 enable_eagle,
@@ -855,6 +856,7 @@ pub unsafe extern "C" fn create_routers(
             RouterMode::KV,
             block_size,
             Some(prefill_config),
+            None,
             None,
             None,
             model_name.clone(),
@@ -1301,16 +1303,15 @@ unsafe fn preprocess_request(
     let cache_namespace = request_cache_salt(&request).map(str::to_owned);
     let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
 
-    let formatted_prompt = match preprocessor.apply_template(&request) {
-        Ok(Some(prompt)) => prompt,
-        Ok(None) => String::new(),
+    let encoding = match preprocessor.apply_template(&request) {
+        Ok(Some(prompt)) => preprocessor.tokenize_rendered_prompt(&prompt),
+        Ok(None) => preprocessor.tokenize(""),
         Err(e) => {
             tracing::error!(error = ?e, "Failed to apply chat template");
             return Err(QueryRouterResult::ErrQueryFailed);
         }
     };
-
-    let encoding = match preprocessor.tokenize(&formatted_prompt) {
+    let encoding = match encoding {
         Ok(enc) => enc,
         Err(e) => {
             tracing::error!(error = ?e, "Failed to tokenize");

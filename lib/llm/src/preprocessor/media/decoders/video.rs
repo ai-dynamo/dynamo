@@ -204,6 +204,18 @@ fn convert_ffmpeg_frame_to_rgb(
     copy_rgb_frame(rgb_frame, output_buffer)
 }
 
+fn video_open_error(error: ffmpeg_next::Error) -> anyhow::Error {
+    anyhow::anyhow!(
+        "failed to open the video for decoding: {error}. If the input uses a \
+         codec other than VP8/VP9 (e.g. H.264 or H.265), note this \
+         frontend decoder's in-tree FFmpeg decodes only VP8/VP9 -- \
+         re-encode to VP9, e.g. `ffmpeg -i input.mp4 -c:v libvpx-vp9 -an \
+         output.webm`, or send it to the backend, where H.264/H.265 \
+         decode in hardware via NVDEC. Otherwise the input may be \
+         malformed or not a video."
+    )
+}
+
 fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaData> {
     use ffmpeg_next::codec::context::Context;
     use ffmpeg_next::software::scaling::{Context as ScalingContext, Flags};
@@ -214,7 +226,7 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
     drop(bytes);
     mem_file.add_seals(Seal::Write | Seal::Shrink | Seal::Grow)?;
     let fd_path = format!("/proc/self/fd/{}", mem_file.as_raw_fd());
-    let mut input = ffmpeg_next::format::input(&fd_path)?;
+    let mut input = ffmpeg_next::format::input(&fd_path).map_err(video_open_error)?;
 
     let (stream_index, stream_time_base, source_duration, source_fps, total_frames, parameters) = {
         let input_stream = input
@@ -245,7 +257,10 @@ fn decode_video(config: &VideoDecoder, bytes: Vec<u8>) -> Result<DecodedMediaDat
     let mut decoder_context = Context::new();
     decoder_context.set_time_base(stream_time_base);
     decoder_context.set_parameters(parameters)?;
-    let mut decoder = decoder_context.decoder().video()?;
+    let mut decoder = decoder_context
+        .decoder()
+        .video()
+        .map_err(video_open_error)?;
     let decoder_time_base = decoder.time_base();
     let (width, height) = (decoder.width(), decoder.height());
     anyhow::ensure!(
@@ -420,6 +435,9 @@ mod tests {
 
     /// Load test video and parse expected dimensions from filename.
     /// Filename format: "{resolution}_{frames}.mp4" (e.g., "240p_10.mp4" -> 320x240, 10 frames)
+    /// Fixtures are VP9-in-mp4: the in-tree ffmpeg only decodes a narrow
+    /// allowlist (VP8/VP9), so H.264 fixtures would not decode. Regenerate with
+    /// `ffmpeg -f lavfi -i testsrc2=size=WxH:rate=1 -frames:v N -c:v libvpx-vp9 -g 1 -strict -2 {resolution}_{frames}.mp4`.
     fn load_test_video(filename: &str) -> (EncodedMediaData, u32, u32, u32) {
         let path = format!(
             "{}/tests/data/media/{}",
@@ -489,6 +507,34 @@ mod tests {
             "video-rs reference decoded {target_index} of {requested_frames} requested frames"
         );
         Ok((frames, sampled_timestamps))
+    }
+
+    #[test]
+    fn test_unsupported_codec_error_is_actionable() {
+        // H.264 fixture: the in-tree FFmpeg decodes only VP8/VP9, so opening
+        // must fail -- and with the re-encode guidance, not ffmpeg's bare
+        // "Decoder not found".
+        let path = format!(
+            "{}/tests/data/media/triangle_240p_10_h264.mp4",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let bytes = std::fs::read(&path).expect("h264 fixture must exist");
+        let encoded = EncodedMediaData {
+            bytes,
+            b64_encoded: false,
+        };
+        let decoder = VideoDecoder {
+            limits: VideoDecoderLimits::default(),
+            fps: None,
+            max_frames: None,
+            num_frames: Some(2),
+            strict: false,
+        };
+
+        let err = decoder.decode(encoded).expect_err("h264 must not decode");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("VP8/VP9"), "no codec guidance in: {msg}");
+        assert!(msg.contains("libvpx-vp9"), "no re-encode hint in: {msg}");
     }
 
     #[test]

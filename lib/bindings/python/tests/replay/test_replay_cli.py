@@ -1,27 +1,31 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
 import json
 from types import SimpleNamespace
 
 import pytest
-
-import dynamo.replay.main as replay_main
 
 from .replay_utils import (
     _assert_basic_report_counts,
     _assert_basic_report_metrics,
     _assert_replay_cli_outputs,
     _planner_profile_data_dir_path,
+    _require_aisimulate_distribution,
     _run_replay_cli,
     _write_cli_smoke_trace,
     _write_multiturn_trace,
     _write_planner_profile_data_npz,
 )
 
+_require_aisimulate_distribution(allow_module_level=True)
+replay_main = importlib.import_module("dynamo.replay.main")
+
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.parallel,
+    pytest.mark.planner,
     pytest.mark.pre_merge,
     pytest.mark.unit,
 ]
@@ -122,6 +126,8 @@ def test_replay_cli_subprocess_synthetic_smoke(tmp_path):
     )
 
     report = _assert_replay_cli_outputs(completed, report_path)
+    assert set(report) == {"summary", "per_request", "coverage", "planner"}
+    assert report["per_request"] is None
     _assert_basic_report_counts(
         report,
         num_requests=10,
@@ -168,6 +174,7 @@ def test_replay_cli_subprocess_synthetic_smoke_accepts_planner_profile_data(
     )
 
     report = _assert_replay_cli_outputs(completed, report_path)
+    assert report["per_request"] is None
     _assert_basic_report_counts(
         report,
         num_requests=10,
@@ -247,6 +254,60 @@ def test_replay_cli_subprocess_trace_smoke(tmp_path):
         output_tokens=25,
     )
     _assert_basic_report_metrics(report)
+
+
+@pytest.mark.timeout(30)
+def test_replay_cli_subprocess_online_trace_jsonl_and_sla(tmp_path):
+    trace_path = _write_multiturn_trace(tmp_path)
+    report_path = tmp_path / "online_trace_report.json"
+    jsonl_path = tmp_path / "online_trace_requests.jsonl"
+
+    completed = _run_replay_cli(
+        tmp_path,
+        str(trace_path),
+        "--replay-mode",
+        "online",
+        "--router-mode",
+        "kv_router",
+        "--num-workers",
+        "2",
+        "--report-json",
+        str(report_path),
+        "--per-request-jsonl",
+        str(jsonl_path),
+        "--sla-e2e-ms",
+        "1000000",
+        "--extra-engine-args",
+        '{"block_size":64,"speedup_ratio":1000.0}',
+    )
+
+    report = _assert_replay_cli_outputs(completed, report_path)
+    assert report["goodput_completed_requests"] == 4
+    assert len(jsonl_path.read_text(encoding="utf-8").splitlines()) == 4
+
+
+@pytest.mark.timeout(30)
+def test_replay_cli_offline_per_request_jsonl_enables_capture(tmp_path):
+    trace_path = _write_multiturn_trace(tmp_path)
+    report_path = tmp_path / "offline_trace_report.json"
+    jsonl_path = tmp_path / "offline_trace_requests.jsonl"
+
+    completed = _run_replay_cli(
+        tmp_path,
+        str(trace_path),
+        "--replay-mode",
+        "offline",
+        "--per-request-jsonl",
+        str(jsonl_path),
+        "--report-json",
+        str(report_path),
+        "--extra-engine-args",
+        '{"block_size":64,"speedup_ratio":1000.0}',
+    )
+
+    report = _assert_replay_cli_outputs(completed, report_path)
+    assert len(report["per_request"]) == 4
+    assert len(jsonl_path.read_text(encoding="utf-8").splitlines()) == 4
 
 
 @pytest.mark.timeout(30)

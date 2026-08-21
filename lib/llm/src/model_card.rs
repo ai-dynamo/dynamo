@@ -18,7 +18,7 @@ use std::sync::{Arc, OnceLock};
 
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
-use crate::local_model::runtime_config::ModelRuntimeConfig;
+use crate::local_model::runtime_config::{ModelRuntimeConfig, TokenizerBackend};
 use crate::model_type::{ModelInput, ModelType};
 use crate::protocols::tensor::TensorModelConfig;
 use anyhow::{Context, Result};
@@ -63,9 +63,22 @@ fn tokenizer_cache_enabled(value: Option<&str>) -> bool {
 }
 
 fn tokenizer_cache_bytes(value: Option<&str>) -> usize {
-    value
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(DEFAULT_TOKENIZER_CACHE_BYTES)
+    match value {
+        Some(value) => match value.parse::<usize>() {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(
+                    env_var = "DYN_TOKENIZER_CACHE_BYTES",
+                    value,
+                    default = DEFAULT_TOKENIZER_CACHE_BYTES,
+                    %error,
+                    "Failed to parse tokenizer cache byte budget; using default"
+                );
+                DEFAULT_TOKENIZER_CACHE_BYTES
+            }
+        },
+        None => DEFAULT_TOKENIZER_CACHE_BYTES,
+    }
 }
 
 fn tokenizer_cache_token_observer(model: &str) -> crate::tokenizers::CacheTokenUsageFn {
@@ -859,6 +872,20 @@ pub struct ModelDeploymentCard {
     #[builder(default)]
     pub architectural_max_context_length: Option<u32>,
 
+    /// Deprecated v1.2 MDC wire field.
+    ///
+    /// This is only a deserialization fallback and serialization projection. Canonical state
+    /// remains in `runtime_config.context_length` and `architectural_max_context_length`.
+    ///
+    /// TODO(v1.5): Remove after the temporary v1.2-to-v1.4 upgrade exception expires.
+    #[serde(
+        default,
+        rename = "context_length",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[builder(default, setter(skip))]
+    legacy_context_length: Option<u32>,
+
     /// Size of a KV cache block.
     /// Passed to the engine, KV router, and trace replay hash path.
     pub kv_cache_block_size: u32,
@@ -972,6 +999,28 @@ impl ModelDeploymentCard {
         ModelDeploymentCardBuilder::default()
     }
 
+    /// Return this card's explicit worker role, with compatibility for legacy cards.
+    ///
+    /// Before `worker_type` was added, prefill cards used `ModelType::Prefill`; every other
+    /// worker was a full-request worker.
+    pub fn effective_worker_type(&self) -> crate::worker_type::WorkerType {
+        Self::resolve_worker_type(self.worker_type, self.model_type)
+    }
+
+    /// Resolve an explicit or legacy worker role without constructing a model card.
+    pub fn resolve_worker_type(
+        worker_type: Option<crate::worker_type::WorkerType>,
+        model_type: ModelType,
+    ) -> crate::worker_type::WorkerType {
+        worker_type.unwrap_or_else(|| {
+            if model_type.supports_prefill() {
+                crate::worker_type::WorkerType::Prefill
+            } else {
+                crate::worker_type::WorkerType::Aggregated
+            }
+        })
+    }
+
     /// Create a ModelDeploymentCard where only the name is filled in.
     ///
     /// Single-process setups don't need an MDC to communicate model details, but it
@@ -1024,12 +1073,19 @@ impl ModelDeploymentCard {
         self.runtime_config
             .context_length
             .or(self.architectural_max_context_length)
+            .or(self.legacy_context_length)
             .unwrap_or(0)
+    }
+
+    pub(crate) fn for_mdc_wire(&self) -> Self {
+        let mut card = self.clone();
+        card.legacy_context_length = Some(self.effective_context_length());
+        card
     }
 
     /// Serialize the model deployment card to a JSON string
     pub fn to_json(&self) -> Result<String, anyhow::Error> {
-        Ok(serde_json::to_string(self)?)
+        Ok(serde_json::to_string(&self.for_mdc_wire())?)
     }
 
     /// Per-MDC resolve directory. After `download_config` runs, every
@@ -1174,8 +1230,11 @@ impl ModelDeploymentCard {
     /// This supports both HuggingFace `tokenizer.json` and tiktoken `.model`/`.tiktoken` files.
     ///
     /// Tokenizer backend controls:
-    /// - `runtime_config.tokenizer_backend=fastokens` — use `fastokens` as the encoding backend
-    /// - `DYN_TOKENIZER=fastokens` — fallback backend for callers without explicit runtime config
+    /// - `runtime_config.tokenizer_backend` — select `default`, `fastokens`, or `basetenkenizer`
+    /// - `DYN_TOKENIZER` — fallback backend for callers without explicit runtime config
+    /// - `runtime_config.tokenizer_fallback_enabled` — control whether an alternate backend load
+    ///   failure falls back to HuggingFace
+    /// - `DYN_TOKENIZER_FALLBACK=0` — fallback control for callers without explicit runtime config
     /// - `DYN_TOKENIZER_CACHE=0` — disable the L1 prefix cache that records tokenizations
     ///   at special-token boundaries (enabled by default; any other value keeps it enabled)
     /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 64 MiB)
@@ -1185,10 +1244,8 @@ impl ModelDeploymentCard {
     ///   per-turn tokenization cost flat instead of growing with history. Set to `0` to
     ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
-        let use_fast = self
-            .runtime_config
-            .effective_tokenizer_backend()
-            .is_fastokens();
+        let tokenizer_backend = self.runtime_config.effective_tokenizer_backend();
+        let is_fallback_enabled = self.runtime_config.is_tokenizer_fallback_enabled()?;
 
         let cache_enabled =
             tokenizer_cache_enabled(std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref());
@@ -1207,9 +1264,9 @@ impl ModelDeploymentCard {
                 })?;
 
                 // Load HF first — needed both for fallback and (if cache is on) for
-                // extracting special-token strings. `FastTokenizer` does not re-expose
-                // `get_added_tokens_decoder`, so we must capture specials from the raw
-                // HF tokenizer before any swap.
+                // extracting special-token strings. Alternate backends do not re-expose
+                // `get_added_tokens_decoder`, so capture specials from the raw HF
+                // tokenizer before any swap.
                 let mut hf = HfTokenizer::from_file(p)
                     .inspect_err(|err| {
                         if let Some(serde_err) = err.downcast_ref::<serde_json::Error>()
@@ -1248,6 +1305,15 @@ impl ModelDeploymentCard {
                         .context("failed to disable tokenizer.json truncation")?;
                 }
 
+                // Padding belongs to the batching layer, not individual online requests.
+                if hf.get_padding().is_some() {
+                    tracing::warn!(
+                        "tokenizer.json declares a padding config; disabling it for online \
+                         tokenization"
+                    );
+                    hf.with_padding(None);
+                }
+
                 // Hold onto specials before any move of `hf`.
                 let specials: Vec<String> = if cache_enabled {
                     extract_hf_special_tokens(&hf)
@@ -1260,30 +1326,76 @@ impl ModelDeploymentCard {
                     |hf: HfTokenizer| crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf);
 
                 // Pick the inner backend.
-                let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = if use_fast {
-                    if let Some(path_str) = p.to_str() {
-                        match crate::tokenizers::FastTokenizer::from_file(path_str) {
-                            Ok(fast) => {
-                                tracing::info!("Using fastokens tokenizer backend");
-                                Arc::new(fast)
+                let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = match tokenizer_backend {
+                    TokenizerBackend::Default => Arc::new(wrap_hf(hf)),
+                    TokenizerBackend::Fastokens => {
+                        if let Some(path_str) = p.to_str() {
+                            match crate::tokenizers::FastTokenizer::from_file(path_str) {
+                                Ok(fast) => {
+                                    tracing::info!("Using fastokens tokenizer backend");
+                                    Arc::new(fast)
+                                }
+                                Err(e) => {
+                                    if !is_fallback_enabled {
+                                        return Err(e).context(
+                                            "failed to load fastokens tokenizer backend and fallback is disabled",
+                                        );
+                                    }
+                                    tracing::warn!(
+                                        %e,
+                                        "Failed to load fastokens, falling back to HuggingFace"
+                                    );
+                                    Arc::new(wrap_hf(hf))
+                                }
                             }
-                            Err(e) => {
-                                tracing::warn!(
-                                    %e,
-                                    "Failed to load fastokens, falling back to HuggingFace"
+                        } else {
+                            if !is_fallback_enabled {
+                                anyhow::bail!(
+                                    "failed to load fastokens tokenizer backend because tokenizer path contains non-UTF-8 characters and fallback is disabled: {}",
+                                    p.display()
                                 );
-                                Arc::new(wrap_hf(hf))
                             }
+                            tracing::warn!(
+                                path = %p.display(),
+                                "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
+                            );
+                            Arc::new(wrap_hf(hf))
                         }
-                    } else {
-                        tracing::warn!(
-                            path = %p.display(),
-                            "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
-                        );
-                        Arc::new(wrap_hf(hf))
                     }
-                } else {
-                    Arc::new(wrap_hf(hf))
+                    TokenizerBackend::Basetenkenizer => {
+                        if let Some(path_str) = p.to_str() {
+                            match crate::tokenizers::BasetenTokenizer::from_file(path_str) {
+                                Ok(baseten) => {
+                                    tracing::info!("Using basetenkenizer tokenizer backend");
+                                    Arc::new(baseten)
+                                }
+                                Err(e) => {
+                                    if !is_fallback_enabled {
+                                        return Err(e).context(
+                                            "failed to load basetenkenizer tokenizer backend and fallback is disabled",
+                                        );
+                                    }
+                                    tracing::warn!(
+                                        %e,
+                                        "Failed to load basetenkenizer, falling back to HuggingFace"
+                                    );
+                                    Arc::new(wrap_hf(hf))
+                                }
+                            }
+                        } else {
+                            if !is_fallback_enabled {
+                                anyhow::bail!(
+                                    "failed to load basetenkenizer tokenizer backend because tokenizer path contains non-UTF-8 characters and fallback is disabled: {}",
+                                    p.display()
+                                );
+                            }
+                            tracing::warn!(
+                                path = %p.display(),
+                                "Tokenizer path contains non-UTF-8 characters, skipping basetenkenizer; falling back to HuggingFace"
+                            );
+                            Arc::new(wrap_hf(hf))
+                        }
+                    }
                 };
 
                 if cache_enabled {
@@ -1708,6 +1820,7 @@ impl ModelDeploymentCard {
             chat_template_file,
             prompt_context: None, // TODO - auto-detect prompt context
             architectural_max_context_length,
+            legacy_context_length: None,
             kv_cache_block_size: 0, // set later
             migration_limit: 0,
             model_type: Default::default(),  // set later
@@ -1735,7 +1848,8 @@ impl PartialEq for ModelDeploymentCard {
     }
 }
 
-/// A ModelDeploymentCard is published a single time per instance and never updated.
+/// Model-card registration is create-only. The discovery taint API owns the
+/// narrow exception for updating runtime_config.taints on an existing record.
 impl kv::Versioned for ModelDeploymentCard {
     fn revision(&self) -> u64 {
         0
@@ -2973,6 +3087,21 @@ mod ownership_tests {
     }
 
     #[test]
+    fn context_length_wire_compatibility() {
+        let card = ModelDeploymentCard::with_name_only("model");
+        let mut legacy_value = serde_json::to_value(&card).unwrap();
+        legacy_value["context_length"] = serde_json::json!(32_768);
+
+        let mut parsed: ModelDeploymentCard = serde_json::from_value(legacy_value).unwrap();
+        assert_eq!(parsed.effective_context_length(), 32_768);
+
+        parsed.runtime_config.context_length = Some(8_192);
+        let wire_value: serde_json::Value =
+            serde_json::from_str(&parsed.to_json().unwrap()).unwrap();
+        assert_eq!(wire_value["context_length"], 8_192);
+    }
+
+    #[test]
     fn tensor_config_serializes_at_card_top_level() {
         let mut card = ModelDeploymentCard::with_name_only("tensor");
         card.tensor_model_config = Some(TensorModelConfig {
@@ -2992,6 +3121,28 @@ mod ownership_tests {
                 .map(|config| config.name.as_str()),
             Some("tensor")
         );
+    }
+
+    #[test]
+    fn runtime_taints_do_not_change_mdcsum() {
+        let mut fast = ModelDeploymentCard::with_name_only("model");
+        fast.runtime_config.taints = std::collections::HashSet::from(["fast".to_string()]);
+
+        let mut slow = ModelDeploymentCard::with_name_only("model");
+        slow.runtime_config.taints = std::collections::HashSet::from(["slow".to_string()]);
+
+        assert_eq!(fast.mdcsum(), slow.mdcsum());
+    }
+
+    #[test]
+    fn runtime_kv_event_capability_does_not_change_mdcsum() {
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled.runtime_config.kv_event_publishing_enabled = Some(false);
+
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled.runtime_config.kv_event_publishing_enabled = Some(true);
+
+        assert_eq!(disabled.mdcsum(), enabled.mdcsum());
     }
 }
 

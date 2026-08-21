@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -456,6 +456,74 @@ fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
     }
 }
 
+/// Trailing usage-only chunk: `choices: []` plus a usage payload, matching what
+/// `transform_postprocessor_stream` appends when usage reporting is on (always
+/// for non-streaming). It carries no delta slot, so it must never be picked as
+/// the EOF-flush envelope.
+fn mock_usage_only_chunk() -> NvCreateChatCompletionStreamResponse {
+    use dynamo_protocols::types::{CompletionUsage, CreateChatCompletionStreamResponse};
+    NvCreateChatCompletionStreamResponse {
+        inner: CreateChatCompletionStreamResponse {
+            id: "test-id".to_string(),
+            choices: vec![],
+            created: 0,
+            model: "test-model".to_string(),
+            system_fingerprint: None,
+            object: "chat.completion.chunk".to_string(),
+            usage: Some(CompletionUsage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            }),
+            service_tier: None,
+        },
+        nvext: None,
+        llm_metrics: None,
+    }
+}
+
+/// Terminal `finish_reason=Stop` chunk carrying one finish per listed choice
+/// index — the multi-choice analog of `mock_final_chunk`, so an `n > 1` stream
+/// flushes every choice's jail state.
+fn mock_multi_choice_final_chunk(indices: &[u32]) -> NvCreateChatCompletionStreamResponse {
+    use dynamo_protocols::types::{
+        ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
+    };
+    #[allow(deprecated)]
+    let choices = indices
+        .iter()
+        .map(|index| ChatChoiceStream {
+            index: *index,
+            delta: ChatCompletionStreamResponseDelta {
+                role: None,
+                content: None,
+                tool_calls: None,
+                function_call: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: Some(FinishReason::Stop),
+            logprobs: None,
+        })
+        .collect();
+    NvCreateChatCompletionStreamResponse {
+        inner: CreateChatCompletionStreamResponse {
+            id: "test-id".to_string(),
+            choices,
+            created: 0,
+            model: "test-model".to_string(),
+            system_fingerprint: None,
+            object: "chat.completion.chunk".to_string(),
+            usage: None,
+            service_tier: None,
+        },
+        nvext: None,
+        llm_metrics: None,
+    }
+}
+
 /// Regression for DeepSeek V4 tool-continuation turns.
 ///
 /// The V4 formatter seeds `<think>` into the prompt after a merged tool result,
@@ -672,12 +740,16 @@ async fn postprocessor_parsing_stream_nemotron_v3_enable_thinking_false_returns_
     assert_eq!(content, "This is plain content");
 }
 
-/// vLLM parity: `chat_template_kwargs={"force_nonempty_content": true}` turns
-/// a leading `<think>...` response into normal content instead of reasoning.
-/// Dynamo checks this in the postprocessor because request flags are applied
-/// before stream parsing, not inside the raw reasoning parser.
+/// Streaming Nemotron `force_nonempty_content=true`, reasoning-only turn: the
+/// parser stays ON (it is no longer disabled for streaming), so an unterminated
+/// `<think>...` with no answer parses entirely as reasoning. Under
+/// `force_nonempty_content` those deltas are held back rather than streamed as
+/// `reasoning_content`, because until the parser leaves the reasoning block it
+/// is not yet known whether an answer follows. Here none does, so at
+/// end-of-stream the held text is emitted as `content` — the template's
+/// non-empty-content promise is honored on the streaming path too.
 #[tokio::test]
-async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_strips_start_token() {
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_reasoning_only_becomes_content() {
     let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
 
     let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
@@ -716,23 +788,135 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_strips_start_to
         }
     }
 
-    assert_eq!(reasoning, "");
-    assert_eq!(content, "This is plain content");
+    assert_eq!(
+        content, "This is plain content",
+        "with no answer to follow, the held reasoning is emitted as content"
+    );
+    assert_eq!(
+        reasoning, "",
+        "nothing is reported as reasoning_content when it had to become content"
+    );
 }
 
-/// Non-streaming parity for the Nemotron `force_nonempty_content` flag.
-///
-/// A `stream=false` request is not a separate code path: the engine always runs
-/// internally in streaming mode, and the HTTP layer folds the resulting deltas
-/// into a single response. The leading-`<think>` strip that
-/// `postprocessor_parsing_stream` applies must therefore survive that fold.
-///
-/// This test exercises the full non-streaming path: `postprocessor_parsing_stream`
-/// (where the `force_nonempty_content` strip lives), then
-/// `NvCreateChatCompletionResponse::from_annotated_stream` (the entrypoint the
-/// non-streaming handler uses). It asserts the aggregated message has non-empty,
-/// `<think>`-stripped `content` and empty `reasoning_content` — the guarantee
-/// clients that require non-empty content depend on.
+/// Streaming Nemotron `force_nonempty_content=true`, reasoning+answer turn: the
+/// headline fix (Case 1). With the parser on, `<think>reason</think>answer`
+/// streams `reason` as `reasoning_content` and `answer` as `content` — no
+/// reasoning text or raw `</think>` leaks into content. On `main` (and before
+/// this change) the parser was disabled for streaming and only the leading
+/// `<think>` was stripped, so `content` was `"reason</think>answer"`.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_stream_reasoning_and_answer_split()
+{
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({ "force_nonempty_content": true })).unwrap(),
+    );
+
+    let input_chunks = vec![
+        mock_content_chunk("<think>Let me greet them.</think>Hello!"),
+        mock_final_chunk(),
+    ];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let mut reasoning = String::new();
+    let mut content = String::new();
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            if let Some(r) = &choice.delta.reasoning_content {
+                reasoning.push_str(r);
+            }
+            if let Some(c) = &choice.delta.content {
+                content.push_str(get_text(c));
+            }
+        }
+    }
+
+    assert_eq!(
+        reasoning, "Let me greet them.",
+        "reasoning must stream as reasoning_content, not leak into content"
+    );
+    assert_eq!(
+        content, "Hello!",
+        "answer must be the content, with no reasoning or </think> leaked in"
+    );
+}
+
+/// Streaming Nemotron `force_nonempty_content=true` with plain output and no
+/// `<think>` at all. Nemotron aliases are force-reasoning parsers, so keeping
+/// the parser on raises the question of whether leading text with no start
+/// token gets swallowed as `reasoning_content`. It does not: the answer streams
+/// through as `content` and `reasoning_content` stays empty. This pins the
+/// dynamo-parsers behavior the fix depends on, so a parser-side change that
+/// started treating bare leading text as reasoning fails here instead of
+/// silently emptying `content` for every plain Nemotron turn.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_stream_plain_content_stays_content()
+ {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({ "force_nonempty_content": true })).unwrap(),
+    );
+
+    let input_chunks = vec![
+        mock_content_chunk("Hello"),
+        mock_content_chunk("!"),
+        mock_final_chunk(),
+    ];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let mut reasoning = String::new();
+    let mut content = String::new();
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            if let Some(r) = &choice.delta.reasoning_content {
+                reasoning.push_str(r);
+            }
+            if let Some(c) = &choice.delta.content {
+                content.push_str(get_text(c));
+            }
+        }
+    }
+
+    assert_eq!(
+        content, "Hello!",
+        "plain output with no <think> must stay content"
+    );
+    assert_eq!(
+        reasoning, "",
+        "no <think> means nothing may be reported as reasoning_content"
+    );
+}
+
+/// Non-streaming parity for the Nemotron `force_nonempty_content` flag,
+/// reasoning-only case. Reasoning parsing stays ON for non-streaming, so a
+/// `<think>` with no answer parses entirely into `reasoning_content`, leaving
+/// `content` empty; the aggregator then surfaces reasoning as `content` when
+/// content is empty, gated by `ParsingOptions::move_reasoning_to_content_when_empty`.
+/// The chat handler sets that flag for `force_nonempty_content` via
+/// `OpenAIPreprocessor::wants_reasoning_as_content_when_empty`; this test mirrors
+/// it and asserts non-empty, `<think>`-stripped `content`.
 #[tokio::test]
 async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_strips_start_token() {
     let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
@@ -760,9 +944,10 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_stri
         .expect("postprocessor_parsing_stream should build");
 
     // Step 2: the non-streaming fold, identical to the `stream=false` HTTP path.
+    // Options mirror what the chat handler sets for `force_nonempty_content`.
     let response = NvCreateChatCompletionResponse::from_annotated_stream(
         output_stream,
-        ParsingOptions::default(),
+        ParsingOptions::default().with_move_reasoning_to_content_when_empty(true),
     )
     .await
     .expect("aggregation should succeed");
@@ -771,7 +956,7 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_stri
     assert_eq!(
         choice.message.content.as_ref().map(get_text),
         Some("This is plain content"),
-        "aggregated content must be non-empty with the leading <think> stripped"
+        "reasoning-only turn must surface reasoning as non-empty content"
     );
     assert_eq!(
         choice.message.reasoning_content, None,
@@ -780,9 +965,10 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_stri
 }
 
 /// Non-streaming parity, EOF-flush case: when the stream ends after only a
-/// partial `<think>` prefix, those bytes are valid content that the strip
-/// flushes on the terminal chunk. This confirms the non-streaming fold keeps
-/// that flushed content instead of dropping it.
+/// partial `<think>` prefix (`<thi`), those bytes must not be dropped. Reasoning
+/// parsing stays on, so `parse_reasoning_content_from_stream` flushes the
+/// unterminated buffer at EOF and the aggregator move (mirroring the chat handler
+/// for `force_nonempty_content`) surfaces it as non-empty `content`.
 #[tokio::test]
 async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_flushes_partial_prefix()
 {
@@ -803,9 +989,10 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_flus
         .postprocessor_parsing_stream(input_stream, &request, false, false)
         .expect("postprocessor_parsing_stream should build");
 
+    // Options mirror what the chat handler sets for `force_nonempty_content`.
     let response = NvCreateChatCompletionResponse::from_annotated_stream(
         output_stream,
-        ParsingOptions::default(),
+        ParsingOptions::default().with_move_reasoning_to_content_when_empty(true),
     )
     .await
     .expect("aggregation should succeed");
@@ -819,8 +1006,82 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_aggregated_flus
     assert_eq!(choice.message.reasoning_content, None);
 }
 
+/// Regression for the leak this PR fixes: a non-streaming Nemotron turn that
+/// emits real reasoning AND a real answer must split them, not dump reasoning
+/// (and a raw `</think>`) into `content`. On `main` this returned
+/// `content = "Let me greet them.</think>Hello!"`, `reasoning_content = None`.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_reasoning_and_answer_split() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({ "force_nonempty_content": true })).unwrap(),
+    );
+    let input_chunks = vec![
+        mock_content_chunk("<think>Let me greet them.</think>Hello!"),
+        mock_final_chunk(),
+    ];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let response = NvCreateChatCompletionResponse::from_annotated_stream(
+        output_stream,
+        ParsingOptions::default().with_move_reasoning_to_content_when_empty(true),
+    )
+    .await
+    .expect("aggregation should succeed");
+    let choice = &response.inner.choices[0];
+    assert_eq!(
+        choice.message.content.as_ref().map(get_text),
+        Some("Hello!"),
+        "answer must be the content, with no leaked reasoning or </think>"
+    );
+    assert_eq!(
+        choice.message.reasoning_content.as_deref(),
+        Some("Let me greet them."),
+        "reasoning must be preserved in reasoning_content, not moved into content"
+    );
+}
+
+/// Same reasoning+answer input WITHOUT `force_nonempty_content`: non-streaming
+/// reasoning parsing is unchanged, so the split is identical. Confirms the flag
+/// is a no-op when content is already present.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_reasoning_and_answer_split_no_flag() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+    let request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    let input_chunks = vec![
+        mock_content_chunk("<think>Let me greet them.</think>Hello!"),
+        mock_final_chunk(),
+    ];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let response = NvCreateChatCompletionResponse::from_annotated_stream(
+        output_stream,
+        ParsingOptions::default(),
+    )
+    .await
+    .expect("aggregation should succeed");
+    let choice = &response.inner.choices[0];
+    assert_eq!(
+        choice.message.content.as_ref().map(get_text),
+        Some("Hello!")
+    );
+    assert_eq!(
+        choice.message.reasoning_content.as_deref(),
+        Some("Let me greet them.")
+    );
+}
+
 /// Regression: if the stream ends after a partial `<think>` prefix, those bytes
-/// are valid content and must be flushed before the terminal chunk is emitted.
+/// must be flushed (not dropped) before the terminal chunk is emitted. With the
+/// parser on for streaming, the parser reports the unterminated buffer as
+/// reasoning at `finish_reasoning_stream`, so `<thi` surfaces as
+/// `reasoning_content` and `content` stays empty (streaming does no move — the
+/// non-streaming aggregated path moves the same bytes into content).
 #[tokio::test]
 async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_flushes_partial_prefix_on_finish()
 {
@@ -863,13 +1124,15 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_flushes_partial
         }
     }
 
+    assert_eq!(content, "<thi", "partial prefix must survive as content");
     assert_eq!(reasoning, "");
-    assert_eq!(content, "<thi");
     assert!(finish_reasons.contains(&FinishReason::Stop));
 }
 
 /// Regression: the EOF path has no terminal delta to carry the buffered bytes,
-/// so the postprocessor must emit one final content chunk itself.
+/// so the postprocessor must emit one final chunk itself. With the parser on,
+/// the unterminated `<thi` flushes as `reasoning_content` (streaming does no
+/// move); the point of the test is that the bytes are not silently dropped.
 #[tokio::test]
 async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_flushes_partial_prefix_on_eof() {
     let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
@@ -907,26 +1170,146 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_flushes_partial
         }
     }
 
+    assert_eq!(content, "<thi", "partial prefix must survive as content");
     assert_eq!(reasoning, "");
-    assert_eq!(content, "<thi");
 }
 
-/// Dynamo already represents streamed responses as `choices: Vec<_>`, so this
-/// test is not adding new `n > 1` behavior. It verifies that the Nemotron v3
-/// `force_nonempty_content=true` path does not use one shared strip buffer for
-/// all choices. Both choices receive a split `<think>` prefix (`"<thi"` then
-/// `"nk>..."`). If the helper keeps only one global buffer/decided flag, choice
-/// 0 can consume the prefix state and choice 1 can leak `<think>` or lose text.
-/// The expected behavior is that each `choice.index` strips its own leading
-/// prefix independently and returns only normal content.
+/// Regression: the EOF flush must survive the trailing usage-only chunk.
+///
+/// In production `transform_postprocessor_stream` appends a final usage chunk
+/// with `choices: []` (always on for non-streaming, opt-in for streaming). If
+/// the flush reuses that chunk as its envelope, the per-choice loop iterates an
+/// empty vec and the buffered bytes are dropped — exactly the truncated-`<think>`
+/// loss the flush exists to prevent. Only content-bearing chunks are retained as
+/// the envelope, so `<thi` still surfaces here.
 #[tokio::test]
-async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_tracks_prefix_per_choice() {
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_flushes_partial_prefix_after_usage_chunk()
+ {
     let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
 
     let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
     request.chat_template_args = Some(
         serde_json::from_value(serde_json::json!({
             "force_nonempty_content": true
+        }))
+        .unwrap(),
+    );
+
+    let input_chunks = vec![mock_content_chunk("<thi"), mock_usage_only_chunk()];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let mut content = String::new();
+    let mut usage_chunks = 0;
+    let mut content_index = None;
+    let mut usage_index = None;
+    for (index, output) in output_chunks.iter().enumerate() {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        if data.inner.usage.is_some() {
+            usage_chunks += 1;
+            usage_index = Some(index);
+        }
+        for choice in &data.inner.choices {
+            if let Some(c) = &choice.delta.content {
+                content.push_str(get_text(c));
+                content_index = Some(index);
+            }
+        }
+    }
+
+    assert_eq!(
+        content, "<thi",
+        "partial prefix must survive the trailing usage-only chunk"
+    );
+    assert_eq!(
+        usage_chunks, 1,
+        "the flush chunk must not duplicate the usage payload"
+    );
+    assert!(
+        content_index.expect("recovered content chunk") < usage_index.expect("usage chunk"),
+        "recovered content must precede the trailing usage-only chunk"
+    );
+}
+
+/// Each choice's parser flushes its own buffered bytes at EOF. With `n > 1` the
+/// last content-bearing chunk need not carry every choice, so the flush rebuilds
+/// the choice list from the indices that actually have buffered text rather than
+/// reusing whichever choices happened to be in that envelope.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_flushes_partial_prefix_per_choice()
+{
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({
+            "force_nonempty_content": true
+        }))
+        .unwrap(),
+    );
+
+    let input_chunks = vec![
+        mock_multi_choice_content_chunk(&[(0, "<th"), (1, "<thi")]),
+        // Only choice 0 is present in the last content-bearing chunk; choice 1's
+        // buffered "<thi" must still be flushed.
+        mock_multi_choice_content_chunk(&[(0, "i")]),
+    ];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let mut content_by_index: HashMap<u32, String> = HashMap::new();
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            if let Some(c) = &choice.delta.content {
+                content_by_index
+                    .entry(choice.index)
+                    .or_default()
+                    .push_str(get_text(c));
+            }
+            assert!(
+                choice.delta.reasoning_content.is_none(),
+                "no answer followed, so nothing may be reported as reasoning_content"
+            );
+        }
+    }
+
+    assert_eq!(content_by_index.get(&0).map(String::as_str), Some("<thi"));
+    assert_eq!(content_by_index.get(&1).map(String::as_str), Some("<thi"));
+}
+
+/// Dynamo already represents streamed responses as `choices: Vec<_>`, so this
+/// test is not adding new `n > 1` behavior. It verifies that the disabled-reasoning
+/// strip path (`enable_thinking=false`, which is where the leading-`<think>` strip
+/// still runs) does not use one shared strip buffer for all choices. Both choices
+/// receive a split `<think>` prefix (`"<thi"` then `"nk>..."`). If the helper keeps
+/// only one global buffer/decided flag, choice 0 can consume the prefix state and
+/// choice 1 can leak `<think>` or lose text. The expected behavior is that each
+/// `choice.index` strips its own leading prefix independently and returns only
+/// normal content. (`force_nonempty_content` no longer takes this path — it keeps
+/// the reasoning parser on — so this exercises the strip path via `enable_thinking`.)
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_disabled_reasoning_tracks_prefix_per_choice() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({
+            "enable_thinking": false
         }))
         .unwrap(),
     );
@@ -957,7 +1340,7 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_tracks_prefix_p
             }
             assert!(
                 choice.delta.reasoning_content.is_none(),
-                "reasoning_content must stay empty when force_nonempty_content=true"
+                "reasoning_content must stay empty when reasoning is disabled"
             );
         }
     }
@@ -966,6 +1349,223 @@ async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_tracks_prefix_p
     assert_eq!(
         content_by_choice.get(&1).map(String::as_str),
         Some("Second")
+    );
+}
+
+#[tokio::test]
+async fn postprocessor_parsing_stream_disabled_reasoning_orders_eof_flush_by_choice() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args =
+        Some(serde_json::from_value(serde_json::json!({"enable_thinking": false})).unwrap());
+
+    let input_stream = stream::iter(vec![Annotated::from_data(mock_multi_choice_content_chunk(
+        &[(2, "<thi"), (0, "<thi"), (1, "<thi")],
+    ))]);
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let output_chunks: Vec<_> = output_stream.collect().await;
+
+    let recovered = output_chunks
+        .iter()
+        .filter_map(|output| output.data.as_ref())
+        .find(|data| {
+            data.inner.choices.iter().any(|choice| {
+                choice
+                    .delta
+                    .content
+                    .as_ref()
+                    .is_some_and(|content| get_text(content) == "<thi")
+            })
+        })
+        .expect("synthetic recovery chunk");
+    let indices: Vec<_> = recovered
+        .inner
+        .choices
+        .iter()
+        .map(|choice| choice.index)
+        .collect();
+    assert_eq!(indices, vec![0, 1, 2]);
+}
+
+/// The disabled-reasoning strip path ends its stream by cloning the last chunk
+/// as an envelope for whatever is still buffered. That clone drops `usage` and
+/// `llm_metrics` so the previous chunk's tokens are not counted twice, but it
+/// keeps `nvext` — so a per-chunk extension such as `completion_token_ids` is
+/// emitted a second time. Non-streaming aggregation append-merges that field,
+/// turning `[42]` into `[42, 42]`.
+///
+/// Unlike the reasoning-stream flush, this path is not gated on
+/// `force_nonempty_content`: it runs for any `enable_thinking=false` request
+/// against a force-reasoning parser.
+#[tokio::test]
+async fn postprocessor_parsing_stream_strip_path_eof_flush_drops_nvext() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({
+            "enable_thinking": false
+        }))
+        .unwrap(),
+    );
+
+    // `<thi` alone is an undecided `<think>` prefix, so the strip helper is
+    // still holding it when the stream ends — that is what triggers the
+    // end-of-stream flush and its cloned envelope.
+    let mut chunk = mock_multi_choice_content_chunk(&[(0, "<thi")]);
+    chunk.nvext = Some(serde_json::json!({ "completion_token_ids": [42] }));
+
+    let input_stream = stream::iter(vec![Annotated::from_data(chunk)]);
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let carrying_nvext = output_chunks
+        .iter()
+        .filter(|o| o.data.as_ref().is_some_and(|d| d.nvext.is_some()))
+        .count();
+
+    assert_eq!(
+        carrying_nvext, 1,
+        "nvext must be emitted once; the synthetic end-of-stream chunk must not repeat it"
+    );
+}
+
+#[tokio::test]
+async fn postprocessor_parsing_stream_strip_path_flushes_partial_prefix_after_usage_chunk() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args =
+        Some(serde_json::from_value(serde_json::json!({"enable_thinking": false})).unwrap());
+
+    let input_stream = stream::iter(
+        vec![mock_content_chunk("<thi"), mock_usage_only_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let output_chunks: Vec<_> = output_stream.collect().await;
+
+    let mut content_index = None;
+    let mut usage_index = None;
+    let content = output_chunks
+        .iter()
+        .enumerate()
+        .inspect(|(index, output)| {
+            if output
+                .data
+                .as_ref()
+                .is_some_and(|data| data.inner.usage.is_some())
+            {
+                usage_index = Some(*index);
+            }
+        })
+        .filter_map(|(index, output)| output.data.as_ref().map(|data| (index, data)))
+        .flat_map(|(index, data)| data.inner.choices.iter().map(move |choice| (index, choice)))
+        .filter_map(|(index, choice)| {
+            choice.delta.content.as_ref().inspect(|_| {
+                content_index = Some(index);
+            })
+        })
+        .map(get_text)
+        .collect::<String>();
+    assert_eq!(content, "<thi");
+    assert!(
+        content_index.expect("recovered content chunk") < usage_index.expect("usage chunk"),
+        "recovered content must precede the trailing usage-only chunk"
+    );
+}
+
+/// Same envelope defect on the `force_nonempty_content` flush. This path is the
+/// one the flag added, so a repeated `nvext` here is a regression introduced by
+/// the feature rather than a pre-existing leak.
+#[tokio::test]
+async fn postprocessor_parsing_stream_force_nonempty_eof_flush_drops_nvext() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({
+            "force_nonempty_content": true
+        }))
+        .unwrap(),
+    );
+
+    let mut chunk = mock_content_chunk("reasoning with no answer");
+    chunk.nvext = Some(serde_json::json!({ "completion_token_ids": [42] }));
+
+    let input_stream = stream::iter(vec![Annotated::from_data(chunk)]);
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let carrying_nvext = output_chunks
+        .iter()
+        .filter(|o| o.data.as_ref().is_some_and(|d| d.nvext.is_some()))
+        .count();
+
+    assert_eq!(
+        carrying_nvext, 1,
+        "the recovered-bytes chunk must not repeat the envelope's nvext"
+    );
+}
+
+/// A backend error is terminal. The deferred-reasoning buffer must be dropped,
+/// not flushed as ordinary `content` after the error — otherwise a consumer that
+/// keeps reading past the error (`/v1/responses` and `/v1/messages` both do,
+/// via `saw_error = true; continue;`) shows the user text as if it were the
+/// answer, immediately before reporting that the request failed.
+#[tokio::test]
+async fn postprocessor_parsing_stream_force_nonempty_no_content_after_backend_error() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({
+            "force_nonempty_content": true
+        }))
+        .unwrap(),
+    );
+
+    // Deferred reasoning arrives, then the backend fails before any answer.
+    let input_stream = stream::iter(vec![
+        Annotated::from_data(mock_content_chunk("partial reasoning")),
+        Annotated::from_error("backend exploded"),
+    ]);
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let error_position = output_chunks
+        .iter()
+        .position(|o| o.is_error())
+        .expect("the backend error must still reach the client");
+
+    let content_after_error: String = output_chunks
+        .iter()
+        .skip(error_position + 1)
+        .filter_map(|o| o.data.as_ref())
+        .flat_map(|d| d.inner.choices.iter())
+        .filter_map(|c| c.delta.content.as_ref())
+        .map(get_text)
+        .collect();
+
+    assert!(
+        content_after_error.is_empty(),
+        "no content may be synthesized after a terminal error, got {content_after_error:?}"
     );
 }
 
@@ -1494,6 +2094,43 @@ async fn drain_stream(
     }
 }
 
+/// One choice's accumulated stream output, keyed by `choice.index` in
+/// `demux_by_choice`. Tool calls stay keyed by tool index so fragments merge.
+#[derive(Default)]
+struct PerChoice {
+    reasoning: String,
+    content: String,
+    tool_calls: BTreeMap<u32, MergedToolCall>,
+}
+
+/// Demux collected output chunks by `choice.index`, merging each choice's
+/// reasoning/content/tool-call deltas in arrival order.
+fn demux_by_choice(
+    output_chunks: &[Annotated<NvCreateChatCompletionStreamResponse>],
+) -> BTreeMap<u32, PerChoice> {
+    let mut by_choice: BTreeMap<u32, PerChoice> = BTreeMap::new();
+    for output in output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            let entry = by_choice.entry(choice.index).or_default();
+            if let Some(r) = &choice.delta.reasoning_content {
+                entry.reasoning.push_str(r);
+            }
+            if let Some(c) = &choice.delta.content {
+                entry.content.push_str(get_text(c));
+            }
+            if let Some(tcs) = &choice.delta.tool_calls {
+                for tc in tcs {
+                    entry.tool_calls.entry(tc.index).or_default().merge_from(tc);
+                }
+            }
+        }
+    }
+    by_choice
+}
+
 /// Assert the standard "tool call extracted, nothing leaks" success shape
 /// shared by every matrix row that expects a successful extraction.
 fn assert_clean_tool_call(
@@ -1618,6 +2255,569 @@ async fn tool_choice_matrix_force_reasoning_named_bare_json() {
         );
         assert_clean_tool_call(&case, &content, &tool_calls, "San Francisco");
     }
+}
+
+/// Regression (GH-11997): with `n > 1`, each choice must decide bare-JSON vs.
+/// reasoning-first INDEPENDENTLY. Choice 0 streams bare guided JSON (bypass →
+/// tool call), choice 1 streams `reasoning</think>{json}` in the SAME chunks.
+/// The pre-fix stream made ONE global bypass decision from whichever choice
+/// emitted content first (choice 0's `[`) and applied it to every choice, so
+/// choice 1's reasoning + `</think>` leaked into `content` and its
+/// `reasoning_content` was lost. Per-choice state keeps the two isolated, and
+/// the different locations (SF vs. Boston) confirm no cross-contamination.
+#[tokio::test]
+async fn postprocessor_parsing_stream_multi_choice_isolates_guided_bypass_decision() {
+    let preprocessor = build_preprocessor(Some("deepseek_r1"), Some("nemotron_nano"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+
+    // choice 0: bare guided JSON. choice 1: reasoning, then `</think>`, then JSON.
+    let json0 = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    let json1 = r#"[{"name":"get_weather","parameters":{"location":"Boston"}}]"#;
+
+    let input_chunks = vec![
+        // First content chunk: choice 0 leads with `[` (decides bypass), choice 1
+        // leads with reasoning text (must decide NOT to bypass).
+        mock_multi_choice_content_chunk(&[(0, "["), (1, "Let me check.")]),
+        mock_multi_choice_content_chunk(&[(0, &json0[1..]), (1, "</think>")]),
+        mock_multi_choice_content_chunk(&[(1, json1)]),
+        mock_multi_choice_final_chunk(&[0, 1]),
+    ];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    let by_choice = demux_by_choice(&output_chunks);
+
+    let c0 = by_choice.get(&0).expect("choice 0 produced output");
+    assert!(
+        c0.reasoning.is_empty(),
+        "choice 0 (bare JSON) must not produce reasoning_content, got: {:?}",
+        c0.reasoning
+    );
+    let c0_calls: Vec<MergedToolCall> = c0.tool_calls.values().cloned().collect();
+    assert_clean_tool_call(
+        "choice 0 bare JSON",
+        &c0.content,
+        &c0_calls,
+        "San Francisco",
+    );
+
+    let c1 = by_choice.get(&1).expect("choice 1 produced output");
+    assert_eq!(
+        c1.reasoning, "Let me check.",
+        "choice 1 reasoning must be separated, not bypassed by choice 0's decision"
+    );
+    let c1_calls: Vec<MergedToolCall> = c1.tool_calls.values().cloned().collect();
+    assert_clean_tool_call("choice 1 reasoning-first", &c1.content, &c1_calls, "Boston");
+}
+
+// ---------------------------------------------------------------------------
+// GH-11997 step 3: n>1 synthetic-interleave lane (per-choice state isolation).
+//
+// Invariant: `demux(parse(interleave(A@0, B@1, ...)))[i] == parse(shape_i)`.
+// Each choice's demuxed output must equal what that same single-choice shape
+// produces on its own (n=1). No n>1 fixture is authored — the golden is each
+// shape's own solo run, computed at test time. Single-choice fixtures are
+// mathematically blind to this bug class: with one choice, per-response and
+// per-choice state are identical, so only interleaving two divergent shapes in
+// one stream reveals a stage that keyed state per response instead of per
+// `choice.index`.
+//
+// Sibling lanes over the frontend-crates v1 jail and v2 stream corpus live in
+// ai-dynamo/frontend-crates (`parsers/v1/tests/jail_interleave.rs`,
+// `conformance/tests/parity_toolcalling_stream_interleave.rs`); the schedule
+// core below is the dynamo-side copy of that lane's origin module.
+mod interleave {
+    //! Deterministic multi-choice interleave schedules. No RNG: every failure
+    //! reproduces byte-exactly. A "shape" is one choice's ordered delta texts.
+    //! `interleave` merges k shapes into one ordered list of chunks, each chunk
+    //! a `(choice.index, delta)` list, ready for `mock_multi_choice_content_chunk`.
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum Schedule {
+        /// One delta from each choice per round, in index order: 0,1,0,1,...
+        RoundRobin,
+        /// Choice `i` starts `i * offset` rounds late (choice 0 streams alone
+        /// first), then the rest interleave by global round.
+        FirstByteOffset(usize),
+        /// Split choice 0's delta in half around the other choices' deltas of
+        /// the same round — stresses a marker split across a choice boundary.
+        BoundarySplit,
+    }
+
+    /// Every schedule the lane exercises — shared by the lossless roundtrip
+    /// test and the isolation assertion so the two cannot drift apart.
+    pub const ALL_SCHEDULES: [Schedule; 4] = [
+        Schedule::RoundRobin,
+        Schedule::FirstByteOffset(1),
+        Schedule::FirstByteOffset(2),
+        Schedule::BoundarySplit,
+    ];
+
+    /// Split `s` near the middle on a UTF-8 char boundary. Returns `("", s)`
+    /// when the string is too short to split (single char / empty).
+    fn split_mid(s: &str) -> (&str, &str) {
+        if s.len() < 2 {
+            return ("", s);
+        }
+        let mut mid = s.len() / 2;
+        while mid < s.len() && !s.is_char_boundary(mid) {
+            mid += 1;
+        }
+        if mid == s.len() {
+            return ("", s);
+        }
+        s.split_at(mid)
+    }
+
+    pub fn interleave(shapes: &[Vec<&str>], schedule: Schedule) -> Vec<Vec<(u32, String)>> {
+        let max_len = shapes.iter().map(|s| s.len()).max().unwrap_or(0);
+        let mut chunks: Vec<Vec<(u32, String)>> = Vec::new();
+        match schedule {
+            // RoundRobin is FirstByteOffset(0): every choice starts at round 0.
+            Schedule::RoundRobin | Schedule::FirstByteOffset(_) => {
+                let offset = match schedule {
+                    Schedule::FirstByteOffset(o) => o,
+                    _ => 0,
+                };
+                // Emit (round, index, delta) events, then order by (round, index)
+                // so each choice's stream starts `index * offset` rounds late.
+                let mut events: Vec<(usize, u32, String)> = Vec::new();
+                for (i, shape) in shapes.iter().enumerate() {
+                    for (j, delta) in shape.iter().enumerate() {
+                        events.push((i * offset + j, i as u32, (*delta).to_string()));
+                    }
+                }
+                events.sort_by_key(|(round, idx, _)| (*round, *idx));
+                chunks = events
+                    .into_iter()
+                    .map(|(_, idx, d)| vec![(idx, d)])
+                    .collect();
+            }
+            Schedule::BoundarySplit => {
+                for t in 0..max_len {
+                    // Choice 0's delta halves bracket the other choices' deltas
+                    // of the same round (no halves when choice 0 is exhausted).
+                    let halves = shapes.first().and_then(|s| s.get(t)).map(|d| split_mid(d));
+                    if let Some((h1, _)) = halves
+                        && !h1.is_empty()
+                    {
+                        chunks.push(vec![(0, h1.to_string())]);
+                    }
+                    for (i, shape) in shapes.iter().enumerate().skip(1) {
+                        if let Some(delta) = shape.get(t) {
+                            chunks.push(vec![(i as u32, (*delta).to_string())]);
+                        }
+                    }
+                    if let Some((_, h2)) = halves {
+                        chunks.push(vec![(0, h2.to_string())]);
+                    }
+                }
+            }
+        }
+        chunks
+    }
+
+    /// Rewrite the generator's positional `0..k` indices onto arbitrary
+    /// `indices`, so a lane can present non-contiguous and unsorted
+    /// `choice.index` values. State keyed by vector position, or code assuming
+    /// sorted contiguous indices, survives the plain lanes but not this one.
+    pub fn remap(chunks: &[Vec<(u32, String)>], indices: &[u32]) -> Vec<Vec<(u32, String)>> {
+        chunks
+            .iter()
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .map(|(i, d)| (indices[*i as usize], d.clone()))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Merge each run of adjacent chunks carrying disjoint indices into one
+    /// chunk, so a single response carries several choices' deltas — the packed
+    /// shape real engines emit. Per-choice delta order is preserved because a
+    /// chunk is never merged with one that repeats an index it already holds.
+    pub fn pack(chunks: &[Vec<(u32, String)>]) -> Vec<Vec<(u32, String)>> {
+        let mut out: Vec<Vec<(u32, String)>> = Vec::new();
+        for chunk in chunks {
+            let disjoint = out
+                .last()
+                .is_some_and(|last| chunk.iter().all(|(i, _)| last.iter().all(|(j, _)| j != i)));
+            if disjoint {
+                out.last_mut()
+                    .expect("checked non-empty")
+                    .extend(chunk.iter().cloned());
+            } else {
+                out.push(chunk.clone());
+            }
+        }
+        out
+    }
+
+    /// De-interleave: concatenate every delta per `choice.index` in arrival
+    /// order. The lossless invariant is on concatenated content per choice.
+    pub fn deinterleave(chunks: &[Vec<(u32, String)>]) -> std::collections::BTreeMap<u32, String> {
+        let mut map: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
+        for chunk in chunks {
+            for (idx, delta) in chunk {
+                map.entry(*idx).or_default().push_str(delta);
+            }
+        }
+        map
+    }
+}
+
+/// Every schedule must be lossless: de-interleaving its output by
+/// `choice.index` recovers each shape's concatenated content byte-exactly.
+#[test]
+fn interleave_schedules_are_lossless() {
+    use interleave::{ALL_SCHEDULES, deinterleave, interleave, pack, remap};
+    let shapes = vec![
+        vec!["Let me ch", "eck.", "</think>", "answer0"],
+        vec!["Short", " reasoning</think>", "answer1"],
+        vec!["one-shot choice2"],
+    ];
+    let expected: BTreeMap<u32, String> = shapes
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (i as u32, s.concat()))
+        .collect();
+    for schedule in ALL_SCHEDULES {
+        let recovered = deinterleave(&interleave(&shapes, schedule));
+        assert_eq!(
+            recovered, expected,
+            "schedule {schedule:?} lost or reordered per-choice content"
+        );
+    }
+
+    // remap + pack must be lossless too. A `pack` that swallowed a delta would
+    // otherwise weaken the isolation lanes built on top of it.
+    let indices = [u32::MAX, 7, 2];
+    let expected_mapped: BTreeMap<u32, String> = shapes
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (indices[i], s.concat()))
+        .collect();
+    for schedule in ALL_SCHEDULES {
+        let chunks = pack(&remap(&interleave(&shapes, schedule), &indices));
+        assert_eq!(
+            deinterleave(&chunks),
+            expected_mapped,
+            "schedule {schedule:?} lost content under remap+pack"
+        );
+        assert!(
+            chunks.iter().any(|c| c.len() > 1),
+            "schedule {schedule:?}: pack produced no multi-choice chunk, so the \
+             packed lane would not differ from the unpacked one"
+        );
+    }
+}
+
+/// Comparable projection of one choice's demuxed output: reasoning, content,
+/// and assembled tool calls (name + arguments per tool index). This lane
+/// intentionally does not assert finish reasons.
+#[derive(Default, PartialEq, Eq, Debug)]
+struct ChoiceOutput {
+    reasoning: String,
+    content: String,
+    tool_calls: Vec<(Option<String>, String)>,
+}
+
+/// Drive `postprocessor_parsing_stream` over pre-built content chunks (one
+/// `(index, delta)` list per chunk) plus a terminal finish for every index,
+/// then demux the output by `choice.index` into a `ChoiceOutput` per choice.
+async fn run_interleaved(
+    preprocessor: &Arc<OpenAIPreprocessor>,
+    request: &NvCreateChatCompletionRequest,
+    chunks: &[Vec<(u32, String)>],
+) -> BTreeMap<u32, ChoiceOutput> {
+    let mut indices: Vec<u32> = chunks
+        .iter()
+        .flat_map(|c| c.iter().map(|(i, _)| *i))
+        .collect();
+    indices.sort_unstable();
+    indices.dedup();
+
+    let mut input: Vec<NvCreateChatCompletionStreamResponse> = chunks
+        .iter()
+        .map(|chunk| {
+            let refs: Vec<(u32, &str)> = chunk.iter().map(|(i, s)| (*i, s.as_str())).collect();
+            mock_multi_choice_content_chunk(&refs)
+        })
+        .collect();
+    input.push(mock_multi_choice_final_chunk(&indices));
+
+    let input_stream = stream::iter(input.into_iter().map(Annotated::from_data));
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+
+    demux_by_choice(&output_chunks)
+        .into_iter()
+        .map(|(idx, acc)| {
+            (
+                idx,
+                ChoiceOutput {
+                    reasoning: acc.reasoning,
+                    content: acc.content,
+                    tool_calls: acc
+                        .tool_calls
+                        .into_values()
+                        .map(|tc| (tc.name, tc.arguments))
+                        .collect(),
+                },
+            )
+        })
+        .collect()
+}
+
+/// Run one shape solo (single choice at index 0) and return its `ChoiceOutput`.
+async fn solo_output(
+    preprocessor: &Arc<OpenAIPreprocessor>,
+    request: &NvCreateChatCompletionRequest,
+    shape: &[&str],
+) -> ChoiceOutput {
+    let chunks = interleave::interleave(&[shape.to_vec()], interleave::Schedule::RoundRobin);
+    let mut out = run_interleaved(preprocessor, request, &chunks).await;
+    out.remove(&0).unwrap_or_default()
+}
+
+/// Core invariant assertion: for `shapes` interleaved under `schedule`, each
+/// choice's demuxed output equals that shape's solo (n=1) output.
+async fn assert_interleave_isolated(
+    label: &str,
+    preprocessor: &Arc<OpenAIPreprocessor>,
+    request: &NvCreateChatCompletionRequest,
+    shapes: &[Vec<&str>],
+) {
+    let indices: Vec<u32> = (0..shapes.len() as u32).collect();
+    assert_interleave_isolated_mapped(label, preprocessor, request, shapes, &indices, false).await;
+}
+
+/// Same invariant with an explicit `choice.index` per shape and optional
+/// chunk packing. `assert_interleave_isolated` is the contiguous, one-choice-
+/// per-chunk case; both route through here so the two cannot drift apart.
+async fn assert_interleave_isolated_mapped(
+    label: &str,
+    preprocessor: &Arc<OpenAIPreprocessor>,
+    request: &NvCreateChatCompletionRequest,
+    shapes: &[Vec<&str>],
+    indices: &[u32],
+    pack_chunks: bool,
+) {
+    let mut goldens: Vec<ChoiceOutput> = Vec::new();
+    for shape in shapes {
+        goldens.push(solo_output(preprocessor, request, shape).await);
+    }
+    // Sanity: the shapes must actually diverge, or the lane proves nothing.
+    if shapes.len() >= 2 {
+        assert!(
+            goldens.iter().any(|g| *g != goldens[0]),
+            "{label}: shapes do not diverge; interleave lane would prove nothing"
+        );
+    }
+    for schedule in interleave::ALL_SCHEDULES {
+        let mut chunks = interleave::remap(&interleave::interleave(shapes, schedule), indices);
+        if pack_chunks {
+            chunks = interleave::pack(&chunks);
+        }
+        let demuxed = run_interleaved(preprocessor, request, &chunks).await;
+        for (i, golden) in goldens.iter().enumerate() {
+            let idx = indices[i];
+            let got = demuxed.get(&idx).unwrap_or_else(|| {
+                panic!("{label} [{schedule:?}]: choice index {idx} produced no output")
+            });
+            assert_eq!(
+                got, golden,
+                "{label} [{schedule:?}]: choice index {idx} demuxed output != its solo (n=1) output \
+                 — cross-choice state leak"
+            );
+        }
+    }
+}
+
+/// Guided-JSON bypass + tool-jail stage: a choice that leads with bare guided
+/// JSON must not freeze the bypass decision for a reasoning-first choice.
+/// Generalizes `..._isolates_guided_bypass_decision` across schedules/pairs.
+#[tokio::test]
+async fn postprocessor_parsing_stream_interleave_isolates_tool_bypass_stage() {
+    let preprocessor = build_preprocessor(Some("deepseek_r1"), Some("nemotron_nano"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+
+    let json_sf = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    let json_boston = r#"[{"name":"get_weather","parameters":{"location":"Boston"}}]"#;
+    let json_paris = r#"[{"name":"get_weather","parameters":{"location":"Paris"}}]"#;
+    let json_denver = r#"[{"name":"get_weather","parameters":{"location":"Denver"}}]"#;
+
+    let bare_json = vec!["[", &json_sf[1..]];
+    let reasoning_first = vec!["Let me check.", "</think>", json_boston];
+    let reasoning_first2 = vec!["Thinking hard.", "</think>", json_paris];
+    // reasoning text and the `</think>` close marker split across deltas.
+    let tag_split = vec!["Let me ch", "eck.", "</th", "ink>", json_denver];
+    // Whitespace-only leading deltas leave this choice's bypass decision on the
+    // undecided (`None`) arm until its first non-whitespace delta. The pre-fix
+    // code read the decision from whichever choice spoke first anywhere in the
+    // chunk, so an undecided choice was exactly where a foreign verdict landed.
+    let ws_then_bare_json = vec!["  ", "[", &json_paris[1..]];
+    let ws_then_reasoning = vec![" ", "\t", "Let me check.", "</think>", json_denver];
+
+    // k=2 pairs: the known killer, two reasoning choices, and a split-marker pair.
+    assert_interleave_isolated(
+        "bare-JSON x reasoning-first",
+        &preprocessor,
+        &request,
+        &[bare_json.clone(), reasoning_first.clone()],
+    )
+    .await;
+    assert_interleave_isolated(
+        "reasoning x reasoning (distinct)",
+        &preprocessor,
+        &request,
+        &[reasoning_first.clone(), reasoning_first2.clone()],
+    )
+    .await;
+    assert_interleave_isolated(
+        "bare-JSON x split-marker reasoning",
+        &preprocessor,
+        &request,
+        &[bare_json.clone(), tag_split.clone()],
+    )
+    .await;
+    // Whitespace-lead shapes exercise the undecided (`None`) bypass arm, which
+    // the schedules above never reach because every shape's first delta already
+    // decides.
+    assert_interleave_isolated(
+        "whitespace-lead bare-JSON x reasoning-first",
+        &preprocessor,
+        &request,
+        &[ws_then_bare_json.clone(), reasoning_first2.clone()],
+    )
+    .await;
+    assert_interleave_isolated(
+        "whitespace-lead reasoning x whitespace-lead bare-JSON",
+        &preprocessor,
+        &request,
+        &[ws_then_reasoning, ws_then_bare_json],
+    )
+    .await;
+    // k=3: prove the per-choice state map generalizes past two choices.
+    assert_interleave_isolated(
+        "k=3 bare-JSON x reasoning x reasoning",
+        &preprocessor,
+        &request,
+        &[bare_json, reasoning_first, reasoning_first2],
+    )
+    .await;
+}
+
+/// Non-contiguous, unsorted `choice.index` values packed several-per-chunk.
+/// Every other lane emits contiguous `0..k`, one choice per chunk, so state
+/// keyed by vector position — or code assuming sorted, contiguous, one-per-
+/// chunk indices — passes those and fails only here.
+#[tokio::test]
+async fn postprocessor_parsing_stream_interleave_isolates_noncontiguous_packed_indices() {
+    let preprocessor = build_preprocessor(Some("deepseek_r1"), Some("nemotron_nano"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+
+    let json_sf = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    let json_boston = r#"[{"name":"get_weather","parameters":{"location":"Boston"}}]"#;
+
+    let ws_lead = vec!["  ", "Delayed.", "</think>", json_boston];
+    let bare_json = vec!["[", &json_sf[1..]];
+    let reasoning_first = vec!["Let me check.", "</think>", json_boston];
+
+    // `u32::MAX` exercises the key's full range; running both descending and
+    // ascending proves nothing depends on the indices' relative order.
+    for indices in [vec![u32::MAX, 7, 2], vec![2, 7, u32::MAX]] {
+        assert_interleave_isolated_mapped(
+            &format!("non-contiguous {indices:?}, packed chunks"),
+            &preprocessor,
+            &request,
+            &[ws_lead.clone(), bare_json.clone(), reasoning_first.clone()],
+            &indices,
+            true,
+        )
+        .await;
+    }
+}
+
+/// Pure reasoning-split / `<think>`-strip stage (no tools): each choice's
+/// `reasoning_content` vs `content` split must be decided per `choice.index`.
+#[tokio::test]
+async fn postprocessor_parsing_stream_interleave_isolates_reasoning_split_stage() {
+    let preprocessor = build_preprocessor(Some("deepseek_r1"), None);
+    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Explain your answer."}],
+        "stream": true,
+        "temperature": 0.0
+    }))
+    .unwrap();
+
+    // deepseek_r1 is force-reasoning: output starts inside reasoning, `</think>`
+    // closes it. Divergent shapes stress per-choice reasoning state.
+    let reason_then_answer_a = vec!["I should compute.", "</think>", "The result is 42."];
+    let reason_then_answer_b = vec!["A different path.", "</think>", "The result is 7."];
+    let reason_only = vec!["Still thinking, never closes."];
+    // `</think>` split across deltas stresses per-choice strip buffering.
+    let tag_split = vec!["Split rea", "soning.", "</th", "ink>", "Final answer."];
+    // Whitespace-only lead: nothing for the parser to act on until delta 2.
+    let ws_then_reason = vec!["  ", "Delayed start.", "</think>", "Answer C."];
+    // Malformed: a second `</think>` after reasoning already closed. It must be
+    // treated as ordinary content, and only for the choice that emitted it.
+    let double_close = vec!["Reason.", "</think>", "Answer.", "</think>", " tail."];
+
+    assert_interleave_isolated(
+        "reason+answer A x B",
+        &preprocessor,
+        &request,
+        &[reason_then_answer_a.clone(), reason_then_answer_b.clone()],
+    )
+    .await;
+    assert_interleave_isolated(
+        "reason+answer x reason-only",
+        &preprocessor,
+        &request,
+        &[reason_then_answer_a.clone(), reason_only.clone()],
+    )
+    .await;
+    assert_interleave_isolated(
+        "reason+answer x split-marker",
+        &preprocessor,
+        &request,
+        &[reason_then_answer_a.clone(), tag_split],
+    )
+    .await;
+    // Whitespace-lead and malformed-marker shapes: the reasoning state machine
+    // must stay per-choice on the paths the schedules above do not enumerate.
+    assert_interleave_isolated(
+        "whitespace-lead reasoning x reason+answer",
+        &preprocessor,
+        &request,
+        &[ws_then_reason, reason_then_answer_b.clone()],
+    )
+    .await;
+    assert_interleave_isolated(
+        "double-close marker x reason+answer",
+        &preprocessor,
+        &request,
+        &[double_close, reason_then_answer_a.clone()],
+    )
+    .await;
+    // k=3 across the reasoning stage.
+    assert_interleave_isolated(
+        "k=3 reasoning split",
+        &preprocessor,
+        &request,
+        &[reason_then_answer_a, reason_then_answer_b, reason_only],
+    )
+    .await;
 }
 
 /// Per-request thinking disablement must retain the old required-tool behavior
@@ -2033,6 +3233,44 @@ async fn response_format_gemma4_bare_json_stays_content() {
         "response_format JSON must not be reasoning_content, got: {reasoning:?}"
     );
     assert_eq!(content, json);
+}
+
+#[tokio::test]
+async fn gemma4_without_enable_thinking_keeps_parser_markers_as_content() {
+    let preprocessor = build_preprocessor(Some("gemma4"), None);
+
+    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+        "model": "dummy-gemma4-model",
+        "messages": [
+            {
+                "role": "user",
+                "content": "answer plainly"
+            }
+        ],
+        "stream": true
+    }))
+    .unwrap();
+
+    let text = "<|channel>thought\nshould stay plain<channel|>final answer";
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(text), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let DrainOutput {
+        reasoning, content, ..
+    } = drain_stream(output_stream).await;
+
+    assert!(
+        reasoning.is_empty(),
+        "Gemma 4 reasoning parser must be gated off without enable_thinking=true, got: {reasoning:?}"
+    );
+    assert_eq!(content, text);
 }
 
 /// MiniMax append-think is a force-reasoning parser that is not yet proven to
@@ -2643,4 +3881,821 @@ async fn tool_choice_matrix_immediate_jail_reasoning_only_first_chunk() {
         "{case}: reasoning_content from the first chunk must reach the client, got: {reasoning:?}"
     );
     assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+}
+
+/// Recovered text must ship on the terminal chunk, not after it.
+///
+/// The held reasoning is only known to be the answer once the stream finishes,
+/// but emitting it as an extra chunk would place `content` after
+/// `finish_reason=stop` and after the trailing usage chunk. A streaming client
+/// that stops reading at the terminal chunk would then see empty content — the
+/// exact failure `force_nonempty_content` exists to prevent. So the drain
+/// happens on the chunk that carries `finish_reason`, and usage stays last.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_recovers_on_terminal_chunk() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({ "force_nonempty_content": true })).unwrap(),
+    );
+
+    let input_chunks = vec![
+        mock_content_chunk("<think>answer"),
+        mock_final_chunk(),
+        mock_usage_only_chunk(),
+    ];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build")
+        .collect()
+        .await;
+
+    let mut finish_index = None;
+    let mut content_indices = Vec::new();
+    let mut usage_indices = Vec::new();
+    let mut content = String::new();
+    for (i, output) in output_chunks.iter().enumerate() {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        if data.inner.usage.is_some() {
+            usage_indices.push(i);
+        }
+        for choice in &data.inner.choices {
+            if choice.finish_reason.is_some() {
+                finish_index = Some(i);
+            }
+            if let Some(c) = &choice.delta.content {
+                content_indices.push(i);
+                content.push_str(get_text(c));
+            }
+        }
+    }
+
+    assert_eq!(content, "answer", "the held text must still be recovered");
+    let finish_index = finish_index.expect("terminal chunk must survive");
+    assert!(
+        content_indices.iter().all(|i| *i <= finish_index),
+        "content must not be emitted after finish_reason: content at {content_indices:?}, finish at {finish_index}"
+    );
+    assert!(
+        usage_indices.iter().all(|i| *i > finish_index),
+        "the usage chunk must stay last"
+    );
+}
+
+/// Once an answer has streamed as content, the non-empty-content promise is met,
+/// so a later truncated reasoning block must stay in `reasoning_content` rather
+/// than being appended to the answer. Input `<think>r1</think>A<think>r2</th`
+/// ends mid-`</think>` of a second reasoning block: `content` is exactly the
+/// answer and the dangling `</th` is reported as reasoning.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_second_block_stays_reasoning() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({ "force_nonempty_content": true })).unwrap(),
+    );
+
+    let input_chunks = vec![mock_content_chunk("<think>r1</think>A<think>r2</th")];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build")
+        .collect()
+        .await;
+
+    let mut reasoning = String::new();
+    let mut content = String::new();
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            if let Some(r) = &choice.delta.reasoning_content {
+                reasoning.push_str(r);
+            }
+            if let Some(c) = &choice.delta.content {
+                content.push_str(get_text(c));
+            }
+        }
+    }
+
+    assert_eq!(
+        content, "A",
+        "a truncated later reasoning block must not leak into the answer"
+    );
+    assert_eq!(
+        reasoning, "r1r2</th",
+        "the dangling reasoning bytes stay in reasoning_content"
+    );
+}
+
+/// Pins the streaming granularity cost of the deferred path, which the
+/// concatenating assertions elsewhere cannot see.
+///
+/// With no `</think>` in the turn, the held text is the answer, so it can only
+/// be released once the stream is known to be over — it arrives as one delta on
+/// the terminal chunk instead of token by token. That is a real regression in
+/// granularity versus `main` for this case, accepted because these parsers emit
+/// reasoning with no opening `<think>`: until `</think>` arrives the bytes are
+/// equally consistent with reasoning and with a plain answer, and emitting
+/// eagerly is what leaked reasoning into `content`. If a future change restores
+/// incremental delivery here, this test should fail and force that tradeoff to
+/// be re-decided rather than drifting silently.
+///
+/// The contrast case is deliberate: once `</think>` has arrived the ambiguity is
+/// gone and the answer streams one delta per chunk again.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_delta_shape() {
+    async fn content_delta_count(chunks: Vec<NvCreateChatCompletionStreamResponse>) -> usize {
+        let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_str(REQUEST_JSON).unwrap();
+        request.chat_template_args = Some(
+            serde_json::from_value(serde_json::json!({ "force_nonempty_content": true })).unwrap(),
+        );
+        let input_stream = stream::iter(chunks.into_iter().map(Annotated::from_data));
+        let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = preprocessor
+            .postprocessor_parsing_stream(input_stream, &request, false, false)
+            .expect("postprocessor_parsing_stream should build")
+            .collect()
+            .await;
+        output_chunks
+            .iter()
+            .filter_map(|o| o.data.as_ref())
+            .flat_map(|d| d.inner.choices.iter())
+            .filter(|c| c.delta.content.is_some())
+            .count()
+    }
+
+    // No `</think>`: three source chunks of answer text collapse into one delta.
+    let no_close = vec![
+        mock_content_chunk("Hel"),
+        mock_content_chunk("lo"),
+        mock_content_chunk("!"),
+        mock_final_chunk(),
+    ];
+    assert_eq!(
+        content_delta_count(no_close).await,
+        1,
+        "without </think> the whole answer must arrive as a single delta"
+    );
+
+    // Same answer after a closing marker: streams one delta per source chunk.
+    let with_close = vec![
+        mock_content_chunk("r</think>Hel"),
+        mock_content_chunk("lo"),
+        mock_content_chunk("!"),
+        mock_final_chunk(),
+    ];
+    assert_eq!(
+        content_delta_count(with_close).await,
+        3,
+        "after </think> the answer must stream incrementally again"
+    );
+}
+
+/// The end-of-stream fallback clones the last content-bearing chunk as its
+/// envelope, and that chunk's tokens were already counted. `metrics.rs` sums
+/// `chunk_tokens` across chunks carrying `llm_metrics` and samples one ITL point
+/// per such chunk, so carrying the annotation over would double-count the tokens
+/// and add a latency sample for a chunk that generated nothing. The recovery
+/// chunk re-channels bytes the parser was already holding, so it must report no
+/// metrics of its own.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_flush_drops_llm_metrics() {
+    use dynamo_llm::protocols::common::metrics::LLMMetricAnnotation;
+
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({ "force_nonempty_content": true })).unwrap(),
+    );
+
+    // No terminal chunk, so the stream takes the EOF fallback that clones the
+    // envelope. The source chunk carries metrics, as it would in production.
+    let mut source = mock_content_chunk("<thi");
+    source.llm_metrics = Some(LLMMetricAnnotation {
+        input_tokens: 7,
+        output_tokens: 3,
+        chunk_tokens: 3,
+        ..Default::default()
+    });
+
+    let input_stream = stream::iter(vec![Annotated::from_data(source)]);
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build")
+        .collect()
+        .await;
+
+    let metric_bearing: Vec<usize> = output_chunks
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| {
+            o.data
+                .as_ref()
+                .is_some_and(|d| d.llm_metrics.as_ref().is_some_and(|m| m.chunk_tokens > 0))
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    assert_eq!(
+        metric_bearing.len(),
+        1,
+        "exactly one chunk may report chunk_tokens; the recovery chunk must not \
+         re-report the envelope's, got chunks {metric_bearing:?}"
+    );
+
+    let recovered: String = output_chunks
+        .iter()
+        .filter_map(|o| o.data.as_ref())
+        .flat_map(|d| d.inner.choices.iter())
+        .filter_map(|c| c.delta.content.as_ref().map(get_text))
+        .collect();
+    assert_eq!(recovered, "<thi", "the recovery itself must still happen");
+}
+
+/// A backend that keeps streaming after a choice's `finish_reason` is out of
+/// protocol, but those bytes still reach the parser, so they still need a
+/// destination. The terminal drain marks the choice drained; a later content
+/// chunk reopens it, so `r2` is emitted rather than stranded.
+///
+/// What is NOT recovered is whatever the parser is still buffering internally at
+/// that point — here the dangling `</th`. Recovering it would mean calling
+/// `finish_reasoning_stream` a second time on the same parser, and the trait does
+/// not promise that is idempotent, so a parser that re-emits on a second
+/// finalize would duplicate text. Losing it is the better trade twice over: the
+/// stream is already out of protocol, and the bytes in question are a truncated
+/// marker fragment, which should never reach `content` anyway.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_content_after_finish_survives() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({ "force_nonempty_content": true })).unwrap(),
+    );
+
+    let input_chunks = vec![
+        mock_content_chunk("<think>r1</think>A"),
+        mock_final_chunk(),
+        mock_content_chunk("<think>r2</th"),
+    ];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build")
+        .collect()
+        .await;
+
+    let mut reasoning = String::new();
+    let mut content = String::new();
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            if let Some(r) = &choice.delta.reasoning_content {
+                reasoning.push_str(r);
+            }
+            if let Some(c) = &choice.delta.content {
+                content.push_str(get_text(c));
+            }
+        }
+    }
+
+    assert_eq!(content, "A", "the answer is unchanged by the stray chunk");
+    assert_eq!(
+        reasoning, "r1r2",
+        "post-finish content is emitted, but the parser's dangling marker fragment is not \
+         re-finalized into the stream"
+    );
+}
+
+/// Streaming and non-streaming must agree on a turn whose only answer text is
+/// whitespace. The aggregator counts whitespace-only content as empty (matching
+/// vLLM's `not final_content.strip()`) and replaces it with the reasoning, so the
+/// streaming path holds whitespace back instead of treating it as the answer.
+/// Releasing it would settle the turn early and leave streaming with
+/// content="\n" and reasoning kept, disagreeing with non-streaming on the same
+/// input.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_whitespace_answer_parity() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({ "force_nonempty_content": true })).unwrap(),
+    );
+
+    let input_chunks = vec![
+        mock_content_chunk("<think>r1</think>\n"),
+        mock_final_chunk(),
+    ];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build")
+        .collect()
+        .await;
+
+    let mut reasoning = String::new();
+    let mut content = String::new();
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            if let Some(r) = &choice.delta.reasoning_content {
+                reasoning.push_str(r);
+            }
+            if let Some(c) = &choice.delta.content {
+                content.push_str(get_text(c));
+            }
+        }
+    }
+
+    assert_eq!(
+        content, "r1",
+        "a whitespace-only answer is empty, so the reasoning becomes the content"
+    );
+    assert_eq!(
+        reasoning, "",
+        "the moved text must not also be reported as reasoning"
+    );
+}
+
+/// The deferred drain attaches a choice's whole buffered payload to the chunk
+/// carrying `finish_reason`, which is a shape the downstream tool-call jail never
+/// saw before: every other test feeds content and the terminal chunk separately.
+/// If the jail finalized on `finish_reason` before consuming that chunk's own
+/// content, tool markup delivered this way would be dropped or leaked as raw text.
+///
+/// It does not. Both orderings extract the call cleanly with nothing leaking into
+/// `content`. The no-`</think>` case is strictly better than without the flag:
+/// there the force-reasoning parser swallows the markup as `reasoning_content` and
+/// no tool call is produced at all, whereas the drain routes it to the jail.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_tool_call_survives_terminal_drain()
+{
+    let xml = "<tool_call>\n<function=get_weather>\n<parameter=location>\nSan Francisco\n</parameter>\n</function>\n</tool_call>";
+
+    for (case, payload) in [
+        // Reasoning closes first, so the jail sees the call mid-stream as usual.
+        ("reasoning then tool call", format!("thinking</think>{xml}")),
+        // No `</think>`: the call is held and drained onto the terminal chunk.
+        ("tool call with no </think>", xml.to_string()),
+    ] {
+        let preprocessor = build_preprocessor(Some("nemotron_v3"), Some("qwen3_coder"));
+        let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+        request.chat_template_args = Some(
+            serde_json::from_value(serde_json::json!({ "force_nonempty_content": true })).unwrap(),
+        );
+
+        let input_stream = stream::iter(
+            vec![mock_content_chunk(&payload), mock_final_chunk()]
+                .into_iter()
+                .map(Annotated::from_data),
+        );
+        let output_stream = preprocessor
+            .postprocessor_parsing_stream(input_stream, &request, true, false)
+            .expect("postprocessor_parsing_stream should build");
+        let DrainOutput {
+            content,
+            tool_calls,
+            ..
+        } = drain_stream(output_stream).await;
+
+        assert_clean_tool_call(case, &content, &tool_calls, "San Francisco");
+    }
+}
+
+#[tokio::test]
+async fn postprocessor_parsing_stream_force_nonempty_guided_bypass_stays_quiet_at_eof() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), Some("nemotron_nano"));
+    let mut request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({ "force_nonempty_content": true })).unwrap(),
+    );
+
+    let json = r#"[{"name":"get_weather","parameters":{"location":"San Francisco"}}]"#;
+    let input_stream = stream::iter(vec![Annotated::from_data(mock_content_chunk(json))]);
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+    let DrainOutput {
+        reasoning,
+        content,
+        tool_calls,
+        ..
+    } = drain_stream(output_stream).await;
+
+    assert!(reasoning.is_empty());
+    assert_clean_tool_call(
+        "bare guided JSON at EOF",
+        &content,
+        &tool_calls,
+        "San Francisco",
+    );
+}
+
+/// The streaming and non-streaming paths must produce the same `content` and
+/// `reasoning_content` for the same model output. They reach it by different
+/// means — the aggregator moves reasoning into empty content, while the stream
+/// holds reasoning until it knows whether an answer follows — so nothing but a
+/// direct comparison proves they agree.
+///
+/// This is also why the streaming side buffers rather than emitting reasoning
+/// live and re-emitting it as content at the end: that alternative would leave a
+/// reasoning-only turn with the same text in BOTH fields on the streaming path
+/// and in only `content` on the non-streaming path, which is a different observable
+/// result for identical model output.
+#[tokio::test]
+async fn postprocessor_parsing_stream_nemotron_v3_force_nonempty_stream_matches_aggregated() {
+    for (case, payload) in [
+        ("reasoning-only", "<think>Let me greet them."),
+        (
+            "reasoning+answer",
+            "<think>Let me greet them.</think>Hello!",
+        ),
+        ("plain, no <think>", "Hello!"),
+    ] {
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_str(REQUEST_JSON).unwrap();
+        request.chat_template_args = Some(
+            serde_json::from_value(serde_json::json!({ "force_nonempty_content": true })).unwrap(),
+        );
+
+        // Streaming: accumulate the deltas a client would receive.
+        let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+        let input_stream = stream::iter(
+            vec![mock_content_chunk(payload), mock_final_chunk()]
+                .into_iter()
+                .map(Annotated::from_data),
+        );
+        let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = preprocessor
+            .postprocessor_parsing_stream(input_stream, &request, false, false)
+            .expect("postprocessor_parsing_stream should build")
+            .collect()
+            .await;
+        let mut streamed_content = String::new();
+        let mut streamed_reasoning = String::new();
+        for output in &output_chunks {
+            let Some(data) = output.data.as_ref() else {
+                continue;
+            };
+            for choice in &data.inner.choices {
+                if let Some(c) = &choice.delta.content {
+                    streamed_content.push_str(get_text(c));
+                }
+                if let Some(r) = &choice.delta.reasoning_content {
+                    streamed_reasoning.push_str(r);
+                }
+            }
+        }
+
+        // Non-streaming: the same stream aggregated the way the chat handler does.
+        let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+        let input_stream = stream::iter(
+            vec![mock_content_chunk(payload), mock_final_chunk()]
+                .into_iter()
+                .map(Annotated::from_data),
+        );
+        let response = NvCreateChatCompletionResponse::from_annotated_stream(
+            preprocessor
+                .postprocessor_parsing_stream(input_stream, &request, false, false)
+                .expect("postprocessor_parsing_stream should build"),
+            ParsingOptions::default().with_move_reasoning_to_content_when_empty(true),
+        )
+        .await
+        .expect("aggregate");
+        let message = &response.inner.choices[0].message;
+        let aggregated_content = message
+            .content
+            .as_ref()
+            .map(get_text)
+            .unwrap_or_default()
+            .to_string();
+        let aggregated_reasoning = message.reasoning_content.clone().unwrap_or_default();
+
+        assert_eq!(
+            streamed_content, aggregated_content,
+            "{case}: content must match across paths"
+        );
+        assert_eq!(
+            streamed_reasoning, aggregated_reasoning,
+            "{case}: reasoning_content must match across paths"
+        );
+    }
+}
+
+/// `force_nonempty_content` is a request-level contract, not a model feature, so
+/// it is honored after parsing for ANY model rather than being keyed on a
+/// parser allow-list. `qwen3` is neither a Nemotron parser nor a force-reasoning
+/// one — before this was made generic the flag was ignored for it entirely, and
+/// a reasoning-only turn returned empty `content`.
+///
+/// The flag must also not over-reach: when an answer WAS generated, reasoning
+/// stays in `reasoning_content`.
+#[tokio::test]
+async fn postprocessor_parsing_stream_force_nonempty_applies_to_any_model() {
+    async fn run(force: bool, payload: &str) -> (String, String) {
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_str(REQUEST_JSON).unwrap();
+        request.chat_template_args = Some(
+            serde_json::from_value(serde_json::json!({ "force_nonempty_content": force })).unwrap(),
+        );
+        let preprocessor = build_preprocessor(Some("qwen3"), None);
+        let input_stream = stream::iter(
+            vec![mock_content_chunk(payload), mock_final_chunk()]
+                .into_iter()
+                .map(Annotated::from_data),
+        );
+        let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = preprocessor
+            .postprocessor_parsing_stream(input_stream, &request, false, false)
+            .expect("postprocessor_parsing_stream should build")
+            .collect()
+            .await;
+        let (mut content, mut reasoning) = (String::new(), String::new());
+        for output in &output_chunks {
+            let Some(data) = output.data.as_ref() else {
+                continue;
+            };
+            for choice in &data.inner.choices {
+                if let Some(c) = &choice.delta.content {
+                    content.push_str(get_text(c));
+                }
+                if let Some(r) = &choice.delta.reasoning_content {
+                    reasoning.push_str(r);
+                }
+            }
+        }
+        (content, reasoning)
+    }
+
+    // Reasoning-only turn: with the flag the reasoning becomes the answer.
+    assert_eq!(
+        run(true, "<think>Hm...</think>").await,
+        ("Hm...".to_string(), String::new()),
+        "a non-Nemotron model must honor force_nonempty_content"
+    );
+    // Without the flag the same turn is untouched.
+    assert_eq!(
+        run(false, "<think>Hm...</think>").await,
+        (String::new(), "Hm...".to_string()),
+        "requests without the flag must be unchanged"
+    );
+    // An answer was generated, so reasoning stays where it belongs.
+    assert_eq!(
+        run(true, "<think>Hm...</think>Hi!").await,
+        ("Hi!".to_string(), "Hm...".to_string()),
+        "the flag must not move reasoning when content exists"
+    );
+}
+
+/// A turn whose entire output is whitespace still has to come back with that
+/// whitespace under `force_nonempty_content=true`. Held whitespace is normally
+/// dropped in favour of the reasoning text (matching the aggregator), but when
+/// whitespace is genuinely all the model produced there is nothing to prefer it
+/// to — dropping it would hand back a completely empty `content` to the one
+/// request that asked for the opposite.
+#[tokio::test]
+async fn postprocessor_parsing_stream_force_nonempty_whitespace_only_turn_survives() {
+    let preprocessor = build_preprocessor(Some("nemotron_v3"), None);
+
+    let mut request: NvCreateChatCompletionRequest = serde_json::from_str(REQUEST_JSON).unwrap();
+    request.chat_template_args = Some(
+        serde_json::from_value(serde_json::json!({ "force_nonempty_content": true })).unwrap(),
+    );
+
+    // `</think>` leaves the reasoning block, so "\n  " is normal text — and it is
+    // whitespace-only, so it is held rather than settling the turn. Nothing else
+    // follows, so the held whitespace is the whole response.
+    let input_chunks = vec![mock_content_chunk("</think>\n  "), mock_final_chunk()];
+    let input_stream = stream::iter(input_chunks.into_iter().map(Annotated::from_data));
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, true, false)
+        .expect("postprocessor_parsing_stream should build")
+        .collect()
+        .await;
+
+    let mut content = String::new();
+    for output in &output_chunks {
+        let Some(data) = output.data.as_ref() else {
+            continue;
+        };
+        for choice in &data.inner.choices {
+            if let Some(c) = &choice.delta.content {
+                content.push_str(get_text(c));
+            }
+        }
+    }
+
+    assert_eq!(
+        content, "\n  ",
+        "whitespace-only output must not vanish for a force_nonempty_content request"
+    );
+}
+
+// ── Muse unified parser routing (default-on) ──────────────────────────────────
+
+/// One muse turn: a `to=self` thought, one `get_weather` call, then the visible
+/// `to=user` answer. Raw model markup, one channel per streamed chunk.
+const MUSE_MARKUP_SHAPE: [&str; 3] = [
+    "<|start|>assistant to=self<|message|>Look it up.<|eom|>",
+    "<|start|>assistant to=get_weather<|message|><atem:invoke name=\"get_weather\"><atem:parameter name=\"location\">Paris</atem:parameter></atem:invoke><|eom|>",
+    "<|start|>assistant to=user<|message|>It's 18C.<|eot|>",
+];
+
+/// Default-on routing: `tool_call_parser=muse_glimmer`, NO reasoning parser. The
+/// guard routes the whole turn through the v2 UNIFIED parser, which owns
+/// reasoning + content + tool calls in one pass — all three surface cleanly with
+/// no marker leak, and neither the v1 reasoning stage nor the jail runs.
+#[tokio::test]
+async fn postprocessor_parsing_stream_muse_routes_to_unified() {
+    let preprocessor = build_preprocessor(None, Some("muse_glimmer"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+
+    let out = solo_output(&preprocessor, &request, &MUSE_MARKUP_SHAPE).await;
+
+    assert_eq!(
+        out.reasoning, "Look it up.",
+        "reasoning_content must come from the unified parser"
+    );
+    assert_eq!(
+        out.content, "It's 18C.",
+        "content must be the stripped answer"
+    );
+    assert_eq!(
+        out.tool_calls.len(),
+        1,
+        "expected one tool call: {:?}",
+        out.tool_calls
+    );
+    assert_eq!(out.tool_calls[0].0.as_deref(), Some("get_weather"));
+    let args: Value = serde_json::from_str(&out.tool_calls[0].1).unwrap();
+    assert_eq!(args, serde_json::json!({"location": "Paris"}));
+    for marker in ["<|start|>", "<|message|>", "<atem:invoke"] {
+        assert!(
+            !out.content.contains(marker) && !out.reasoning.contains(marker),
+            "marker {marker:?} leaked: content={:?} reasoning={:?}",
+            out.content,
+            out.reasoning
+        );
+    }
+}
+
+/// `tool_choice=Required` is excluded by the guard (auto/none only), so the turn
+/// falls through to the guided-decode + jail path. No reasoning parser is
+/// configured there, so `reasoning_content` can never be produced — proof the
+/// unified parser (which would yield "Look it up.") did NOT engage.
+#[tokio::test]
+async fn postprocessor_parsing_stream_muse_required_does_not_route_to_unified() {
+    let preprocessor = build_preprocessor(None, Some("muse_glimmer"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+
+    let out = solo_output(&preprocessor, &request, &MUSE_MARKUP_SHAPE).await;
+
+    assert!(
+        out.reasoning.is_empty(),
+        "Required must NOT route to unified; reasoning_content must stay empty, got {:?}",
+        out.reasoning
+    );
+    // Empty reasoning alone also passes if the unified parser ran and dropped it, so
+    // assert the POSITIVE signal of the jail path: it does not strip muse markers.
+    assert!(
+        out.content.contains("<|start|>"),
+        "the jail path leaves muse markup in content; got {:?}",
+        out.content
+    );
+    assert!(
+        out.tool_calls
+            .iter()
+            .all(|(name, _)| name.as_deref() != Some("get_weather")),
+        "the unified parser must not produce a native-markup call here: {:?}",
+        out.tool_calls
+    );
+}
+
+/// A structural-tag request must stay on the guided-decode + jail path, exactly as a
+/// forced `tool_choice` does: it emits guided JSON, not the native ATEM markup the
+/// unified parser reads. The guard carries `!uses_tool_call_structural_tag` for that,
+/// and nothing pinned it — a refactor could drop the clause and every other muse test
+/// would still pass, because they all run with the flag false.
+///
+/// `solo_output` hardcodes `false, false`, so this drives
+/// `postprocessor_parsing_stream` directly to set the flag.
+#[tokio::test]
+async fn postprocessor_parsing_stream_muse_structural_tag_does_not_route_to_unified() {
+    let preprocessor = build_preprocessor(None, Some("muse_glimmer"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+
+    let mut input: Vec<NvCreateChatCompletionStreamResponse> = MUSE_MARKUP_SHAPE
+        .iter()
+        .map(|text| mock_multi_choice_content_chunk(&[(0, *text)]))
+        .collect();
+    input.push(mock_multi_choice_final_chunk(&[0]));
+
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(
+            stream::iter(input.into_iter().map(Annotated::from_data)),
+            &request,
+            false,
+            // The one axis under test.
+            true,
+        )
+        .expect("postprocessor_parsing_stream should build");
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+    let out = demux_by_choice(&output_chunks)
+        .remove(&0)
+        .map(|acc| ChoiceOutput {
+            reasoning: acc.reasoning,
+            content: acc.content,
+            tool_calls: acc
+                .tool_calls
+                .into_values()
+                .map(|tc| (tc.name, tc.arguments))
+                .collect(),
+        })
+        .unwrap_or_default();
+
+    // No reasoning parser is configured, so any `reasoning_content` at all could only
+    // have come from the unified parser engaging.
+    assert!(
+        out.reasoning.is_empty(),
+        "structural-tag must NOT route to unified; reasoning stayed {:?}",
+        out.reasoning
+    );
+    // The positive jail signal: that path does not strip muse markers.
+    assert!(
+        out.content.contains("<|start|>"),
+        "the jail path leaves muse markup in content; got {:?}",
+        out.content
+    );
+    assert!(
+        out.tool_calls
+            .iter()
+            .all(|(name, _)| name.as_deref() != Some("get_weather")),
+        "the unified parser must not produce a native-markup call here: {:?}",
+        out.tool_calls
+    );
+}
+
+/// `unified_family` keys on EITHER parser name, so a card that sets only
+/// `--dyn-reasoning-parser muse_glimmer` must route the stream to unified as well.
+/// The batch path pins this (`test_muse_unified_batch_finalize_routes_on_reasoning_name_only`);
+/// streaming had no equivalent.
+#[tokio::test]
+async fn postprocessor_parsing_stream_muse_reasoning_name_only_routes_to_unified() {
+    let preprocessor = build_preprocessor(Some("muse_glimmer"), None);
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+
+    let out = solo_output(&preprocessor, &request, &MUSE_MARKUP_SHAPE).await;
+
+    assert_eq!(out.reasoning, "Look it up.");
+    assert_eq!(out.content, "It's 18C.");
+}
+
+/// Explicit `tool_choice=None` must route to unified like auto — the guard's
+/// "auto/none only" contract. A stream guard that matched only unset+auto let None fall
+/// through to the Basic reasoning fallback, which leaked raw markers into content and
+/// dropped reasoning; the batch path always routed it, so only streaming regressed.
+#[tokio::test]
+async fn postprocessor_parsing_stream_muse_none_routes_to_unified() {
+    let preprocessor = build_preprocessor(None, Some("muse_glimmer"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::None);
+
+    let out = solo_output(&preprocessor, &request, &MUSE_MARKUP_SHAPE).await;
+
+    assert_eq!(
+        out.reasoning, "Look it up.",
+        "tool_choice=None must route to unified; reasoning_content must come from it"
+    );
+    assert_eq!(
+        out.content, "It's 18C.",
+        "content must be the stripped answer"
+    );
+    for marker in ["<|start|>", "<|message|>", "<atem:invoke"] {
+        assert!(
+            !out.content.contains(marker) && !out.reasoning.contains(marker),
+            "marker {marker:?} leaked under tool_choice=None: content={:?} reasoning={:?}",
+            out.content,
+            out.reasoning
+        );
+    }
+    // Routing here is for the split and the stripping ONLY. The caller disabled tool
+    // calling, so the parsed call must be dropped rather than surfaced — the contract
+    // every other family gets from `should_apply_tool_jail` returning false for `none`.
+    assert!(
+        out.tool_calls.is_empty(),
+        "tool_choice=None must not return tool_calls, got {:?}",
+        out.tool_calls
+    );
 }

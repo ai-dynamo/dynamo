@@ -141,7 +141,10 @@ core.*
 !/.claude/skills
 /.agents/*
 !/.agents/skills
-/.codex
+/.codex/*
+!/.codex/config.toml
+!/.codex/agents/
+!/.codex/agents/*.toml
 /CLAUDE.md
 /CLAUDE.md.bak
 
@@ -158,6 +161,8 @@ profiling_results*
 # Node.js
 node_modules/
 package-lock.json
+# Exception: the docs events generator pins its deps for npm ci in CI.
+!.github/scripts/events/package-lock.json
 
 # Compiled static libraries
 *.a
@@ -175,3 +180,7 @@ fern/components/install-selector-data.ts
 
 # Local git worktrees
 .worktrees/
+
+
+# Optimization-run artifacts (EXP_ROOT lives at runs/<EXP_ID>/ in the repo root)
+/runs/

@@ -1,0 +1,358 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# kimi-k3 on vLLM via Dynamo, DISAGGREGATED prefill/decode (1P2D), GB300.
+
+---
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: kimi-k3-disagg-compute-domain
+spec:
+  numNodes: 0
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: kimi-k3-disagg-compute-domain-channel
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: kimi-k3-disagg
+spec:
+  backendFramework: vllm
+  components:
+    # ---------------------------------------------------------------- Frontend (router)
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1
+              securityContext:
+                runAsUser: 0
+              command:
+                - python3
+                - -m
+                - dynamo.frontend
+              args:
+                - --dyn-chat-processor
+                - dynamo
+                - --router-mode
+                - kv
+                - --http-port
+                - "8000"
+    # ---------------------------------------------------------------- Prefill worker (compute-bound)
+    - name: PrefillWorker
+      type: prefill
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      sharedMemorySize: 200Gi
+      podTemplate:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-GB300
+          resourceClaims:
+            - name: compute-domain-channel
+              resourceClaimTemplateName: kimi-k3-disagg-compute-domain-channel
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1
+              securityContext:
+                runAsUser: 0
+              resources:
+                limits:
+                  nvidia.com/gpu: "4"
+                requests:
+                  nvidia.com/gpu: "4"
+                claims:
+                  - name: compute-domain-channel
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 9090
+                periodSeconds: 10
+                timeoutSeconds: 10
+                failureThreshold: 720    # 2 hr startup budget (weights + CuTeDSL/cudagraph warmup)
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              env:
+                # Weights come from the model-cache PVC populated by model-cache/model-download.yaml.
+                - name: HF_HOME
+                  value: /model-cache
+                - name: MODEL_ID
+                  value: moonshotai/Kimi-K3
+                - name: SERVED_MODEL_NAME
+                  value: moonshotai/Kimi-K3
+                - name: NCCL_SOCKET_IFNAME       # DGD pods use CNI pod networking -> eth0
+                  value: eth0
+                - name: GLOO_SOCKET_IFNAME
+                  value: eth0
+                - name: FLASHINFER_PRIVATE_CUBIN_DIR
+                  value: "/opt/flashinfer-local-cubins/20260617_v0613rc1_situ_v0611_barrierfix"
+                - name: CUDA_HOME
+                  value: "/usr/local/cuda"
+                - name: DYN_REQUEST_PLANE
+                  value: "tcp"
+                - name: PYTORCH_CUDA_ALLOC_CONF
+                  value: "expandable_segments:True"
+                - name: ETCD_LEASE_TTL
+                  value: "120"
+                - name: VLLM_ENGINE_READY_TIMEOUT_S
+                  value: "3600"
+                - name: VLLM_RPC_TIMEOUT
+                  value: "600000"
+                - name: TILELANG_CLEANUP_TEMP_FILES
+                  value: "1"
+                - name: VLLM_USE_NCCL_SYMM_MEM
+                  value: "0"
+                - name: TORCH_SYMMMEM
+                  value: "NVSHMEM"
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+                - name: NCCL_MNNVL_ENABLE
+                  value: "1"
+                - name: NCCL_NVLS_ENABLE
+                  value: "1"
+                - name: VLLM_SERVER_DEV_MODE
+                  value: "1"
+                - name: VLLM_DEEP_GEMM_WARMUP
+                  value: "skip"
+                - name: VLLM_FASTSAFETENSORS_QUEUE_SIZE
+                  value: "1"
+                - name: TORCHINDUCTOR_ENABLE_PDL
+                  value: "1"
+                - name: VLLM_USE_V2_MODEL_RUNNER
+                  value: "0"
+                - name: VLLM_USE_RUST_FRONTEND
+                  value: "0"
+                - name: VLLM_ALLREDUCE_USE_FLASHINFER
+                  value: "1"
+                - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
+                  value: "mnnvl"
+                - name: VLLM_CONNECTOR_PREFETCH_DEPTH
+                  value: "8"
+                - name: VLLM_CONNECTOR_PREFETCH_KV_CAP
+                  value: "0.65"
+                - name: DG_JIT_CACHE_DIR
+                  value: "/tmp/dg-cache"
+                - name: VLLM_DSV4_MEGA_FP8_COMBINE
+                  value: "1"
+                - name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+                  value: "1800"
+                - name: VLLM_PREFIX_CACHE_RETENTION_INTERVAL
+                  value: "0"
+                - name: VLLM_SPARSE_INDEXER_MAX_LOGITS_MB
+                  value: "1024"
+                - name: VLLM_SSM_CONV_STATE_LAYOUT   # KDA conv-state disagg transfer over NIXL needs DS layout
+                  value: "DS"
+                - name: NCCL_P2P_LEVEL
+                  value: NVL
+              command:
+                - /bin/sh
+                - -c
+              args:
+                - |
+                  # Prefill worker: dedicated to prompt processing -> larger prefill batch, fewer
+                  # concurrent seqs. Builds KV then hands it to decode over NIXL. Roles/registration
+                  # come from --disaggregation-mode; KV path from --kv-transfer-config.
+                  exec python3 -m dynamo.vllm \
+                    --model "${MODEL_ID}" \
+                    --served-model-name "${SERVED_MODEL_NAME}" \
+                    --trust-remote-code \
+                    --tensor-parallel-size 8 \
+                    --gpu-memory-utilization 0.9 \
+                    --max-num-seqs 4 \
+                    --distributed-executor-backend mp \
+                    --load-format fastsafetensors \
+                    --safetensors-load-strategy lazy \
+                    --enable-cumem-allocator \
+                    --enforce-eager \
+                    --max-num-batched-tokens 32768 \
+                    --kv-cache-dtype fp8 \
+                    --no-enable-flashinfer-autotune \
+                    --enable-prefix-caching \
+                    --enable-multimodal \
+                    --attention-backend FLASHINFER_MLA \
+                    --attention-config '{"mla_prefill_backend":"TRTLLM_RAGGED", "use_prefill_query_quantization":true}' \
+                    --scheduler-cls vllm.v1.core.sched.async_scheduler.AsyncScheduler \
+                    --dyn-tool-call-parser kimi_k3 \
+                    --reasoning-parser kimi_k3 \
+                    --dyn-reasoning-parser kimi_k3 \
+                    --disaggregation-mode prefill \
+                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
+                    --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}'
+    # ---------------------------------------------------------------- Decode worker (memory-bound)
+    - name: DecodeWorker
+      type: decode
+      replicas: 2
+      multinode:
+        nodeCount: 2
+      sharedMemorySize: 200Gi
+      podTemplate:
+        spec:
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-GB300
+          resourceClaims:
+            - name: compute-domain-channel
+              resourceClaimTemplateName: kimi-k3-disagg-compute-domain-channel
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1
+              securityContext:
+                runAsUser: 0
+              resources:
+                limits:
+                  nvidia.com/gpu: "4"
+                requests:
+                  nvidia.com/gpu: "4"
+                claims:
+                  - name: compute-domain-channel
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 9090
+                periodSeconds: 10
+                timeoutSeconds: 10
+                failureThreshold: 720
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              env:
+                # Weights come from the model-cache PVC populated by model-cache/model-download.yaml.
+                - name: HF_HOME
+                  value: /model-cache
+                - name: MODEL_ID
+                  value: moonshotai/Kimi-K3
+                - name: SERVED_MODEL_NAME
+                  value: moonshotai/Kimi-K3
+                - name: NCCL_SOCKET_IFNAME       # DGD pods use CNI pod networking -> eth0
+                  value: eth0
+                - name: GLOO_SOCKET_IFNAME
+                  value: eth0
+                - name: FLASHINFER_PRIVATE_CUBIN_DIR
+                  value: "/opt/flashinfer-local-cubins/20260617_v0613rc1_situ_v0611_barrierfix"
+                - name: CUDA_HOME
+                  value: "/usr/local/cuda"
+                - name: DYN_REQUEST_PLANE
+                  value: "tcp"
+                - name: PYTORCH_CUDA_ALLOC_CONF
+                  value: "expandable_segments:True"
+                - name: ETCD_LEASE_TTL
+                  value: "120"
+                - name: VLLM_ENGINE_READY_TIMEOUT_S
+                  value: "3600"
+                - name: VLLM_RPC_TIMEOUT
+                  value: "600000"
+                - name: TILELANG_CLEANUP_TEMP_FILES
+                  value: "1"
+                - name: VLLM_USE_NCCL_SYMM_MEM
+                  value: "0"
+                - name: TORCH_SYMMMEM
+                  value: "NVSHMEM"
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+                - name: NCCL_MNNVL_ENABLE
+                  value: "1"
+                - name: NCCL_NVLS_ENABLE
+                  value: "1"
+                - name: VLLM_SERVER_DEV_MODE
+                  value: "1"
+                - name: VLLM_DEEP_GEMM_WARMUP
+                  value: "skip"
+                - name: VLLM_FASTSAFETENSORS_QUEUE_SIZE
+                  value: "1"
+                - name: TORCHINDUCTOR_ENABLE_PDL
+                  value: "1"
+                - name: VLLM_USE_V2_MODEL_RUNNER
+                  value: "0"
+                - name: VLLM_USE_RUST_FRONTEND
+                  value: "0"
+                - name: VLLM_ALLREDUCE_USE_FLASHINFER
+                  value: "1"
+                - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
+                  value: "mnnvl"
+                - name: VLLM_CONNECTOR_PREFETCH_DEPTH
+                  value: "8"
+                - name: VLLM_CONNECTOR_PREFETCH_KV_CAP
+                  value: "0.65"
+                - name: DG_JIT_CACHE_DIR
+                  value: "/tmp/dg-cache"
+                - name: VLLM_DSV4_MEGA_FP8_COMBINE
+                  value: "1"
+                - name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+                  value: "1800"
+                - name: VLLM_PREFIX_CACHE_RETENTION_INTERVAL
+                  value: "0"
+                - name: VLLM_SPARSE_INDEXER_MAX_LOGITS_MB
+                  value: "1024"
+                - name: VLLM_SSM_CONV_STATE_LAYOUT   # KDA conv-state disagg transfer over NIXL needs DS layout
+                  value: "DS"
+                - name: NCCL_P2P_LEVEL
+                  value: NVL
+                - name: VLLM_ENABLE_K3_LATENT_MOE_TAIL_FUSION
+                  value: "1"
+              command:
+                - /bin/sh
+                - -c
+              args:
+                - |
+                  # Decode worker: receives prefilled KV over NIXL, generates tokens. Many concurrent
+                  # seqs + FULL_DECODE_ONLY cudagraph (uniform decode step -> fast). No prompt prefill here.
+                  exec python3 -m dynamo.vllm \
+                    --model "${MODEL_ID}" \
+                    --served-model-name "${SERVED_MODEL_NAME}" \
+                    --trust-remote-code \
+                    --tensor-parallel-size 8 \
+                    --gpu-memory-utilization 0.9 \
+                    --max-num-seqs 256 \
+                    --max-num-batched-tokens 2048 \
+                    --distributed-executor-backend mp \
+                    --load-format fastsafetensors \
+                    --safetensors-load-strategy lazy \
+                    --enable-cumem-allocator \
+                    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "max_cudagraph_capture_size": 2048, "cudagraph_capture_sizes": [1, 2, 4, 8, 12, 16, 24, 32, 64, 128, 256, 512, 1024, 2048]}' \
+                    --no-enable-flashinfer-autotune \
+                    --enable-prefix-caching \
+                    --kv-cache-dtype fp8 \
+                    --enable-multimodal \
+                    --attention-backend FLASHINFER_MLA \
+                    --attention-config '{"mla_prefill_backend":"TRTLLM_RAGGED", "use_prefill_query_quantization":true}' \
+                    --scheduler-cls vllm.v1.core.sched.async_scheduler.AsyncScheduler \
+                    --dyn-tool-call-parser kimi_k3 \
+                    --reasoning-parser kimi_k3 \
+                    --dyn-reasoning-parser kimi_k3 \
+                    --disaggregation-mode decode \
+                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'

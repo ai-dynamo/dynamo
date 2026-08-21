@@ -160,8 +160,11 @@ impl ZmqKvEventSink {
 
                         let sock = router_socket.as_mut().unwrap();
                         for (seq, payload) in ring_buffer.iter().skip(start_idx) {
+                            // ROUTER consumes the identity frame; the DEALER-side
+                            // listener receives [delimiter, topic, seq, payload].
                             let frames = vec![
                                 identity.clone().to_vec(),
+                                Vec::new(),
                                 Vec::new(),
                                 seq.to_be_bytes().to_vec(),
                                 payload.to_vec(),
@@ -174,6 +177,7 @@ impl ZmqKvEventSink {
 
                         let sentinel_frames = vec![
                             identity.to_vec(),
+                            Vec::new(),
                             Vec::new(),
                             (-1i64).to_be_bytes().to_vec(),
                             Vec::new(),
@@ -263,7 +267,7 @@ pub(crate) fn encode_event_batch(
         .unwrap_or_default()
         .as_secs_f64();
     let batch: (f64, Vec<ZmqRawKvEvent>, Option<i32>) = (timestamp, events, Some(dp_rank as i32));
-    rmp_serde::to_vec(&batch).map(|payload| Some(payload.into()))
+    rmp_serde::to_vec_named(&batch).map(|payload| Some(payload.into()))
 }
 
 fn convert_to_zmq_events(
@@ -428,5 +432,95 @@ mod tests {
             panic!("expected one BlockStored event");
         };
         assert_eq!(*medium, None);
+    }
+
+    #[test]
+    fn encoded_batch_decodes_through_router_zmq_wire() {
+        use dynamo_kv_router::protocols::KvCacheRemoveData;
+        use dynamo_kv_router::zmq_wire::{KvEventBatch, RawKvEvent as WireKvEvent};
+
+        let stored = RawKvEvent {
+            event: stored_event(),
+            block_token_ids: Some(vec![vec![1, 2, 3, 4]]),
+            storage_tier: StorageTier::Device,
+        };
+        // Device tier omits `medium`: under positional (unnamed) encoding the
+        // required `group_idx` shifts into `medium`'s slot and BlockRemoved
+        // fails to decode at the consumer.
+        let removed = RawKvEvent {
+            event: KvCacheEvent {
+                event_id: 2,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: vec![ExternalSequenceBlockHash(10)],
+                }),
+                dp_rank: 0,
+            },
+            block_token_ids: None,
+            storage_tier: StorageTier::Device,
+        };
+
+        // Host-pinned stored events also mis-decode positionally: the medium
+        // string lands in a numeric legacy slot at the consumer.
+        let stored_pinned = RawKvEvent {
+            event: stored_event(),
+            block_token_ids: Some(vec![vec![5, 6, 7, 8]]),
+            storage_tier: StorageTier::HostPinned,
+        };
+
+        let payload = encode_event_batch(&[stored, removed, stored_pinned], 4, 3)
+            .expect("encoding must succeed")
+            .expect("non-empty batch must produce a payload");
+
+        let batch: KvEventBatch =
+            rmp_serde::from_slice(&payload).expect("router zmq_wire must decode the payload");
+        assert_eq!(batch.data_parallel_rank, Some(3));
+
+        let [
+            WireKvEvent::BlockStored {
+                block_hashes,
+                token_ids,
+                medium,
+                group_idx,
+                ..
+            },
+            WireKvEvent::BlockRemoved {
+                block_hashes: removed_hashes,
+                medium: removed_medium,
+                group_idx: removed_group_idx,
+                ..
+            },
+            WireKvEvent::BlockStored {
+                medium: pinned_medium,
+                group_idx: pinned_group_idx,
+                ..
+            },
+        ] = batch.events.as_slice()
+        else {
+            panic!(
+                "expected BlockStored + BlockRemoved, got {:?}",
+                batch.events
+            );
+        };
+        assert_eq!(
+            block_hashes
+                .iter()
+                .map(|h| h.into_u64())
+                .collect::<Vec<_>>(),
+            vec![10]
+        );
+        assert_eq!(token_ids, &vec![1, 2, 3, 4]);
+        assert_eq!(*medium, None);
+        assert_eq!(*group_idx, Some(0));
+        assert_eq!(
+            removed_hashes
+                .iter()
+                .map(|h| h.into_u64())
+                .collect::<Vec<_>>(),
+            vec![10]
+        );
+        assert_eq!(*removed_medium, None);
+        assert_eq!(*removed_group_idx, Some(0));
+        assert_eq!(pinned_medium.as_deref(), Some("CPU_PINNED"));
+        assert_eq!(*pinned_group_idx, Some(0));
     }
 }

@@ -24,7 +24,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Dict, List, Optional, Set
+from typing import List, Optional, Set
 
 import pytest
 
@@ -44,30 +44,6 @@ logging.disable(logging.WARNING)
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
-
-REQUIRED_CATEGORIES: Dict[str, Set[str]] = {
-    "Lifecycle": {"pre_merge", "post_merge", "nightly", "weekly", "release"},
-    "Test Type": {
-        "unit",
-        "integration",
-        "e2e",
-        "benchmark",
-        "stress",
-        "multimodal",
-        "performance",
-    },
-    "Hardware": {
-        "gpu_0",
-        "gpu_1",
-        "gpu_2",
-        "gpu_4",
-        "gpu_8",
-        "h100",
-        "k8s",
-        "xpu_1",
-        "xpu_2",
-    },
-}
 
 STUB_MODULES = [
     "pytest_httpserver",
@@ -131,6 +107,9 @@ STUB_MODULES = [
     "numpy",
     "aiconfigurator",
     "boto3",
+    "boto3.exceptions",
+    "boto3.s3",
+    "boto3.s3.transfer",
     "botocore",
     "botocore.client",
     "botocore.exceptions",
@@ -242,6 +221,7 @@ STUB_MODULES = [
     "vllm.tool_parsers.hermes_tool_parser",
     "vllm.tool_parsers.mistral_tool_parser",
     "vllm.tool_parsers.qwen3_engine_tool_parser",
+    "vllm.tool_parsers.utils",
     "vllm.utils",
     "vllm.utils.async_utils",
     "vllm.utils.hashing",
@@ -275,8 +255,18 @@ STUB_MODULES = [
     "nixl._api",
     "nixl._bindings",
     "aiohttp.web",
+    "aiconfigurator.generator",
+    "aiconfigurator.generator.naive",
     "aiconfigurator.sdk",
-    "aiconfigurator.sdk.task",
+    "aiconfigurator.sdk.task_v2",
+    "aiconfigurator.cli",
+    "aiconfigurator.cli.main",
+    "aiconfigurator_core.sdk",
+    "aiconfigurator_core.sdk.engine",
+    "aiconfigurator_core.sdk.memory",
+    "aiconfigurator_core.sdk.models",
+    "aiconfigurator_core.sdk.perf_database",
+    "aiconfigurator_core.sdk.utils",
     "plotly",
     "plotly.graph_objects",
     "plotly.subplots",
@@ -286,6 +276,19 @@ STUB_MODULES = [
     "blake3",
 ]
 
+# These APIs define the AIC 0.11 upper/core contract. The marker-report
+# environment may contain an older, otherwise importable AIC release, so force
+# stubs for these versioned modules during marker-only collection.
+FORCE_STUB_MODULES = {
+    "aiconfigurator.sdk.task_v2",
+    "aiconfigurator.cli.main",
+    "aiconfigurator_core.sdk.engine",
+    "aiconfigurator_core.sdk.memory",
+    "aiconfigurator_core.sdk.models",
+    "aiconfigurator_core.sdk.perf_database",
+    "aiconfigurator_core.sdk.utils",
+}
+
 # Project paths for local imports
 PROJECT_PATHS = [
     os.getcwd(),
@@ -293,6 +296,11 @@ PROJECT_PATHS = [
     os.path.join(os.getcwd(), "lib", "bindings", "python", "src"),
 ]
 sys.path[:0] = PROJECT_PATHS  # prepend to sys.path
+
+# Must follow the sys.path bootstrap above: this file runs as
+# `python3 tests/report_pytest_markers.py`, so sys.path[0] is tests/, not the
+# repo root, and the `tests` package is not importable any earlier.
+from tests.marker_categories import REQUIRED_CATEGORIES  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -413,9 +421,9 @@ class DependencyStubber:
         stub.__package__ = name.rsplit(".", 1)[0] if "." in name else name
         return stub
 
-    def ensure_available(self, module_name: str) -> ModuleType:
+    def ensure_available(self, module_name: str, *, force: bool = False) -> ModuleType:
         """Ensure a module is available, stubbing it if not installed."""
-        if module_name in sys.modules:
+        if module_name in sys.modules and not force:
             return sys.modules[module_name]
 
         parts = module_name.split(".")
@@ -423,7 +431,7 @@ class DependencyStubber:
             ".".join(parts[:i]) in self.stubbed for i in range(1, len(parts))
         )
 
-        if not parent_stubbed:
+        if not force and not parent_stubbed:
             try:
                 return importlib.import_module(module_name)
             except (ImportError, AttributeError):
@@ -443,6 +451,11 @@ class DependencyStubber:
         stub = self._create_module_stub(module_name)
         sys.modules[module_name] = stub
         self.stubbed.add(module_name)
+        if "." in module_name:
+            parent_name, child_name = module_name.rsplit(".", 1)
+            parent = sys.modules.get(parent_name)
+            if parent is not None:
+                setattr(parent, child_name, stub)
         return stub
 
 
@@ -625,7 +638,7 @@ def run_collection(test_paths: list[str], use_stubbing: bool) -> tuple[int, Repo
 
         stubber = DependencyStubber()
         for module in STUB_MODULES:
-            stubber.ensure_available(module)
+            stubber.ensure_available(module, force=module in FORCE_STUB_MODULES)
 
         # Special case: pytest-benchmark needs a real Warning subclass
         try:
@@ -654,6 +667,12 @@ def run_collection(test_paths: list[str], use_stubbing: bool) -> tuple[int, Repo
         LOG.info("Stubbed %d modules", len(stubber.stubbed))
 
     plugin = MarkerReportPlugin()
+    # The repository-root conftest.py defaults pre_merge/gpu_0 onto unmarked
+    # tests so CI still runs them. Opt out here: this report exists to show what
+    # tests actually declare, and with the defaults applied every test would
+    # look Lifecycle- and Hardware-complete, so no missing marker could ever be
+    # reported.
+    os.environ["DYNAMO_PYTEST_NO_DEFAULT_MARKERS"] = "1"
     exitcode = pytest.main(
         [
             "--collect-only",

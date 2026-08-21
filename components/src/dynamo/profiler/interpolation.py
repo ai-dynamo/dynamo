@@ -46,6 +46,40 @@ from dynamo.profiler.utils.profile_prefill import profile_prefill
 logger = logging.getLogger(__name__)
 
 
+async def _wait_for_required_interpolation_deployment(
+    client: DynamoDeploymentClient,
+    deployment_clients: list[DynamoDeploymentClient],
+    timeout: int,
+    phase: str,
+) -> None:
+    """Wait for a thorough-mode deployment without silently losing profile data."""
+    try:
+        await client.wait_for_deployment_ready(timeout=timeout)
+    except (TimeoutError, DeploymentFailedError) as error:
+        reason = (
+            "timed out"
+            if isinstance(error, TimeoutError)
+            else "entered a terminal failure state"
+        )
+        message = (
+            f"{phase.capitalize()} interpolation deployment {reason}. "
+            "Thorough mode requires real-GPU interpolation data; use "
+            "pre_deployment_sweeping_mode='rapid' for GPU-free profiling."
+        )
+        logger.error("%s Details: %s", message, error)
+        try:
+            await client.delete_deployment()
+        except Exception:
+            logger.exception(
+                "Failed to delete the %s interpolation deployment; "
+                "final cleanup will retry.",
+                phase,
+            )
+        else:
+            deployment_clients.remove(client)
+        raise RuntimeError(message) from error
+
+
 async def run_interpolation(
     dgdr: DynamoGraphDeploymentRequestSpec,
     ops: ProfilerOperationalConfig,
@@ -113,22 +147,12 @@ async def run_interpolation(
     deployment_clients.append(client)
     await client.create_deployment(prefill_config_fn)
     logger.info("Waiting for prefill interpolation deployment...")
-    try:
-        await client.wait_for_deployment_ready(timeout=ops.deployment_timeout)
-    except TimeoutError:
-        logger.error("Prefill interpolation deployment timed out, skipping.")
-        await client.delete_deployment()
-        deployment_clients.remove(client)
-        return
-    except DeploymentFailedError as e:
-        logger.error(
-            "Prefill interpolation deployment entered a terminal failure state, "
-            "skipping: %s",
-            e,
-        )
-        await client.delete_deployment()
-        deployment_clients.remove(client)
-        return
+    await _wait_for_required_interpolation_deployment(
+        client,
+        deployment_clients,
+        ops.deployment_timeout,
+        "prefill",
+    )
 
     await client.get_deployment_logs()
     base_url = client.get_service_url()
@@ -172,22 +196,12 @@ async def run_interpolation(
     deployment_clients.append(client)
     await client.create_deployment(decode_config_fn)
     logger.info("Waiting for decode interpolation deployment...")
-    try:
-        await client.wait_for_deployment_ready(timeout=ops.deployment_timeout)
-    except TimeoutError:
-        logger.error("Decode interpolation deployment timed out, skipping.")
-        await client.delete_deployment()
-        deployment_clients.remove(client)
-        return
-    except DeploymentFailedError as e:
-        logger.error(
-            "Decode interpolation deployment entered a terminal failure state, "
-            "skipping: %s",
-            e,
-        )
-        await client.delete_deployment()
-        deployment_clients.remove(client)
-        return
+    await _wait_for_required_interpolation_deployment(
+        client,
+        deployment_clients,
+        ops.deployment_timeout,
+        "decode",
+    )
 
     await client.get_deployment_logs()
 

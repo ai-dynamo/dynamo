@@ -9,19 +9,28 @@ from typing import Optional
 
 import pytest
 
+from dynamo.common.multimodal.nvdec_decoder import nvdec_available
+from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 from tests.serve.common import (
     SERVE_TEST_DIR,
     WORKSPACE_DIR,
     params_with_model_mark,
     run_serve_deployment,
 )
-from tests.serve.conftest import MULTIMODAL_VIDEO_URL
+from tests.serve.conftest import (
+    MULTIMODAL_MEDIA_DIR,
+    MULTIMODAL_VIDEO_EXPECTED,
+    MULTIMODAL_VIDEO_H264_FILE_URI,
+    MULTIMODAL_VIDEO_H264_URL,
+    MULTIMODAL_VIDEO_H265_URL,
+    MULTIMODAL_VIDEO_URL,
+)
 from tests.serve.lora_utils import DEFAULT_LORA_REPO, MinioLoraConfig
 from tests.serve.multimodal_profiles.sglang import (
     SGLANG_MULTIMODAL_PROFILES,
     SGLANG_TOPOLOGY_SCRIPTS,
 )
-from tests.utils.constants import DefaultPort
+from tests.utils.constants import DefaultPort, DynamoPortRange
 from tests.utils.engine_process import EngineConfig
 from tests.utils.multimodal import make_image_payload_b64, make_multimodal_configs
 from tests.utils.payload_builder import (
@@ -33,6 +42,7 @@ from tests.utils.payload_builder import (
     embedding_payload,
     embedding_payload_default,
     guided_decoding_chat_payload_default,
+    image_token_metrics_payload,
     kv_events_metrics_payload,
     metric_payload_default,
     responses_payload_default,
@@ -40,19 +50,27 @@ from tests.utils.payload_builder import (
     router_selection_chat_payload_default,
 )
 from tests.utils.payloads import (
+    ChatPayload,
     ImageGenerationPayload,
     LoraTestChatPayload,
+    ResponsesPayload,
+    ResponsesStreamPayload,
     VideoGenerationPayload,
 )
+from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
 
 logger = logging.getLogger(__name__)
 
 pytest_plugins = ("tests.utils.otel_plugin",)
 
 
-def _is_cuda13() -> bool:
-    v = os.environ.get("CUDA_VERSION", "")
-    return v.startswith("13")
+def _disable_responses_reasoning(
+    payload: ResponsesPayload | ResponsesStreamPayload,
+) -> ResponsesPayload | ResponsesStreamPayload:
+    # Keep the streaming and non-streaming smoke tests consistent by preventing
+    # reasoning from consuming the entire output token budget.
+    payload.body["reasoning"] = {"effort": "none"}
+    return payload
 
 
 @dataclass
@@ -65,9 +83,15 @@ class SGLangConfig(EngineConfig):
 sglang_dir = os.environ.get("SGLANG_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/sglang"
 )
-REMOTE_VIDEO_TEST_URI = (
-    "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"
-)
+# Video clips are served by the image_server fixture from the in-repo media
+# fixtures. This used to point at a third-party host, which made the SGLang
+# video tests depend on that host being reachable: a read timeout fetching the
+# clip failed the run with no relation to the code under test.
+VIDEO_TEST_URI = MULTIMODAL_VIDEO_URL
+
+# Evaluated once at collection, like the vLLM profile's guard: NVDEC needs
+# the container's driver "video" capability, which CI runners do not grant.
+_NVDEC_UNAVAILABLE = not nvdec_available()
 
 # Generated multimodal configs from profile definitions (mirrors test_vllm.py).
 # Each profile expands into one config per MmCase per topology with the
@@ -123,8 +147,8 @@ sglang_configs = {
                 expected_num_choices=2,
             ),
             completion_payload_default(),
-            responses_payload_default(),
-            responses_stream_payload_default(),
+            _disable_responses_reasoning(responses_payload_default()),
+            _disable_responses_reasoning(responses_stream_payload_default()),
             guided_decoding_chat_payload_default(),
             metric_payload_default(min_num_requests=6, backend="sglang"),
         ],
@@ -144,6 +168,45 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+        ],
+    ),
+    "disaggregated_dp_attention": SGLangConfig(
+        # Prefill and decode each run two DP-attention ranks over the same
+        # two-GPU pair. PR #13464 excludes h100 tests from non-H100 multi-GPU
+        # lanes; leaving this unprofiled routes it through sequential H100 CI.
+        name="disaggregated_dp_attention",
+        directory=sglang_dir,
+        script_name="disagg_dp_attn.sh",
+        marks=[
+            pytest.mark.core,
+            pytest.mark.gpu_2,
+            pytest.mark.h100,
+            pytest.mark.requested_sglang_kv_tokens(2048),
+            pytest.mark.timeout(600),
+            pytest.mark.nightly,
+        ],
+        model="silence09/DeepSeek-R1-Small-2layers",
+        script_args=["--model", "silence09/DeepSeek-R1-Small-2layers"],
+        timeout=480,
+        env={},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            ChatPayload(
+                body={
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": "What is a mixture-of-experts model?",
+                        }
+                    ],
+                    "max_tokens": 32,
+                    "temperature": 0.0,
+                    "stream": False,
+                },
+                repeat_count=2,
+                expected_response=[],
+                expected_log=[],
+            )
         ],
     ),
     "disaggregated_router": SGLangConfig(
@@ -193,10 +256,6 @@ sglang_configs = {
             # "ready" at ~176s on a warm-cache RTX 6000 Ada.
             pytest.mark.timeout(470),  # 3x ~155s (sglang gpu_1 log)
             pytest.mark.pre_merge,
-            pytest.mark.skipif(
-                _is_cuda13(),
-                reason="torch-memory-saver preload .so links libcudart.so.12, missing in cuda13 images",
-            ),
         ],
         model="Qwen/Qwen3-0.6B",
         delayed_start=10,
@@ -234,10 +293,6 @@ sglang_configs = {
             pytest.mark.requested_sglang_kv_tokens(37472),
             pytest.mark.timeout(470),  # 3x ~156s (sglang gpu_1 log)
             pytest.mark.post_merge,
-            pytest.mark.skipif(
-                _is_cuda13(),
-                reason="torch-memory-saver preload .so links libcudart.so.12, missing in cuda13 images",
-            ),
         ],
         model="Qwen/Qwen3-0.6B",
         delayed_start=10,
@@ -261,10 +316,6 @@ sglang_configs = {
             pytest.mark.requested_sglang_kv_tokens(37472),
             pytest.mark.timeout(470),  # 3x ~151s (sglang gpu_1 log)
             pytest.mark.post_merge,
-            pytest.mark.skipif(
-                _is_cuda13(),
-                reason="torch-memory-saver preload .so links libcudart.so.12, missing in cuda13 images",
-            ),
         ],
         model="Qwen/Qwen3-0.6B",
         delayed_start=10,
@@ -370,6 +421,38 @@ sglang_configs = {
             )
         ],
     ),
+    "multimodal_e_pd_fd_qwen": SGLangConfig(
+        # The frontend decodes an inline image, transfers RGB pixels to the
+        # dedicated encode worker, and the encode worker passes PIL input to
+        # SGLang's MMEncoder before handing embeddings to the PD worker.
+        name="multimodal_e_pd_fd_qwen",
+        directory=sglang_dir,
+        script_name="multimodal_epd.sh",
+        marks=[
+            pytest.mark.multimodal,
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(9.3),  # actual nvidia-smi peak
+            pytest.mark.requested_sglang_kv_tokens(4096),
+            pytest.mark.timeout(180),  # 3x ~57s (local E/PD run)
+            # NIXL stubs outside the container can lack Decoded media transport.
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=[
+            "--model",
+            "Qwen/Qwen3-VL-2B-Instruct",
+            "--single-gpu",
+            "--frontend-decoding",
+            "--multimodal-embedding-cache-capacity-gb",
+            "1",
+        ],
+        timeout=360,
+        env={
+            "DYN_SGL_EMBEDDING_TRANSFER_MODE": "local",
+        },
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[make_image_payload_b64(["green"], repeat_count=2)],
+    ),
     "multimodal_disagg_qwen": SGLangConfig(
         # E/P/D architecture: Encode, Prefill, Decode workers all on GPU 0
         name="multimodal_disagg_qwen",
@@ -451,6 +534,7 @@ sglang_configs = {
             # Rust frontend + NIXL RDMA transfer of decoded pixels — the
             # path that distinguishes FD from the plain URL path.
             make_image_payload_b64(["green"]),
+            image_token_metrics_payload(),
         ],
     ),
     "multimodal_agg_qwen": SGLangConfig(
@@ -518,6 +602,10 @@ sglang_configs = {
         marks=[
             pytest.mark.multimodal,
             pytest.mark.gpu_1,
+            # Installs decord below, which the shipped image omits: this proves
+            # the routing works given a decoder, not that the codec decodes in a
+            # shipped image.
+            pytest.mark.installs_extra_dependencies,
             # Bisected with tests/utils/profile_pytest.py: minimum = 4368
             # tokens, 2x safety = 8736. Peak 20.5 GiB at 8736 tokens. Without
             # the cap, sglang's default 65% fraction allocates ~278k tokens
@@ -533,6 +621,10 @@ sglang_configs = {
             "Qwen/Qwen2-VL-7B-Instruct",
         ],
         timeout=360,
+        # SGLang's video path decodes with decord; the shipped image omits it as
+        # a media-codec carrier, so install it for this test only.
+        # See common._install_test_only_packages.
+        env={"DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS["decord2"]},
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload(
@@ -540,11 +632,11 @@ sglang_configs = {
                     {"type": "text", "text": "Describe the video in detail"},
                     {
                         "type": "video_url",
-                        "video_url": {"url": REMOTE_VIDEO_TEST_URI},
+                        "video_url": {"url": VIDEO_TEST_URI},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["guitar", "tablet", "draw"],
+                expected_response=MULTIMODAL_VIDEO_EXPECTED,
                 temperature=0.0,
                 max_tokens=100,
             )
@@ -584,9 +676,95 @@ sglang_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["red", "static", "still"],
+                expected_response=MULTIMODAL_VIDEO_EXPECTED,
                 temperature=0.0,
                 max_tokens=100,
+            )
+        ],
+    ),
+    "video_e_pd_qwen_nvdec": SGLangConfig(
+        # H.264/H.265 video input decoded on the GPU by NVDEC, which is the only
+        # video decoder in the shipped image -- so unlike the cases above this
+        # installs nothing and exercises what a deployment actually gets. It is
+        # the only end-to-end cover for the video_metadata shim in
+        # encode_worker_handler, which SGLang's pre-decoded-frame path needs.
+        #
+        # Must be the E/PD topology: NVDEC is wired into the encode worker, and
+        # the aggregated path hands the URL to SGLang, which resolves and decodes
+        # it internally with no interception point.
+        #
+        # Must also be a qwen2-family model. Qwen3-VL is in
+        # _NVDEC_UNSAFE_MODEL_TYPES (its preprocessing cannot take pre-decoded
+        # frames), so NVDEC is deliberately skipped for it and the request would
+        # fall back to the URL path, which has no decoder here.
+        name="video_e_pd_qwen_nvdec",
+        directory=sglang_dir,
+        script_name="multimodal_epd.sh",
+        marks=[
+            pytest.mark.multimodal,
+            pytest.mark.gpu_1,
+            # CI runners lack the driver "video" capability libnvcuvid needs, so
+            # this skips there and is exercised on GPU hardware instead.
+            pytest.mark.skipif(
+                _NVDEC_UNAVAILABLE,
+                reason=(
+                    "NVDEC/PyNvVideoCodec unavailable; needs the driver "
+                    "'video' capability (NVIDIA_DRIVER_CAPABILITIES)"
+                ),
+            ),
+            pytest.mark.timeout(420),
+            pytest.mark.post_merge,
+        ],
+        model="Qwen/Qwen2.5-VL-3B-Instruct",
+        # Deliberately does NOT set --multimodal-embedding-cache-capacity-gb, so
+        # the embedding cache stays at its default of 0 (disabled) and this
+        # exercises the branch a stock deployment actually takes. An earlier
+        # revision set 0.1 here, which routed the request through the cached
+        # encode path -- the only path that performed the NVDEC conversion --
+        # and so passed while default deployments failed outright. The cached
+        # path keeps its coverage in the encode-worker unit tests.
+        script_args=[
+            "--model",
+            "Qwen/Qwen2.5-VL-3B-Instruct",
+            "--chat-template",
+            "qwen2-vl",
+            "--single-gpu",
+        ],
+        timeout=420,
+        env={
+            "DYN_ENCODE_GPU_MEM": "0.1",
+            "DYN_WORKER_GPU_MEM": "0.4",
+            "DYN_SGL_EMBEDDING_TRANSFER_MODE": "local",
+            # The clips come from the image_server over plain http on localhost,
+            # which the URL policy rejects by default. Without this the encode
+            # worker refuses the URL before NVDEC sees it and falls back to the
+            # URL path, which has no decoder in this image.
+            "DYN_MM_ALLOW_INTERNAL": "1",
+            # Permits the file:// payload below. The local branch reads through
+            # read_local_media_bytes instead of fetching, then joins the same
+            # NVDEC routing, so without a file:// case that read, its policy
+            # gate, and its hand-off to the decoder are never exercised.
+            "DYN_MM_LOCAL_PATH": MULTIMODAL_MEDIA_DIR,
+        },
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe the video in detail"},
+                    {"type": "video_url", "video_url": {"url": url}},
+                ],
+                repeat_count=1,
+                expected_response=MULTIMODAL_VIDEO_EXPECTED,
+                temperature=0.0,
+                max_tokens=100,
+            )
+            # The same clip over http and as a local file. All three are the
+            # identical triangle footage, so a difference in the answer points at
+            # the transport rather than at the model or the encoding.
+            for url in (
+                MULTIMODAL_VIDEO_H264_URL,
+                MULTIMODAL_VIDEO_H265_URL,
+                MULTIMODAL_VIDEO_H264_FILE_URI,
             )
         ],
     ),
@@ -599,6 +777,9 @@ sglang_configs = {
         marks=[
             pytest.mark.multimodal,
             pytest.mark.gpu_1,
+            # See video_agg_qwen: installs decord, so likewise a
+            # installs_extra_dependencies case.
+            pytest.mark.installs_extra_dependencies,
             # No profiled_vram_gib: multimodal_epd.sh uses explicit
             # --mem-fraction-static via DYN_ENCODE_GPU_MEM / DYN_WORKER_GPU_MEM.
             pytest.mark.timeout(360),
@@ -619,6 +800,16 @@ sglang_configs = {
             "DYN_ENCODE_GPU_MEM": "0.1",
             "DYN_WORKER_GPU_MEM": "0.4",
             "DYN_SGL_EMBEDDING_TRANSFER_MODE": "local",
+            # The clips come from the image_server over plain http on localhost,
+            # which the URL policy rejects by default. This model is gated out of
+            # NVDEC (see _NVDEC_UNSAFE_MODEL_TYPES), and that disabled path now
+            # applies the policy just like the NVDEC path already did -- so this
+            # opt-in is required here for the same reason as in the nvdec config
+            # above, not because the two tests differ.
+            "DYN_MM_ALLOW_INTERNAL": "1",
+            # SGLang's video path decodes with decord; the shipped image omits it
+            # as a media-codec carrier, so install it for this test only.
+            "DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS["decord2"],
         },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -627,11 +818,11 @@ sglang_configs = {
                     {"type": "text", "text": "Describe the video in detail"},
                     {
                         "type": "video_url",
-                        "video_url": {"url": REMOTE_VIDEO_TEST_URI},
+                        "video_url": {"url": VIDEO_TEST_URI},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["guitar", "tablet", "draw"],
+                expected_response=MULTIMODAL_VIDEO_EXPECTED,
                 temperature=0.0,
                 max_tokens=100,
             ),
@@ -640,11 +831,11 @@ sglang_configs = {
                     {"type": "text", "text": "Describe the video in detail"},
                     {
                         "type": "video_url",
-                        "video_url": {"url": REMOTE_VIDEO_TEST_URI},
+                        "video_url": {"url": VIDEO_TEST_URI},
                     },
                 ],
                 repeat_count=1,
-                expected_response=["guitar", "tablet", "draw"],
+                expected_response=MULTIMODAL_VIDEO_EXPECTED,
                 expected_log=["Embedding cache hit for VIDEO URL index 0"],
                 temperature=0.0,
                 max_tokens=100,
@@ -806,7 +997,9 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(17.6),
             pytest.mark.requested_sglang_vram_gib(17.6),
-            pytest.mark.timeout(180),
+            # 420s is ~3x the measured 127s H100 runtime and covers deployment
+            # readiness, request execution, and teardown.
+            pytest.mark.timeout(420),
             pytest.mark.nightly,
         ],
         model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
@@ -843,6 +1036,7 @@ sglang_configs = {
             pytest.mark.gpu_1,
             pytest.mark.h100,
             pytest.mark.profiled_vram_gib(56.0),
+            pytest.mark.requested_sglang_vram_gib(56.0),
             # 32-token H100 smoke runs ~135s; ~4.4x headroom for cold pulls.
             pytest.mark.timeout(600),
             pytest.mark.nightly,
@@ -891,13 +1085,40 @@ def sglang_config_test(request):
     return sglang_configs[request.param]
 
 
+@pytest.fixture
+def sglang_config_with_dist_ports(sglang_config_test):
+    """Give each DP-attention process a disjoint SGLang port block."""
+    if sglang_config_test.name != "disaggregated_dp_attention":
+        yield sglang_config_test
+        return
+
+    # SGLang PortArgs consumes the supplied distributed-init port and the next
+    # six ports, so reserve two independently contiguous seven-port blocks.
+    ports = allocate_contiguous_ports(
+        count=2,
+        block_size=7,
+        start_port=DynamoPortRange.SERVE.value,
+    )
+    try:
+        yield dataclasses.replace(
+            sglang_config_test,
+            env={
+                **sglang_config_test.env,
+                "SGLANG_PREFILL_DIST_INIT_ADDR": f"127.0.0.1:{ports[0]}",
+                "SGLANG_DECODE_DIST_INIT_ADDR": f"127.0.0.1:{ports[7]}",
+            },
+        )
+    finally:
+        deallocate_ports(ports)
+
+
 @pytest.mark.e2e
 @pytest.mark.sglang
-# Allocate 4 system ports: disaggregated_router runs 4 workers each needing a
-# unique DYN_SYSTEM_PORT; other configs use <=2 (extra ports are harmless).
+# Allocate 4 system ports: disaggregated_router runs 4 workers, while the
+# two-GPU DP-attention config uses ports 1/2 for metrics and 3/4 for NCCL.
 @pytest.mark.parametrize("num_system_ports", [4], indirect=True)
 def test_sglang_deployment(
-    sglang_config_test,
+    sglang_config_with_dist_ports,
     request,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
@@ -910,25 +1131,10 @@ def test_sglang_deployment(
         num_system_ports >= 2
     ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
     config = dataclasses.replace(
-        sglang_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
+        sglang_config_with_dist_ports,
+        frontend_port=dynamo_dynamic_ports.frontend_port,
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
-
-
-@pytest.mark.e2e
-@pytest.mark.sglang
-@pytest.mark.core
-@pytest.mark.gpu_2
-@pytest.mark.nightly
-@pytest.mark.skip(
-    reason="Requires 4 GPUs - enable when hardware is consistently available"
-)
-def test_sglang_disagg_dp_attention(
-    request, runtime_services_dynamic_ports, dynamo_dynamic_ports, predownload_models
-):
-    """Test sglang disaggregated with DP attention (requires 4 GPUs)"""
-
-    # Kept for reference; this test uses a different launch path and is skipped
 
 
 # ── LoRA Tests ──────────────────────────────────────────────────────────────

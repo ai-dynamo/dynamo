@@ -38,7 +38,7 @@ spec:
   {{- end }}
   podMetricsEndpoints:
   - interval: 5s
-    path: /metrics
+    path: {{ .Values.dynamo.metrics.podMonitors.frontendPath | default "/metrics" }}
     port: http
     # honorLabels ensures dynamo_namespace and other labels set by the dynamo
     # runtime (including router metrics embedded in the frontend) are preserved.
@@ -105,6 +105,22 @@ spec:
       sourceLabels:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_graph_deployment_name
       targetLabel: dynamo_graph_deployment
+  # Frontend sidecar (GAIE/EPP direct-routing): scrapes dynamo_frontend_* on
+  # container port "http" (8000). Pods without that named port are dropped by
+  # the Prometheus Operator keep rule, so plain workers are unaffected.
+  - interval: 5s
+    path: {{ .Values.dynamo.metrics.podMonitors.frontendPath | default "/metrics" }}
+    port: http
+    honorLabels: true
+    relabelings:
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_namespace
+      targetLabel: dynamo_namespace
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
+      targetLabel: dynamo_component_type
 {{- if .Values.dynamo.metrics.podMonitors.nixlTelemetry }}
   - interval: 5s
     path: /metrics
@@ -148,6 +164,30 @@ spec:
   selector:
     matchLabels:
       nvidia.com/dynamo-component-type: planner
+      nvidia.com/metrics-enabled: "true"
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: dynamo-epp
+spec:
+  {{- if .Values.namespaceRestriction.enabled }}
+  namespaceSelector:
+    matchNames:
+    - {{ .Release.Namespace }}
+  {{- else }}
+  namespaceSelector:
+    any: true
+  {{- end }}
+  podMetricsEndpoints:
+  # The EPP container declares "metrics" (9090) alongside its gRPC ports; see
+  # EPPDefaults.GetBaseContainer in the operator.
+  - interval: 5s
+    path: /metrics
+    port: metrics
+  selector:
+    matchLabels:
+      nvidia.com/dynamo-component-type: epp
       nvidia.com/metrics-enabled: "true"
 ---
 # TODO: Once a first-class 'router' componentType is added to the dynamo operator,
