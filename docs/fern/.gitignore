@@ -5,3 +5,11 @@
 
 # Include logos
 !*.svg
+
+# Generated API reference pages: produced by docs/fern/scripts/gen_python_api.py
+# and gen_rust_api.py at docs publish/preview time (fern-docs.yml) and before
+# fern check in pre-merge, never committed. Anchored at /pages/ so the synced
+# copy of this file on the docs-website branch (pages-dev/, pages-vX.Y.Z/)
+# cannot swallow the published snapshots.
+/pages/reference/api/python/
+/pages/reference/api/rust/
