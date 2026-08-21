@@ -73,13 +73,7 @@ impl EppRouter {
     ) -> Result<Self> {
         let selector = Arc::new(selector);
         let (renderer, reflector, reflector_ready) = Self::dependencies(&cfg).await?;
-        Ok(Self::from_selector_parts(
-            cfg,
-            renderer,
-            reflector,
-            reflector_ready,
-            selector,
-        ))
+        Self::from_selector_parts(cfg, renderer, reflector, reflector_ready, selector).await
     }
 
     /// Assemble a custom EPP image around a prebuilt selection service.
@@ -89,13 +83,7 @@ impl EppRouter {
     ) -> Result<Self> {
         let selector = Arc::new(Selector::from_service(&cfg, service).await?);
         let (renderer, reflector, reflector_ready) = Self::dependencies(&cfg).await?;
-        Ok(Self::from_selector_parts(
-            cfg,
-            renderer,
-            reflector,
-            reflector_ready,
-            selector,
-        ))
+        Self::from_selector_parts(cfg, renderer, reflector, reflector_ready, selector).await
     }
 
     async fn dependencies(
@@ -113,23 +101,29 @@ impl EppRouter {
         Ok((renderer, reflector, reflector_ready))
     }
 
-    fn from_selector_parts(
+    async fn from_selector_parts(
         cfg: EppStandaloneConfig,
         renderer: VllmRenderClient,
         reflector: Arc<PodDiscovery>,
         reflector_ready: Arc<AtomicBool>,
         selector: Arc<Selector>,
-    ) -> Self {
+    ) -> Result<Self> {
         let peer_ready = selector.peer_ready();
 
         let defaults = RegistrationDefaults::from_config(&cfg);
         let adapter =
             TopologyAdapter::spawn(reflector.as_ref().clone(), selector.clone(), defaults);
 
+        // Subscribe-first: the topology adapter registers workers (their ZMQ
+        // KV-event listeners begin buffering live events) before the peer dump,
+        // so recovery overlaps the live event stream instead of leaving a gap.
+        // `is_ready` stays false (and /dump stays 503) until recovery completes.
+        selector.start_peer_recovery().await?;
+
         // Readiness is driven solely by the live pod+pool signal (see `is_ready`);
         // we do not block startup on a schedulable worker. A valid, empty pool is
         // ready immediately and returns 503 per-request until capacity appears.
-        Self {
+        Ok(Self {
             renderer,
             reflector,
             selector,
@@ -138,7 +132,7 @@ impl EppRouter {
             peer_ready,
             model_name: cfg.model_name,
             inflight: Arc::new(Semaphore::new(cfg.max_inflight_requests)),
-        }
+        })
     }
 
     /// Overall EPP readiness: worker discovery is ready and replicated mode has
