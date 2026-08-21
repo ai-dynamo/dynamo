@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use async_trait::async_trait;
+use dynamo_llm::kv_router::sequence::ActiveSequenceEventPublisher;
 use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
 use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
 use dynamo_runtime::engine::AsyncEngineContext;
@@ -29,7 +30,7 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::disagg::DisaggregationMode;
-use crate::engine::{GenerateContext, LLMEngine, RawEngine};
+use crate::engine::{FirstTokenNotifier, GenerateContext, LLMEngine, RawEngine};
 
 /// Test-only override count. Compiled out of release builds — tests acquire
 /// an `OtlpExportOverride` RAII guard to force-enable the recording
@@ -135,11 +136,25 @@ impl Drop for CancelMonitorGuard {
 pub(crate) struct EngineAdapter {
     engine: Arc<dyn LLMEngine>,
     mode: DisaggregationMode,
+    prefill_publisher: Option<(ActiveSequenceEventPublisher, u64)>,
 }
 
 impl EngineAdapter {
     pub(crate) fn new(engine: Arc<dyn LLMEngine>, mode: DisaggregationMode) -> Self {
-        Self { engine, mode }
+        Self {
+            engine,
+            mode,
+            prefill_publisher: None,
+        }
+    }
+
+    pub(crate) fn with_prefill_publisher(
+        mut self,
+        publisher: ActiveSequenceEventPublisher,
+        worker_id: u64,
+    ) -> Self {
+        self.prefill_publisher = Some((publisher, worker_id));
+        self
     }
 }
 
@@ -289,8 +304,23 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             (None, None)
         };
 
-        let gen_ctx =
-            GenerateContext::with_metadata(ctx.clone(), ft_tx.clone(), handle.metadata().clone());
+        let lifecycle = if self.mode.is_prefill() || self.mode.is_encode() {
+            None
+        } else {
+            self.prefill_publisher
+                .as_ref()
+                .and_then(|(publisher, worker_id)| {
+                    request.routing.as_ref()?.dp_rank.map(|dp_rank| {
+                        (publisher.clone(), ctx.id().to_string(), *worker_id, dp_rank)
+                    })
+                })
+        };
+        let first_token = FirstTokenNotifier::new(ft_tx.clone(), lifecycle);
+        let gen_ctx = GenerateContext::with_first_token_notifier(
+            ctx.clone(),
+            first_token.clone(),
+            handle.metadata().clone(),
+        );
         // `.instrument()` the setup call so a setup-time error lands on the
         // same span as the streaming body.
         let chunks = self
@@ -395,11 +425,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 stream_span.record("ttft_ms", format!("{:.2}", ttft_ms).as_str());
                                 last_token_at = Some(Instant::now());
                             }
-                            if let Some(tx) = &ft_tx {
-                                // Receiver is held by the monitor task; send only
-                                // fails if it panicked, in which case the abort is
-                                // already moot.
-                                let _ = tx.send(true);
+                            if let Some(notifier) = &first_token {
+                                notifier.notify();
                             }
                             if let Some(link) = &worker_trace_link {
                                 chunk.worker_trace_link = Some(link.clone());

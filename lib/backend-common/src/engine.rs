@@ -14,8 +14,10 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
+use dynamo_llm::kv_router::sequence::ActiveSequenceEventPublisher;
 use futures::stream::BoxStream;
 use tokio::sync::watch;
 
@@ -35,13 +37,76 @@ pub use dynamo_llm::protocols::common::{
 pub use dynamo_protocols::types::{CompletionUsage, StopReason};
 pub use dynamo_runtime::engine::AsyncEngineContext;
 
+/// Shared one-shot action fired by explicit engine notification or first output observation.
+#[derive(Clone)]
+pub struct FirstTokenNotifier {
+    inner: Arc<FirstTokenNotifierInner>,
+}
+
+struct FirstTokenNotifierInner {
+    notified: AtomicBool,
+    abort_sender: Option<watch::Sender<bool>>,
+    lifecycle: Option<FirstTokenLifecycle>,
+}
+
+struct FirstTokenLifecycle {
+    publisher: ActiveSequenceEventPublisher,
+    request_id: String,
+    worker_id: u64,
+    dp_rank: u32,
+}
+
+impl FirstTokenNotifier {
+    pub(crate) fn new(
+        abort_sender: Option<watch::Sender<bool>>,
+        lifecycle: Option<(ActiveSequenceEventPublisher, String, u64, u32)>,
+    ) -> Option<Self> {
+        if abort_sender.is_none() && lifecycle.is_none() {
+            return None;
+        }
+        Some(Self {
+            inner: Arc::new(FirstTokenNotifierInner {
+                notified: AtomicBool::new(false),
+                abort_sender,
+                lifecycle: lifecycle.map(|(publisher, request_id, worker_id, dp_rank)| {
+                    FirstTokenLifecycle {
+                        publisher,
+                        request_id,
+                        worker_id,
+                        dp_rank,
+                    }
+                }),
+            }),
+        })
+    }
+
+    /// Run the configured abort-release and lifecycle-publication actions at most once.
+    pub fn notify(&self) {
+        if self.inner.notified.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if let Some(sender) = &self.inner.abort_sender {
+            let _ = sender.send(true);
+        }
+        if let Some(lifecycle) = &self.inner.lifecycle {
+            let _ = lifecycle.publisher.mark_prefill_completed(
+                lifecycle.request_id.clone(),
+                lifecycle.worker_id,
+                lifecycle.dp_rank,
+            );
+        }
+    }
+
+    fn abort_sender(&self) -> Option<&watch::Sender<bool>> {
+        self.inner.abort_sender.as_ref()
+    }
+}
+
 /// Per-request handle wrapping the runtime context. `Deref`s to
 /// `dyn AsyncEngineContext` so engine code uses it transparently.
 pub struct GenerateContext {
     inner: Arc<dyn AsyncEngineContext>,
-    /// Decode-mode first-token signal. `Some` only on decode-mode requests;
-    /// `None` otherwise.
-    first_token: Option<watch::Sender<bool>>,
+    first_token: Option<FirstTokenNotifier>,
     metadata: BTreeMap<String, String>,
 }
 
@@ -52,7 +117,7 @@ impl GenerateContext {
     ) -> Self {
         Self {
             inner,
-            first_token,
+            first_token: FirstTokenNotifier::new(first_token, None),
             metadata: BTreeMap::new(),
         }
     }
@@ -60,6 +125,19 @@ impl GenerateContext {
     pub fn with_metadata(
         inner: Arc<dyn AsyncEngineContext>,
         first_token: Option<watch::Sender<bool>>,
+        metadata: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            inner,
+            first_token: FirstTokenNotifier::new(first_token, None),
+            metadata,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn with_first_token_notifier(
+        inner: Arc<dyn AsyncEngineContext>,
+        first_token: Option<FirstTokenNotifier>,
         metadata: BTreeMap<String, String>,
     ) -> Self {
         Self {
@@ -75,21 +153,25 @@ impl GenerateContext {
         self.inner.clone()
     }
 
-    /// Fire the first-token signal. Idempotent; no-op on non-decode
-    /// requests. Engines normally don't need this — the framework
-    /// auto-fires on the first non-empty chunk. Use only when first-token
-    /// is observable via a side channel before the main stream yields.
+    /// Fire the shared first-token notifier. This idempotently releases a decode worker's
+    /// deferred abort and publishes worker-side prefill completion when configured. Engines
+    /// normally don't need this because the framework auto-fires on the first non-empty chunk.
     pub fn notify_first_token(&self) {
-        if let Some(tx) = &self.first_token {
-            let _ = tx.send(true);
+        if let Some(notifier) = &self.first_token {
+            notifier.notify();
         }
     }
 
-    /// Framework-internal: borrow the underlying Sender for cross-boundary
-    /// threading (PyO3 mirrors this handle into Python's `Context` so
-    /// `notify_first_token()` fires the same signal). Rust engines should
-    /// call [`notify_first_token`](Self::notify_first_token) instead.
+    /// Framework-internal compatibility accessor for the decode abort sender. Lifecycle-aware
+    /// bridges must clone [`Self::first_token_notifier`] so all actions share the same gate.
     pub fn first_token_sender(&self) -> Option<&watch::Sender<bool>> {
+        self.first_token
+            .as_ref()
+            .and_then(FirstTokenNotifier::abort_sender)
+    }
+
+    #[doc(hidden)]
+    pub fn first_token_notifier(&self) -> Option<&FirstTokenNotifier> {
         self.first_token.as_ref()
     }
 
@@ -653,6 +735,19 @@ pub fn usage(prompt_tokens: u32, completion_tokens: u32) -> CompletionUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_token_notifier_is_one_shot() {
+        let (tx, mut rx) = watch::channel(false);
+        let notifier = FirstTokenNotifier::new(Some(tx), None).expect("abort action exists");
+
+        notifier.notify();
+        assert!(rx.has_changed().unwrap());
+        assert!(*rx.borrow_and_update());
+
+        notifier.notify();
+        assert!(!rx.has_changed().unwrap());
+    }
 
     #[test]
     fn chunk_token_sets_only_token_ids() {

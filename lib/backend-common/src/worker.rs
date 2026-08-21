@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dynamo_llm::kv_router::sequence::ActiveSequenceEventPublisher;
 use dynamo_llm::local_model::runtime_config::{
     DisaggregatedEndpoint, ModelRuntimeConfig, StructuralTagMode, StructuralTagSchemaMode,
     StructuralTagScope, TOPOLOGY_TAINT_PREFIX,
@@ -55,6 +56,7 @@ const DRAIN_HEARTBEAT_INTERVAL_S: f64 = 5.0;
 /// Budget reserved for `cleanup()` so the drain loop can't consume the whole
 /// graceful-shutdown deadline and trip the hard-exit that skips cleanup.
 const CLEANUP_RESERVE_S: f64 = 5.0;
+const PREFILL_COMPLETION_CHANNEL_CAPACITY: usize = 4096;
 
 /// Operator override for the health-check canary, mirrors the Python helper
 /// in `lib/bindings/python/src/dynamo/health_check.py`.
@@ -662,17 +664,16 @@ impl Worker {
             return Ok(());
         }
 
-        self.serve_with_orchestrator(&engine_config, endpoint, shutdown.clone())
+        self.serve_with_orchestrator(&engine_config, endpoint, worker_id, shutdown.clone())
             .await
     }
 
     /// Build KV-event publishers and the `SnapshotPublisher` from the
     /// engine's declarations. KV events flow on the engine's own threads
     /// (via Push or ZMQ); snapshot writes flow through the publisher
-    /// inline (no polling, no GIL on the framework side). No-op if
-    /// `enable_kv_routing` is off, the engine returned no sources +
-    /// no dp_ranks, or `engine_config.kv_cache_block_size` is unset for
-    /// KV events.
+    /// inline (no polling, no GIL on the framework side). KV/snapshot setup is skipped when the
+    /// engine declares neither source, and KV events additionally require a block size. The
+    /// lifecycle publisher is independent of those engine declarations.
     async fn setup_publishing(
         &mut self,
         endpoint: &dynamo_runtime::component::Endpoint,
@@ -694,9 +695,31 @@ impl Worker {
             self.lifecycle = Some(lifecycle);
             return Ok(());
         }
+        let prefill_publisher = if matches!(&self.engine, EngineKind::Llm(_)) {
+            match ActiveSequenceEventPublisher::for_endpoint(
+                endpoint,
+                PREFILL_COMPLETION_CHANNEL_CAPACITY,
+            )
+            .await
+            {
+                Ok(publisher) => Some(publisher),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "worker prefill-completion publisher unavailable; continuing with response-side cleanup"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let kv_sources = self.engine.kv_event_sources().await?;
         if kv_sources.is_empty() && bindings.dp_ranks.is_empty() {
-            tracing::debug!("engine returned no KV sources / dp_ranks; KV-aware routing disabled");
+            tracing::debug!(
+                "engine returned no KV sources / dp_ranks; skipping KV/snapshot publishers"
+            );
+            self.publishers = Some(PublisherHandles::lifecycle_only(prefill_publisher));
             self.lifecycle = Some(lifecycle);
             return Ok(());
         }
@@ -733,6 +756,7 @@ impl Worker {
             bindings.on_publisher_ready,
             kv_cache_block_size,
             enable_local_indexer,
+            prefill_publisher,
         )
         .await?;
         self.publishers = Some(handles);
@@ -905,10 +929,9 @@ impl Worker {
         if let Some(lifecycle) = self.lifecycle.as_ref() {
             lifecycle.observe_cleanup_time(cleanup_elapsed);
         }
-        // Drop publisher handles AFTER engine.cleanup so the engine's
-        // last snapshot writes complete. There is no background task to
-        // join — snapshot writes are event-driven (engine pushes
-        // synchronously); KV-event publishers own their own threads.
+        // Drop publisher handles AFTER engine.cleanup so the engine's last snapshot writes
+        // complete. The worker completion publisher follows the serving endpoint's process-local
+        // lifetime; its channel closes naturally when the adapter and any request clones drop.
         self.publishers = None;
         // Mark stopped even on failure so a follow-up call no-ops. Cleanup may
         // tear down process groups that cannot safely be destroyed twice.
@@ -921,6 +944,7 @@ impl Worker {
         &mut self,
         engine_config: &EngineConfig,
         endpoint: dynamo_runtime::component::Endpoint,
+        worker_id: u64,
         shutdown: CancellationToken,
     ) -> Result<(), DynamoError> {
         let model_type = resolve_model_type(&self.config)?;
@@ -991,10 +1015,16 @@ impl Worker {
             dynamo_runtime::local_endpoint_registry::LocalAsyncEngine,
         ) = match &self.engine {
             EngineKind::Llm(engine) => {
-                let engine_adapter = Arc::new(EngineAdapter::new(
-                    engine.clone(),
-                    self.config.disaggregation_mode,
-                ));
+                let mut engine_adapter =
+                    EngineAdapter::new(engine.clone(), self.config.disaggregation_mode);
+                if let Some(publisher) = self
+                    .publishers
+                    .as_ref()
+                    .and_then(PublisherHandles::prefill_publisher)
+                {
+                    engine_adapter = engine_adapter.with_prefill_publisher(publisher, worker_id);
+                }
+                let engine_adapter = Arc::new(engine_adapter);
                 let ingress = Ingress::for_engine(engine_adapter.clone()).map_err(|e| {
                     err(
                         ErrorType::Backend(BackendError::Unknown),

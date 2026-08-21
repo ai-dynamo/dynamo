@@ -10,6 +10,7 @@
 // unified [`SpanProxy`] handle whose `set_attribute` / `add_event` /
 // `set_status` operations mirror the OTel `Span` API.
 
+use dynamo_backend_common::FirstTokenNotifier;
 use dynamo_runtime::logging::DistributedTraceContext;
 pub use dynamo_runtime::pipeline::AsyncEngineContext;
 use dynamo_runtime::pipeline::context::Controller;
@@ -20,7 +21,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-use tokio::sync::watch;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Process-wide guard: once-per-process WARN when telemetry calls hit a
@@ -61,9 +61,7 @@ fn warn_bridge_missing_once(method: &str) {
 pub struct Context {
     inner: Arc<dyn AsyncEngineContext>,
     trace_context: Option<DistributedTraceContext>,
-    /// First-token signal for decode-mode disagg. `None` on aggregated /
-    /// prefill requests.
-    first_token: Option<watch::Sender<bool>>,
+    first_token: Option<FirstTokenNotifier>,
     metadata: Arc<Mutex<BTreeMap<String, String>>>,
     /// Captured `engine.generate` span. `None` for Python-instantiated test
     /// contexts (where no parent span was plumbed in) — `current_span` /
@@ -176,7 +174,7 @@ impl Context {
     pub fn new(
         inner: Arc<dyn AsyncEngineContext>,
         trace_context: Option<DistributedTraceContext>,
-        first_token: Option<watch::Sender<bool>>,
+        first_token: Option<FirstTokenNotifier>,
         metadata: BTreeMap<String, String>,
     ) -> Self {
         Self {
@@ -310,13 +308,12 @@ impl Context {
         })
     }
 
-    /// Fire the first-token signal so the framework can release any
-    /// deferred `engine.abort()`. Idempotent; no-op on non-decode
-    /// requests. Engines normally don't need this — the framework
-    /// auto-fires on the first non-empty chunk in the response stream.
+    /// Fire the shared first-token notifier. This releases deferred decode abort and publishes
+    /// worker-side prefill completion when configured. The framework normally auto-fires it on
+    /// the first non-empty response chunk.
     fn notify_first_token(&self) {
-        if let Some(tx) = &self.first_token {
-            let _ = tx.send(true);
+        if let Some(notifier) = &self.first_token {
+            notifier.notify();
         }
     }
 

@@ -20,6 +20,7 @@ use std::sync::Arc;
 use dynamo_llm::kv_router::publisher::{
     KvEventPublisher, KvEventSourceConfig, WorkerMetricsPublisher,
 };
+use dynamo_llm::kv_router::sequence::ActiveSequenceEventPublisher;
 use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::protocols::EndpointId;
 
@@ -29,8 +30,7 @@ use crate::metrics::{ComponentGauges, EngineMetrics};
 use crate::snapshot_publisher::SnapshotPublisher;
 
 /// Live publisher handles owned by `Worker` for the lifetime of serving.
-/// All variants are kept alive solely so their `Drop` impls run on
-/// shutdown — there is no background task to join.
+/// They keep the underlying publishers alive; there is no task to join during cleanup.
 pub(crate) struct PublisherHandles {
     #[allow(dead_code)]
     kv_publishers: Vec<Arc<KvEventPublisher>>,
@@ -40,6 +40,21 @@ pub(crate) struct PublisherHandles {
     /// inside don't drop their NATS endpoints prematurely.
     #[allow(dead_code)]
     snapshot_publisher: Option<Arc<SnapshotPublisher>>,
+    prefill_publisher: Option<ActiveSequenceEventPublisher>,
+}
+
+impl PublisherHandles {
+    pub(crate) fn prefill_publisher(&self) -> Option<ActiveSequenceEventPublisher> {
+        self.prefill_publisher.clone()
+    }
+
+    pub(crate) fn lifecycle_only(prefill_publisher: Option<ActiveSequenceEventPublisher>) -> Self {
+        Self {
+            kv_publishers: Vec::new(),
+            snapshot_publisher: None,
+            prefill_publisher,
+        }
+    }
 }
 
 // Sync — `KvEventPublisher::new_with_local_indexer` doesn't await. The
@@ -137,6 +152,7 @@ pub(crate) async fn setup_publishers(
     on_publisher_ready: Option<crate::engine::OnSnapshotPublisherReady>,
     kv_cache_block_size: Option<u32>,
     enable_local_indexer: bool,
+    prefill_publisher: Option<ActiveSequenceEventPublisher>,
 ) -> Result<PublisherHandles, DynamoError> {
     // KV event publishers require the engine's block size; without it, the
     // router can't translate token IDs into cache blocks. Snapshot publisher
@@ -175,5 +191,6 @@ pub(crate) async fn setup_publishers(
     Ok(PublisherHandles {
         kv_publishers,
         snapshot_publisher,
+        prefill_publisher,
     })
 }
