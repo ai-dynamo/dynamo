@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
+from _thinking_parity import THINKING_PARITY_CASES
 from _tool_guidance_parity import (
     TOOL_GUIDANCE_PARITY_CASES,
     assistant_response_format,
@@ -2423,3 +2424,19 @@ def test_ensure_chat_template_preserves_existing_hf_template(
     vllm_processor_module._ensure_chat_template(tokenizer, str(tmp_path), None)
 
     assert tokenizer.chat_template == existing
+
+
+class TestThinkingControlParity:  # FRONTEND.10
+    # Keep vLLM's thinking kwargs aligned with the shared backend matrix.
+    @pytest.mark.parametrize("case", THINKING_PARITY_CASES, ids=lambda case: case.name)
+    def test_shared_thinking_policy(self, tokenizer, case):
+        _, _, kwargs, _, _ = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                **case.request,
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        assert kwargs == case.expected

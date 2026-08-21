@@ -190,16 +190,6 @@ class DynamoWorkerProcess(ManagedProcess):
             display_name=worker_id,
         )
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Release allocated port when worker exits."""
-        try:
-            # system_port is always allocated in __init__
-            deallocate_port(self.system_port)
-        except Exception as e:
-            logging.warning(f"Failed to release vLLM worker port: {e}")
-
-        return super().__exit__(exc_type, exc_val, exc_tb)
-
     def is_ready(self, response) -> bool:
         """Check the health of the worker process"""
         try:
