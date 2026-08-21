@@ -28,11 +28,13 @@ import (
 func TestAddToSchemeRegistersSearchResources(t *testing.T) {
 	t.Parallel()
 
+	t.Log("Create a scheme and register v1beta2 search resources.")
 	scheme := runtime.NewScheme()
 	if err := AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme() error = %v", err)
 	}
 
+	t.Log("Verify that the scheme creates each search resource kind.")
 	tests := []struct {
 		gvk  string
 		kind string
@@ -43,6 +45,7 @@ func TestAddToSchemeRegistersSearchResources(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.kind, func(t *testing.T) {
+			t.Logf("Create the registered %s resource.", test.gvk)
 			gvk := GroupVersion.WithKind(test.kind)
 			if _, err := scheme.New(gvk); err != nil {
 				t.Fatalf("scheme.New(%s) error = %v", test.gvk, err)
@@ -54,6 +57,7 @@ func TestAddToSchemeRegistersSearchResources(t *testing.T) {
 func TestRunSpecIsExactRequestSpec(t *testing.T) {
 	t.Parallel()
 
+	t.Log("Compare the run spec type with the request spec type.")
 	requestType := reflect.TypeOf(DynamoGraphDeploymentRequestSpec{})
 	runType := reflect.TypeOf(DynamoGraphDeploymentRunSpec{})
 	if requestType != runType {
@@ -64,6 +68,7 @@ func TestRunSpecIsExactRequestSpec(t *testing.T) {
 func TestCandidateSpecUsesV1Beta1DGDContract(t *testing.T) {
 	t.Parallel()
 
+	t.Log("Compare the candidate spec type with the v1beta1 DGD contract.")
 	candidateType := reflect.TypeOf(DynamoGraphDeploymentCandidate{}).Field(2).Type
 	dgdType := reflect.TypeOf(v1beta1.DynamoGraphDeploymentSpec{})
 	if candidateType != dgdType {
