@@ -14,7 +14,10 @@ from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.common.multimodal.image_loader import ImageLoader
-from dynamo.common.utils.engine_response import normalize_finish_reason
+from dynamo.common.utils.engine_response import (
+    normalize_finish_reason,
+    trailing_stop_prefix_len,
+)
 from dynamo.llm import HttpError
 from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
@@ -132,17 +135,6 @@ def _stop_strings(request: Dict[str, Any]) -> set[str]:
     if isinstance(stop, list):
         return {item for item in stop if isinstance(item, str)}
     return set()
-
-
-def _trailing_stop_prefix_len(text: str, stop_strings: set[str]) -> int:
-    if not text or not stop_strings:
-        return 0
-    max_len = min(len(text), max(len(stop) for stop in stop_strings))
-    for suffix_len in range(max_len, 0, -1):
-        suffix = text[-suffix_len:]
-        if any(stop.startswith(suffix) for stop in stop_strings):
-            return suffix_len
-    return 0
 
 
 def _remove_suppressed_stop_tokens(
@@ -714,7 +706,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 out: dict[str, Any] = {"index": output_idx}
                 finish_reason = meta_info["finish_reason"]
                 if finish_reason:
-                    out["raw_finish_reason"] = finish_reason
                     out["finish_reason"] = normalize_finish_reason(
                         finish_reason["type"]
                     )
@@ -898,7 +889,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 ):
                     visible_text_len = len(text) - len(matched)
                 elif not finish_reason:
-                    visible_text_len -= _trailing_stop_prefix_len(text, stop_strings)
+                    visible_text_len -= trailing_stop_prefix_len(text, stop_strings)
 
                 delta = text[count:visible_text_len] if visible_text_len > count else ""
 

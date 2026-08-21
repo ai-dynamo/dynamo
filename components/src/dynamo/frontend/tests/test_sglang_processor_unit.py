@@ -3251,7 +3251,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             {
                 "token_ids": tokenizer.encode("<|user|>"),
                 "finish_reason": "stop",
-                "raw_finish_reason": {"type": "stop", "matched": 128001},
+                "stop_reason": "<|user|>",
             }
         )
 
@@ -3261,7 +3261,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert final["delta"] == {}
         assert final["finish_reason"] == "stop"
 
-    def test_processor_preserves_raw_finish_reason_for_stop_filtering(self):
+    def test_processor_passes_typed_stop_reason_to_postprocessor(self):
         processor = SglangProcessor(
             tokenizer=self.ByteTokenizer(),
             routed_engine=FakeRoutedEngine(
@@ -3269,7 +3269,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                     {
                         "token_ids": list(b"AEND"),
                         "finish_reason": "stop",
-                        "raw_finish_reason": {"type": "stop", "matched": 128001},
+                        "stop_reason": "END",
                     }
                 ]
             ),
@@ -3299,6 +3299,56 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert chunks[0]["choices"][0]["delta"]["content"] == "A"
         assert chunks[0]["choices"][0]["finish_reason"] == "stop"
 
+    def test_processor_stops_generation_on_local_stop_string(self):
+        processor = SglangProcessor(
+            tokenizer=self.ByteTokenizer(),
+            routed_engine=FakeRoutedEngine(
+                items=[
+                    {
+                        "token_ids": list(b"AEN"),
+                        "finish_reason": None,
+                    },
+                    {"token_ids": list(b"Dignored"), "finish_reason": None},
+                ]
+            ),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            eos_token_ids=None,
+            stream_interval=20,
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=None,
+            reasoning_parser=None,
+            stop_strings={"END"},
+        )
+
+        class Context:
+            stopped = False
+
+            def stop_generating(self):
+                self.stopped = True
+
+        context = Context()
+
+        async def collect():
+            return [
+                item["data"]
+                async for item in processor._generate_and_stream(
+                    "req-stop", {"model": "test-model"}, {}, [], post, context
+                )
+                if "data" in item
+            ]
+
+        chunks = asyncio.run(collect())
+
+        assert chunks[0]["choices"][0]["delta"]["content"] == "A"
+        assert chunks[0]["choices"][0]["finish_reason"] is None
+        assert chunks[1]["choices"][0]["delta"] == {}
+        assert chunks[1]["choices"][0]["finish_reason"] == "stop"
+        assert context.stopped
+        assert len(chunks) == 2
+
     def test_split_stop_string_suffix_is_not_emitted(self, tokenizer):
         post = SglangStreamingPostProcessor(
             tokenizer=tokenizer,
@@ -3313,8 +3363,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         final = post.process_output(
             {
                 "token_ids": tokenizer.encode("er|>"),
-                "finish_reason": "stop",
-                "raw_finish_reason": {"type": "stop", "matched": "<|user|>"},
+                "finish_reason": None,
             }
         )
 
@@ -3342,8 +3391,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         final = post.process_output(
             {
                 "token_ids": [ord("D")],
-                "finish_reason": "stop",
-                "raw_finish_reason": {"type": "stop", "matched": 128001},
+                "finish_reason": None,
                 "log_probs": [-0.4],
             }
         )
@@ -3375,7 +3423,6 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             {
                 "token_ids": [],
                 "finish_reason": "stop",
-                "raw_finish_reason": {"type": "eos", "matched": None},
             }
         )
 
@@ -3388,7 +3435,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             "N",
         ]
 
-    def test_stop_suffix_is_preserved_when_eos_matched(self, tokenizer):
+    def test_complete_stop_string_is_suppressed_before_backend_finish(self, tokenizer):
         post = SglangStreamingPostProcessor(
             tokenizer=tokenizer,
             tool_call_parser=None,
@@ -3398,14 +3445,13 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
 
         final = post.process_output(
             {
-                "token_ids": tokenizer.encode("Hello\n\n"),
-                "finish_reason": "stop",
-                "raw_finish_reason": {"type": "eos", "matched": None},
+                "token_ids": tokenizer.encode("Hello\n\nignored"),
+                "finish_reason": None,
             }
         )
 
         assert final is not None
-        assert final["delta"]["content"] == "Hello\n\n"
+        assert final["delta"]["content"] == "Hello"
         assert final["finish_reason"] == "stop"
 
     def test_empty_token_ids(self, tokenizer):

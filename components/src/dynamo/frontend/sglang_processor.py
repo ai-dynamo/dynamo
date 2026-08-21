@@ -722,7 +722,6 @@ class SglangProcessor:
             def flush_pending(
                 *,
                 finish_reason: str | None,
-                raw_finish_reason: Any | None,
                 stop_reason: Any | None,
                 engine_data: Any | None,
             ) -> dict[str, Any]:
@@ -739,7 +738,7 @@ class SglangProcessor:
                 mapped_response: dict[str, Any] = {
                     "token_ids": pending_token_ids,
                     "finish_reason": finish_reason,
-                    "raw_finish_reason": raw_finish_reason,
+                    "stop_reason": stop_reason,
                 }
                 if pending_log_probs is not None:
                     mapped_response["log_probs"] = pending_log_probs
@@ -768,10 +767,16 @@ class SglangProcessor:
                     if pending_usage:
                         dynamo_out["usage"] = pending_usage
                     response_nvext: dict[str, Any] = {}
-                    if stop_reason is not None and nvext_extra_field_requested(
-                        request, "stop_reason"
+                    effective_stop_reason = (
+                        stop_reason
+                        if stop_reason is not None
+                        else post.local_stop_reason
+                    )
+                    if (
+                        effective_stop_reason is not None
+                        and nvext_extra_field_requested(request, "stop_reason")
                     ):
-                        response_nvext["stop_reason"] = stop_reason
+                        response_nvext["stop_reason"] = effective_stop_reason
                     if engine_data is not None and nvext_extra_field_requested(
                         request, "engine_data"
                     ):
@@ -847,16 +852,12 @@ class SglangProcessor:
                     if pending_logprob_shape != chunk_logprob_shape:
                         yield flush_pending(
                             finish_reason=None,
-                            raw_finish_reason=None,
                             stop_reason=None,
                             engine_data=None,
                         )
 
                 chunk_tokens = len(new_ids)
                 cumulative_output_tokens += chunk_tokens
-                raw_finish = engine_response.get(
-                    "raw_finish_reason", engine_response.get("finish_reason")
-                )
                 finish_reason = _map_finish_reason(engine_response.get("finish_reason"))
                 stop_reason = engine_response.get("stop_reason")
 
@@ -876,14 +877,20 @@ class SglangProcessor:
 
                 # Flush on finish or when we've accumulated enough tokens.
                 # First chunk flushes immediately (si=1) to minimize TTFT.
-                flush_threshold = 1 if first_chunk else stream_interval
+                flush_threshold = (
+                    1 if first_chunk or post.has_pending_stop_text else stream_interval
+                )
                 if finish_reason or len(pending_token_ids) >= flush_threshold:
-                    yield flush_pending(
+                    envelope = flush_pending(
                         finish_reason=finish_reason,
-                        raw_finish_reason=raw_finish,
                         stop_reason=stop_reason,
                         engine_data=engine_data,
                     )
+                    if post.locally_finished and context is not None:
+                        context.stop_generating()
+                    yield envelope
+                    if post.locally_finished:
+                        break
         except Unknown:
             raise
         except Exception as e:
