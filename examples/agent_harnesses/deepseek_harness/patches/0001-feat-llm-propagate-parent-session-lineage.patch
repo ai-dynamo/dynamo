@@ -143,7 +143,7 @@ index 287e73303c..b0d8b7111d 100644
 @@ -111,6 +111,26 @@ describe('request stability across the loop', () => {
      expectPrefixExtension(adapter.requests[0]!, adapter.requests[1]!)
    })
- 
+
 +  it('stamps durable parent lineage on a child request', async () => {
 +    const adapter = new MockAdapter([textResponse('done')])
 +    const ctx = await harness(adapter)
@@ -197,27 +197,27 @@ index 1c007d34f3..8bb3dc53b2 100644
 --- a/packages/llm/llm-deepseek/README.md
 +++ b/packages/llm/llm-deepseek/README.md
 @@ -71,7 +71,7 @@ The plugin also declares its route in the configurable-provider directory (`ctx.
- 
+
  Every request carries the shared attribution header from dsh-llm's `attributionHeaders()` - the mandatory `User-Agent` baseline identifying the harness (see [dsh-llm § App attribution](../llm/README.md#app-attribution-attributionts)). Direct DeepSeek requests and OpenAI-compatible gateway requests get no provider-specific app-attribution headers under this adapter contract; OpenRouter app attribution is deferred to a future explicit OpenRouter adapter or mode. A request whose `GenerateOptions.purpose` is `compaction` (dsh-compaction-basic's auxiliary summarization call) additionally carries `x-deepseek-harness-compact: 1`, so the host can separate compaction traffic from conversation requests.
- 
+
 -DeepSeek request identity is separate from app attribution. After credential resolution, every provider request carries `x-deepseek-harness-user-id` with the stable anonymous id from [`@deepseek-ai/dsh-anonymous-user-id`](../../identity/anonymous-user-id/README.md); a request carrying `GenerateOptions.sessionId` also sends that exact value as `x-deepseek-harness-session-id`, while a direct call without a session omits the session header. Both headers go to the resolved `baseURL`, including a configured gateway, and remain outside the request body and model-visible content.
 +DeepSeek request identity is separate from app attribution. After credential resolution, every provider request carries `x-deepseek-harness-user-id` with the stable anonymous id from [`@deepseek-ai/dsh-anonymous-user-id`](../../identity/anonymous-user-id/README.md); a request carrying `GenerateOptions.sessionId` also sends that exact value as `x-deepseek-harness-session-id`, and a session-backed child carrying `GenerateOptions.parentSessionId` sends `x-deepseek-harness-parent-session-id`. Root and direct calls omit the parent header, while a direct call without a session omits both session headers. These headers go to the resolved `baseURL`, including a configured gateway, and remain outside the request body and model-visible content.
- 
+
  ## Wire-format notes
- 
+
 diff --git a/packages/llm/llm-deepseek/README.zh.md b/packages/llm/llm-deepseek/README.zh.md
 index 181b30bd03..57aeffe71a 100644
 --- a/packages/llm/llm-deepseek/README.zh.md
 +++ b/packages/llm/llm-deepseek/README.zh.md
 @@ -71,7 +71,7 @@ harness LLM（大语言模型）seam 的 DeepSeek chat-completions 适配器：
- 
+
  每个请求都携带 dsh-llm `attributionHeaders()` 的共享归因标头，即用于识别 harness 的必需 `User-Agent` 基线（见 [dsh-llm § 应用归因](../llm/README.md#app-attribution-attributionts)）。在该适配器约定（adapter contract）下，直接 DeepSeek 请求与 OpenAI 兼容 gateway 请求都不会获得提供方特定应用归因标头；OpenRouter 应用归因暂缓到未来的显式 OpenRouter 适配器或模式。`GenerateOptions.purpose` 为 `compaction` 的请求（dsh-compaction-basic 的辅助摘要调用）还会携带 `x-deepseek-harness-compact: 1`，让宿主可以将压缩流量与会话请求分开。
- 
+
 -DeepSeek 请求身份独立于应用归因。凭据解析成功后，每个提供方请求都会通过 `x-deepseek-harness-user-id` 携带来自 [`@deepseek-ai/dsh-anonymous-user-id`](../../identity/anonymous-user-id/README.md) 的稳定匿名 id；携带 `GenerateOptions.sessionId` 的请求还会通过 `x-deepseek-harness-session-id` 发送该确切值，缺少会话的直接调用则省略会话标头。两个标头都会发送至解析后的 `baseURL`（包括已配置的 gateway），且不会进入请求正文或模型可见内容。
 +DeepSeek 请求身份独立于应用归因。凭据解析成功后，每个提供方请求都会通过 `x-deepseek-harness-user-id` 携带来自 [`@deepseek-ai/dsh-anonymous-user-id`](../../identity/anonymous-user-id/README.md) 的稳定匿名 id；携带 `GenerateOptions.sessionId` 的请求还会通过 `x-deepseek-harness-session-id` 发送该确切值，携带 `GenerateOptions.parentSessionId` 的会话型子请求则发送 `x-deepseek-harness-parent-session-id`。根请求和直接调用会省略父会话标头，缺少会话的直接调用会同时省略两个会话标头。这些标头都会发送至解析后的 `baseURL`（包括已配置的 gateway），且不会进入请求正文或模型可见内容。
- 
+
  ## 协议格式说明
- 
+
 diff --git a/packages/llm/llm-deepseek/src/adapter.ts b/packages/llm/llm-deepseek/src/adapter.ts
 index 638d555b1e..8d895daaf3 100644
 --- a/packages/llm/llm-deepseek/src/adapter.ts
@@ -239,24 +239,24 @@ index 6d86691e5c..bb38bcb01b 100644
 @@ -216,7 +216,7 @@ describe('DeepSeekAdapter against a mock server', () => {
      expect(kinds).toEqual(['block-start', 'text-delta', 'block-end', 'usage', 'finish'])
    })
- 
+
 -  it('forwards the harness user and session ids for host-side trajectory routing', async () => {
 +  it('forwards harness user and session lineage for host-side trajectory routing', async () => {
      const server = await mockServer([{ kind: 'sse', events: textEvents }])
      const ctx = await harness(server.url)
- 
+
 @@ -227,9 +227,11 @@ describe('DeepSeekAdapter against a mock server', () => {
          source: { kind: 'plugin', plugin: 'test' },
        })],
        sessionId: SessionId('child-session'),
 +      parentSessionId: SessionId('parent-session'),
      })
- 
+
      expect(server.headers[0]?.['x-deepseek-harness-session-id']).toBe('child-session')
 +    expect(server.headers[0]?.['x-deepseek-harness-parent-session-id']).toBe('parent-session')
      expect(server.headers[0]?.['x-deepseek-harness-user-id']).toBe(getOrCreateAnonymousUserId())
    })
- 
+
 diff --git a/packages/llm/llm/README.i18n.yaml b/packages/llm/llm/README.i18n.yaml
 index 0700b14362..00c483cbb1 100644
 --- a/packages/llm/llm/README.i18n.yaml
@@ -306,6 +306,3 @@ index 8c5be187dd..a63a2e8915 100644
    /**
     * Provider-neutral classification for an auxiliary model call. Adapters may
     * map the purpose to model-hidden transport metadata or purpose-specific
--- 
-2.52.0
-

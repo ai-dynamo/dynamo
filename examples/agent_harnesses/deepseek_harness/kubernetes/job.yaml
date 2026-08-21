@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 apiVersion: batch/v1
@@ -25,6 +25,8 @@ spec:
         dynamo.nvidia.com/harness: deepseek
         dynamo.nvidia.com/owner: anish-maddipoti
     spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
       restartPolicy: Never
       securityContext:
         fsGroup: 1000
@@ -32,12 +34,14 @@ spec:
           type: RuntimeDefault
       containers:
         - name: dsh
-          image: REPLACE_WITH_IMMUTABLE_DSH_CLIENT_IMAGE
+          # The README render step replaces this local-only sentinel with an immutable digest.
+          image: dsh-dynamo-client:0.1.0-rc.8
           imagePullPolicy: IfNotPresent
           command: ["sh", "-ceu"]
           args:
             - |
               set -- node /usr/local/bin/drive_deepseek_harness.mjs --base-url "$DYNAMO_BASE_URL" --model "$DYNAMO_MODEL" --task "$DSH_TASK" --capture /evidence/dsh-request-trace.jsonl --cwd /workspace --dsh-home /dsh-home --dsh-bin "$DSH_BIN"
+              if [ "$DSH_CANONICALIZE_DYNAMO_HEADERS" = "true" ]; then set -- "$@" --canonicalize-dynamo-headers; fi
               if [ "$DSH_SESSION_FINAL" = "true" ]; then set -- "$@" --session-final; fi
               exec "$@"
           envFrom:

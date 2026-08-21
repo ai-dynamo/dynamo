@@ -1181,6 +1181,49 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_compaction_requires_selected_deepseek_identity() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HEADER_DEEPSEEK_HARNESS_SESSION_ID,
+            "dsh-session".parse().unwrap(),
+        );
+        headers.insert(HEADER_DEEPSEEK_HARNESS_COMPACT, "1".parse().unwrap());
+
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "canonical".parse().unwrap());
+        let canonical_context = agent_context_from_headers(&headers).unwrap();
+        assert_eq!(canonical_context.session_id, "canonical");
+        assert_eq!(canonical_context.compaction, None);
+
+        headers.remove(HEADER_DYNAMO_SESSION_ID);
+        headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
+        headers.insert(
+            HEADER_CODEX_TURN_METADATA,
+            r#"{"request_kind":"compaction","compaction":{"strategy":"memento"}}"#
+                .parse()
+                .unwrap(),
+        );
+        let codex_context = agent_context_from_headers(&headers).unwrap();
+        assert_eq!(codex_context.session_id, "codex-thread");
+        assert_eq!(
+            codex_context
+                .compaction
+                .and_then(|compaction| compaction.strategy)
+                .as_deref(),
+            Some("memento")
+        );
+
+        headers.remove(HEADER_CODEX_THREAD_ID);
+        headers.remove(HEADER_CODEX_TURN_METADATA);
+        headers.insert(
+            HEADER_CLAUDE_CODE_SESSION_ID,
+            "claude-session".parse().unwrap(),
+        );
+        let claude_context = agent_context_from_headers(&headers).unwrap();
+        assert_eq!(claude_context.session_id, "claude-session");
+        assert_eq!(claude_context.compaction, None);
+    }
+
+    #[test]
     fn agent_context_from_codex_thread_headers_preserves_subagent_lineage() {
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_CODEX_THREAD_ID, "codex-child".parse().unwrap());

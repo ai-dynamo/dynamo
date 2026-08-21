@@ -41,7 +41,7 @@ bash examples/backends/sglang/launch/agg_agent.sh
   </Tab>
   <Tab title="DeepSeek Harness">
 
-    DeepSeek Harness (DSH) uses Chat Completions. Its shipped headless profile accepts the Dynamo `/v1` endpoint through `DEEPSEEK_BASE_URL`, while its model selection lives in the DSH settings profile. The repository's lifecycle relay pins the package, creates that isolated profile, captures redacted request evidence, and runs one task:
+    DeepSeek Harness (DSH) uses Chat Completions. Its shipped headless profile accepts the Dynamo `/v1` endpoint through `DEEPSEEK_BASE_URL`, while its model selection lives in the DSH settings profile. The repository's lifecycle relay pins the package, creates that isolated profile, passes a minimal environment, captures redacted request evidence with exclusive creation, and runs one task. It reads `DYNAMO_API_KEY` only and ignores an ambient `DEEPSEEK_API_KEY`:
 
     ```bash
     node .agents/skills/dynamo-agent-harness/scripts/drive_deepseek_harness.mjs \
@@ -51,9 +51,11 @@ bash examples/backends/sglang/launch/agg_agent.sh
       --capture dsh-request-trace.jsonl
     ```
 
-    Dynamo maps DSH's `x-deepseek-harness-session-id` to `session_id`, `x-deepseek-harness-parent-session-id` to `parent_session_id`, and exact `x-deepseek-harness-compact: 1` to compaction metadata. The published basic package carries session and compaction identity; use the separately pinned full recipe under `examples/agent_harnesses/deepseek_harness` when child lineage is required.
+    Dynamo maps DSH's `x-deepseek-harness-session-id` to `session_id`, `x-deepseek-harness-parent-session-id` to `parent_session_id`, and exact `x-deepseek-harness-compact: 1` to compaction metadata when DSH identity wins header precedence. The published basic package carries session and compaction identity; use the separately pinned full recipe under `examples/agent_harnesses/deepseek_harness` when child lineage is required.
 
-    Add `--session-final` only when the target is the native ThunderAgent frontend. The relay waits for DSH to flush, then sends `x-dynamo-session-final: true` after normal or interrupted shutdown. Stock KV has no program lifecycle to close, so leave the option off there.
+    Add `--canonicalize-dynamo-headers` only for an older server that predates native DSH normalization. The relay preserves native headers and duplicates session and parent identity into canonical Dynamo headers; the option does not backport compaction normalization.
+
+    Add `--session-final` only when the target is the native ThunderAgent frontend. The relay waits for DSH to flush, then sends `x-dynamo-session-final: true` after normal or interrupted shutdown. It fails when no session reached Dynamo or cleanup is rejected, and returns `130` for SIGINT or `143` for SIGTERM. Stock KV has no program lifecycle to close, so leave the option off there.
 
   </Tab>
   <Tab title="Pi">
@@ -229,7 +231,7 @@ An agent harness can compact older conversation history into a summary when its 
 | Harness | Signal recognized by Dynamo | Normalized agent context |
 | --- | --- | --- |
 | Codex | `x-codex-turn-metadata` with `request_kind` set to `compaction` | `agent_context.compaction` |
-| DeepSeek Harness | Exact `x-deepseek-harness-compact: 1` | `agent_context.compaction` |
+| DeepSeek Harness | Exact `x-deepseek-harness-compact: 1` on the selected DSH identity mapping | `agent_context.compaction` |
 | Claude Code | No supported mapping | Unset |
 | OpenCode | No supported mapping | Unset |
 

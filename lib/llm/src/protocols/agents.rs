@@ -80,10 +80,6 @@ fn borrowed_header_value<'a>(headers: &'a HeaderMap, header_name: &str) -> Optio
 
 pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentContextHeaderValues> {
     let session_final = header_bool(headers, HEADER_DYNAMO_SESSION_FINAL);
-    let compaction = deepseek_compaction_header_value(headers).or_else(|| {
-        borrowed_header_value(headers, HEADER_CODEX_THREAD_ID)
-            .and_then(|_| codex_compaction_header_value(headers))
-    });
 
     if let Some(session_id) = borrowed_header_value(headers, HEADER_DYNAMO_SESSION_ID) {
         return Some(AgentContextHeaderValues {
@@ -92,7 +88,8 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
                 .map(str::to_owned),
             session_id: session_id.to_owned(),
             session_final,
-            compaction,
+            compaction: borrowed_header_value(headers, HEADER_CODEX_THREAD_ID)
+                .and_then(|_| codex_compaction_header_value(headers)),
         });
     }
 
@@ -121,7 +118,11 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
             session_id: session_id.to_owned(),
             parent_session_id,
             session_final,
-            compaction,
+            compaction: match mapping.root_session_header {
+                HEADER_CODEX_THREAD_ID => codex_compaction_header_value(headers),
+                HEADER_DEEPSEEK_HARNESS_SESSION_ID => deepseek_compaction_header_value(headers),
+                _ => None,
+            },
         });
     }
     None
@@ -135,6 +136,7 @@ fn codex_compaction_header_value(headers: &HeaderMap) -> Option<AgentCompaction>
 }
 
 fn deepseek_compaction_header_value(headers: &HeaderMap) -> Option<AgentCompaction> {
+    borrowed_header_value(headers, HEADER_DEEPSEEK_HARNESS_SESSION_ID)?;
     (borrowed_header_value(headers, HEADER_DEEPSEEK_HARNESS_COMPACT) == Some("1"))
         .then(AgentCompaction::default)
 }

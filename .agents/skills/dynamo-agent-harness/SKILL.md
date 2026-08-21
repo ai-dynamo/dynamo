@@ -29,6 +29,7 @@ Treat the [Agent Harnesses guide](https://github.com/ai-dynamo/dynamo/blob/main/
 - A reachable Dynamo endpoint whose `/v1/models` includes the requested model.
 - `uv` and Node.js 22+.
 - Node.js 24+ for DSH.
+- A POSIX host with Linux `/proc` or `/bin/ps` for process-tree cleanup.
 - `opencode` on `PATH` only when selecting the OpenCode harness.
 - A working directory that limits the delegated agent's scope.
 - `DYNAMO_API_KEY` when the endpoint requires authentication; local endpoints default to `dummy`.
@@ -68,13 +69,17 @@ The driver hides their incompatible model, mode, gateway-auth, and environment c
 
 ## Run DeepSeek Harness
 
-DSH is not driven through the ACP script above. Its shipped `headless` profile creates one fresh persisted session, runs one task, flushes it, prints the final answer, and exits. The dedicated relay pins `@deepseek-ai/dsh@0.1.0-rc.8`, generates an isolated model profile, preserves native request headers, and writes redacted JSONL evidence:
+DSH is not driven through the ACP script above. Its shipped `headless` profile creates one fresh persisted session, runs one task, flushes it, prints the final answer, and exits. The dedicated relay pins `@deepseek-ai/dsh@0.1.0-rc.8`, generates an isolated model profile, preserves native request headers, passes a minimal child environment, and writes redacted JSONL evidence with exclusive creation:
 
 ```bash
 node .agents/skills/dynamo-agent-harness/scripts/drive_deepseek_harness.mjs --base-url http://127.0.0.1:8000 --model Qwen/Qwen3-0.6B --task 'Use tools to inspect this workspace and report one verified fact.' --capture dsh-request-trace.jsonl
 ```
 
-Use `--session-final` only against Dynamo's native ThunderAgent frontend. It sends one canonical final request for every DSH session observed by the relay after normal exit, SIGINT, or SIGTERM, and fails closed when cleanup is rejected. Do not enable it for stock KV endpoints. Use the full pinned lineage recipe in [`examples/agent_harnesses/deepseek_harness`](../../../examples/agent_harnesses/deepseek_harness/README.md) when a child must carry `x-deepseek-harness-parent-session-id`.
+The relay reads `DYNAMO_API_KEY` only, then projects the selected value to the variable expected by DSH. An ambient `DEEPSEEK_API_KEY` is ignored. Use `--api-key-env NAME` only to explicitly select a different credential variable, and use `--overwrite-capture` only to intentionally replace an existing trace.
+
+Use `--canonicalize-dynamo-headers` only with an older server such as the pinned Dynamo 1.3 deployment. It preserves native headers while copying DSH session and parent identity into canonical Dynamo headers; it cannot backport native DSH compaction normalization. Leave it off against a server that includes the native mapping.
+
+Use `--session-final` only against Dynamo's native ThunderAgent frontend. It sends one canonical final request for every DSH session observed by the relay after normal exit, SIGINT, or SIGTERM, and fails closed when cleanup is rejected or zero sessions were observed. Signals terminate the complete tracked Corepack/pnpm/DSH process tree, including detached descendants observed before shutdown, and return `130` for SIGINT or `143` for SIGTERM after cleanup. Do not enable it for stock KV endpoints. Use the full pinned lineage recipe in [`examples/agent_harnesses/deepseek_harness`](../../../examples/agent_harnesses/deepseek_harness/README.md) when a child must carry `x-deepseek-harness-parent-session-id`.
 
 ## Delegate safely
 
@@ -99,7 +104,7 @@ Foreground turns should normally begin with `user_message`; tool feedback should
 
 Return:
 
-- harness, model, mode, and ACP session ID
+- harness, model, mode, and harness session ID; call it an ACP session ID only for ACP-driven harnesses
 - prompt count and observed tool/result behavior
 - targeted validation result
 - trace trigger counts when tracing is available
@@ -111,4 +116,5 @@ Return:
 - OpenCode can issue background title-generation requests and may require a corrective follow-up when the served model reports an unverified result.
 - The adapters are pinned in `scripts/drive_harness.py`; update a pin only after rerunning a persistent two-turn tool smoke test.
 - DSH basic is pinned in `scripts/drive_deepseek_harness.mjs`. Its published package carries native session and compaction headers but needs the separately reviewable full patch for parent lineage.
+- DSH's basic container installs its complete dependency graph from the frozen recipe lockfile. A direct local `pnpm dlx` run pins the top-level package only, so use the container or full source build for reproducible qualification evidence.
 - DSH request evidence contains plaintext model bodies even though credentials are redacted and its stable anonymous user ID is hashed. Handle the JSONL as sensitive data.
