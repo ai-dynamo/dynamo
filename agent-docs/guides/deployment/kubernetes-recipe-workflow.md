@@ -51,16 +51,17 @@ kubectl --context "${KUBE_CONTEXT}" get pvc -n "${NAMESPACE}"
 ```
 
 Run model download and validation jobs when present. Read each Job name from its manifest's `metadata.name`; never infer
-the resource name from the filename. Both the existence and the filename of these manifests are recipe-dependent — some
-recipes ship precision-suffixed download manifests, and some fold the download into the model-cache manifest — so take
-the filename from the handoff and skip the block entirely when the recipe ships no such job.
+the resource name from the filename. A recipe may ship variant-specific download manifests (for example
+`model-download-fp8.yaml` and `model-download-nvfp4.yaml`); select the one matching the assigned DGD and copy it into
+`applied_manifests/` as `model-download.yaml`, per `deploy-dynamo-recipe`. Skip a block when the recipe ships no such
+job.
 
 ```bash
-kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/${DOWNLOAD_MANIFEST}" -n "${NAMESPACE}"
+kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/model-download.yaml" -n "${NAMESPACE}"
 # Poll the job true condition with a bounded loop (Complete -> proceed, Failed -> exit 1); a Failed job must
 # fail fast, not burn the timeout. Use the scripted poll block from deploy-dynamo-recipe SKILL.md.
 
-kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/${VALIDATE_MANIFEST}" -n "${NAMESPACE}"
+kubectl --context "${KUBE_CONTEXT}" apply -f "${DEPLOY_ROOT}/applied_manifests/model-validate.yaml" -n "${NAMESPACE}"
 # Same bounded Complete/Failed poll as the download job (60 min bound).
 ```
 
