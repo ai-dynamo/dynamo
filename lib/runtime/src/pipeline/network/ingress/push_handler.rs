@@ -140,6 +140,69 @@ impl Drop for RequestMetricsGuard {
     }
 }
 
+trait ResponsePublisher {
+    async fn send(&self, payload: Bytes) -> anyhow::Result<()>;
+    async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()>;
+    async fn finish(&mut self) -> anyhow::Result<()>;
+    async fn abort(&mut self) -> anyhow::Result<()>;
+
+    fn reset_on_stop(&self) -> bool {
+        false
+    }
+
+    fn strict_prologue(&self) -> bool {
+        false
+    }
+}
+
+impl ResponsePublisher for quic_response::QuicResponseSender {
+    async fn send(&self, payload: Bytes) -> anyhow::Result<()> {
+        quic_response::QuicResponseSender::send(self, payload).await
+    }
+
+    async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()> {
+        quic_response::QuicResponseSender::send_prologue(self, error)
+            .await
+            .map_err(anyhow::Error::msg)
+    }
+
+    async fn finish(&mut self) -> anyhow::Result<()> {
+        quic_response::QuicResponseSender::finish(self).await
+    }
+
+    async fn abort(&mut self) -> anyhow::Result<()> {
+        quic_response::QuicResponseSender::abort(self).await
+    }
+
+    fn reset_on_stop(&self) -> bool {
+        true
+    }
+
+    fn strict_prologue(&self) -> bool {
+        true
+    }
+}
+
+impl ResponsePublisher for StreamSender {
+    async fn send(&self, payload: Bytes) -> anyhow::Result<()> {
+        StreamSender::send(self, payload).await
+    }
+
+    async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()> {
+        StreamSender::send_prologue(self, error)
+            .await
+            .map_err(anyhow::Error::msg)
+    }
+
+    async fn finish(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn abort(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
 impl<Req, Resp, Adapter> Ingress<Req, Resp, Adapter>
 where
     Req: PipelineIO + Sync,
@@ -147,7 +210,7 @@ where
     Adapter: Send + Sync + 'static,
 {
     /// Pump every chunk from the engine's response stream out to the
-    /// upstream-side `StreamSender`, plus the terminal complete-final
+    /// upstream response transport, plus the terminal complete-final
     /// frame. Captures the per-frame metrics, the publish-failure error
     /// classification (client-side disconnect vs. real failure), and the
     /// health-check notifier policy (notify only on non-error chunks and
@@ -155,7 +218,7 @@ where
     async fn pump_response_stream<U>(
         &self,
         mut stream: ManyOut<U>,
-        publisher: &StreamSender,
+        publisher: &impl ResponsePublisher,
         payload_codec: RequestPlanePayloadCodec,
     ) where
         U: Data + std::fmt::Debug,
@@ -231,6 +294,12 @@ where
                 // before the queued error and clean terminal frames are read.
                 break;
             }
+        }
+        // The TCP response writer exits without its clean sentinel when the
+        // worker context is stopped. Preserve that behavior on QUIC: the
+        // caller sends a logical reset instead of a clean terminal frame.
+        if publisher.reset_on_stop() && context.is_stopped() && !context.is_killed() {
+            send_complete_final = false;
         }
         if send_complete_final {
             let encoded = match self
@@ -569,6 +638,111 @@ where
     U: Data + std::fmt::Debug,
     Adapter: IngressResponseEncoder<U> + Send + Sync + 'static,
 {
+    async fn generate_and_publish<P>(
+        &self,
+        request: Req,
+        payload_codec: RequestPlanePayloadCodec,
+        start_time: Instant,
+        configured_mode: ResponsePlaneMode,
+        advertised_mode: ResponsePlaneMode,
+        mut publisher: P,
+    ) -> Result<(), PipelineError>
+    where
+        Self: IngressDispatch<Request = Req>,
+        P: ResponsePublisher,
+    {
+        if configured_mode != advertised_mode {
+            let message = format!(
+                "response plane mismatch: frontend requested {}, worker configured {}",
+                advertised_mode.name(),
+                configured_mode.name()
+            );
+            let _ = publisher.send_prologue(Some(message.clone())).await;
+            let _ = publisher.finish().await;
+            return Err(PipelineError::Generic(message));
+        }
+
+        let request_context = request.context();
+        tracing::trace!("calling generate");
+        let stream = self
+            .segment
+            .get()
+            .expect("segment not set")
+            .generate(request)
+            .await
+            .map_err(|error| {
+                if let Some(metrics) = self.metrics() {
+                    metrics
+                        .error_counter
+                        .with_label_values(&[work_handler::error_types::GENERATE])
+                        .inc();
+                }
+                PipelineError::GenerateError(error)
+            });
+
+        let stream = match stream {
+            Ok(stream) => {
+                tracing::trace!("Successfully generated response stream; sending prologue");
+                let result = publisher.send_prologue(None).await;
+                if publisher.strict_prologue() {
+                    result.map_err(|error| {
+                        if let Some(metrics) = self.metrics() {
+                            metrics
+                                .error_counter
+                                .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
+                                .inc();
+                        }
+                        PipelineError::Generic(format!(
+                            "Failed to open {} response stream: {error}",
+                            configured_mode.name()
+                        ))
+                    })?;
+                }
+                WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS
+                    .observe(start_time.elapsed().as_secs_f64());
+                stream
+            }
+            Err(error) => {
+                let error_string = error.to_string();
+
+                #[cfg(debug_assertions)]
+                tracing::debug!(
+                    "Failed to generate response stream (with debug backtrace): {:?}",
+                    error
+                );
+                #[cfg(not(debug_assertions))]
+                tracing::error!("Failed to generate response stream: {error_string}");
+
+                if publisher.reset_on_stop()
+                    && request_context.is_stopped()
+                    && !request_context.is_killed()
+                {
+                    let _ = publisher.abort().await;
+                } else {
+                    let _ = publisher.send_prologue(Some(error_string)).await;
+                }
+                return Err(error);
+            }
+        };
+
+        self.pump_response_stream(stream, &publisher, payload_codec)
+            .await;
+        let finish = if publisher.reset_on_stop()
+            && request_context.is_stopped()
+            && !request_context.is_killed()
+        {
+            publisher.abort().await
+        } else {
+            publisher.finish().await
+        };
+        finish.map_err(|error| {
+            PipelineError::Generic(format!(
+                "Failed to finish {} response stream: {error}",
+                configured_mode.name()
+            ))
+        })
+    }
+
     /// Shared body of `PushWorkHandler::handle_payload` for every
     /// `Ingress<Req, ManyOut<U>>` shape that has an [`IngressDispatch`]
     /// impl. Sets up the inflight metrics guard, calls
@@ -619,72 +793,75 @@ where
             WORK_HANDLER_NETWORK_TRANSIT_SECONDS.observe(transit_ns as f64 / 1_000_000_000.0);
         }
 
-        // todo - eventually have a handler class which will returned an abstracted object, but for now,
-        // we only support tcp here, so we can just unwrap the connection info
-        tracing::trace!("creating tcp response stream");
-        let mut publisher = tcp::client::TcpClient::create_response_stream(
-            request.context(),
-            response_connection_info,
-            self.metrics().map(|m| m.cancellation_total.clone()),
-        )
-        .await
-        .map_err(|e| {
-            if let Some(m) = self.metrics() {
-                m.error_counter
-                    .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
-                    .inc();
+        let advertised_mode =
+            ResponsePlaneMode::from_transport_name(&response_connection_info.transport)
+                .map_err(|error| PipelineError::Generic(error.to_string()))?;
+        let configured_mode = ResponsePlaneMode::configured()
+            .map_err(|error| PipelineError::Generic(error.to_string()))?;
+        let cancellation_counter = self
+            .metrics()
+            .map(|metrics| metrics.cancellation_total.clone());
+
+        match advertised_mode {
+            ResponsePlaneMode::Tcp => {
+                tracing::trace!("creating tcp response stream");
+                let publisher = tcp::client::TcpClient::create_response_stream(
+                    request.context(),
+                    response_connection_info,
+                    cancellation_counter,
+                )
+                .await
+                .map_err(|error| {
+                    if let Some(metrics) = self.metrics() {
+                        metrics
+                            .error_counter
+                            .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
+                            .inc();
+                    }
+                    PipelineError::Generic(format!("Failed to create response stream: {error}"))
+                })?;
+                self.generate_and_publish(
+                    request,
+                    payload_codec,
+                    start_time,
+                    configured_mode,
+                    advertised_mode,
+                    publisher,
+                )
+                .await?;
             }
-            PipelineError::Generic(format!("Failed to create response stream: {e}"))
-        })?;
-
-        tracing::trace!("calling generate");
-        let stream = self
-            .segment
-            .get()
-            .expect("segment not set")
-            .generate(request)
-            .await
-            .map_err(|e| {
-                if let Some(m) = self.metrics() {
-                    m.error_counter
-                        .with_label_values(&[work_handler::error_types::GENERATE])
-                        .inc();
-                }
-                PipelineError::GenerateError(e)
-            });
-
-        // the prolouge is sent to the client to indicate that the stream is ready to receive data
-        // or if the generate call failed, the error is sent to the client
-        let stream = match stream {
-            Ok(stream) => {
-                tracing::trace!("Successfully generated response stream; sending prologue");
-                let _result = publisher.send_prologue(None).await;
-                WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS
-                    .observe(start_time.elapsed().as_secs_f64());
-                stream
+            ResponsePlaneMode::Quic => {
+                tracing::trace!("creating QUIC response sender");
+                let response_pool = self.quic_response_client_pool()?;
+                let publisher = response_pool
+                    .sender_with_cancellation_metric(
+                        request.context(),
+                        response_connection_info,
+                        cancellation_counter,
+                    )
+                    .await
+                    .map_err(|error| {
+                        if let Some(metrics) = self.metrics() {
+                            metrics
+                                .error_counter
+                                .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
+                                .inc();
+                        }
+                        PipelineError::Generic(format!(
+                            "Failed to create QUIC response stream: {error}"
+                        ))
+                    })?;
+                self.generate_and_publish(
+                    request,
+                    payload_codec,
+                    start_time,
+                    configured_mode,
+                    advertised_mode,
+                    publisher,
+                )
+                .await?;
             }
-            Err(e) => {
-                let error_string = e.to_string();
-
-                #[cfg(debug_assertions)]
-                {
-                    tracing::debug!(
-                        "Failed to generate response stream (with debug backtrace): {:?}",
-                        e
-                    );
-                }
-                #[cfg(not(debug_assertions))]
-                {
-                    tracing::error!("Failed to generate response stream: {error_string}");
-                }
-
-                let _result = publisher.send_prologue(Some(error_string)).await;
-                Err(e)?
-            }
-        };
-
-        self.pump_response_stream(stream, &publisher, payload_codec)
-            .await;
+        }
 
         // Ensure the metrics guard is not dropped until the end of the function.
         // Drop fires "request completed" log via RAII.
@@ -766,10 +943,71 @@ mod tests {
     use crate::protocols::annotated::Annotated;
     use futures::stream;
     use prometheus::{Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     type TestRequest = serde_json::Value;
     type TestResponse = Annotated<serde_json::Value>;
     type TestIngress = Ingress<SingleIn<TestRequest>, ManyOut<TestResponse>>;
+
+    #[derive(Default)]
+    struct MismatchPublisher {
+        prologue: Arc<std::sync::Mutex<Option<Option<String>>>>,
+        finished: Arc<AtomicBool>,
+    }
+
+    impl ResponsePublisher for MismatchPublisher {
+        async fn send(&self, _payload: Bytes) -> anyhow::Result<()> {
+            panic!("mismatch must not send response data")
+        }
+
+        async fn send_prologue(&mut self, error: Option<String>) -> anyhow::Result<()> {
+            *self.prologue.lock().unwrap() = Some(error);
+            Ok(())
+        }
+
+        async fn finish(&mut self) -> anyhow::Result<()> {
+            self.finished.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        async fn abort(&mut self) -> anyhow::Result<()> {
+            panic!("mismatch must finish with a frontend-visible error")
+        }
+    }
+
+    #[tokio::test]
+    async fn response_plane_mismatch_reports_error_before_generate() {
+        for (configured, advertised) in [
+            (ResponsePlaneMode::Tcp, ResponsePlaneMode::Quic),
+            (ResponsePlaneMode::Quic, ResponsePlaneMode::Tcp),
+        ] {
+            let ingress = TestIngress::new();
+            let publisher = MismatchPublisher::default();
+            let prologue = publisher.prologue.clone();
+            let finished = publisher.finished.clone();
+
+            let error = ingress
+                .generate_and_publish(
+                    Context::new(serde_json::json!({})),
+                    RequestPlanePayloadCodec::Json,
+                    Instant::now(),
+                    configured,
+                    advertised,
+                    publisher,
+                )
+                .await
+                .expect_err("mismatched response planes must fail");
+
+            let expected = format!(
+                "response plane mismatch: frontend requested {}, worker configured {}",
+                advertised.name(),
+                configured.name()
+            );
+            assert!(error.to_string().contains(&expected));
+            assert_eq!(*prologue.lock().unwrap(), Some(Some(expected)));
+            assert!(finished.load(Ordering::Acquire));
+        }
+    }
 
     /// Standalone metrics, not bound to an `Endpoint`, so the test needs no DRT.
     fn test_metrics() -> WorkHandlerMetrics {
@@ -786,6 +1024,16 @@ mod tests {
             .unwrap(),
             IntCounter::with_opts(Opts::new("cancellation_total", "t")).unwrap(),
         )
+    }
+
+    #[test]
+    fn test_quic_client_pool_initializes_without_add_metrics() {
+        let ingress = TestIngress::new();
+        assert!(ingress.metrics().is_none());
+
+        let first = ingress.quic_response_client_pool().unwrap();
+        let second = ingress.quic_response_client_pool().unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
     }
 
     /// Which half of the teardown race a given run exercises.

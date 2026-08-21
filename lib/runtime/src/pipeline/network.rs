@@ -12,9 +12,11 @@ pub mod codec;
 pub mod egress;
 pub mod ingress;
 pub mod manager;
+pub mod quic_response;
 pub mod tcp;
 
 use crate::SystemHealth;
+use crate::traits::DistributedRuntimeProvider;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
@@ -42,6 +44,54 @@ pub(crate) const DEFAULT_TCP_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 
 static TCP_MAX_MESSAGE_SIZE: OnceLock<usize> = OnceLock::new();
 static REQUEST_PLANE_PAYLOAD_CODEC: OnceLock<RequestPlanePayloadCodec> = OnceLock::new();
+static RESPONSE_PLANE_MODE: OnceLock<ResponsePlaneMode> = OnceLock::new();
+
+/// Process-wide response transport. Frontends and workers must use the same mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ResponsePlaneMode {
+    #[default]
+    Tcp,
+    Quic,
+}
+
+impl ResponsePlaneMode {
+    pub fn configured() -> Result<Self> {
+        if let Some(mode) = RESPONSE_PLANE_MODE.get() {
+            return Ok(*mode);
+        }
+        let value =
+            std::env::var(crate::config::environment_names::response_plane::DYN_RESPONSE_PLANE)
+                .ok();
+        let mode = Self::from_config_value(value.as_deref())?;
+        Ok(*RESPONSE_PLANE_MODE.get_or_init(|| mode))
+    }
+
+    fn from_config_value(value: Option<&str>) -> Result<Self> {
+        match value {
+            None | Some("tcp") => Ok(Self::Tcp),
+            Some("quic") => Ok(Self::Quic),
+            Some(other) => anyhow::bail!(
+                "invalid {} value '{other}'; expected 'tcp' or 'quic'",
+                crate::config::environment_names::response_plane::DYN_RESPONSE_PLANE
+            ),
+        }
+    }
+
+    pub fn from_transport_name(transport: &str) -> Result<Self> {
+        match transport {
+            "tcp_server" => Ok(Self::Tcp),
+            quic_response::TRANSPORT_NAME => Ok(Self::Quic),
+            other => anyhow::bail!("unsupported response transport '{other}'"),
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Quic => "quic",
+        }
+    }
+}
 
 /// Read the configured TCP max message size once and share it across client,
 /// server, and zero-copy decoder code paths.
@@ -205,6 +255,7 @@ impl Drop for Cleanup {
 pub struct RegisteredStream<T> {
     pub connection_info: ConnectionInfo,
     pub stream_provider: StreamProvider<T>,
+    registration_id: Option<uuid::Uuid>,
     cleanup: Cleanup,
 }
 
@@ -221,8 +272,18 @@ impl<T> RegisteredStream<T> {
         Self {
             connection_info,
             stream_provider,
+            registration_id: None,
             cleanup: Cleanup(None),
         }
+    }
+
+    pub(crate) fn with_registration_id(mut self, registration_id: uuid::Uuid) -> Self {
+        self.registration_id = Some(registration_id);
+        self
+    }
+
+    pub(crate) fn registration_id(&self) -> Option<uuid::Uuid> {
+        self.registration_id
     }
 
     pub(crate) fn with_cleanup<F>(mut self, cleanup: F) -> Self
@@ -239,6 +300,7 @@ impl<T> RegisteredStream<T> {
         let Self {
             connection_info,
             stream_provider,
+            registration_id: _,
             mut cleanup,
         } = self;
         cleanup.0.take();
@@ -471,7 +533,7 @@ pub struct Egress<Req: PipelineIO, Resp: PipelineIO> {
 mod tests {
     use super::{
         DEFAULT_SEND_BUFFER_COUNT, NetworkStreamWrapper, RequestControlMessage,
-        RequestPlanePayloadCodec, RequestType, ResponseType, StreamOptions,
+        RequestPlanePayloadCodec, RequestType, ResponsePlaneMode, ResponseType, StreamOptions,
     };
     use crate::engine::AsyncEngineContextProvider;
     use crate::pipeline::Context;
@@ -482,6 +544,24 @@ mod tests {
         id: u64,
         text: String,
         tokens: Vec<u32>,
+    }
+
+    #[test]
+    fn response_plane_mode_parses_supported_values() {
+        assert_eq!(
+            ResponsePlaneMode::from_config_value(None).unwrap(),
+            ResponsePlaneMode::Tcp
+        );
+        assert_eq!(
+            ResponsePlaneMode::from_config_value(Some("tcp")).unwrap(),
+            ResponsePlaneMode::Tcp
+        );
+        assert_eq!(
+            ResponsePlaneMode::from_config_value(Some("quic")).unwrap(),
+            ResponsePlaneMode::Quic
+        );
+        assert!(ResponsePlaneMode::from_config_value(Some("")).is_err());
+        assert!(ResponsePlaneMode::from_config_value(Some("invalid")).is_err());
     }
 
     #[test]
@@ -748,6 +828,7 @@ pub struct Ingress<Req: PipelineIO, Resp: PipelineIO, Adapter = SerdeIngressPayl
     metrics: OnceLock<Arc<WorkHandlerMetrics>>,
     /// Endpoint-specific notifier for health check timer resets
     endpoint_health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
+    quic_response_client_pool: OnceLock<Arc<quic_response::QuicResponseClientPool>>,
     payload_adapter: Arc<Adapter>,
 }
 
@@ -784,6 +865,7 @@ where
             segment: OnceLock::new(),
             metrics: OnceLock::new(),
             endpoint_health_check_notifier: OnceLock::new(),
+            quic_response_client_pool: OnceLock::new(),
             payload_adapter: Arc::new(payload_adapter),
         })
     }
@@ -792,6 +874,25 @@ where
         self.segment
             .set(segment)
             .map_err(|_| anyhow::anyhow!("Segment already set"))
+    }
+
+    pub(crate) fn set_quic_response_client_pool(
+        &self,
+        pool: Arc<quic_response::QuicResponseClientPool>,
+    ) -> Result<()> {
+        self.quic_response_client_pool
+            .set(pool)
+            .map_err(|_| anyhow::anyhow!("QUIC response client pool already set"))
+    }
+
+    pub(crate) fn quic_response_client_pool(
+        &self,
+    ) -> Result<Arc<quic_response::QuicResponseClientPool>, PipelineError> {
+        if let Some(pool) = self.quic_response_client_pool.get() {
+            return Ok(pool.clone());
+        }
+        let pool = quic_response::process_client_pool_from_env()?;
+        Ok(self.quic_response_client_pool.get_or_init(|| pool).clone())
     }
 
     pub fn add_metrics(

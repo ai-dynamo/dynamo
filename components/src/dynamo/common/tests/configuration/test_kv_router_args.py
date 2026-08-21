@@ -422,6 +422,30 @@ def test_frontend_reasoning_field_name_rejects_invalid_choice() -> None:
         parser.parse_args(["--reasoning-field-name", "invalid"])
 
 
+def test_frontend_response_plane_defaults_to_tcp_and_accepts_quic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DYN_RESPONSE_PLANE", raising=False)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    default_config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    quic_config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--response-plane", "quic"])
+    )
+    monkeypatch.setenv("DYN_RESPONSE_PLANE", "quic")
+    env_parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(env_parser)
+    env_config = FrontendConfig.from_cli_args(env_parser.parse_args([]))
+
+    assert default_config.response_plane == "tcp"
+    assert quic_config.response_plane == "quic"
+    assert env_config.response_plane == "quic"
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--response-plane", "invalid"])
+
+
 def test_conditional_disagg_config_cli_lowers_to_router_kwargs() -> None:
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)

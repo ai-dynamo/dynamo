@@ -177,6 +177,7 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
             args.discovery_backend,
             args.request_plane,
             args.event_plane,
+            response_plane=args.response_plane,
         )
         runtimes.append(runtime)
 
