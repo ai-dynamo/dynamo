@@ -78,6 +78,44 @@ fn test_sampling_parameters_include_stop_str_in_output_extraction() {
     assert_eq!(sampling.include_stop_str_in_output, Some(true));
 }
 
+fn chat_request_with_top_p(top_p: f32) -> NvCreateChatCompletionRequest {
+    // helper to create a chat request with a specific top_p value for testing
+    serde_json::from_value(serde_json::json!({
+        "model": "test-model",
+        "messages": [{"role": "user", "content": "Hello"}],
+        "top_p": top_p,
+    }))
+    .unwrap()
+}
+
+#[test]
+fn test_sampling_options_reject_zero_top_p() {
+    // Test that top_p = 0 is rejected
+    use dynamo_llm::protocols::common::SamplingOptionsProvider;
+
+    let error = chat_request_with_top_p(0.0)
+        .extract_sampling_options()
+        .expect_err("top_p = 0 must be rejected");
+
+    assert!(
+        error.to_string().contains("Top_p"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn test_sampling_options_accept_valid_top_p() {
+    // Test that valid top_p values are accepted
+    use dynamo_llm::protocols::common::SamplingOptionsProvider;
+
+    for top_p in [0.0001, 0.5, 1.0] {
+        let sampling = chat_request_with_top_p(top_p)
+            .extract_sampling_options()
+            .unwrap_or_else(|e| panic!("top_p = {top_p} must be accepted: {e}"));
+        assert_eq!(sampling.top_p, Some(top_p));
+    }
+}
+
 #[test]
 fn test_chat_completions_guided_decoding_from_common() {
     // Test that guided_json can be specified at root level

@@ -383,10 +383,17 @@ def update_engine_config_with_dynamo(
             "warmup_iterations": dynamo_config.benchmark_warmup_iterations,
             "output_path": dynamo_config.benchmark_output_path,
             "timeout": dynamo_config.benchmark_timeout,
+            "collect_imbalanced": dynamo_config.benchmark_collect_imbalanced,
         }
         explicit_points = dynamo_config._benchmark_points
         if explicit_points is not None:
-            benchmark_config["points"] = explicit_points.model_dump(mode="json")
+            # exclude_none so a v1 manifest round-trips as itself: the v3
+            # optional fields (partition, rows) would otherwise be dumped as
+            # nulls the operator never wrote, into a config the scheduler
+            # re-parses and a test compares against the file it read.
+            benchmark_config["points"] = explicit_points.model_dump(
+                mode="json", exclude_none=True
+            )
         else:
             benchmark_config.update(
                 {
