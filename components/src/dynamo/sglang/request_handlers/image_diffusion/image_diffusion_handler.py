@@ -26,6 +26,12 @@ logger = logging.getLogger(__name__)
 MAX_NUM_INFERENCE_STEPS = 50
 DEFAULT_NUM_INFERENCE_STEPS = 50
 DEFAULT_GUIDANCE_SCALE = 7.5
+# Bounds for the OpenAI `n` request field, matching the TRT-LLM image
+# handler (num_images_per_prompt in [1, 10]) and the OpenAI API limit. The
+# engine generates one image per call, so `n` is served as sequential
+# generations; the bound keeps a single request from monopolizing the
+# worker.
+MAX_IMAGES_PER_REQUEST = 10
 
 
 class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
@@ -115,16 +121,30 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
 
             width, height = self._parse_size(req.size)
 
-            images = await self._generate_images(
-                prompt=req.prompt,
-                negative_prompt=nvext.negative_prompt,
-                width=width,
-                height=height,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                seed=nvext.seed,
-                input_reference=req.input_reference,
-            )
+            num_images = req.n
+            if not 1 <= num_images <= MAX_IMAGES_PER_REQUEST:
+                raise ValueError(
+                    f"n must be in [1, {MAX_IMAGES_PER_REQUEST}], " f"got {num_images}"
+                )
+
+            # The engine produces one image per call, so serve OpenAI `n`
+            # semantics as n sequential generations. With an explicit seed use
+            # seed+i: deterministic overall, yet each sample is distinct.
+            # Without a seed, each generation draws its own random seed.
+            images: list[bytes] = []
+            for i in range(num_images):
+                images.extend(
+                    await self._generate_images(
+                        prompt=req.prompt,
+                        negative_prompt=nvext.negative_prompt,
+                        width=width,
+                        height=height,
+                        num_inference_steps=num_inference_steps,
+                        guidance_scale=guidance_scale,
+                        seed=nvext.seed + i if nvext.seed is not None else None,
+                        input_reference=req.input_reference,
+                    )
+                )
 
             context_id = context.id()
             assert context_id is not None

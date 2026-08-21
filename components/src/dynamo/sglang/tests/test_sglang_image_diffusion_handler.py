@@ -443,3 +443,94 @@ class TestImageDiffusionWorkerHandler:
         call_args = handler.generator.generate.call_args
         sampling_params = call_args[1]["sampling_params_kwargs"]
         assert "image_path" not in sampling_params
+
+
+class TestNParameter:
+    """The OpenAI `n` field: n independent images per request."""
+
+    @staticmethod
+    def _request(n=None, seed=42):
+        req = {
+            "prompt": "A red square",
+            "model": "test-model",
+            "size": "256x256",
+            "response_format": "b64_json",
+            "user": "test-user",
+            "nvext": {"num_inference_steps": 10, "seed": seed},
+        }
+        if n is not None:
+            req["n"] = n
+        return req
+
+    @staticmethod
+    def _mock_one_image(handler):
+        test_image = Image.new("RGB", (256, 256), color="red")
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[test_image])
+        )
+
+    @pytest.mark.asyncio
+    async def test_n_returns_n_images(self, handler, mock_context):
+        """n=3 produces three generations and three data entries."""
+        self._mock_one_image(handler)
+
+        results = []
+        async for result in handler.generate(self._request(n=3), mock_context):
+            results.append(result)
+
+        assert len(results) == 1
+        assert len(results[0]["data"]) == 3
+        assert handler.generator.generate.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_n_seeds_are_deterministic_and_distinct(self, handler, mock_context):
+        """With an explicit seed, generation i uses seed+i."""
+        self._mock_one_image(handler)
+
+        async for _ in handler.generate(self._request(n=3, seed=42), mock_context):
+            pass
+
+        seeds = [
+            call.kwargs["sampling_params_kwargs"]["seed"]
+            for call in handler.generator.generate.call_args_list
+        ]
+        assert seeds == [42, 43, 44]
+
+    @pytest.mark.asyncio
+    async def test_n_defaults_to_single_image(self, handler, mock_context):
+        """Omitted n behaves exactly as before: one generation, one image."""
+        self._mock_one_image(handler)
+
+        results = []
+        async for result in handler.generate(self._request(), mock_context):
+            results.append(result)
+
+        assert len(results[0]["data"]) == 1
+        assert handler.generator.generate.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_n_above_max_is_rejected(self, handler, mock_context):
+        """n above MAX_IMAGES_PER_REQUEST is rejected, matching the TRT-LLM
+        image handler's [1, 10] validation (no silent clamping)."""
+        self._mock_one_image(handler)
+
+        results = []
+        async for result in handler.generate(self._request(n=99), mock_context):
+            results.append(result)
+
+        assert results[0]["data"] == []
+        assert "n must be in [1, 10]" in results[0]["error"]
+        assert handler.generator.generate.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_n_below_one_is_an_error(self, handler, mock_context):
+        """n=0 must not silently produce one image."""
+        self._mock_one_image(handler)
+
+        results = []
+        async for result in handler.generate(self._request(n=0), mock_context):
+            results.append(result)
+
+        assert results[0]["data"] == []
+        assert "n must be in [1, 10]" in results[0]["error"]
+        assert handler.generator.generate.call_count == 0
