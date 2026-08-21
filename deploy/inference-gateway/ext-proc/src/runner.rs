@@ -287,11 +287,11 @@ async fn run_inner(
         });
     }
 
-    // Graceful shutdown: on SIGTERM/SIGINT, flip health to NOT_SERVING (the
-    // gateway stops routing new requests to this EPP), let in-flight ext_proc
-    // streams drain for a bounded grace period, then stop accepting and let
-    // the process exit cleanly (destructors stop the peer discovery, ZMQ
-    // listeners, and replica-sync tasks).
+    // Shutdown coordination: on SIGTERM/SIGINT, flip health to NOT_SERVING
+    // (the gateway stops routing new requests to this EPP), allow the endpoint
+    // propagation window to elapse, then stop accepting connections. The
+    // protocol-correct drain deadline and forced close of long-lived HTTP/2
+    // connections are handled by the follow-up connection-lifecycle work.
     let draining = CancellationToken::new();
     let shutdown = CancellationToken::new();
     {
@@ -299,7 +299,7 @@ async fn run_inner(
         let shutdown = shutdown.clone();
         tokio::spawn(async move {
             wait_for_shutdown_signal().await;
-            tracing::info!("Shutdown signal received; draining in-flight requests");
+            tracing::info!("Shutdown signal received; starting endpoint withdrawal");
             // The readiness mirror owns the health transition so it cannot
             // race with a final SERVING update. If initialization has not
             // reached `serve` yet, health is already NOT_SERVING and the
@@ -315,7 +315,7 @@ async fn run_inner(
             );
             tokio::time::sleep(std::time::Duration::from_secs(propagation_secs)).await;
             shutdown.cancel();
-            tracing::info!("EPP graceful shutdown complete");
+            tracing::info!("EPP endpoint propagation complete; stopping accepts");
         });
     }
 
@@ -484,7 +484,7 @@ async fn serve<P: crate::EndpointPicker>(
         let result: Result<()> = loop {
             // Acquire permit before accept() so we backpressure the listener
             // instead of accepting and immediately dropping connections. Stop
-            // accepting once the shutdown grace period has elapsed.
+            // accepting once the endpoint propagation window has elapsed.
             let permit = tokio::select! {
                 _ = shutdown.cancelled() => break Ok(()),
                 permit = conn_semaphore.clone().acquire_owned() => match permit {
