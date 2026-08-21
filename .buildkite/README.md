@@ -34,3 +34,23 @@ Build parameters are supplied as Buildkite build environment variables:
 Publishing is opt-in because registry authentication must use short-lived
 Buildkite OIDC credentials. Do not add static registry credentials to this
 pipeline or repository.
+
+## Staging results
+
+The `nvidia-oss-ci-staging` pilot on August 20, 2026 produced these results:
+
+| Test | Result |
+| --- | --- |
+| [Hosted builder verification](https://buildkite.com/nvidia-oss-ci-staging/dynamo-hosted-remote-builder-poc/builds/2) | Active Buildx driver was `remote` |
+| AMD64 `base` | 50 seconds first build, 6 seconds repeated build |
+| [AMD64 `runtime`](https://buildkite.com/nvidia-oss-ci-staging/dynamo-hosted-remote-builder-poc/builds/4) | 588 seconds first build, 9 seconds repeated build |
+| [Cross-build cache](https://buildkite.com/nvidia-oss-ci-staging/dynamo-hosted-remote-builder-poc/builds/5) | 8 seconds in a separate, identical build |
+| [Multi-architecture `runtime`](https://buildkite.com/nvidia-oss-ci-staging/dynamo-hosted-remote-builder-poc/builds/3) | ARM64 ran under QEMU and failed on unavailable ARM64 build packages |
+| [GitHub Actions baseline](https://github.com/ai-dynamo/dynamo/actions/runs/32443989551/job/96660039875) | 377 seconds for the multi-architecture build-and-push step |
+
+The managed cache is effective, but this configuration is not a production
+replacement. The first AMD64-only runtime build was slower than GitHub's
+multi-architecture build-and-push step, native ARM64 hosted capacity was not
+enabled for the organization, and no short-lived registry or SCCache access
+was configured. Keep the required image pipeline on GitHub Actions unless a
+follow-up pilot passes native ARM64, registry push, and compiler-cache tests.
