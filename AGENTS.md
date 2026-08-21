@@ -43,6 +43,8 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `dynamo-agent-harness` — drive persistent Claude Code, Codex, or OpenCode sessions through Dynamo over ACP
 - `graham-code-review` — strict Rust/systems review in Graham King's style
 - `pr-monitor` — CI health check, failure root-cause, and skip analysis
+- `reviewers` — rank active CODEOWNERS reviewers for a PR or local diff
+- `reviewers-slack` — request and track active PR reviewers from a Slack thread
 - `visual-review` — interactive HTML code-review dashboards with diagrams and annotated diffs
 
 **For deploying and operating Dynamo:**

@@ -1,0 +1,4 @@
+interface:
+  display_name: "PR Reviewers"
+  short_description: "Rank active CODEOWNERS reviewers for a PR"
+  default_prompt: "Use $reviewers to find the best active reviewers for this pull request."
