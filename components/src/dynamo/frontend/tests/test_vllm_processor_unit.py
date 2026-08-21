@@ -1844,6 +1844,21 @@ class _FakePassthroughToolParser(_FakeGrammarToolParser):
         return request
 
 
+class _FakePreAdjustStructuralTagParser(_FakeStructuralTagParser):
+    supports_required_and_named = False
+
+    def __init__(self, tokenizer, tools):
+        del tokenizer, tools
+        super().__init__()
+        self.adjusted = False
+
+    def adjust_request(self, request):
+        assert request.structured_outputs is not None
+        assert request.structured_outputs.structural_tag is not None
+        self.adjusted = True
+        return request
+
+
 class _FakeResponseFormatConsumingToolParser(_FakeAdjustRequestGrammarToolParser):
     def adjust_request(self, request):
         request.response_format = None
@@ -2405,6 +2420,36 @@ class TestToolCallGuidedDecoding:
         )
 
         assert result.guided_decoding == {"grammar": 'root ::= "<tool_call>"'}
+        assert result.uses_dynamo_json_tool_call_fallback is False
+
+    @pytest.mark.asyncio
+    async def test_structural_tag_is_attached_before_parser_adjust_request(
+        self, tokenizer
+    ):
+        result = await prepost_module.preprocess_chat_request(
+            {
+                **TOOL_REQUEST,
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_weather"},
+                },
+            },
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1]})
+                )
+            ),
+            tool_parser_class=_FakePreAdjustStructuralTagParser,
+            structural_tag_mode="on",
+            structural_tag_scope="auto",
+            structural_tag_schema="strict",
+        )
+
+        assert result.tool_parser.adjusted is True
+        assert result.guided_decoding == {
+            "structural_tag": {"format": {"strict": [True]}}
+        }
         assert result.uses_dynamo_json_tool_call_fallback is False
 
     @pytest.mark.parametrize(

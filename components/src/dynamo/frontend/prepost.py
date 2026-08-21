@@ -26,7 +26,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.reasoning import ReasoningParser
 from vllm.renderers import ChatParams, merge_kwargs
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.utils import get_json_schema_from_tools
@@ -458,6 +458,9 @@ def _prepare_request(
     enable_auto_tool_choice: bool = False,
     default_chat_template_kwargs: dict[str, Any] | None = None,
     default_thinking_mode: str | None = None,
+    structural_tag_mode: str = "off",
+    structural_tag_scope: str = "auto",
+    structural_tag_schema: str = "auto",
     validated_request: ChatCompletionRequest | None = None,
     guidance_snapshots: dict[str, Any] | None = None,
 ) -> tuple[ChatCompletionRequest, ToolParser | None, dict[str, Any], Any, ChatParams]:
@@ -488,10 +491,32 @@ def _prepare_request(
     # client did not supply an explicit `tools` list, so we activate the parser
     # whenever the tool_parser_class is available.
     has_tools = bool(request_for_sampling.tools)
-    if tool_parser_class and (has_tools or enable_auto_tool_choice):
-        if request_for_sampling.tool_choice != "none":
-            tool_parser = tool_parser_class(tokenizer, request_for_sampling.tools)
-            request_for_sampling = tool_parser.adjust_request(request_for_sampling)
+    if (
+        tool_parser_class
+        and (has_tools or enable_auto_tool_choice)
+        and request_for_sampling.tool_choice != "none"
+    ):
+        tool_parser = tool_parser_class(tokenizer, request_for_sampling.tools)
+        # Kimi K3's raw parser rejects a named tool choice unless its XTML
+        # structural tag is already attached. Standard vLLM satisfies that
+        # contract in DelegatingParser before invoking adjust_request().
+        # Dynamo owns the equivalent orchestration here, so mirror that
+        # ordering instead of waiting until guided decoding is assembled
+        # below. Other parsers are unchanged when they return no tag.
+        pre_adjust_guidance = build_tool_call_guided_decoding(
+            request_for_sampling,
+            tool_parser,
+            structural_tag_mode=structural_tag_mode,
+            structural_tag_scope=structural_tag_scope,
+            structural_tag_schema=structural_tag_schema,
+        )
+        if pre_adjust_guidance is not None and set(pre_adjust_guidance) == {
+            "structural_tag"
+        }:
+            request_for_sampling.structured_outputs = StructuredOutputsParams(
+                structural_tag=json.dumps(pre_adjust_guidance["structural_tag"])
+            )
+        request_for_sampling = tool_parser.adjust_request(request_for_sampling)
 
     # Strip tools from the template when tool_choice=none so the model doesn't
     # see them and generate raw XML tool calls in its response.
@@ -656,6 +681,9 @@ async def preprocess_chat_request(
         enable_auto_tool_choice=enable_auto_tool_choice,
         default_chat_template_kwargs=default_chat_template_kwargs,
         default_thinking_mode=default_thinking_mode,
+        structural_tag_mode=structural_tag_mode,
+        structural_tag_scope=structural_tag_scope,
+        structural_tag_schema=structural_tag_schema,
         validated_request=validated_request,
         guidance_snapshots=guidance_snapshots,
     )
