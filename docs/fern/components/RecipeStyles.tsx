@@ -2140,22 +2140,111 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 }
 
 .dynamo-target-picker-summary span {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
+    /* Block, not flex-column: a flex container promotes EVERY child to its own
+       row, so a value containing inline <code> ("FLASHINFER_MLA, TRTLLM_RAGGED
+       MLA prefill") breaks across four lines with the comma stranded on one of
+       them. Block keeps the value's inline run flowing; the label below is what
+       stacks it above the value. */
+    display: block;
     /* the value (text node after the label) — prominent, dark */
     font-size: 13.5px;
-    line-height: 1.35;
+    line-height: 1.45;
     color: var(--pst-color-text-base);
 }
 
 .dynamo-target-picker-summary b {
-    /* the label — small, uppercase, muted, sits above the value */
+    /* the label — small, uppercase, muted, sits above the value.
+       Block + margin replaces the old flex gap property, which no longer applies now
+       that the cell is a block container. */
+    display: block;
+    margin-bottom: 3px;
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: var(--grayscale-a9, #777);
+}
+
+/* Inline code inside a summary value must not introduce line breaks: the value
+   is a single inline run and wraps as prose. */
+.dynamo-target-picker-summary span code {
+    white-space: nowrap;
+}
+
+/* A hidden conditional option must also leave the tab order: the radio itself is
+   only visually hidden (position:absolute;opacity:0), so without this a keyboard
+   user could Tab onto an option whose label is not shown and land the page on a
+   combination that ships no recipe. :has(+ label) keys the input off the very
+   label the rules below hide.                                                   */
+.dynamo-target-picker input[type="radio"]:has(+ label[data-needs-sku]),
+.dynamo-target-picker input[type="radio"]:has(+ label[data-needs-usecase]),
+.dynamo-target-picker input[type="radio"]:has(+ label[data-needs-engine]),
+.dynamo-target-picker input[type="radio"]:has(+ label[data-needs-variant]) {
+    /* re-enabled below whenever its label is actually visible */
+}
+.dynamo-target-picker label[data-needs-sku],
+.dynamo-target-picker label[data-needs-usecase],
+.dynamo-target-picker label[data-needs-engine],
+.dynamo-target-picker label[data-needs-variant] {
+    /* marker class only; visibility is decided by the body:has() rules below */
+}
+
+/* ---- Conditional picker options -------------------------------------------
+   A recipe may offer a target only for some selections (e.g. Nemotron-3-Ultra
+   ships a disaggregated lane on B200 agentic only). Tag that option's label
+   with the selections it requires:
+
+     <label htmlFor="recipe-variant-disagg"
+            data-needs-sku="b200" data-needs-usecase="agentic">Disaggregated</label>
+
+   The label then hides whenever the current selection does not satisfy it, so
+   the picker never offers a combination that has no content behind it. A label
+   with no data-needs-* attribute is always shown, which is every existing
+   option, so this is additive. Same :has() mechanism as the content rules
+   below -- no JavaScript.                                                     */
+body:has(input[name="recipe-sku"][value="b200"]:checked) .dynamo-target-picker label[data-needs-sku]:not([data-needs-sku~="b200"]),
+body:has(input[name="recipe-sku"][value="h200"]:checked) .dynamo-target-picker label[data-needs-sku]:not([data-needs-sku~="h200"]),
+body:has(input[name="recipe-sku"][value="h100"]:checked) .dynamo-target-picker label[data-needs-sku]:not([data-needs-sku~="h100"]),
+body:has(input[name="recipe-sku"][value="gb200"]:checked) .dynamo-target-picker label[data-needs-sku]:not([data-needs-sku~="gb200"]),
+body:has(input[name="recipe-sku"][value="gb300"]:checked) .dynamo-target-picker label[data-needs-sku]:not([data-needs-sku~="gb300"]),
+body:has(input[name="recipe-sku"][value="hopper"]:checked) .dynamo-target-picker label[data-needs-sku]:not([data-needs-sku~="hopper"]),
+body:has(input[name="recipe-sku"][value="blackwell"]:checked) .dynamo-target-picker label[data-needs-sku]:not([data-needs-sku~="blackwell"]),
+body:has(input[name="recipe-usecase"][value="chat"]:checked) .dynamo-target-picker label[data-needs-usecase]:not([data-needs-usecase~="chat"]),
+body:has(input[name="recipe-usecase"][value="agentic"]:checked) .dynamo-target-picker label[data-needs-usecase]:not([data-needs-usecase~="agentic"]),
+body:has(input[name="recipe-usecase"][value="static"]:checked) .dynamo-target-picker label[data-needs-usecase]:not([data-needs-usecase~="static"]),
+body:has(input[name="recipe-usecase"][value="multimodal"]:checked) .dynamo-target-picker label[data-needs-usecase]:not([data-needs-usecase~="multimodal"]),
+body:has(input[name="recipe-engine"][value="vllm"]:checked) .dynamo-target-picker label[data-needs-engine]:not([data-needs-engine~="vllm"]),
+body:has(input[name="recipe-engine"][value="sglang"]:checked) .dynamo-target-picker label[data-needs-engine]:not([data-needs-engine~="sglang"]),
+body:has(input[name="recipe-engine"][value="trtllm"]:checked) .dynamo-target-picker label[data-needs-engine]:not([data-needs-engine~="trtllm"]),
+body:has(input[name="recipe-variant"][value="agg"]:checked) .dynamo-target-picker label[data-needs-variant]:not([data-needs-variant~="agg"]),
+body:has(input[name="recipe-variant"][value="disagg"]:checked) .dynamo-target-picker label[data-needs-variant]:not([data-needs-variant~="disagg"]),
+body:has(input[name="recipe-variant"][value="disagg-single-node"]:checked) .dynamo-target-picker label[data-needs-variant]:not([data-needs-variant~="disagg-single-node"]),
+body:has(input[name="recipe-variant"][value="disagg-multi-node"]:checked) .dynamo-target-picker label[data-needs-variant]:not([data-needs-variant~="disagg-multi-node"]),
+body:has(input[name="recipe-variant"][value="efa"]:checked) .dynamo-target-picker label[data-needs-variant]:not([data-needs-variant~="efa"]),
+body:has(input[name="recipe-variant"][value="standard"]:checked) .dynamo-target-picker label[data-needs-variant]:not([data-needs-variant~="standard"]),
+body:has(input[name="recipe-variant"][value="kvbm"]:checked) .dynamo-target-picker label[data-needs-variant]:not([data-needs-variant~="kvbm"]) {
+    display: none;
+}
+
+
+/* Companion: when the label is hidden, drop its radio from the tab order too. */
+body:has(input[name="recipe-sku"][value="b200"]:checked) .dynamo-target-picker input:has(+ label[data-needs-sku]:not([data-needs-sku~="b200"])),
+body:has(input[name="recipe-sku"][value="h200"]:checked) .dynamo-target-picker input:has(+ label[data-needs-sku]:not([data-needs-sku~="h200"])),
+body:has(input[name="recipe-sku"][value="h100"]:checked) .dynamo-target-picker input:has(+ label[data-needs-sku]:not([data-needs-sku~="h100"])),
+body:has(input[name="recipe-sku"][value="gb200"]:checked) .dynamo-target-picker input:has(+ label[data-needs-sku]:not([data-needs-sku~="gb200"])),
+body:has(input[name="recipe-sku"][value="gb300"]:checked) .dynamo-target-picker input:has(+ label[data-needs-sku]:not([data-needs-sku~="gb300"])),
+body:has(input[name="recipe-sku"][value="hopper"]:checked) .dynamo-target-picker input:has(+ label[data-needs-sku]:not([data-needs-sku~="hopper"])),
+body:has(input[name="recipe-sku"][value="blackwell"]:checked) .dynamo-target-picker input:has(+ label[data-needs-sku]:not([data-needs-sku~="blackwell"])),
+body:has(input[name="recipe-usecase"][value="chat"]:checked) .dynamo-target-picker input:has(+ label[data-needs-usecase]:not([data-needs-usecase~="chat"])),
+body:has(input[name="recipe-usecase"][value="agentic"]:checked) .dynamo-target-picker input:has(+ label[data-needs-usecase]:not([data-needs-usecase~="agentic"])),
+body:has(input[name="recipe-usecase"][value="static"]:checked) .dynamo-target-picker input:has(+ label[data-needs-usecase]:not([data-needs-usecase~="static"])),
+body:has(input[name="recipe-usecase"][value="multimodal"]:checked) .dynamo-target-picker input:has(+ label[data-needs-usecase]:not([data-needs-usecase~="multimodal"])),
+body:has(input[name="recipe-engine"][value="vllm"]:checked) .dynamo-target-picker input:has(+ label[data-needs-engine]:not([data-needs-engine~="vllm"])),
+body:has(input[name="recipe-engine"][value="sglang"]:checked) .dynamo-target-picker input:has(+ label[data-needs-engine]:not([data-needs-engine~="sglang"])),
+body:has(input[name="recipe-engine"][value="trtllm"]:checked) .dynamo-target-picker input:has(+ label[data-needs-engine]:not([data-needs-engine~="trtllm"])),
+body:has(input[name="recipe-variant"][value="agg"]:checked) .dynamo-target-picker input:has(+ label[data-needs-variant]:not([data-needs-variant~="agg"])),
+body:has(input[name="recipe-variant"][value="disagg"]:checked) .dynamo-target-picker input:has(+ label[data-needs-variant]:not([data-needs-variant~="disagg"])) {
+    display: none;
 }
 
 /* Variant visibility: hide blocks that do not match the checked sku/usecase */
@@ -2165,7 +2254,9 @@ body:has(input[name="recipe-sku"][value="h100"]:checked) [data-sku]:not([data-sk
 body:has(input[name="recipe-sku"][value="gb200"]:checked) [data-sku]:not([data-sku~="gb200"]),
 body:has(input[name="recipe-sku"][value="gb300"]:checked) [data-sku]:not([data-sku~="gb300"]),
 body:has(input[name="recipe-usecase"][value="chat"]:checked) [data-usecase]:not([data-usecase~="chat"]),
-body:has(input[name="recipe-usecase"][value="agentic"]:checked) [data-usecase]:not([data-usecase~="agentic"]) {
+body:has(input[name="recipe-usecase"][value="agentic"]:checked) [data-usecase]:not([data-usecase~="agentic"]),
+body:has(input[name="recipe-usecase"][value="static"]:checked) [data-usecase]:not([data-usecase~="static"]),
+body:has(input[name="recipe-usecase"][value="multimodal"]:checked) [data-usecase]:not([data-usecase~="multimodal"]) {
     display: none;
 }
 

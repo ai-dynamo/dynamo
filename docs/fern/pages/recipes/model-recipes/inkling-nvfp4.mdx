@@ -9,23 +9,68 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Day-0 aggregated SGLang deployment for `thinkingmachines/Inkling-NVFP4` — the NVFP4-quantized checkpoint of Thinking Machines Lab's first open-weights model, a Mixture-of-Experts that reasons natively over text, image, and audio input with controllable reasoning effort. One TP8 worker on 8x B200 with EAGLE speculative decoding, FA4 attention, and the Inkling reasoning and tool-call parsers wired end to end.
+Day-0 aggregated SGLang deployment for `thinkingmachines/Inkling-NVFP4` — the NVFP4-quantized checkpoint of Thinking Machines Lab's first open-weights model, a Mixture-of-Experts that reasons natively over text, image, and audio input with controllable reasoning effort. One TP8 worker on 8x B200 with EAGLE speculative decoding, FA4 attention, and the Inkling reasoning and tool-call parsers wired end to end. Every row of the picker below carries a single option, because this recipe ships exactly one target — SGLang, aggregated, on 8x B200, for the multimodal workload.
 
-<div className="dynamo-target-picker static">
-<p className="dynamo-target-picker-title">Deployment target</p>
-<div className="dynamo-target-picker-summary">
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">GPU</span>
+<input type="radio" id="recipe-sku-b200" name="recipe-sku" value="b200" defaultChecked />
+<label htmlFor="recipe-sku-b200">B200 <span className="dynamo-target-picker-hint">8x, one node</span></label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Workload</span>
+<input type="radio" id="recipe-usecase-multimodal" name="recipe-usecase" value="multimodal" defaultChecked />
+<label htmlFor="recipe-usecase-multimodal">Multimodal</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Backend</span>
+<input type="radio" id="recipe-engine-sglang" name="recipe-engine" value="sglang" defaultChecked />
+<label htmlFor="recipe-engine-sglang">SGLang</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Topology</span>
+<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
+<label htmlFor="recipe-variant-agg">Aggregated</label>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="b200" data-engine="sglang" data-usecase="multimodal" data-variant="agg">
 <span><b>Checkpoint</b> thinkingmachines/Inkling-NVFP4 (~592 GB)</span>
-<span><b>Precision</b> NVFP4 (modelopt_fp4)</span>
+<span><b>Precision</b> NVFP4 (`modelopt_fp4`)</span>
 <span><b>GPUs</b> 8x B200, one TP8 worker</span>
 <span><b>Techniques</b> Aggregated serving, EAGLE speculative decoding, FA4 attention, Mamba radix cache</span>
 <span><b>Modalities</b> Text + image + audio input, text output</span>
+<span><b>GPU (per worker)</b> 8x B200</span>
+<span><b>Mode</b> aggregated</span>
+<span><b>Framework</b> SGLang (`sglang-inkling` custom build)</span>
+<span><b>Parallelism</b> TP8</span>
+<span><b>Attention backend</b> FA4</span>
+<span><b>FP4 GEMM backend</b> `FLASHINFER_TRTLLM`</span>
+<span><b>MoE runner backend</b> `FLASHINFER_TRTLLM_ROUTED`</span>
+<span><b>AllReduce backend</b> Torch symmetric memory (`--enable-torch-symm-mem`)</span>
+<span><b>Mamba radix cache</b> `extra_buffer` strategy</span>
+<span><b>Speculative decoding</b> EAGLE multi-layer (8 steps, topk 1, 9 draft tokens, rejection sampling)</span>
 </div>
 </div>
+
+## Configurations
+
+Dynamo + SGLang deployment profile, as set in `sglang/agg-b200/deploy.yaml`:
+
+- EAGLE speculative decoding is enabled by default in the deploy manifest; remove the `--speculative-*` flags to run without it.
+- The Mamba radix cache (`extra_buffer` strategy) and the FlashInfer TRT-LLM GEMM/MoE backends are part of the validated configuration — change them only deliberately.
+- This is a Day-0 recipe on a dedicated dev runtime image (`nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1`, a custom SGLang build carrying the Inkling model support); it is functional but not yet promoted to a release runtime image, and no benchmark results are published yet.
+
+## Supported features
+
+- Inkling accepts text, image, and audio input in a single OpenAI-compatible API.
+- Reasoning and tool calling use the model's dedicated parsers, wired in both the frontend and the worker (`--reasoning-parser inkling --tool-call-parser inkling`).
+- Audio input: the model card specifies WAV sampled at 16 kHz, ideally under 20 minutes. The runtime image ships without royalty-bearing media codecs — AAC/`.m4a` decode is not included; other common formats (WAV, FLAC, OGG/Opus, MP3) decode via `libsndfile`. Image input is unaffected.
+- Video input is not supported in this recipe: the model card notes video handling exists for downstream fine-tuning but is unevaluated out of the box.
 
 ## Prerequisites
 
 - A Kubernetes cluster with the Dynamo platform installed and **8x B200** available on one node — see the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
-- An image pull secret with access to the runtime image registry.
+- An image pull secret for `nvcr.io` — the deploy manifest pulls the dev runtime image `nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1`.
 - A Hugging Face token (the model is public, but a token avoids rate limits).
 
 Create the namespace and secrets:
@@ -45,20 +90,31 @@ kubectl create secret generic hf-token-secret \
   -n ${NAMESPACE}
 ```
 
+## Quick Start
+
+### 1. Create Storage
+
 <Warning>
-Update `storageClassName` in `model-cache/model-cache.yaml` to match your cluster (`kubectl get storageclass`) before applying. The checkpoint is ~592 GB — the download job can take a while. On clusters that already provide a shared RWX PVC, skip the cache step and replace the `model-cache` claim name in the manifests with the shared PVC name.
+Update `storageClassName` in `model-cache/model-cache.yaml` to a ReadWriteMany storage class on your cluster (`kubectl get storageclass`) before applying. The checkpoint is ~592 GB — the download job can take a while. On clusters that already provide a shared RWX PVC (for example `shared-model-cache` on the Dynamo dev clusters), skip the cache step and replace the `model-cache` claim name in three places: `model-cache/model-download.yaml` (`.spec.template.spec.volumes[0].persistentVolumeClaim.claimName`) and `sglang/agg-b200/deploy.yaml` in both the Frontend and the decode component volumes.
 </Warning>
 
-## Deploy
-
-Prepare the model cache and download the checkpoint:
+Prepare the model cache:
 
 ```bash
 # Update storageClassName in model-cache.yaml first!
 kubectl apply -f recipes/inkling/model-cache/model-cache.yaml -n ${NAMESPACE}
+```
+
+### 2. Download the Model
+
+Download the checkpoint:
+
+```bash
 kubectl apply -f recipes/inkling/model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/inkling-model-download -n ${NAMESPACE} --timeout=7200s
 ```
+
+### 3. Deploy the DynamoGraphDeployment
 
 Then deploy:
 
@@ -66,15 +122,15 @@ Then deploy:
 kubectl apply -f recipes/inkling/sglang/agg-b200/deploy.yaml -n ${NAMESPACE}
 ```
 
-## Smoke Test
+### 4. Smoke Test
 
-Inkling accepts text, image, and audio input in a single OpenAI-compatible API. First, forward the frontend port:
+First, forward the frontend port:
 
 ```bash
 kubectl port-forward svc/tml-inkling-sglang-agg-frontend 8000:8000 -n ${NAMESPACE} &
 ```
 
-### Text
+#### Text
 
 ```bash
 curl -s http://localhost:8000/v1/chat/completions \
@@ -82,11 +138,11 @@ curl -s http://localhost:8000/v1/chat/completions \
   -d '{
     "model": "thinkingmachines/Inkling-NVFP4",
     "messages": [{"role": "user", "content": "Hello, who are you?"}],
-    "max_tokens": 64
+    "max_tokens": 128
   }'
 ```
 
-### Image
+#### Image
 
 Images ride as an `image_url` content part — a public HTTP(S) URL (the worker pod fetches it, so it needs egress) or a base64 `data:` URI:
 
@@ -98,15 +154,36 @@ curl -s http://localhost:8000/v1/chat/completions \
     "messages": [{
       "role": "user",
       "content": [
-        {"type": "text", "text": "Describe this image, including its text and visual elements."},
-        {"type": "image_url", "image_url": {"url": "https://raw.githubusercontent.com/ai-dynamo/dynamo/main/docs/assets/img/frontpage-banner.png"}}
+        {"type": "image_url", "image_url": {"url": "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/inpaint.png"}},
+        {"type": "text", "text": "Describe what is in this image."}
       ]
     }],
-    "max_tokens": 256
+    "max_tokens": 512
   }'
 ```
 
-### Audio
+#### Multiple Images
+
+Send several `image_url` content parts in the same user message to exercise multi-image input:
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "thinkingmachines/Inkling-NVFP4",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "image_url", "image_url": {"url": "https://huggingface.co/datasets/Xenova/transformers.js-docs/resolve/main/cats.jpg"}},
+        {"type": "image_url", "image_url": {"url": "https://huggingface.co/datasets/Xenova/transformers.js-docs/resolve/main/corgi.jpg"}},
+        {"type": "text", "text": "Describe each image separately. Label them Image 1 and Image 2."}
+      ]
+    }],
+    "max_tokens": 512
+  }'
+```
+
+#### Audio
 
 Audio rides as an `audio_url` content part, same URL-or-data-URI rule. Inkling expects 16 kHz audio; WAV is ideal, and MP3/FLAC/OGG also decode in this image. This sample is 16 kHz mono WAV, matching the model card spec:
 
@@ -126,9 +203,38 @@ curl -s http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-For air-gapped clusters, send local files as `data:` URIs instead. Encode to a single line first (`base64` wraps output by default, which breaks the JSON payload): `AUDIO_B64=$(base64 < sample.wav | tr -d '\n')`, then `{"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,'"${AUDIO_B64}"'"}}`. Multiple media parts can ride in one message as the context budget allows.
+#### Multiple Audio Clips
 
-### Reasoning effort
+Send several `audio_url` content parts in the same user message to exercise multi-audio input:
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "thinkingmachines/Inkling-NVFP4",
+    "messages": [{
+      "role": "user",
+      "content": [
+        {"type": "audio_url", "audio_url": {"url": "https://huggingface.co/datasets/Xenova/transformers.js-docs/resolve/main/mlk.wav"}},
+        {"type": "audio_url", "audio_url": {"url": "https://huggingface.co/datasets/Xenova/transformers.js-docs/resolve/main/librispeech_asr_demo_validation_0.wav"}},
+        {"type": "text", "text": "Transcribe each audio clip separately. Label them Audio 1 and Audio 2."}
+      ]
+    }],
+    "max_tokens": 512
+  }'
+```
+
+For air-gapped clusters, send local media files as `data:` URIs instead:
+
+```json
+{"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,<BASE64_WAV>"}}
+```
+
+Encode to a single line first (`base64` wraps output by default, which breaks the JSON payload): `AUDIO_B64=$(base64 < sample.wav | tr -d '\n')`, then interpolate that value into the `url` field.
+
+Mix multiple media parts in one message as the context budget allows.
+
+#### Reasoning Effort
 
 Inkling's controllable thinking is exposed per request: pass `reasoning_effort` as a named level (`none` / `minimal` / `low` / `medium` / `high` / `max`) or a float in `[0.0, 0.99]`; omitted requests default to `0.9` (high). These are the values in this checkpoint's chat template — `xhigh` from the launch blog is not in its map and is rejected:
 
@@ -143,15 +249,36 @@ curl -s http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-## Notes
+## Cleanup
 
-- This is a Day-0 recipe on a dedicated dev runtime image (`sglang-runtime:1.4.0-inkling-dev.1`, a custom SGLang build carrying the Inkling model support); it is functional but not yet promoted to a release runtime image, and no benchmark results are published yet.
-- Audio input: the model card specifies WAV sampled at 16 kHz, ideally under 20 minutes. The runtime image ships without royalty-bearing media codecs — AAC/`.m4a` decode is not included; other common formats (WAV, FLAC, OGG/Opus, MP3) decode via `libsndfile`. Image input is unaffected.
-- Video input is not supported in this recipe: the model card notes video handling exists for downstream fine-tuning but is unevaluated out of the box.
-- Reasoning and tool calling use the model's dedicated parsers, wired in both the frontend and the worker (`--reasoning-parser inkling --tool-call-parser inkling`).
-- EAGLE speculative decoding is enabled by default in the deploy manifest (multi-layer, 8 steps, rejection sampling); remove the `--speculative-*` flags to run without it.
-- The manifest sets `DYN_FORWARDPASS_METRIC_PORT` to an empty value — a deliberate workaround that keeps forward-pass metrics off, because this rc image crashes on EAGLE batches when they are enabled. Keep it (and don't set that variable) until a fixed image ships.
-- The worker enables the Mamba radix cache (`extra_buffer` strategy) and FlashInfer TRT-LLM GEMM/MoE backends; these flags are part of the validated configuration — change them only deliberately.
+Tear down the deployment and free cluster resources:
+
+```bash
+# Stop the port-forward if it is still running
+pkill -f "kubectl port-forward svc/tml-inkling-sglang-agg-frontend" 2>/dev/null || true
+
+# Delete the deployment (stops all pods)
+kubectl delete dynamographdeployment tml-inkling-sglang-agg -n ${NAMESPACE} 2>/dev/null || true
+
+# Delete the model-download job (idempotent — already finished or not yet run)
+kubectl delete job inkling-model-download -n ${NAMESPACE} 2>/dev/null || true
+
+# Delete secrets (optional — omit if you reuse them across deployments)
+kubectl delete secret nvcr-imagepullsecret hf-token-secret -n ${NAMESPACE} 2>/dev/null || true
+
+# Delete the PVC — WARNING: this destroys the downloaded 592 GB model.
+# Skip this step if you plan to redeploy or share the PVC with other workloads.
+# kubectl delete pvc model-cache -n ${NAMESPACE}
+
+# Delete the namespace — WARNING: this destroys everything in it.
+# kubectl delete namespace ${NAMESPACE}
+```
+
+For a one-shot cleanup run, the recipe also ships [`cleanup.sh`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/inkling/cleanup.sh).
+
+## Known Issues
+
+- Known issue: the manifest overrides `DYN_FORWARDPASS_METRIC_PORT` to an empty value. This override is required for MTP/EAGLE speculative decoding with SGLang, because the forward-pass metrics reporter — auto-enabled by the operator-injected port — crashes the scheduler on speculative batches (`batch.seq_lens_cpu` is `None`). Only per-forward-pass telemetry is lost. Remove the override once the container image carries a fix.
 
 ## Source
 

@@ -9,11 +9,32 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-This recipe deploys DeepSeek V3.2 NVFP4 disaggregated across 32 GB200 GPUs — 2x prefill + 2x decode workers (DEP8) with KV-aware routing and WideEP — for long-context coding traces with heavy prefix reuse (~39.2K avg ISL, 44% KV block hit rate). The aggregated round-robin configuration is the benchmark control and lives on the related Feature Benchmark page.
+This recipe deploys DeepSeek V3.2 NVFP4 disaggregated across 32 GB200 GPUs — 2x prefill + 2x decode workers (DEP8) with KV-aware routing and WideEP — for long-context coding traces with heavy prefix reuse (~39.2K avg ISL, 44% KV block hit rate). The aggregated round-robin configuration is the benchmark control and lives on the related Feature Benchmark page. This page ships one validated target — GB200, agentic trace replay, TensorRT-LLM, disaggregated — so every picker row below carries a single option.
 
-<div className="dynamo-target-picker static">
+<div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Deployment target</p>
-<div className="dynamo-target-picker-summary">
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">GPU</span>
+<input type="radio" id="recipe-sku-gb200" name="recipe-sku" value="gb200" defaultChecked />
+<label htmlFor="recipe-sku-gb200">GB200</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Workload</span>
+<input type="radio" id="recipe-usecase-agentic" name="recipe-usecase" value="agentic" defaultChecked />
+<label htmlFor="recipe-usecase-agentic">Agentic trace replay</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Backend</span>
+<input type="radio" id="recipe-engine-trtllm" name="recipe-engine" value="trtllm" defaultChecked />
+<label htmlFor="recipe-engine-trtllm">TensorRT-LLM</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Topology</span>
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" defaultChecked />
+<label htmlFor="recipe-variant-disagg">Disaggregated</label>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="gb200" data-engine="trtllm" data-usecase="agentic" data-variant="disagg">
+<span><b>Target</b> disagg-kv-router (GB200 / agentic trace replay / TensorRT-LLM / disaggregated)</span>
 <span><b>Checkpoint</b> nvidia/DeepSeek-V3.2-NVFP4</span>
 <span><b>GPUs</b> 32x GB200 across 8 nodes (NVL72, MNNVL)</span>
 <span><b>Techniques</b> Disagg, KV-aware routing, WideEP</span>
@@ -22,56 +43,31 @@ This recipe deploys DeepSeek V3.2 NVFP4 disaggregated across 32 GB200 GPUs — 2
 </div>
 </div>
 
-## Prerequisites
+## Results
 
-- A Kubernetes cluster with the Dynamo platform (operator) installed and **32x GB200 across 8 nodes (NVL72, MNNVL-connected)** available.
-- A Hugging Face token with access to `nvidia/DeepSeek-V3.2-NVFP4`.
-- The `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.2.1` image (already pinned in `deploy.yaml`).
+The reference run is published as a video rather than a numeric table:
 
-Create the namespace and token secret:
+<video controls width="100%">
+  <source src="https://github.com/user-attachments/assets/fcdb703c-7c1a-4109-a7ca-54196fcef885" type="video/mp4" />
+</video>
 
-```bash
-export NAMESPACE=your-namespace
-kubectl create namespace ${NAMESPACE}
-kubectl create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN="your-token" \
-  -n ${NAMESPACE}
-```
+## Experiment Overview
 
-Multinode deployments on MNNVL-connected GB200 clusters typically require a ComputeDomain in your namespace so the DRA scheduler co-locates worker pods on MNNVL-connected nodes — otherwise internode GPU peer memory access fails:
+Two deployment modes are compared on **32x GB200 GPUs across 8 nodes**:
 
-```bash
-kubectl apply -f recipes/deepseek-v32-fp4/model-cache/compute-domain.yaml -n ${NAMESPACE}
-```
+| Mode | Routing | Configuration |
+| --- | --- | --- |
+| **Aggregated** | Round-robin | 4x DEP8 workers |
+| **Disaggregated** | KV-aware | 2x prefill + 2x decode w/ WideEP (DEP8) |
 
-If you rename the ComputeDomain or its `resourceClaimTemplate` (defaults: `your-compute-domain` / `your-compute-domain-channel`), apply the same names in the deploy YAMLs under `extraPodSpec.resourceClaims` and `mainContainer.resources.claims`.
+- The aggregated round-robin configuration (`trtllm/agg-round-robin/`) is the benchmark control arm — 4x DEP8 workers with round-robin routing on the same 32x GB200 across 8 nodes. It appears on the Feature Benchmark page, not as a recipe target here.
+- Decode workers run the WIDEEP MoE backend with `moe_expert_parallel_size: 8` and FP8 KV cache; prefill enables chunked prefill and KV block reuse (`tokens_per_block: 64`, matching `--kv-block-size 64`).
+- The trace tops out at 109,459 input tokens; both engine configs set `max_seq_len: 121000` to accommodate it.
+- Related feature benchmark: [DeepSeek V3.2 WideEP routing A/B](../feature-benchmarks/deepseek-v3-2-wideep-routing.mdx)
 
-<Warning>
-Edit cluster-specific values before applying: `storageClassName` in `model-cache/model-cache.yaml` (run kubectl get storageclass), your namespace (perf.yaml hardcodes `namespace: your-namespace`), and the ComputeDomain claim names.
-</Warning>
+## Dataset: Mooncake-based Synthetic Coding Trace
 
-## Deploy
-
-Create storage, download NVIDIA's official NVFP4 checkpoint, copy the trace into the PVC, then deploy:
-
-```bash
-# 1. Create the model-cache PVC (RWX, 400Gi).
-kubectl apply -f recipes/deepseek-v32-fp4/model-cache/model-cache.yaml -n ${NAMESPACE}
-
-# 2. Download nvidia/DeepSeek-V3.2-NVFP4 into the PVC.
-kubectl apply -f recipes/deepseek-v32-fp4/model-cache/model-download.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=600s
-
-# 3. Copy the synthesized trace file into the PVC.
-kubectl cp <local_trace.jsonl> ${NAMESPACE}/<helper-pod>:/model-cache/traces/
-
-# 4. Deploy: KV-routed frontend + 2x prefill + 2x decode (WideEP) workers.
-kubectl apply -f recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/deploy.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=ready pod -l nvidia.com/dynamo-graph-deployment-name=disagg-kv-dsv32-nvfp4 \
-  -n ${NAMESPACE} --timeout=1200s
-```
-
-To synthesize the trace, run Dynamo's [prefix data generator](https://github.com/ai-dynamo/dynamo/tree/main/benchmarks/prefix_data_generator) on the Mooncake `conversation_trace.jsonl`:
+The trace simulates a coding workload. To synthesize it, run Dynamo's [prefix data generator](https://github.com/ai-dynamo/dynamo/tree/main/benchmarks/prefix_data_generator) on the [Mooncake](https://github.com/kvcache-ai/Mooncake) FAST25 [`conversation_trace.jsonl`](https://github.com/kvcache-ai/Mooncake/blob/main/FAST25-release/traces/conversation_trace.jsonl), which increases the input sequence length and prefix reuse rate of the original conversation trace:
 
 ```bash
 datagen synthesize \
@@ -83,9 +79,83 @@ datagen synthesize \
 # emits conversation_trace_synth_16.00x1+10.00_speedup1_maxisl110000.jsonl
 ```
 
-## Smoke Test
+The resulting trace is long-context and heavily reuse-biased:
 
-The Dynamo operator creates the `disagg-kv-dsv32-nvfp4-frontend` service for this deployment.
+| Statistic | Value |
+| --- | ---: |
+| Total requests | 10,000 |
+| Unique / total hash blocks | 430,838 / 770,934 |
+| ISL — average / maximum / minimum | 39,186 / 109,459 / 12,801 tokens |
+| OSL — average / maximum / minimum | 344 / 2,000 / 1 tokens |
+| KV hit rate — block-level / token-level | 44.1% / 44.0% |
+| Avg context (shared) | 22,400 tokens/req |
+| Avg unique prompt | 16,786 tokens/req |
+| Shared prefix ratio | 57.2% |
+
+The ~44% KV cache hit rate is computed from `hash_id` overlap across requests, and roughly 57% of input tokens come from shared context prefixes.
+
+## Prerequisites
+
+- A Kubernetes cluster with the Dynamo platform (operator) installed and **32x GB200 across 8 nodes (NVL72, MNNVL-connected)** available. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
+- A Hugging Face token with access to [`nvidia/DeepSeek-V3.2-NVFP4`](https://huggingface.co/nvidia/DeepSeek-V3.2-NVFP4), NVIDIA's official NVFP4-quantized checkpoint.
+- The `nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0` image (already pinned in `deploy.yaml`).
+
+Create the namespace and token secret:
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" \
+  -n ${NAMESPACE}
+```
+
+## Quick Start
+
+Create storage, download NVIDIA's official NVFP4 checkpoint, copy the trace into the PVC, then deploy:
+
+### 1. Create Storage
+
+<Warning>
+Edit cluster-specific values before applying: `storageClassName` in `model-cache/model-cache.yaml` (run kubectl get storageclass), your namespace (perf.yaml hardcodes `namespace: your-namespace`), and the ComputeDomain claim names.
+</Warning>
+
+```bash
+# 1. Create the model-cache PVC (RWX, 400Gi).
+kubectl apply -f recipes/deepseek-v32-fp4/model-cache/model-cache.yaml -n ${NAMESPACE}
+```
+
+### 2. Configure K8 Benchmarking Environment
+
+Multinode deployments on MNNVL-connected GB200 clusters typically require a ComputeDomain in your namespace so the DRA scheduler co-locates worker pods on MNNVL-connected nodes — otherwise internode GPU peer memory access fails:
+
+```bash
+kubectl apply -f recipes/deepseek-v32-fp4/model-cache/compute-domain.yaml -n ${NAMESPACE}
+```
+
+If you rename the ComputeDomain or its `resourceClaimTemplate` (defaults: `your-compute-domain` / `your-compute-domain-channel`), apply the same names in the deploy YAMLs under `extraPodSpec.resourceClaims` and `resources.claims`.
+
+### 3. Setup Model and Data
+
+```bash
+# 2. Download nvidia/DeepSeek-V3.2-NVFP4 into the PVC.
+kubectl apply -f recipes/deepseek-v32-fp4/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=600s
+
+# 3. Copy the synthesized trace file into the PVC.
+kubectl cp <local_trace.jsonl> ${NAMESPACE}/<helper-pod>:/model-cache/traces/
+```
+
+### 4. Deploy & Benchmark
+
+```bash
+# 4. Deploy: KV-routed frontend + 2x prefill + 2x decode (WideEP) workers.
+kubectl apply -f recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=ready pod -l nvidia.com/dynamo-graph-deployment-name=disagg-kv-dsv32-nvfp4 \
+  -n ${NAMESPACE} --timeout=1200s
+```
+
+Smoke test the deployment before benchmarking. The Dynamo operator creates the `disagg-kv-dsv32-nvfp4-frontend` service for this deployment.
 
 ```bash
 kubectl port-forward svc/disagg-kv-dsv32-nvfp4-frontend 8000:8000 -n ${NAMESPACE}
@@ -94,8 +164,6 @@ curl http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"nvidia/DeepSeek-V3.2-NVFP4","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
 ```
-
-## Benchmark
 
 The checked-in [`perf.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/perf.yaml) runs a short synthetic warmup, then replays the trace at its original timestamps. It wraps this AIPerf run:
 
@@ -107,27 +175,57 @@ aiperf profile -m nvidia/DeepSeek-V3.2-NVFP4 --tokenizer nvidia/DeepSeek-V3.2-NV
   --goodput "time_to_first_token:20000 inter_token_latency:50"
 ```
 
+Launch it as a Job:
+
 ```bash
 kubectl apply -f recipes/deepseek-v32-fp4/trtllm/disagg-kv-router/perf.yaml -n ${NAMESPACE}
+```
+
+### 5. Monitor Benchmark Progress
+
+```bash
+# Find the benchmark pod:
+kubectl get pods -n ${NAMESPACE} -l job-name=disagg-kv-dsv32-nvfp4-bench
 
 # Follow the benchmark Job's logs:
 kubectl logs -f -l job-name=disagg-kv-dsv32-nvfp4-bench -n ${NAMESPACE}
 ```
 
-Results land under `/model-cache/perf/<epoch>_<job-name>/` on the `model-cache` PVC; copy them out with `kubectl cp`.
+### 6. View Results
+
+Results land under `/model-cache/perf/<epoch>_<job-name>/` on the `model-cache` PVC. Inspect the artifact directory in place, or copy it to your machine:
+
+```bash
+# Check artifact directory
+kubectl exec -it -n ${NAMESPACE} <benchmark-pod-name> -- ls -la /model-cache/perf/
+
+# Copy results to local machine
+kubectl cp ${NAMESPACE}/<benchmark-pod-name>:/model-cache/perf ./benchmark-results
+```
+
+## Expected Results
 
 Because the replay is `--fixed-schedule`, throughput is fixed by the trace — the metrics to compare are TTFT (KV-aware routing cuts prefill compute via prefix hits), ITL (disaggregation isolates decode from prefill interference), total request latency, and goodput against the TTFT 20s / ITL 50ms SLA.
 
-## Related Feature Benchmarks
+| Metric | Why it matters |
+| --- | --- |
+| **TTFT** (time to first token) | KV-aware routing reduces prefill compute via prefix cache hits |
+| **ITL** (inter-token latency) | Disaggregated serving isolates decode from prefill interference |
+| **Total request latency** | Combined benefit of both optimizations |
 
-- [DeepSeek V3.2 WideEP routing A/B](../feature-benchmarks/deepseek-v3-2-wideep-routing.mdx)
+For production contexts, evaluate the deployments with **goodput** — the rate of requests that satisfy a predetermined service level agreement (SLA). These experiments set the SLA at TTFT 20s and ITL 50ms.
 
-## Notes
+## Cleanup
 
-- The aggregated round-robin configuration (`trtllm/agg-round-robin/`) is the benchmark control arm; it appears on the Feature Benchmark page, not as a recipe target here.
-- The benchmark job pins `transformers==4.57.6`: the trtllm-runtime base ships 4.55.0, and aiperf's `transformers>=4.56.0` floor would otherwise pull 5.x, which cannot load the `deepseek_v32` tokenizer (surfaces as "Failed to load tokenizer").
-- Decode workers run the WIDEEP MoE backend with `moe_expert_parallel_size: 8` and FP8 KV cache; prefill enables chunked prefill and KV block reuse (`tokens_per_block: 64`, matching `--kv-block-size 64`).
-- The trace tops out at 109,459 input tokens; both engine configs set `max_seq_len: 121000` to accommodate it.
+```bash
+kubectl delete job disagg-kv-dsv32-nvfp4-bench -n ${NAMESPACE}
+kubectl delete dynamographdeployment disagg-kv-dsv32-nvfp4 -n ${NAMESPACE}
+```
+
+## References
+
+- [Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving](https://github.com/kvcache-ai/Mooncake) — the FAST25 paper and trace data this dataset is derived from.
+- Background on the underlying optimizations: [Optimizing DeepSeek-V3.2 on NVIDIA Blackwell GPUs](https://nvidia.github.io/TensorRT-LLM/blogs/tech_blog/blog15_Optimizing_DeepSeek_V32_on_NVIDIA_Blackwell_GPUs.html), the TensorRT-LLM tech blog covering DeepSeek V3.2 on GB200.
 
 ## Source
 

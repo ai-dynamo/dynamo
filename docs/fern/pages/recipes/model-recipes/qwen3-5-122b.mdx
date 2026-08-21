@@ -9,7 +9,7 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-All four targets below are Dynamo + vLLM deployments of Alibaba's Qwen3.5-122B-A10B — a 122B total / 10B active hybrid MoE combining Gated DeltaNet linear attention with full attention every fourth layer — tuned for an agentic workload (64K median ISL / 400 median OSL, 90% KV cache hit) with KV-aware routing. B200 runs the NVFP4 checkpoint at TP1; H200 runs FP8, where the weights leave less room for paged KV, so the aggregated profile shards to TP2 and adds MTP speculative decoding. Aggregated is the recommended path on both SKUs. Pick your target; every command on this page updates to match.
+All four targets below are Dynamo + vLLM deployments of Alibaba's Qwen3.5-122B-A10B — a 122B total / 10B active hybrid MoE combining Gated DeltaNet linear attention with full attention every fourth layer — tuned for an agentic workload (64K median ISL / 400 median OSL, 90% KV cache hit) with KV-aware routing. B200 runs the NVFP4 checkpoint at TP1; H200 runs FP8, which fits one 143 GB H200 at the full 262,144-token context. The H200 aggregated profile shards to TP2 and adds MTP speculative decoding. Every target accepts text, image, and video input and supports reasoning (`--dyn-reasoning-parser qwen3`) and tool calling (`--dyn-tool-call-parser qwen3_coder`). Aggregated is the recommended path on both SKUs. Pick your target; every command on this page updates to match.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
@@ -21,57 +21,129 @@ All four targets below are Dynamo + vLLM deployments of Alibaba's Qwen3.5-122B-A
 <label htmlFor="recipe-sku-b200">B200 · NVFP4</label>
 </div>
 <div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Workload</span>
+<input type="radio" id="recipe-usecase-agentic" name="recipe-usecase" value="agentic" defaultChecked />
+<label htmlFor="recipe-usecase-agentic">Agentic</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Backend</span>
+<input type="radio" id="recipe-engine-vllm" name="recipe-engine" value="vllm" defaultChecked />
+<label htmlFor="recipe-engine-vllm">vLLM</label>
+</div>
+<div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">Topology</span>
 <input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
 <label htmlFor="recipe-variant-agg">Aggregated <span className="dynamo-target-picker-hint">Recommended</span></label>
 <input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
 <label htmlFor="recipe-variant-disagg">Disaggregated</label>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="h200" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-sku="h200" data-engine="vllm" data-usecase="agentic" data-variant="agg">
 <span><b>Checkpoint</b> Qwen/Qwen3.5-122B-A10B-FP8</span>
 <span><b>Precision</b> FP8 weights, BF16 KV</span>
+<span><b>Context length</b> 262,144</span>
 <span><b>GPUs</b> 2x H200 per replica, `replicas: 2` (4x)</span>
 <span><b>Parallelism</b> TP2</span>
+<span><b>MoE backend</b> `triton`</span>
+<span><b>KV cache manager</b> Hybrid (DeltaNet SSM + attention)</span>
 <span><b>Spec decode</b> MTP, 3 tokens</span>
-<span><b>Routing</b> KV-aware</span>
+<span><b>Routing</b> KV-aware + worker KV events</span>
+<span><b>Async scheduling</b> Enabled</span>
+<span><b>Target</b> `agg-h200-agentic`</span>
+<span><b>GPU</b> H200</span>
+<span><b>Backend</b> vLLM</span>
+<span><b>Workload</b> Agentic trace replay</span>
+<span><b>Topology</b> Aggregated</span>
+<span><b>Reported point</b> c64, highest SLA-passing</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="h200" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-sku="h200" data-engine="vllm" data-usecase="agentic" data-variant="disagg">
 <span><b>Checkpoint</b> Qwen/Qwen3.5-122B-A10B-FP8</span>
 <span><b>Precision</b> FP8 + FP8 KV</span>
+<span><b>Context length</b> 262,144</span>
 <span><b>GPUs</b> 1x H200 prefill + 2x H200 decode</span>
 <span><b>Parallelism</b> TP1 per worker</span>
+<span><b>MoE backend</b> `triton`</span>
+<span><b>KV cache manager</b> Hybrid (DeltaNet SSM + attention)</span>
 <span><b>Spec decode</b> None — see Limitations</span>
-<span><b>Routing</b> KV-aware, NIXL/UCX over IB</span>
+<span><b>Routing</b> KV-aware + worker KV events</span>
+<span><b>KV transfer</b> NIXL/UCX over InfiniBand</span>
+<span><b>Async scheduling</b> Disabled on decode — see Limitations</span>
+<span><b>Target</b> `disagg-h200-agentic`</span>
+<span><b>GPU</b> H200</span>
+<span><b>Backend</b> vLLM</span>
+<span><b>Workload</b> Agentic trace replay</span>
+<span><b>Topology</b> Disaggregated 1P2D</span>
+<span><b>Reported point</b> c18, highest SLA-passing</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="b200" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-sku="b200" data-engine="vllm" data-usecase="agentic" data-variant="agg">
 <span><b>Checkpoint</b> nvidia/Qwen3.5-122B-A10B-NVFP4</span>
 <span><b>Precision</b> NVFP4 + FP8 KV</span>
+<span><b>Context length</b> 262,144</span>
 <span><b>GPUs</b> 1x B200 per replica, `replicas: 2` (2x)</span>
 <span><b>Parallelism</b> TP1</span>
-<span><b>Spec decode</b> None</span>
-<span><b>Routing</b> KV-aware</span>
+<span><b>MoE backend</b> FLASHINFER_TRTLLM</span>
+<span><b>KV cache manager</b> Hybrid (DeltaNet SSM + attention)</span>
+<span><b>Spec decode</b> None — see Limitations</span>
+<span><b>Routing</b> KV-aware (workers publish KV events)</span>
+<span><b>Target</b> `agg-b200-agentic`</span>
+<span><b>GPU</b> B200</span>
+<span><b>Backend</b> vLLM</span>
+<span><b>Workload</b> Agentic trace replay</span>
+<span><b>Topology</b> Aggregated</span>
+<span><b>Reported point</b> c50, just above the 50 tok/s/user floor</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="b200" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-sku="b200" data-engine="vllm" data-usecase="agentic" data-variant="disagg">
 <span><b>Checkpoint</b> nvidia/Qwen3.5-122B-A10B-NVFP4</span>
 <span><b>Precision</b> NVFP4 + FP8 KV</span>
+<span><b>Context length</b> 262,144</span>
 <span><b>GPUs</b> 1x B200 prefill + 2x B200 decode</span>
 <span><b>Parallelism</b> TP1 per worker</span>
-<span><b>Spec decode</b> None</span>
-<span><b>Routing</b> KV-aware, NIXL/UCX over IB</span>
+<span><b>MoE backend</b> FLASHINFER_TRTLLM</span>
+<span><b>KV cache manager</b> Hybrid (DeltaNet SSM + attention)</span>
+<span><b>Spec decode</b> None — see Limitations</span>
+<span><b>Routing</b> KV-aware (workers publish KV events)</span>
+<span><b>KV transfer</b> NIXL/UCX over InfiniBand</span>
+<span><b>Target</b> `disagg-b200-agentic`</span>
+<span><b>GPU</b> B200</span>
+<span><b>Backend</b> vLLM</span>
+<span><b>Workload</b> Agentic trace replay</span>
+<span><b>Topology</b> Disaggregated 1P2D</span>
+<span><b>Reported point</b> c60, just above the 50 tok/s/user floor</span>
 </div>
 </div>
+
+## Configurations
+
+- All four targets run Dynamo 1.3.0 / vLLM 0.23.
+- The H200 aggregated target runs `--kv-cache-dtype auto`; the disaggregated targets and both B200 targets use `fp8`. FP8 KV costs compute and only pays back when the cache is the binding constraint, which it is not at TP2.
+- Worker `--block-size` must match the frontend `--kv-cache-block-size`. If they diverge, prefix hashing does not line up and KV-aware routing silently degrades toward round-robin.
+
+## Supported features
+
+- Modalities: text, image, video
+- Reasoning (`--dyn-reasoning-parser qwen3`)
+- Tool calling (`--dyn-tool-call-parser qwen3_coder`)
 
 ## Prerequisites
 
-1. Dynamo Platform installed on the target cluster with DGD CRDs served.
-2. A Hugging Face token stored as `hf-token-secret`. The checkpoint is public and Apache-2.0.
+1. Dynamo Platform installed on the target cluster with DGD CRDs served — see the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
+2. A Hugging Face token stored as `hf-token-secret`, with access to the checkpoint your target uses. `Qwen/Qwen3.5-122B-A10B-FP8` is public and Apache-2.0; the B200 target additionally needs access to `nvidia/Qwen3.5-122B-A10B-NVFP4`.
 3. A `model-cache` PVC (ReadWriteMany), populated with the manifests in `model-cache/`.
 
-<div data-variant="disagg">
+<div data-sku="b200 h200" data-engine="vllm" data-usecase="agentic" data-variant="agg">
+
+4. No RDMA fabric requirement — an aggregated replica prefills and decodes on the same worker, so no KV crosses the network.
+
+</div>
+
+<div data-sku="b200 h200" data-engine="vllm" data-usecase="agentic" data-variant="disagg">
 
 4. GPU-local RDMA NICs exposed to pods (an `rdma/ib` device plugin) for NIXL KV transfer.
 
 </div>
+
+## Quick Start
+
+### 1. Namespace + HF secret
 
 ```bash
 export NAMESPACE=your-namespace
@@ -80,11 +152,13 @@ kubectl create secret generic hf-token-secret \
   --from-literal=HF_TOKEN="your-token" -n ${NAMESPACE}
 ```
 
-## Deploy
+### 2. Storage
 
 Create the cache and download the checkpoint. Set `storageClassName` in `model-cache.yaml` to a ReadWriteMany class first.
 
-<div data-sku="h200">
+### 3. Download the model
+
+<div data-sku="h200" data-engine="vllm" data-usecase="agentic" data-variant="agg disagg">
 
 ```bash
 kubectl apply -f recipes/qwen3.5-122b/fp8/model-cache/model-cache.yaml -n ${NAMESPACE}
@@ -94,17 +168,19 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 
 </div>
 
-<div data-sku="b200">
+<div data-sku="b200" data-engine="vllm" data-usecase="agentic" data-variant="agg disagg">
 
 ```bash
 kubectl apply -f recipes/qwen3.5-122b/nvfp4/model-cache/model-cache.yaml -n ${NAMESPACE}
 kubectl apply -f recipes/qwen3.5-122b/nvfp4/model-cache/model-download.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
 ```
 
 </div>
 
-<div data-sku="h200" data-variant="agg">
+### 4. Deploy
+
+<div data-sku="h200" data-engine="vllm" data-usecase="agentic" data-variant="agg">
 
 ```bash
 kubectl apply -f recipes/qwen3.5-122b/fp8/vllm/agg-h200-agentic/deploy.yaml -n ${NAMESPACE}
@@ -113,11 +189,11 @@ kubectl wait --for=condition=Ready pod \
   -n ${NAMESPACE} --timeout=7200s
 ```
 
-Deploy `replicas: 2` or more so the KV-aware router has replicas to route shared prefixes across. Each replica is TP2, so a full 8x H200 node runs `replicas: 4`.
+Deploy `replicas: 2` or more so the KV-aware router has replicas to route shared prefixes across. Each replica is TP2, so scale aggregated to a full 8x H200 node with `replicas: 4`.
 
 </div>
 
-<div data-sku="h200" data-variant="disagg">
+<div data-sku="h200" data-engine="vllm" data-usecase="agentic" data-variant="disagg">
 
 ```bash
 kubectl apply -f recipes/qwen3.5-122b/fp8/vllm/disagg-h200-agentic/deploy.yaml -n ${NAMESPACE}
@@ -128,7 +204,7 @@ kubectl wait --for=condition=Ready pod \
 
 </div>
 
-<div data-sku="b200" data-variant="agg">
+<div data-sku="b200" data-engine="vllm" data-usecase="agentic" data-variant="agg">
 
 ```bash
 kubectl apply -f recipes/qwen3.5-122b/nvfp4/vllm/agg-b200-agentic/deploy.yaml -n ${NAMESPACE}
@@ -141,7 +217,7 @@ Deploy `replicas: 2` or more so the KV-aware router has replicas to route shared
 
 </div>
 
-<div data-sku="b200" data-variant="disagg">
+<div data-sku="b200" data-engine="vllm" data-usecase="agentic" data-variant="disagg">
 
 ```bash
 kubectl apply -f recipes/qwen3.5-122b/nvfp4/vllm/disagg-b200-agentic/deploy.yaml -n ${NAMESPACE}
@@ -154,7 +230,7 @@ kubectl wait --for=condition=Ready pod \
 
 First cold starts take 30-45 minutes while the runtime loads the weights and captures CUDA graphs; a measured cold load spent 28.5 minutes on weights alone before graph capture began.
 
-## Smoke Test
+### 5. Smoke test
 
 ```bash
 kubectl port-forward -n ${NAMESPACE} \
@@ -171,32 +247,40 @@ curl http://localhost:8000/v1/chat/completions -H 'Content-Type: application/jso
 
 Both SKUs serve the model as `Qwen/Qwen3.5-122B-A10B` regardless of the underlying checkpoint.
 
-## Benchmark
+### 6. Benchmark
 
-The benchmark replays a Mooncake-format agentic trace through AIPerf.
+The benchmark replays a [Mooncake-format](https://github.com/kvcache-ai/Mooncake) agentic trace through [AIPerf](https://github.com/ai-dynamo/aiperf). The Job waits for the target model on the DGD frontend, runs a short warmup, replays the configured trace at one `CONCURRENCY` value, and writes raw artifacts to the shared `model-cache` PVC. Its pod is co-located with a DGD frontend through `podAffinity`.
 
-<div data-sku="b200">
+Each JSONL line in the trace describes one request (`input_length`, `output_length`, `hash_ids`, `timestamp`).
 
-```bash
-kubectl apply -f recipes/qwen3.5-122b/nvfp4/perf/perf.yaml -n ${NAMESPACE}
-```
+<div data-sku="b200" data-engine="vllm" data-usecase="agentic" data-variant="agg disagg">
 
-See [nvfp4/perf/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.5-122b/nvfp4/perf/README.md) for the full workflow.
-
-</div>
-
-<div data-sku="h200">
-
-```bash
-kubectl apply -f recipes/qwen3.5-122b/fp8/perf/perf.yaml -n ${NAMESPACE}
-```
-
-Edit `ENDPOINT` and `CONCURRENCY` in the Job to select a target — aggregated at c64, disaggregated at c18. See [fp8/perf/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.5-122b/fp8/perf/README.md) for the full workflow.
+Edit `ENDPOINT` and `CONCURRENCY` in the Job to select a target — `qwen35-122b-agg-b200-agentic-frontend:8000` at c50, or `qwen35-122b-disagg-b200-agentic-frontend:8000` at c60; the shipped default is the aggregated endpoint at c64. See [nvfp4/perf/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.5-122b/nvfp4/perf/README.md) for the full workflow.
 
 AIPerf builds its replay schedule from a `timestamp` field. The shipped trace rows have none, and without one AIPerf replays a small default instead of the whole file, so add one before staging the trace on the PVC:
 
 ```bash
 git lfs install
+git lfs pull --include "recipes/*/perf/traces/*"
+python3 -c "
+import json
+src='recipes/qwen3.5-122b/nvfp4/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl'
+for line in open(src):
+    print(json.dumps({'timestamp': 0, **json.loads(line)}))
+" > mooncake_agentic.jsonl
+```
+
+</div>
+
+<div data-sku="h200" data-engine="vllm" data-usecase="agentic" data-variant="agg disagg">
+
+Edit `ENDPOINT` and `CONCURRENCY` in the Job to select a target — `qwen35-122b-agg-h200-agentic-frontend:8000` at c64, or `qwen35-122b-disagg-h200-agentic-frontend:8000` at c18. See [fp8/perf/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.5-122b/fp8/perf/README.md) for the full workflow. This Job replays at a 512-token prompt block size and aborts if the trace has no `timestamp` field.
+
+AIPerf builds its replay schedule from a `timestamp` field. The shipped trace rows have none, and without one AIPerf replays a small default instead of the whole file, so add one before staging the trace on the PVC:
+
+```bash
+git lfs install
+# the trace here is a symlink into recipes/kimi-k2.6, where the LFS object lives
 git lfs pull --include "recipes/kimi-k2.6/perf/traces/*"
 python3 -c "
 import json
@@ -206,13 +290,124 @@ for line in open(src):
 " > mooncake_agentic.jsonl
 ```
 
-Confirm a run replayed the whole file: `Request Count` in `profile_export_aiperf.csv` should be about 3,411, plus roughly 130 rows that exceed the 262,144-token context and return errors.
+</div>
+
+Stage the generated `mooncake_agentic.jsonl` on the `model-cache` PVC before running the Job:
+
+```bash
+kubectl run pvc-helper -n ${NAMESPACE} \
+  --image=busybox:1.36 --restart=Never \
+  --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.36","command":["sleep","3600"],"volumeMounts":[{"name":"model-cache","mountPath":"/model-cache"}]}],"volumes":[{"name":"model-cache","persistentVolumeClaim":{"claimName":"model-cache"}}]}}' \
+  --command -- sleep 3600
+
+kubectl exec -n ${NAMESPACE} pvc-helper -- mkdir -p /model-cache/traces
+kubectl cp mooncake_agentic.jsonl ${NAMESPACE}/pvc-helper:/model-cache/traces/
+```
+
+Keep `pvc-helper` around for fetching artifacts later, or delete it once staging is done. If you run more than one benchmark in the same namespace, also update `metadata.name` and `labels.app` in `perf.yaml` so Jobs and artifact directories stay distinct.
+
+Then run the Job:
+
+<div data-sku="b200" data-engine="vllm" data-usecase="agentic" data-variant="agg disagg">
+
+```bash
+kubectl apply -f recipes/qwen3.5-122b/nvfp4/perf/perf.yaml -n ${NAMESPACE}
+kubectl logs -n ${NAMESPACE} -l job-name=qwen35-122b-bench -f
+kubectl wait --for=condition=Complete job/qwen35-122b-bench \
+  -n ${NAMESPACE} --timeout=10800s
+```
 
 </div>
 
-## Expected Performance
+<div data-sku="h200" data-engine="vllm" data-usecase="agentic" data-variant="agg disagg">
 
-Measured on the 3,541-request agentic Mooncake trace, block size 512, closed-loop. SLA: P50 TTFT under 5 s and P50 output at or above 50 tok/s/user. Each target is reported at its highest SLA-passing concurrency.
+```bash
+kubectl apply -f recipes/qwen3.5-122b/fp8/perf/perf.yaml -n ${NAMESPACE}
+kubectl logs -n ${NAMESPACE} -l job-name=qwen35-122b-fp8-bench -f
+kubectl wait --for=condition=Complete job/qwen35-122b-fp8-bench \
+  -n ${NAMESPACE} --timeout=10800s
+```
+
+</div>
+
+Besides `ENDPOINT` and `CONCURRENCY`, the Job reads `TRACE_FILE` (`/model-cache/traces/mooncake_agentic.jsonl` — the 3,541-request agentic trace with timestamps) and `TARGET_MODEL` (`Qwen/Qwen3.5-122B-A10B`, which must match `--served-model-name`).
+
+Run one `CONCURRENCY` value per Job, and restart the DGD pods between values (`kubectl delete pods -n ${NAMESPACE} -l nvidia.com/dynamo-graph-deployment-name=<DGD>`) so vLLM KV and Dynamo router state do not carry over — otherwise runs are not comparable. `perf.yaml` sets `--num-requests` to the trace line count, so in mooncake mode AIPerf replays the whole file provided each row carries a `timestamp`; subset the file to cap the request count.
+
+Confirm a run replayed the whole file: `Request Count` in `profile_export_aiperf.csv` should be about 3,411, plus roughly 130 rows that exceed the 262,144-token context and return errors. Do not compare partial runs — a completed run must account for successful, errored, and unfinished requests before reporting aggregate throughput.
+
+Results land on the PVC under `/model-cache/perf/<epoch>_<job-name>/`:
+
+```text
+/model-cache/perf/<epoch>_<job-name>/
+  warmup/
+  Qwen3.5-122B-A10B_trace_c<concurrency>_<timestamp>/
+    profile_export_aiperf.json
+    inputs.json
+    ...
+```
+
+Read `Output Token Throughput`, `Request Throughput`, `Time to First Token`, `Inter Token Latency`, and `Output Token Throughput Per User` from `profile_export_aiperf.{csv,json}`. KV-cache hit rate is on the frontend `/metrics` (`dynamo_component_router_kv_hit_rate_{sum,count}`).
+
+Fetch the artifacts through `pvc-helper`, then clean up:
+
+<div data-sku="b200" data-engine="vllm" data-usecase="agentic" data-variant="agg disagg">
+
+```bash
+kubectl cp \
+  ${NAMESPACE}/pvc-helper:/model-cache/perf/<epoch>_qwen35-122b-bench \
+  ./results
+
+kubectl delete job qwen35-122b-bench -n ${NAMESPACE}
+kubectl delete pod pvc-helper -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="h200" data-engine="vllm" data-usecase="agentic" data-variant="agg disagg">
+
+```bash
+kubectl cp \
+  ${NAMESPACE}/pvc-helper:/model-cache/perf/<epoch>_qwen35-122b-fp8-bench \
+  ./results
+
+kubectl delete job qwen35-122b-fp8-bench -n ${NAMESPACE}
+kubectl delete pod pvc-helper -n ${NAMESPACE}
+```
+
+</div>
+
+To drive AIPerf directly instead of through the Job, run the same image against the frontend service — the Job uses `nvcr.io/nvidia/ai-dynamo/aiperf:0.11.0` with the `model-cache` PVC mounted, and does not install or patch AIPerf at runtime:
+
+```bash
+aiperf profile Qwen/Qwen3.5-122B-A10B --tokenizer Qwen/Qwen3.5-122B-A10B \
+  --url http://${ENDPOINT} --endpoint-type chat \
+  --input-file ${TRACE_FILE} \
+  --custom-dataset-type mooncake_trace --prompt-input-tokens-block-size 512 \
+  --concurrency ${CONCURRENCY} --workers-max ${CONCURRENCY} \
+  --extra-inputs ignore_eos:true --streaming --use-server-token-count \
+  --artifact-dir /model-cache/perf/<run> --ui none
+```
+
+## Optimization targets
+
+The agentic target is median ISL ~64k, OSL ~400, ~90% token-weighted cache hit, replayed closed-loop at a fixed concurrency. Sweep concurrency to find the SLA knee: the highest value holding P50 TTFT under 5 s and P50 output at or above 50 tok/s/user.
+
+## Benchmark Results
+
+Measured 2026-08-06 on the 3,541-request agentic Mooncake trace, closed-loop, with both profiles on a SKU run against the same trace. SLA: P50 TTFT under 5 s and P50 output at or above 50 tok/s/user. `System output tok/s/GPU` is system throughput divided by GPUs.
+
+<div data-sku="h200" data-engine="vllm" data-usecase="agentic" data-variant="agg disagg">
+
+Each H200 profile is reported at its highest SLA-passing concurrency, at the 512-token prompt block size its `perf.yaml` sets.
+
+</div>
+
+<div data-sku="b200" data-engine="vllm" data-usecase="agentic" data-variant="agg disagg">
+
+Both B200 profiles are reported at the concurrency where P50 user tok/s sits just above the floor.
+
+</div>
 
 | Target | GPUs | Concurrency | User output tok/s | TTFT (P50) | System output tok/s/GPU |
 |--------|------|-------------|-------------------|------------|-------------------------|
@@ -221,23 +416,9 @@ Measured on the 3,541-request agentic Mooncake trace, block size 512, closed-loo
 | H200 aggregated, 2x TP2 + MTP | 4 | 64 | 52.9 | 313 ms | 720.3 |
 | H200 disaggregated 1P2D | 3 | 18 | 52.5 | 3087 ms | 256.5 |
 
-## Compare All Targets
+Aggregated leads on both SKUs at the same SLA: 1173.2 against 916.6 output tok/s per GPU on B200, where disaggregated is 22% lower per GPU, and 720.3 against 256.5 on H200, where it is 2.8x lower per GPU. **Aggregated is the recommended profile; the disaggregated targets are a functional reference rather than a throughput recommendation.** At 90% KV-cache hit the dedicated prefill worker has little to do yet emits no output tokens, so a third of the fleet is unproductive, and both disaggregated targets pay ~7% for `--no-async-scheduling` on vLLM < 0.26.0. MTP runs on H200 aggregated only — H200 disaggregated gives it up, and neither B200 profile runs it. Choose disaggregation to scale prefill and decode independently, or for a workload with a lower cache-hit rate where the prefill GPU earns its place.
 
-| Target | GPU | Topology | GPUs | Spec decode | Reported point |
-|--------|-----|----------|------|-------------|----------------|
-| `agg-b200-agentic` | B200 | Aggregated | 2 | None | c50, at the 50 tok/s/user floor |
-| `disagg-b200-agentic` | B200 | Disaggregated 1P2D | 3 | None | c60, at the 50 tok/s/user floor |
-| `agg-h200-agentic` | H200 | Aggregated | 4 | MTP, 3 tokens | c64, at the 50 tok/s/user floor |
-| `disagg-h200-agentic` | H200 | Disaggregated 1P2D | 3 | None | c18, at the 50 tok/s/user floor |
-
-Aggregated leads on both SKUs at the same SLA: 1173.2 against 916.6 output tok/s per GPU on B200, 720.3 against 256.5 on H200. **Aggregated is the recommended profile; the disaggregated targets are a functional reference rather than a throughput recommendation.** At 90% KV-cache hit the dedicated prefill worker has little to do yet emits no output tokens, and both disaggregated targets pay ~7% for `--no-async-scheduling` on vLLM < 0.26.0. MTP runs on H200 aggregated only — H200 disaggregated gives it up, and neither B200 profile runs it. Choose disaggregation to scale prefill and decode independently, or for a workload with a lower cache-hit rate.
-
-## Notes
-
-- Worker `--block-size` must match the frontend `--kv-cache-block-size`. If they diverge, prefix hashing does not line up and KV-aware routing silently degrades toward round-robin.
-- The H200 aggregated target runs `--kv-cache-dtype auto`; the disaggregated targets and both B200 targets use `fp8`. FP8 KV costs compute and only pays back when the cache is the binding constraint, which it is not at TP2.
-
-<div data-sku="h200" data-variant="agg">
+<div data-sku="h200" data-engine="vllm" data-usecase="agentic" data-variant="agg">
 
 - Ship the `speculative-config` ConfigMap key; benchmark with `speculative-config-synthetic`, which forces the acceptance length of 2.937 measured against real text. Real MTP reports about 3.2 on this trace because the Mooncake rows synthesise prompts from `hash_ids`, which the draft predicts more easily than real text.
 
@@ -245,12 +426,28 @@ Aggregated leads on both SKUs at the same SLA: 1173.2 against 916.6 output tok/s
 
 ## Limitations
 
+<div data-sku="b200 h200" data-engine="vllm" data-usecase="agentic" data-variant="agg disagg">
+
 - Prefill and decode must use the same tensor-parallel size when disaggregated — asymmetric sharding fails the NIXL transfer with a block-size mismatch.
-- MTP is not supported with disaggregation on this architecture. NIXL's Mamba conv-state transfer needs `VLLM_SSM_CONV_STATE_LAYOUT=DS`, which conflicts with the `mamba_cache_mode='align'` that MTP plus prefix caching forces ([vllm#38898](https://github.com/vllm-project/vllm/issues/38898)).
+- MTP is not supported with disaggregation on this architecture. NIXL's 3-read Mamba conv-state transfer needs `VLLM_SSM_CONV_STATE_LAYOUT=DS`, which conflicts with the `mamba_cache_mode='align'` that MTP plus prefix caching forces ([vllm#38898](https://github.com/vllm-project/vllm/issues/38898)); the align-mode DS conv-state copy path is unimplemented for `num_accepted_tokens > 1` in the shipped vLLM 0.23.0 runtime, so the decode `EngineCore` crashes (`NotImplementedError` → `EngineDeadError`) on the first concurrent batch of real long-context traffic. Patching that crash ([vllm#45473](https://github.com/vllm-project/vllm/pull/45473)) does not make it usable — a spec-decode conv-state metadata mismatch between prefill and decode then makes the NIXL transfer misplace the Mamba conv state, producing garbage output.
 
-<div data-variant="disagg">
+</div>
 
-- Disaggregated decode requires `--no-async-scheduling` on vLLM earlier than 0.26.0. Without it the KV-block zeroing kernel races the NIXL RDMA write and silently erases transferred KV. The flag costs about 7% throughput and can be dropped on a runtime shipping vLLM 0.26.0 or later.
+<div data-sku="b200" data-engine="vllm" data-usecase="agentic" data-variant="agg disagg">
+
+- MTP on B200 NVFP4 aggregation is also not shipped. Output is *correct* in isolation — aggregated plus MTP stays coherent even on a forced Mamba prefix-cache hit, because the prefill-to-decode transfer garbage above cannot occur without disaggregation — but MTP plus prefix caching forces `mamba_cache_mode='align'`, whose conv-state copy path crashes under real concurrent long-context traffic ([vllm#38898](https://github.com/vllm-project/vllm/issues/38898) / PR [#40454](https://github.com/vllm-project/vllm/pull/40454); NVBug 6442165). Even with DS unset to sidestep that crash, MTP-heavy decode starves prefill on the shared GPU, with TTFT regressions, for no throughput win.
+
+</div>
+
+<div data-sku="b200" data-engine="vllm" data-usecase="agentic" data-variant="agg disagg">
+
+- Neither B200 profile ships MTP. Do **not** reintroduce a `rejection_sample_method: synthetic` block to "benchmark" it — a forced-acceptance sweep skips the conv-state copy path that crashes on real traffic, so it reports throughput for a configuration that cannot actually serve. Validate any spec-decode change against the real trace, not a synthetic sweep.
+
+</div>
+
+<div data-sku="b200 h200" data-engine="vllm" data-usecase="agentic" data-variant="disagg">
+
+- Disaggregated decode requires `--no-async-scheduling` on vLLM earlier than 0.26.0. Without it the KV-block zeroing kernel races the NIXL RDMA write and silently erases transferred KV — measured on the H200 FP8 recipe as IFEval 84.66 → 51.02 and GPQA-Diamond 83.84 → 19.19. Fixed upstream by [vllm#45357](https://github.com/vllm-project/vllm/pull/45357) and [vllm#48481](https://github.com/vllm-project/vllm/pull/48481); the flag costs about 7% throughput and can be dropped on a runtime shipping vLLM 0.26.0 or later.
 
 </div>
 

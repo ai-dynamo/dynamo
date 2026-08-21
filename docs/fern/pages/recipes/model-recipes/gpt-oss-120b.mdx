@@ -9,18 +9,32 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Validated deployment targets for `openai/gpt-oss-120b` (MXFP4 MoE, 128 experts, top-4) across two runtimes. The vLLM targets serve the Mooncake agentic trace (64K ISL / 400 OSL, 90% KV cache hit) on B200 or H200, aggregated or disaggregated, with KV-aware routing and EAGLE3 speculative decoding. The TensorRT-LLM targets cover short-prompt high-concurrency and long-context generation on GB200. The GPU choice selects the runtime — B200/H200 run vLLM, GB200 runs TensorRT-LLM — and the targets use different traffic shapes, so this page is not a backend benchmark. Pick your GPU and topology; every command on this page updates to match.
+Validated deployment targets for `openai/gpt-oss-120b` (MXFP4 MoE, 128 experts / top-4, GQA + sliding-window + attention sinks) across two runtimes. The vLLM targets serve the Mooncake agentic trace (64K ISL / 400 OSL, 90% KV cache hit) on B200 or H200, aggregated or disaggregated, with KV-aware routing and EAGLE3-v3 speculative decoding. The TensorRT-LLM targets serve the same checkpoint on GB200: aggregated for short-prompt high-concurrency traffic, disaggregated prefill/decode for long-context generation. The GPU choice pins both the backend and the workload — B200/H200 run vLLM on the agentic trace, GB200 runs TensorRT-LLM on static synthetic traffic — and the targets use different traffic shapes, so this page is not a backend benchmark. Pick your GPU and topology; the Workload and Backend rows follow from the GPU, and every command on this page updates to match.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
 <div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">GPU</span>
 <input type="radio" id="recipe-sku-b200" name="recipe-sku" value="b200" defaultChecked />
-<label htmlFor="recipe-sku-b200">B200 · vLLM</label>
+<label htmlFor="recipe-sku-b200">B200</label>
 <input type="radio" id="recipe-sku-h200" name="recipe-sku" value="h200" />
-<label htmlFor="recipe-sku-h200">H200 · vLLM</label>
+<label htmlFor="recipe-sku-h200">H200</label>
 <input type="radio" id="recipe-sku-gb200" name="recipe-sku" value="gb200" />
-<label htmlFor="recipe-sku-gb200">GB200 · TRT-LLM</label>
+<label htmlFor="recipe-sku-gb200">GB200</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Workload</span>
+<input type="radio" id="recipe-usecase-agentic" name="recipe-usecase" value="agentic" defaultChecked />
+<label htmlFor="recipe-usecase-agentic" data-needs-sku="b200 h200">Agentic</label>
+<input type="radio" id="recipe-usecase-static" name="recipe-usecase" value="static" />
+<label htmlFor="recipe-usecase-static" data-needs-sku="gb200">Static synthetic</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Backend</span>
+<input type="radio" id="recipe-engine-vllm" name="recipe-engine" value="vllm" defaultChecked />
+<label htmlFor="recipe-engine-vllm" data-needs-sku="b200 h200">vLLM</label>
+<input type="radio" id="recipe-engine-trtllm" name="recipe-engine" value="trtllm" />
+<label htmlFor="recipe-engine-trtllm" data-needs-sku="gb200">TensorRT-LLM</label>
 </div>
 <div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">Topology</span>
@@ -31,76 +45,177 @@ Validated deployment targets for `openai/gpt-oss-120b` (MXFP4 MoE, 128 experts, 
 </div>
 <div className="dynamo-target-picker-summary" data-sku="b200" data-variant="agg">
 <span><b>Checkpoint</b> openai/gpt-oss-120b</span>
-<span><b>Runtime</b> vLLM · MXFP4 + FP8 KV cache</span>
-<span><b>GPUs</b> 8x B200, 8x TP1 replicas</span>
-<span><b>Techniques</b> KV-aware routing, EAGLE3-v3, flashinfer_trtllm MoE</span>
+<span><b>Framework</b> Dynamo 1.3.0 / vLLM 0.23</span>
+<span><b>GPUs (per node)</b> 8x B200</span>
+<span><b>Techniques</b> KV-aware routing, EAGLE3-v3, flashinfer_trtllm MoE, FlashInfer attention</span>
 <span><b>Workload</b> Agentic (64K ISL / 400 OSL, 90% KV hit)</span>
+<span><b>Deployment</b> DGD (8 pods, KV router)</span>
+<span><b>Precision</b> MXFP4 + FP8 KV</span>
+<span><b>Parallelism</b> 8x TP1 replicas</span>
+<span><b>MoE backend</b> flashinfer_trtllm (MXFP4xFP8)</span>
+<span><b>Attention backend</b> FlashInfer</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Speculative decoding</b> EAGLE3-v3 (DL=3), ON</span>
+<span><b>KV cache offloading</b> none (SimpleCPUOffload opt-in)</span>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="b200" data-variant="disagg">
 <span><b>Checkpoint</b> openai/gpt-oss-120b</span>
-<span><b>Runtime</b> vLLM · MXFP4 + FP8 KV cache</span>
-<span><b>GPUs</b> 8x B200, 2 prefill + 6 decode (in-pod)</span>
-<span><b>Techniques</b> KV-aware routing, EAGLE3-v3, flashinfer_trtllm MoE</span>
+<span><b>Framework</b> Dynamo 1.3.0 / vLLM 0.23</span>
+<span><b>GPUs (per node)</b> 8x B200 (2 prefill + 6 decode)</span>
+<span><b>Techniques</b> KV-aware routing, EAGLE3-v3, flashinfer_trtllm MoE, FlashInfer attention</span>
 <span><b>Workload</b> Agentic (64K ISL / 400 OSL, 90% KV hit)</span>
+<span><b>Deployment</b> DGD (colocated 1 node)</span>
+<span><b>Precision</b> MXFP4 + FP8 KV</span>
+<span><b>Parallelism</b> 2x TP1 prefill + 6x TP1 decode</span>
+<span><b>MoE backend</b> flashinfer_trtllm</span>
+<span><b>Attention backend</b> FlashInfer</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Speculative decoding</b> EAGLE3-v3 (DL=3), ON (both)</span>
+<span><b>KV cache offloading</b> none (NIXL-incompatible)</span>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="h200" data-variant="agg">
 <span><b>Checkpoint</b> openai/gpt-oss-120b</span>
-<span><b>Runtime</b> vLLM · MXFP4 + FP8 KV cache</span>
-<span><b>GPUs</b> 8x H200, 8x TP1 replicas</span>
-<span><b>Techniques</b> KV-aware routing, EAGLE3-v3, SimpleCPUOffload, flashinfer_cutlass MoE</span>
+<span><b>Framework</b> Dynamo 1.3.0 / vLLM 0.23</span>
+<span><b>GPUs (per node)</b> 8x H200</span>
+<span><b>Techniques</b> KV-aware routing, EAGLE3-v3, SimpleCPUOffload, flashinfer_cutlass MoE, FlashInfer attention</span>
 <span><b>Workload</b> Agentic (64K ISL / 400 OSL, 90% KV hit)</span>
+<span><b>Deployment</b> DGD (8 pods, KV router)</span>
+<span><b>Precision</b> MXFP4 + FP8 KV</span>
+<span><b>Parallelism</b> 8x TP1 replicas</span>
+<span><b>MoE backend</b> flashinfer_cutlass</span>
+<span><b>Attention backend</b> FlashInfer</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Speculative decoding</b> EAGLE3-v3 (DL=3), ON</span>
+<span><b>KV cache offloading</b> SimpleCPUOffload ON</span>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="h200" data-variant="disagg">
 <span><b>Checkpoint</b> openai/gpt-oss-120b</span>
-<span><b>Runtime</b> vLLM · MXFP4 + FP8 KV cache</span>
-<span><b>GPUs</b> 8x H200, 4 prefill + 4 decode (in-pod)</span>
-<span><b>Techniques</b> KV-aware routing, EAGLE3-v3, flashinfer_cutlass MoE</span>
+<span><b>Framework</b> Dynamo 1.3.0 / vLLM 0.23</span>
+<span><b>GPUs (per node)</b> 8x H200 (4 prefill + 4 decode)</span>
+<span><b>Techniques</b> KV-aware routing, EAGLE3-v3, flashinfer_cutlass MoE, FlashInfer attention</span>
 <span><b>Workload</b> Agentic (64K ISL / 400 OSL, 90% KV hit)</span>
+<span><b>Deployment</b> DGD (colocated 1 node)</span>
+<span><b>Precision</b> MXFP4 + FP8 KV</span>
+<span><b>Parallelism</b> 4x TP1 prefill + 4x TP1 decode</span>
+<span><b>MoE backend</b> flashinfer_cutlass</span>
+<span><b>Attention backend</b> FlashInfer</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Speculative decoding</b> EAGLE3-v3 (DL=3), ON (both)</span>
+<span><b>KV cache offloading</b> none (NIXL-incompatible)</span>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="gb200" data-variant="agg">
 <span><b>Checkpoint</b> openai/gpt-oss-120b</span>
-<span><b>Runtime</b> TensorRT-LLM (tensorrtllm-runtime:1.2.1)</span>
-<span><b>GPUs</b> 4x GB200 (ARM64), TP4, EP4 + attention-DP</span>
-<span><b>Workload</b> Short prompts, long outputs, high concurrency (128 ISL / 1000 OSL)</span>
+<span><b>Runtime</b> TensorRT-LLM (tensorrtllm-runtime:1.3.0)</span>
+<span><b>Topology</b> TP4, EP4 + attention-DP</span>
+<span><b>GPUs</b> 4x GB200 (ARM64 required)</span>
+<span><b>Quantization</b> Checkpoint default</span>
+<span><b>Workload</b> 128 ISL / 1000 OSL, 3,600 concurrency</span>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="gb200" data-variant="disagg">
 <span><b>Checkpoint</b> openai/gpt-oss-120b</span>
-<span><b>Runtime</b> TensorRT-LLM (tensorrtllm-runtime:1.2.1)</span>
-<span><b>GPUs</b> 5x GB200/B200 (TP1 prefill + TP4 decode)</span>
+<span><b>Runtime</b> TensorRT-LLM (tensorrtllm-runtime:1.3.0)</span>
+<span><b>Topology</b> TP1 prefill + TP4 decode</span>
+<span><b>GPUs</b> 5x GB200/B200</span>
 <span><b>Quantization</b> W4A8_MXFP4_MXFP8</span>
-<span><b>Workload</b> Long-context generation (8K ISL / 1K OSL)</span>
+<span><b>Workload</b> 8K ISL / 1K OSL, 1,536 concurrency</span>
+<span><b>KV transfer</b> UCX cache transceiver</span>
 </div>
+</div>
+
+## Configurations
+
+<div data-sku="b200 h200">
+
+Dynamo + vLLM deployment profiles for the Mooncake agentic trace (64k/400/90%-KV) across two GPU SKUs and two topologies.
+
+- The disaggregated targets run **single-node colocated**: a `podAffinity` packs the prefill and decode Pods onto one node so NIXL P→D KV transfer stays on the NVLink path.
+- KV-offload defaults differ by SKU: **B200 aggregated ships prefix-caching only** (net-neutral there) while **H200 aggregated ships CPU offload ON** (`--kv-transfer-config=$(KV_TRANSFER_CONFIG)`, +9% at the 50-tps floor, quality-neutral).
+- **Do not enable LMCache for gpt-oss.** `LMCacheConnectorV1` crashes the engine on the request-completion path (`lmcache vllm_v1_adapter request_finished: assert self.lmcache_engine is not None` → `EngineDeadError`) and is not `SupportsHMA`, so it force-disables the hybrid KV cache manager — costing KV capacity on gpt-oss sliding-window attention.
+- **The working opt-in backend is `SimpleCPUOffloadConnector`** (native, `SupportsHMA` so the hybrid KV manager stays on; verified coherent and stable across a 384-request concurrent soak with 0 crashes). It is pre-wired as `KV_TRANSFER_CONFIG` in the aggregated deploy YAMLs — enable it by adding `--kv-transfer-config=$(KV_TRANSFER_CONFIG)` to the worker args, with no `--disable-hybrid-kv-cache-manager` needed.
+- Disaggregated variants stay NixlConnector-only — combining offload connectors with NIXL breaks the P→D handshake.
+- Speculative decoding uses the `nvidia/gpt-oss-120b-Eagle3-v3` head (EAGLE3-v3, draft length 3).
+
+</div>
+
+<div data-sku="gb200">
+
+TensorRT-LLM targets (GB200, static synthetic traffic).
+
+- The aggregated target requires ARM64 (GB200) nodes; the disaggregated target accepts GB200 or B200.
+- Do not read the two TensorRT-LLM targets as an aggregated-vs-disaggregated benchmark; their traffic shapes differ by design.
+
+</div>
+
+<div data-sku="gb200" data-variant="agg">
+
+- The `deploy.yaml` ships a ConfigMap with `enable_attention_dp: true`, `moe_config.backend: CUTLASS` and `cuda_graph_config.max_batch_size: 800`; the worker runs TP4 with expert parallelism 4 and `--free-gpu-memory-fraction 0.9`.
+- Quantization is the checkpoint default — no `OVERRIDE_QUANT_ALGO` is applied.
+
+</div>
+
+<div data-sku="gb200" data-variant="disagg">
+
+The disaggregated target splits prefill and decode across two worker roles:
+
+| Role | Nodes | GPUs/node | Total GPUs | Parallelism |
+|---|---|---|---|---|
+| Prefill | 1 | 1 | 1 | TP1 |
+| Decode | 1 | 4 | 4 | TP4 |
+
+- The `deploy.yaml` includes a ConfigMap with separate engine configurations for the prefill and decode workers. Key differences: **prefill** is TP1 with `max_batch_size=64`, `free_gpu_memory_fraction=0.8` and the overlap scheduler disabled; **decode** is TP4 with `max_batch_size=1280`, `free_gpu_memory_fraction=0.85` and the overlap scheduler enabled.
+- KV cache moves between the prefill and decode workers over a UCX-based cache transceiver (`max_tokens_in_buffer=9216`).
+- Quantization is `W4A8_MXFP4_MXFP8`, applied via the `OVERRIDE_QUANT_ALGO` environment variable.
+
+</div>
+
+## Supported features
+
+<div data-sku="b200 h200">
+
+- Modality: text, in the gpt-oss "harmony" format (reasoning traces plus tool calls).
+- Reasoning and tool calling use that harmony format, wired with `--dyn-reasoning-parser gpt_oss --dyn-tool-call-parser harmony`; `tool_calls` populates with `finish_reason: tool_calls`.
+
+</div>
+
+<div data-sku="gb200">
+
+- Modality: text. The TensorRT-LLM targets serve the same checkpoint over `/v1/chat/completions`, but they do not wire the `gpt_oss` reasoning parser or the `harmony` tool-call parser — harmony reasoning and tool-call segments arrive as raw text in `content`.
+
 </div>
 
 ## Prerequisites
 
 <div data-sku="b200">
 
-- A Kubernetes cluster with the Dynamo platform installed and **8x B200 on a single node** — the disaggregated target co-locates prefill and decode workers in one Pod.
+- A Kubernetes cluster with the Dynamo platform installed and **8x B200 on a single node** — the disaggregated target co-locates prefill and decode workers on one node. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx). The recipes pull `nvcr.io/nvidia/ai-dynamo/vllm-runtime` images via the `dynamo-ngc-token` image pull secret.
 - A Hugging Face token with access to `openai/gpt-oss-120b` and `nvidia/gpt-oss-120b-Eagle3-v3` (the EAGLE3 speculative-decoding head).
 
 </div>
 
 <div data-sku="h200">
 
-- A Kubernetes cluster with the Dynamo platform installed and **8x H200 on a single node** — the disaggregated target co-locates prefill and decode workers in one Pod.
+- A Kubernetes cluster with the Dynamo platform installed and **8x H200 on a single node** — the disaggregated target co-locates prefill and decode workers on one node. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx). The recipes pull `nvcr.io/nvidia/ai-dynamo/vllm-runtime` images via the `dynamo-ngc-token` image pull secret.
 - A Hugging Face token with access to `openai/gpt-oss-120b` and `nvidia/gpt-oss-120b-Eagle3-v3` (the EAGLE3 speculative-decoding head).
 
 </div>
 
 <div data-sku="gb200" data-variant="agg">
 
-- A Kubernetes cluster with the Dynamo platform installed and **4x GB200 available on ARM64 nodes** — the aggregated target will not run on x86 Hopper/Ampere hardware.
+- A Kubernetes cluster with the Dynamo platform installed and **4x GB200 available on ARM64 nodes** — the aggregated target will not run on x86 Hopper/Ampere hardware. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
 - A Hugging Face token with access to `openai/gpt-oss-120b`.
 
 </div>
 
 <div data-sku="gb200" data-variant="disagg">
 
-- A Kubernetes cluster with the Dynamo platform installed and **5x GB200 or B200** available (1 prefill + 4 decode GPUs).
+- A Kubernetes cluster with the Dynamo platform installed and **Blackwell GPU nodes (GB200 or B200)** — 5 GPUs in total: 1 for the TP1 prefill worker and 4 for the TP4 decode worker. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
 - A Hugging Face token with access to `openai/gpt-oss-120b`.
 
 </div>
+
+## Quick Start
+
+### 1. Create namespace
 
 Create the namespace and token secret:
 
@@ -112,18 +227,22 @@ kubectl create secret generic hf-token-secret \
   -n ${NAMESPACE}
 ```
 
+### 2. Create Storage
+
 <Warning>
-Update `storageClassName` in `model-cache/model-cache.yaml` and the container image tag in `deploy.yaml` to match your Dynamo release before deploying. Also edit namespace, node selectors, and cluster-specific placement.
+Edit `model-cache/model-cache.yaml` first and update `storageClassName` to match your cluster (`kubectl get storageclass`). Also update the container image tag in `deploy.yaml` to match your Dynamo release, and edit the namespace, node selectors, and any other cluster-specific placement before deploying.
 </Warning>
 
-## Deploy
+### 3. Download model + EAGLE3 head
 
-Prepare the model cache (shared by all targets; the vLLM targets also pull the EAGLE3 head):
+Prepare the model cache (shared by all targets; the download Job pulls both `openai/gpt-oss-120b` and the `nvidia/gpt-oss-120b-Eagle3-v3` head):
 
 ```bash
 kubectl apply -f recipes/gpt-oss-120b/model-cache/ -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
 ```
+
+### 4. Deploy
 
 Then deploy:
 
@@ -178,8 +297,6 @@ kubectl get pods -n ${NAMESPACE} -l nvidia.com/dynamo-graph-deployment-name=gpt-
 
 </div>
 
-## Smoke Test
-
 Send a test request to verify the deployment serves traffic. First forward the frontend port for your target:
 
 <div data-sku="b200" data-variant="agg">
@@ -192,10 +309,8 @@ kubectl port-forward svc/turbo-gptoss-120b-agg-b200-agentic-frontend 8000:8000 -
 
 <div data-sku="b200" data-variant="disagg">
 
-The disaggregated target is a single co-located Pod exposed as one Service (no separate frontend):
-
 ```bash
-kubectl port-forward svc/turbo-gptoss-120b-disagg-b200-agentic 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/turbo-gptoss-120b-disagg-b200-agentic-frontend 8000:8000 -n ${NAMESPACE}
 ```
 
 </div>
@@ -210,10 +325,8 @@ kubectl port-forward svc/turbo-gptoss-120b-agg-h200-agentic-frontend 8000:8000 -
 
 <div data-sku="h200" data-variant="disagg">
 
-The disaggregated target is a single co-located Pod exposed as one Service (no separate frontend):
-
 ```bash
-kubectl port-forward svc/turbo-gptoss-120b-disagg-h200-agentic 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/turbo-gptoss-120b-disagg-h200-agentic-frontend 8000:8000 -n ${NAMESPACE}
 ```
 
 </div>
@@ -238,35 +351,137 @@ All targets serve `openai/gpt-oss-120b`:
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"openai/gpt-oss-120b","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+  -H "Content-Type: application/json" \
+  -d '{"model":"openai/gpt-oss-120b","messages":[{"role":"user","content":"Hello!"}],"max_tokens":50}'
 ```
 
-## Benchmark
+### 5. Benchmark
 
 <div data-sku="b200 h200">
 
-A single AIPerf trace-replay Job — `perf/perf.yaml` — covers every vLLM variant. It replays the Mooncake agentic trace (reused from the Kimi-K2.6 recipe; fetch it with `git lfs pull --include "recipes/kimi-k2.6/perf/traces/*"`) at one concurrency value and writes artifacts to the shared `model-cache` PVC. Edit the `env` block to set `ENDPOINT`, `TRACE_FILE`, and `CONCURRENCY` for your target:
+A single [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job — `perf/perf.yaml` — covers every vLLM variant (agg/disagg x B200/H200). The benchmark is identical across variants; only `ENDPOINT`, `TRACE_FILE`, and `CONCURRENCY` need to change.
 
-| Target | `ENDPOINT` | `CONCURRENCY` |
+The Job waits for `GET /v1/models` on the frontend to return `openai/gpt-oss-120b` (up to ~1h by default), runs a short warmup, then replays the configured trace at a single `CONCURRENCY` value and writes raw artifacts to the shared `model-cache` PVC. The Job carries a 2h hard cap (`activeDeadlineSeconds: 7200`), which is why the wait below uses a 7200s timeout.
+
+The bench pod is **co-located with the DGD frontend** (`podAffinity` on the frontend's host) so client → server traffic stays on a single node.
+
+Edit the `env` block in `perf.yaml` to target a variant:
+
+| Variant target | `ENDPOINT` | Measured `CONCURRENCY` |
 | --- | --- | --- |
-| vLLM aggregated (B200) | `turbo-gptoss-120b-agg-b200-agentic-frontend:8000` | `512` |
-| vLLM aggregated (H200) | `turbo-gptoss-120b-agg-h200-agentic-frontend:8000` | `256` |
-| vLLM disaggregated (B200) | `turbo-gptoss-120b-disagg-b200-agentic:8000` | `256` |
-| vLLM disaggregated (H200) | `turbo-gptoss-120b-disagg-h200-agentic:8000` | `256` |
+| B200 agg, agentic | `turbo-gptoss-120b-agg-b200-agentic-frontend:8000` | `512` |
+| H200 agg, agentic | `turbo-gptoss-120b-agg-h200-agentic-frontend:8000` | `256` |
+| B200 disagg, agentic | `turbo-gptoss-120b-disagg-b200-agentic-frontend:8000` | `256` |
+| H200 disagg, agentic | `turbo-gptoss-120b-disagg-h200-agentic-frontend:8000` | `256` |
+
+All variants serve `openai/gpt-oss-120b`, so any trace can be replayed against any variant by swapping `TRACE_FILE`.
+
+<Note>
+The `podAffinity` in `perf.yaml` matches the `nvidia.com/dynamo-component-type: frontend` + `nvidia.com/dynamo-graph-deployment-name` labels. Every target here is a DGD with its own `Frontend` component, so the operator sets these labels on all four frontends; `perf.yaml` already lists all four deployment names, and the one perf Job co-locates with aggregated and disaggregated targets unchanged.
+</Note>
+
+If you run more than one benchmark in the same namespace, also update `metadata.name` / `labels.app` so Jobs and artifact directories stay distinct.
+
+Stage the trace on the `model-cache` PVC with a short-lived helper pod that mounts it:
 
 ```bash
+kubectl run pvc-helper -n ${NAMESPACE} \
+  --image=busybox:1.36 --restart=Never \
+  --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.36","command":["sleep","3600"],"volumeMounts":[{"name":"model-cache","mountPath":"/model-cache"}]}],"volumes":[{"name":"model-cache","persistentVolumeClaim":{"claimName":"model-cache"}}]}}' \
+  --command -- sleep 3600
+
+git lfs install
+git lfs pull --include "recipes/kimi-k2.6/perf/traces/*"
+kubectl exec -n ${NAMESPACE} pvc-helper -- mkdir -p /model-cache/traces
+kubectl cp recipes/kimi-k2.6/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl \
+  ${NAMESPACE}/pvc-helper:/model-cache/traces/
+```
+
+Keep `pvc-helper` around for fetching artifacts later, or delete it once you are done staging.
+
+Then run the Job:
+
+```bash
+kubectl apply -f recipes/gpt-oss-120b/perf/perf.yaml -n ${NAMESPACE}
+
+# Stream logs
+kubectl logs -n ${NAMESPACE} -l job-name=turbo-gptoss-120b-bench -f
+
+# Wait for completion (2h hard cap on the Job)
+kubectl wait --for=condition=Complete \
+  job/turbo-gptoss-120b-bench \
+  -n ${NAMESPACE} --timeout=7200s
+```
+
+Fetch the artifacts, then clean up:
+
+```bash
+kubectl cp ${NAMESPACE}/pvc-helper:/model-cache/perf/<epoch>_turbo-gptoss-120b-bench ./results
+
+kubectl delete job turbo-gptoss-120b-bench -n ${NAMESPACE}
+kubectl delete pod pvc-helper -n ${NAMESPACE}   # if you kept it around
+```
+
+Results are written to:
+
+```text
+/model-cache/perf/<epoch>_<job-name>/
+  warmup/
+  gpt-oss-120b_trace_c<concurrency>_<timestamp>/
+    profile_export.json
+    inputs.json
+    ...
+```
+
+Per-GPU throughput = `output_token_throughput` / 8 (all variants run on 8 GPUs); the interactivity target is ≥50 tok/s/user.
+
+**Tunable environment variables.** Edit the `env` block on the Job to adjust:
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `ENDPOINT` | `turbo-gptoss-120b-agg-b200-agentic-frontend:8000` | Frontend service:port — change per variant (see the table above) |
+| `TRACE_FILE` | agentic 15% subset | Swap to the full trace, the chat flavour, or a smaller subset |
+| `CONCURRENCY` | `384` | B200 agentic ~50-tps floor; H200 ~128. See the concurrency sweep below |
+| `TARGET_MODEL` | `openai/gpt-oss-120b` | Must match `--served-model-name` |
+
+**Running a concurrency sweep.** `perf.yaml` runs a **single** `CONCURRENCY` value. To measure multiple concurrencies you must clear server state between runs — otherwise residual KV cache / prefix-cache hits from the previous run skew results. For each concurrency value you want to measure:
+
+```bash
+# 1. Delete the previous bench job
+kubectl delete job turbo-gptoss-120b-bench -n ${NAMESPACE} --ignore-not-found
+
+# 2. Drop KV / prefix-cache state.
+#    agg (DGD): DGDs are Grove-managed (DGD → PodCliqueSet → PodClique → Pod), not
+#    Deployments, so `kubectl rollout restart deployment` won't match anything —
+#    delete the worker pods directly and let Grove recreate them.
+DGD=turbo-gptoss-120b-agg-b200-agentic
+kubectl delete pods -n ${NAMESPACE} \
+  -l nvidia.com/dynamo-graph-deployment-name=${DGD},nvidia.com/dynamo-component-type=worker
+kubectl wait --for=condition=Ready pod -n ${NAMESPACE} \
+  -l nvidia.com/dynamo-graph-deployment-name=${DGD},nvidia.com/dynamo-component-type=worker \
+  --timeout=900s
+
+#    disagg (also a DGD): delete its worker pods and let the operator recreate them.
+# kubectl delete pods -n ${NAMESPACE} -l nvidia.com/dynamo-graph-deployment-name=turbo-gptoss-120b-disagg-b200-agentic,nvidia.com/dynamo-component-type=worker
+
+# 3. Bump CONCURRENCY in perf.yaml, then re-apply
 kubectl apply -f recipes/gpt-oss-120b/perf/perf.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/turbo-gptoss-120b-bench -n ${NAMESPACE} --timeout=7200s
 ```
 
-To measure multiple concurrencies, clear server state between runs — otherwise residual KV/prefix-cache hits skew results. See the [benchmark README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/perf/README.md).
+The bench Job's `wait_for_model_ready` loop handles the worker restart window — it re-polls `/v1/models` until the frontend reports ready again.
+
+</div>
+
+<div data-sku="gb200">
+
+Edit `perf.yaml` to set your namespace and PVC before running the Job.
 
 </div>
 
 <div data-sku="gb200" data-variant="agg">
 
-The TensorRT-LLM target ships a `perf.yaml` Kubernetes Job that runs AIPerf at ISL 128 / OSL 1000 and 900 per GPU x 4 GPUs = 3,600 total concurrency (request count 10x concurrency). The Job wraps this AIPerf run:
+The TensorRT-LLM aggregated target ships a `perf.yaml` Kubernetes Job that runs AIPerf at ISL 128 / OSL 1000 and 900 per GPU x 4 GPUs = 3,600 total concurrency (request count 10x concurrency). The Job wraps this AIPerf run:
 
 ```bash
 aiperf profile \
@@ -287,7 +502,7 @@ kubectl logs -f -l job-name=gpt-oss-120b-bench -n ${NAMESPACE}
 
 <div data-sku="gb200" data-variant="disagg">
 
-The TensorRT-LLM target ships a `perf.yaml` Kubernetes Job that runs AIPerf at ISL 8192 / OSL 1024 and 1,536 total concurrency (request count 10x concurrency). The Job wraps this AIPerf run:
+The TensorRT-LLM disaggregated target ships a `perf.yaml` Kubernetes Job that runs AIPerf at ISL 8192 / OSL 1024 and 1,536 total concurrency (request count 10x concurrency). The Job wraps this AIPerf run:
 
 ```bash
 aiperf profile \
@@ -306,66 +521,75 @@ kubectl logs -f -l job-name=gpt-oss-120b-disagg-bench -n ${NAMESPACE}
 
 </div>
 
-## Expected Performance
+## Optimization targets
+
+The vLLM recipes are optimized for the following configuration, at the target user interactivity:
+
+| Workload | Median ISL | Median OSL | KV cache hit rate | User output tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| Agentic | 64k | 400 | 90% | 50 |
 
 <div data-sku="b200 h200">
 
-Measured on the agentic 15% trace (8 GPUs) with the synthetic-acceptance EAGLE3 throughput proxy (AL=2.72; use for *relative* comparison — the generated text is intentionally garbage). Per-GPU throughput is system throughput / 8.
+The benchmark replays a [Mooncake-format](https://github.com/kvcache-ai/Mooncake) trace via `aiperf --custom-dataset-type mooncake_trace`. Each JSONL line describes one request (`input_length`, `output_length`, `hash_ids`). The traces are token-length-only, so model-agnostic — this recipe reuses the [traces shipped with the Kimi-K2.6 recipe](https://github.com/ai-dynamo/dynamo/tree/main/recipes/kimi-k2.6/perf/traces). **Only the agentic 15% subset is needed** — the recipes target the agentic workload (64k/400/90%-KV), and the 15% subset keeps run time short while preserving the KV-hit rate. It is the default `TRACE_FILE`; the full trace, the 30% subset, and the chat flavour live in the same folder for longer runs or experimentation.
 
-| Target | Concurrency | tok/s/GPU | tok/s/user | TTFT avg |
-| --- | --- | --- | --- | --- |
-| vLLM aggregated (B200) | 512 | 2896 | 58 | 4.4s |
-| vLLM aggregated (H200) | 256 | 1256 | 47.5 | 1.4s |
-| vLLM disaggregated (B200) | 256 | 2069 | 99 | 5.6s |
-| vLLM disaggregated (H200) | 256 | 1046 | 43 | 4.4s |
+<Note>
+The trace files are stored in **Git LFS** — a plain `git clone` leaves ~132-byte pointer files, so fetch the actual data with `git lfs install` followed by `git lfs pull` before staging. A real trace file is several MB (`ls -lh`); if the first line starts with `version https://git-lfs...`, it is still a pointer.
+</Note>
+
+The trace was generated for models with a longer context window than gpt-oss-120b. A small, deterministic fraction of requests (~7%) has `input_length` above 131072 (the recipes' `--max-model-len`) and is rejected by the server. The rejected set is identical on every run, so comparisons across configs and concurrencies remain valid — just expect the error count in the AIPerf export to be non-zero.
 
 </div>
 
 <div data-sku="gb200">
 
-The TensorRT-LLM targets ship benchmark Jobs but no published numbers — reproduce them with the [Benchmark](#benchmark) step above.
+The TensorRT-LLM targets replay static synthetic traffic instead of a trace, so their optimization target is the ISL/OSL pair and concurrency baked into each `perf.yaml`:
+
+| Target | ISL | OSL | Total concurrency |
+| --- | --- | --- | --- |
+| TRT-LLM aggregated | 128 | 1000 | 3,600 (900 per GPU x 4 GPUs) |
+| TRT-LLM disaggregated | 8192 | 1024 | 1,536 (256 per GPU x 6) |
 
 </div>
 
-## Compare All Targets
-
-vLLM targets (agentic Mooncake trace, 8 GPUs, MXFP4 + FP8 KV, EAGLE3-v3, KV-aware routing):
-
-| | vLLM agg B200 | vLLM agg H200 | vLLM disagg B200 | vLLM disagg H200 |
-|---|---|---|---|---|
-| **GPUs** | 8x B200, 8x TP1 | 8x H200, 8x TP1 | 8x B200, 2P6D in-pod | 8x H200, 4P4D in-pod |
-| **MoE backend** | flashinfer_trtllm | flashinfer_cutlass | flashinfer_trtllm | flashinfer_cutlass |
-| **KV offload** | none | SimpleCPUOffload | none (NIXL-incompatible) | none (NIXL-incompatible) |
-| **Concurrency** | 512 | 256 | 256 | 256 |
-
-TensorRT-LLM targets (GB200, static synthetic traffic):
-
-| | TRT-LLM aggregated | TRT-LLM disaggregated |
-|---|---|---|
-| **GPUs** | 4x GB200 (ARM64 required) | 5x GB200/B200 |
-| **Topology** | TP4, EP4 + attention-DP | TP1 prefill + TP4 decode |
-| **Workload** | 128 ISL / 1000 OSL, 3,600 concurrency | 8K ISL / 1K OSL, 1,536 concurrency |
-| **Quantization** | Checkpoint default | W4A8_MXFP4_MXFP8 |
-| **KV transfer** | — | UCX cache transceiver |
-
-## Notes
+## Performance results
 
 <div data-sku="b200 h200">
 
-- Reasoning and tool calling use the gpt-oss "harmony" format, wired with `--dyn-reasoning-parser gpt_oss --dyn-tool-call-parser harmony`; `tool_calls` populates with `finish_reason: tool_calls`.
-- The disaggregated targets run **single-node in-pod** (prefill and decode co-located in one Pod). Multi-pod disaggregation is not supported.
-- Structured output (`response_format: json_object` / `json_schema`) may return invalid JSON while speculative decoding is enabled — use tool calling or validate client-side.
-- The H200 aggregated target enables `SimpleCPUOffload` (about +9% throughput, quality-neutral); the B200 targets leave it off by default.
-- Speculative decoding uses the `nvidia/gpt-oss-120b-Eagle3-v3` head (EAGLE3-v3, draft length 3).
+Measured 2026-07-09 on the agentic 15% trace, 8 GPUs, with the **synthetic-acceptance EAGLE3 throughput proxy** (AL=2.72 on all workers — output is garbage by design; use for *relative* comparisons) and each recipe's KV-offload default. Per-GPU throughput is system throughput / 8, and the recipes are tuned to an interactivity target of 50 user output tok/s.
+
+| Target | Concurrency | tok/s/GPU | tok/s/user | TTFT avg | Note |
+| --- | --- | --- | --- | --- | --- |
+| vLLM aggregated (B200), 8x TP1 | c512 | **2896** | 58 | 4.4s | offload quality-neutral |
+| vLLM disaggregated (B200), 2P6D colocated | c256 | 2069 | 99 | 5.6s | plateau; TTFT-limited above c256 |
+| vLLM aggregated (H200), 8x TP1 + CPU offload | c256 | **1256** | 47.5 | 1.4s | at the 50-tps floor; offload = +9%, quality-neutral |
+| vLLM disaggregated (H200), 4P4D colocated | c256 | 1046 | 43 | 4.4s | best usable H200 split |
 
 </div>
 
 <div data-sku="gb200">
 
-- The aggregated target requires ARM64 (GB200) nodes; the disaggregated target accepts GB200 or B200.
-- Do not read the two TensorRT-LLM targets as an aggregated-vs-disaggregated benchmark; their traffic shapes differ by design.
-- The disaggregated deployment uses 5 GPUs (1x TP1 prefill + 1x TP4 decode), while its `perf.yaml` computes total concurrency from a 6-GPU count (256 x 6 = 1,536); adjust `DEPLOYMENT_GPU_COUNT` if you want strict per-GPU normalization.
-- The disaggregated target uses `W4A8_MXFP4_MXFP8` quantization via the `OVERRIDE_QUANT_ALGO` environment variable, and UCX-based KV transfer (`max_tokens_in_buffer=9216`).
+The TensorRT-LLM targets ship benchmark Jobs but no published numbers — reproduce them with the [Benchmark](#5-benchmark) step above.
+
+</div>
+
+## Known issues
+
+<div data-sku="b200 h200">
+
+- Structured output (`response_format: json_object` / `json_schema`) is not working — it may return invalid JSON while speculative decoding is enabled; use tool calling or validate client-side.
+
+</div>
+
+<div data-sku="gb200" data-variant="disagg">
+
+- The disaggregated deployment uses 5 GPUs (1x TP1 prefill + 1x TP4 decode), while its `perf.yaml` computes total concurrency from a 6-GPU count (`DEPLOYMENT_GPU_COUNT: "6"`, 256 x 6 = 1,536); adjust `DEPLOYMENT_GPU_COUNT` if you want strict per-GPU normalization.
+
+</div>
+
+<div data-sku="gb200" data-variant="agg">
+
+- The benchmark Job compiles the `crick` dependency from source because it has no Linux aarch64 wheel, so the pod installs build tools before AIPerf starts — expect a few extra minutes of startup on GB200.
 
 </div>
 
@@ -377,4 +601,5 @@ TensorRT-LLM targets (GB200, static synthetic traffic):
 - vLLM disaggregated: [B200](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/vllm/disagg-b200-agentic/deploy.yaml) and [H200](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/vllm/disagg-h200-agentic/deploy.yaml) deploy.yaml
 - vLLM benchmark manifest: [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/perf/perf.yaml)
 - TRT-LLM aggregated: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/agg/deploy.yaml) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/agg/perf.yaml)
+- TRT-LLM disaggregated README: [recipes/gpt-oss-120b/trtllm/disagg/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/disagg/README.md)
 - TRT-LLM disaggregated: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/disagg/deploy.yaml) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/disagg/perf.yaml)

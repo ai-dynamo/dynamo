@@ -9,10 +9,25 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Three validated vLLM topologies for `RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic` — aggregated TP4, single-node prefill/decode split, and two-node prefill/decode — all benchmarked with the same 8K ISL / 1K OSL traffic at 16 concurrency per GPU so you can compare normalized TPS/GPU across footprints. Pick your topology; every command on this page updates to match.
+Production-ready deployments of `RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic` using vLLM with FP8 dynamic quantization, in three configurations — aggregated TP4 on one node, prefill/decode separation on one node, and disaggregated across two nodes of 8 GPUs each. All three are benchmarked with the same 8K ISL / 1K OSL traffic at 16 concurrency per GPU, so you can compare normalized TPS/GPU across footprints. Pick your GPU, workload, backend, and topology; every command on this page updates to match.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">GPU</span>
+<input type="radio" id="recipe-sku-hopper" name="recipe-sku" value="hopper" defaultChecked />
+<label htmlFor="recipe-sku-hopper">H100 / H200</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Workload</span>
+<input type="radio" id="recipe-usecase-static" name="recipe-usecase" value="static" defaultChecked />
+<label htmlFor="recipe-usecase-static">Static synthetic</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Backend</span>
+<input type="radio" id="recipe-engine-vllm" name="recipe-engine" value="vllm" defaultChecked />
+<label htmlFor="recipe-engine-vllm">vLLM</label>
+</div>
 <div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">Topology</span>
 <input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" />
@@ -22,50 +37,80 @@ Three validated vLLM topologies for `RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic
 <input type="radio" id="recipe-variant-disagg-multi-node" name="recipe-variant" value="disagg-multi-node" />
 <label htmlFor="recipe-variant-disagg-multi-node">Disagg multi-node (16 GPU)</label>
 </div>
-<div className="dynamo-target-picker-summary" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-sku="hopper" data-engine="vllm" data-usecase="static" data-variant="agg">
 <span><b>Checkpoint</b> RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic</span>
 <span><b>Precision</b> FP8 dynamic</span>
-<span><b>GPUs</b> 4x H100/H200, one TP4 worker</span>
-<span><b>Techniques</b> Aggregated serving</span>
-<span><b>Workload</b> 8K ISL / 1K OSL, 64 concurrency</span>
+<span><b>Backend</b> vLLM</span>
+<span><b>GPUs</b> 4x H100/H200</span>
+<span><b>Techniques</b> Aggregated serving, single-node TP4</span>
+<span><b>Workload</b> Static synthetic, 8K ISL / 1K OSL, 64 concurrency</span>
+<span><b>Nodes</b> 1</span>
+<span><b>Mode</b> Aggregated</span>
+<span><b>Workers</b> 1x TP4</span>
+<span><b>Details</b> Single-node, TP4</span>
+<span><b>Total concurrency</b> 64</span>
 </div>
-<div className="dynamo-target-picker-summary" data-variant="disagg-single-node">
+<div className="dynamo-target-picker-summary" data-sku="hopper" data-engine="vllm" data-usecase="static" data-variant="disagg-single-node">
 <span><b>Checkpoint</b> RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic</span>
 <span><b>Precision</b> FP8 dynamic</span>
-<span><b>GPUs</b> 8x H100/H200: 2x TP2 prefill + 1x TP4 decode</span>
-<span><b>Techniques</b> Disaggregated P/D over NIXL</span>
-<span><b>Workload</b> 8K ISL / 1K OSL, 128 concurrency</span>
+<span><b>Backend</b> vLLM</span>
+<span><b>GPUs</b> 8x H100/H200</span>
+<span><b>Techniques</b> Disaggregated P/D over NIXL, prefill/decode separation on one node</span>
+<span><b>Workload</b> Static synthetic, 8K ISL / 1K OSL, 128 concurrency</span>
+<span><b>Nodes</b> 1</span>
+<span><b>Mode</b> Disaggregated</span>
+<span><b>Workers</b> 2x TP2 prefill + 1x TP4 decode</span>
+<span><b>Details</b> Prefill/decode separation on one node</span>
+<span><b>Total concurrency</b> 128</span>
 </div>
-<div className="dynamo-target-picker-summary" data-variant="disagg-multi-node">
+<div className="dynamo-target-picker-summary" data-sku="hopper" data-engine="vllm" data-usecase="static" data-variant="disagg-multi-node">
 <span><b>Checkpoint</b> RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic</span>
 <span><b>Precision</b> FP8 dynamic</span>
-<span><b>GPUs</b> 16x H100/H200: 1x TP8 prefill + 1x TP8 decode</span>
-<span><b>Techniques</b> Disaggregated P/D over NIXL</span>
-<span><b>Workload</b> 8K ISL / 1K OSL, 256 concurrency</span>
+<span><b>Backend</b> vLLM</span>
+<span><b>GPUs</b> 16x H100/H200</span>
+<span><b>Techniques</b> Disaggregated P/D over NIXL, 2 nodes with 8 GPUs each</span>
+<span><b>Workload</b> Static synthetic, 8K ISL / 1K OSL, 256 concurrency</span>
+<span><b>Nodes</b> 2</span>
+<span><b>Mode</b> Disaggregated</span>
+<span><b>Workers</b> 1x TP8 prefill + 1x TP8 decode</span>
+<span><b>Details</b> 2 nodes, 8 GPUs each</span>
+<span><b>Total concurrency</b> 256</span>
 </div>
 </div>
+
+## Available Configurations
+
+All three targets serve `RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic` with vLLM and FP8 dynamic quantization on the vLLM runtime image (`nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0`), and are benchmarked at 16 concurrency per GPU with 8K ISL / 1K OSL traffic.
+
+GPU class (H100/H200), workload (static synthetic), and backend (vLLM) are the same for every target, so those rows of the picker each offer a single option — topology is the only choice that changes the commands below.
 
 ## Prerequisites
 
-<div data-variant="agg">
+<div data-sku="hopper" data-engine="vllm" data-usecase="static" data-variant="agg">
 
-- A Kubernetes cluster with the Dynamo platform installed and **4x H100 or H200** available on one node.
-
-</div>
-
-<div data-variant="disagg-single-node">
-
-- A Kubernetes cluster with the Dynamo platform installed and **8x H100 or H200** available on one node.
+- A Kubernetes cluster with the Dynamo platform installed and **4x H100 or H200** available on one node — see the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
 
 </div>
 
-<div data-variant="disagg-multi-node">
+<div data-sku="hopper" data-engine="vllm" data-usecase="static" data-variant="disagg-single-node">
 
-- A Kubernetes cluster with the Dynamo platform installed and **16x H100 or H200** available across two nodes.
+- A Kubernetes cluster with the Dynamo platform installed and **8x H100 or H200** available on one node — see the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
 
 </div>
 
-- A Hugging Face token with access to `RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic`.
+<div data-sku="hopper" data-engine="vllm" data-usecase="static" data-variant="disagg-multi-node">
+
+- A Kubernetes cluster with the Dynamo platform installed and **16x H100 or H200** available across two nodes — see the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
+
+</div>
+
+- A Hugging Face token with access to Llama models (`RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic`).
+
+<Warning>
+Update `storageClassName` in `model-cache/model-cache.yaml` to match your cluster, and edit namespace, image tags, node selectors, and Hugging Face secrets before applying these manifests. Model download takes approximately 15-30 minutes depending on network speed.
+</Warning>
+
+## Quick Start
 
 Create the namespace and token secret:
 
@@ -77,51 +122,45 @@ kubectl create secret generic hf-token-secret \
   -n ${NAMESPACE}
 ```
 
-<Warning>
-Update `storageClassName` in `model-cache/model-cache.yaml` to match your cluster, and edit namespace, image tags, node selectors, and Hugging Face secrets before applying these manifests. Model download takes approximately 15-30 minutes depending on network speed.
-</Warning>
-
-## Deploy
-
-Prepare the model cache and download the checkpoint (shared by all three targets):
+Prepare the model cache and download the checkpoint (shared by all three targets). Run the `kubectl apply` commands on this page from the recipe directory, `recipes/llama-3-70b/`:
 
 ```bash
 # Update storageClassName in model-cache.yaml first!
-kubectl apply -f recipes/llama-3-70b/model-cache/ -n ${NAMESPACE}
+kubectl apply -f model-cache/ -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
 ```
 
 Then deploy:
 
-<div data-variant="agg">
+<div data-sku="hopper" data-engine="vllm" data-usecase="static" data-variant="agg">
 
 ```bash
-kubectl apply -f recipes/llama-3-70b/vllm/agg/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/agg/deploy.yaml -n ${NAMESPACE}
 ```
 
 </div>
 
-<div data-variant="disagg-single-node">
+<div data-sku="hopper" data-engine="vllm" data-usecase="static" data-variant="disagg-single-node">
 
 ```bash
-kubectl apply -f recipes/llama-3-70b/vllm/disagg-single-node/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/disagg-single-node/deploy.yaml -n ${NAMESPACE}
 ```
 
 </div>
 
-<div data-variant="disagg-multi-node">
+<div data-sku="hopper" data-engine="vllm" data-usecase="static" data-variant="disagg-multi-node">
 
 ```bash
-kubectl apply -f recipes/llama-3-70b/vllm/disagg-multi-node/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/disagg-multi-node/deploy.yaml -n ${NAMESPACE}
 ```
 
 </div>
 
-## Smoke Test
+## Test the Deployment
 
 Send a test request to verify the deployment serves traffic:
 
-<div data-variant="agg">
+<div data-sku="hopper" data-engine="vllm" data-usecase="static" data-variant="agg">
 
 ```bash
 kubectl port-forward svc/llama3-70b-agg-frontend 8000:8000 -n ${NAMESPACE}
@@ -129,7 +168,7 @@ kubectl port-forward svc/llama3-70b-agg-frontend 8000:8000 -n ${NAMESPACE}
 
 </div>
 
-<div data-variant="disagg-single-node">
+<div data-sku="hopper" data-engine="vllm" data-usecase="static" data-variant="disagg-single-node">
 
 ```bash
 kubectl port-forward svc/llama3-70b-disagg-sn-frontend 8000:8000 -n ${NAMESPACE}
@@ -137,7 +176,7 @@ kubectl port-forward svc/llama3-70b-disagg-sn-frontend 8000:8000 -n ${NAMESPACE}
 
 </div>
 
-<div data-variant="disagg-multi-node">
+<div data-sku="hopper" data-engine="vllm" data-usecase="static" data-variant="disagg-multi-node">
 
 ```bash
 kubectl port-forward svc/llama3-70b-disagg-mn-frontend 8000:8000 -n ${NAMESPACE}
@@ -147,15 +186,19 @@ kubectl port-forward svc/llama3-70b-disagg-mn-frontend 8000:8000 -n ${NAMESPACE}
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "max_tokens": 50
+  }'
 ```
 
-## Benchmark
+### Benchmark
 
 Each target ships a `perf.yaml` Kubernetes Job that waits for the model to come up, then runs AIPerf with the same traffic shape: ISL=8192, OSL=1024, 16 concurrency per GPU (so total concurrency scales with the target's GPU count), and a request count of 10x total concurrency.
 
-<div data-variant="agg">
+<div data-sku="hopper" data-engine="vllm" data-usecase="static" data-variant="agg">
 
 The Job wraps this AIPerf run (64 concurrency, 640 requests):
 
@@ -171,13 +214,13 @@ aiperf profile \
 ```
 
 ```bash
-kubectl apply -f recipes/llama-3-70b/vllm/agg/perf.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/agg/perf.yaml -n ${NAMESPACE}
 kubectl logs -f job/llama3-70b-agg-perf -n ${NAMESPACE}
 ```
 
 </div>
 
-<div data-variant="disagg-single-node">
+<div data-sku="hopper" data-engine="vllm" data-usecase="static" data-variant="disagg-single-node">
 
 The Job wraps this AIPerf run (128 concurrency, 1,280 requests):
 
@@ -193,13 +236,13 @@ aiperf profile \
 ```
 
 ```bash
-kubectl apply -f recipes/llama-3-70b/vllm/disagg-single-node/perf.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/disagg-single-node/perf.yaml -n ${NAMESPACE}
 kubectl logs -f job/llama3-70b-disagg-sn-perf -n ${NAMESPACE}
 ```
 
 </div>
 
-<div data-variant="disagg-multi-node">
+<div data-sku="hopper" data-engine="vllm" data-usecase="static" data-variant="disagg-multi-node">
 
 The Job wraps this AIPerf run (256 concurrency, 2,560 requests):
 
@@ -215,33 +258,25 @@ aiperf profile \
 ```
 
 ```bash
-kubectl apply -f recipes/llama-3-70b/vllm/disagg-multi-node/perf.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/disagg-multi-node/perf.yaml -n ${NAMESPACE}
 kubectl logs -f job/llama3-70b-disagg-mn-perf -n ${NAMESPACE}
 ```
 
 </div>
 
-## Compare All Targets
-
-All three targets serve `RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic` on the vLLM runtime (`nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1`) and are benchmarked at 16 concurrency per GPU with 8K ISL / 1K OSL traffic:
-
-| | Aggregated | Disagg single-node | Disagg multi-node |
-|---|---|---|---|
-| **GPUs** | 4x H100/H200 | 8x H100/H200 | 16x H100/H200 |
-| **Nodes** | 1 | 1 | 2 |
-| **Workers** | 1x TP4 | 2x TP2 prefill + 1x TP4 decode | 1x TP8 prefill + 1x TP8 decode |
-| **Technique** | Aggregated serving | Disaggregated prefill/decode | Disaggregated prefill/decode |
-| **Total concurrency** | 64 | 128 | 256 |
-
-## Related Feature Benchmarks
+### Related Feature Benchmarks
 
 - [Llama-3.3-70B topology benchmark](../feature-benchmarks/llama-3-3-70b-topology.mdx) — how the three topologies compare when normalized by GPU.
 
-## Notes
+## Model Details
 
 - FP8 dynamic quantization is applied at runtime; the served model is `RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic`.
+- Context length is the default model context.
+
+## Notes
+
 - GPU counts differ by target (4 / 8 / 16), so compare total throughput and TPS/GPU — the topology comparison lives on the related Feature Benchmarks page.
-- A GAIE (Gateway API Inference Extension) integration example is included: apply the manifests under [vllm/agg/gaie/](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/agg/gaie) (or [vllm/disagg-single-node/gaie/](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/disagg-single-node/gaie)) to front the deployment with an inference gateway. These are integration artifacts, not separate recipe targets.
+- For GAIE (Gateway API Inference Extension) integration, `kubectl apply` the files from the corresponding subfolder, for example [vllm/agg/gaie/](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/agg/gaie) (or [vllm/disagg-single-node/gaie/](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b/vllm/disagg-single-node/gaie)) to front the deployment with an inference gateway. These are integration artifacts, not separate recipe targets.
 
 ## Source
 

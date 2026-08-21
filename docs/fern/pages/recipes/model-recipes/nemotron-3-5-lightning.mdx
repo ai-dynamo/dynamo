@@ -25,88 +25,98 @@ This recipe deploys `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4`, a 30B 
 <label htmlFor="recipe-sku-gb200">GB200</label>
 </div>
 <div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Workload</span>
+<input type="radio" id="recipe-usecase-agentic" name="recipe-usecase" value="agentic" defaultChecked />
+<label htmlFor="recipe-usecase-agentic">Agentic</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Backend</span>
+<input type="radio" id="recipe-engine-vllm" name="recipe-engine" value="vllm" defaultChecked />
+<label htmlFor="recipe-engine-vllm">vLLM</label>
+<input type="radio" id="recipe-engine-trtllm" name="recipe-engine" value="trtllm" />
+<label htmlFor="recipe-engine-trtllm">TensorRT-LLM</label>
+</div>
+<div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">Topology</span>
 <input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
-<label htmlFor="recipe-variant-agg">vLLM aggregated</label>
-<input type="radio" id="recipe-variant-vllm-disagg" name="recipe-variant" value="vllm-disagg" />
-<label htmlFor="recipe-variant-vllm-disagg">vLLM disaggregated</label>
-<input type="radio" id="recipe-variant-trtllm-agg" name="recipe-variant" value="trtllm-agg" />
-<label htmlFor="recipe-variant-trtllm-agg">TensorRT-LLM aggregated</label>
+<label htmlFor="recipe-variant-agg">Aggregated</label>
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
+<label htmlFor="recipe-variant-disagg" data-needs-engine="vllm">Disaggregated</label>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="b200" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-sku="b200" data-engine="vllm" data-usecase="agentic" data-variant="agg">
 <span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4</span>
 <span><b>GPUs</b> 1x B200, or 4x B200 with KV routing</span>
 <span><b>Runtime</b> vLLM aggregate worker</span>
 <span><b>Spec decode</b> DSpark, DFlash, or MTP</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="h100" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-sku="h100" data-engine="vllm" data-usecase="agentic" data-variant="agg">
 <span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4</span>
 <span><b>GPUs</b> 1x H100, or 4x H100 with KV routing</span>
 <span><b>Runtime</b> vLLM aggregate worker</span>
 <span><b>Spec decode</b> DSpark, DFlash, or MTP</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="h200" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-sku="h200" data-engine="vllm" data-usecase="agentic" data-variant="agg">
 <span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4</span>
 <span><b>GPUs</b> 1x H200, or 4x H200 with KV routing</span>
 <span><b>Runtime</b> vLLM aggregate worker</span>
 <span><b>Spec decode</b> DSpark, DFlash, or MTP</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="gb200" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-sku="gb200" data-engine="vllm" data-usecase="agentic" data-variant="agg">
 <span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4</span>
 <span><b>GPUs</b> 1x GB200</span>
 <span><b>Runtime</b> vLLM, aggregate worker</span>
 <span><b>Spec decode</b> DSpark, DFlash, or MTP</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="b200" data-variant="vllm-disagg">
+<div className="dynamo-target-picker-summary" data-sku="b200" data-engine="vllm" data-usecase="agentic" data-variant="disagg">
 <span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4</span>
 <span><b>GPUs</b> 2x B200</span>
 <span><b>Runtime</b> vLLM, 1 prefill + 1 decode</span>
 <span><b>Transport</b> IB/RDMA with UCX</span>
 <span><b>Spec decode</b> DSpark</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="h100" data-variant="vllm-disagg">
+<div className="dynamo-target-picker-summary" data-sku="h100" data-engine="vllm" data-usecase="agentic" data-variant="disagg">
 <span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4</span>
 <span><b>GPUs</b> 2x H100</span>
 <span><b>Runtime</b> vLLM, 1 prefill + 1 decode</span>
 <span><b>Transport</b> AWS EFA/LIBFABRIC</span>
 <span><b>Spec decode</b> MTP, DFlash, or DSpark</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="h200" data-variant="vllm-disagg">
+<div className="dynamo-target-picker-summary" data-sku="h200" data-engine="vllm" data-usecase="agentic" data-variant="disagg">
 <span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4</span>
 <span><b>GPUs</b> 2x H200</span>
 <span><b>Runtime</b> vLLM, 1 prefill + 1 decode</span>
 <span><b>Transport</b> IB/RDMA with UCX</span>
 <span><b>Spec decode</b> MTP, DFlash, or DSpark</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="gb200" data-variant="vllm-disagg">
+<div className="dynamo-target-picker-summary" data-sku="gb200" data-engine="vllm" data-usecase="agentic" data-variant="disagg">
 <span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4</span>
 <span><b>GPUs</b> 2x GB200</span>
 <span><b>Runtime</b> vLLM, 1 prefill + 1 decode</span>
 <span><b>Transport</b> UCX/NIXL with cluster-specific fabric resources</span>
 <span><b>Spec decode</b> DFlash or DSpark</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="b200" data-variant="trtllm-agg">
+<div className="dynamo-target-picker-summary" data-sku="b200" data-engine="trtllm" data-usecase="agentic">
 <span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4</span>
 <span><b>GPUs</b> 1x B200</span>
 <span><b>Runtime</b> TensorRT-LLM, aggregate worker</span>
 <span><b>Spec decode</b> MTP or no-spec fallback</span>
 <span><b>Status</b> Experimental</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="h100" data-variant="trtllm-agg">
+<div className="dynamo-target-picker-summary" data-sku="h100" data-engine="trtllm" data-usecase="agentic">
 <span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4</span>
 <span><b>GPUs</b> 1x H100</span>
 <span><b>Runtime</b> TensorRT-LLM, aggregate worker</span>
 <span><b>Spec decode</b> MTP</span>
 <span><b>Status</b> Experimental</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="h200" data-variant="trtllm-agg">
+<div className="dynamo-target-picker-summary" data-sku="h200" data-engine="trtllm" data-usecase="agentic">
 <span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4</span>
 <span><b>GPUs</b> 1x H200</span>
 <span><b>Runtime</b> TensorRT-LLM, aggregate worker</span>
 <span><b>Spec decode</b> MTP</span>
 <span><b>Status</b> Experimental</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="gb200" data-variant="trtllm-agg">
+<div className="dynamo-target-picker-summary" data-sku="gb200" data-engine="trtllm" data-usecase="agentic">
 <span><b>Checkpoint</b> nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4</span>
 <span><b>GPUs</b> 1x GB200</span>
 <span><b>Runtime</b> TensorRT-LLM, aggregate worker</span>
@@ -115,33 +125,80 @@ This recipe deploys `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4`, a 30B 
 </div>
 </div>
 
+## Configurations
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead>
+<tr><th>Runtime</th><th>Topology</th><th>GPU</th><th>Spec decode options</th><th>Checked-in manifests</th></tr>
+</thead>
+<tbody>
+<tr data-sku="b200" data-engine="vllm" data-variant="agg"><td>vLLM</td><td>Aggregated</td><td>B200</td><td>MTP, DFlash, DSpark</td><td><code>vllm/agg-b200-dspark-kv-router/deploy.yaml</code> (DSpark + KV router)<br /><code>vllm/agg-b200-dspark/deploy.yaml</code><br /><code>vllm/agg-b200-dflash/deploy.yaml</code><br /><code>vllm/agg-b200-mtp/deploy.yaml</code></td></tr>
+<tr data-sku="h100" data-engine="vllm" data-variant="agg"><td>vLLM</td><td>Aggregated</td><td>H100</td><td>MTP, DFlash, DSpark</td><td><code>vllm/agg-h100-dspark-kv-router/deploy.yaml</code> (DSpark + KV router)<br /><code>vllm/agg-h100-dspark/deploy.yaml</code><br /><code>vllm/agg-h100-dflash/deploy.yaml</code><br /><code>vllm/agg-h100-mtp/deploy.yaml</code></td></tr>
+<tr data-sku="h200" data-engine="vllm" data-variant="agg"><td>vLLM</td><td>Aggregated</td><td>H200</td><td>MTP, DFlash, DSpark</td><td><code>vllm/agg-h200-dspark-kv-router/deploy.yaml</code> (DSpark + KV router)<br /><code>vllm/agg-h200-dspark/deploy.yaml</code><br /><code>vllm/agg-h200-dflash/deploy.yaml</code><br /><code>vllm/agg-h200-mtp/deploy.yaml</code></td></tr>
+<tr data-sku="gb200" data-engine="vllm" data-variant="agg"><td>vLLM</td><td>Aggregated</td><td>GB200</td><td>MTP, DFlash, DSpark</td><td><code>vllm/agg-gb200-dspark/deploy.yaml</code><br /><code>vllm/agg-gb200-dflash/deploy.yaml</code><br /><code>vllm/agg-gb200-mtp/deploy.yaml</code></td></tr>
+<tr data-sku="b200" data-engine="vllm" data-variant="disagg"><td>vLLM</td><td>Disaggregated 1P1D</td><td>B200</td><td>DSpark</td><td><code>vllm/disagg-b200-dspark/deploy.yaml</code></td></tr>
+<tr data-sku="h100" data-engine="vllm" data-variant="disagg"><td>vLLM</td><td>Disaggregated 1P1D</td><td>H100</td><td>MTP, DFlash, DSpark</td><td><code>vllm/disagg-h100-dspark/deploy.yaml</code><br /><code>vllm/disagg-h100-dflash/deploy.yaml</code><br /><code>vllm/disagg-h100-mtp/deploy.yaml</code></td></tr>
+<tr data-sku="h200" data-engine="vllm" data-variant="disagg"><td>vLLM</td><td>Disaggregated 1P1D</td><td>H200</td><td>MTP, DFlash, DSpark</td><td><code>vllm/disagg-h200-dspark/deploy.yaml</code><br /><code>vllm/disagg-h200-dflash/deploy.yaml</code><br /><code>vllm/disagg-h200-mtp/deploy.yaml</code></td></tr>
+<tr data-sku="gb200" data-engine="vllm" data-variant="disagg"><td>vLLM</td><td>Disaggregated 1P1D</td><td>GB200</td><td>DFlash, DSpark</td><td><code>vllm/disagg-gb200-dspark/deploy.yaml</code><br /><code>vllm/disagg-gb200-dflash/deploy.yaml</code></td></tr>
+<tr data-sku="b200" data-engine="trtllm"><td>TensorRT-LLM</td><td>Aggregated</td><td>B200</td><td>MTP, no-spec fallback</td><td><code>trtllm/agg-b200-mtp/deploy.yaml</code><br /><code>trtllm/agg-b200/deploy.yaml</code></td></tr>
+<tr data-sku="h100" data-engine="trtllm"><td>TensorRT-LLM</td><td>Aggregated</td><td>H100</td><td>MTP</td><td><code>trtllm/agg-h100-mtp/deploy.yaml</code></td></tr>
+<tr data-sku="h200" data-engine="trtllm"><td>TensorRT-LLM</td><td>Aggregated</td><td>H200</td><td>MTP</td><td><code>trtllm/agg-h200-mtp/deploy.yaml</code></td></tr>
+<tr data-sku="gb200" data-engine="trtllm"><td>TensorRT-LLM</td><td>Aggregated</td><td>GB200</td><td>MTP, no-spec fallback</td><td><code>trtllm/agg-gb200-mtp/deploy.yaml</code><br /><code>trtllm/agg-gb200/deploy.yaml</code></td></tr>
+</tbody>
+</table>
+</div>
+
+## Repository layout
+
+The recipe directory holds `model-cache/` for the shared cache PVC and the model-download Job, `vllm/` for the aggregate and 1P/1D disaggregated vLLM recipes, `trtllm/` for the aggregate TensorRT-LLM recipes, and `perf/` for the benchmark trace reference and trace results. vLLM recipes are organized as `vllm/{agg,disagg}-{hardware}-{specdec}` and TensorRT-LLM recipes as `trtllm/agg-{hardware}[-{specdec}]`; each identifier corresponds to `identifier/deploy.yaml`.
+
 ## Prerequisites
 
 - A Kubernetes cluster with the Dynamo Platform installed and DGD CRDs served.
 - A namespace with access to the selected GPU target.
-- A Hugging Face token with access to the base model and draft models.
+- A Hugging Face secret named `hf-token-secret` with access to the target and draft-model repositories.
 - An image pull secret if your cluster requires authenticated image pulls.
 
-<div data-sku="h100" data-variant="vllm-disagg">
+<div data-sku="gb200" data-engine="vllm" data-variant="agg disagg">
 
-- AWS EFA/LIBFABRIC resources exposed as `vpc.amazonaws.com/efa` for the H100 disaggregated manifests.
+- GB200 vLLM recipes require ARM-node scheduling. The manifests select `nvidia.com/gpu.product: NVIDIA-GB200` nodes and tolerate the `kubernetes.io/arch=arm64` taint.
+
+</div>
+
+<div data-sku="gb200" data-engine="trtllm">
+
+- GB200 TensorRT-LLM recipes require GB200 nodes. The manifests select `nvidia.com/gpu.product: NVIDIA-GB200` through node affinity rather than by architecture, and they carry no `kubernetes.io/arch=arm64` toleration.
+
+</div>
+
+<div data-sku="h100" data-engine="vllm" data-variant="disagg">
+
+- AWS EFA resources exposed as `vpc.amazonaws.com/efa`. The H100 disaggregated manifests request `vpc.amazonaws.com/efa: 4` and select the NIXL LIBFABRIC backend. Change that resource when your cluster exposes different RDMA devices.
 - AWS EFA userspace available in the runtime image or installed by your cluster bootstrap flow before pod startup. The manifests do not download or install EFA packages. Use the [EFA check helper](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3.5-lightning/vllm/check-efa-userspace.sh) to validate a prepared image or running pod; its install mode requires a pinned `EFA_INSTALLER_VERSION` and `EFA_INSTALLER_SHA256`.
 
+Run the helper against a prepared image or a running pod:
+
+```bash
+kubectl exec -i -n "${NAMESPACE}" <h100-worker-pod> -- \
+  bash -s -- check < recipes/nemotron-3.5-lightning/vllm/check-efa-userspace.sh
+```
+
 </div>
 
-<div data-sku="h200 b200" data-variant="vllm-disagg">
+<div data-sku="h200 b200" data-engine="vllm" data-variant="disagg">
 
-- IB/RDMA resources exposed as `rdma/ib` for the H200 and B200 disaggregated manifests.
+- An IB/RDMA fabric for the H200 and B200 disaggregated manifests, which move KV cache with UCX over IB/RDMA. Those manifests request `rdma/ib: 1`. Change that resource when your cluster exposes different RDMA devices.
 
 </div>
 
-<div data-sku="gb200" data-variant="vllm-disagg">
+<div data-sku="gb200" data-engine="vllm" data-variant="disagg">
 
 - GB200 disaggregated manifests leave fabric resources cluster-specific. Add the UCX/NIXL resource claims or network resources required by your platform.
 
 </div>
 
-Create the namespace and Hugging Face token secret:
+Set the namespace used by the commands on this page, then create it along with the Hugging Face token secret:
 
 ```bash
 export NAMESPACE=your-namespace
@@ -155,7 +212,7 @@ kubectl create secret generic hf-token-secret \
 Edit storage class, image pull secret names, node selectors, fabric resources, and cluster-specific placement before applying these manifests.
 </Warning>
 
-## Deploy
+## Quick start
 
 Create the shared model cache and download the base and draft checkpoints. This step is common to every target:
 
@@ -168,40 +225,46 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 
 Then deploy the selected target.
 
-<div data-sku="b200" data-variant="agg">
+<div data-sku="b200" data-engine="vllm" data-variant="agg">
 
 ```bash
 kubectl apply -f recipes/nemotron-3.5-lightning/vllm/agg-b200-dspark/deploy.yaml -n ${NAMESPACE}
 kubectl get dgd vllm-agg-b200-dspark -n ${NAMESPACE} -w
 ```
 
-DSpark is the promoted single-worker B200 aggregate path from the checked-in validation table. Use `agg-b200-dflash`, `agg-b200-mtp`, or `agg-b200-dspark-kv-router` to compare the other aggregate options. For this validation trace, KV-aware routing did not materially change the result because KV-cache pressure was low; it can help workloads with enough reusable KV state to pressure a single worker.
+DSpark is the promoted single-worker B200 aggregate path from the checked-in validation table. Use `agg-b200-dflash`, `agg-b200-mtp`, or `agg-b200-dspark-kv-router` to compare the other aggregate options.
+
+`agg-b200-dspark-kv-router` keeps the vLLM aggregate DSpark worker configuration, runs four aggregate replicas, and publishes KV-cache events to the frontend KV router. It is provided for workloads that benefit from distributing reusable KV state across several workers, for example when a single worker sees enough distinct long-prefix families to create KV-cache pressure. For this validation trace, KV-aware routing was not promoted over the single-worker aggregate DSpark recipe: even H100, the lowest-VRAM SKU tested here, peaked at only 38.1% GPU KV-cache usage in the one-worker full-trace run, so the single worker kept useful prefixes resident without meaningful eviction pressure while adding replicas split work across more GPUs.
 
 </div>
 
-<div data-sku="h100" data-variant="agg">
+<div data-sku="h100" data-engine="vllm" data-variant="agg">
 
 ```bash
 kubectl apply -f recipes/nemotron-3.5-lightning/vllm/agg-h100-dspark/deploy.yaml -n ${NAMESPACE}
 kubectl get dgd vllm-agg-h100-dspark -n ${NAMESPACE} -w
 ```
 
-DSpark is the highest-throughput H100 single-worker aggregate row in the checked-in validation table. Use `agg-h100-dflash`, `agg-h100-mtp`, or `agg-h100-dspark-kv-router` to compare the other aggregate options. For this validation trace, KV-aware routing did not materially change the result because KV-cache pressure was low; it can help workloads with enough reusable KV state to pressure a single worker.
+DSpark is the highest-throughput H100 single-worker aggregate row in the checked-in validation table. Use `agg-h100-dflash`, `agg-h100-mtp`, or `agg-h100-dspark-kv-router` to compare the other aggregate options.
+
+`agg-h100-dspark-kv-router` keeps the vLLM aggregate DSpark worker configuration, runs four aggregate replicas, and publishes KV-cache events to the frontend KV router. It is provided for workloads that benefit from distributing reusable KV state across several workers, for example when a single worker sees enough distinct long-prefix families to create KV-cache pressure. For this validation trace, KV-aware routing was not promoted over the single-worker aggregate DSpark recipe: even H100, the lowest-VRAM SKU tested here, peaked at only 38.1% GPU KV-cache usage in the one-worker full-trace run, so the single worker kept useful prefixes resident without meaningful eviction pressure while adding replicas split work across more GPUs.
 
 </div>
 
-<div data-sku="h200" data-variant="agg">
+<div data-sku="h200" data-engine="vllm" data-variant="agg">
 
 ```bash
 kubectl apply -f recipes/nemotron-3.5-lightning/vllm/agg-h200-dspark/deploy.yaml -n ${NAMESPACE}
 kubectl get dgd vllm-agg-h200-dspark -n ${NAMESPACE} -w
 ```
 
-DSpark is the highest-throughput H200 single-worker aggregate row in the checked-in validation table. Use `agg-h200-dflash`, `agg-h200-mtp`, or `agg-h200-dspark-kv-router` to compare the other aggregate options. For this validation trace, KV-aware routing did not materially change the result because KV-cache pressure was low; it can help workloads with enough reusable KV state to pressure a single worker.
+DSpark is the highest-throughput H200 single-worker aggregate row in the checked-in validation table. Use `agg-h200-dflash`, `agg-h200-mtp`, or `agg-h200-dspark-kv-router` to compare the other aggregate options.
+
+`agg-h200-dspark-kv-router` keeps the vLLM aggregate DSpark worker configuration, runs four aggregate replicas, and publishes KV-cache events to the frontend KV router. It is provided for workloads that benefit from distributing reusable KV state across several workers, for example when a single worker sees enough distinct long-prefix families to create KV-cache pressure. For this validation trace, KV-aware routing was not promoted over the single-worker aggregate DSpark recipe: even H100, the lowest-VRAM SKU tested here, peaked at only 38.1% GPU KV-cache usage in the one-worker full-trace run, so the single worker kept useful prefixes resident without meaningful eviction pressure while adding replicas split work across more GPUs.
 
 </div>
 
-<div data-sku="gb200" data-variant="agg">
+<div data-sku="gb200" data-engine="vllm" data-variant="agg">
 
 ```bash
 kubectl apply -f recipes/nemotron-3.5-lightning/vllm/agg-gb200-dspark/deploy.yaml -n ${NAMESPACE}
@@ -212,7 +275,7 @@ DSpark is the highest-throughput GB200 aggregate row in the checked-in validatio
 
 </div>
 
-<div data-sku="b200" data-variant="vllm-disagg">
+<div data-sku="b200" data-engine="vllm" data-variant="disagg">
 
 ```bash
 kubectl apply -f recipes/nemotron-3.5-lightning/vllm/disagg-b200-dspark/deploy.yaml -n ${NAMESPACE}
@@ -223,7 +286,7 @@ Use this target for B200 disaggregated vLLM validation with DSpark speculative d
 
 </div>
 
-<div data-sku="h100" data-variant="vllm-disagg">
+<div data-sku="h100" data-engine="vllm" data-variant="disagg">
 
 ```bash
 kubectl apply -f recipes/nemotron-3.5-lightning/vllm/disagg-h100-dspark/deploy.yaml -n ${NAMESPACE}
@@ -234,7 +297,7 @@ DSpark is the highest-output-throughput H100 disaggregated row in the source inv
 
 </div>
 
-<div data-sku="h200" data-variant="vllm-disagg">
+<div data-sku="h200" data-engine="vllm" data-variant="disagg">
 
 ```bash
 kubectl apply -f recipes/nemotron-3.5-lightning/vllm/disagg-h200-dspark/deploy.yaml -n ${NAMESPACE}
@@ -245,7 +308,7 @@ DSpark is the highest-throughput H200 disaggregated row in the source inventory.
 
 </div>
 
-<div data-sku="gb200" data-variant="vllm-disagg">
+<div data-sku="gb200" data-engine="vllm" data-variant="disagg">
 
 ```bash
 kubectl apply -f recipes/nemotron-3.5-lightning/vllm/disagg-gb200-dspark/deploy.yaml -n ${NAMESPACE}
@@ -256,18 +319,18 @@ DSpark is the highest-throughput GB200 disaggregated row in the source inventory
 
 </div>
 
-<div data-sku="b200" data-variant="trtllm-agg">
+<div data-sku="b200" data-engine="trtllm">
 
 ```bash
 kubectl apply -f recipes/nemotron-3.5-lightning/trtllm/agg-b200-mtp/deploy.yaml -n ${NAMESPACE}
 kubectl get dgd trtllm-agg-b200-mtp -n ${NAMESPACE} -w
 ```
 
-Use `trtllm/agg-b200/deploy.yaml` for the no-spec fallback.
+Use `trtllm/agg-b200/deploy.yaml` for the no-spec fallback. Its Kubernetes resources keep the `-nospec` suffix, so watch `dgd/trtllm-agg-b200-nospec` and port-forward `svc/trtllm-agg-b200-nospec-frontend`.
 
 </div>
 
-<div data-sku="h100" data-variant="trtllm-agg">
+<div data-sku="h100" data-engine="trtllm">
 
 ```bash
 kubectl apply -f recipes/nemotron-3.5-lightning/trtllm/agg-h100-mtp/deploy.yaml -n ${NAMESPACE}
@@ -278,7 +341,7 @@ The H100 TensorRT-LLM target uses the MTP manifest.
 
 </div>
 
-<div data-sku="h200" data-variant="trtllm-agg">
+<div data-sku="h200" data-engine="trtllm">
 
 ```bash
 kubectl apply -f recipes/nemotron-3.5-lightning/trtllm/agg-h200-mtp/deploy.yaml -n ${NAMESPACE}
@@ -289,22 +352,20 @@ The H200 TensorRT-LLM target uses the MTP manifest.
 
 </div>
 
-<div data-sku="gb200" data-variant="trtllm-agg">
+<div data-sku="gb200" data-engine="trtllm">
 
 ```bash
 kubectl apply -f recipes/nemotron-3.5-lightning/trtllm/agg-gb200-mtp/deploy.yaml -n ${NAMESPACE}
 kubectl get dgd trtllm-agg-gb200-mtp -n ${NAMESPACE} -w
 ```
 
-Use `trtllm/agg-gb200/deploy.yaml` for the no-spec fallback.
+Use `trtllm/agg-gb200/deploy.yaml` for the no-spec fallback. Its Kubernetes resources keep the `-nospec` suffix, so watch `dgd/trtllm-agg-gb200-nospec` and port-forward `svc/trtllm-agg-gb200-nospec-frontend`.
 
 </div>
 
-## Smoke Test
-
 Port-forward the frontend service for the deployment you applied:
 
-<div data-sku="b200" data-variant="agg">
+<div data-sku="b200" data-engine="vllm" data-variant="agg">
 
 ```bash
 kubectl port-forward svc/vllm-agg-b200-dspark-frontend 8000:8000 -n ${NAMESPACE}
@@ -312,7 +373,7 @@ kubectl port-forward svc/vllm-agg-b200-dspark-frontend 8000:8000 -n ${NAMESPACE}
 
 </div>
 
-<div data-sku="h100" data-variant="agg">
+<div data-sku="h100" data-engine="vllm" data-variant="agg">
 
 ```bash
 kubectl port-forward svc/vllm-agg-h100-dspark-frontend 8000:8000 -n ${NAMESPACE}
@@ -320,7 +381,7 @@ kubectl port-forward svc/vllm-agg-h100-dspark-frontend 8000:8000 -n ${NAMESPACE}
 
 </div>
 
-<div data-sku="h200" data-variant="agg">
+<div data-sku="h200" data-engine="vllm" data-variant="agg">
 
 ```bash
 kubectl port-forward svc/vllm-agg-h200-dspark-frontend 8000:8000 -n ${NAMESPACE}
@@ -328,7 +389,7 @@ kubectl port-forward svc/vllm-agg-h200-dspark-frontend 8000:8000 -n ${NAMESPACE}
 
 </div>
 
-<div data-sku="gb200" data-variant="agg">
+<div data-sku="gb200" data-engine="vllm" data-variant="agg">
 
 ```bash
 kubectl port-forward svc/vllm-agg-gb200-dspark-frontend 8000:8000 -n ${NAMESPACE}
@@ -336,7 +397,7 @@ kubectl port-forward svc/vllm-agg-gb200-dspark-frontend 8000:8000 -n ${NAMESPACE
 
 </div>
 
-<div data-sku="b200" data-variant="vllm-disagg">
+<div data-sku="b200" data-engine="vllm" data-variant="disagg">
 
 ```bash
 kubectl port-forward svc/vllm-disagg-b200-dspark-frontend 8000:8000 -n ${NAMESPACE}
@@ -344,7 +405,7 @@ kubectl port-forward svc/vllm-disagg-b200-dspark-frontend 8000:8000 -n ${NAMESPA
 
 </div>
 
-<div data-sku="h100" data-variant="vllm-disagg">
+<div data-sku="h100" data-engine="vllm" data-variant="disagg">
 
 ```bash
 kubectl port-forward svc/vllm-disagg-h100-dspark-frontend 8000:8000 -n ${NAMESPACE}
@@ -352,7 +413,7 @@ kubectl port-forward svc/vllm-disagg-h100-dspark-frontend 8000:8000 -n ${NAMESPA
 
 </div>
 
-<div data-sku="h200" data-variant="vllm-disagg">
+<div data-sku="h200" data-engine="vllm" data-variant="disagg">
 
 ```bash
 kubectl port-forward svc/vllm-disagg-h200-dspark-frontend 8000:8000 -n ${NAMESPACE}
@@ -360,7 +421,7 @@ kubectl port-forward svc/vllm-disagg-h200-dspark-frontend 8000:8000 -n ${NAMESPA
 
 </div>
 
-<div data-sku="gb200" data-variant="vllm-disagg">
+<div data-sku="gb200" data-engine="vllm" data-variant="disagg">
 
 ```bash
 kubectl port-forward svc/vllm-disagg-gb200-dspark-frontend 8000:8000 -n ${NAMESPACE}
@@ -368,7 +429,7 @@ kubectl port-forward svc/vllm-disagg-gb200-dspark-frontend 8000:8000 -n ${NAMESP
 
 </div>
 
-<div data-sku="b200" data-variant="trtllm-agg">
+<div data-sku="b200" data-engine="trtllm">
 
 ```bash
 kubectl port-forward svc/trtllm-agg-b200-mtp-frontend 8000:8000 -n ${NAMESPACE}
@@ -376,7 +437,7 @@ kubectl port-forward svc/trtllm-agg-b200-mtp-frontend 8000:8000 -n ${NAMESPACE}
 
 </div>
 
-<div data-sku="h100" data-variant="trtllm-agg">
+<div data-sku="h100" data-engine="trtllm">
 
 ```bash
 kubectl port-forward svc/trtllm-agg-h100-mtp-frontend 8000:8000 -n ${NAMESPACE}
@@ -384,7 +445,7 @@ kubectl port-forward svc/trtllm-agg-h100-mtp-frontend 8000:8000 -n ${NAMESPACE}
 
 </div>
 
-<div data-sku="h200" data-variant="trtllm-agg">
+<div data-sku="h200" data-engine="trtllm">
 
 ```bash
 kubectl port-forward svc/trtllm-agg-h200-mtp-frontend 8000:8000 -n ${NAMESPACE}
@@ -392,7 +453,7 @@ kubectl port-forward svc/trtllm-agg-h200-mtp-frontend 8000:8000 -n ${NAMESPACE}
 
 </div>
 
-<div data-sku="gb200" data-variant="trtllm-agg">
+<div data-sku="gb200" data-engine="trtllm">
 
 ```bash
 kubectl port-forward svc/trtllm-agg-gb200-mtp-frontend 8000:8000 -n ${NAMESPACE}
@@ -405,22 +466,54 @@ Then send a chat completion request:
 ```bash
 curl http://localhost:8000/v1/models
 curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
+  -H 'Content-Type: application/json' \
   -d '{
     "model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 32,
+    "messages": [{"role": "user", "content": "Say OK."}],
+    "max_tokens": 128,
     "temperature": 0
   }'
 ```
 
-## Benchmark
-
 The checked-in recipe includes benchmark results in [`recipes/nemotron-3.5-lightning/perf/README.md`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3.5-lightning/perf/README.md). The pass criteria are `tok/s/user >= 50` and TTFT p50 under 5 seconds.
 
-To reproduce the shape, run AIPerf against the selected frontend with a Mooncake trace replay and the target concurrency from the table.
+To reproduce a row, run AIPerf against the port-forwarded frontend with the AIPerf shape below, using the request count and concurrency shown for that row in the results table.
 
-<div data-sku="b200" data-variant="agg">
+The trace is `recipes/nemotron-3.5-lightning/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl`, a symlink to the shared trace under `recipes/kimi-k2.6/perf/traces/`. Some trace requests exceed the model's native 262144-token context length. Those requests return errors and are excluded from the valid-request latency and throughput metrics, which is what the non-zero error counts in the results table represent.
+
+<div data-engine="vllm" data-variant="agg disagg">
+
+The published numbers use the synthetic acceptance configuration. Every vLLM manifest defines two draft configurations: `speculative-config` is the standard serving configuration, and `speculative-config-synthetic` enables synthetic rejection sampling for benchmark reproduction. Before benchmarking, select the synthetic configuration by changing the `SPECULATIVE_CONFIG` ConfigMap key.
+
+The synthetic configuration for the selected target:
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead>
+<tr><th>Spec decode</th><th>Draft tokens</th><th>Expected acceptance length</th></tr>
+</thead>
+<tbody>
+<tr data-sku="b200 h100 h200 gb200" data-engine="vllm" data-variant="agg"><td>DSpark</td><td>7</td><td>3.69</td></tr>
+<tr data-sku="b200 h100 h200 gb200" data-engine="vllm" data-variant="agg"><td>DFlash</td><td>5</td><td>3.18</td></tr>
+<tr data-sku="h100 h200" data-engine="vllm" data-variant="agg"><td>MTP</td><td>7</td><td>3.687</td></tr>
+<tr data-sku="b200 gb200" data-engine="vllm" data-variant="agg"><td>MTP</td><td>3</td><td>2.874</td></tr>
+<tr data-sku="b200 h100 h200 gb200" data-engine="vllm" data-variant="disagg"><td>DSpark</td><td>1</td><td>1.83</td></tr>
+<tr data-sku="h100 h200" data-engine="vllm" data-variant="disagg"><td>DFlash</td><td>3</td><td>2.73</td></tr>
+<tr data-sku="gb200" data-engine="vllm" data-variant="disagg"><td>DFlash</td><td>7</td><td>3.41</td></tr>
+<tr data-sku="h100 h200" data-engine="vllm" data-variant="disagg"><td>MTP</td><td>5</td><td>3.421</td></tr>
+</tbody>
+</table>
+</div>
+
+</div>
+
+<div data-engine="trtllm">
+
+The published MTP numbers use synthetic acceptance.
+
+</div>
+
+<div data-sku="b200" data-engine="vllm" data-variant="agg">
 
 ```bash
 aiperf profile \
@@ -432,31 +525,93 @@ aiperf profile \
   --use-server-token-count \
   --extra-inputs ignore_eos:true \
   --request-timeout-seconds 1200 \
-  --url http://vllm-agg-b200-dspark-frontend:8000 \
+  --url http://localhost:8000 \
+  --concurrency 24
+```
+
+For `agg-b200-dspark-kv-router`, start benchmark concurrency at 4x the matching non-KV aggregate recommendation: 4 worker replicas, base concurrency 24, suggested KV-router concurrency 96.
+
+</div>
+
+<div data-sku="h100" data-engine="vllm" data-variant="agg">
+
+```bash
+aiperf profile \
+  -m nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
+  --custom-dataset-type mooncake_trace \
+  --num-requests 3541 \
+  --endpoint-type chat \
+  --streaming \
+  --use-server-token-count \
+  --extra-inputs ignore_eos:true \
+  --request-timeout-seconds 1200 \
+  --url http://localhost:8000 \
+  --concurrency 20
+```
+
+For `agg-h100-dspark-kv-router`, start benchmark concurrency at 4x the matching non-KV aggregate recommendation: 4 worker replicas, base concurrency 20, suggested KV-router concurrency 80.
+
+</div>
+
+<div data-sku="h200" data-engine="vllm" data-variant="agg">
+
+```bash
+aiperf profile \
+  -m nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
+  --custom-dataset-type mooncake_trace \
+  --num-requests 3541 \
+  --endpoint-type chat \
+  --streaming \
+  --use-server-token-count \
+  --extra-inputs ignore_eos:true \
+  --request-timeout-seconds 1200 \
+  --url http://localhost:8000 \
+  --concurrency 20
+```
+
+For `agg-h200-dspark-kv-router`, start benchmark concurrency at 4x the matching non-KV aggregate recommendation: 4 worker replicas, base concurrency 20, suggested KV-router concurrency 80.
+
+</div>
+
+<div data-sku="gb200" data-engine="vllm" data-variant="agg">
+
+```bash
+aiperf profile \
+  -m nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
+  --custom-dataset-type mooncake_trace \
+  --num-requests 3541 \
+  --endpoint-type chat \
+  --streaming \
+  --use-server-token-count \
+  --extra-inputs ignore_eos:true \
+  --request-timeout-seconds 1200 \
+  --url http://localhost:8000 \
   --concurrency 24
 ```
 
 </div>
 
-<div data-sku="h100" data-variant="agg">
+<div data-sku="b200" data-engine="vllm" data-variant="disagg">
 
 ```bash
 aiperf profile \
   -m nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   --custom-dataset-type mooncake_trace \
-  --num-requests 3541 \
+  --num-requests 500 \
   --endpoint-type chat \
   --streaming \
   --use-server-token-count \
   --extra-inputs ignore_eos:true \
   --request-timeout-seconds 1200 \
-  --url http://vllm-agg-h100-dspark-frontend:8000 \
-  --concurrency 20
+  --url http://localhost:8000 \
+  --concurrency 8
 ```
+
+The published B200 disaggregated row is a 500-request run, not the full 3541-request trace used by the other vLLM rows.
 
 </div>
 
-<div data-sku="h200" data-variant="agg">
+<div data-sku="h100" data-engine="vllm" data-variant="disagg">
 
 ```bash
 aiperf profile \
@@ -468,31 +623,13 @@ aiperf profile \
   --use-server-token-count \
   --extra-inputs ignore_eos:true \
   --request-timeout-seconds 1200 \
-  --url http://vllm-agg-h200-dspark-frontend:8000 \
-  --concurrency 20
-```
-
-</div>
-
-<div data-sku="gb200" data-variant="agg">
-
-```bash
-aiperf profile \
-  -m nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
-  --custom-dataset-type mooncake_trace \
-  --num-requests 3541 \
-  --endpoint-type chat \
-  --streaming \
-  --use-server-token-count \
-  --extra-inputs ignore_eos:true \
-  --request-timeout-seconds 1200 \
-  --url http://vllm-agg-gb200-dspark-frontend:8000 \
+  --url http://localhost:8000 \
   --concurrency 24
 ```
 
 </div>
 
-<div data-sku="b200" data-variant="vllm-disagg">
+<div data-sku="h200" data-engine="vllm" data-variant="disagg">
 
 ```bash
 aiperf profile \
@@ -504,153 +641,153 @@ aiperf profile \
   --use-server-token-count \
   --extra-inputs ignore_eos:true \
   --request-timeout-seconds 1200 \
-  --url http://vllm-disagg-b200-dspark-frontend:8000 \
+  --url http://localhost:8000 \
+  --concurrency 24
+```
+
+</div>
+
+<div data-sku="gb200" data-engine="vllm" data-variant="disagg">
+
+```bash
+aiperf profile \
+  -m nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
+  --custom-dataset-type mooncake_trace \
+  --num-requests 3541 \
+  --endpoint-type chat \
+  --streaming \
+  --use-server-token-count \
+  --extra-inputs ignore_eos:true \
+  --request-timeout-seconds 1200 \
+  --url http://localhost:8000 \
   --concurrency 8
 ```
 
 </div>
 
-<div data-sku="h100" data-variant="vllm-disagg">
+<div data-engine="trtllm">
+
+The published TensorRT-LLM rows were measured over 500 requests, not the full 3541-request trace. Use the shape below with the concurrency listed for the selected TensorRT-LLM row.
+
+</div>
+
+<div data-sku="b200 gb200" data-engine="trtllm">
 
 ```bash
 aiperf profile \
   -m nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   --custom-dataset-type mooncake_trace \
-  --num-requests 3541 \
+  --num-requests 500 \
   --endpoint-type chat \
   --streaming \
   --use-server-token-count \
   --extra-inputs ignore_eos:true \
   --request-timeout-seconds 1200 \
-  --url http://vllm-disagg-h100-dspark-frontend:8000 \
-  --concurrency 24
+  --url http://localhost:8000 \
+  --concurrency 18
 ```
 
 </div>
 
-<div data-sku="h200" data-variant="vllm-disagg">
+<div data-sku="h100 h200" data-engine="trtllm">
 
 ```bash
 aiperf profile \
   -m nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   --custom-dataset-type mooncake_trace \
-  --num-requests 3541 \
+  --num-requests 500 \
   --endpoint-type chat \
   --streaming \
   --use-server-token-count \
   --extra-inputs ignore_eos:true \
   --request-timeout-seconds 1200 \
-  --url http://vllm-disagg-h200-dspark-frontend:8000 \
-  --concurrency 24
+  --url http://localhost:8000 \
+  --concurrency 12
 ```
 
 </div>
-
-<div data-sku="gb200" data-variant="vllm-disagg">
-
-```bash
-aiperf profile \
-  -m nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
-  --custom-dataset-type mooncake_trace \
-  --num-requests 3541 \
-  --endpoint-type chat \
-  --streaming \
-  --use-server-token-count \
-  --extra-inputs ignore_eos:true \
-  --request-timeout-seconds 1200 \
-  --url http://vllm-disagg-gb200-dspark-frontend:8000 \
-  --concurrency 8
-```
-
-</div>
-
-<div data-variant="trtllm-agg">
-
-TensorRT-LLM rows are experimental smoke or inventory results in the source README. Use the same AIPerf shape after replacing the `--url` and concurrency with the selected TensorRT-LLM row below.
-
-</div>
-
-## Expected Performance
 
 <div className="dynamo-variant-table-wrap">
 <table className="dynamo-variant-table">
 <thead>
-<tr><th>Recipe</th><th>Spec decode</th><th>Routing</th><th>Concurrency</th><th>TTFT p50 (ms)</th><th>Output tok/s/GPU</th><th>Tok/s/user</th></tr>
+<tr><th>Recipe</th><th>Spec decode</th><th>Routing</th><th>Spec tok</th><th>Synthetic AL</th><th>Concurrency</th><th>Requests</th><th>Valid requests</th><th>Errors</th><th>TTFT p50 (ms)</th><th>Output tok/s/GPU</th><th>Tok/s/user</th></tr>
 </thead>
 <tbody>
-<tr data-sku="b200" data-variant="agg"><td><code>vllm/agg-b200-dspark-kv-router/deploy.yaml</code></td><td>DSpark</td><td>KV router</td><td>96</td><td>295.03</td><td>2507.70</td><td>104.49</td></tr>
-<tr data-sku="b200" data-variant="agg"><td><code>vllm/agg-b200-dspark/deploy.yaml</code></td><td>DSpark</td><td>Single worker</td><td>24</td><td>207.44</td><td>2471.12</td><td>102.96</td></tr>
-<tr data-sku="b200" data-variant="agg"><td><code>vllm/agg-b200-dflash/deploy.yaml</code></td><td>DFlash</td><td>Single worker</td><td>20</td><td>212.57</td><td>2004.06</td><td>100.20</td></tr>
-<tr data-sku="b200" data-variant="agg"><td><code>vllm/agg-b200-mtp/deploy.yaml</code></td><td>MTP</td><td>Single worker</td><td>18</td><td>217.12</td><td>1829.94</td><td>101.66</td></tr>
-<tr data-sku="h100" data-variant="agg"><td><code>vllm/agg-h100-dspark-kv-router/deploy.yaml</code></td><td>DSpark</td><td>KV router</td><td>80</td><td>303.84</td><td>2037.43</td><td>101.87</td></tr>
-<tr data-sku="h100" data-variant="agg"><td><code>vllm/agg-h100-dspark/deploy.yaml</code></td><td>DSpark</td><td>Single worker</td><td>20</td><td>238.64</td><td>1878.11</td><td>93.91</td></tr>
-<tr data-sku="h100" data-variant="agg"><td><code>vllm/agg-h100-dflash/deploy.yaml</code></td><td>DFlash</td><td>Single worker</td><td>16</td><td>216.44</td><td>1757.75</td><td>109.86</td></tr>
-<tr data-sku="h100" data-variant="agg"><td><code>vllm/agg-h100-mtp/deploy.yaml</code></td><td>MTP</td><td>Single worker</td><td>12</td><td>241.21</td><td>1275.37</td><td>106.28</td></tr>
-<tr data-sku="h200" data-variant="agg"><td><code>vllm/agg-h200-dspark-kv-router/deploy.yaml</code></td><td>DSpark</td><td>KV router</td><td>80</td><td>286.67</td><td>2171.00</td><td>108.55</td></tr>
-<tr data-sku="h200" data-variant="agg"><td><code>vllm/agg-h200-dspark/deploy.yaml</code></td><td>DSpark</td><td>Single worker</td><td>20</td><td>243.97</td><td>2193.59</td><td>109.68</td></tr>
-<tr data-sku="h200" data-variant="agg"><td><code>vllm/agg-h200-dflash/deploy.yaml</code></td><td>DFlash</td><td>Single worker</td><td>16</td><td>243.30</td><td>1744.04</td><td>109.00</td></tr>
-<tr data-sku="h200" data-variant="agg"><td><code>vllm/agg-h200-mtp/deploy.yaml</code></td><td>MTP</td><td>Single worker</td><td>12</td><td>250.66</td><td>1478.67</td><td>123.22</td></tr>
-<tr data-sku="gb200" data-variant="agg"><td><code>vllm/agg-gb200-dspark/deploy.yaml</code></td><td>DSpark</td><td>Single worker</td><td>24</td><td>296.82</td><td>2860.20</td><td>119.18</td></tr>
-<tr data-sku="gb200" data-variant="agg"><td><code>vllm/agg-gb200-mtp/deploy.yaml</code></td><td>MTP</td><td>Single worker</td><td>18</td><td>402.99</td><td>1758.22</td><td>97.68</td></tr>
-<tr data-sku="gb200" data-variant="agg"><td><code>vllm/agg-gb200-dflash/deploy.yaml</code></td><td>DFlash</td><td>Single worker</td><td>20</td><td>429.97</td><td>842.42</td><td>42.12</td></tr>
-<tr data-sku="b200" data-variant="vllm-disagg"><td><code>vllm/disagg-b200-dspark/deploy.yaml</code></td><td>DSpark</td><td>1P1D</td><td>8</td><td>236.43</td><td>904.03</td><td>226.01</td></tr>
-<tr data-sku="h100" data-variant="vllm-disagg"><td><code>vllm/disagg-h100-dflash/deploy.yaml</code></td><td>DFlash</td><td>1P1D</td><td>12</td><td>542.71</td><td>1117.29</td><td>186.21</td></tr>
-<tr data-sku="h100" data-variant="vllm-disagg"><td><code>vllm/disagg-h100-dspark/deploy.yaml</code></td><td>DSpark</td><td>1P1D</td><td>24</td><td>2028.23</td><td>1445.29</td><td>120.44</td></tr>
-<tr data-sku="h100" data-variant="vllm-disagg"><td><code>vllm/disagg-h100-mtp/deploy.yaml</code></td><td>MTP</td><td>1P1D</td><td>12</td><td>493.52</td><td>1055.68</td><td>175.95</td></tr>
-<tr data-sku="h200" data-variant="vllm-disagg"><td><code>vllm/disagg-h200-dflash/deploy.yaml</code></td><td>DFlash</td><td>1P1D</td><td>12</td><td>408.30</td><td>1277.86</td><td>212.98</td></tr>
-<tr data-sku="h200" data-variant="vllm-disagg"><td><code>vllm/disagg-h200-dspark/deploy.yaml</code></td><td>DSpark</td><td>1P1D</td><td>24</td><td>834.80</td><td>1656.90</td><td>138.08</td></tr>
-<tr data-sku="h200" data-variant="vllm-disagg"><td><code>vllm/disagg-h200-mtp/deploy.yaml</code></td><td>MTP</td><td>1P1D</td><td>12</td><td>424.66</td><td>1203.97</td><td>200.66</td></tr>
-<tr data-sku="gb200" data-variant="vllm-disagg"><td><code>vllm/disagg-gb200-dflash/deploy.yaml</code></td><td>DFlash</td><td>1P1D</td><td>4</td><td>491.40</td><td>584.85</td><td>292.43</td></tr>
-<tr data-sku="gb200" data-variant="vllm-disagg"><td><code>vllm/disagg-gb200-dspark/deploy.yaml</code></td><td>DSpark</td><td>1P1D</td><td>8</td><td>599.17</td><td>939.28</td><td>234.82</td></tr>
-<tr data-sku="b200" data-variant="trtllm-agg"><td><code>trtllm/agg-b200/deploy.yaml</code></td><td>None</td><td>Single worker</td><td>18</td><td>377.68</td><td>386.998</td><td>21.50</td></tr>
-<tr data-sku="b200" data-variant="trtllm-agg"><td><code>trtllm/agg-b200-mtp/deploy.yaml</code></td><td>MTP</td><td>Single worker</td><td>18</td><td>446.88</td><td>427.82</td><td>23.77</td></tr>
-<tr data-sku="h100" data-variant="trtllm-agg"><td><code>trtllm/agg-h100-mtp/deploy.yaml</code></td><td>MTP</td><td>Single worker</td><td>12</td><td>1757.00</td><td>264.87</td><td>22.07</td></tr>
-<tr data-sku="h200" data-variant="trtllm-agg"><td><code>trtllm/agg-h200-mtp/deploy.yaml</code></td><td>MTP</td><td>Single worker</td><td>12</td><td>1630.96</td><td>269.26</td><td>22.44</td></tr>
-<tr data-sku="gb200" data-variant="trtllm-agg"><td><code>trtllm/agg-gb200/deploy.yaml</code></td><td>None</td><td>Single worker</td><td>18</td><td>318.88</td><td>280.10</td><td>15.56</td></tr>
-<tr data-sku="gb200" data-variant="trtllm-agg"><td><code>trtllm/agg-gb200-mtp/deploy.yaml</code></td><td>MTP</td><td>Single worker</td><td>18</td><td>400.88</td><td>580.09</td><td>32.23</td></tr>
+<tr data-sku="b200" data-engine="vllm" data-variant="agg"><td><code>vllm/agg-b200-dspark-kv-router/deploy.yaml</code></td><td>DSpark</td><td>KV router</td><td>7</td><td>3.69</td><td>96</td><td>3541</td><td>3411</td><td>130</td><td>295.03</td><td>2507.70</td><td>104.49</td></tr>
+<tr data-sku="b200" data-engine="vllm" data-variant="agg"><td><code>vllm/agg-b200-dspark/deploy.yaml</code></td><td>DSpark</td><td>Single worker</td><td>7</td><td>3.69</td><td>24</td><td>3541</td><td>3411</td><td>130</td><td>207.44</td><td>2471.12</td><td>102.96</td></tr>
+<tr data-sku="b200" data-engine="vllm" data-variant="agg"><td><code>vllm/agg-b200-dflash/deploy.yaml</code></td><td>DFlash</td><td>Single worker</td><td>5</td><td>3.18</td><td>20</td><td>3541</td><td>3411</td><td>130</td><td>212.57</td><td>2004.06</td><td>100.20</td></tr>
+<tr data-sku="b200" data-engine="vllm" data-variant="agg"><td><code>vllm/agg-b200-mtp/deploy.yaml</code></td><td>MTP</td><td>Single worker</td><td>3</td><td>2.874</td><td>18</td><td>3541</td><td>3411</td><td>130</td><td>217.12</td><td>1829.94</td><td>101.66</td></tr>
+<tr data-sku="h100" data-engine="vllm" data-variant="agg"><td><code>vllm/agg-h100-dspark-kv-router/deploy.yaml</code></td><td>DSpark</td><td>KV router</td><td>7</td><td>3.69</td><td>80</td><td>3541</td><td>3411</td><td>130</td><td>303.84</td><td>2037.43</td><td>101.87</td></tr>
+<tr data-sku="h100" data-engine="vllm" data-variant="agg"><td><code>vllm/agg-h100-dspark/deploy.yaml</code></td><td>DSpark</td><td>Single worker</td><td>7</td><td>3.69</td><td>20</td><td>3541</td><td>3411</td><td>130</td><td>238.64</td><td>1878.11</td><td>93.91</td></tr>
+<tr data-sku="h100" data-engine="vllm" data-variant="agg"><td><code>vllm/agg-h100-dflash/deploy.yaml</code></td><td>DFlash</td><td>Single worker</td><td>5</td><td>3.18</td><td>16</td><td>3541</td><td>3411</td><td>130</td><td>216.44</td><td>1757.75</td><td>109.86</td></tr>
+<tr data-sku="h100" data-engine="vllm" data-variant="agg"><td><code>vllm/agg-h100-mtp/deploy.yaml</code></td><td>MTP</td><td>Single worker</td><td>7</td><td>3.687</td><td>12</td><td>3541</td><td>3411</td><td>130</td><td>241.21</td><td>1275.37</td><td>106.28</td></tr>
+<tr data-sku="h200" data-engine="vllm" data-variant="agg"><td><code>vllm/agg-h200-dspark-kv-router/deploy.yaml</code></td><td>DSpark</td><td>KV router</td><td>7</td><td>3.69</td><td>80</td><td>3541</td><td>3411</td><td>130</td><td>286.67</td><td>2171.00</td><td>108.55</td></tr>
+<tr data-sku="h200" data-engine="vllm" data-variant="agg"><td><code>vllm/agg-h200-dspark/deploy.yaml</code></td><td>DSpark</td><td>Single worker</td><td>7</td><td>3.69</td><td>20</td><td>3541</td><td>3411</td><td>130</td><td>243.97</td><td>2193.59</td><td>109.68</td></tr>
+<tr data-sku="h200" data-engine="vllm" data-variant="agg"><td><code>vllm/agg-h200-dflash/deploy.yaml</code></td><td>DFlash</td><td>Single worker</td><td>5</td><td>3.18</td><td>16</td><td>3541</td><td>3411</td><td>130</td><td>243.30</td><td>1744.04</td><td>109.00</td></tr>
+<tr data-sku="h200" data-engine="vllm" data-variant="agg"><td><code>vllm/agg-h200-mtp/deploy.yaml</code></td><td>MTP</td><td>Single worker</td><td>7</td><td>3.687</td><td>12</td><td>3541</td><td>3411</td><td>130</td><td>250.66</td><td>1478.67</td><td>123.22</td></tr>
+<tr data-sku="gb200" data-engine="vllm" data-variant="agg"><td><code>vllm/agg-gb200-dspark/deploy.yaml</code></td><td>DSpark</td><td>Single worker</td><td>7</td><td>3.69</td><td>24</td><td>3541</td><td>3411</td><td>130</td><td>296.82</td><td>2860.20</td><td>119.18</td></tr>
+<tr data-sku="gb200" data-engine="vllm" data-variant="agg"><td><code>vllm/agg-gb200-mtp/deploy.yaml</code></td><td>MTP</td><td>Single worker</td><td>3</td><td>2.874</td><td>18</td><td>3541</td><td>3411</td><td>130</td><td>402.99</td><td>1758.22</td><td>97.68</td></tr>
+<tr data-sku="gb200" data-engine="vllm" data-variant="agg"><td><code>vllm/agg-gb200-dflash/deploy.yaml</code></td><td>DFlash</td><td>Single worker</td><td>5</td><td>3.18</td><td>20</td><td>3541</td><td>3411</td><td>130</td><td>429.97</td><td>842.42</td><td>42.12</td></tr>
+<tr data-sku="b200" data-engine="vllm" data-variant="disagg"><td><code>vllm/disagg-b200-dspark/deploy.yaml</code></td><td>DSpark</td><td>1P1D</td><td>1</td><td>1.83</td><td>8</td><td>500</td><td>489</td><td>11</td><td>236.43</td><td>904.03</td><td>226.01</td></tr>
+<tr data-sku="h100" data-engine="vllm" data-variant="disagg"><td><code>vllm/disagg-h100-dflash/deploy.yaml</code></td><td>DFlash</td><td>1P1D</td><td>3</td><td>2.73</td><td>12</td><td>3541</td><td>3404</td><td>137</td><td>542.71</td><td>1117.29</td><td>186.21</td></tr>
+<tr data-sku="h100" data-engine="vllm" data-variant="disagg"><td><code>vllm/disagg-h100-dspark/deploy.yaml</code></td><td>DSpark</td><td>1P1D</td><td>1</td><td>1.83</td><td>24</td><td>3541</td><td>3411</td><td>130</td><td>2028.23</td><td>1445.29</td><td>120.44</td></tr>
+<tr data-sku="h100" data-engine="vllm" data-variant="disagg"><td><code>vllm/disagg-h100-mtp/deploy.yaml</code></td><td>MTP</td><td>1P1D</td><td>5</td><td>3.421</td><td>12</td><td>3541</td><td>3398</td><td>143</td><td>493.52</td><td>1055.68</td><td>175.95</td></tr>
+<tr data-sku="h200" data-engine="vllm" data-variant="disagg"><td><code>vllm/disagg-h200-dflash/deploy.yaml</code></td><td>DFlash</td><td>1P1D</td><td>3</td><td>2.73</td><td>12</td><td>3541</td><td>3401</td><td>140</td><td>408.30</td><td>1277.86</td><td>212.98</td></tr>
+<tr data-sku="h200" data-engine="vllm" data-variant="disagg"><td><code>vllm/disagg-h200-dspark/deploy.yaml</code></td><td>DSpark</td><td>1P1D</td><td>1</td><td>1.83</td><td>24</td><td>3541</td><td>3411</td><td>130</td><td>834.80</td><td>1656.90</td><td>138.08</td></tr>
+<tr data-sku="h200" data-engine="vllm" data-variant="disagg"><td><code>vllm/disagg-h200-mtp/deploy.yaml</code></td><td>MTP</td><td>1P1D</td><td>5</td><td>3.421</td><td>12</td><td>3541</td><td>3342</td><td>199</td><td>424.66</td><td>1203.97</td><td>200.66</td></tr>
+<tr data-sku="gb200" data-engine="vllm" data-variant="disagg"><td><code>vllm/disagg-gb200-dflash/deploy.yaml</code></td><td>DFlash</td><td>1P1D</td><td>7</td><td>3.41</td><td>4</td><td>3541</td><td>3411</td><td>130</td><td>491.40</td><td>584.85</td><td>292.43</td></tr>
+<tr data-sku="gb200" data-engine="vllm" data-variant="disagg"><td><code>vllm/disagg-gb200-dspark/deploy.yaml</code></td><td>DSpark</td><td>1P1D</td><td>1</td><td>1.83</td><td>8</td><td>3541</td><td>3411</td><td>130</td><td>599.17</td><td>939.28</td><td>234.82</td></tr>
+<tr data-sku="b200" data-engine="trtllm"><td><code>trtllm/agg-b200/deploy.yaml</code></td><td>None</td><td>Single worker</td><td>0</td><td>0.0</td><td>18</td><td>500</td><td>489</td><td>11</td><td>377.68</td><td>386.998</td><td>21.50</td></tr>
+<tr data-sku="b200" data-engine="trtllm"><td><code>trtllm/agg-b200-mtp/deploy.yaml</code></td><td>MTP</td><td>Single worker</td><td>3</td><td>2.874</td><td>18</td><td>500</td><td>489</td><td>11</td><td>446.88</td><td>427.82</td><td>23.77</td></tr>
+<tr data-sku="h100" data-engine="trtllm"><td><code>trtllm/agg-h100-mtp/deploy.yaml</code></td><td>MTP</td><td>Single worker</td><td>7</td><td>3.687</td><td>12</td><td>500</td><td>499</td><td>1</td><td>1757.00</td><td>264.87</td><td>22.07</td></tr>
+<tr data-sku="h200" data-engine="trtllm"><td><code>trtllm/agg-h200-mtp/deploy.yaml</code></td><td>MTP</td><td>Single worker</td><td>7</td><td>3.687</td><td>12</td><td>500</td><td>499</td><td>1</td><td>1630.96</td><td>269.26</td><td>22.44</td></tr>
+<tr data-sku="gb200" data-engine="trtllm"><td><code>trtllm/agg-gb200/deploy.yaml</code></td><td>None</td><td>Single worker</td><td>0</td><td>0.0</td><td>18</td><td>500</td><td>499</td><td>1</td><td>318.88</td><td>280.10</td><td>15.56</td></tr>
+<tr data-sku="gb200" data-engine="trtllm"><td><code>trtllm/agg-gb200-mtp/deploy.yaml</code></td><td>MTP</td><td>Single worker</td><td>3</td><td>2.874</td><td>18</td><td>500</td><td>499</td><td>1</td><td>400.88</td><td>580.09</td><td>32.23</td></tr>
 </tbody>
 </table>
 </div>
 
-## Compare All Targets
+## Model cache
 
-<div className="dynamo-variant-table-wrap">
-<table className="dynamo-variant-table">
-<thead>
-<tr><th>Runtime</th><th>Topology</th><th>GPU</th><th>Spec decode options</th><th>Checked-in manifests</th></tr>
-</thead>
-<tbody>
-<tr data-sku="b200" data-variant="agg"><td>vLLM</td><td>Aggregated</td><td>B200</td><td>MTP, DFlash, DSpark</td><td><code>vllm/agg-b200-dspark-kv-router/deploy.yaml</code> (DSpark + KV router)<br /><code>vllm/agg-b200-dspark/deploy.yaml</code><br /><code>vllm/agg-b200-dflash/deploy.yaml</code><br /><code>vllm/agg-b200-mtp/deploy.yaml</code></td></tr>
-<tr data-sku="h100" data-variant="agg"><td>vLLM</td><td>Aggregated</td><td>H100</td><td>MTP, DFlash, DSpark</td><td><code>vllm/agg-h100-dspark-kv-router/deploy.yaml</code> (DSpark + KV router)<br /><code>vllm/agg-h100-dspark/deploy.yaml</code><br /><code>vllm/agg-h100-dflash/deploy.yaml</code><br /><code>vllm/agg-h100-mtp/deploy.yaml</code></td></tr>
-<tr data-sku="h200" data-variant="agg"><td>vLLM</td><td>Aggregated</td><td>H200</td><td>MTP, DFlash, DSpark</td><td><code>vllm/agg-h200-dspark-kv-router/deploy.yaml</code> (DSpark + KV router)<br /><code>vllm/agg-h200-dspark/deploy.yaml</code><br /><code>vllm/agg-h200-dflash/deploy.yaml</code><br /><code>vllm/agg-h200-mtp/deploy.yaml</code></td></tr>
-<tr data-sku="gb200" data-variant="agg"><td>vLLM</td><td>Aggregated</td><td>GB200</td><td>MTP, DFlash, DSpark</td><td><code>vllm/agg-gb200-dspark/deploy.yaml</code><br /><code>vllm/agg-gb200-dflash/deploy.yaml</code><br /><code>vllm/agg-gb200-mtp/deploy.yaml</code></td></tr>
-<tr data-sku="b200" data-variant="vllm-disagg"><td>vLLM</td><td>Disaggregated 1P1D</td><td>B200</td><td>DSpark</td><td><code>vllm/disagg-b200-dspark/deploy.yaml</code></td></tr>
-<tr data-sku="h100" data-variant="vllm-disagg"><td>vLLM</td><td>Disaggregated 1P1D</td><td>H100</td><td>MTP, DFlash, DSpark</td><td><code>vllm/disagg-h100-dspark/deploy.yaml</code><br /><code>vllm/disagg-h100-dflash/deploy.yaml</code><br /><code>vllm/disagg-h100-mtp/deploy.yaml</code></td></tr>
-<tr data-sku="h200" data-variant="vllm-disagg"><td>vLLM</td><td>Disaggregated 1P1D</td><td>H200</td><td>MTP, DFlash, DSpark</td><td><code>vllm/disagg-h200-dspark/deploy.yaml</code><br /><code>vllm/disagg-h200-dflash/deploy.yaml</code><br /><code>vllm/disagg-h200-mtp/deploy.yaml</code></td></tr>
-<tr data-sku="gb200" data-variant="vllm-disagg"><td>vLLM</td><td>Disaggregated 1P1D</td><td>GB200</td><td>DFlash, DSpark</td><td><code>vllm/disagg-gb200-dspark/deploy.yaml</code><br /><code>vllm/disagg-gb200-dflash/deploy.yaml</code></td></tr>
-<tr data-sku="b200" data-variant="trtllm-agg"><td>TensorRT-LLM</td><td>Aggregated</td><td>B200</td><td>MTP, no-spec fallback</td><td><code>trtllm/agg-b200-mtp/deploy.yaml</code><br /><code>trtllm/agg-b200/deploy.yaml</code></td></tr>
-<tr data-sku="h100" data-variant="trtllm-agg"><td>TensorRT-LLM</td><td>Aggregated</td><td>H100</td><td>MTP</td><td><code>trtllm/agg-h100-mtp/deploy.yaml</code></td></tr>
-<tr data-sku="h200" data-variant="trtllm-agg"><td>TensorRT-LLM</td><td>Aggregated</td><td>H200</td><td>MTP</td><td><code>trtllm/agg-h200-mtp/deploy.yaml</code></td></tr>
-<tr data-sku="gb200" data-variant="trtllm-agg"><td>TensorRT-LLM</td><td>Aggregated</td><td>GB200</td><td>MTP, no-spec fallback</td><td><code>trtllm/agg-gb200-mtp/deploy.yaml</code><br /><code>trtllm/agg-gb200/deploy.yaml</code></td></tr>
-</tbody>
-</table>
+The download Job pulls three repositories:
+
+- `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4`
+- `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DFlash`
+- `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark`
+
+<div data-engine="vllm" data-variant="agg disagg">
+
+Every vLLM recipe serves `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4` as the target model. The draft model depends on the speculative decoding mode: MTP uses the embedded MTP draft, DFlash uses `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DFlash`, and DSpark uses `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark`.
+
 </div>
-
-<div data-variant="vllm-disagg trtllm-agg">
 
 ## Notes
 
-<div data-variant="vllm-disagg">
+- Replace `your-image-pull-secret` and any cluster-specific networking resource names with values available in the target cluster.
 
-- H100 disaggregated manifests request `vpc.amazonaws.com/efa: 4`; H200 and B200 disaggregated manifests request `rdma/ib: 1`. Change those resources when your cluster exposes different RDMA devices.
+<div data-sku="b200" data-engine="vllm" data-variant="agg disagg">
+
+- The B200 vLLM manifests disable the FlashInfer FP8 ScaledMM linear kernel with `VLLM_DISABLED_KERNELS: FlashInferFP8ScaledMMLinearKernel`.
 
 </div>
 
-<div data-variant="trtllm-agg">
+<div data-sku="gb200" data-engine="vllm" data-variant="disagg">
+
+- The GB200 disaggregated manifests disable the FlashInfer FP8 ScaledMM linear kernel with `VLLM_DISABLED_KERNELS: FlashInferFP8ScaledMMLinearKernel`.
+
+</div>
+
+<div data-engine="vllm" data-variant="disagg">
+
+- Disaggregated recipes require identical speculative-decoding settings on the prefill and decode workers so NIXL cache metadata stays compatible. Do not change `SPECULATIVE_CONFIG` on only one side.
+
+</div>
+
+<div data-engine="trtllm">
 
 - TensorRT-LLM manifests are experimental in this recipe.
-
-</div>
+- MTP and no-spec TensorRT-LLM recipes are separate serving configurations with their own manifest-level engine settings.
+- No TensorRT-LLM row meets the `tok/s/user >= 50` pass criterion in the source results (15.56 to 32.23 tok/s/user).
 
 </div>
 

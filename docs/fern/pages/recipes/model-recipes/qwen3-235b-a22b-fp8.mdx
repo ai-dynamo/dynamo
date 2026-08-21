@@ -11,6 +11,8 @@ import { RecipeStyles } from "@/components/RecipeStyles";
 
 Each target below is a validated TensorRT-LLM deployment of Qwen3-235B-A22B-FP8 — a 235B-parameter Mixture-of-Experts model with ~22B active parameters per token — on 16 GPUs with KV-aware routing, benchmarked at 4K ISL / 200 OSL. Hopper and Blackwell need different MoE backends, and you can serve aggregated or with prefill/decode disaggregation. Pick your GPU architecture and serving topology; every command on this page updates to match.
 
+## Available Configurations
+
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
 <div className="dynamo-target-picker-row">
@@ -21,41 +23,59 @@ Each target below is a validated TensorRT-LLM deployment of Qwen3-235B-A22B-FP8 
 <label htmlFor="recipe-sku-hopper">Hopper (H100/H200)</label>
 </div>
 <div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Workload</span>
+<input type="radio" id="recipe-usecase-static" name="recipe-usecase" value="static" defaultChecked />
+<label htmlFor="recipe-usecase-static">Static generation</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Backend</span>
+<input type="radio" id="recipe-engine-trtllm" name="recipe-engine" value="trtllm" defaultChecked />
+<label htmlFor="recipe-engine-trtllm">TensorRT-LLM</label>
+</div>
+<div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">Topology</span>
 <input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
 <label htmlFor="recipe-variant-agg">Aggregated</label>
 <input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
 <label htmlFor="recipe-variant-disagg">Disaggregated</label>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="blackwell" data-variant="agg">
-<span><b>Checkpoint</b> Qwen/Qwen3-235B-A22B-FP8</span>
-<span><b>GPUs</b> 16x B100/B200, 4 workers</span>
-<span><b>Parallelism</b> TP4 x EP4 per worker</span>
-<span><b>MoE backend</b> DEEPGEMM (required on SM100+)</span>
-<span><b>Routing</b> KV-aware</span>
-<span><b>Workload</b> 4K ISL / 200 OSL, concurrency 32</span>
-</div>
-<div className="dynamo-target-picker-summary" data-sku="blackwell" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-sku="blackwell" data-engine="trtllm" data-usecase="static" data-variant="agg">
 <span><b>Checkpoint</b> Qwen/Qwen3-235B-A22B-FP8</span>
 <span><b>GPUs</b> 16x B100/B200</span>
-<span><b>Parallelism</b> 6x prefill (TP2) + 1x decode (TP4 x EP4)</span>
+<span><b>Topology</b> 4x workers</span>
+<span><b>Parallelism</b> TP4 x EP4 (Expert Parallel) per worker</span>
 <span><b>MoE backend</b> DEEPGEMM (required on SM100+)</span>
+<span><b>Chunked prefill</b> Enabled</span>
 <span><b>Routing</b> KV-aware</span>
 <span><b>Workload</b> 4K ISL / 200 OSL, concurrency 32</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="hopper" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-sku="blackwell" data-engine="trtllm" data-usecase="static" data-variant="disagg">
 <span><b>Checkpoint</b> Qwen/Qwen3-235B-A22B-FP8</span>
-<span><b>GPUs</b> 16x H100/H200, 4 workers</span>
-<span><b>Parallelism</b> TP4 x EP4 per worker</span>
-<span><b>MoE backend</b> CUTLASS (TRT-LLM default)</span>
+<span><b>GPUs</b> 16x B100/B200</span>
+<span><b>Topology</b> 6x prefill + 1x decode</span>
+<span><b>Parallelism</b> Prefill TP2; decode TP4 x EP4 (Expert Parallel)</span>
+<span><b>MoE backend</b> DEEPGEMM (required on SM100+)</span>
+<span><b>Chunked prefill</b> Disabled</span>
 <span><b>Routing</b> KV-aware</span>
 <span><b>Workload</b> 4K ISL / 200 OSL, concurrency 32</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="hopper" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-sku="hopper" data-engine="trtllm" data-usecase="static" data-variant="agg">
 <span><b>Checkpoint</b> Qwen/Qwen3-235B-A22B-FP8</span>
 <span><b>GPUs</b> 16x H100/H200</span>
-<span><b>Parallelism</b> 6x prefill (TP2) + 1x decode (TP4 x EP4)</span>
-<span><b>MoE backend</b> CUTLASS (TRT-LLM default)</span>
+<span><b>Topology</b> 4x workers</span>
+<span><b>Parallelism</b> TP4 x EP4 (Expert Parallel) per worker</span>
+<span><b>MoE backend</b> CUTLASS (TRT-LLM default on SM90)</span>
+<span><b>Chunked prefill</b> Enabled</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Workload</b> 4K ISL / 200 OSL, concurrency 32</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="hopper" data-engine="trtllm" data-usecase="static" data-variant="disagg">
+<span><b>Checkpoint</b> Qwen/Qwen3-235B-A22B-FP8</span>
+<span><b>GPUs</b> 16x H100/H200</span>
+<span><b>Topology</b> 6x prefill + 1x decode</span>
+<span><b>Parallelism</b> Prefill TP2; decode TP4 x EP4 (Expert Parallel)</span>
+<span><b>MoE backend</b> CUTLASS (TRT-LLM default on SM90)</span>
+<span><b>Chunked prefill</b> Disabled</span>
 <span><b>Routing</b> KV-aware</span>
 <span><b>Workload</b> 4K ISL / 200 OSL, concurrency 32</span>
 </div>
@@ -63,24 +83,26 @@ Each target below is a validated TensorRT-LLM deployment of Qwen3-235B-A22B-FP8 
 
 ## Prerequisites
 
-<div data-sku="blackwell">
+<div data-sku="blackwell" data-engine="trtllm" data-usecase="static" data-variant="agg disagg">
 
-- A Kubernetes cluster with the Dynamo platform installed and **16x B100/B200** available (~1.3 TB total GPU VRAM).
+- A Kubernetes cluster with the Dynamo platform installed and **16x B100/B200** available (~1.3 TB total GPU VRAM). See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
 - A Hugging Face token with access to `Qwen/Qwen3-235B-A22B-FP8`.
 
 </div>
 
-<div data-sku="hopper">
+<div data-sku="hopper" data-engine="trtllm" data-usecase="static" data-variant="agg disagg">
 
-- A Kubernetes cluster with the Dynamo platform installed and **16x H100/H200** available (~1.3 TB total GPU VRAM).
+- A Kubernetes cluster with the Dynamo platform installed and **16x H100/H200** available (~1.3 TB total GPU VRAM). See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
 - A Hugging Face token with access to `Qwen/Qwen3-235B-A22B-FP8`.
 
 </div>
+
+## Quick Start
 
 Create the namespace and token secret:
 
 ```bash
-export NAMESPACE=your-namespace
+export NAMESPACE=dynamo-demo
 kubectl create namespace ${NAMESPACE}
 kubectl create secret generic hf-token-secret \
   --from-literal=HF_TOKEN="your-token" \
@@ -90,8 +112,6 @@ kubectl create secret generic hf-token-secret \
 <Warning>
 Edit namespace, storage class, image tags, node selectors, resource claims, and cluster-specific placement in the manifests before applying them.
 </Warning>
-
-## Deploy
 
 Prepare the model cache and download the checkpoint (30-60 minutes):
 
@@ -104,7 +124,7 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 
 Then deploy:
 
-<div data-sku="blackwell" data-variant="agg">
+<div data-sku="blackwell" data-engine="trtllm" data-usecase="static" data-variant="agg">
 
 ```bash
 kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/deploy.yaml -n ${NAMESPACE}
@@ -112,21 +132,24 @@ kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/deploy.yaml -n
 
 </div>
 
-<div data-sku="blackwell" data-variant="disagg">
+<div data-sku="blackwell" data-engine="trtllm" data-usecase="static" data-variant="disagg">
 
-Choose the manifest matching your cluster interconnect:
+Choose the manifest matching your cluster interconnect, or the provider-neutral baseline if none apply:
 
 ```bash
+# Provider-neutral baseline
+kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-generic.yaml -n ${NAMESPACE}
+# OR AWS EFA on p6-b200.48xlarge (8 EFA per worker)
 kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-aws-p6-b200.48xlarge.yaml -n ${NAMESPACE}
-# OR
+# OR GKE RoCE
 kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-gcp-roce.yaml -n ${NAMESPACE}
-# OR
+# OR Nscale InfiniBand
 kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-nscale-ib.yaml -n ${NAMESPACE}
 ```
 
 </div>
 
-<div data-sku="hopper" data-variant="agg">
+<div data-sku="hopper" data-engine="trtllm" data-usecase="static" data-variant="agg">
 
 ```bash
 kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/deploy.yaml -n ${NAMESPACE}
@@ -134,7 +157,7 @@ kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/deploy.yaml -n ${
 
 </div>
 
-<div data-sku="hopper" data-variant="disagg">
+<div data-sku="hopper" data-engine="trtllm" data-usecase="static" data-variant="disagg">
 
 ```bash
 kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/deploy.yaml -n ${NAMESPACE}
@@ -142,11 +165,62 @@ kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/deploy.yaml -n
 
 </div>
 
-## Smoke Test
+## Cloud Provider Overlays
+
+Provider-specific interconnect overlays ship for the Blackwell disaggregated target.
+
+<div data-sku="blackwell" data-engine="trtllm" data-usecase="static" data-variant="disagg">
+
+Applying a checked-in `deploy-*.yaml` and applying its public overlay with `kubectl apply -k` are equivalent, and neither path requires regeneration. For example, the GKE RoCE composition from its checked-in Kustomization:
+
+```bash
+kubectl apply -k recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/kustomize/overlays/gcp-roce -n ${NAMESPACE}
+```
+
+Kustomize is both the authoring model and the documentation for these variants: the base and Components explain the provider settings, and each public overlay documents the composition it selects. The shared deployment lives in `trtllm/disagg/blackwell/kustomize/base/deploy.yaml`, provider-specific deltas live in Kustomize Components, and `trtllm/disagg/blackwell/.kustomize-matrix.yaml` selects the composition behind each rendered manifest. Shared building blocks belong under `recipes/kustomize/components/`, and the disaggregated provider Components target the backend-neutral `PrefillWorker` and `DecodeWorker` service keys. Each manifest's patch source:
+
+- `deploy-generic.yaml` (provider-neutral baseline) — `trtllm/disagg/blackwell/kustomize/overlays/generic/`
+- `deploy-aws-p6-b200.48xlarge.yaml` (AWS EFA on `p6-b200.48xlarge`, 8 EFA per worker) — `recipes/kustomize/components/aws-efa-p8d8/`
+- `deploy-gcp-roce.yaml` (GKE RoCE) — `recipes/kustomize/components/disagg-workers/gke-roce/`
+- `deploy-nscale-ib.yaml` (Nscale InfiniBand) — `recipes/kustomize/components/disagg-workers/nscale-ib/`
+
+To make a local, uncommitted composition, create your own `kustomization.yaml` in the repository checkout, or run `compose` from the repository root:
+
+```bash
+scripts/kustomize-matrix.py compose \
+  recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/kustomize/base \
+  recipes/kustomize/components/disagg-workers/gke-roce \
+  | kubectl apply -f - -n ${NAMESPACE}
+```
+
+Only recipe contributors update the checked-in derived artifacts. The source of truth is the matrix, `kustomize/base/`, and the recipe-local plus referenced shared Components; the public overlay `kustomization.yaml` files and the `deploy-*.yaml` manifests are generated — commit them for review, but do not edit them by hand. After editing the matrix, base, or Components, regenerate from the repository root:
+
+```bash
+scripts/kustomize-matrix.py unfold recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/.kustomize-matrix.yaml
+scripts/kustomize-matrix.py render recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/.kustomize-matrix.yaml
+```
+
+Kustomize drops comments while rendering Kubernetes objects, so the renderer re-inserts non-SPDX comments from the source YAML before the matching rendered fields. Comments inside literal block scalars already render in place.
+
+</div>
+
+<div data-sku="blackwell hopper" data-engine="trtllm" data-usecase="static" data-variant="agg">
+
+The aggregated targets ship a single `deploy.yaml` per GPU architecture and need no interconnect overlay: each worker is self-contained, so there is no cross-node KV transfer to tune. Nothing extra to apply here — continue to [Test the Deployment](#test-the-deployment). To see the overlay workflow, select **GPU** Blackwell with **Topology** Disaggregated.
+
+</div>
+
+<div data-sku="hopper" data-engine="trtllm" data-usecase="static" data-variant="disagg">
+
+The Hopper disaggregated target ships one provider-neutral `trtllm/disagg/hopper/deploy.yaml` and no generated interconnect overlays. Apply it as shown in [Quick Start](#quick-start), and set your cluster's RDMA resource claims and node selectors directly in that manifest. To see the overlay workflow, switch **GPU** to Blackwell.
+
+</div>
+
+## Test the Deployment
 
 Send a test request to verify the deployment serves traffic:
 
-<div data-variant="agg">
+<div data-sku="blackwell hopper" data-engine="trtllm" data-usecase="static" data-variant="agg">
 
 ```bash
 kubectl port-forward svc/qwen3-235b-a22b-agg-frontend 8000:8000 -n ${NAMESPACE}
@@ -154,7 +228,7 @@ kubectl port-forward svc/qwen3-235b-a22b-agg-frontend 8000:8000 -n ${NAMESPACE}
 
 </div>
 
-<div data-variant="disagg">
+<div data-sku="blackwell hopper" data-engine="trtllm" data-usecase="static" data-variant="disagg">
 
 ```bash
 kubectl port-forward svc/qwen3-235b-a22b-disagg-frontend 8000:8000 -n ${NAMESPACE}
@@ -164,15 +238,19 @@ kubectl port-forward svc/qwen3-235b-a22b-disagg-frontend 8000:8000 -n ${NAMESPAC
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"Qwen/Qwen3-235B-A22B-FP8","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-235B-A22B-FP8",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "max_tokens": 50
+  }'
 ```
 
-## Benchmark
+### Benchmark
 
 Every target ships a `perf.yaml` AIPerf Job sized at 4K ISL / 200 OSL and concurrency 32 (2 per GPU x 16 GPUs) with `--request-count 320`, so aggregated vs disaggregated results are comparable within the same hardware architecture. Artifacts land on the `model-cache` PVC under `/model-cache/perf`.
 
-<div data-variant="agg">
+<div data-sku="blackwell hopper" data-engine="trtllm" data-usecase="static" data-variant="agg">
 
 The aggregated Job wraps this AIPerf run:
 
@@ -190,7 +268,7 @@ aiperf profile \
 
 </div>
 
-<div data-variant="disagg">
+<div data-sku="blackwell hopper" data-engine="trtllm" data-usecase="static" data-variant="disagg">
 
 The disaggregated Job wraps this AIPerf run:
 
@@ -210,7 +288,7 @@ aiperf profile \
 
 Apply the manifest matching your deployed target:
 
-<div data-sku="blackwell" data-variant="agg">
+<div data-sku="blackwell" data-engine="trtllm" data-usecase="static" data-variant="agg">
 
 ```bash
 kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/perf.yaml -n ${NAMESPACE}
@@ -219,7 +297,7 @@ kubectl wait --for=condition=Complete job/qwen3-235b-a22b-bench -n ${NAMESPACE} 
 
 </div>
 
-<div data-sku="blackwell" data-variant="disagg">
+<div data-sku="blackwell" data-engine="trtllm" data-usecase="static" data-variant="disagg">
 
 ```bash
 kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/perf.yaml -n ${NAMESPACE}
@@ -228,7 +306,7 @@ kubectl wait --for=condition=Complete job/qwen3-235b-a22b-disagg-bench -n ${NAME
 
 </div>
 
-<div data-sku="hopper" data-variant="agg">
+<div data-sku="hopper" data-engine="trtllm" data-usecase="static" data-variant="agg">
 
 ```bash
 kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/perf.yaml -n ${NAMESPACE}
@@ -237,7 +315,7 @@ kubectl wait --for=condition=Complete job/qwen3-235b-a22b-bench -n ${NAMESPACE} 
 
 </div>
 
-<div data-sku="hopper" data-variant="disagg">
+<div data-sku="hopper" data-engine="trtllm" data-usecase="static" data-variant="disagg">
 
 ```bash
 kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/perf.yaml -n ${NAMESPACE}
@@ -246,30 +324,25 @@ kubectl wait --for=condition=Complete job/qwen3-235b-a22b-disagg-bench -n ${NAME
 
 </div>
 
-## Compare All Targets
+## Model Details
 
-All four targets serve `Qwen/Qwen3-235B-A22B-FP8` on TensorRT-LLM (PyTorch backend) over 16 GPUs with KV-aware routing and the same 4K ISL / 200 OSL benchmark shape:
+All four targets serve `Qwen/Qwen3-235B-A22B-FP8` on TensorRT-LLM (PyTorch backend) over 16 GPUs with KV-aware routing and the same 4K ISL / 200 OSL benchmark shape.
 
-| | Blackwell aggregated | Blackwell disaggregated | Hopper aggregated | Hopper disaggregated |
-|---|---|---|---|---|
-| **GPUs** | 16x B100/B200 | 16x B100/B200 | 16x H100/H200 | 16x H100/H200 |
-| **Topology** | 4x workers, TP4 x EP4 | 6x prefill (TP2) + 1x decode (TP4 x EP4) | 4x workers, TP4 x EP4 | 6x prefill (TP2) + 1x decode (TP4 x EP4) |
-| **MoE backend** | DEEPGEMM | DEEPGEMM | CUTLASS (default) | CUTLASS (default) |
-| **Chunked prefill** | Enabled | Disabled | Enabled | Disabled |
-| **Workload** | 4K / 200, conc. 32 | 4K / 200, conc. 32 | 4K / 200, conc. 32 | 4K / 200, conc. 32 |
+## Hardware Requirements
+
+- The Hopper/Blackwell split is required with TRT-LLM 1.3.x: Hopper (H100/H200, SM90) uses the default MoE backend, while on Blackwell (B100/B200, SM100+) that default CUTLASS backend falls through to a Hopper-specific JIT path and crashes, so Blackwell needs `moe_config.backend: DEEPGEMM`. DEEPGEMM in turn crashes on Hopper due to a scale-factor dtype mismatch — hence two separate variants per topology.
 
 ## Notes
 
-- The Hopper/Blackwell split is required with TRT-LLM 1.3.x: the default CUTLASS MoE backend falls through to a Hopper-specific JIT path on SM100 and crashes, so Blackwell needs `moe_config.backend: DEEPGEMM`. DEEPGEMM in turn crashes on Hopper due to a scale-factor dtype mismatch — hence two separate variants per topology.
 - Chunked prefill is enabled for the aggregated targets and disabled for the disaggregated targets.
-- All targets use KV-aware routing (`--router-mode kv`) at the frontend.
+- All targets use KV-aware routing (`--router-mode kv`) at the frontend for efficient cache utilization.
 - Model download may take 30-60 minutes; update `storageClassName` in `model-cache/model-cache.yaml` before deploying.
 
 ## Source
 
 - Source README: [recipes/qwen3-235b-a22b-fp8/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/README.md)
 - Aggregated Blackwell: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/deploy.yaml) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/perf.yaml)
-- Disaggregated Blackwell: [AWS EFA](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-aws-p6-b200.48xlarge.yaml), [GKE RoCE](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-gcp-roce.yaml), [Nscale InfiniBand](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-nscale-ib.yaml), and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/perf.yaml)
+- Disaggregated Blackwell: [provider-neutral baseline](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-generic.yaml), [AWS EFA](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-aws-p6-b200.48xlarge.yaml), [GKE RoCE](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-gcp-roce.yaml), [Nscale InfiniBand](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-nscale-ib.yaml), and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/perf.yaml)
 - Aggregated Hopper: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/deploy.yaml) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/perf.yaml)
 - Disaggregated Hopper: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/deploy.yaml) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/perf.yaml)
 - Setup assets: [model-cache/model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/model-cache/model-cache.yaml) and [model-cache/model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/model-cache/model-download.yaml)
