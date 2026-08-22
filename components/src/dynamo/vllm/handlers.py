@@ -3137,6 +3137,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
         encode_worker_client: Client | None = None,
+        first_token_source: Any | None = None,
     ):
         super().__init__(
             runtime,
@@ -3152,13 +3153,18 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             enable_frontend_decoding=enable_frontend_decoding,
             encode_worker_client=encode_worker_client,
         )
+        self._first_token_source = first_token_source
 
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation
         request_id = context.id()
         logger.debug(f"Decode Request ID: {request_id}")
+        routing = request.get("routing") or {}
+        if self._first_token_source is not None:
+            self._first_token_source.bind(context, routing.get("dp_rank"))
         self._multimodal_request_processor.validate_multimodal_request(request)
         first_token = True
+        first_output_seen = False
         with time_and_log_code_section(
             f"[DECODE] request: {request_id} generate"
         ) as decode_timer:
@@ -3173,6 +3179,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if first_token:
                     decode_timer.stop_interval()
                     first_token = False
+                if not first_output_seen:
+                    token_ids = chunk.get("token_ids") or []
+                    has_text = any(
+                        choice.get("delta", {}).get("content") or ""
+                        for choice in chunk.get("choices", [])
+                    )
+                    if token_ids or has_text:
+                        first_output_seen = True
+                        context.notify_first_token()
                 yield chunk
 
     async def _assemble_custom_encoder_prompt(
