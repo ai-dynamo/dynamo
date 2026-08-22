@@ -226,6 +226,10 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         // picker and for the stream-end bookkeeping keyed on the request ID.
         if let Some(header_map) = &hdr.headers {
             ctx.request_headers = envoy_helpers::collect_headers(header_map);
+            // Client-owned routing metadata must not influence selection. A
+            // trusted replacement can only come back through `PickResult`.
+            ctx.request_headers
+                .retain(|(key, _)| !envoy_helpers::is_prefiller_host_port_header(key));
 
             if let Some(id) =
                 envoy_helpers::extract_header_value(header_map, metadata::REQUEST_ID_HEADER_KEY)
@@ -270,6 +274,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             &result.endpoint,
             None,
             &result.headers,
+            result.selected_prefill_endpoint.as_deref(),
         ));
         Ok(())
     }
@@ -324,6 +329,7 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             &result.endpoint,
             Some(ctx.request_size),
             &result.headers,
+            result.selected_prefill_endpoint.as_deref(),
         ));
 
         // Inject nvext.token_data into the request body JSON so the backend

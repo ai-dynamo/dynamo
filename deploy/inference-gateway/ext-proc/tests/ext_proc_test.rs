@@ -17,7 +17,7 @@
 //! returns a pre-built PickResult labeled "disaggregated" to exercise the
 //! prefill-related header fields end-to-end.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::net::TcpListener;
@@ -37,15 +37,17 @@ use dynamo_ext_proc::proto::envoy::service::ext_proc::v3::{
 
 struct MockPicker {
     result: PickResult,
+    observed_headers: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 #[tonic::async_trait]
 impl EndpointPicker for MockPicker {
     async fn pick(
         &self,
-        _req: &RequestInfo,
+        req: &RequestInfo,
         _endpoints: &[Endpoint],
     ) -> Result<PickResult, PickError> {
+        *self.observed_headers.lock().unwrap() = req.headers.clone();
         Ok(self.result.clone())
     }
 }
@@ -75,12 +77,15 @@ async fn test_pick_result_translates_to_ext_proc_mutations() {
             ),
             ("x-dynamo-prefill-dp-rank".to_string(), "0".to_string()),
         ],
+        selected_prefill_endpoint: Some("[2001:db8::10]:8001".to_string()),
         token_ids: Some(vec![1, 2, 3, 4, 5]),
         reservation_id: None,
     };
 
+    let observed_headers = Arc::new(Mutex::new(Vec::new()));
     let picker = Arc::new(MockPicker {
         result: pick_result,
+        observed_headers: observed_headers.clone(),
     });
     let server = ExtProcServer::new(picker);
 
@@ -117,11 +122,18 @@ async fn test_pick_result_translates_to_ext_proc_mutations() {
         request: Some(ext_proc::processing_request::Request::RequestHeaders(
             ext_proc::HttpHeaders {
                 headers: Some(HeaderMap {
-                    headers: vec![HeaderValue {
-                        key: "content-type".to_string(),
-                        raw_value: b"application/json".to_vec(),
-                        ..Default::default()
-                    }],
+                    headers: vec![
+                        HeaderValue {
+                            key: "content-type".to_string(),
+                            raw_value: b"application/json".to_vec(),
+                            ..Default::default()
+                        },
+                        HeaderValue {
+                            key: "x-prefiller-host-port".to_string(),
+                            raw_value: b"attacker.invalid:9999".to_vec(),
+                            ..Default::default()
+                        },
+                    ],
                 }),
                 end_of_stream: false,
             },
@@ -161,6 +173,14 @@ async fn test_pick_result_translates_to_ext_proc_mutations() {
         responses.len() >= 2,
         "Expected at least 2 responses (header + body), got {}",
         responses.len()
+    );
+    assert!(
+        observed_headers
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(key, _)| !key.eq_ignore_ascii_case("x-prefiller-host-port")),
+        "client-supplied prefill metadata must not reach the picker"
     );
 
     // -----------------------------------------------------------------------
@@ -226,6 +246,11 @@ async fn test_pick_result_translates_to_ext_proc_mutations() {
         Some(&"0".to_string()),
         "prefill dp_rank"
     );
+    assert_eq!(
+        set_headers.get("x-prefiller-host-port"),
+        Some(&"[2001:db8::10]:8001".to_string()),
+        "authoritative prefill endpoint"
+    );
 
     // remove_headers must strip client-spoofable gateway-control headers so a
     // client can't smuggle routing / model-rewrite hints to the backend, while
@@ -250,6 +275,10 @@ async fn test_pick_result_translates_to_ext_proc_mutations() {
     assert!(
         !remove_headers.contains("x-gateway-destination-endpoint"),
         "EPP-owned destination endpoint must not be in remove_headers (it is set, not stripped)"
+    );
+    assert!(
+        !remove_headers.contains("x-prefiller-host-port"),
+        "EPP-owned prefill endpoint must be overwritten, not removed"
     );
 
     // Check dynamic_metadata has envoy.lb with the endpoint

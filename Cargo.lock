@@ -2543,6 +2543,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-epp-sidecar"
+version = "1.5.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum 0.8.4",
+ "futures",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tower 0.5.3",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "dynamo-ext-proc"
 version = "1.5.0"
 dependencies = [

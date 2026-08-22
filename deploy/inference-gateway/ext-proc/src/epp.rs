@@ -1087,6 +1087,7 @@ impl EndpointPicker for Router {
             endpoint,
             fallbacks: vec![],
             headers,
+            selected_prefill_endpoint: None,
             token_ids: Some(tokens),
             reservation_id: None,
         })

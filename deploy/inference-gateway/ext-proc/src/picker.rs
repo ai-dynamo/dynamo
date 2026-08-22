@@ -26,9 +26,29 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    /// Returns the endpoint in "ip:port" format.
+    /// Returns the endpoint in `host:port` format, bracketing IPv6 addresses.
     pub fn address_port(&self) -> String {
-        format!("{}:{}", self.address, self.port)
+        match self.address.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V6(address)) => format!("[{address}]:{}", self.port),
+            _ => format!("{}:{}", self.address, self.port),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Endpoint;
+
+    #[test]
+    fn address_port_brackets_ipv6() {
+        let endpoint = Endpoint {
+            pod_name: "prefill-0".to_string(),
+            address: "2001:db8::10".to_string(),
+            port: "8001".to_string(),
+            labels: Default::default(),
+        };
+
+        assert_eq!(endpoint.address_port(), "[2001:db8::10]:8001");
     }
 }
 
@@ -64,6 +84,12 @@ pub struct PickResult {
     /// Extra headers to inject into the forwarded request.
     /// Used by Dynamo for routing metadata (worker IDs, DP ranks, routing mode).
     pub headers: Vec<(String, String)>,
+    /// EPP-selected prefill endpoint for standalone disaggregated routing.
+    ///
+    /// This is deliberately separate from `headers`: the ext-proc boundary
+    /// drops client-supplied values and emits at most one authoritative
+    /// `x-prefiller-host-port` value from this field.
+    pub selected_prefill_endpoint: Option<String>,
     /// Pre-computed token IDs from the picker's tokenization.
     /// Injected into the request body as `nvext.token_data` so the backend
     /// skips redundant tokenization. Mirrors Go EPP's `setTokenizedPrompt`.
