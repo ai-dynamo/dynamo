@@ -16,7 +16,8 @@ use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
 use dynamo_kv_router::{
     DefaultWorkerSelector, KvRouterConfig, SchedulingRequest, WorkerCandidate, WorkerFilter,
     WorkerInputView, WorkerInputs, WorkerLoadProjection, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelector,
+    WorkerSelectionContext, WorkerSelectionInput, WorkerSelectionPolicy,
+    WorkerSelectionPolicyError, WorkerSelector,
 };
 use rustc_hash::FxHashMap;
 
@@ -241,12 +242,12 @@ fn worker_selection(c: &mut Criterion) {
                         b.iter(|| {
                             black_box(
                                 selector
-                                    .select_worker(
+                                    .select_worker(WorkerSelectionInput::configured(
                                         black_box(&workers),
                                         black_box(&request),
                                         request.eligibility(),
                                         black_box(16),
-                                    )
+                                    ))
                                     .unwrap(),
                             )
                         })
@@ -289,12 +290,12 @@ fn custom_worker_selection(c: &mut Criterion) {
         b.iter(|| {
             black_box(
                 custom_no_filter
-                    .select_worker(
+                    .select_worker(WorkerSelectionInput::configured(
                         black_box(&workers),
                         black_box(&request),
                         request.eligibility(),
                         black_box(16),
-                    )
+                    ))
                     .unwrap(),
             )
         })
@@ -303,12 +304,12 @@ fn custom_worker_selection(c: &mut Criterion) {
         b.iter(|| {
             black_box(
                 custom_keep_all_filter
-                    .select_worker(
+                    .select_worker(WorkerSelectionInput::configured(
                         black_box(&workers),
                         black_box(&request),
                         request.eligibility(),
                         black_box(16),
-                    )
+                    ))
                     .unwrap(),
             )
         })
@@ -343,12 +344,12 @@ fn unused_preferred_taint_metadata(c: &mut Criterion) {
                 b.iter(|| {
                     black_box(
                         policy
-                            .select_worker(
+                            .select_worker(WorkerSelectionInput::configured(
                                 black_box(&workers),
                                 black_box(&request),
                                 request.eligibility(),
                                 black_box(16),
-                            )
+                            ))
                             .unwrap(),
                     )
                 })
@@ -381,12 +382,12 @@ fn default_policy_wrapper(c: &mut Criterion) {
                 b.iter(|| {
                     black_box(
                         direct
-                            .select_worker(
+                            .select_worker(WorkerSelectionInput::configured(
                                 black_box(&workers),
                                 black_box(&request),
                                 request.eligibility(),
                                 black_box(16),
-                            )
+                            ))
                             .unwrap(),
                     )
                 })
@@ -399,12 +400,12 @@ fn default_policy_wrapper(c: &mut Criterion) {
                 b.iter(|| {
                     black_box(
                         policy
-                            .select_worker(
+                            .select_worker(WorkerSelectionInput::configured(
                                 black_box(&workers),
                                 black_box(&request),
                                 request.eligibility(),
                                 black_box(16),
-                            )
+                            ))
                             .unwrap(),
                     )
                 })

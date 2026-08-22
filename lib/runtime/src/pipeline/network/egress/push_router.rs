@@ -221,6 +221,14 @@ impl RouterMode {
         *self == RouterMode::Direct
     }
 
+    /// Whether this mode admits requests against host-owned occupancy counters.
+    pub const fn requires_occupancy(self) -> bool {
+        matches!(
+            self,
+            Self::PowerOfTwoChoices | Self::LeastLoaded | Self::DeviceAwareWeighted
+        )
+    }
+
     fn route_policy(self) -> Option<RoutePolicy> {
         match self {
             Self::RoundRobin => Some(RoutePolicy::RoundRobin),
@@ -515,12 +523,7 @@ where
     ) -> anyhow::Result<Self> {
         let addressed = addressed_router(&client.endpoint).await?;
 
-        let occupancy_state = if matches!(
-            router_mode,
-            RouterMode::PowerOfTwoChoices
-                | RouterMode::LeastLoaded
-                | RouterMode::DeviceAwareWeighted
-        ) {
+        let occupancy_state = if router_mode.requires_occupancy() {
             Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
         } else {
             None
@@ -580,12 +583,7 @@ where
             monitor.start_monitoring().await?;
         }
 
-        let occupancy_state = if matches!(
-            router_mode,
-            RouterMode::PowerOfTwoChoices
-                | RouterMode::LeastLoaded
-                | RouterMode::DeviceAwareWeighted
-        ) {
+        let occupancy_state = if router_mode.requires_occupancy() {
             Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
         } else {
             None
@@ -639,12 +637,7 @@ where
         router_mode: RouterMode,
         dispatch: Arc<dyn StreamingDispatch<T, U>>,
     ) -> anyhow::Result<Self> {
-        let occupancy_state = if matches!(
-            router_mode,
-            RouterMode::PowerOfTwoChoices
-                | RouterMode::LeastLoaded
-                | RouterMode::DeviceAwareWeighted
-        ) {
+        let occupancy_state = if router_mode.requires_occupancy() {
             Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
         } else {
             None

@@ -26,35 +26,94 @@ use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 
-/// Low-level worker-selection contract used by the scheduler.
+/// Low-level selector used by routing hosts.
 ///
-/// Generic over `C` so that the scheduling layer does not depend on a concrete config type.
-/// External policies should compose [`WorkerScorer`] and [`WorkerPicker`] implementations with
-/// [`WorkerSelectionPolicy`] instead of implementing this trait directly.
+/// External policies should use [`WorkerSelectionPolicy`].
 pub trait WorkerSelector<C: WorkerConfigLike> {
-    /// Declare the worker-signal groups required by this selector.
-    ///
-    /// Hosts use this declaration to initialize only the routing capabilities a policy needs.
-    /// Return [`WorkerInputs::NONE`] when the selector reads no optional worker data.
+    /// Optional worker data required by this selector.
     fn required_worker_inputs(&self) -> WorkerInputs;
 
     fn select_worker(
         &self,
-        workers: &HashMap<WorkerId, C>,
-        request: &SchedulingRequest,
-        eligibility: RoutingEligibility<'_>,
-        block_size: u32,
+        input: WorkerSelectionInput<'_, C>,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
+}
 
-    /// Select from a cache-free host's ordered worker-ID snapshot.
-    ///
-    /// Selectors that implement this path must require [`WorkerInputs::NONE`].
-    /// The default keeps existing configured-worker selectors source-compatible.
-    fn select_worker_from_ids(
-        &self,
-        _worker_ids: &[WorkerId],
-    ) -> Result<WorkerSelectionResult, KvSchedulerError> {
-        Err(WorkerSelectionPolicyError::failed("selector requires configured worker inputs").into())
+/// Inputs supplied by the selector's host.
+#[derive(Clone, Copy)]
+pub enum WorkerSelectionInput<'a, C: WorkerConfigLike> {
+    Configured {
+        workers: &'a HashMap<WorkerId, C>,
+        request: &'a SchedulingRequest,
+        eligibility: RoutingEligibility<'a>,
+        block_size: u32,
+    },
+    Hosted {
+        worker_ids: &'a [WorkerId],
+        occupancy: Option<&'a dyn Fn(WorkerId) -> u64>,
+    },
+}
+
+pub type ConfiguredSelectionInputs<'a, C> = (
+    &'a HashMap<WorkerId, C>,
+    &'a SchedulingRequest,
+    RoutingEligibility<'a>,
+    u32,
+);
+
+pub type HostedSelectionInputs<'a> = (&'a [WorkerId], Option<&'a dyn Fn(WorkerId) -> u64>);
+
+impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
+    pub fn configured(
+        workers: &'a HashMap<WorkerId, C>,
+        request: &'a SchedulingRequest,
+        eligibility: RoutingEligibility<'a>,
+        block_size: u32,
+    ) -> Self {
+        Self::Configured {
+            workers,
+            request,
+            eligibility,
+            block_size,
+        }
+    }
+
+    pub fn hosted(
+        worker_ids: &'a [WorkerId],
+        occupancy: Option<&'a dyn Fn(WorkerId) -> u64>,
+    ) -> Self {
+        Self::Hosted {
+            worker_ids,
+            occupancy,
+        }
+    }
+
+    pub fn into_configured(self) -> Result<ConfiguredSelectionInputs<'a, C>, KvSchedulerError> {
+        match self {
+            Self::Configured {
+                workers,
+                request,
+                eligibility,
+                block_size,
+            } => Ok((workers, request, eligibility, block_size)),
+            Self::Hosted { .. } => Err(WorkerSelectionPolicyError::failed(
+                "selector requires configured worker inputs",
+            )
+            .into()),
+        }
+    }
+
+    pub fn into_hosted(self) -> Result<HostedSelectionInputs<'a>, KvSchedulerError> {
+        match self {
+            Self::Hosted {
+                worker_ids,
+                occupancy,
+            } => Ok((worker_ids, occupancy)),
+            Self::Configured { .. } => Err(WorkerSelectionPolicyError::failed(
+                "selector requires hosted worker inputs",
+            )
+            .into()),
+        }
     }
 }
 
@@ -66,14 +125,14 @@ struct LogitWeights {
     shared_cache_multiplier: f64,
 }
 
-struct WorkerSelectionInput<'a> {
+struct MaterializedSelectionInput<'a> {
     request: &'a SchedulingRequest,
     has_tier_overlap_blocks: bool,
     use_default_cache_fallbacks: bool,
     context: WorkerSelectionContext<'a>,
 }
 
-impl<'a> WorkerSelectionInput<'a> {
+impl<'a> MaterializedSelectionInput<'a> {
     fn new<C: WorkerConfigLike>(
         workers: &'a HashMap<WorkerId, C>,
         request: &'a SchedulingRequest,
@@ -361,7 +420,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
     };
     let mut input =
-        WorkerSelectionInput::new(workers, request, eligibility, block_size, weights, inputs);
+        MaterializedSelectionInput::new(workers, request, eligibility, block_size, weights, inputs);
     let selected = match state {
         WorkerSelectionPolicyStateRef::Default(picker) => {
             let scorer = DefaultWorkerScorer {
