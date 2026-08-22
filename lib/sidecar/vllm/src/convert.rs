@@ -117,6 +117,8 @@ pub(crate) fn build_generate_request(
             output_token_ids: true,
             output_logprobs: output_logprobs.is_some(),
             output_candidates: output_logprobs.map(top_n_candidates).transpose()?,
+            skip_special_tokens: None,
+            routed_experts_prompt_start: None,
         }),
         kv: Some(kv),
         truncate_prompt_tokens: 0,
