@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
@@ -63,7 +63,7 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[Kimi-K3](kimi-k3/vllm/)** | vLLM | Agg + Disagg | 16x GB200 / 16x GB300 | ✅ | ❌ | Multimodal MoE (1M ctx), MXFP4 experts + BF16 dense + FP8 KV, TP16 over MNNVL (GB200) / TP8 (GB300), KV-aware routing, FlashInfer MLA, reasoning + tool calling; plus disagg 1P1D (32x GB200) / 1P2D (24x GB300) | ❌ |
 | **[Kimi-K2.6](kimi-k2.6/vllm/)** | vLLM | Aggregated | 4x B200 / 8x H200 | ✅ | ✅ | MoE, NVFP4+FP8 KV (B200) / INT4 (H200), TP4/TP8, EAGLE3 MLA spec decode, LMCache CPU offload; text+image, chat + agentic profiles | ❌ |
 | **[Nemotron-3-Super](nemotron-3-super/vllm/)** | vLLM | Aggregated | 4x B200 / 4x H200 | ✅ | ✅ | ~120B hybrid Mamba/Attention/MoE (~12B active), NVFP4 (B200) / FP8 (H200) + FP8 KV, TP4+EP, MTP, KV-aware routing; chat + agentic profiles | ❌ |
-| **[Nemotron-3-Ultra](nemotron-3-ultra/vllm/)** | vLLM | Agg + Disagg | 4x B200 / 8x H200 | ✅ | ✅ | ~550B hybrid Mamba/Attention/MoE (~55B active), NVFP4 + FP8, TP4 (B200) / TP8 (H200) + EP, MTP, KV-aware routing; chat + agentic, plus 1P1D disagg on B200 | ❌ |
+| **[Nemotron-3-Ultra](nemotron-3-ultra/vllm/)** | vLLM | Agg + Disagg | B200 / GB200 / H200 | ✅ | ✅ | Day-0 chat and agentic profiles plus Refresh agentic profiles for 256K and 1M context; NVFP4 + FP8, MTP, and KV-aware routing | ❌ |
 
 **Legend:**
 - **Deployment**: ✅ = Complete `deploy.yaml` manifest available

@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Nemotron-3-Ultra"
-subtitle: "Serve nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4 with Dynamo and vLLM, tuned per GPU and workload."
+subtitle: "Serve nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4 with Dynamo and vLLM, including Day-0 and Refresh profiles."
 ---
 
 import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Each target below is a validated aggregated vLLM deployment of Nemotron-3-Ultra — NVIDIA's ~550B hybrid Mamba/Attention/MoE model (~55B active) — with MTP speculative decoding (1 token) and KV-aware routing; the B200 agentic target measured 310.8 system output tok/s per GPU on its trace. Pick your GPU and workload; every command on this page updates to match.
+The target picker covers the original Day-0 vLLM deployments of Nemotron-3-Ultra — NVIDIA's ~550B hybrid Mamba/Attention/MoE model (~55B active). The same recipe also includes Refresh profiles for B200, GB200, and H200 at 256K and 1M context lengths.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
@@ -61,6 +61,74 @@ Each target below is a validated aggregated vLLM deployment of Nemotron-3-Ultra 
 </div>
 </div>
 
+## Refresh Profiles
+
+Refresh profiles include two-worker aggregated and selected 1P1D or 1P2D disaggregated agentic deployments with KV-aware routing, prefix caching, asynchronous scheduling, FP8 KV cache, BF16 Mamba state, decoupled weights, and Expert Parallelism disabled. Aggregated 256K profiles use five-token MTP; aggregated 1M and all disaggregated profiles run without MTP.
+
+<Info>
+The Refresh manifests use the released `vllm-runtime:1.4.0` image pinned by digest in the source recipe. Review the image and cluster-specific placement before deployment.
+</Info>
+
+| GPU | Context | Topology | Worker shape | Reference concurrency | Manifest |
+|---|---:|---|---:|---:|---|
+| B200 | 256K | Aggregated | 2 × TP4 | 94 | `vllm/agg-b200-agentic-256k-2w-kv/deploy.yaml` |
+| B200 | 1M | Aggregated | 2 × TP4 | 46 | `vllm/agg-b200-agentic-1m-2w-kv/deploy.yaml` |
+| GB200 | 256K | Aggregated | 2 × TP4 | 96 | `vllm/agg-gb200-agentic-256k-2w-kv/deploy.yaml` |
+| GB200 | 1M | Aggregated | 2 × TP4 | 48 | `vllm/agg-gb200-agentic-1m-2w-kv/deploy.yaml` |
+| H200 | 256K | Aggregated | 2 × TP8 | 64 | `vllm/agg-h200-agentic-256k-2w-kv/deploy.yaml` |
+| H200 | 1M | Aggregated | 2 × TP8 | 32 | `vllm/agg-h200-agentic-1m-2w-kv/deploy.yaml` |
+| B200 | 256K | Disaggregated | 1P TP4 + 2D TP4 | 144 | `vllm/disagg-b200-agentic-256k-1p2d/deploy.yaml` |
+| B200 | 1M | Disaggregated | 1P TP4 + 1D TP4 | 38 | `vllm/disagg-b200-agentic-1m-1p1d/deploy.yaml` |
+| GB200 | 256K | Disaggregated | 1P TP4 + 2D TP4 | 140 | `vllm/disagg-gb200-agentic-256k-1p2d/deploy.yaml` |
+| GB200 | 1M | Disaggregated | 1P TP4 + 1D TP4 | 48 | `vllm/disagg-gb200-agentic-1m-1p1d/deploy.yaml` |
+| H200 | 256K | Disaggregated | 1P TP8 + 2D TP8 | 72 | `vllm/disagg-h200-agentic-256k-1p2d/deploy.yaml` |
+| H200 | 1M | Disaggregated | 1P TP8 + 1D TP8 | 30 | `vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml` |
+
+The numeric disaggregated rows passed the complete exact-count trace and all three SLA gates. H200 1M selects CC30; CC32 is its first valid TTFT failure.
+
+The B200 and GB200 256K 1P2D profiles use FlashInfer attention; the H200 256K 1P2D profile uses FlashAttention. GB200 disaggregated profiles use GKE multi-network MRDMA.
+
+Deploy a Refresh profile by selecting the GPU and context length:
+
+```bash
+export NAMESPACE=your-namespace
+GPU=h200       # b200, gb200, or h200
+CONTEXT=256k   # 256k or 1m
+PROFILE=agg-${GPU}-agentic-${CONTEXT}-2w-kv
+
+kubectl apply \
+  -f recipes/nemotron-3-ultra/vllm/${PROFILE}/deploy.yaml \
+  -n ${NAMESPACE}
+```
+
+For a disaggregated profile, select the GPU, context length, and qualified topology:
+
+```bash
+case "${GPU}-${CONTEXT}" in
+  b200-256k|gb200-256k) SHAPE=1p2d ;;
+  *) SHAPE=1p1d ;;
+esac
+PROFILE=disagg-${GPU}-agentic-${CONTEXT}-${SHAPE}
+
+kubectl apply \
+  -f recipes/nemotron-3-ultra/vllm/${PROFILE}/deploy.yaml \
+  -n ${NAMESPACE}
+```
+
+All Refresh profiles share one benchmark Job and runner:
+
+```bash
+# Edit the env block for the selected target first.
+kubectl apply \
+  -f recipes/nemotron-3-ultra/perf/refresh-runner.configmap.yaml \
+  -n ${NAMESPACE}
+kubectl apply \
+  -f recipes/nemotron-3-ultra/perf/refresh-perf.yaml \
+  -n ${NAMESPACE}
+```
+
+See the [benchmark workflow](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/perf/README.md) for the per-profile environment values and artifact layout.
+
 ## Prerequisites
 
 <div data-sku="b200">
@@ -68,7 +136,7 @@ Each target below is a validated aggregated vLLM deployment of Nemotron-3-Ultra 
 - A Kubernetes cluster with the Dynamo Platform installed (DGD CRDs served) and **4x B200 per aggregated worker** available (8x B200 for the disaggregated fallback).
 - An NGC image pull secret named `nvcr-secret` for `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-ultra-dev.1`.
 - A Hugging Face token with access to `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4`.
-- A `shared-model-cache` PVC containing the tokenizer-patched Ultra model view, or permission to create and populate it with the manifests in `model-cache/` (~1200 Gi).
+- A `shared-model-cache` PVC containing the tokenizer-patched Ultra model view, or permission to create and populate it with the manifests in `model-cache/` (~1200 Gi). Weights are decoupled from the runtime image: they are downloaded and validated onto this PVC independently, not baked into the container.
 
 </div>
 
@@ -77,7 +145,7 @@ Each target below is a validated aggregated vLLM deployment of Nemotron-3-Ultra 
 - A Kubernetes cluster with the Dynamo Platform installed (DGD CRDs served) and **8x H200 per worker** available.
 - An NGC image pull secret named `nvcr-secret` for `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0-nemotron-ultra-dev.1`.
 - A Hugging Face token with access to `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4`.
-- A `shared-model-cache` PVC containing the tokenizer-patched Ultra model view, or permission to create and populate it with the manifests in `model-cache/` (~1200 Gi).
+- A `shared-model-cache` PVC containing the tokenizer-patched Ultra model view, or permission to create and populate it with the manifests in `model-cache/` (~1200 Gi). Weights are decoupled from the runtime image: they are downloaded and validated onto this PVC independently, not baked into the container.
 
 </div>
 
@@ -117,7 +185,7 @@ Then deploy:
 <div data-sku="b200" data-usecase="chat">
 
 ```bash
-kubectl apply -f recipes/nemotron-3-ultra/vllm/agg-b200-chat-mtp/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/nemotron-3-ultra/vllm/agg-b200-chat-256k-mtp/deploy.yaml -n ${NAMESPACE}
 kubectl get dgd ultra-agg-b200-chat-mtp -n ${NAMESPACE} -w
 ```
 
@@ -126,7 +194,7 @@ kubectl get dgd ultra-agg-b200-chat-mtp -n ${NAMESPACE} -w
 <div data-sku="b200" data-usecase="agentic">
 
 ```bash
-kubectl apply -f recipes/nemotron-3-ultra/vllm/agg-b200-agentic-mtp/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/nemotron-3-ultra/vllm/agg-b200-agentic-256k-mtp/deploy.yaml -n ${NAMESPACE}
 kubectl get dgd ultra-agg-b200-agentic-mtp -n ${NAMESPACE} -w
 ```
 
@@ -135,7 +203,7 @@ kubectl get dgd ultra-agg-b200-agentic-mtp -n ${NAMESPACE} -w
 A disaggregated B200 agentic fallback splits prefill and decode into separate TP4 workers (8x B200 total: 4 prefill + 4 decode) with KV-aware routing plus P/D transfer, and runs without MTP. Its frontend service is `ultra-disagg-b200-1p1d-agentic-nomtp-frontend`; benchmark it by retargeting the same perf Job at that endpoint with the agentic trace at concurrency 32:
 
 ```bash
-kubectl apply -f recipes/nemotron-3-ultra/vllm/disagg-b200-agentic/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/nemotron-3-ultra/vllm/disagg-b200-agentic-256k/deploy.yaml -n ${NAMESPACE}
 kubectl get dgd ultra-disagg-b200-1p1d-agentic-nomtp -n ${NAMESPACE} -w
 ```
 
@@ -146,7 +214,7 @@ Measured on the 15% agentic trace at concurrency 32: **61.6 user output tok/s** 
 <div data-sku="h200" data-usecase="chat">
 
 ```bash
-kubectl apply -f recipes/nemotron-3-ultra/vllm/agg-h200-chat-mtp/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/nemotron-3-ultra/vllm/agg-h200-chat-256k-mtp/deploy.yaml -n ${NAMESPACE}
 kubectl get dgd ultra-agg-h200-chat-mtp -n ${NAMESPACE} -w
 ```
 
@@ -155,7 +223,7 @@ kubectl get dgd ultra-agg-h200-chat-mtp -n ${NAMESPACE} -w
 <div data-sku="h200" data-usecase="agentic">
 
 ```bash
-kubectl apply -f recipes/nemotron-3-ultra/vllm/agg-h200-agentic-mtp/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/nemotron-3-ultra/vllm/agg-h200-agentic-256k-mtp/deploy.yaml -n ${NAMESPACE}
 kubectl get dgd ultra-agg-h200-agentic-mtp -n ${NAMESPACE} -w
 ```
 
@@ -328,15 +396,15 @@ B200 rows use 15% raw Moontrace replay with `raw_direct_no_filter` trace semanti
 <table className="dynamo-variant-table">
 <thead><tr><th>Recipe</th><th>GPU</th><th>Topology</th><th>Workload</th><th>MTP</th><th>Concurrency</th><th>User output tok/s</th><th>System output tok/s/GPU</th></tr></thead>
 <tbody>
-<tr data-sku="b200" data-usecase="chat"><td><code>vllm/agg-b200-chat-mtp/deploy.yaml</code></td><td>B200</td><td>AGG</td><td>chat</td><td>yes</td><td>18</td><td>52.0</td><td>201.4</td></tr>
-<tr data-sku="b200" data-usecase="chat"><td><code>vllm/agg-b200-chat-nomtp/deploy.yaml</code></td><td>B200</td><td>AGG</td><td>chat</td><td>no</td><td>16</td><td>51.0</td><td>181.3</td></tr>
-<tr data-sku="b200" data-usecase="agentic"><td><code>vllm/agg-b200-agentic-mtp/deploy.yaml</code></td><td>B200</td><td>AGG</td><td>agentic</td><td>yes</td><td>20</td><td>80.6</td><td>310.8</td></tr>
-<tr data-sku="b200" data-usecase="agentic"><td><code>vllm/agg-b200-agentic-nomtp/deploy.yaml</code></td><td>B200</td><td>AGG</td><td>agentic</td><td>no</td><td>8</td><td>99.5</td><td>175.9</td></tr>
-<tr data-sku="b200" data-usecase="agentic"><td><code>vllm/disagg-b200-agentic/deploy.yaml</code></td><td>B200</td><td>1P1D</td><td>agentic</td><td>no</td><td>32</td><td>61.6</td><td>231.1</td></tr>
-<tr data-sku="h200" data-usecase="chat"><td><code>vllm/agg-h200-chat-mtp/deploy.yaml</code></td><td>H200</td><td>AGG</td><td>chat</td><td>yes</td><td>10</td><td>58.7</td><td>46.8</td></tr>
-<tr data-sku="h200" data-usecase="chat"><td><code>vllm/agg-h200-chat-nomtp/deploy.yaml</code></td><td>H200</td><td>AGG</td><td>chat</td><td>no</td><td>8</td><td>54.2</td><td>43.0</td></tr>
-<tr data-sku="h200" data-usecase="agentic"><td><code>vllm/agg-h200-agentic-mtp/deploy.yaml</code></td><td>H200</td><td>AGG</td><td>agentic</td><td>yes</td><td>8</td><td>53.2</td><td>27.4</td></tr>
-<tr data-sku="h200" data-usecase="agentic"><td><code>vllm/agg-h200-agentic-nomtp/deploy.yaml</code></td><td>H200</td><td>AGG</td><td>agentic</td><td>no</td><td>8</td><td>52.3</td><td>26.5</td></tr>
+<tr data-sku="b200" data-usecase="chat"><td><code>vllm/agg-b200-chat-256k-mtp/deploy.yaml</code></td><td>B200</td><td>AGG</td><td>chat</td><td>yes</td><td>18</td><td>52.0</td><td>201.4</td></tr>
+<tr data-sku="b200" data-usecase="chat"><td><code>vllm/agg-b200-chat-256k-nomtp/deploy.yaml</code></td><td>B200</td><td>AGG</td><td>chat</td><td>no</td><td>16</td><td>51.0</td><td>181.3</td></tr>
+<tr data-sku="b200" data-usecase="agentic"><td><code>vllm/agg-b200-agentic-256k-mtp/deploy.yaml</code></td><td>B200</td><td>AGG</td><td>agentic</td><td>yes</td><td>20</td><td>80.6</td><td>310.8</td></tr>
+<tr data-sku="b200" data-usecase="agentic"><td><code>vllm/agg-b200-agentic-256k-nomtp/deploy.yaml</code></td><td>B200</td><td>AGG</td><td>agentic</td><td>no</td><td>8</td><td>99.5</td><td>175.9</td></tr>
+<tr data-sku="b200" data-usecase="agentic"><td><code>vllm/disagg-b200-agentic-256k/deploy.yaml</code></td><td>B200</td><td>1P1D</td><td>agentic</td><td>no</td><td>32</td><td>61.6</td><td>231.1</td></tr>
+<tr data-sku="h200" data-usecase="chat"><td><code>vllm/agg-h200-chat-256k-mtp/deploy.yaml</code></td><td>H200</td><td>AGG</td><td>chat</td><td>yes</td><td>10</td><td>58.7</td><td>46.8</td></tr>
+<tr data-sku="h200" data-usecase="chat"><td><code>vllm/agg-h200-chat-256k-nomtp/deploy.yaml</code></td><td>H200</td><td>AGG</td><td>chat</td><td>no</td><td>8</td><td>54.2</td><td>43.0</td></tr>
+<tr data-sku="h200" data-usecase="agentic"><td><code>vllm/agg-h200-agentic-256k-mtp/deploy.yaml</code></td><td>H200</td><td>AGG</td><td>agentic</td><td>yes</td><td>8</td><td>53.2</td><td>27.4</td></tr>
+<tr data-sku="h200" data-usecase="agentic"><td><code>vllm/agg-h200-agentic-256k-nomtp/deploy.yaml</code></td><td>H200</td><td>AGG</td><td>agentic</td><td>no</td><td>8</td><td>52.3</td><td>26.5</td></tr>
 </tbody>
 </table>
 </div>
@@ -361,8 +429,10 @@ All targets serve `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4` on the dedica
 
 - This is a Day-0 recipe on a dedicated dev runtime image (`vllm-runtime:1.3.0-nemotron-ultra-dev.1`); it is functional and benchmarked but not yet promoted to a release runtime image.
 - The recipes pin `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel` and pass `--no-enable-flashinfer-autotune` on vLLM workers. Do not remove these unless rerunning the benchmark qualification — they select the non-FlashInfer FP8 linear kernel path and avoid a measured vLLM 0.22 FlashInfer FP8 regression.
-- No-MTP fallback manifests are included for every aggregated target at `vllm/agg-<sku>-<usecase>-nomtp/deploy.yaml`; their DGD names carry the `-nomtp` suffix, and their measured rows appear in the performance table above.
+- No-MTP fallback manifests are included for every Day-0 aggregated target at `vllm/agg-<sku>-<usecase>-256k-nomtp/deploy.yaml`; their DGD names carry the `-nomtp` suffix, and their measured rows appear in the performance table above.
 - Reasoning is controlled per request via `chat_template_kwargs` (`enable_thinking`, `force_nonempty_content`) and `nvext.max_thinking_tokens`. Do not send `force_nonempty_content` as a top-level request parameter. Top-level reasoning controls such as `include_reasoning` and `reasoning_effort` are part of shared Dynamo API compatibility work, not Ultra-specific failures.
+- With the OSS vLLM version bundled in the pinned Dynamo 1.4.0 runtime, reasoning-enabled requests using `response_format` with `json_object` or `json_schema` may return malformed JSON with HTTP 200. The fix is available upstream in [vLLM PR #44993](https://github.com/vllm-project/vllm/pull/44993) but is not included in the pinned runtime. Disable thinking for constrained output when appropriate, and validate structured output before consuming the response.
+- The same bundled OSS vLLM limitation affects reasoning-enabled requests using `tool_choice: "required"` or a named tool choice: the response may contain plain `content` with `finish_reason: "stop"` instead of structured `tool_calls`. Disable thinking for constrained tool calls when appropriate, and validate `tool_calls` before consuming the response.
 - Raw Moontrace replay may contain over-context or pathological long-generation rows. Preserve them as HTTP/error evidence rather than dropping them silently.
 - Tool calling uses the `qwen3_coder` parser; reasoning parsing uses the model-local `ultra_v3_reasoning_parser.py` (validated by the model-validate Job).
 
@@ -370,10 +440,12 @@ All targets serve `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4` on the dedica
 
 - Source README: [recipes/nemotron-3-ultra/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/README.md)
 - Benchmark workflow: [recipes/nemotron-3-ultra/perf/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/perf/README.md) and [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/perf/perf.yaml)
-- B200 chat + MTP: [vllm/agg-b200-chat-mtp/deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/vllm/agg-b200-chat-mtp/deploy.yaml)
-- B200 agentic + MTP: [vllm/agg-b200-agentic-mtp/deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/vllm/agg-b200-agentic-mtp/deploy.yaml)
-- H200 chat + MTP: [vllm/agg-h200-chat-mtp/deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/vllm/agg-h200-chat-mtp/deploy.yaml)
-- H200 agentic + MTP: [vllm/agg-h200-agentic-mtp/deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/vllm/agg-h200-agentic-mtp/deploy.yaml)
-- B200 disaggregated agentic: [vllm/disagg-b200-agentic/deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/vllm/disagg-b200-agentic/deploy.yaml)
+- B200 chat + MTP: [vllm/agg-b200-chat-256k-mtp/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/vllm)
+- B200 agentic + MTP: [vllm/agg-b200-agentic-256k-mtp/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/vllm)
+- H200 chat + MTP: [vllm/agg-h200-chat-256k-mtp/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/vllm)
+- H200 agentic + MTP: [vllm/agg-h200-agentic-256k-mtp/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/vllm)
+- B200 disaggregated agentic: [vllm/disagg-b200-agentic-256k/deploy.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/vllm)
+- Refresh profiles: [vllm/](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/vllm) (`agg-<sku>-agentic-<context>-2w-kv/deploy.yaml` and the selected `disagg-<sku>-agentic-<context>-1p1d|1p2d/deploy.yaml`)
+- Refresh benchmark: [refresh-perf.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/perf) and [refresh-runner.configmap.yaml](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/perf)
 - No-MTP fallbacks: [vllm/](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/vllm) (`agg-*-nomtp/deploy.yaml`)
 - Model cache setup: [model-cache/](https://github.com/ai-dynamo/dynamo/tree/main/recipes/nemotron-3-ultra/model-cache) (`model-cache.yaml`, `model-download.yaml`, `model-validate.yaml`)

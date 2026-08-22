@@ -5,9 +5,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # Nemotron-3-Ultra Benchmark Recipe
 
-A single AIPerf trace-replay Job — [perf.yaml](perf.yaml) — covers the Nemotron-3-Ultra DGD variants. The benchmark is identical across variants; change `ENDPOINT`, `TRACE_FILE`, `CONCURRENCY`, and `TARGET_MODEL` in the Job env block to target a specific server.
+The Day-0 profiles share one AIPerf trace-replay Job, [perf.yaml](perf.yaml). The Refresh profiles share a second Job, [refresh-perf.yaml](refresh-perf.yaml), and its [runner ConfigMap](refresh-runner.configmap.yaml). There is no profile-specific perf manifest.
 
-The Job waits for `GET /v1/models` on the DGD frontend to return `TARGET_MODEL`, runs a short warmup, then replays the configured Mooncake-format trace at one `CONCURRENCY` value. Artifacts are written to the shared model-cache PVC under `/opt/models/perf`.
+The Day-0 Job waits for `GET /v1/models` on the DGD frontend to return `TARGET_MODEL`, runs a short warmup, then replays the configured Mooncake-format trace at one `CONCURRENCY` value. Its artifacts are written to the shared model-cache PVC under `/opt/models/perf`.
 
 Benchmark rows assume the vLLM DGD manifests in this recipe, including the CUDA13 image and worker runtime settings:
 
@@ -17,9 +17,9 @@ VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel
 --no-enable-flashinfer-autotune
 ```
 
-The bench pod is co-located with the DGD frontend through pod affinity on the frontend host. If you run more than one benchmark in the same namespace, also update `metadata.name` and `labels.app` so Jobs and artifact directories stay distinct.
+The Day-0 bench pod is co-located with the DGD frontend through pod affinity on the frontend host. If you run more than one benchmark in the same namespace, also update `metadata.name` and `labels.app` so Jobs and artifact directories stay distinct.
 
-## Targeting a Variant
+## Targeting a Day-0 Variant
 
 Edit the `env` block in [perf.yaml](perf.yaml):
 
@@ -36,6 +36,40 @@ Edit the `env` block in [perf.yaml](perf.yaml):
 | H200 AGG agentic no-MTP | `ultra-agg-h200-agentic-nomtp-frontend:8000` | `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4` | `/opt/models/traces/nim_turbo_64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | 8 |
 
 The default Job is configured for the B200 AGG chat MTP 15% trace at concurrency 18. For other release-style benchmark rows, use the trace/concurrency pair that matches the recipe row being reported.
+
+## Targeting a Refresh Profile
+
+The shared Refresh Job replays all 3541 rows of the 15% agentic Mooncake trace through AIPerf 0.12. Edit its `env` block with one row from this table before applying it:
+
+| Profile | `DGD_NAME` | `CONTEXT` | `CONCURRENCY` | `GPU_COUNT` | `REQUEST_TIMEOUT` | `WARMUP_BURSTS` | Expected requests | Expected errors |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| B200 256K | `ultra-agg-b200-256k-2w-kv` | `256k` | 94 | 8 | 3600 | 2 | 3411 | 130 |
+| B200 1M | `ultra-agg-b200-1m-2w-kv` | `1m` | 46 | 8 | 3600 | 2 | 3528 | 13 |
+| GB200 256K | `ultra-agg-gb200-256k-2w-kv` | `256k` | 96 | 8 | 1200 | 1 | 3411 | 130 |
+| GB200 1M | `ultra-agg-gb200-1m-2w-kv` | `1m` | 48 | 8 | 3600 | 2 | 3528 | 13 |
+| H200 256K | `ultra-agg-h200-256k-2w-kv` | `256k` | 64 | 16 | 1200 | 2 | 3411 | 130 |
+| H200 1M | `ultra-agg-h200-1m-2w-kv` | `1m` | 32 | 16 | 3600 | 2 | 3528 | 13 |
+| B200 256K 1P2D | `ultra-disagg-b200-256k-1p2d` | `256k` | 144 | 12 | 3600 | 2 | 3411 | 130 |
+| B200 1M 1P1D | `ultra-disagg-b200-1m-1p1d` | `1m` | 38 | 8 | 3600 | 2 | 3528 | 13 |
+| GB200 256K 1P2D | `ultra-disagg-gb200-256k-1p2d` | `256k` | 140 | 12 | 1200 | 1 | 3411 | 130 |
+| GB200 1M 1P1D | `ultra-disagg-gb200-1m-1p1d` | `1m` | 48 | 8 | 3600 | 2 | 3528 | 13 |
+| H200 256K 1P2D | `ultra-disagg-h200-256k-1p2d` | `256k` | 72 | 24 | 1200 | 2 | 3411 | 130 |
+| H200 1M 1P1D | `ultra-disagg-h200-1m-1p1d` | `1m` | 30 | 16 | 3600 | 2 | 3528 | 13 |
+
+Set `ENDPOINT` to `<DGD_NAME>-frontend:8000`, `EXPECTED_REQUEST_COUNT` and `EXPECTED_ERROR_COUNT` to the final two columns, and leave `JOB_NAME=perf-nemotron-ultra-refresh`. Then run:
+
+All numeric rows are selected released-1.4.0 reference points.
+
+```bash
+kubectl apply -f refresh-runner.configmap.yaml -n ${NAMESPACE}
+kubectl apply -f refresh-perf.yaml -n ${NAMESPACE}
+kubectl logs -f job/perf-nemotron-ultra-refresh -n ${NAMESPACE}
+kubectl wait --for=condition=Complete \
+  job/perf-nemotron-ultra-refresh \
+  -n ${NAMESPACE} --timeout=21600s
+```
+
+Refresh artifacts are written to `/artifacts/perf-dynamo/perf-nemotron-ultra-refresh/<UTC-run-id>/` on `shared-model-cache`. The result contains the AIPerf output, `run_manifest.json`, and `summary.json`.
 
 ## Dataset
 

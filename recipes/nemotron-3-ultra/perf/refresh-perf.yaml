@@ -1,0 +1,98 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: perf-nemotron-ultra-refresh
+  labels:
+    app.kubernetes.io/name: perf-nemotron-ultra-refresh
+    app.kubernetes.io/part-of: nemotron-3-ultra
+    nemotron-ultra-refresh.nvidia.com/routing: kv-aware
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 21600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: perf-nemotron-ultra-refresh
+        nemotron-ultra-refresh.nvidia.com/routing: kv-aware
+    spec:
+      restartPolicy: Never
+      imagePullSecrets:
+      - name: nvcr-secret
+      containers:
+      - name: perf
+        image: nvcr.io/nvidia/ai-dynamo/aiperf:0.12.0
+        imagePullPolicy: IfNotPresent
+        command:
+        - "/bin/bash"
+        - "/runner/run.sh"
+        env:
+        - name: JOB_NAME
+          value: perf-nemotron-ultra-refresh
+        - name: DGD_NAME
+          value: ultra-agg-h200-256k-2w-kv
+        - name: ENDPOINT
+          value: ultra-agg-h200-256k-2w-kv-frontend:8000
+        - name: CONTEXT
+          value: 256k
+        - name: CONCURRENCY
+          value: '64'
+        - name: GPU_COUNT
+          value: '16'
+        - name: REQUEST_TIMEOUT
+          value: '1200'
+        - name: WARMUP_BURSTS
+          value: '2'
+        - name: EXPECTED_REQUEST_COUNT
+          value: '3411'
+        - name: EXPECTED_ERROR_COUNT
+          value: '130'
+        - name: SERVER_RUNTIME
+          value: 1.4.0
+        - name: AIPERF_HTTP_CONNECTION_LIMIT
+          value: '200'
+        - name: AIPERF_HTTP_SO_RCVTIMEO
+          value: '120'
+        - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
+          value: '3600'
+        - name: AIPERF_DATASET_CONFIGURATION_TIMEOUT
+          value: '3600'
+        - name: ROUTING_MODE
+          value: kv-aware
+        - name: WORKER_REPLICAS
+          value: '2'
+        resources:
+          requests:
+            cpu: '4'
+            memory: 8Gi
+          limits:
+            cpu: '16'
+            memory: 32Gi
+        volumeMounts:
+        - name: runner
+          mountPath: "/runner"
+          readOnly: true
+        - name: artifacts
+          mountPath: "/artifacts"
+      volumes:
+      - name: runner
+        configMap:
+          name: nemotron-ultra-refresh-aiperf-runner
+          defaultMode: 365
+      - name: artifacts
+        persistentVolumeClaim:
+          claimName: shared-model-cache

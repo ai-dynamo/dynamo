@@ -1,0 +1,212 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nemotron-ultra-refresh-aiperf-runner
+  labels:
+    app.kubernetes.io/part-of: nemotron-3-ultra
+data:
+  run.sh: |
+    #!/usr/bin/env bash
+    set -Eeuo pipefail
+
+    : "${JOB_NAME:?JOB_NAME is required}"
+    : "${DGD_NAME:?DGD_NAME is required}"
+    : "${ENDPOINT:?ENDPOINT is required}"
+    : "${CONTEXT:?CONTEXT is required}"
+    : "${CONCURRENCY:?CONCURRENCY is required}"
+    : "${GPU_COUNT:?GPU_COUNT is required}"
+    : "${REQUEST_TIMEOUT:?REQUEST_TIMEOUT is required}"
+    : "${WARMUP_BURSTS:?WARMUP_BURSTS is required}"
+    : "${EXPECTED_REQUEST_COUNT:?EXPECTED_REQUEST_COUNT is required}"
+    : "${EXPECTED_ERROR_COUNT:?EXPECTED_ERROR_COUNT is required}"
+
+    MODEL="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
+    TRACE_URL="https://media.githubusercontent.com/media/ai-dynamo/dynamo/main/recipes/nemotron-3-ultra/perf/traces/nim_turbo_64k_400_90kv_agent_new_noschedule_short_15perc.jsonl"
+    TRACE_SHA256="f20d3f2bc83dd1306cda659fbe34e7c4d85ca5497626c98bc0b1c4d2211379d0"
+    TRACE_FILE="/tmp/mt15-agentic-64k-400-90kv.jsonl"
+    RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+    RESULT_DIR="/artifacts/perf-dynamo/${JOB_NAME}/${RUN_ID}"
+
+    mkdir -p "${RESULT_DIR}"
+    ulimit -n 600000 || true
+
+    export MODEL TRACE_URL TRACE_SHA256 TRACE_FILE RESULT_DIR RUN_ID
+    python3 - <<'PY'
+    import hashlib
+    import os
+    import urllib.request
+
+    url = os.environ["TRACE_URL"]
+    path = os.environ["TRACE_FILE"]
+    expected = os.environ["TRACE_SHA256"]
+    urllib.request.urlretrieve(url, path)
+    with open(path, "rb") as handle:
+        actual = hashlib.file_digest(handle, "sha256").hexdigest()
+    with open(path, "rb") as handle:
+        lines = sum(1 for _ in handle)
+    if actual != expected:
+        raise SystemExit(f"TRACE_SHA_MISMATCH expected={expected} actual={actual}")
+    if lines != 3541:
+        raise SystemExit(f"TRACE_LINE_COUNT_MISMATCH expected=3541 actual={lines}")
+    print(f"TRACE_OK sha256={actual} lines={lines}")
+    PY
+
+    AIPERF_VERSION="$(python3 -c 'import importlib.metadata; print(importlib.metadata.version("aiperf"))')"
+    if [[ "${AIPERF_VERSION}" != "0.12.0" ]]; then
+      echo "AIPERF_VERSION_MISMATCH expected=0.12.0 actual=${AIPERF_VERSION}" >&2
+      exit 40
+    fi
+    export AIPERF_VERSION
+
+    python3 - <<'PY'
+    import json
+    import os
+    import time
+    import urllib.request
+
+    endpoint = os.environ["ENDPOINT"]
+    model = os.environ["MODEL"]
+    url = f"http://{endpoint}/v1/models"
+    for attempt in range(1, 721):
+        try:
+            with urllib.request.urlopen(url, timeout=10) as response:
+                payload = json.load(response)
+            if any(item.get("id") == model for item in payload.get("data", [])):
+                body = json.dumps({
+                    "model": model,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 1,
+                }).encode()
+                request = urllib.request.Request(
+                    f"http://{endpoint}/v1/chat/completions",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(request, timeout=60) as response:
+                    completion = json.load(response)
+                if completion.get("choices"):
+                    print(f"MODEL_READY endpoint={endpoint} attempt={attempt}")
+                    break
+        except Exception as error:
+            if attempt % 12 == 0:
+                print(f"MODEL_WAIT endpoint={endpoint} attempt={attempt} error={error}")
+        time.sleep(5)
+    else:
+        raise SystemExit(f"MODEL_READY_TIMEOUT endpoint={endpoint}")
+    PY
+
+    python3 - <<'PY'
+    import json
+    import os
+    from pathlib import Path
+
+    keys = [
+        "JOB_NAME", "DGD_NAME", "ENDPOINT", "CONTEXT", "CONCURRENCY",
+        "GPU_COUNT", "REQUEST_TIMEOUT", "WARMUP_BURSTS", "EXPECTED_REQUEST_COUNT",
+        "EXPECTED_ERROR_COUNT", "SERVER_RUNTIME", "ROUTING_MODE",
+        "WORKER_REPLICAS",
+        "AIPERF_VERSION", "TRACE_SHA256", "RUN_ID",
+    ]
+    payload = {key.lower(): os.environ.get(key) for key in keys}
+    payload.update({
+        "model": os.environ["MODEL"],
+        "trace_url": os.environ["TRACE_URL"],
+        "trace_lines": 3541,
+        "endpoint_type": "chat",
+        "ignore_eos": True,
+        "random_seed": 42,
+        "warmup_bursts": int(os.environ["WARMUP_BURSTS"]),
+    })
+    Path(os.environ["RESULT_DIR"], "run_manifest.json").write_text(
+        json.dumps(payload, indent=2) + "\n"
+    )
+    PY
+
+    run_profile() {
+      local request_count="$1"
+      local output_dir="$2"
+      aiperf profile \
+        --model "${MODEL}" \
+        --url "http://${ENDPOINT}" \
+        --endpoint-type chat \
+        --streaming \
+        --input-file "${TRACE_FILE}" \
+        --custom-dataset-type mooncake_trace \
+        --concurrency "${CONCURRENCY}" \
+        --request-count "${request_count}" \
+        --no-allow-dataset-wrap \
+        --use-server-token-count \
+        --extra-inputs ignore_eos:true \
+        --tokenizer-trust-remote-code \
+        --random-seed 42 \
+        --request-timeout-seconds "${REQUEST_TIMEOUT}" \
+        --workers-max "${CONCURRENCY}" \
+        --output-artifact-dir "${output_dir}" \
+        --ui simple
+    }
+
+    for warmup in $(seq 1 "${WARMUP_BURSTS}"); do
+      run_profile "${CONCURRENCY}" "${RESULT_DIR}/warmup-${warmup}"
+    done
+    run_profile 3541 "${RESULT_DIR}/main"
+
+    python3 - <<'PY'
+    import json
+    import os
+    from pathlib import Path
+
+    result_dir = Path(os.environ["RESULT_DIR"])
+    report_path = result_dir / "main" / "profile_export_aiperf.json"
+    report = json.loads(report_path.read_text())
+
+    def avg(name):
+        return float(report[name]["avg"])
+
+    request_count = int(avg("request_count"))
+    error_count = int(avg("error_request_count"))
+    expected_requests = int(os.environ["EXPECTED_REQUEST_COUNT"])
+    expected_errors = int(os.environ["EXPECTED_ERROR_COUNT"])
+    gpu_count = int(os.environ["GPU_COUNT"])
+    throughput = avg("output_token_throughput")
+    summary = {
+        "aiperf_version": report.get("aiperf_version"),
+        "request_count": request_count,
+        "error_request_count": error_count,
+        "output_token_throughput": throughput,
+        "tps_per_gpu": throughput / gpu_count,
+        "output_token_throughput_per_user_p50": report["output_token_throughput_per_user"]["p50"],
+        "time_to_first_token_p50_ms": report["time_to_first_token"]["p50"],
+        "inter_token_latency_p50_ms": report["inter_token_latency"]["p50"],
+        "total_output_tokens": int(avg("total_output_tokens")),
+        "benchmark_duration_seconds": avg("benchmark_duration"),
+        "expected_request_count": expected_requests,
+        "expected_error_request_count": expected_errors,
+        "validity_pass": request_count == expected_requests and error_count == expected_errors,
+    }
+    summary["sla_pass"] = (
+        summary["output_token_throughput_per_user_p50"] >= 50
+        and summary["time_to_first_token_p50_ms"] <= 5000
+        and summary["inter_token_latency_p50_ms"] <= 20
+    )
+    (result_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    print(json.dumps(summary, indent=2))
+    if not summary["validity_pass"]:
+        raise SystemExit("VALIDITY_GATE_FAILED")
+    PY
+
+    echo "RESULT_DIR=${RESULT_DIR}"

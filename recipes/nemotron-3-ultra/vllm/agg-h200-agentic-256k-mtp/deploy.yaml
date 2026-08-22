@@ -10,6 +10,7 @@ metadata:
     nemotron-ultra.nvidia.com/backend: vllm
     nemotron-ultra.nvidia.com/topology: agg1-tp8
     nemotron-ultra.nvidia.com/workload: agentic
+    nemotron-ultra.nvidia.com/context: 256k
 spec:
   backendFramework: vllm
   env:
