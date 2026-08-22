@@ -180,7 +180,6 @@ impl Router {
             None,
             model_name.clone(),
             actual_namespace.to_string(),
-            enable_eagle,
             // ext-proc constructs no KvWorkerMonitor; overload publishing is
             // unused on this path (matches the prior namespace-lookup miss).
             None,

@@ -80,6 +80,32 @@ pub enum InputTrigger {
     Other,
 }
 
+/// Metadata for an inference request that creates a compacted session summary.
+///
+/// Fields are optional because harnesses may expose different levels of detail.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentCompaction {
+    /// How the compaction was initiated, such as `manual` or `automatic`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+
+    /// Why the compaction was initiated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+
+    /// Compaction mechanism selected by the harness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implementation: Option<String>,
+
+    /// Position of this inference within the compaction flow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+
+    /// Summary or checkpoint strategy selected by the harness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+}
+
 /// Identity metadata for agentic workloads.
 // Not `deny_unknown_fields`: `AgentContext` is part of the frontend->worker wire
 // format (`PreprocessedRequest.agent_context`), so additive fields must be tolerated
@@ -98,6 +124,11 @@ pub struct AgentContext {
     #[builder(default, setter(strip_option))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_final: Option<bool>,
+
+    /// Present when the current inference creates a compacted session summary.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<AgentCompaction>,
 
     #[builder(default, setter(strip_option))]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -282,6 +313,7 @@ impl From<AgentContextHeaderValues> for AgentContext {
             session_id: values.session_id,
             parent_session_id: values.parent_session_id,
             session_final: values.session_final,
+            compaction: values.compaction,
             kv_hints,
             input_trigger: None,
         }
@@ -717,8 +749,8 @@ mod tests {
     use crate::protocols::agents::{
         HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_PARENT_AGENT_ID,
         HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_PARENT_THREAD_ID, HEADER_CODEX_THREAD_ID,
-        HEADER_DYNAMO_PARENT_SESSION_ID, HEADER_DYNAMO_SESSION_FINAL, HEADER_DYNAMO_SESSION_ID,
-        HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
+        HEADER_CODEX_TURN_METADATA, HEADER_DYNAMO_PARENT_SESSION_ID, HEADER_DYNAMO_SESSION_FINAL,
+        HEADER_DYNAMO_SESSION_ID, HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
     };
 
     #[derive(Default)]
@@ -748,6 +780,18 @@ mod tests {
     }
 
     #[test]
+    fn agent_context_accepts_nested_compaction() {
+        let context = serde_json::from_str::<AgentContext>(
+            r#"{"session_id":"root","compaction":{"trigger":"manual"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            context.compaction.and_then(|compaction| compaction.trigger),
+            Some("manual".to_string())
+        );
+    }
+
+    #[test]
     fn request_cache_salt_uses_canonical_precedence_and_empty_fallbacks() {
         let mut request = CacheSaltRequest::default();
         assert_eq!(request_cache_salt(&request), None);
@@ -773,45 +817,6 @@ mod tests {
     }
 
     #[test]
-    fn shared_nvext_builder_default() {
-        let nv_ext = NvExt::builder().build().unwrap();
-        assert_eq!(nv_ext.greed_sampling, None);
-        assert_eq!(nv_ext.use_raw_prompt, None);
-        assert_eq!(nv_ext.annotations, None);
-        assert_eq!(nv_ext.backend_instance_id, None);
-        assert_eq!(nv_ext.token_data, None);
-        assert_eq!(nv_ext.max_thinking_tokens, None);
-        assert_eq!(nv_ext.cache_salt, None);
-        assert_eq!(nv_ext.extra_fields, None);
-        assert_eq!(nv_ext.metadata_upload, None);
-        assert_eq!(nv_ext.prefill_worker_id, None);
-        assert_eq!(nv_ext.decode_worker_id, None);
-        assert_eq!(nv_ext.agent_hints, None);
-        assert_eq!(nv_ext.request_timestamp_ms, None);
-        assert_eq!(nv_ext.routing_constraints, None);
-    }
-
-    #[test]
-    fn shared_nvext_builder_custom() {
-        let nv_ext = NvExt::builder()
-            .greed_sampling(true)
-            .use_raw_prompt(true)
-            .backend_instance_id(42)
-            .token_data(vec![1, 2, 3, 4])
-            .max_thinking_tokens(1024)
-            .extra_fields(vec!["worker_id".to_string()])
-            .build()
-            .unwrap();
-
-        assert_eq!(nv_ext.greed_sampling, Some(true));
-        assert_eq!(nv_ext.use_raw_prompt, Some(true));
-        assert_eq!(nv_ext.backend_instance_id, Some(42));
-        assert_eq!(nv_ext.token_data, Some(vec![1, 2, 3, 4]));
-        assert_eq!(nv_ext.max_thinking_tokens, Some(1024));
-        assert_eq!(nv_ext.extra_fields, Some(vec!["worker_id".to_string()]));
-    }
-
-    #[test]
     fn parse_nvext_rejects_unknown_fields_in_llm_layer() {
         let err = parse_nvext(Some(serde_json::json!({
             "unsupported_future_field": true
@@ -832,18 +837,6 @@ mod tests {
         );
 
         assert!(serde_json::from_str::<AgentHints>(r#"{"strict_priority":-1}"#).is_err());
-    }
-
-    #[test]
-    fn shared_nvext_disagg_worker_ids() {
-        let nv_ext = NvExt::builder()
-            .prefill_worker_id(100)
-            .decode_worker_id(200)
-            .build()
-            .unwrap();
-
-        assert_eq!(nv_ext.prefill_worker_id, Some(100));
-        assert_eq!(nv_ext.decode_worker_id, Some(200));
     }
 
     #[test]
@@ -1085,6 +1078,71 @@ mod tests {
             assert_eq!(agent_context.session_final, None);
             assert_eq!(agent_context.kv_hints, None);
         }
+    }
+
+    #[test]
+    fn agent_context_from_codex_compaction_header_preserves_metadata() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
+        headers.insert(
+            HEADER_CODEX_TURN_METADATA,
+            r#"{"request_kind":"compaction","compaction":{"trigger":"manual","reason":"user_requested","implementation":"responses_compact","phase":"standalone_turn","strategy":"memento"}}"#
+                .parse()
+                .unwrap(),
+        );
+
+        let agent_context = agent_context_from_headers(&headers).unwrap();
+        assert_eq!(
+            agent_context.compaction,
+            Some(AgentCompaction {
+                trigger: Some("manual".to_string()),
+                reason: Some("user_requested".to_string()),
+                implementation: Some("responses_compact".to_string()),
+                phase: Some("standalone_turn".to_string()),
+                strategy: Some("memento".to_string()),
+            })
+        );
+
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "canonical".parse().unwrap());
+        let agent_context = agent_context_from_headers(&headers).unwrap();
+        assert_eq!(agent_context.session_id, "canonical");
+        assert_eq!(
+            agent_context
+                .compaction
+                .and_then(|compaction| compaction.strategy),
+            Some("memento".to_string())
+        );
+    }
+
+    #[test]
+    fn agent_context_ignores_invalid_or_non_compaction_codex_metadata() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
+        headers.insert(HEADER_CODEX_TURN_METADATA, "{".parse().unwrap());
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().compaction,
+            None
+        );
+
+        headers.insert(
+            HEADER_CODEX_TURN_METADATA,
+            r#"{"request_kind":"turn","compaction":{"trigger":"manual"}}"#
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().compaction,
+            None
+        );
+
+        headers.insert(
+            HEADER_CODEX_TURN_METADATA,
+            r#"{"request_kind":"compaction"}"#.parse().unwrap(),
+        );
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().compaction,
+            Some(AgentCompaction::default())
+        );
     }
 
     #[test]

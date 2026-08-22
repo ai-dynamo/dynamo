@@ -74,10 +74,13 @@ adapters:
       temperature: [0.0]
   dynamo.planner:
     search_space:
-      scaling_policy: [throughput_180_5, throughput_600_5, load_180_5,
-                       load_180_10, hybrid_180_5, hybrid_600_5]
-      load_sensitivity: [aggressive, default, conservative]
-      fpm_sampling: [small, default, large, fine]
+      scaling_policy:
+        preset: [throughput_180_5, throughput_600_5, load_180_5,
+                 load_180_10, hybrid_180_5, hybrid_600_5]
+      load_sensitivity:
+        preset: [aggressive, default, conservative]
+      fpm_sampling:
+        preset: [small, default, large, fine]
 workload:
   trace_path: <toolagent_trace.jsonl>            # open-loop: no replay_concurrency
   trace_format: mooncake
@@ -145,19 +148,19 @@ spread within the `load_180_10` family is noise).
   runs TPOT ~78 ms (near the 50 ms ITL bound) and TTFT ~1100 ms (under the 2000 ms bound),
   letting goodput dip to ~1000 while avg_gpu drops to ~8 → goodput/gpu peaks. The conservative
   predictive policies keep latency low but waste GPUs.
-- **Caveat:** `load_*` policies don't use `planner_fpm_sampling` (it only affects predictive
+- **Caveat:** `load_*` policies don't use `fpm_sampling` (it only affects predictive
   throughput scaling), so the `sens`/`fpm` spread *within* the `load_180_10` family (117–121) is
   mostly mocker noise (~5%). The robust conclusion is the **policy family** (`load_180_10`), not
   a precise `sens`/`fpm` setting.
 
-## Reproduce
+## Reproduction Status
 
-```bash
-python aisimulate/examples/sweeper/tools/run_sweep.py --config path/to/planner-sweep.yaml
-```
+These results are historical and cannot be reproduced from the current public artifacts.
+The published `aisimulate==0.1.0.dev1` wheel does not include the example runner or the
+experiment configuration used for this sweep.
 
-Notes: the planner path needs the `aic-forward-pass` binding; a per-throughput-interval
-load-predictor sub-sweep runs first (forecast-loss winner pinned per interval). Static and
-default-planner baselines are run via `dynamo.replay.run_trace_replay` (static: no
+The original planner path required the `aic-forward-pass` binding; a per-throughput-interval
+load-predictor sub-sweep ran first (forecast-loss winner pinned per interval). Static and
+default-planner baselines ran via `dynamo.replay.run_trace_replay` (static: no
 `planner_config`; planner: `planner_config` + the SLA). Same deployment as
 [Router End-to-End Latency Sweep](router-end-to-end-latency-sweep.md).

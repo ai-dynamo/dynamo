@@ -464,7 +464,7 @@ impl ModelManager {
     /// reservation first-come and symmetric across namespaces. A later deployment
     /// re-using a name fails loudly rather than silently displacing the owner.
     ///
-    /// Holds [`Self::reservation_lock`] across the reserved-name check and the
+    /// Holds `Self::reservation_lock` across the reserved-name check and the
     /// insert so the claim is atomic against a concurrent `register_alias` for
     /// the same name (a name can never end up both a live primary and an alias).
     /// The lock is always taken before any map access, so it never inverts with a
@@ -536,7 +536,7 @@ impl ModelManager {
     /// refused and logged so operators find the collision in the logs rather
     /// than through silent metric re-attribution.
     ///
-    /// Holds [`Self::reservation_lock`] across the live-primary probe and the
+    /// Holds `Self::reservation_lock` across the live-primary probe and the
     /// entry insert so the claim is atomic against a concurrent `add_worker_set`
     /// for the same name. Within that section the `models` guard is dropped before
     /// touching `alias_to_primary` (via `is_some_and`), and the lock is taken
@@ -1880,8 +1880,9 @@ impl ModelManager {
         .await
     }
 
+    /// Construct a KV chooser with a selector resolved by the router host at startup.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn kv_chooser_for_with_selector<Sel>(
+    pub async fn kv_chooser_for_with_selector<Sel>(
         &self,
         endpoint: &Endpoint,
         kv_cache_block_size: u32,
@@ -1932,8 +1933,8 @@ impl ModelManager {
         let lora_domain = self.lora_domain(&endpoint.id());
 
         // Register router via discovery mechanism.
-        let discovery = endpoint.component().drt().discovery();
-        let instance_id = discovery.instance_id();
+        let drt = endpoint.component().drt();
+        let instance_id = drt.discovery().instance_id();
 
         // Build transport for router endpoint based on request plane mode
         // Use the worker's component name so each target pool gets its own router discovery group
@@ -1950,7 +1951,7 @@ impl ModelManager {
             request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
         };
 
-        discovery.register(discovery_spec).await?;
+        let registration = drt.register_endpoint_lease(discovery_spec).await?;
 
         // Get of create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
@@ -1987,7 +1988,7 @@ impl ModelManager {
                 None
             };
 
-        let chooser = KvRouter::new_with_worker_role(
+        let mut chooser = KvRouter::new_with_worker_role(
             endpoint.clone(),
             client,
             workers_with_configs,
@@ -2004,6 +2005,7 @@ impl ModelManager {
             self.lora_enabled.then(|| lora_domain.filter.clone()),
         )
         .await?;
+        chooser.set_endpoint_registration(registration);
 
         // F2: feed the LoRA LoadEstimator in KV mode. Start exactly one active-sequence
         // subscription per decode endpoint. WORKER_TYPE_DECODE is the routing path for BOTH
@@ -2262,7 +2264,9 @@ impl ModelManager {
         // Slow path: create the watch (spawns a background task).
         // If another caller raced us, the entry() below picks up the winner;
         // the loser's background task stops once its receivers are dropped.
-        let rx = runtime_config_watch(endpoint).await?;
+        // This registry is keyed by endpoint and outlives any one WorkerSet, so
+        // the watch is scoped to the process, not to a caller's own lifecycle.
+        let rx = runtime_config_watch(endpoint, endpoint.drt().primary_token()).await?;
         let result = match self.runtime_configs.entry(endpoint_id) {
             Entry::Occupied(e) => e.get().clone(),
             Entry::Vacant(e) => {
@@ -2447,7 +2451,7 @@ mod tests {
     use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, WorkerWithDpRank};
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
-        discovery::{Discovery, DiscoverySpec, MockDiscovery, SharedMockRegistry},
+        discovery::{Discovery, MockDiscovery, SharedMockRegistry},
         distributed::DistributedConfig,
         pipeline::RouterMode,
         transports::event_plane::EventScope,
@@ -3283,7 +3287,6 @@ mod tests {
             None,
             "topology-model".to_string(),
             worker_set.namespace().to_string(),
-            false,
             None,
         );
         let encoder = crate::kv_router::EncoderRouter::new(

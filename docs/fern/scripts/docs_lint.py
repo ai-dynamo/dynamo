@@ -74,6 +74,24 @@ PATH_RE = re.compile(r"^\s*path:\s*(\S+)\s*$", re.M)
 # link rules still apply to them; only the frontmatter rules are skipped.
 NON_PAGE_FILES = ("AGENTS.md", "CLAUDE.md", "README.md")
 
+# Generated at publish time by docs/fern/scripts/gen_python_api.py and its Rust
+# counterpart. #13556 stopped committing them and gitignored both trees, so they
+# are absent from a clean checkout and present in the published site. A nav entry
+# or link that targets them is correct even though the file is not on disk, so
+# resolution checks treat these prefixes as satisfied. Keep in sync with the
+# ignore entries in docs/fern/.gitignore.
+GENERATED_PAGE_DIRS = (
+    os.path.join("pages", "reference", "api", "python"),
+    os.path.join("pages", "reference", "api", "rust"),
+)
+
+
+def is_generated(fern_rel: str) -> bool:
+    """True for a docs/fern-relative path inside a publish-time generated tree."""
+    norm = os.path.normpath(fern_rel)
+    return any(norm == d or norm.startswith(d + os.sep) for d in GENERATED_PAGE_DIRS)
+
+
 # Docs on how to fix each rule, surfaced in the CI failure output.
 RULE_HELP = {
     "SPDX": "add the SPDX header (frontmatter `#` lines for Fern pages, HTML comment otherwise)",
@@ -253,7 +271,9 @@ def check_links(rel: str, abspath: str, text: str, repo: str, out: list) -> None
                     f"relative link escapes docs/ ({url}) — use an absolute github.com/ai-dynamo/dynamo URL",
                 )
             )
-        elif not os.path.exists(target):
+        elif not os.path.exists(target) and not is_generated(
+            os.path.relpath(target, os.path.join(repo, FERN_DIR))
+        ):
             out.append(
                 Finding(rel, line, "LINK", "error", f"broken relative link: {url}")
             )
@@ -314,7 +334,7 @@ def check_nav(repo: str, out: list) -> None:
         p = m.group(1).strip().strip("\"'")
         referenced.add(p)
         target = os.path.join(repo, FERN_DIR, p)
-        if not os.path.exists(target):
+        if not os.path.exists(target) and not is_generated(p):
             line = content[: m.start()].count("\n") + 1
             out.append(
                 Finding(NAV_FILE, line, "NAV", "error", f"nav path has no file: {p}")

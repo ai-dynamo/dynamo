@@ -47,18 +47,19 @@ jobs:
 
       - name: Check if vCluster exists
         id: vcluster-check
-        uses: ./.github/actions/check-vcluster-exists
+        uses: $/.github/actions/check-vcluster-exists
         with:
           vcluster_name: ${{ inputs.vcluster_name }}
           vcluster_namespace: ${{ inputs.namespace }}
 
       - name: Self-bootstrap vCluster (rerun)
         if: steps.vcluster-check.outputs.exists != 'true'
-        uses: ./.github/actions/setup-dynamo-operator
+        uses: $/.github/actions/setup-dynamo-operator
         with:
           vcluster_name: ${{ inputs.vcluster_name }}
           vcluster_namespace: ${{ inputs.namespace }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          repository: ${{ vars.ACR_REPOSITORY }}
           operator_tag: ${{ inputs.operator_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
@@ -88,18 +89,19 @@ jobs:
 
       - name: Recheck vCluster before test
         id: vcluster-check
-        uses: ./.github/actions/check-vcluster-exists
+        uses: $/.github/actions/check-vcluster-exists
         with:
           vcluster_name: ${{ inputs.vcluster_name }}
           vcluster_namespace: ${{ inputs.namespace }}
 
       - name: Self-bootstrap missing vCluster
         if: steps.vcluster-check.outputs.exists != 'true'
-        uses: ./.github/actions/setup-dynamo-operator
+        uses: $/.github/actions/setup-dynamo-operator
         with:
           vcluster_name: ${{ inputs.vcluster_name }}
           vcluster_namespace: ${{ inputs.namespace }}
           registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          repository: ${{ vars.ACR_REPOSITORY }}
           operator_tag: ${{ inputs.operator_tag }}
           hf_token: ${{ secrets.HF_TOKEN }}
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
@@ -107,7 +109,7 @@ jobs:
 
       - name: Connect to vCluster
         id: connect-vcluster
-        uses: ./.github/actions/connect-vcluster
+        uses: $/.github/actions/connect-vcluster
         with:
           vcluster_name: ${{ inputs.vcluster_name }}
           vcluster_namespace: ${{ inputs.namespace }}
@@ -140,7 +142,7 @@ jobs:
           kubectl get secret hf-token-secret -n "${DGDR_NAMESPACE}" >/dev/null
 
       - name: Run CPU DGDR tests
-        uses: ./.github/actions/dynamo-deploy-test
+        uses: $/.github/actions/dynamo-deploy-test
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: ${{ env.DGDR_NAMESPACE }}

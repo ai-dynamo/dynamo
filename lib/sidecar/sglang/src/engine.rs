@@ -9,17 +9,18 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
-    AsyncEngineContext, DisaggregationMode, DynamoError, EngineConfig, GenerateContext, LLMEngine,
-    LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, ModelInput, PreprocessedRequest,
-    WorkerConfig, usage,
+    AsyncEngineContext, DisaggregationMode, DynamoError, EngineConfig, GenerateContext,
+    KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, ModelInput,
+    PreprocessedRequest, WorkerConfig, usage,
 };
+use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::stream::BoxStream;
 use serde_json::Value;
 use tokio::sync::OnceCell;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::args::{Args, TransportConfig, normalize_endpoint};
+use crate::args::Args;
 use crate::client::{self, Client, Discovery, Pool};
 use crate::proto as pb;
 use crate::protocol::{
@@ -28,30 +29,42 @@ use crate::protocol::{
 };
 
 pub struct SglangSidecarEngine {
-    endpoint: String,
-    transport: TransportConfig,
+    endpoint: GrpcEndpoint,
+    transport: GrpcTransportConfig,
     disaggregation_mode: DisaggregationMode,
     bootstrap_host: Option<String>,
     bootstrap_port: Option<u16>,
-    pool: OnceCell<Pool>,
+    state: OnceCell<StartedState>,
     cancel: CancellationToken,
+}
+
+struct StartedState {
+    pool: Pool,
+    kv_event_sources: Vec<DiscoveredKvEventSource>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DiscoveredKvEventSource {
+    endpoint: String,
+    topic: String,
+    dp_rank: u32,
 }
 
 impl SglangSidecarEngine {
     pub(crate) fn new(
-        endpoint: impl Into<String>,
-        transport: TransportConfig,
+        endpoint: GrpcEndpoint,
+        transport: GrpcTransportConfig,
         disaggregation_mode: DisaggregationMode,
         bootstrap_host: Option<String>,
         bootstrap_port: Option<u16>,
     ) -> Self {
         Self {
-            endpoint: endpoint.into(),
+            endpoint,
             transport,
             disaggregation_mode,
             bootstrap_host,
             bootstrap_port,
-            pool: OnceCell::new(),
+            state: OnceCell::new(),
             cancel: CancellationToken::new(),
         }
     }
@@ -63,12 +76,22 @@ impl SglangSidecarEngine {
             None => <Args as clap::Parser>::parse(),
         };
 
-        let endpoint = normalize_endpoint(&args.sglang_endpoint).map_err(client::invalid_arg)?;
-        let transport = args.transport();
+        if args.sidecar.common.route_to_encoder {
+            return Err(client::invalid_arg(
+                "route-to-encoder is not supported by the SGLang sidecar",
+            ));
+        }
+
+        let endpoint = GrpcEndpoint::parse(&args.sglang_endpoint, "--sglang-endpoint")?;
+        let transport = args.sidecar.grpc.config();
         let discovery = bootstrap_discover(&endpoint, &transport)?;
         let disaggregation_mode = discovery_mode(&discovery)?;
         let bootstrap_host = if disaggregation_mode.is_prefill() {
-            resolve_bootstrap_host(args.bootstrap_host.as_deref(), &endpoint, &discovery)?
+            resolve_bootstrap_host(
+                args.bootstrap_host.as_deref(),
+                endpoint.as_str(),
+                &discovery,
+            )?
         } else {
             None
         };
@@ -85,18 +108,30 @@ impl SglangSidecarEngine {
             "sglang sidecar bootstrapped native gRPC discovery"
         );
 
+        let common = args.sidecar.common;
         let config = WorkerConfig {
-            namespace: args.namespace,
-            component: disaggregation_mode.discovery_component().to_string(),
-            endpoint: args.endpoint,
-            endpoint_types: args.endpoint_types,
-            custom_jinja_template: args.custom_jinja_template,
+            namespace: common.namespace,
+            component: if disaggregation_mode == DisaggregationMode::Aggregated {
+                common.component
+            } else {
+                disaggregation_mode.discovery_component().to_string()
+            },
+            endpoint: common.endpoint,
+            endpoint_types: common.endpoint_types,
+            custom_jinja_template: common.custom_jinja_template,
             disaggregation_mode,
             model_name: discovery.tokenizer_path.clone(),
             served_model_name: discovery.served_model_name.clone(),
             model_input: ModelInput::Tokens,
-            reasoning_parser: discovery_string(&discovery.server_info, "reasoning_parser"),
-            tool_call_parser: discovery_string(&discovery.server_info, "tool_call_parser"),
+            reasoning_parser: common
+                .dyn_reasoning_parser
+                .or_else(|| discovery_string(&discovery.server_info, "reasoning_parser")),
+            tool_call_parser: common
+                .dyn_tool_call_parser
+                .or_else(|| discovery_string(&discovery.server_info, "tool_call_parser")),
+            exclude_tools_when_tool_choice_none: common.exclude_tools_when_tool_choice_none,
+            route_to_encoder: false,
+            enable_rl: common.enable_rl,
             ..Default::default()
         };
 
@@ -126,11 +161,13 @@ impl SglangSidecarEngine {
             if Instant::now() >= deadline {
                 return Err(client::engine_shutdown(format!(
                     "SGLang did not become healthy within {:?}: {retry_message}",
-                    self.transport.deadline
+                    self.transport.startup_deadline
                 )));
             }
-            tokio::time::sleep_until((Instant::now() + self.transport.poll_interval).min(deadline))
-                .await;
+            tokio::time::sleep_until(
+                (Instant::now() + self.transport.retry_interval).min(deadline),
+            )
+            .await;
         }
     }
 }
@@ -138,18 +175,12 @@ impl SglangSidecarEngine {
 #[async_trait]
 impl LLMEngine for SglangSidecarEngine {
     async fn start(&self, _worker_id: u64) -> Result<EngineConfig, DynamoError> {
-        if self.pool.initialized() {
+        if self.state.initialized() {
             return Err(client::engine_shutdown("sglang sidecar already started"));
         }
 
-        let deadline = Instant::now() + self.transport.deadline;
-        let pool = Pool::connect(
-            &self.endpoint,
-            &self.transport,
-            self.transport.connections,
-            deadline,
-        )
-        .await?;
+        let deadline = Instant::now() + self.transport.startup_deadline;
+        let pool = Pool::connect(&self.endpoint, &self.transport, deadline).await?;
         let mut control = pool.control_client();
         self.await_ready(&mut control, deadline).await?;
         let discovery = client::discover(&mut control, deadline).await?;
@@ -167,14 +198,20 @@ impl LLMEngine for SglangSidecarEngine {
             self.bootstrap_host.clone(),
             self.bootstrap_port,
         )?;
+        let kv_event_sources = discover_kv_event_sources(&discovery, &config, &self.endpoint)?;
         let connection_count = pool.len();
-        self.pool
-            .set(pool)
+        let kv_event_source_count = kv_event_sources.len();
+        self.state
+            .set(StartedState {
+                pool,
+                kv_event_sources,
+            })
             .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
         tracing::info!(
             model = %config.model,
             mode = ?self.disaggregation_mode,
             connections = connection_count,
+            kv_event_sources = kv_event_source_count,
             "sglang sidecar started"
         );
         Ok(config)
@@ -186,9 +223,9 @@ impl LLMEngine for SglangSidecarEngine {
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
         let mut grpc_client = self
-            .pool
+            .state
             .get()
-            .map(Pool::stream_client)
+            .map(|state| state.pool.stream_client())
             .ok_or_else(|| client::engine_shutdown("generate called before start"))?;
 
         let prompt_tokens = request.token_ids.len() as u32;
@@ -375,15 +412,20 @@ impl LLMEngine for SglangSidecarEngine {
     }
 
     async fn abort(&self, ctx: Arc<dyn AsyncEngineContext>) {
-        let Some(mut grpc_client) = self.pool.get().map(Pool::control_client) else {
+        let Some(mut grpc_client) = self.state.get().map(|state| state.pool.control_client())
+        else {
             return;
         };
         let request = pb::AbortRequest {
             rid: ctx.id().to_string(),
             abort_all: false,
         };
-        if let Err(error) =
-            client::abort(&mut grpc_client, request, self.transport.connect_timeout).await
+        if let Err(error) = client::abort(
+            &mut grpc_client,
+            request,
+            self.transport.connect_attempt_timeout,
+        )
+        .await
         {
             tracing::debug!(
                 request_id = ctx.id(),
@@ -398,18 +440,34 @@ impl LLMEngine for SglangSidecarEngine {
         tracing::info!("sglang sidecar shutdown complete");
         Ok(())
     }
+
+    async fn kv_event_sources(&self) -> Result<Vec<KvEventSource>, DynamoError> {
+        let state = self
+            .state
+            .get()
+            .ok_or_else(|| client::engine_shutdown("sglang sidecar is not started"))?;
+        Ok(state
+            .kv_event_sources
+            .iter()
+            .map(|source| KvEventSource::Zmq {
+                endpoint: source.endpoint.clone(),
+                topic: source.topic.clone(),
+                dp_rank: source.dp_rank,
+            })
+            .collect())
+    }
 }
 
 fn bootstrap_discover(
-    endpoint: &str,
-    transport: &TransportConfig,
+    endpoint: &GrpcEndpoint,
+    transport: &GrpcTransportConfig,
 ) -> Result<Discovery, DynamoError> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|err| client::engine_shutdown(format!("bootstrap runtime: {err}")))?;
     runtime.block_on(async {
-        let deadline = Instant::now() + transport.deadline;
+        let deadline = Instant::now() + transport.startup_deadline;
         let mut grpc_client = client::connect(endpoint, transport, deadline).await?;
         client::discover(&mut grpc_client, deadline).await
     })
@@ -534,6 +592,162 @@ fn is_routable_host(host: &str) -> bool {
         .unwrap_or(true)
 }
 
+fn discover_kv_event_sources(
+    discovery: &Discovery,
+    engine_config: &EngineConfig,
+    grpc_endpoint: &GrpcEndpoint,
+) -> Result<Vec<DiscoveredKvEventSource>, DynamoError> {
+    let Some(descriptor) = discovery.server_info.get("kv_events") else {
+        return Ok(Vec::new());
+    };
+    if descriptor.is_null() {
+        return Ok(Vec::new());
+    }
+    let descriptor = descriptor.as_object().ok_or_else(|| {
+        client::protocol_error("SGLang GetServerInfo.kv_events must be an object or null")
+    })?;
+
+    let publisher = descriptor
+        .get("publisher")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            client::protocol_error("SGLang GetServerInfo.kv_events.publisher must be a string")
+        })?;
+    if publisher != "zmq" {
+        return Err(client::protocol_error(format!(
+            "unsupported SGLang KV-event publisher `{publisher}`; expected `zmq`"
+        )));
+    }
+    let endpoint_host = descriptor
+        .get("endpoint_host")
+        .and_then(Value::as_str)
+        .filter(|host| !host.trim().is_empty())
+        .ok_or_else(|| {
+            client::protocol_error(
+                "SGLang GetServerInfo.kv_events.endpoint_host must be a non-empty string",
+            )
+        })?;
+    let base_port = descriptor
+        .get("endpoint_port_base")
+        .and_then(Value::as_u64)
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port != 0)
+        .ok_or_else(|| {
+            client::protocol_error(
+                "SGLang GetServerInfo.kv_events.endpoint_port_base must be in 1..=65535",
+            )
+        })?;
+    let topic = descriptor
+        .get("topic")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            client::protocol_error("SGLang GetServerInfo.kv_events.topic must be a string")
+        })?;
+    let block_size = descriptor
+        .get("block_size")
+        .and_then(Value::as_u64)
+        .and_then(|size| u32::try_from(size).ok())
+        .filter(|size| *size != 0)
+        .ok_or_else(|| {
+            client::protocol_error(
+                "SGLang GetServerInfo.kv_events.block_size must be a positive uint32",
+            )
+        })?;
+    let reported_dp_size = descriptor
+        .get("dp_size")
+        .and_then(Value::as_u64)
+        .and_then(|size| u32::try_from(size).ok())
+        .filter(|size| *size != 0)
+        .ok_or_else(|| {
+            client::protocol_error(
+                "SGLang GetServerInfo.kv_events.dp_size must be a positive uint32",
+            )
+        })?;
+
+    let llm = engine_config.llm.as_ref().ok_or_else(|| {
+        client::protocol_error("SGLang KV events require an LLM engine registration")
+    })?;
+    if llm.kv_cache_block_size != Some(block_size) {
+        return Err(client::protocol_error(format!(
+            "SGLang KV-event block size {block_size} does not match the registered engine block size {:?}",
+            llm.kv_cache_block_size
+        )));
+    }
+    let dp_start = llm.data_parallel_start_rank.unwrap_or(0);
+    let dp_size = llm.data_parallel_size.unwrap_or(1);
+    if reported_dp_size != dp_size {
+        return Err(client::protocol_error(format!(
+            "SGLang KV-event discovery reports {reported_dp_size} DP ranks but this sidecar registered {dp_size}"
+        )));
+    }
+    let dp_end = dp_start.checked_add(dp_size).ok_or_else(|| {
+        client::protocol_error("SGLang data-parallel rank range overflows uint32")
+    })?;
+    if dp_end > reported_dp_size {
+        return Err(client::protocol_error(format!(
+            "SGLang KV-event discovery does not cover registered DP rank range {dp_start}..{dp_end}"
+        )));
+    }
+    let nnodes = client::json_u32(&discovery.server_info, "nnodes")
+        .unwrap_or(1)
+        .max(1);
+    if nnodes > 1 && dp_size > 1 {
+        return Err(client::protocol_error(format!(
+            "SGLang KV events for multi-node DP are unsupported because GetServerInfo does not map DP ranks to publisher hosts (nnodes={nnodes}, dp_size={dp_size})"
+        )));
+    }
+
+    let connect_host = kv_event_connect_host(endpoint_host, grpc_endpoint)?;
+    let mut sources = Vec::with_capacity(dp_size as usize);
+    for dp_rank in dp_start..dp_end {
+        let port = u32::from(base_port)
+            .checked_add(dp_rank)
+            .filter(|port| *port <= u32::from(u16::MAX))
+            .ok_or_else(|| {
+                client::protocol_error(format!(
+                    "SGLang KV-event port overflows 65535 for base port {base_port} and DP rank {dp_rank}"
+                ))
+            })?;
+        sources.push(DiscoveredKvEventSource {
+            endpoint: format!("tcp://{connect_host}:{port}"),
+            topic: topic.to_string(),
+            dp_rank,
+        });
+    }
+
+    tracing::info!(
+        sources = sources.len(),
+        block_size,
+        base_port,
+        topic,
+        "discovered SGLang ZMQ KV-event sources"
+    );
+    Ok(sources)
+}
+
+fn kv_event_connect_host(
+    endpoint_host: &str,
+    grpc_endpoint: &GrpcEndpoint,
+) -> Result<String, DynamoError> {
+    let endpoint_host = endpoint_host.trim();
+    let bare_host = endpoint_host.trim_matches(&['[', ']'][..]);
+    if matches!(bare_host, "*" | "0.0.0.0" | "::") {
+        return Ok(grpc_endpoint.authority_host().to_string());
+    }
+    if let Ok(address) = bare_host.parse::<IpAddr>() {
+        return Ok(match address {
+            IpAddr::V4(address) => address.to_string(),
+            IpAddr::V6(address) => format!("[{address}]"),
+        });
+    }
+    if bare_host.contains([':', '/', '\\']) || bare_host.chars().any(char::is_whitespace) {
+        return Err(client::protocol_error(format!(
+            "invalid SGLang KV-event endpoint host `{endpoint_host}`"
+        )));
+    }
+    Ok(bare_host.to_string())
+}
+
 fn build_engine_config(
     discovery: &Discovery,
     mode: DisaggregationMode,
@@ -612,10 +826,12 @@ fn build_engine_config(
 
 #[cfg(test)]
 mod tests {
+    use dynamo_sidecar_common::GrpcEndpoint;
     use serde_json::json;
 
     use super::{
-        DisaggregationMode, Discovery, build_engine_config, resolve_bootstrap_host_with_local,
+        DisaggregationMode, DiscoveredKvEventSource, Discovery, build_engine_config,
+        discover_kv_event_sources, resolve_bootstrap_host_with_local,
     };
 
     fn discovery(server_info: serde_json::Value) -> Discovery {
@@ -732,5 +948,44 @@ mod tests {
 
         assert_eq!(registration.kv_cache_block_size, Some(512));
         assert_eq!(registration.total_kv_blocks, Some(16));
+    }
+
+    #[test]
+    fn discovers_ranked_kv_event_sources_from_server_info() {
+        let discovery = discovery(json!({
+            "page_size": 64,
+            "dcp_size": 2,
+            "dp_size": 2,
+            "enable_dp_attention": true,
+            "kv_events": {
+                "publisher": "zmq",
+                "endpoint_host": "*",
+                "endpoint_port_base": 5557,
+                "topic": "kv",
+                "block_size": 128,
+                "dp_size": 2
+            }
+        }));
+        let config =
+            build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None).unwrap();
+        let endpoint = GrpcEndpoint::parse("http://worker.example:30001", "test").unwrap();
+
+        let sources = discover_kv_event_sources(&discovery, &config, &endpoint).unwrap();
+
+        assert_eq!(
+            sources,
+            [
+                DiscoveredKvEventSource {
+                    endpoint: "tcp://worker.example:5557".to_string(),
+                    topic: "kv".to_string(),
+                    dp_rank: 0,
+                },
+                DiscoveredKvEventSource {
+                    endpoint: "tcp://worker.example:5558".to_string(),
+                    topic: "kv".to_string(),
+                    dp_rank: 1,
+                },
+            ]
+        );
     }
 }

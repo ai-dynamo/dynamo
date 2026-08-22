@@ -31,8 +31,6 @@ Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API
 - [DynamoGraphDeploymentRequest](#dynamographdeploymentrequest)
 - [DynamoGraphDeploymentScalingAdapter](#dynamographdeploymentscalingadapter)
 - [DynamoModel](#dynamomodel)
-- [PodSnapshot](#podsnapshot)
-- [PodSnapshotContent](#podsnapshotcontent)
 
 
 
@@ -218,7 +216,7 @@ _Appears in:_
 | `namespace` _string_ | Namespace is the desired namespace for the created DynamoGraphDeployment.<br />If not specified, defaults to the DGDR namespace. |  | Optional: \{\} <br /> |
 | `labels` _object (keys:string, values:string)_ | Labels are additional labels to add to the DynamoGraphDeployment metadata.<br />These are merged with auto-generated labels from the profiling process. |  | Optional: \{\} <br /> |
 | `annotations` _object (keys:string, values:string)_ | Annotations are additional annotations to add to the DynamoGraphDeployment metadata. |  | Optional: \{\} <br /> |
-| `workersImage` _string_ | WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.<br />This image is used for both temporary DGDs created during online profiling and the final DGD.<br />If omitted, the image from the base config file (e.g., disagg.yaml) is used.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1" |  | Optional: \{\} <br /> |
+| `workersImage` _string_ | WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.<br />This image is used for both temporary DGDs created during online profiling and the final DGD.<br />If omitted, the image from the base config file (e.g., disagg.yaml) is used.<br />Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0" |  | Optional: \{\} <br /> |
 
 
 #### DeploymentStatus
@@ -418,17 +416,17 @@ DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 - [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `providerOverride` _[ProviderOverride](#provideroverride)_ | ProviderOverride configures the primary Grove unit representing this DGD<br />component. With apiVersion `grove.io/v1alpha1`, target is<br />`PodCliqueTemplateSpec` for a single-node component or<br />`PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set<br />only `topologyConstraint`. Standalone DCD OpenAPI omits this field. |  | Optional: \{\} <br /> |
 | `annotations` _object (keys:string, values:string)_ | Annotations to add to generated Kubernetes resources for this component<br />(such as Pod, Service, and Ingress when applicable). |  |  |
 | `labels` _object (keys:string, values:string)_ | Labels to add to generated Kubernetes resources for this component. |  |  |
 | `serviceName` _string_ | The name of the component |  |  |
 | `componentType` _string_ | ComponentType indicates the role of this component (for example, "main"). |  |  |
 | `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  |  |
-| `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's<br />main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable<br />semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is<br />not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".<br />It does not change the image or rendered Pod, and changing only this field does not trigger a rollout. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
+| `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's<br />main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable<br />semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is<br />not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".<br />It does not change the image. Setting or changing an override that resolves to version 1.5.0 or<br />later may trigger a rollout. Keep it consistent with the image's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
 | `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  |  |
@@ -473,7 +471,7 @@ _Appears in:_
 | `serviceName` _string_ | The name of the component |  |  |
 | `componentType` _string_ | ComponentType indicates the role of this component (for example, "main"). |  |  |
 | `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  |  |
-| `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's<br />main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable<br />semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is<br />not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".<br />It does not change the image or rendered Pod, and changing only this field does not trigger a rollout. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
+| `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's<br />main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable<br />semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is<br />not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".<br />It does not change the image. Setting or changing an override that resolves to version 1.5.0 or<br />later may trigger a rollout. Keep it consistent with the image's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
 | `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  |  |
@@ -489,7 +487,7 @@ _Appears in:_
 | `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
 | `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
 | `minAvailable` _integer_ | MinAvailable maps to Grove PodClique minAvailable for single-node and<br />Grove PodCliqueScalingGroup minAvailable for multi-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />For Grove-backed DynamoGraphDeployment components, minAvailable defaults to<br />1 when omitted and is immutable after creation. Positive replica counts must<br />be greater than or equal to minAvailable. Replicas may be scaled to 0 as a<br />special scale-to-zero state; minAvailable remains configured but is not<br />enforced again until replicas is scaled back to a positive value.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
-| `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
+| `multinode` _object_ | Multinode is the configuration for multinode components. Standalone DCDs accept only `nodeCount`; `leader` and `worker` are DGD-only provider contexts. |  |  |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed by the DGDSA and external autoscalers scale the service<br />via the Scale subresource; when disabled, replicas are set directly. Opt in with<br />`scalingAdapter: \{enabled: true\}` -- a bare `scalingAdapter: \{\}` is disabled because<br />`enabled` defaults to false. |  | Optional: \{\} <br /> |
 | `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  | Optional: \{\} <br /> |
 | `frontendSidecar` _[FrontendSidecarSpec](#frontendsidecarspec)_ | FrontendSidecar configures an auto-generated frontend sidecar container.<br />When specified, the operator injects a fully configured frontend container<br />with all standard Dynamo environment variables, health probes, and ports.<br />This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE) |  | Optional: \{\} <br /> |
@@ -710,6 +708,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `providerOverride` _[ProviderOverride](#provideroverride)_ | ProviderOverride configures the root resource generated by the selected<br />graph-level workload provider. For Grove it uses apiVersion<br />`grove.io/v1alpha1`, target `PodCliqueSet`, and may set only<br />`spec.template.topologyConstraint`. It cannot select or change the provider. |  | Optional: \{\} <br /> |
 | `annotations` _object (keys:string, values:string)_ | Annotations to propagate to all child resources (PCS, DCD, Deployments, and pod templates).<br />Service-level annotations take precedence over these values. |  | Optional: \{\} <br /> |
 | `labels` _object (keys:string, values:string)_ | Labels to propagate to all child resources (PCS, DCD, Deployments, and pod templates).<br />Service-level labels take precedence over these values. |  | Optional: \{\} <br /> |
 | `priorityClassName` _string_ | PriorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.<br />Requires the Grove pathway. |  | Optional: \{\} <br /> |
@@ -1097,6 +1096,22 @@ _Appears in:_
 | `uri` _string_ | URI is the model source URI<br />Supported formats:<br />- S3: s3://bucket/path/to/model<br />- HuggingFace: hf://org/model@revision_sha<br />- Local filesystem: file:///path/to/model |  | Required: \{\} <br /> |
 
 
+#### MultinodeRoleSpec
+
+
+
+MultinodeRoleSpec configures one explicit role of a multinode component.
+
+
+
+_Appears in:_
+- [MultinodeSpec](#multinodespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `providerOverride` _[ProviderOverride](#provideroverride)_ | providerOverride configures the Grove PCLQ template generated for this<br />multinode role. It uses apiVersion `grove.io/v1alpha1`, target<br />`PodCliqueTemplateSpec`, and may set only `topologyConstraint`. It is<br />supported only for components embedded in a DGD. |  | Optional: \{\} <br /> |
+
+
 #### MultinodeSpec
 
 
@@ -1107,11 +1122,12 @@ _Appears in:_
 
 _Appears in:_
 - [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
-- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `nodeCount` _integer_ | Indicates the number of nodes to deploy for multinode components.<br />Total number of GPUs is NumberOfNodes * GPU limit.<br />Must be greater than 1. | 2 | Minimum: 2 <br /> |
+| `leader` _[MultinodeRoleSpec](#multinoderolespec)_ | Leader configures the generated multinode leader unit. |  | Optional: \{\} <br /> |
+| `worker` _[MultinodeRoleSpec](#multinoderolespec)_ | Worker configures the generated multinode worker unit. |  | Optional: \{\} <br /> |
 
 
 #### PVC
@@ -1175,191 +1191,6 @@ _Appears in:_
 | `state` _[PlacementScoreState](#placementscorestate)_ | State indicates placement score reporting state. |  | Enum: [Reported Partial Unsupported Unknown] <br />Optional: \{\} <br /> |
 
 
-#### PodReference
-
-
-
-PodReference names a pod in the same namespace as the referencing PodSnapshot.
-
-
-
-_Appears in:_
-- [PodSnapshotContentSource](#podsnapshotcontentsource)
-- [PodSnapshotSource](#podsnapshotsource)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `name` _string_ | Name of the source pod. |  | MinLength: 1 <br />Required: \{\} <br /> |
-| `uid` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg)_ | UID of the source pod, recorded so the node agent dumps that specific<br />pod and not a same-named recreation. |  | Optional: \{\} <br /> |
-| `containers` _string array_ | Containers narrows the capture to these containers of the source pod. The<br />node agent reads this instead of the source pod's target-container<br />annotation. v1alpha1 supports exactly one container; the cap is lifted when<br />the runtime supports multi-container capture. |  | MaxItems: 1 <br />MinItems: 1 <br />Required: \{\} <br />items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br /> |
-
-
-#### PodSnapshot
-
-
-
-PodSnapshot is the Schema for the snapshots API. It is the namespaced binding
-for a captured container checkpoint and is consumed by restore paths.
-
-No conversion: this type exists only in v1alpha1 (no other API version), so it
-is not part of any conversion scheme.
-
-
-
-
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
-| `kind` _string_ | `PodSnapshot` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[PodSnapshotSpec](#podsnapshotspec)_ |  |  |  |
-| `status` _[PodSnapshotStatus](#podsnapshotstatus)_ |  |  |  |
-
-
-#### PodSnapshotContent
-
-
-
-PodSnapshotContent is the Schema for the snapshotcontents API. It is the
-cluster-scoped artifact-of-record for a captured container checkpoint.
-
-No conversion: this type exists only in v1alpha1 (no other API version), so it
-is not part of any conversion scheme.
-
-
-
-
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
-| `kind` _string_ | `PodSnapshotContent` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[PodSnapshotContentSpec](#podsnapshotcontentspec)_ |  |  |  |
-| `status` _[PodSnapshotContentStatus](#podsnapshotcontentstatus)_ |  |  |  |
-
-
-#### PodSnapshotContentSource
-
-
-
-PodSnapshotContentSource is the immutable source descriptor: what to dump
-(PodRef) and where it runs (NodeName).
-
-
-
-_Appears in:_
-- [PodSnapshotContentSpec](#podsnapshotcontentspec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `podRef` _[PodReference](#podreference)_ | PodRef identifies the pod to dump. Its UID guards against dumping a<br />same-named recreation of the pod. |  | Required: \{\} <br /> |
-| `nodeName` _string_ | NodeName is the node the source pod runs on, denormalized from the live<br />pod so it travels with PodRef as one immutable unit and selects the node<br />agent that performs the dump. |  | MinLength: 1 <br />Required: \{\} <br /> |
-
-
-#### PodSnapshotContentSpec
-
-
-
-PodSnapshotContentSpec defines the desired state of PodSnapshotContent. It is
-populated by the PodSnapshotReconciler (operator) at creation time and is
-immutable thereafter.
-
-
-
-_Appears in:_
-- [PodSnapshotContent](#podsnapshotcontent)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `snapshotRef` _[PodSnapshotReference](#podsnapshotreference)_ | PodSnapshotRef is the back-pointer to the bound PodSnapshot. It may span<br />namespaces because PodSnapshotContent is cluster-scoped. |  | Required: \{\} <br /> |
-| `source` _[PodSnapshotContentSource](#podsnapshotcontentsource)_ | Source describes what to capture: the source pod and the node it runs on. |  | Required: \{\} <br /> |
-
-
-#### PodSnapshotContentStatus
-
-
-
-PodSnapshotContentStatus defines the observed state of PodSnapshotContent.
-
-
-
-_Appears in:_
-- [PodSnapshotContent](#podsnapshotcontent)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions reflect the latest observations of the PodSnapshotContent's state.<br />Standard types are Ready and Failed. |  | Optional: \{\} <br /> |
-
-
-#### PodSnapshotReference
-
-
-
-PodSnapshotReference is a cross-namespace reference to a PodSnapshot.
-
-
-
-_Appears in:_
-- [PodSnapshotContentSpec](#podsnapshotcontentspec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `namespace` _string_ | Namespace of the referenced PodSnapshot. |  | Required: \{\} <br /> |
-| `name` _string_ | Name of the referenced PodSnapshot. |  | Required: \{\} <br /> |
-| `uid` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg)_ | UID of the referenced PodSnapshot, recorded at binding time to detect a<br />stale reference after a delete and recreate. |  | Optional: \{\} <br /> |
-
-
-#### PodSnapshotSource
-
-
-
-PodSnapshotSource identifies the workload captured by a PodSnapshot.
-
-
-
-_Appears in:_
-- [PodSnapshotSpec](#podsnapshotspec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `podRef` _[PodReference](#podreference)_ | PodRef references the pod, in the PodSnapshot's namespace, that is captured.<br />The operator prepares the pod (control volume, checkpoint storage mount)<br />before creating the PodSnapshot. The capture target container is carried on<br />PodRef.Containers, not a pod annotation. |  | Required: \{\} <br /> |
-
-
-#### PodSnapshotSpec
-
-
-
-PodSnapshotSpec defines the desired state of PodSnapshot.
-
-
-
-_Appears in:_
-- [PodSnapshot](#podsnapshot)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `source` _[PodSnapshotSource](#podsnapshotsource)_ | Source identifies the captured workload. It is a struct (rather than an<br />inlined reference) so future source variants can be added additively. |  | Required: \{\} <br /> |
-
-
-#### PodSnapshotStatus
-
-
-
-PodSnapshotStatus defines the observed state of PodSnapshot.
-
-
-
-_Appears in:_
-- [PodSnapshot](#podsnapshot)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `boundSnapshotContentName` _string_ | BoundPodSnapshotContentName is the name of the cluster-scoped PodSnapshotContent<br />this PodSnapshot is bound to. It is nil until the agent has created the<br />content and recorded the binding. |  | Optional: \{\} <br /> |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions reflect the latest observations of the PodSnapshot's state.<br />Standard types are Ready and Failed. |  | Optional: \{\} <br /> |
-
-
 #### ProfilingConfigSpec
 
 
@@ -1377,11 +1208,39 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `config` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | Config is the profiling configuration as arbitrary JSON/YAML. This will be passed directly to the profiler.<br />The profiler will validate the configuration and report any errors. |  | Optional: \{\} <br />Type: object <br /> |
 | `configMapRef` _[ConfigMapKeySelector](#configmapkeyselector)_ | ConfigMapRef is an optional reference to a ConfigMap containing the DynamoGraphDeployment<br />base config file (disagg.yaml). This is separate from the profiling config above.<br />The path to this config will be set as engine.config in the profiling config. |  | Optional: \{\} <br /> |
-| `profilerImage` _string_ | ProfilerImage specifies the container image to use for profiling jobs.<br />This image contains the profiler code and dependencies needed for SLA-based profiling.<br />Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1" |  | Required: \{\} <br /> |
+| `profilerImage` _string_ | ProfilerImage specifies the container image to use for profiling jobs.<br />This image contains the profiler code and dependencies needed for SLA-based profiling.<br />Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0" |  | Required: \{\} <br /> |
 | `outputPVC` _string_ | OutputPVC is an optional PersistentVolumeClaim name for storing profiling output.<br />If specified, all profiling artifacts (logs, plots, configs, raw data) will be written<br />to this PVC instead of an ephemeral emptyDir volume. This allows users to access<br />complete profiling results after the job completes by mounting the PVC.<br />The PVC must exist in the same namespace as the DGDR.<br />If not specified, profiling uses emptyDir and only essential data is saved to ConfigMaps.<br />Note: ConfigMaps are still created regardless of this setting for planner integration. |  | Optional: \{\} <br /> |
 | `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core)_ | Resources specifies the compute resource requirements for the profiling job container.<br />If not specified, no resource requests or limits are set. |  | Optional: \{\} <br /> |
 | `tolerations` _[Toleration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core) array_ | Tolerations allows the profiling job to be scheduled on nodes with matching taints.<br />For example, to schedule on GPU nodes, add a toleration for the nvidia.com/gpu taint. |  | Optional: \{\} <br /> |
 | `nodeSelector` _object (keys:string, values:string)_ | NodeSelector is a selector which must match a node's labels for the profiling pod to be scheduled on that node.<br />For example, to schedule on ARM64 nodes, use \{"kubernetes.io/arch": "arm64"\}. |  | Optional: \{\} <br /> |
+
+
+#### ProviderOverride
+
+
+
+ProviderOverride carries a sparse provider-native fragment for its DGD context.
+Grove support is restricted as follows:
+  - apiVersion must be `grove.io/v1alpha1`.
+  - target is `PodCliqueSet`, `PodCliqueTemplateSpec`, or
+    `PodCliqueScalingGroupConfig`, according to the field location and
+    component shape.
+  - value may set only the target's topologyConstraint subtree.
+
+All other providers, versions, targets, and fields are rejected.
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+- [MultinodeRoleSpec](#multinoderolespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | apiVersion is the Kubernetes API group and version of the provider schema.<br />Grove requires `grove.io/v1alpha1`. |  | MinLength: 1 <br />Required: \{\} <br /> |
+| `target` _string_ | target identifies the provider resource kind or embedded provider schema.<br />It may be omitted on input when the DGD location has one unambiguous target;<br />admission resolves and persists it. |  | Optional: \{\} <br /> |
+| `value` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | value is a sparse fragment of the selected provider schema. For Grove,<br />PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded<br />PodCliqueTemplateSpec and PodCliqueScalingGroupConfig targets accept only<br />`topologyConstraint`. |  | Required: \{\} <br />Type: object <br /> |
 
 
 #### ResourceItem
@@ -1960,7 +1819,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `componentKind` _[ComponentKind](#componentkind)_ | componentKind is the underlying resource kind (e.g. `PodClique`,<br />`Deployment`, `LeaderWorkerSet`). |  | Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet] <br /> |
 | `componentNames` _string array_ | componentNames is the list of underlying Kubernetes resource names for<br />this Dynamo component. During normal operation this contains a single<br />name; during rolling updates it contains both old and new resource names. |  | Optional: \{\} <br /> |
-| `runtimeNamespace` _string_ | runtimeNamespace is the effective Dynamo runtime namespace for this<br />component. Worker components may include a generation suffix; non-workers and<br />Grove-backed workers use the base namespace. During rolling updates, worker<br />status keeps the old active revision namespace until cutover completes. |  | Optional: \{\} <br /> |
+| `runtimeNamespace` _string_ | runtimeNamespace is the effective Dynamo runtime namespace for this<br />component. Worker components may include a generation suffix; non-workers<br />use the base namespace. During rolling updates, worker status keeps the old<br />active revision namespace until cutover completes. |  | Optional: \{\} <br /> |
 | `replicas` _integer_ | replicas is the total number of non-terminated replicas. |  | Minimum: 0 <br /> |
 | `updatedReplicas` _integer_ | updatedReplicas is the number of replicas at the current/desired revision. |  | Minimum: 0 <br /> |
 | `readyReplicas` _integer_ | readyReplicas is the number of ready replicas. Populated for<br />`PodClique`, `Deployment`, and `LeaderWorkerSet`; not available for<br />`PodCliqueScalingGroup`. |  | Minimum: 0 <br />Optional: \{\} <br /> |
@@ -2120,14 +1979,14 @@ directly in `podTemplate` without any `extraPodSpec`-style escape hatch.
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 - [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `providerOverride` _[ProviderOverride](#provideroverride)_ | providerOverride configures the primary Grove unit representing this DGD<br />component. With apiVersion `grove.io/v1alpha1`, target is<br />`PodCliqueTemplateSpec` for a single-node component or<br />`PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set<br />only `topologyConstraint`. Standalone DCD OpenAPI omits this field. |  | Optional: \{\} <br /> |
 | `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$` <br />Required: \{\} <br /> |
 | `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly. |  | Enum: [frontend worker prefill decode planner epp] <br />Optional: \{\} <br /> |
-| `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's<br />main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has<br />no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the<br />parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for<br />example "1.4.0". It does not change the image or rendered Pod, and changing only this field does<br />not trigger a rollout. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
+| `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's<br />main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has<br />no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the<br />parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for<br />example "1.4.0". It does not change the image. Setting or changing an override that resolves to<br />version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | globalDynamoNamespace places the component in the global Dynamo<br />namespace rather than the per-deployment namespace derived from the<br />DGD name. |  | Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate defines the component's Pod configuration. New components must<br />include a container named "main" with a non-empty image. Existing components<br />created without a podTemplate may remain unchanged. The operator merges<br />defaults into the main container.<br />For DGD components whose main image tag is not a Dynamo semantic version,<br />set runtimeVersionOverride explicitly.<br />All other containers are user-managed sidecars and must specify their<br />required fields, including image. |  | Optional: \{\} <br /> |
 | `replicas` _integer_ | replicas is the desired number of Pods for this component. When<br />`scalingAdapter` is set on this component, this field is managed by<br />the DynamoGraphDeploymentScalingAdapter and should not be modified<br />directly. |  | Minimum: 0 <br />Optional: \{\} <br /> |
@@ -2159,12 +2018,12 @@ _Appears in:_
 | `backendFramework` _string_ | backendFramework specifies the backend framework. |  | Enum: [sglang vllm trtllm] <br /> |
 | `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$` <br />Required: \{\} <br /> |
 | `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly. |  | Enum: [frontend worker prefill decode planner epp] <br />Optional: \{\} <br /> |
-| `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's<br />main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has<br />no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the<br />parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for<br />example "1.4.0". It does not change the image or rendered Pod, and changing only this field does<br />not trigger a rollout. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
+| `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's<br />main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has<br />no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the<br />parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for<br />example "1.4.0". It does not change the image. Setting or changing an override that resolves to<br />version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | globalDynamoNamespace places the component in the global Dynamo<br />namespace rather than the per-deployment namespace derived from the<br />DGD name. |  | Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate defines the component's Pod configuration. New components must<br />include a container named "main" with a non-empty image. Existing components<br />created without a podTemplate may remain unchanged. The operator merges<br />defaults into the main container.<br />For DGD components whose main image tag is not a Dynamo semantic version,<br />set runtimeVersionOverride explicitly.<br />All other containers are user-managed sidecars and must specify their<br />required fields, including image. |  | Optional: \{\} <br /> |
 | `replicas` _integer_ | replicas is the desired number of Pods for this component. When<br />`scalingAdapter` is set on this component, this field is managed by<br />the DynamoGraphDeploymentScalingAdapter and should not be modified<br />directly. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `minAvailable` _integer_ | minAvailable maps to Grove PodCliqueScalingGroup minAvailable for<br />components rendered as a scaling group (multi-node, inter-pod GMS, or<br />`experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove<br />PodClique minAvailable for all other single-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />For Grove-backed DynamoGraphDeployment components, minAvailable defaults to<br />1 when omitted and is immutable after creation. Positive replica counts must<br />be greater than or equal to minAvailable. Replicas may be scaled to 0 as a<br />special scale-to-zero state; minAvailable remains configured but is not<br />enforced again until replicas is scaled back to a positive value.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
-| `multinode` _[MultinodeSpec](#multinodespec)_ | multinode configures multinode components. |  | Optional: \{\} <br /> |
+| `multinode` _object_ | multinode configures multinode components. Standalone DCDs accept only `nodeCount`; `leader` and `worker` are DGD-only provider contexts. |  | Optional: \{\} <br /> |
 | `sharedMemorySize` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | sharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`.<br />`nil` selects the operator default (8Gi), a positive quantity sets a<br />custom size, and `"0"` disables the shared-memory volume entirely.<br />Simpler replacement for v1alpha1's `SharedMemorySpec` struct with its<br />`disabled bool` + `size Quantity` pattern. |  | Optional: \{\} <br /> |
 | `modelRef` _[ModelReference](#modelreference)_ | modelRef references a model served by this component. When specified,<br />a headless service is created for endpoint discovery. |  | Optional: \{\} <br /> |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter.<br />Setting it (even as an empty object, `scalingAdapter: \{\}`) creates a DGDSA that owns the<br />`replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the<br />Scale subresource; omit the field to opt out. |  | Optional: \{\} <br /> |
@@ -2283,7 +2142,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `model` _string_ | Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").<br />Can be a HuggingFace ID or a private model name. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `backend` _[BackendType](#backendtype)_ | Backend specifies the inference backend to use for profiling and deployment. | auto | Enum: [auto sglang trtllm vllm] <br />Optional: \{\} <br /> |
-| `image` _string_ | Image is the container image reference for the profiling job (planner image).<br />Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1".<br />For Dynamo < 1.1.0, use dynamo-frontend. |  | Optional: \{\} <br /> |
+| `image` _string_ | Image is the container image reference for the profiling job (planner image).<br />Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0".<br />For Dynamo < 1.1.0, use dynamo-frontend. |  | Optional: \{\} <br /> |
 | `runtimeVersionOverride` _string_ | RuntimeVersionOverride supplies the default Dynamo runtime version for<br />generated DynamoGraphDeployment components that do not set their own<br />override. Set this when Image uses a non-semantic-version tag or digest, or<br />when its tag does not identify the Dynamo runtime version. An explicit<br />component value in overrides.dgd takes precedence. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `modelCache` _[ModelCacheSpec](#modelcachespec)_ | ModelCache provides optional PVC configuration for pre-downloaded model weights.<br />When provided, weights are loaded from the PVC instead of downloading from HuggingFace. |  | Optional: \{\} <br /> |
 | `hardware` _[HardwareSpec](#hardwarespec)_ | Hardware describes the hardware resources available for profiling and deployment.<br />Typically auto-filled by the operator from cluster discovery. |  | Optional: \{\} <br /> |
@@ -2397,6 +2256,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
+| `providerOverride` _[ProviderOverride](#provideroverride)_ | providerOverride configures the root resource generated by the selected<br />graph-level workload provider. For Grove it uses apiVersion<br />`grove.io/v1alpha1`, target `PodCliqueSet`, and may set only<br />`spec.template.topologyConstraint`. It cannot select or change the provider. |  | Optional: \{\} <br /> |
 | `annotations` _object (keys:string, values:string)_ | annotations to propagate to all child resources (PCS, DCD, Deployments,<br />and pod templates). Component-level (`podTemplate`) values take precedence<br />on conflict. |  | Optional: \{\} <br /> |
 | `labels` _object (keys:string, values:string)_ | labels to propagate to all child resources. Same precedence rules as `annotations`. |  | Optional: \{\} <br /> |
 | `priorityClassName` _string_ | priorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.<br />Requires the Grove pathway. |  | Optional: \{\} <br /> |
@@ -2744,6 +2604,24 @@ _Appears in:_
 | `revision` _string_ | revision is the model revision/version. |  | Optional: \{\} <br /> |
 
 
+#### MultinodeRoleSpec
+
+
+
+MultinodeRoleSpec configures one explicit role of a multinode component.
+Additional role-specific settings can be added here without introducing a
+polymorphic list keyed by generated provider resource names.
+
+
+
+_Appears in:_
+- [MultinodeSpec](#multinodespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `providerOverride` _[ProviderOverride](#provideroverride)_ | providerOverride configures the Grove PCLQ template generated for this<br />multinode role. It uses apiVersion `grove.io/v1alpha1`, target<br />`PodCliqueTemplateSpec`, and may set only `topologyConstraint`. It is<br />supported only for components embedded in a DGD. |  | Optional: \{\} <br /> |
+
+
 #### MultinodeSpec
 
 
@@ -2754,11 +2632,12 @@ MultinodeSpec configures a multinode component.
 
 _Appears in:_
 - [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
-- [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `nodeCount` _integer_ | nodeCount is the number of nodes to deploy for the multinode component.<br />Total GPUs used is `nodeCount * container GPU request`. | 2 | Minimum: 2 <br />Optional: \{\} <br /> |
+| `leader` _[MultinodeRoleSpec](#multinoderolespec)_ | leader configures the generated multinode leader unit. |  | Optional: \{\} <br /> |
+| `worker` _[MultinodeRoleSpec](#multinoderolespec)_ | worker configures the generated multinode worker unit. |  | Optional: \{\} <br /> |
 
 
 #### OptimizationType
@@ -2907,6 +2786,34 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `pareto` _[ParetoConfig](#paretoconfig) array_ | Pareto is retained for compatibility with existing status objects.<br />Deprecated: The controller no longer populates this field. |  | Optional: \{\} <br /> |
 | `selectedConfig` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | SelectedConfig is the recommended configuration chosen by the profiler<br />based on the SLA targets. This is the configuration used for deployment<br />when autoApply is true. |  | Type: object <br />Optional: \{\} <br /> |
+
+
+#### ProviderOverride
+
+
+
+ProviderOverride carries a sparse provider-native fragment for its DGD context.
+Grove support is restricted as follows:
+  - apiVersion must be `grove.io/v1alpha1`.
+  - target is `PodCliqueSet`, `PodCliqueTemplateSpec`, or
+    `PodCliqueScalingGroupConfig`, according to the field location and
+    component shape.
+  - value may set only the target's topologyConstraint subtree.
+
+All other providers, versions, targets, and fields are rejected.
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+- [MultinodeRoleSpec](#multinoderolespec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | apiVersion is the Kubernetes API group and version of the provider schema.<br />Grove requires `grove.io/v1alpha1`. |  | MinLength: 1 <br />Required: \{\} <br /> |
+| `target` _string_ | target identifies the provider resource kind or embedded provider schema.<br />It may be omitted on input when the DGD location has one unambiguous target;<br />admission resolves and persists it. |  | Optional: \{\} <br /> |
+| `value` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | value is a sparse fragment of the selected provider schema. For Grove,<br />PodCliqueSet accepts only `spec.template.topologyConstraint`; embedded<br />PodCliqueTemplateSpec and PodCliqueScalingGroupConfig targets accept only<br />`topologyConstraint`. |  | Required: \{\} <br />Type: object <br /> |
 
 
 #### Restart

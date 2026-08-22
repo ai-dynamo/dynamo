@@ -23,6 +23,8 @@ import pytest
 from tests.router.common import (
     _test_busy_threshold_endpoint,
     _test_disagg_direct_mode,
+    _test_disagg_per_role_router_modes,
+    _test_disagg_per_role_session_affinity,
     _test_disagg_router_overload_529,
     _test_disagg_topology_required_prefill_pin_match_and_mismatch,
     _test_python_router_bindings,
@@ -1033,8 +1035,9 @@ async def _wait_for_frontend_to_commit_single_pd_role(
     )
 
 
-async def _wait_for_disagg_worker_ids(
+async def _wait_for_expected_disagg_worker_ids(
     frontend_port: int,
+    expected_worker_ids: dict[str, int],
     timeout: float = 60,
 ) -> dict[str, int]:
     payload = {
@@ -1076,7 +1079,12 @@ async def _wait_for_disagg_worker_ids(
             last_worker_ids = worker_ids
             prefill_worker_id = worker_ids["prefill_worker_id"]
             decode_worker_id = worker_ids["decode_worker_id"]
-            if prefill_worker_id is not None and decode_worker_id is not None:
+            if (
+                prefill_worker_id is not None
+                and decode_worker_id is not None
+                and prefill_worker_id == expected_worker_ids["prefill_worker_id"]
+                and decode_worker_id == expected_worker_ids["decode_worker_id"]
+            ):
                 return {
                     "prefill_worker_id": prefill_worker_id,
                     "decode_worker_id": decode_worker_id,
@@ -1084,8 +1092,8 @@ async def _wait_for_disagg_worker_ids(
             await asyncio.sleep(0.25)
 
     raise AssertionError(
-        f"P/D routing did not become active within {timeout}s; last worker IDs: "
-        f"{last_worker_ids}"
+        f"P/D routing did not converge within {timeout}s; expected worker IDs: "
+        f"{expected_worker_ids}; last worker IDs: {last_worker_ids}"
     )
 
 
@@ -1156,7 +1164,13 @@ def test_mocker_disagg_startup_lifecycle(
                 )
 
         assert frontend is not None
-        actual_worker_ids = asyncio.run(_wait_for_disagg_worker_ids(frontend_port))
+        expected_attribution = {
+            "prefill_worker_id": expected_worker_ids["prefill"],
+            "decode_worker_id": expected_worker_ids["decode"],
+        }
+        actual_worker_ids = asyncio.run(
+            _wait_for_expected_disagg_worker_ids(frontend_port, expected_attribution)
+        )
 
     assert actual_worker_ids["prefill_worker_id"] == expected_worker_ids["prefill"]
     assert actual_worker_ids["decode_worker_id"] == expected_worker_ids["decode"]
@@ -1411,6 +1425,93 @@ def test_router_decisions_disagg_round_robin_prefill_dp_rank(
         enable_disagg_bootstrap=enable_disagg_bootstrap,
     ) as (prefill_workers, decode_workers):
         run_case(prefill_workers, decode_workers)
+
+
+@pytest.mark.timeout(180)
+def test_disagg_per_role_router_modes(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+):
+    """KV-routed prefill in front of round-robin decode, via per-role MDC config.
+
+    The prefill mockers advertise RouterConfig(RouterMode.KV) in their cards; the
+    decode mockers advertise nothing and inherit the frontend's round-robin. Both
+    hops must then route on their own terms rather than sharing one mode.
+    """
+    logger.info("Starting per-role router mode disagg test (KV prefill, RR decode)")
+
+    shared_namespace = f"test-namespace-{generate_random_suffix()}"
+    base_mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+    }
+
+    with launch_disagg_workers(
+        request,
+        shared_namespace,
+        "prefill_first",
+        # Only the prefill tier advertises a mode; decode inherits the frontend's.
+        prefill_mocker_args={**base_mocker_args, "router_mode": "kv"},
+        decode_mocker_args=base_mocker_args,
+        num_prefill_mockers=2,
+        num_decode_mockers=2,
+        enable_disagg_bootstrap=False,
+    ) as (prefill_workers, decode_workers):
+        _test_disagg_per_role_router_modes(
+            prefill_workers=prefill_workers,
+            decode_workers=decode_workers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=allocate_frontend_ports(request, 1)[0],
+            test_payload=TEST_PAYLOAD,
+            request_plane="nats",
+        )
+
+
+@pytest.mark.timeout(180)
+def test_disagg_per_role_session_affinity(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+):
+    """Session affinity is configured per hop: prefill pins, decode does not.
+
+    Both tiers advertise round-robin; only prefill advertises a TTL. If the two
+    hops shared a session-affinity setting, decode would pin alongside prefill.
+    """
+    logger.info("Starting per-hop session affinity disagg test")
+
+    shared_namespace = f"test-namespace-{generate_random_suffix()}"
+    base_mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+    }
+
+    with launch_disagg_workers(
+        request,
+        shared_namespace,
+        "prefill_first",
+        # Same mode on both tiers, so affinity is the only difference between them.
+        prefill_mocker_args={
+            **base_mocker_args,
+            "router_mode": "round-robin",
+            "router_session_affinity_ttl_secs": 300,
+        },
+        decode_mocker_args={**base_mocker_args, "router_mode": "round-robin"},
+        num_prefill_mockers=2,
+        num_decode_mockers=2,
+        enable_disagg_bootstrap=False,
+    ) as (prefill_workers, decode_workers):
+        _test_disagg_per_role_session_affinity(
+            prefill_workers=prefill_workers,
+            decode_workers=decode_workers,
+            block_size=BLOCK_SIZE,
+            request=request,
+            frontend_port=allocate_frontend_ports(request, 1)[0],
+            test_payload=TEST_PAYLOAD,
+            request_plane="nats",
+        )
 
 
 @pytest.mark.timeout(180)

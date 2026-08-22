@@ -5,11 +5,6 @@ title: Sweeper Configuration
 subtitle: Core fields and optional adapter-owned search spaces
 ---
 
-<!--
-Generated from `aisimulate/docs/sweeper/configuration.md` by `docs/fern/scripts/sync_aisimulate_docs.py`.
-Edit the canonical source instead of this Fern copy.
--->
-
 > [!WARNING]
 > **Experimental.** Sweeper's configuration schema may change without a standard deprecation period.
 
@@ -109,4 +104,5 @@ AI Simulate variable takes precedence.
 ## Removed KVBM Fields
 
 Sweeper rejects the old KVBM block-count, transfer-bandwidth, offload-batch-size, and cache-hit
-fields. Native G2 replaces KVBM, so these fields have no adapter migration.
+fields. The AI Simulate engine and replay path do not support them, and they have no adapter
+migration.

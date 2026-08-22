@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -59,6 +60,7 @@ use crate::{
     worker_type::WorkerType,
 };
 
+use super::readiness::normalize_legacy_prefill_topology;
 use super::{
     ModelManager,
     controller::{ControllerHost, DesiredInstance, GroupKey, GroupSpec, ModelDiscoveryController},
@@ -153,23 +155,6 @@ fn supports_enabled_engine_generate(card: &ModelDeploymentCard, capabilities: &[
 // Generate's opaque request state is not yet verified for migration replay.
 const GENERATE_MIGRATION_LIMIT: u32 = 0;
 
-/// Project the topology implicit in a pre-`worker_type` prefill card into the
-/// explicit contract used by current workers.
-///
-/// TODO(v1.5): Remove this projection together with the missing-role fallback
-/// in `effective_worker_type` and the legacy readiness bypass after the v1.2
-/// MDC compatibility window expires.
-fn normalize_legacy_prefill_topology(card: &mut ModelDeploymentCard) {
-    if card.worker_type.is_some() || !card.model_type.supports_prefill() {
-        return;
-    }
-
-    card.worker_type = Some(WorkerType::Prefill);
-    if card.needs.is_empty() {
-        card.needs = vec![vec![WorkerType::Decode]];
-    }
-}
-
 /// Resolve the effective [`WorkerType`] for a card during the
 /// cross-version rollout.
 ///
@@ -187,13 +172,7 @@ fn normalize_legacy_prefill_topology(card: &mut ModelDeploymentCard) {
 /// the readiness path handles that by not topology-gating namespaces that
 /// still contain legacy cards — see `Model::is_workers_ready`.)
 fn effective_worker_type(worker_type: Option<WorkerType>, model_type: ModelType) -> WorkerType {
-    worker_type.unwrap_or_else(|| {
-        if model_type.supports_prefill() {
-            WorkerType::Prefill
-        } else {
-            WorkerType::Aggregated
-        }
-    })
+    ModelDeploymentCard::resolve_worker_type(worker_type, model_type)
 }
 
 #[derive(Debug, Clone)]
@@ -224,15 +203,29 @@ where
     local_model_path: Option<PathBuf>,
     /// Frontend-level tokenizer backend override for discovered model cards.
     tokenizer_backend: Option<TokenizerBackend>,
+    /// Frontend-level tokenizer fallback override for discovered model cards.
+    tokenizer_fallback_enabled: Option<bool>,
     /// Worker capabilities accepted by the frontend's engine-native Generate routes.
     /// Keep raw pipelines out of default-off and backend-mismatched paths.
     generate_engine_capabilities: Vec<&'static str>,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
+    /// Custom selector dispatch cannot infer whether an untyped legacy card is decode or aggregated.
+    require_typed_worker_role: bool,
 }
 
 pub(crate) struct PreparedWorkerSet {
     worker_set: Option<WorkerSet>,
     card: ModelDeploymentCard,
+}
+
+impl PreparedWorkerSet {
+    fn new(mut worker_set: WorkerSet, card: ModelDeploymentCard) -> Self {
+        worker_set.enable_allocator_trim_on_teardown();
+        Self {
+            worker_set: Some(worker_set),
+            card,
+        }
+    }
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -316,8 +309,12 @@ impl ModelWatcher<DefaultWorkerSelector> {
             chat_engine_factory,
             prefill_load_estimator,
             metrics,
+            false,
             Arc::new(|config, worker_type, _partition| {
-                DefaultWorkerSelector::new(Some(config.clone()), worker_type)
+                DefaultWorkerSelector::new(
+                    Some(config.clone()),
+                    worker_type.default_selector_label(),
+                )
             }),
         )
     }
@@ -337,6 +334,7 @@ where
         chat_engine_factory: Option<ChatEngineFactoryCallback>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         metrics: Arc<Metrics>,
+        require_typed_worker_role: bool,
         worker_selector_factory: WorkerSelectorFactory<Sel>,
     ) -> Self {
         Self {
@@ -353,8 +351,10 @@ where
             metrics,
             local_model_path: None,
             tokenizer_backend: None,
+            tokenizer_fallback_enabled: None,
             generate_engine_capabilities: Vec::new(),
             worker_selector_factory,
+            require_typed_worker_role,
         }
     }
 
@@ -370,6 +370,10 @@ where
         self.tokenizer_backend = tokenizer_backend;
     }
 
+    pub fn set_tokenizer_fallback_enabled(&mut self, enabled: Option<bool>) {
+        self.tokenizer_fallback_enabled = enabled;
+    }
+
     pub(crate) fn set_generate_engine_capabilities(&mut self, capabilities: Vec<&'static str>) {
         self.generate_engine_capabilities = capabilities;
     }
@@ -381,9 +385,12 @@ where
             .collect();
     }
 
-    fn apply_tokenizer_backend_override(&self, card: &mut ModelDeploymentCard) {
+    fn apply_tokenizer_overrides(&self, card: &mut ModelDeploymentCard) {
         if let Some(tokenizer_backend) = self.tokenizer_backend {
             card.runtime_config.tokenizer_backend = Some(tokenizer_backend);
+        }
+        if let Some(enabled) = self.tokenizer_fallback_enabled {
+            card.runtime_config.tokenizer_fallback_enabled = Some(enabled);
         }
     }
 
@@ -444,9 +451,13 @@ where
         card.download_config(self.local_model_path.as_deref())
             .await?;
 
+        validate_selector_worker_role(card, self.require_typed_worker_role)?;
+
         // Use per-worker-set router config if the worker provided one in its MDC,
-        // otherwise fall back to the frontend-level global config.
-        let router_config = card.router_config.as_ref().unwrap_or(&self.router_config);
+        // otherwise fall back to the frontend-level global config. Policy selections
+        // are process-local, so preserve them when the MDC supplies the base config.
+        let router_config =
+            effective_router_config(card.router_config.as_ref(), &self.router_config);
 
         let component = self
             .drt
@@ -467,6 +478,7 @@ where
         let namespace = mcid.namespace.clone();
         // Build the WorkerSet with all applicable engines
         let mut worker_set = WorkerSet::new(namespace.clone(), checksum.to_string(), card.clone());
+        let allocator_trim = worker_set.initialize_allocator_trim_on_teardown();
         worker_set.set_lifecycle_cancellation(cancellation);
         worker_set.set_topology_endpoint(endpoint.clone());
         worker_set.set_instance_watcher(instance_watcher);
@@ -483,10 +495,7 @@ where
                     card.model_input.as_str()
                 );
             }
-            return Ok(PreparedWorkerSet {
-                worker_set: Some(worker_set),
-                card: card.clone(),
-            });
+            return Ok(PreparedWorkerSet::new(worker_set, card.clone()));
         }
 
         // worker_type-driven short circuit for Prefill.
@@ -520,10 +529,7 @@ where
                 "Prefill worker detected, registering and activating prefill router"
             );
 
-            return Ok(PreparedWorkerSet {
-                worker_set: Some(worker_set),
-                card: card.clone(),
-            });
+            return Ok(PreparedWorkerSet::new(worker_set, card.clone()));
         }
 
         if card.model_input == ModelInput::Tokens
@@ -567,25 +573,28 @@ where
                 if router_config.router_mode == RouterMode::KV && needs_preprocessed_routing {
                     let selector = (self.worker_selector_factory)(
                         &router_config.kv_router_config,
-                        WORKER_TYPE_DECODE,
+                        effective_worker_type(card.worker_type, card.model_type),
                         RoutingPartitionRef::new(&card.display_name, DEFAULT_ROUTING_GROUP),
                     );
-                    Some(
-                        self.manager
-                            .kv_chooser_for_with_selector_and_client(
-                                &endpoint,
-                                client.clone(),
-                                card.kv_cache_block_size,
-                                selector,
-                                Some(router_config.kv_router_config.clone()),
-                                self.prefill_load_estimator.clone(),
-                                card.worker_type,
-                                WORKER_TYPE_DECODE, // This is the decode router
-                                Some(card.display_name.clone()),
-                                card.runtime_config.enable_eagle,
-                            )
-                            .await?,
-                    )
+                    let mut chooser = self
+                        .manager
+                        .kv_chooser_for_with_selector_and_client(
+                            &endpoint,
+                            client.clone(),
+                            card.kv_cache_block_size,
+                            selector,
+                            Some(router_config.kv_router_config.clone()),
+                            self.prefill_load_estimator.clone(),
+                            card.worker_type,
+                            WORKER_TYPE_DECODE, // This is the decode router
+                            Some(card.display_name.clone()),
+                            card.runtime_config.enable_eagle,
+                        )
+                        .await?;
+                    Arc::get_mut(&mut chooser)
+                        .expect("new KV chooser must have one owner")
+                        .set_teardown_task_guard(allocator_trim.clone());
+                    Some(chooser)
                 } else {
                     None
                 };
@@ -608,9 +617,10 @@ where
                     .as_ref()
                     .map(|chooser| chooser.client().clone())
                     .unwrap_or_else(|| client.clone());
-                Some(KvWorkerMonitor::new(
+                Some(KvWorkerMonitor::new_with_task_guard(
                     monitor_client,
                     router_config.load_threshold_config.clone(),
+                    allocator_trim.clone(),
                 ))
             } else {
                 None
@@ -625,8 +635,9 @@ where
             {
                 let mut prefill_config = router_config.kv_router_config.clone();
                 prefill_config.router_track_active_blocks = false;
-                let prefill_enable_eagle = false;
 
+                // Fallback only: a prefill worker that declares its own
+                // `router_config` overrides this at activation time.
                 Some(PrefillRouter::new_with_selector_factory(
                     None,
                     self.manager.clone(),
@@ -639,15 +650,19 @@ where
                     router_config.session_affinity_ttl_secs,
                     model_name.clone(),
                     namespace.clone(),
-                    prefill_enable_eagle,
                     worker_monitor.clone(),
+                    Some(allocator_trim.clone()),
                 ))
             } else {
                 None
             };
 
             let encoder_chooser = if needs_preprocessed_routing {
-                Some(EncoderRouter::new(model_name.clone(), namespace.clone()))
+                Some(EncoderRouter::new_with_task_guard(
+                    model_name.clone(),
+                    namespace.clone(),
+                    allocator_trim.clone(),
+                ))
             } else {
                 None
             };
@@ -940,7 +955,7 @@ where
                 .link(service_backend)?
                 .link(backend.backward_edge())?
                 .link(preprocessor.backward_edge())?
-                .link(frontend)?;
+                .link_terminal(frontend)?;
 
             worker_set.embeddings_engine = Some(embedding_engine);
         } else if card.model_input == ModelInput::Tensor && card.model_type.supports_tensor() {
@@ -979,10 +994,7 @@ where
             );
         }
 
-        Ok(PreparedWorkerSet {
-            worker_set: Some(worker_set),
-            card: card.clone(),
-        })
+        Ok(PreparedWorkerSet::new(worker_set, card.clone()))
     }
 
     fn emit_update(&self, update: ModelUpdate) {
@@ -1011,7 +1023,7 @@ where
 
         let mut card = instance.deserialize_model::<ModelDeploymentCard>()?;
         normalize_legacy_prefill_topology(&mut card);
-        self.apply_tokenizer_backend_override(&mut card);
+        self.apply_tokenizer_overrides(&mut card);
         validate_card_shape(&card)?;
         anyhow::ensure!(
             mcid.model_suffix.is_some() == card.lora.is_some(),
@@ -1261,6 +1273,38 @@ fn materialization_fingerprint(
     Ok(blake3::hash(&bytes).to_string())
 }
 
+fn effective_router_config<'a>(
+    worker_config: Option<&'a RouterConfig>,
+    frontend_config: &'a RouterConfig,
+) -> Cow<'a, RouterConfig> {
+    let Some(worker_config) = worker_config else {
+        return Cow::Borrowed(frontend_config);
+    };
+
+    let mut effective = worker_config.clone();
+    effective.kv_router_config.router_prefill_policy = frontend_config
+        .kv_router_config
+        .router_prefill_policy
+        .clone();
+    effective.kv_router_config.router_decode_policy = frontend_config
+        .kv_router_config
+        .router_decode_policy
+        .clone();
+    Cow::Owned(effective)
+}
+
+fn validate_selector_worker_role(
+    card: &ModelDeploymentCard,
+    require_typed_worker_role: bool,
+) -> anyhow::Result<()> {
+    if require_typed_worker_role && card.worker_type.is_none() {
+        anyhow::bail!(
+            "custom worker-selection policies require model cards with an explicit worker_type"
+        );
+    }
+    Ok(())
+}
+
 fn lora_projection_fingerprint(card: &ModelDeploymentCard) -> anyhow::Result<String> {
     let mut value = serde_json::json!({
         "display_name": &card.display_name,
@@ -1325,6 +1369,47 @@ mod tests {
             &card,
             &[OTHER_GENERATE_CAPABILITY]
         ));
+    }
+
+    #[tokio::test]
+    async fn tokenizer_fallback_override_applies_to_discovered_card() {
+        use dynamo_runtime::{Runtime, distributed::DistributedConfig};
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let mut watcher = ModelWatcher::new(
+            drt,
+            Arc::new(ModelManager::new()),
+            RouterConfig::default(),
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new()),
+        );
+        watcher.set_tokenizer_fallback_enabled(Some(false));
+
+        let mut card = ModelDeploymentCard::with_name_only("strict-tokenizer");
+        card.runtime_config.tokenizer_fallback_enabled = Some(true);
+        let instance = DiscoveryInstance::Model {
+            namespace: "ns1".to_string(),
+            component: "workers".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 1,
+            card_json: serde_json::to_value(card).unwrap(),
+            model_suffix: None,
+        };
+
+        let desired = watcher
+            .normalize(instance, &NamespaceFilter::Global)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            desired.card.runtime_config.tokenizer_fallback_enabled,
+            Some(false)
+        );
     }
 
     #[tokio::test]
@@ -1393,6 +1478,198 @@ mod tests {
         assert!(model.has_chat_engine());
         assert!(model.has_classify_engine());
         assert!(model.has_pooling_engine());
+    }
+
+    #[tokio::test]
+    async fn repeated_lora_registration_releases_adapter_views_and_chat_pipeline() {
+        use dynamo_runtime::{
+            Runtime,
+            discovery::{DiscoveryEvent, DiscoveryInstanceId},
+            distributed::DistributedConfig,
+        };
+        use futures::StreamExt;
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let manager = Arc::new(ModelManager::new());
+        let watcher = Arc::new(ModelWatcher::new(
+            drt,
+            manager.clone(),
+            RouterConfig::default(),
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new_with_prefix(Some(
+                "watcher_lora_lifecycle_test".to_string(),
+            ))),
+        ));
+        let base_mcid = ModelCardInstanceId {
+            namespace: "lora-lifecycle-ns".to_string(),
+            component: "workers".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 1,
+            model_suffix: None,
+        };
+        let adapter_mcid = ModelCardInstanceId {
+            model_suffix: Some("adapter".to_string()),
+            ..base_mcid.clone()
+        };
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut base_card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        base_card.set_name("lora-lifecycle-base");
+        base_card.model_input = ModelInput::Tokens;
+        base_card.model_type = ModelType::Chat;
+        base_card.worker_type = Some(WorkerType::Aggregated);
+        let mut adapter_card = base_card.clone();
+        adapter_card.set_name("lora-lifecycle-adapter");
+        adapter_card.lora = Some(crate::model_card::LoraInfo {
+            name: adapter_card.name().to_string(),
+            max_gpu_lora_count: Some(1),
+        });
+        let ws_key = worker_set_key(
+            &model_card_endpoint_id(&base_mcid),
+            base_card.model_type,
+            base_card.worker_type,
+        );
+        let instance =
+            |mcid: &ModelCardInstanceId, card: &ModelDeploymentCard| DiscoveryInstance::Model {
+                namespace: mcid.namespace.clone(),
+                component: mcid.component.clone(),
+                endpoint: mcid.endpoint.clone(),
+                instance_id: mcid.instance_id,
+                card_json: serde_json::to_value(card).unwrap(),
+                model_suffix: mcid.model_suffix.clone(),
+            };
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let stream: DiscoveryStream = futures::stream::unfold(event_rx, |mut receiver| async {
+            receiver.recv().await.map(|event| (event, receiver))
+        })
+        .boxed();
+        let watch_task = tokio::spawn(
+            watcher
+                .clone()
+                .watch(stream, NamespaceFilter::Exact(base_mcid.namespace.clone())),
+        );
+        event_tx
+            .send(Ok(DiscoveryEvent::Added(instance(&base_mcid, &base_card))))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while manager.get_committed_model(base_card.name()).is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("base model was not committed");
+        let base_engine = manager
+            .get_committed_model(base_card.name())
+            .and_then(|model| model.get_worker_set(&ws_key))
+            .and_then(|worker_set| worker_set.chat_engine.clone())
+            .expect("base chat pipeline was not committed");
+        let released_base_engine = Arc::downgrade(&base_engine);
+        drop(base_engine);
+        let base_engine_owner_count = released_base_engine.strong_count();
+
+        let mut released_adapter_views = Vec::new();
+        let mut released_adapter_engines = Vec::new();
+        for _ in 0..3 {
+            event_tx
+                .send(Ok(DiscoveryEvent::Added(instance(
+                    &adapter_mcid,
+                    &adapter_card,
+                ))))
+                .unwrap();
+            let adapter_view = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(worker_set) = manager
+                        .get_committed_model(adapter_card.name())
+                        .and_then(|model| model.get_worker_set(&ws_key))
+                    {
+                        break worker_set;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("LoRA adapter view was not committed");
+            assert!(
+                released_base_engine.strong_count() > base_engine_owner_count,
+                "LoRA adapter must retain the shared base chat pipeline"
+            );
+            let engine = adapter_view.chat_engine.clone().unwrap();
+            let messages: Vec<dynamo_protocols::types::ChatCompletionRequestMessage> =
+                serde_json::from_str(r#"[{"role":"user","content":"populate tokenizer cache"}]"#)
+                    .unwrap();
+            let request = NvCreateChatCompletionRequest {
+                inner: dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
+                    .model(adapter_card.name())
+                    .messages(messages)
+                    .build()
+                    .unwrap(),
+                common: Default::default(),
+                nvext: None,
+                chat_template_args: None,
+                thinking: None,
+                media_io_kwargs: None,
+                return_tokens_as_token_ids: None,
+                unsupported_fields: Default::default(),
+            };
+            assert!(engine.generate(SingleIn::new(request)).await.is_err());
+            released_adapter_views.push(Arc::downgrade(&adapter_view));
+            released_adapter_engines.push(Arc::downgrade(&engine));
+            drop(engine);
+            drop(adapter_view);
+
+            event_tx
+                .send(Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::Model(
+                    adapter_mcid.clone(),
+                ))))
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while manager.get_committed_model(adapter_card.name()).is_some() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("LoRA adapter view was not removed");
+            assert_eq!(
+                released_adapter_views.last().unwrap().strong_count(),
+                0,
+                "removed LoRA adapter view remained strongly referenced"
+            );
+            assert_eq!(
+                released_adapter_engines.last().unwrap().strong_count(),
+                0,
+                "removed LoRA adapter engine remained strongly referenced"
+            );
+            assert_eq!(
+                released_base_engine.strong_count(),
+                base_engine_owner_count,
+                "removed LoRA adapter retained the shared base chat pipeline"
+            );
+        }
+
+        event_tx
+            .send(Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::Model(
+                base_mcid,
+            ))))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while manager.get_committed_model(base_card.name()).is_some()
+                || released_base_engine.strong_count() != 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("removed LoRA chat pipeline remained strongly referenced");
+
+        drop(event_tx);
+        watch_task.await.unwrap();
+        runtime.shutdown();
     }
 
     #[test]
@@ -1633,6 +1910,16 @@ mod tests {
     }
 
     #[test]
+    fn custom_selector_requires_explicit_worker_type() {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        assert!(validate_selector_worker_role(&card, false).is_ok());
+        assert!(validate_selector_worker_role(&card, true).is_err());
+
+        card.worker_type = Some(WorkerType::Decode);
+        assert!(validate_selector_worker_role(&card, true).is_ok());
+    }
+
+    #[test]
     fn materialization_fingerprint_normalizes_legacy_prefill_topology() {
         let mut legacy = ModelDeploymentCard::with_name_only("model");
         legacy.model_type = ModelType::Prefill;
@@ -1681,6 +1968,34 @@ mod tests {
             materialization_fingerprint(&legacy_wire, &RouterConfig::default()).unwrap(),
             materialization_fingerprint(&current_wire, &RouterConfig::default()).unwrap()
         );
+    }
+
+    #[test]
+    fn worker_router_config_preserves_frontend_policy_selections() {
+        let mut frontend = RouterConfig::default();
+        frontend.kv_router_config.router_prefill_policy = Some("frontend-prefill".to_string());
+        frontend.kv_router_config.router_decode_policy = Some("frontend-decode".to_string());
+
+        let mut worker = RouterConfig::default();
+        worker.kv_router_config.router_temperature = 0.75;
+        worker.kv_router_config.router_policy_config = Some("worker-policy.yaml".to_string());
+
+        let effective = effective_router_config(Some(&worker), &frontend);
+        assert_eq!(effective.kv_router_config.router_temperature, 0.75);
+        assert_eq!(
+            effective.kv_router_config.router_policy_config.as_deref(),
+            Some("worker-policy.yaml")
+        );
+        assert_eq!(
+            effective.kv_router_config.router_prefill_policy.as_deref(),
+            Some("frontend-prefill")
+        );
+        assert_eq!(
+            effective.kv_router_config.router_decode_policy.as_deref(),
+            Some("frontend-decode")
+        );
+        assert!(worker.kv_router_config.router_prefill_policy.is_none());
+        assert!(worker.kv_router_config.router_decode_policy.is_none());
     }
 
     #[tokio::test]

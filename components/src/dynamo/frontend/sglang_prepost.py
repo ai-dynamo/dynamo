@@ -110,6 +110,7 @@ _SGLANG_PARSER_NAME_ALIASES = {
     "minimax_m3_nom": "minimax-m3",
     "minimax-m3-nom": "minimax-m3",
     "kimi-k3": "kimi_k3",
+    "gemma-4": "gemma4",
 }
 
 
@@ -413,7 +414,7 @@ def _flatten_message_content(content: Any) -> Any:
     return " ".join(text_parts)
 
 
-def _normalize_openai_thinking_template_kwargs(
+def _with_thinking_template_kwargs(
     request: dict[str, Any],
     default_thinking_mode: str | None = None,
 ) -> dict[str, Any]:
@@ -422,29 +423,12 @@ def _normalize_openai_thinking_template_kwargs(
         request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
     )
 
-    def setdefault_reasoning(enabled: bool) -> None:
-        # Different SGLang model families consult different template toggles.
-        chat_template_kwargs.setdefault("thinking", enabled)
-        chat_template_kwargs.setdefault("enable_thinking", enabled)
-        chat_template_kwargs.setdefault(
-            "thinking_mode", "enabled" if enabled else "disabled"
-        )
-
-    thinking = request.get("thinking")
-    if isinstance(thinking, bool):
-        setdefault_reasoning(thinking)
-    elif isinstance(thinking, dict):
-        thinking_type = thinking.get("type")
-        if thinking_type == "enabled":
-            setdefault_reasoning(True)
-        elif thinking_type == "disabled":
-            setdefault_reasoning(False)
-
+    # Rust normalization already resolved every thinking control into these
+    # kwargs, so nothing here decides one; the deployment default below only
+    # applies when the request set none.
     reasoning_effort = request.get("reasoning_effort")
     if reasoning_effort is not None:
         chat_template_kwargs["reasoning_effort"] = reasoning_effort
-    if reasoning_effort == "none":
-        setdefault_reasoning(False)
 
     chat_template_kwargs = apply_default_thinking_mode_to_template_kwargs(
         chat_template_kwargs,
@@ -740,7 +724,7 @@ def preprocess_chat_request(
 
     Synchronous -- suitable for both main-process and worker-process execution.
     """
-    request = _normalize_openai_thinking_template_kwargs(request, default_thinking_mode)
+    request = _with_thinking_template_kwargs(request, default_thinking_mode)
     messages = _materialize_messages(request.get("messages", []))
 
     # Generation mode is independent of whether the client wants reasoning

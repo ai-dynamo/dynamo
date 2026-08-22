@@ -20,7 +20,7 @@ support the current version plus 1 version back (N and N-1). The pattern:
    enough surface area to cover what Dynamo actually calls.
 4. Each fallback branch in `_compat.py` MUST have a comment noting which SGLang
    version it supports and when it can be removed, e.g.:
-   `# Fallback for sglang <= 0.5.12. Remove when min supported version is 0.5.14+`
+   `# Fallback for sglang <= 0.5.16. Remove when min supported version is 0.5.18+`
 5. When a new SGLang version is released and the old N-1 falls outside the support
    window, delete the corresponding fallback branches and polyfills from `_compat.py`.
    If `_compat.py` becomes trivial re-exports, inline the imports and delete the file.
@@ -69,6 +69,11 @@ Worker dispatch (main.py:60-132):
    (args.py:350-366) with only the fields needed for `DiffGenerator`. The stub does NOT
    have `max_running_requests`, `dllm_algorithm_config`, or other LLM-specific fields.
    Use `getattr()` when accessing fields that may not exist on the stub.
+
+SGLang 0.5.17 makes a resolved `ServerArgs` unconditionally read-only. Apply Dynamo's
+post-resolution startup overrides through `_compat.override_server_args()`; control-plane
+updates after engine creation should use the tokenizer manager's update API instead of
+assigning fields on `server_args`.
 
 **DynamoConfig** combines `DynamoRuntimeConfig` (common flags like `--namespace`,
 `--output-modalities`, `--media-output-fs-url`) with `DynamoSGLangConfig` (sglang-specific

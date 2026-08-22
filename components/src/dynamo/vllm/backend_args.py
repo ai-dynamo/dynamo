@@ -416,6 +416,19 @@ class DynamoVllmArgGroup(ArgGroup):
                 "(default: /tmp/benchmark_results.json)."
             ),
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--benchmark-collect-imbalanced",
+            env_var="DYN_BENCHMARK_COLLECT_IMBALANCED",
+            default=False,
+            help=(
+                "Also measure batches whose requests differ in length. Those "
+                "points come from an explicit --benchmark-points-file carrying "
+                "per-request rows, and are skipped unless this is set. Off by "
+                "default -- they exist to calibrate an intra-batch work-delta "
+                "correction and cost several forward passes per coordinate."
+            ),
+        )
         add_argument(
             g,
             flag_name="--benchmark-timeout",
@@ -486,6 +499,15 @@ class DynamoVllmConfig(ConfigBase):
     decode_max_kv_read_token_samples_explicit: bool = False
     decode_max_batch_size_samples_explicit: bool = False
     prefix_max_batch_size_samples_explicit: bool = False
+    # Whether to measure the manifest's imbalanced prefill points (those
+    # carrying explicit rows or a partition). Off by default: an imbalanced
+    # point costs a forward pass but only pays off for work-delta calibration,
+    # and a manifest written for that purpose is still useful without them --
+    # its uniform points are an ordinary sweep. Leaving them out therefore
+    # means "collect less", never "collect something different".
+    benchmark_collect_imbalanced: bool = False
+    # None -> probe the model config for a sparse-attention index budget.
+    # None -> a sibling of --benchmark-output-path.
     benchmark_prefill_granularity: Optional[int] = None
     benchmark_prefill_kv_read_granularity: Optional[int] = None
     benchmark_prefill_batch_granularity: Optional[int] = None
@@ -602,6 +624,9 @@ class DynamoVllmConfig(ConfigBase):
             raise ValueError("--benchmark-warmup-iterations must be non-negative")
         if self.benchmark_timeout <= 0:
             raise ValueError("--benchmark-timeout must be positive")
+        # Fail at startup rather than at manifest-writing time: a repeat count
+        # of zero produces a manifest with no prefill rows, and the run that
+        # reads it back looks like one that simply had nothing to measure.
 
     def _resolve_embedding_transfer_mode(self) -> None:
         """Resolve embedding_transfer_mode from string to enum."""

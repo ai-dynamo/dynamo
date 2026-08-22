@@ -37,7 +37,14 @@ pytestmark = [
     pytest.mark.router,
     pytest.mark.sglang,
 ]
-PAGE_SIZE = 16  # SGLang uses "page_size" instead of "block_size"
+# SGLang uses "page_size" instead of "block_size". 64 (not 16) because the
+# TRT-LLM MLA attention backend only supports page sizes 32/64, and
+# dynamo.sglang coerces page_size up to 64 on GPUs where that backend is
+# selected (overrides._mla_backend_page_constraints). A 16-token page here
+# then desyncs the router radix (16) from the worker KV events (64) and every
+# device_blocks assertion sees 0. 64 is honored on every backend, so the
+# router and workers always agree.
+PAGE_SIZE = 64
 
 # Shared SGLang configuration for all tests.
 # Memory is budgeted with the token-cap form (--max-total-tokens +
@@ -329,9 +336,9 @@ def test_router_decisions_sglang_multiple_workers(
 
 @pytest.mark.e2e
 @pytest.mark.model(MODEL_NAME)
+@pytest.mark.h100
 @pytest.mark.gpu_2
 @pytest.mark.nightly
-@pytest.mark.profiled_vram_gib(3.7)
 @pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)

@@ -27,13 +27,13 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
     VllmDecodeWorker:
       componentType: worker
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
           command:
           - python3
           - -m
@@ -49,7 +49,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
           command:
           - python3
           - -m
@@ -75,13 +75,13 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
     VllmDecodeWorker:
       componentType: worker
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
           command:
           - python3
           - -m
@@ -99,7 +99,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
           command:
           - python3
           - -m
@@ -285,7 +285,7 @@ The rolling update progress is tracked in `.status.rollingUpdate` with the follo
 The status also tracks:
 - `startTime` — When the rolling update began.
 - `endTime` — When the rolling update completed.
-- `updatedServices` — List of worker services that have completed the transition.
+- `updatedComponents` - List of worker components that have completed the transition.
 
 ### Configuring maxSurge and maxUnavailable
 
@@ -351,7 +351,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
 ```
 
 `Recreate` applies independently to each worker component. Other worker components without the

@@ -11,6 +11,8 @@ import tempfile
 from functools import cache
 from uuid import UUID
 
+from gpu_memory_service.common.vmm.cuda_utils import cuda_ensure_initialized
+
 try:
     from cuda.bindings import driver as cuda
 except ImportError:
@@ -47,8 +49,7 @@ def get_device_uuid(device: int) -> str:
             "cuda-python is required for GPU Memory Service device identity"
         )
 
-    (result,) = cuda.cuInit(0)
-    _check_cuda(result, "cuInit")
+    cuda_ensure_initialized()
     result, cuda_device = cuda.cuDeviceGet(device)
     _check_cuda(result, "cuDeviceGet")
     result, uuid = cuda.cuDeviceGetUuid(cuda_device)
@@ -66,7 +67,7 @@ def get_socket_path(device: int, tag: str = "weights") -> str:
     socket_dir = os.environ.get("GMS_SOCKET_DIR") or tempfile.gettempdir()
     path = os.path.join(
         socket_dir,
-        f"gms_{get_device_uuid(device)}_{tag}.sock",
+        f"gms_{device}_{tag}.sock",
     )
     path_bytes = len(os.fsencode(path))
     if path_bytes >= _AF_UNIX_PATH_LIMIT:
