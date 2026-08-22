@@ -273,6 +273,12 @@ STUB_MODULES = [
     "zmq",
     "zmq.asyncio",
     "blake3",
+    # tqdm -- imported at module scope by aisimulate.sweeper.search, which
+    # planner/replay/sweeper test modules pull in transitively. The report
+    # only needs the import to resolve during --collect-only, and the hook
+    # env is built from additional_dependencies alone, so stub it rather
+    # than grow that env.
+    "tqdm",
 ]
 
 # These APIs define the AIC 0.11 upper/core contract. The marker-report

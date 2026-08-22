@@ -76,13 +76,27 @@ review. The correct command depends on the component.
 Common starting points include:
 
 ```bash
-pytest tests/
+python3 -m pytest -m "unit and not post_merge" tests/
 cargo test --locked --all-targets
 cd deploy/operator && go test ./... -v
 ```
 
-Use package-specific test instructions when a component provides them. Include the exact commands
-and results in the pull request's **Validation** section.
+The Python suite needs test-only dependencies that the Dynamo wheel does not carry. Install them
+once per environment:
+
+```bash
+uv pip install -r container/deps/requirements.test.txt
+```
+
+Without them, pytest fails during collection rather than warning, because it runs with
+`--strict-config` and `--strict-markers`. See
+[Building from Source](../../developer-guide/advanced-customizations/building-from-source.md#9-install-test-dependencies)
+for the full setup and for the `torch` collection errors you hit on a runtime-only install.
+
+Use package-specific test instructions when a component provides them, and see
+[Pytest Guidelines](https://github.com/ai-dynamo/dynamo/blob/main/.ai/pytest-guidelines.md) for
+marker filtering and test conventions. Include the exact commands and results in the pull
+request's **Validation** section.
 
 ## Quality Checklist
 
