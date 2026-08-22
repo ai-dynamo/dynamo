@@ -1979,9 +1979,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         it can be deferred until the first engine output (used in disagg decode
         mode to avoid aborting during an active NIXL KV transfer).
         """
+        wait_for = []
         try:
             # Build list of futures/tasks to wait for
-            wait_for = [context.async_killed_or_stopped()]
+            wait_for.append(context.async_killed_or_stopped())
             shutdown_task = None
 
             if self.shutdown_event:
@@ -2041,6 +2042,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             raise
         except Exception as e:
             logger.error(f"Error in abort monitor for request {request_id}: {e}")
+        finally:
+            to_drain = []
+            for task in wait_for:
+                if not task.done():
+                    task.cancel()
+                    to_drain.append(task)
+            # Avoid suspending with EngineShutdown in flight. The owner can
+            # otherwise cancel this monitor and replace the pending exception.
+            if to_drain:
+                await asyncio.gather(*to_drain, return_exceptions=True)
 
     @asynccontextmanager
     async def _abort_monitor(
