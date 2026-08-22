@@ -416,7 +416,3 @@ type DynamoGraphDeploymentRequestList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []DynamoGraphDeploymentRequest `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&DynamoGraphDeploymentRequest{}, &DynamoGraphDeploymentRequestList{})
-}
