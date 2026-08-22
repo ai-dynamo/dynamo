@@ -50,7 +50,25 @@ class RemoteBinding:
             )
 
 
+@dataclass(frozen=True)
+class GenerateEndpointBinding(RemoteBinding):
+    """Bind a contracted stage to Dynamo's stock token Generate endpoint."""
+
+
 Binding = Union[InlineBinding, RemoteBinding]
+
+
+def validate_binding_contract(binding: Binding, contract: StageContract) -> None:
+    """Validate protocol-specific stage ports against one physical binding."""
+
+    if not isinstance(binding, GenerateEndpointBinding):
+        return
+    if contract.inputs != {"request"}:
+        raise WorkflowValidationError("Generate endpoint stage input must be request")
+    if contract.outputs != {"completion"}:
+        raise WorkflowValidationError(
+            "Generate endpoint stage output must be completion"
+        )
 
 
 @dataclass(frozen=True)
@@ -84,6 +102,8 @@ class ExecutionPlan:
                 f"extra={sorted(actual_stages - expected_stages)}"
             )
 
+        for stage_id, contract in self.stage_contracts.items():
+            validate_binding_contract(bindings[stage_id], contract)
         object.__setattr__(self, "bindings", MappingProxyType(bindings))
 
     @property

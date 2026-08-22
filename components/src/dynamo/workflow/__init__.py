@@ -8,7 +8,12 @@ from dynamo.workflow.compiler import DeploymentSpec, compile_workflow
 from dynamo.workflow.frontend import WorkflowTokenEngine, load_workflow_orchestrator
 from dynamo.workflow.ir import StageIR, WorkflowIR
 from dynamo.workflow.orchestrator import WorkflowOrchestrator
-from dynamo.workflow.plan import ExecutionPlan, InlineBinding, RemoteBinding
+from dynamo.workflow.plan import (
+    ExecutionPlan,
+    GenerateEndpointBinding,
+    InlineBinding,
+    RemoteBinding,
+)
 from dynamo.workflow.remote import RemoteStageClient, RemoteStageServer
 from dynamo.workflow.runtime import StageContext, StageRunner, WorkflowExecutionError
 from dynamo.workflow.types import StageContract, ValueRef, WorkflowValidationError
@@ -28,6 +33,7 @@ __all__ = [
     "WorkflowTokenEngine",
     "WorkflowValidationError",
     "ExecutionPlan",
+    "GenerateEndpointBinding",
     "InlineBinding",
     "RemoteBinding",
     "RemoteStageClient",
