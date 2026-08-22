@@ -14,10 +14,17 @@ from __future__ import annotations
 import pytest
 
 from tests.utils.pytest_parallel_gpu import (
+    _WATCHDOG_GRACE_S,
+    _WATCHDOG_REPORT_RESERVE_S,
     _GpuState,
+    _job_budget_s,
+    _mangle_test_address,
     _priority_key,
     _select_launches,
     _TestEntry,
+    _watchdog_attempts,
+    _watchdog_kill_at,
+    _write_watchdog_junit,
 )
 from tests.utils.vram_utils import VRAM_MULTI_PROC_MARGIN
 
@@ -420,3 +427,151 @@ def test_simulation_conserves_work_and_respects_budget():
 
     assert makespan >= longest
     assert makespan >= total_work / 8 - 1e-6
+
+
+# --------------------------------------------------------------------------- #
+# watchdog sizing and reporting
+#
+# All pure -- no subprocesses involved. The kill path itself is covered
+# end-to-end against the real run_parallel, but these three are arithmetic and
+# string handling, and the deadline in particular is the thing that decides
+# whether the watchdog fires inside the job's own timeout-minutes at all.
+# --------------------------------------------------------------------------- #
+def test_watchdog_attempts_counts_the_initial_run_not_just_retries(monkeypatch):
+    # DD_CIVISIBILITY_FLAKY_RETRY_COUNT is a count of *retries*: ddtrace derives
+    # retries_so_far from len(test_runs) - 1, so COUNT=2 means three attempts.
+    monkeypatch.delenv("DD_CIVISIBILITY_FLAKY_RETRY_ENABLED", raising=False)
+    monkeypatch.setenv("DD_CIVISIBILITY_FLAKY_RETRY_COUNT", "2")
+    assert _watchdog_attempts() == 3
+
+
+def test_watchdog_attempts_is_one_when_retries_are_disabled(monkeypatch):
+    # nightly-ci.yml turns retries off on nine jobs, several of which also run
+    # the GPU-parallel stage. A child then makes exactly one attempt, and
+    # budgeting for three would leave a stalled slot sitting three times as long
+    # as anything justifies.
+    monkeypatch.setenv("DD_CIVISIBILITY_FLAKY_RETRY_COUNT", "2")
+    monkeypatch.setenv("DD_CIVISIBILITY_FLAKY_RETRY_ENABLED", "false")
+    assert _watchdog_attempts() == 1
+
+
+def test_watchdog_attempts_falls_back_to_the_shipped_count(monkeypatch):
+    monkeypatch.delenv("DD_CIVISIBILITY_FLAKY_RETRY_ENABLED", raising=False)
+    monkeypatch.delenv("DD_CIVISIBILITY_FLAKY_RETRY_COUNT", raising=False)
+    assert _watchdog_attempts() == 3  # shared-test.yml ships COUNT=2
+
+
+def test_watchdog_deadline_allows_every_attempt_a_full_timeout():
+    # 320s test, 3 attempts, inside a 30-minute step that has only just started.
+    kill_at = _watchdog_kill_at(
+        start_time=0.0, timeout=320, attempts=3, step_deadline=30 * 60
+    )
+    assert kill_at == 320 * 3 + _WATCHDOG_GRACE_S
+
+
+def test_watchdog_deadline_is_capped_by_the_job_step():
+    # The case that made the watchdog inert before it was clamped: the longest
+    # pre_merge test declares timeout(1800), which wants 3 x 1800 + 120 = 92
+    # minutes, while sglang/trtllm parallel jobs inherit shared-test.yml's
+    # 30-minute default. Uncapped, the runner always died first.
+    step_deadline = 30 * 60
+    kill_at = _watchdog_kill_at(
+        start_time=0.0, timeout=1800, attempts=3, step_deadline=step_deadline
+    )
+    assert kill_at == step_deadline - _WATCHDOG_REPORT_RESERVE_S
+    assert kill_at < step_deadline, "must leave room to report before the step dies"
+
+
+def test_watchdog_deadline_shrinks_for_a_late_launched_child():
+    # These lanes run serially, so a routine test can start most of the way
+    # through the step. Its own window would run well past the end; what is left
+    # of the job is the binding constraint.
+    step_deadline = 30 * 60
+    late = _watchdog_kill_at(
+        start_time=step_deadline - 300,
+        timeout=600,
+        attempts=3,
+        step_deadline=step_deadline,
+    )
+    assert late == step_deadline - _WATCHDOG_REPORT_RESERVE_S
+
+
+def test_mangle_test_address_matches_what_pytest_writes():
+    # pytest's junitxml mangles the file path into a dotted classname; a plain
+    # rpartition("::") leaves "tests/serve/test_vllm.py", which lands the
+    # synthesized entry in a class of its own in the combined report.
+    assert _mangle_test_address("tests/serve/test_vllm.py::test_foo") == (
+        "tests.serve.test_vllm",
+        "test_foo",
+    )
+    assert _mangle_test_address("tests/serve/test_vllm.py::TestCls::test_foo") == (
+        "tests.serve.test_vllm.TestCls",
+        "test_foo",
+    )
+
+
+def test_mangle_test_address_keeps_colons_inside_parameters():
+    # IPv6 literals appear in this repo's parametrized ids; splitting on "::"
+    # without honouring the bracket moves half the parameter into the name.
+    assert _mangle_test_address("tests/router/test_r.py::test_x[::1-8080]") == (
+        "tests.router.test_r",
+        "test_x[::1-8080]",
+    )
+
+
+def test_write_watchdog_junit_reports_a_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr("tests.utils.pytest_parallel_gpu._JUNIT_DIR", str(tmp_path))
+    test = _TestEntry(
+        id="tests/serve/test_vllm.py::test_foo",
+        name="tests/serve/test_vllm.py::test_foo",
+        profiled_gib=1.0,
+        timeout=320,
+    )
+
+    _write_watchdog_junit(test, duration=1234.5, reason="killed by the orchestrator")
+
+    import xml.etree.ElementTree as ET
+
+    written = list(tmp_path.glob("*.xml"))
+    assert len(written) == 1
+    suite = ET.parse(written[0]).getroot()
+    # _aggregate_junit_xml sums its counters off the <testsuite> wrapper and
+    # skips any file that lacks one.
+    assert suite.tag == "testsuite"
+    assert suite.get("tests") == "1" and suite.get("failures") == "1"
+    case = suite.find("testcase")
+    assert case is not None
+    assert case.get("classname") == "tests.serve.test_vllm"
+    assert case.get("name") == "test_foo"
+    failure = case.find("failure")
+    assert failure is not None
+    assert failure.get("type") == "WatchdogTimeout"
+    assert "killed by the orchestrator" in (failure.get("message") or "")
+
+
+def test_write_watchdog_junit_never_raises(monkeypatch):
+    # It runs inside the scheduling loop, which has no handler of its own beyond
+    # the cleanup finally -- an escape here would abandon every other running
+    # child holding its VRAM.
+    monkeypatch.setattr(
+        "tests.utils.pytest_parallel_gpu._JUNIT_DIR", "/proc/nonexistent/nope"
+    )
+    test = _TestEntry(id="a.py::t", name="a.py::t", profiled_gib=0.0, timeout=1)
+    _write_watchdog_junit(test, duration=1.0, reason="boom")  # must not raise
+
+
+def test_watchdog_deadline_has_no_job_wall_outside_ci(monkeypatch):
+    # Locally there is no step being torn down, so there is no wall to clamp to.
+    # Inventing one would kill healthy tests in a long local session against a
+    # deadline that does not exist.
+    monkeypatch.delenv("GPU_TEST_TIMEOUT_MINUTES", raising=False)
+    assert _job_budget_s() is None
+    kill_at = _watchdog_kill_at(
+        start_time=0.0, timeout=1800, attempts=3, step_deadline=None
+    )
+    assert kill_at == 1800 * 3 + _WATCHDOG_GRACE_S
+
+
+def test_job_budget_comes_from_the_workflow_passthrough(monkeypatch):
+    monkeypatch.setenv("GPU_TEST_TIMEOUT_MINUTES", "30")
+    assert _job_budget_s() == 1800

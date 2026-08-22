@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -35,10 +36,13 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import psutil
+
 _repo_root = str(Path(__file__).resolve().parents[2])
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
+# Below the sys.path insert above, which is what makes these resolvable.
 from tests.utils.vram_utils import (  # noqa: E402
     VRAM_MULTI_PROC_MARGIN,
     auto_worker_count,
@@ -65,6 +69,11 @@ class _TestEntry:
     w_id: int = 0
     assigned_gpu: int | None = None
     retries: int = 0
+    # When this test first started, across all its attempts. Each relaunch takes
+    # a fresh per-child start_time, so without this a test that fails just under
+    # its deadline gets a brand-new full budget on every retry and can burn the
+    # whole step without the watchdog ever firing.
+    first_start_time: float | None = None
 
     @property
     def est_duration(self) -> float:
@@ -87,6 +96,10 @@ class _CompletedTest:
     skipped: bool = False
     skip_reason: str | None = None
     fail_reason: str | None = None
+    # Never started: the job ran out of time or GPU capacity. Reported apart
+    # from a failure because the test did not fail, but still counted against
+    # the run, since a suite that did not finish must not come out green.
+    not_run: bool = False
 
 
 @dataclass
@@ -116,8 +129,17 @@ class _RunningTest:
     proc: subprocess.Popen[str]
     test: _TestEntry
     start_time: float
+    # Process-group id, captured at launch. Not derived from the pid on demand:
+    # once the direct child is reaped, getpgid(pid) fails even while surviving
+    # grandchildren still sit in the group holding VRAM.
+    pgid: int
     captured: list[str] = field(default_factory=list)
     reader_thread: threading.Thread | None = None
+    watchdog_reason: str | None = None
+    # When the watchdog first signalled this child. Escalation is timed from
+    # here rather than counted, because repeating a signal does nothing: the
+    # kernel already holds it pending.
+    kill_started_at: float | None = None
 
 
 def _print(msg: str = "") -> None:
@@ -143,6 +165,68 @@ def _fmt_req(test: _TestEntry) -> str:
 
 _JUNIT_DIR = os.path.join(tempfile.gettempdir(), "gpu_parallel_junit")
 _JUNIT_COMBINED = os.path.join(_JUNIT_DIR, "combined.xml")
+
+
+def _junit_path(test_name: str) -> str:
+    """Where a child is told to write its --junitxml, keyed on the node id."""
+    safe_name = test_name.replace("/", "_").replace("::", "__")
+    return os.path.join(_JUNIT_DIR, f"{safe_name}.xml")
+
+
+def _mangle_test_address(node_id: str) -> tuple[str, str]:
+    """Split a node id the way pytest's own junitxml writer does.
+
+    Mirrors _pytest.junitxml.mangle_test_address so a synthesized entry lines up
+    with a real one: "tests/a/b.py::T::t[p]" -> ("tests.a.b.T", "t[p]"). A plain
+    rpartition("::") would yield "tests/a/b.py", which pytest never emits, and
+    would mis-split any parametrized id containing "::" -- IPv6 literals such as
+    "::1" appear in this repo's ids.
+    """
+    path, open_bracket, params = node_id.partition("[")
+    names = path.split("::")
+    names[0] = names[0].replace("/", ".").removesuffix(".py")
+    names[-1] += open_bracket + params
+    return ".".join(names[:-1]), names[-1]
+
+
+def _write_watchdog_junit(test: _TestEntry, duration: float, reason: str) -> None:
+    """Write the JUnit entry a watchdog-killed child never got to write.
+
+    SIGKILL means pytest never reaches its own --junitxml write, so without this
+    the test is absent from the aggregated report entirely -- a silent hole in
+    Datadog test visibility and CI test reports rather than a visible failure.
+
+    Nothing in here is allowed to escape into the scheduling loop: an exception
+    there orphans every other running child holding its VRAM, which is a far
+    worse outcome than a missing report line.
+    """
+    try:
+        import xml.etree.ElementTree as ET
+
+        classname, name = _mangle_test_address(test.name)
+        # _aggregate_junit_xml skips any file whose root is not a <testsuite> and
+        # sums these counters off it, so the wrapper is required even for one case.
+        # Its own name attribute is discarded there, so it is not worth inventing.
+        suite = ET.Element(
+            "testsuite", {"tests": "1", "failures": "1", "time": f"{duration:.3f}"}
+        )
+        case = ET.SubElement(
+            suite,
+            "testcase",
+            {"classname": classname, "name": name, "time": f"{duration:.3f}"},
+        )
+        ET.SubElement(
+            case, "failure", {"message": reason, "type": "WatchdogTimeout"}
+        ).text = reason
+        os.makedirs(_JUNIT_DIR, exist_ok=True)
+        # encoding="utf-8" rather than "unicode": the latter writes through the
+        # locale's preferred encoding, which is US-ASCII under LC_ALL=C, and a
+        # non-ASCII node id then raises UnicodeEncodeError.
+        ET.ElementTree(suite).write(
+            _junit_path(test.name), encoding="utf-8", xml_declaration=True
+        )
+    except Exception as exc:  # noqa: BLE001 - a report write must never escape
+        _print(f"[watchdog] could not write a JUnit entry for {test.name}: {exc}")
 
 
 def _parse_junit_skipped(junit_path: str) -> str | None:
@@ -266,6 +350,139 @@ _RETRYABLE_INIT_MARKERS = [
     "exited with code -9 while waiting for health check",  # SIGKILL (OOM killer) during init
 ]
 _MAX_RETRIES = 3
+
+# Last-resort deadline behind the child's own --timeout, for when pytest-timeout
+# is swallowed by a C-level block and the stuck child stalls the whole run.
+_WATCHDOG_GRACE_S = 120
+# Held back from the job budget so the orchestrator can still kill what is
+# running, write the summary and aggregate JUnit before the runner is torn down.
+_WATCHDOG_REPORT_RESERVE_S = 60
+# How long a killed child gets to shut down cleanly on SIGTERM -- releasing
+# /dev/shm segments, NATS subscriptions and etcd leases -- before it is forced.
+# A SIGKILLed tree leaves those behind and the next test on the slot then fails
+# for reasons invisible in its own log.
+_WATCHDOG_TERM_GRACE_S = 5.0
+# Total patience after the deadline before the lane is retired. SIGKILL lands in
+# microseconds when it can land at all, so a tree still alive a few seconds past
+# the first one is in uninterruptible sleep -- a CUDA/NCCL ioctl is the usual
+# cause -- and waiting longer only delays the tests that could still run
+# elsewhere. Kept short because being wrong now costs one lane, not the run.
+_WATCHDOG_GIVE_UP_S = 8.0
+
+
+def _watchdog_attempts() -> int:
+    """How many of a child's own --timeout windows to allow before killing it.
+
+    An attempt here is one full --timeout window. A child runs its test once,
+    plus once more per Datadog Auto Test Retry, and ddtrace calls
+    _reset_pytest_timeout() before each retry -- so every attempt gets a fresh
+    window rather than sharing one, and the budget has to clear all of them.
+
+    DD_CIVISIBILITY_FLAKY_RETRY_COUNT is a count of *retries*, not attempts:
+    ddtrace computes ``retries_so_far = len(test.test_runs) - 1``. So the shipped
+    COUNT=2 in shared-test.yml means three attempts, not two. With retries turned
+    off -- nightly-ci.yml does this on nine jobs, several of which also run the
+    GPU-parallel stage -- a child makes exactly one attempt, and allowing more
+    would leave a stalled slot sitting for twice as long as anything justifies.
+    """
+    if os.environ.get("DD_CIVISIBILITY_FLAKY_RETRY_ENABLED", "").strip().lower() in (
+        "0",
+        "false",
+    ):
+        return 1
+    try:
+        return max(1, int(os.environ["DD_CIVISIBILITY_FLAKY_RETRY_COUNT"]) + 1)
+    except (KeyError, ValueError):
+        return 3  # the shipped retry count of 2, plus the initial attempt
+
+
+def _job_budget_s() -> float | None:
+    """Wall-clock the GPU stage gets before the runner kills the whole step.
+
+    A deadline past this never fires -- the runner dies first and the watchdog
+    never gets a turn, which is the failure this exists to prevent. GitHub
+    exposes no variable for `timeout-minutes`, so shared-test.yml passes it
+    through explicitly, and always has a value to pass because its own input
+    carries a default.
+
+    None means there is no step wall, which is the truth for a local run rather
+    than a value worth guessing: assuming one would kill healthy tests in a long
+    local session for a deadline that does not exist.
+    """
+    try:
+        return float(os.environ["GPU_TEST_TIMEOUT_MINUTES"]) * 60
+    except (KeyError, ValueError):
+        return None
+
+
+def _watchdog_kill_at(
+    start_time: float, timeout: float, attempts: int, step_deadline: float | None
+) -> float:
+    """When to give up on a child, as a monotonic timestamp.
+
+    Two independent bounds, whichever comes first:
+
+    - what the test itself could legitimately need: every attempt burning a full
+      --timeout, plus grace for interpreter start, collection and teardown;
+    - what the job has left, when it is running under one. The step is torn down
+      at `step_deadline` whatever happens, so a child still running just before
+      it cannot finish. Killing it first turns an opaque runner timeout into a
+      named FAILED test, and is what keeps a test guarded when its own deadline
+      lands past the step cap -- the 1800s tests in a 30-minute pipeline -- or
+      when it started so late in a serial lane that its own window never had
+      room to expire.
+    """
+    kill_at = start_time + timeout * attempts + _WATCHDOG_GRACE_S
+    if step_deadline is None:
+        return kill_at
+    return min(kill_at, step_deadline - _WATCHDOG_REPORT_RESERVE_S)
+
+
+def _signal_process_tree(pid: int, pgid: int, sig: int) -> None:
+    """Signal a child and everything it started. Never blocks, never raises.
+
+    Signals the process group first, which reaches descendants that have already
+    been reparented to init and so are invisible to a ppid walk. Engines that
+    call setsid() escape their parent's group, so the psutil descendants are
+    swept too -- snapshotted before signalling, since the walk stops finding them
+    once the intermediate processes die.
+
+    Deliberately does not wait: psutil's wait() reaps through os.waitpid, which
+    makes the later Popen.poll() raise ChildProcessError and report status 0 --
+    a killed test reading as a pass. Reaping stays with Popen; the scheduling
+    loop observes the exit on its next pass.
+    """
+    try:
+        descendants = psutil.Process(pid).children(recursive=True)
+    except (psutil.Error, OSError):
+        descendants = []
+    try:
+        os.killpg(pgid, sig)
+    except OSError:
+        pass
+    for proc in descendants:
+        try:
+            proc.send_signal(sig)
+        except (psutil.Error, OSError):
+            pass
+
+
+def _process_group_alive(pgid: int) -> bool:
+    """Whether anything is left in the child's process group.
+
+    Kept off Popen.poll(), which only ever describes the direct child: a tree
+    whose pytest died while an engine grandchild survived still holds VRAM, and
+    that is the case worth knowing about before the slot is handed on.
+    """
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, just not ours to signal
+    except OSError:
+        return False
+    return True
 
 
 def _capture_output(pipe, captured: list[str], prefix: str | None = None) -> None:
@@ -715,7 +932,7 @@ def run_parallel(
         parent_cov_file = env.get("COVERAGE_FILE")
         if parent_cov_file:
             env["COVERAGE_FILE"] = f"{parent_cov_file}.w{test.w_id}"
-        junit_path = os.path.join(_JUNIT_DIR, f"{safe_name}.xml")
+        junit_path = _junit_path(test.name)
         has_tb = extra_pytest_args and any(
             a.startswith("--tb") for a in extra_pytest_args
         )
@@ -743,14 +960,24 @@ def run_parallel(
             child_basetemp = os.path.join(parent_basetemp, f"w{test.w_id}-{safe_name}")
             cmd.extend(["--basetemp", child_basetemp])
 
+        # start_new_session makes the child a process-group leader, so the
+        # watchdog can signal it and everything it spawned with one killpg --
+        # including descendants already reparented to init, which a ppid walk
+        # cannot see. It also detaches the child from the orchestrator's
+        # terminal, so a Ctrl-C no longer reaches it; the try/finally around the
+        # scheduling loop is what cleans up in that case.
         proc = subprocess.Popen(
             cmd,
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            start_new_session=True,
         )
-        run_info = _RunningTest(proc=proc, test=test, start_time=time.monotonic())
+        started = time.monotonic()
+        if test.first_start_time is None:
+            test.first_start_time = started
+        run_info = _RunningTest(proc=proc, test=test, start_time=started, pgid=proc.pid)
         w_id = test.w_id
         stream_prefix = f"[w{w_id}]" if stream else None
         t = threading.Thread(
@@ -762,171 +989,297 @@ def run_parallel(
         run_info.reader_thread = t
         return run_info
 
+    def _close_child_pipe(run_info: _RunningTest) -> None:
+        """Release the read end once the reader thread is done with it.
+
+        _capture_output only returns at EOF, which needs every holder of the
+        inherited write end to exit -- so after a kill that leaves a survivor,
+        the join times out and the thread never runs its own close(). Closing
+        here keeps a long run from leaking one fd per kill.
+        """
+        if run_info.reader_thread is not None:
+            run_info.reader_thread.join(timeout=5)
+        try:
+            if run_info.proc.stdout is not None:
+                run_info.proc.stdout.close()
+        except OSError:
+            pass
+
+    def _record_unreaped(run_info: _RunningTest, now: float) -> None:
+        """Book a child that outlived its kills.
+
+        The normal completion path cannot: it is keyed on Popen.poll(), which
+        never returns for a process stuck in uninterruptible sleep.
+        """
+        test = run_info.test
+        duration = now - run_info.start_time
+        reason = run_info.watchdog_reason or "killed by the orchestrator"
+        _close_child_pipe(run_info)
+        if not stream:
+            for line in list(run_info.captured):
+                _print(f"[w{test.w_id}] {line}")
+        _print(f"[w{test.w_id}] {test.name} FAILED [{duration:.0f}s]")
+        if not os.path.exists(_junit_path(test.name)):
+            _write_watchdog_junit(test, duration, reason)
+        completed.append(
+            _CompletedTest(
+                test=test, duration=duration, passed=False, fail_reason=reason
+            )
+        )
+
     env_base = os.environ.copy()
+    watchdog_attempts = _watchdog_attempts()
+    job_budget = _job_budget_s()
+    step_deadline = None if job_budget is None else t0 + job_budget
+    # Set when the run cannot continue: a child would not die, so its VRAM is
+    # never coming back. Every job that runs this stage has a single GPU, so
+    # there is nowhere else to put the remaining tests.
+    abort_reason: str | None = None
 
-    while pending or running:
-        now = time.monotonic()
+    def _latest_start(now: float) -> float | None:
+        """Last moment a test may be launched and still have time to finish."""
+        if step_deadline is None:
+            return None
+        return step_deadline - _WATCHDOG_REPORT_RESERVE_S
 
-        # Check for completed subprocesses
-        for w_id in list(running.keys()):
-            run_info = running[w_id]
-            rc = run_info.proc.poll()
-            if rc is not None:
-                if run_info.reader_thread is not None:
-                    run_info.reader_thread.join(timeout=5)
-                duration = now - run_info.start_time
-                passed = rc == 0
+    try:
+        while pending or running:
+            now = time.monotonic()
+
+            # Kill anything past its deadline; the completion check below reaps it
+            # and frees its GPU budget for the queued tests. Signals are sent
+            # without waiting -- a blocking wait here would stall every other
+            # child's reaping, and reaping through psutil would make Popen.poll()
+            # report a false success for the test we just killed.
+            for w_id, run_info in list(running.items()):
+                if run_info.proc.poll() is not None:
+                    continue
                 test = run_info.test
-                gi = test.assigned_gpu
+                kill_at = _watchdog_kill_at(
+                    run_info.start_time, test.timeout, watchdog_attempts, step_deadline
+                )
+                if now <= kill_at:
+                    continue
+                if run_info.watchdog_reason is None:
+                    # Re-poll immediately before committing: a child that exits
+                    # between the check above and here has genuinely finished, and
+                    # recording a reason would force its result to FAILED and
+                    # overwrite the JUnit report it just wrote.
+                    if run_info.proc.poll() is not None:
+                        continue
+                    elapsed = now - run_info.start_time
+                    # Ask the same function what the deadline would have been
+                    # with no job wall: if the real one is earlier, the job
+                    # budget is what bound it. Recomputing the window inline
+                    # here would be a second copy of that arithmetic to keep in
+                    # step with the first.
+                    own_kill_at = _watchdog_kill_at(
+                        run_info.start_time, test.timeout, watchdog_attempts, None
+                    )
+                    if step_deadline is not None and kill_at < own_kill_at:
+                        limit_note = (
+                            f"ran {elapsed:.0f}s and the job step runs out of time in "
+                            f"{step_deadline - now:.0f}s"
+                        )
+                        run_info.watchdog_reason = (
+                            f"killed by the orchestrator: the job step ran out of time "
+                            f"({limit_note}). Its {test.timeout:.0f}s timeout does not "
+                            f"fit the remaining budget — raise gpu_test_timeout_minutes "
+                            f"or lower the test's timeout"
+                        )
+                    else:
+                        limit_note = (
+                            f"ran {elapsed:.0f}s against a "
+                            f"{kill_at - run_info.start_time:.0f}s limit, from a "
+                            f"{test.timeout:.0f}s test timeout x{watchdog_attempts} "
+                            f"attempts"
+                        )
+                        run_info.watchdog_reason = (
+                            f"killed by the orchestrator: hit its time limit "
+                            f"({limit_note}) and its own "
+                            f"{test.timeout:.0f}s timeout did not stop it"
+                        )
+                    _print(
+                        f"[watchdog] w{w_id} {limit_note} — killing the test process "
+                        f"and everything it started."
+                    )
+                # Escalate on a clock, not a retry count. Re-sending a signal to
+                # the same process is a no-op -- SIGKILL cannot be caught and the
+                # kernel already holds it pending -- so what these stages buy is
+                # a teardown window, and then a bound on how long to wait.
+                if run_info.kill_started_at is None:
+                    run_info.kill_started_at = now
+                    _signal_process_tree(
+                        run_info.proc.pid, run_info.pgid, signal.SIGTERM
+                    )
+                    continue
+                since_kill = now - run_info.kill_started_at
+                if since_kill >= _WATCHDOG_GIVE_UP_S:
+                    # SIGKILL cannot be caught, so a tree still alive now is in
+                    # uninterruptible sleep and is never going to exit. Its VRAM
+                    # is gone for the rest of the job and this stage runs on a
+                    # single GPU, so there is nothing left to run anything on.
+                    # Stop, and say why -- spinning here is the stall this
+                    # watchdog exists to prevent.
+                    _print(
+                        f"[watchdog] w{w_id} still alive {since_kill:.0f}s after "
+                        f"SIGKILL, so it is stuck where signals cannot reach it. "
+                        f"Its GPU memory is not coming back — stopping the run."
+                    )
+                    _record_unreaped(run_info, now)
+                    del running[w_id]
+                    abort_reason = (
+                        f"w{w_id} could not be killed and still holds the GPU"
+                    )
+                    break
+                elif since_kill >= _WATCHDOG_TERM_GRACE_S:
+                    # Past the teardown window. Re-signalled every pass, which
+                    # costs nothing and re-walks the tree: _signal_process_tree
+                    # snapshots descendants before signalling, so a grandchild
+                    # spawned or reparented since the last pass is only caught by
+                    # taking a fresh snapshot.
+                    _signal_process_tree(
+                        run_info.proc.pid, run_info.pgid, signal.SIGKILL
+                    )
 
-                # Detect retryable init errors (profiling race, OOM at startup)
-                if not passed and test.retries < _MAX_RETRIES:
-                    matched_marker = None
-                    for line in run_info.captured:
-                        for marker in _RETRYABLE_INIT_MARKERS:
-                            if marker in line:
-                                matched_marker = marker
+            if abort_reason:
+                break
+
+            # Check for completed subprocesses
+            for w_id in list(running.keys()):
+                run_info = running[w_id]
+                rc = run_info.proc.poll()
+                if rc is not None:
+                    _close_child_pipe(run_info)
+                    # Re-sampled rather than reusing the loop-top `now`: the kills
+                    # above and the pipe join here each take real time, so by the
+                    # later entries in this pass that value is already stale -- and
+                    # it feeds the reported duration, the sequential-time summary,
+                    # the JUnit time= attribute and the status-line schedule.
+                    now = time.monotonic()
+                    duration = now - run_info.start_time
+                    # Do not simplify to `rc == 0`. A watchdog kill can still leave
+                    # rc at 0 -- anything that reaps the child behind Popen's back
+                    # makes poll() report a false success -- so without the second
+                    # term every killed test would be logged as PASSED, which is the
+                    # exact failure this watchdog exists to make visible.
+                    passed = rc == 0 and run_info.watchdog_reason is None
+                    test = run_info.test
+                    gi = test.assigned_gpu
+
+                    # Detect retryable init errors (profiling race, OOM at startup)
+                    # A stuck test is not a transient startup failure, so never
+                    # relaunch one even if its output carries a retryable marker.
+                    #
+                    # The elapsed check bounds the retries as a whole: each relaunch
+                    # takes a fresh start_time, so a test that dies just under its
+                    # deadline every time would otherwise get a brand-new full
+                    # budget on each of its attempts and could burn the entire step
+                    # -- the stall this watchdog exists to prevent -- while the
+                    # watchdog itself never fires, because its clock keeps
+                    # restarting.
+                    first_start = test.first_start_time or run_info.start_time
+                    total_elapsed = now - first_start
+                    retry_budget = test.timeout * watchdog_attempts + _WATCHDOG_GRACE_S
+                    room_in_step = (
+                        step_deadline is None
+                        or now + test.timeout
+                        < step_deadline - _WATCHDOG_REPORT_RESERVE_S
+                    )
+                    if (
+                        not passed
+                        and run_info.watchdog_reason is None
+                        and test.retries < _MAX_RETRIES
+                        and total_elapsed < retry_budget
+                        and room_in_step
+                    ):
+                        matched_marker = None
+                        for line in run_info.captured:
+                            for marker in _RETRYABLE_INIT_MARKERS:
+                                if marker in line:
+                                    matched_marker = marker
+                                    break
+                            if matched_marker:
                                 break
                         if matched_marker:
-                            break
-                    if matched_marker:
-                        test.retries += 1
-                        _print(
-                            f"[w{w_id}] retrying ({test.retries}/{_MAX_RETRIES})"
-                            f" — {matched_marker}"
+                            test.retries += 1
+                            _print(
+                                f"[w{w_id}] retrying ({test.retries}/{_MAX_RETRIES})"
+                                f" — {matched_marker}"
+                            )
+                            if gi is not None:
+                                gpu_states[gi].budget_used -= test.profiled_gib
+                                gpu_states[gi].running_count -= 1
+                            del running[w_id]
+                            test.assigned_gpu = None
+                            pending.insert(0, test)
+                            continue
+
+                    # Detect runtime skips via JUnit XML (subprocess exit 0
+                    # covers both "all passed" and "all skipped").
+                    skipped = False
+                    skip_reason: str | None = None
+                    if passed:
+                        junit_path = _junit_path(test.name)
+                        skip_reason = _parse_junit_skipped(junit_path)
+                        if skip_reason is not None:
+                            passed = False
+                            skipped = True
+
+                    # Dump buffered output on failure only (matches pytest behavior).
+                    # With -s, output was already streamed live.
+                    fail_reason = ""
+                    if not passed and not skipped:
+                        if not stream:
+                            prefix = f"[w{w_id}]"
+                            for line in run_info.captured:
+                                _print(f"{prefix} {line}")
+                        for line in reversed(run_info.captured):
+                            stripped = line.strip()
+                            if stripped and not stripped.startswith("="):
+                                fail_reason = stripped
+                                break
+                        # Stated outright; after a SIGKILL the child's output is
+                        # only whatever happened to flush.
+                        if run_info.watchdog_reason is not None:
+                            fail_reason = run_info.watchdog_reason
+                            # Only synthesize what the child never wrote. pytest
+                            # emits its --junitxml from pytest_sessionfinish, so a
+                            # wedge in post-session teardown -- atexit handlers,
+                            # CUDA/NCCL teardown, a lingering non-daemon thread,
+                            # exactly what pytest-timeout cannot see -- leaves a
+                            # real report on disk that this would otherwise clobber.
+                            if not os.path.exists(_junit_path(test.name)):
+                                _write_watchdog_junit(test, duration, fail_reason)
+
+                    if skipped:
+                        status = "SKIPPED"
+                    elif passed:
+                        status = "PASSED"
+                    else:
+                        status = "FAILED"
+
+                    if skipped:
+                        _print(f"[w{w_id}] {test.name} SKIPPED" f" - {skip_reason}")
+                    else:
+                        _print(f"[w{w_id}] {test.name} {status} [{duration:.0f}s]")
+
+                    if gi is not None:
+                        gpu_states[gi].budget_used -= test.profiled_gib
+                        gpu_states[gi].running_count -= 1
+                    completed.append(
+                        _CompletedTest(
+                            test=test,
+                            duration=duration,
+                            passed=passed,
+                            skipped=skipped,
+                            skip_reason=skip_reason,
+                            fail_reason=fail_reason,
                         )
-                        if gi is not None:
-                            gpu_states[gi].budget_used -= test.profiled_gib
-                            gpu_states[gi].running_count -= 1
-                        del running[w_id]
-                        test.assigned_gpu = None
-                        pending.insert(0, test)
-                        continue
-
-                # Detect runtime skips via JUnit XML (subprocess exit 0
-                # covers both "all passed" and "all skipped").
-                skipped = False
-                skip_reason: str | None = None
-                if passed:
-                    safe_name = test.name.replace("/", "_").replace("::", "__")
-                    junit_path = os.path.join(_JUNIT_DIR, f"{safe_name}.xml")
-                    skip_reason = _parse_junit_skipped(junit_path)
-                    if skip_reason is not None:
-                        passed = False
-                        skipped = True
-
-                # Dump buffered output on failure only (matches pytest behavior).
-                # With -s, output was already streamed live.
-                fail_reason = ""
-                if not passed and not skipped:
-                    if not stream:
-                        prefix = f"[w{w_id}]"
-                        for line in run_info.captured:
-                            _print(f"{prefix} {line}")
-                    for line in reversed(run_info.captured):
-                        stripped = line.strip()
-                        if stripped and not stripped.startswith("="):
-                            fail_reason = stripped
-                            break
-
-                if skipped:
-                    status = "SKIPPED"
-                elif passed:
-                    status = "PASSED"
-                else:
-                    status = "FAILED"
-
-                if skipped:
-                    _print(f"[w{w_id}] {test.name} SKIPPED" f" - {skip_reason}")
-                else:
-                    _print(f"[w{w_id}] {test.name} {status} [{duration:.0f}s]")
-
-                if gi is not None:
-                    gpu_states[gi].budget_used -= test.profiled_gib
-                    gpu_states[gi].running_count -= 1
-                completed.append(
-                    _CompletedTest(
-                        test=test,
-                        duration=duration,
-                        passed=passed,
-                        skipped=skipped,
-                        skip_reason=skip_reason,
-                        fail_reason=fail_reason,
                     )
-                )
-                del running[w_id]
+                    del running[w_id]
 
-                # Print status immediately after completion
-                lines = _build_status_lines(now)
-                if pending:
-                    queued_str = ", ".join(f"w{t.w_id}" for t in pending)
-                    lines[-1] += f" [queued: {queued_str}]"
-                for ln in lines:
-                    _print(ln)
-                next_status = now + 10
-
-        # --- Launch pending tests ---
-        # _select_launches packs VRAM tests up to budget (pairing a big test
-        # with smaller ones), backfills spare slots with zero-VRAM fillers, and
-        # reserves space for a blocked high-priority test so it can't be starved
-        # onto the tail. The vLLM stagger below is per-GPU only — tests on
-        # different GPUs launch simultaneously.
-        if pending and len(running) < num_slots:
-            actual_free = {
-                gi: gs.total_gib - _get_gpu_used_gib(gi)
-                for gi, gs in gpu_states.items()
-            }
-            to_launch = _select_launches(
-                pending=pending,
-                gpu_states=gpu_states,
-                actual_free=actual_free,
-                num_slots=num_slots,
-                running_count=len(running),
-            )
-
-            # Pop from pending in reverse to preserve indices, then reverse
-            # back so highest-priority tests launch first.
-            batch: list[_TestEntry] = []
-            for pending_idx, assigned_gpu in reversed(to_launch):
-                entry = pending.pop(pending_idx)
-                entry.assigned_gpu = assigned_gpu
-                batch.append(entry)
-            batch.reverse()
-
-            for entry in batch:
-                w_id = entry.w_id
-                gi = entry.assigned_gpu
-                assert gi is not None
-                is_vllm = (
-                    entry.requested_vllm_kv_cache_bytes is not None
-                    and entry.profiled_gib > 0
-                )
-
-                # Per-GPU vLLM stagger — only between vLLM tests on the
-                # same GPU.  Tests on different GPUs launch simultaneously.
-                if is_vllm:
-                    last_t = last_vllm_launch.get(gi, 0)
-                    wait = _VLLM_LAUNCH_STAGGER_S - (time.monotonic() - last_t)
-                    if wait > 0:
-                        time.sleep(wait)
-
-                gpu_states[gi].budget_used += entry.profiled_gib
-                gpu_states[gi].running_count += 1
-                run_info = _launch_test(entry, env_base)
-                running[w_id] = run_info
-
-                if is_vllm:
-                    last_vllm_launch[gi] = time.monotonic()
-
-                retry_str = f" (retry {entry.retries})" if entry.retries else ""
-                _print(
-                    f"[w{w_id}] {entry.name} "
-                    f"(GPU{gi}, profiled={entry.profiled_gib:.1f} GiB, "
-                    f"{_fmt_req(entry)}) RUNNING{retry_str}"
-                )
-
-                now = time.monotonic()
-                if now >= next_status and (running or pending):
+                    # Print status immediately after completion
                     lines = _build_status_lines(now)
                     if pending:
                         queued_str = ", ".join(f"w{t.w_id}" for t in pending)
@@ -935,28 +1288,149 @@ def run_parallel(
                         _print(ln)
                     next_status = now + 10
 
-        # Periodic status (print even when waiting for VRAM to free up)
-        if now >= next_status and (running or pending):
-            lines = _build_status_lines(now)
-            if pending:
-                queued_str = ", ".join(f"w{t.w_id}" for t in pending)
-                if not running:
-                    next_needed = pending[0].profiled_gib
-                    lines[-1] += f" [waiting for {next_needed:.1f} GiB free]"
-                lines[-1] += f" [queued: {queued_str}]"
-            for ln in lines:
-                _print(ln)
-            next_status = now + 10
+            # --- Launch pending tests ---
+            # _select_launches packs VRAM tests up to budget (pairing a big test
+            # with smaller ones), backfills spare slots with zero-VRAM fillers, and
+            # reserves space for a blocked high-priority test so it can't be starved
+            # onto the tail. The vLLM stagger below is per-GPU only — tests on
+            # different GPUs launch simultaneously.
+            # Only offer the scheduler tests the job still has time to finish.
+            # Launching one it does not would put the child past its watchdog
+            # deadline on the first pass: killed within seconds and reported
+            # FAILED without having run.
+            latest_start = _latest_start(now)
+            launchable = (
+                pending
+                if latest_start is None
+                else [t for t in pending if now + t.timeout <= latest_start]
+            )
+            if not launchable and not running:
+                # Nothing left that can be started and nothing running to change
+                # that, so the remaining tests are reported below rather than
+                # waited on.
+                break
 
-        if running or pending:
-            time.sleep(1.0)
+            if launchable and len(running) < num_slots:
+                actual_free = {
+                    gi: gs.total_gib - _get_gpu_used_gib(gi)
+                    for gi, gs in gpu_states.items()
+                }
+                to_launch = _select_launches(
+                    pending=launchable,
+                    gpu_states=gpu_states,
+                    actual_free=actual_free,
+                    num_slots=num_slots,
+                    running_count=len(running),
+                )
+
+                # Indices address `launchable`, so take the entries by identity
+                # and drop them from `pending` separately. Highest priority
+                # first, which is the order _select_launches returns.
+                batch: list[_TestEntry] = []
+                for launch_idx, assigned_gpu in to_launch:
+                    entry = launchable[launch_idx]
+                    entry.assigned_gpu = assigned_gpu
+                    pending.remove(entry)
+                    batch.append(entry)
+
+                for entry in batch:
+                    w_id = entry.w_id
+                    gi = entry.assigned_gpu
+                    assert gi is not None
+                    is_vllm = (
+                        entry.requested_vllm_kv_cache_bytes is not None
+                        and entry.profiled_gib > 0
+                    )
+
+                    # Per-GPU vLLM stagger — only between vLLM tests on the
+                    # same GPU.  Tests on different GPUs launch simultaneously.
+                    if is_vllm:
+                        last_t = last_vllm_launch.get(gi, 0)
+                        wait = _VLLM_LAUNCH_STAGGER_S - (time.monotonic() - last_t)
+                        if wait > 0:
+                            time.sleep(wait)
+
+                    gpu_states[gi].budget_used += entry.profiled_gib
+                    gpu_states[gi].running_count += 1
+                    run_info = _launch_test(entry, env_base)
+                    running[w_id] = run_info
+
+                    if is_vllm:
+                        last_vllm_launch[gi] = time.monotonic()
+
+                    retry_str = f" (retry {entry.retries})" if entry.retries else ""
+                    _print(
+                        f"[w{w_id}] {entry.name} "
+                        f"(GPU{gi}, profiled={entry.profiled_gib:.1f} GiB, "
+                        f"{_fmt_req(entry)}) RUNNING{retry_str}"
+                    )
+
+                    now = time.monotonic()
+                    if now >= next_status and (running or pending):
+                        lines = _build_status_lines(now)
+                        if pending:
+                            queued_str = ", ".join(f"w{t.w_id}" for t in pending)
+                            lines[-1] += f" [queued: {queued_str}]"
+                        for ln in lines:
+                            _print(ln)
+                        next_status = now + 10
+
+            # Periodic status (print even when waiting for VRAM to free up)
+            if now >= next_status and (running or pending):
+                lines = _build_status_lines(now)
+                if pending:
+                    queued_str = ", ".join(f"w{t.w_id}" for t in pending)
+                    if not running:
+                        next_needed = pending[0].profiled_gib
+                        lines[-1] += f" [waiting for {next_needed:.1f} GiB free]"
+                    lines[-1] += f" [queued: {queued_str}]"
+                for ln in lines:
+                    _print(ln)
+                next_status = now + 10
+
+            if running or pending:
+                time.sleep(1.0)
+
+        # Anything still queued when the loop ends could not be started: the
+        # job ran out of time for it, or a child would not die and took the GPU
+        # with it. Reported apart from failures, since these did not fail, but
+        # still counted against the run -- a suite that did not finish must not
+        # come out green.
+        for entry in pending:
+            reason = abort_reason or (
+                f"the job step had less time left than its own "
+                f"{entry.timeout:.0f}s timeout needs"
+            )
+            _print(f"[w{entry.w_id}] {entry.name} NOT RUN - {reason}")
+            completed.append(
+                _CompletedTest(
+                    test=entry,
+                    duration=0,
+                    passed=False,
+                    not_run=True,
+                    fail_reason=reason,
+                )
+            )
+        pending.clear()
+    finally:
+        # Nothing above is allowed to leave a child behind holding VRAM. This
+        # covers an unhandled error escaping the loop and, because
+        # start_new_session detaches children from the orchestrator's terminal,
+        # it is also what stops a Ctrl-C from stranding a live engine on the GPU.
+        for w_id, run_info in running.items():
+            if run_info.proc.poll() is None or _process_group_alive(run_info.pgid):
+                _print(f"[watchdog] cleaning up w{w_id} before exit")
+                _signal_process_tree(run_info.proc.pid, run_info.pgid, signal.SIGKILL)
 
     # Summary
     wall_time = time.monotonic() - t0
     sequential_time = sum(c.duration for c in completed if not c.skipped)
     n_passed = sum(1 for c in completed if c.passed)
     n_skipped = sum(1 for c in completed if c.skipped)
-    n_failed = sum(1 for c in completed if not c.passed and not c.skipped)
+    n_not_run = sum(1 for c in completed if c.not_run)
+    n_failed = sum(
+        1 for c in completed if not c.passed and not c.skipped and not c.not_run
+    )
 
     completed.sort(key=lambda c: c.test.w_id)
 
@@ -965,7 +1439,9 @@ def run_parallel(
     for c in completed:
         test = c.test
         w_id = test.w_id
-        if c.skipped:
+        if c.not_run:
+            _print(f"NOT RUN [w{w_id}] {test.name} - {c.fail_reason}")
+        elif c.skipped:
             reason = c.skip_reason or "skipped"
             _print(f"SKIPPED [w{w_id}] {test.name} - {reason}")
         elif c.passed:
@@ -990,6 +1466,8 @@ def run_parallel(
     n_summary_parts = []
     if n_failed:
         n_summary_parts.append(f"{n_failed} failed")
+    if n_not_run:
+        n_summary_parts.append(f"{n_not_run} not run")
     n_summary_parts.append(f"{n_passed} passed")
     if n_skipped:
         n_summary_parts.append(f"{n_skipped} skipped")
@@ -1011,11 +1489,17 @@ def run_parallel(
     pad = max(0, (78 - len(summary) - 2) // 2)
     _print(f"{'=' * pad} {summary} {'=' * pad}")
 
+    if abort_reason:
+        _print(f"WARNING: run stopped early — {abort_reason}.")
+
     combined = _aggregate_junit_xml(_JUNIT_DIR)
     if combined:
         _print(f"JUnit XML: {combined}")
 
-    return 0 if n_failed == 0 else 1
+    # Tests the job never got to are counted against the run as well: a suite
+    # that did not finish must not report green just because nothing it managed
+    # to run happened to fail.
+    return 0 if n_failed == 0 and n_not_run == 0 else 1
 
 
 # ---------------------------------------------------------------------------
