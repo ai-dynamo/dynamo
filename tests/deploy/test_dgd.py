@@ -23,6 +23,7 @@ import yaml
 from tests.deploy.conftest import DeploymentTarget
 from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment, _get_workspace_dir
 from tests.utils.client import send_request, wait_for_model_availability
+from tests.utils.constants import CROSS_BACKEND_SMOKE_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ DEFAULT_REQUEST_TIMEOUT = 120
 # Minimum response content length to validate that the model is generating meaningful output.
 # This matches the validation threshold from the original shell-based deployment tests.
 MIN_RESPONSE_CONTENT_LENGTH = 100
-GAIE_MODEL_NAME = "Qwen/Qwen3-0.6B"
+GAIE_MODEL_NAME = CROSS_BACKEND_SMOKE_MODEL
 # The install script deploys the Gateway into agentgateway-system; the
 # controller provisions the proxy Service in that same namespace.
 GAIE_AGW_NAMESPACE = "agentgateway-system"

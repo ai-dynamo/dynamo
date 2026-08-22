@@ -28,6 +28,7 @@ from tests.serve.multimodal_profiles.vllm_xpu import (
 )
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
+from tests.utils.model_registry import QWEN_QWEN3_0_6B
 from tests.utils.multimodal import (
     IMAGE_COLOR_PROMPT,
     LOCAL_VIDEO_TEST_URI,
@@ -86,7 +87,7 @@ vllm_configs = {
             ),  # ~8.5x observed 42.2s; bumped for GPU-parallel headroom
             pytest.mark.pre_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
@@ -118,7 +119,7 @@ vllm_configs = {
             pytest.mark.timeout(420),
             pytest.mark.post_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         request_payloads=[
             chat_payload_with_logprobs(
                 repeat_count=2,
@@ -151,7 +152,7 @@ vllm_configs = {
             pytest.mark.timeout(360),  # ~7x observed 49.0s; old value before profiling
             pytest.mark.pre_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
@@ -174,7 +175,7 @@ vllm_configs = {
             pytest.mark.timeout(360),  # ~7x observed 49.3s; old value before profiling
             pytest.mark.pre_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         env={
             "PROMETHEUS_MULTIPROC_DIR": f"/tmp/prometheus_multiproc_test_{os.getpid()}_{random.randint(0, 10000)}",
         },
@@ -201,7 +202,7 @@ vllm_configs = {
             ),  # ~8x observed 43.0s; bumped for GPU-parallel headroom
             pytest.mark.pre_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         script_args=["--tcp"],
         request_payloads=[
             chat_payload_default(),
@@ -224,7 +225,7 @@ vllm_configs = {
             ),  # 2 workers + router startup; bumped for GPU-parallel headroom
             pytest.mark.post_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         request_payloads=[
             router_selection_chat_payload_default(),
             kv_events_metrics_payload(system_ports=[DefaultPort.SYSTEM2.value]),
@@ -247,7 +248,7 @@ vllm_configs = {
             ),  # 2 workers + router startup; bumped for GPU-parallel headroom
             pytest.mark.post_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         request_payloads=[
             # Test approximate KV routing (--no-kv-events mode)
             # Repeated requests should show cache-aware routing in nvext.
@@ -543,7 +544,7 @@ vllm_configs = {
             pytest.mark.timeout(360),
             pytest.mark.pre_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         request_payloads=[
             chat_payload(
                 "Generate a person with name and age",
@@ -801,7 +802,7 @@ def lora_chat_payload(
 @pytest.mark.core
 @pytest.mark.e2e
 @pytest.mark.xpu_1
-@pytest.mark.model("Qwen/Qwen3-0.6B", "codelion/Qwen3-0.6B-accuracy-recovery-lora")
+@pytest.mark.model(QWEN_QWEN3_0_6B, "codelion/Qwen3-0.6B-accuracy-recovery-lora")
 @pytest.mark.timeout(600)
 @pytest.mark.post_merge
 @pytest.mark.xfail(
@@ -842,7 +843,7 @@ def test_lora_aggregated(
         directory=vllm_dir,
         script_name="lora/xpu/agg_lora_xpu.sh",
         marks=[],  # markers at function-level
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         timeout=600,
         env=env_vars,
         request_payloads=[lora_payload],
@@ -863,7 +864,7 @@ def test_lora_aggregated(
 @pytest.mark.router
 @pytest.mark.e2e
 @pytest.mark.xpu_2
-@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.model(QWEN_QWEN3_0_6B)
 @pytest.mark.timeout(600)
 @pytest.mark.post_merge
 @pytest.mark.xfail(
@@ -928,7 +929,7 @@ def test_lora_aggregated_router(
         directory=vllm_dir,
         script_name="lora/xpu/agg_lora_router_xpu.sh",
         marks=[],  # markers at function-level
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         timeout=600,
         env=env_vars,
         request_payloads=[

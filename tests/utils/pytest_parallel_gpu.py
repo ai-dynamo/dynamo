@@ -652,12 +652,9 @@ def run_parallel(
     pending = list(tests)
     running: dict[int, _RunningTest] = {}
     next_status = t0 + 10
-    # vLLM needs a stagger because --gpu-memory-utilization triggers a memory
-    # profiling step that snapshots free memory — concurrent launches corrupt
-    # each other's snapshots (bug #10643). SGLang uses --max-total-tokens
-    # which is deterministic, so no stagger is needed.
-    _VLLM_LAUNCH_STAGGER_S = 5.0
-    last_vllm_launch: dict[int, float] = {}  # gpu_index -> monotonic timestamp
+    # Every scheduled GPU test has an explicit runtime-specific KV cap. In
+    # particular, --kv-cache-memory-bytes makes vLLM skip memory profiling, so
+    # capped vLLM launches are safe to start concurrently on the same GPU.
 
     def _build_status_lines(now: float) -> list[str]:
         """Build per-GPU status lines for periodic output."""
@@ -869,8 +866,7 @@ def run_parallel(
         # _select_launches packs VRAM tests up to budget (pairing a big test
         # with smaller ones), backfills spare slots with zero-VRAM fillers, and
         # reserves space for a blocked high-priority test so it can't be starved
-        # onto the tail. The vLLM stagger below is per-GPU only — tests on
-        # different GPUs launch simultaneously.
+        # onto the tail.
         if pending and len(running) < num_slots:
             actual_free = {
                 gi: gs.total_gib - _get_gpu_used_gib(gi)
@@ -897,26 +893,10 @@ def run_parallel(
                 w_id = entry.w_id
                 gi = entry.assigned_gpu
                 assert gi is not None
-                is_vllm = (
-                    entry.requested_vllm_kv_cache_bytes is not None
-                    and entry.profiled_gib > 0
-                )
-
-                # Per-GPU vLLM stagger — only between vLLM tests on the
-                # same GPU.  Tests on different GPUs launch simultaneously.
-                if is_vllm:
-                    last_t = last_vllm_launch.get(gi, 0)
-                    wait = _VLLM_LAUNCH_STAGGER_S - (time.monotonic() - last_t)
-                    if wait > 0:
-                        time.sleep(wait)
-
                 gpu_states[gi].budget_used += entry.profiled_gib
                 gpu_states[gi].running_count += 1
                 run_info = _launch_test(entry, env_base)
                 running[w_id] = run_info
-
-                if is_vllm:
-                    last_vllm_launch[gi] = time.monotonic()
 
                 retry_str = f" (retry {entry.retries})" if entry.retries else ""
                 _print(

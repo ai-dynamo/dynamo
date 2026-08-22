@@ -12,7 +12,7 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
-from tests.utils.constants import DefaultPort
+from tests.utils.constants import VLLM_SMOKE_MODEL, DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
     chat_payload_default,
@@ -29,7 +29,7 @@ sample_configs = {
         name="aggregated",
         directory=sample_dir,
         script_name="agg.sh",
-        script_args=["--model-name", "Qwen/Qwen3-0.6B"],
+        script_args=["--model-name", VLLM_SMOKE_MODEL],
         marks=[
             pytest.mark.gpu_0,
             # CPU-mode vLLM startup for this deployment runs ~237s; the old
@@ -43,7 +43,7 @@ sample_configs = {
             pytest.mark.unified,
             pytest.mark.vllm,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=VLLM_SMOKE_MODEL,
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload_default(),

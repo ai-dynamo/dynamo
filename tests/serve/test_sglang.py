@@ -30,8 +30,14 @@ from tests.serve.multimodal_profiles.sglang import (
     SGLANG_MULTIMODAL_PROFILES,
     SGLANG_TOPOLOGY_SCRIPTS,
 )
-from tests.utils.constants import DefaultPort, DynamoPortRange
+from tests.utils.constants import (
+    CROSS_BACKEND_SMOKE_MODEL,
+    SGLANG_SMOKE_MODEL,
+    DefaultPort,
+    DynamoPortRange,
+)
 from tests.utils.engine_process import EngineConfig
+from tests.utils.model_registry import QWEN_QWEN3_0_6B
 from tests.utils.multimodal import make_image_payload_b64, make_multimodal_configs
 from tests.utils.payload_builder import (
     anthropic_messages_payload_default,
@@ -133,7 +139,8 @@ sglang_configs = {
             pytest.mark.timeout(360),  # 3x ~119s (sglang gpu_1 log)
             pytest.mark.pre_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=SGLANG_SMOKE_MODEL,
+        script_args=["--model-path", SGLANG_SMOKE_MODEL],
         env={},
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -162,7 +169,7 @@ sglang_configs = {
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
         ],  # TODO(gpu_2): profile max_vram, timeout, add markers (separate PR)
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         env={},
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -221,7 +228,7 @@ sglang_configs = {
             pytest.mark.timeout(470),  # parity with sglang disaggregated configs
             pytest.mark.nightly,  # heavy e2e launch scenario; runs on nightly multi-gpu lane
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         env={},
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -257,7 +264,7 @@ sglang_configs = {
             pytest.mark.timeout(470),  # 3x ~155s (sglang gpu_1 log)
             pytest.mark.pre_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         delayed_start=10,
         health_check_workers=True,
         env={},
@@ -294,7 +301,7 @@ sglang_configs = {
             pytest.mark.timeout(470),  # 3x ~156s (sglang gpu_1 log)
             pytest.mark.post_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         delayed_start=10,
         health_check_workers=True,
         env={"DYN_CHAT_PROCESSOR": "sglang"},
@@ -317,7 +324,7 @@ sglang_configs = {
             pytest.mark.timeout(470),  # 3x ~151s (sglang gpu_1 log)
             pytest.mark.post_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         delayed_start=10,
         health_check_workers=True,
         env={
@@ -341,7 +348,7 @@ sglang_configs = {
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
         ],  # TODO(gpu_2): profile max_vram, timeout, add markers (separate PR)
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         env={},
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -367,7 +374,7 @@ sglang_configs = {
             pytest.mark.pre_merge,
             pytest.mark.nightly,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=CROSS_BACKEND_SMOKE_MODEL,
         env={},
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -1028,7 +1035,8 @@ sglang_configs = {
             pytest.mark.skip(reason="DYN-2261"),
             # TODO: profile once DYN-2261 is fixed (uses agg.sh, profiler works)
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=SGLANG_SMOKE_MODEL,
+        script_args=["--model-path", SGLANG_SMOKE_MODEL],
         env={"DYN_ENABLE_ANTHROPIC_API": "1"},
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
@@ -1140,7 +1148,7 @@ def lora_chat_payload(
 @pytest.mark.core
 @pytest.mark.e2e
 @pytest.mark.gpu_1
-@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.model(QWEN_QWEN3_0_6B)
 @pytest.mark.model(DEFAULT_LORA_REPO)
 @pytest.mark.profiled_vram_gib(4.7)
 @pytest.mark.requested_sglang_kv_tokens(2848)
@@ -1176,7 +1184,7 @@ def test_sglang_lora_aggregated(
         directory=sglang_dir,
         script_name="lora/agg_lora.sh",
         marks=[],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         timeout=158,
         env=minio_config.get_env_vars(),
         request_payloads=[lora_payload],

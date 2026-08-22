@@ -11,6 +11,7 @@ from transformers import AutoTokenizer
 from dynamo.common.utils.paths import WORKSPACE_DIR
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
+from tests.utils.constants import CROSS_BACKEND_SMOKE_MODEL
 
 SERVE_TEST_DIR = os.path.join(WORKSPACE_DIR, "tests/serve")
 
@@ -18,7 +19,7 @@ SERVE_TEST_DIR = os.path.join(WORKSPACE_DIR, "tests/serve")
 class TemplateVerificationHandler:
     """Handler to verify custom template application during preprocessing."""
 
-    def __init__(self, model_name="Qwen/Qwen3-0.6B"):
+    def __init__(self, model_name=CROSS_BACKEND_SMOKE_MODEL):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.template_marker = "CUSTOM_TEMPLATE_ACTIVE|"
 
@@ -52,7 +53,7 @@ async def main(runtime: DistributedRuntime):
         sys.exit(1)
 
     # Register model with custom template
-    model_name = "Qwen/Qwen3-0.6B"
+    model_name = CROSS_BACKEND_SMOKE_MODEL
     await register_model(
         ModelInput.Tokens,
         ModelType.Chat,

@@ -14,11 +14,12 @@ import pytest
 import requests
 
 from dynamo.common.utils.paths import WORKSPACE_DIR
+from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.engine_process import EngineConfig, EngineProcess
 
 CANARY_READY_BUDGET_S = 60
 SAMPLE_DIR = os.path.join(WORKSPACE_DIR, "examples/backends/sample")
-MODEL = "Qwen/Qwen3-0.6B"
+MODEL = FAULT_TOLERANCE_MODEL_NAME
 
 pytestmark = [
     pytest.mark.fault_tolerance,

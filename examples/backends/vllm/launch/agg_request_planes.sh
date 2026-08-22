@@ -8,8 +8,9 @@ SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
 source "$SCRIPT_DIR/../../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../../common/launch_utils.sh"
 
-# Parse command-line arguments for request plane mode
+# Parse command-line arguments for request plane mode and model
 REQUEST_PLANE="tcp"  # Default to TCP
+MODEL="Qwen/Qwen3-0.6B"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -21,10 +22,15 @@ while [[ $# -gt 0 ]]; do
             REQUEST_PLANE="nats"
             shift
             ;;
+        --model)
+            MODEL="$2"
+            shift 2
+            ;;
         -h|--help)
-            echo "Usage: $0 [--tcp|--nats]"
+            echo "Usage: $0 [--tcp|--nats] [--model MODEL]"
             echo "  --tcp   Use TCP request plane (default)"
             echo "  --nats  Use NATS request plane"
+            echo "  --model Model name or path (default: $MODEL)"
             exit 0
             ;;
         *)
@@ -34,8 +40,6 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-
-MODEL="Qwen/Qwen3-0.6B"
 
 # ---- Tunable (override via env vars) ----
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"

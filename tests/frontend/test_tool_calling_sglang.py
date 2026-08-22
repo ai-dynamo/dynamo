@@ -30,6 +30,7 @@ import pytest
 from tests.conftest import EtcdServer, NatsServer
 from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.model_registry import QWEN_QWEN3_0_6B
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_ports
 
@@ -40,7 +41,7 @@ Draft7Validator = jsonschema.Draft7Validator
 
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_NAME = QWEN_QWEN3_0_6B
 
 pytestmark = [
     pytest.mark.sglang,

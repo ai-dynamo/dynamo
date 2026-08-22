@@ -11,6 +11,7 @@ import shutil
 import pytest
 import requests
 
+from tests.utils.constants import TRTLLM_SMOKE_MODEL
 from tests.utils.engine_process import FRONTEND_PORT
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.payloads import check_models_api
@@ -18,7 +19,7 @@ from tests.utils.payloads import check_models_api
 logger = logging.getLogger(__name__)
 
 # Just need a model to show the config works rather than any stress of the system.
-MODEL_PATH = "Qwen/Qwen3-0.6B"
+MODEL_PATH = TRTLLM_SMOKE_MODEL
 SERVED_MODEL_NAME = MODEL_PATH
 
 PROMPT = "Takes skill to be real"
@@ -172,6 +173,7 @@ def send_completion_request(
 @pytest.mark.slow
 @pytest.mark.gpu_1
 @pytest.mark.nightly
+@pytest.mark.model(TRTLLM_SMOKE_MODEL)
 def test_smoke(request, runtime_services):
     """End-to-end test for TRTLLM worker with autodeploy backend in its most basic form."""
 

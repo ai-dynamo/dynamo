@@ -15,13 +15,13 @@ import requests
 import yaml
 
 from tests.serve.common import WORKSPACE_DIR, managed_serve_deployment
-from tests.utils.constants import DynamoPortRange
+from tests.utils.constants import CROSS_BACKEND_SMOKE_MODEL, DynamoPortRange
 from tests.utils.engine_process import EngineConfig
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
 
-MODEL = "Qwen/Qwen3-0.6B"
+MODEL = CROSS_BACKEND_SMOKE_MODEL
 CONTEXT_LIMIT = 128
 
 

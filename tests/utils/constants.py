@@ -14,11 +14,22 @@ from tests.utils.model_registry import (
     DEEPSEEK_AI_DEEPSEEK_R1_DISTILL_LLAMA_8B,
     DEFAULT_TEST_MODELS,
     OPENAI_GPT_OSS_20B,
-    QWEN_QWEN3_0_6B,
     QWEN_QWEN3_EMBEDDING_4B,
+    resolve_model_profile,
 )
 
-QWEN = QWEN_QWEN3_0_6B
+# Role-based defaults are intentionally resolved at import/collection time. A CI
+# job can compare a candidate without editing every test, while the profile
+# rejects models that lack the required runtime or architectural properties.
+CROSS_BACKEND_SMOKE_MODEL = resolve_model_profile("cross_backend_smoke")
+VLLM_SMOKE_MODEL = resolve_model_profile("vllm_smoke")
+SGLANG_SMOKE_MODEL = resolve_model_profile("sglang_smoke")
+TRTLLM_SMOKE_MODEL = resolve_model_profile("trtllm_smoke")
+KV_TRANSFER_MODEL = resolve_model_profile("kv_transfer")
+
+# Compatibility alias for existing tests. New tests should name the role they
+# need rather than the current model family.
+QWEN = CROSS_BACKEND_SMOKE_MODEL
 LLAMA = DEEPSEEK_AI_DEEPSEEK_R1_DISTILL_LLAMA_8B  # on an l4 gpu, must limit --max-seq-len, otherwise it will not fit
 GPT_OSS = OPENAI_GPT_OSS_20B
 QWEN_EMBEDDING = QWEN_QWEN3_EMBEDDING_4B
@@ -56,5 +67,9 @@ class DynamoPortRange(IntEnum):
 
 # Env-driven defaults for specific test groups
 # Allows overriding via environment variables
-ROUTER_MODEL_NAME = os.environ.get("ROUTER_MODEL_NAME", QWEN)
-FAULT_TOLERANCE_MODEL_NAME = os.environ.get("FAULT_TOLERANCE_MODEL_NAME", QWEN)
+ROUTER_MODEL_NAME = resolve_model_profile(
+    "cross_backend_smoke", override=os.environ.get("ROUTER_MODEL_NAME")
+)
+FAULT_TOLERANCE_MODEL_NAME = resolve_model_profile(
+    "cross_backend_smoke", override=os.environ.get("FAULT_TOLERANCE_MODEL_NAME")
+)

@@ -10,6 +10,8 @@ import json
 
 import pytest
 
+from tests.utils.model_registry import QWEN_QWEN3_0_6B
+
 from .common import check_module_available
 
 HAS_VLLM = check_module_available("vllm.entrypoints.openai.chat_completion.protocol")
@@ -1304,7 +1306,7 @@ def request_for_sampling():
                 "role": "user",
             }
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         tools=[
             ChatCompletionToolsParam(
                 type="function",

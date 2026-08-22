@@ -10,6 +10,52 @@ Dynamo has three areas of tests and checks:
 
 All tests run inside containers. See the [Container Development Guide](../container/README.md) for how to build and launch one.
 
+## CI model registry and selection
+
+All Hugging Face repositories referenced by files under `tests/` must have a
+`ModelSpec` in [`tests/utils/model_registry.py`](utils/model_registry.py). The
+registry records snapshot size, model kind, architecture characteristics,
+runtime support, parameter count, context length, license, and whether access
+is gated. A unit test rejects new unregistered model literals and models over
+the 20 GiB default snapshot cap unless they carry a documented exception.
+
+Prefer a role from `tests.utils.constants` when the test needs any compatible
+model. Keep an exact registry constant when the behavior is architecture- or
+checkpoint-specific (for example a Qwen reasoning parser, a LoRA adapter/base
+pair, MLA, or EAGLE speculative decoding).
+
+| Role | Override | Compatibility constraint |
+|---|---|---|
+| `CROSS_BACKEND_SMOKE_MODEL` (`QWEN` compatibility alias) | `DYN_CI_CROSS_BACKEND_SMOKE_MODEL` | Chat/instruct LLM supported by vLLM, SGLang, and TensorRT-LLM |
+| `VLLM_SMOKE_MODEL` | `DYN_CI_VLLM_SMOKE_MODEL` | Chat/instruct vLLM LLM, at most 700M parameters |
+| `SGLANG_SMOKE_MODEL` | `DYN_CI_SGLANG_SMOKE_MODEL` | Chat/instruct SGLang LLM, at most 700M parameters |
+| `TRTLLM_SMOKE_MODEL` | `DYN_CI_TRTLLM_SMOKE_MODEL` | Chat/instruct TensorRT-LLM LLM, at most 700M parameters |
+| `KV_TRANSFER_MODEL` | `DYN_CI_KV_TRANSFER_MODEL` | vLLM model with full attention (hybrid state-space models excluded) |
+
+Overrides are validated during collection, so an incompatible choice fails
+before acquiring a GPU. Gated models may satisfy a role, but the CI job remains
+responsible for accepting the model's license and providing download access.
+To find the smallest registered model with a set of characteristics:
+
+```bash
+python3 -m tests.utils.model_registry \
+  --kind llm \
+  --require instruction_tuned \
+  --require small_ci_candidate \
+  --backend vllm \
+  --max-parameters-millions 400
+```
+
+To compare a compatible model in a role without editing tests:
+
+```bash
+DYN_CI_VLLM_SMOKE_MODEL=ibm-granite/granite-4.0-h-350m \
+  python3 -m pytest -m 'vllm and pre_merge' tests/
+```
+
+See [Fast vLLM startup in CI](VLLM_STARTUP.md) for measured H100 startup and
+GPU-memory results, the recommended launch policy, and candidate tradeoffs.
+
 Each area can have one or more of the following types of tests:
 
 1. **Unit** -- Exercises a single function, class, or module in isolation. No external services, no GPU. Each test typically runs in milliseconds; all unit tests combined may take <5 minutes.

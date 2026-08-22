@@ -25,6 +25,7 @@ import requests
 from tests.serve.test_sglang import sglang_configs
 from tests.serve.test_trtllm import trtllm_configs
 from tests.serve.test_vllm import vllm_configs
+from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.engine_process import EngineProcess
 
 logger = logging.getLogger(__name__)
@@ -147,7 +148,7 @@ def _wait_for_status(url: str, target: int, deadline_s: float) -> int:
 @pytest.mark.nightly
 @pytest.mark.gpu_1
 @pytest.mark.timeout(300)
-@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
 @pytest.mark.parametrize("scenario", SCENARIOS)
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_canary_detects_rank_pause(

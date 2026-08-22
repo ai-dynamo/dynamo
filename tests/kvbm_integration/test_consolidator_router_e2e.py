@@ -24,6 +24,7 @@ import requests
 import yaml
 
 from tests.kvbm_integration.common import ApiTester, check_logs_for_patterns
+from tests.utils.constants import KV_TRANSFER_MODEL
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.test_output import resolve_test_output_path
 
@@ -340,7 +341,7 @@ def engine_type(request):
 @pytest.fixture
 def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
     """Start LLM worker (vLLM or TensorRT-LLM) with KVBM connector and KV Event Consolidator."""
-    model_id = os.environ.get("CONSOLIDATOR_MODEL_ID", "Qwen/Qwen3-0.6B")
+    model_id = os.environ.get("CONSOLIDATOR_MODEL_ID", KV_TRANSFER_MODEL)
     engine = engine_type
 
     logger.info(
@@ -770,7 +771,7 @@ class TestConsolidatorRouterE2E:
             logger.info(f"Frontend started on port {FRONTEND_PORT}")
 
             # Start worker with constrained GPU blocks but larger KVBM blocks
-            model_id = os.environ.get("CONSOLIDATOR_MODEL_ID", "Qwen/Qwen3-0.6B")
+            model_id = os.environ.get("CONSOLIDATOR_MODEL_ID", KV_TRANSFER_MODEL)
 
             # Fixed cache tier sizes
             block_size = 16

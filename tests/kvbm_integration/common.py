@@ -521,7 +521,7 @@ def llm_server_kvbm(request, runtime_services_dynamic_ports):
 
     Usage in test files:
         @pytest.mark.parametrize("llm_server_kvbm",
-            [{"cpu_blocks": 100, "gpu_blocks": 10, "model": "Qwen/Qwen3-0.6B"}], indirect=True)
+            [{"cpu_blocks": 100, "gpu_blocks": 10, "model": KV_TRANSFER_MODEL}], indirect=True)
         def test_example(llm_server_kvbm):
             ...
     """

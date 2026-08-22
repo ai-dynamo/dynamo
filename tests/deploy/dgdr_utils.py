@@ -20,6 +20,8 @@ import yaml
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
 
+from tests.utils.constants import CROSS_BACKEND_SMOKE_MODEL
+
 logger = logging.getLogger(__name__)
 
 DGDR_GROUP = "nvidia.com"
@@ -62,7 +64,7 @@ class DGDRTestConfig:
 
     namespace: str
     image: str
-    model: str = "Qwen/Qwen3-0.6B"
+    model: str = CROSS_BACKEND_SMOKE_MODEL
     backend: str = "vllm"
     mocker: bool = True
     profiling_timeout: int = 3600

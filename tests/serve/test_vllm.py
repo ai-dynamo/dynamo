@@ -22,8 +22,9 @@ from tests.serve.multimodal_profiles.vllm import (
     VLLM_MULTIMODAL_PROFILES,
     VLLM_TOPOLOGY_SCRIPTS,
 )
-from tests.utils.constants import DefaultPort
+from tests.utils.constants import VLLM_SMOKE_MODEL, DefaultPort
 from tests.utils.engine_process import EngineConfig
+from tests.utils.model_registry import QWEN_QWEN3_0_6B
 from tests.utils.multimodal import make_multimodal_configs
 from tests.utils.payload_builder import (
     chat_payload,
@@ -121,7 +122,7 @@ vllm_configs = {
             pytest.mark.timeout(610),  # 3x ~203s under new scheduler (3d1554f)
             pytest.mark.pre_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         request_payloads=[
             chat_payload_default(),
             chat_payload(
@@ -208,7 +209,8 @@ vllm_configs = {
             pytest.mark.timeout(120),  # ~5x observed 24.3s; CI machines are slower
             pytest.mark.post_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=VLLM_SMOKE_MODEL,
+        script_args=["--model", VLLM_SMOKE_MODEL],
         request_payloads=[
             chat_payload_with_logprobs(
                 repeat_count=2,
@@ -242,7 +244,7 @@ vllm_configs = {
             pytest.mark.timeout(600),  # 3x ~200s under new scheduler (3d1554f)
             pytest.mark.pre_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
@@ -266,7 +268,7 @@ vllm_configs = {
             pytest.mark.timeout(600),  # 3x ~199s multiproc, new scheduler (3d1554f)
             pytest.mark.pre_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         env={
             "PROMETHEUS_MULTIPROC_DIR": f"/tmp/prometheus_multiproc_test_{os.getpid()}_{random.randint(0, 10000)}"
         },
@@ -292,7 +294,7 @@ vllm_configs = {
             pytest.mark.timeout(640),  # 3x ~213s under new scheduler (3d1554f)
             pytest.mark.pre_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         env={"LMCACHE_L1_SIZE_GB": "8"},
         request_payloads=[
             chat_payload_default(),
@@ -314,8 +316,8 @@ vllm_configs = {
             pytest.mark.timeout(600),  # 3x ~199s under new scheduler (3d1554f)
             pytest.mark.pre_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
-        script_args=["--tcp"],
+        model=VLLM_SMOKE_MODEL,
+        script_args=["--tcp", "--model", VLLM_SMOKE_MODEL],
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
@@ -331,7 +333,7 @@ vllm_configs = {
             pytest.mark.pre_merge,
             pytest.mark.timeout(600),
         ],  # TODO: profile to get max_vram
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         request_payloads=[
             router_selection_chat_payload_default(),
             kv_events_metrics_payload(system_ports=[DefaultPort.SYSTEM2.value]),
@@ -348,7 +350,7 @@ vllm_configs = {
             pytest.mark.pre_merge,
             pytest.mark.timeout(600),
         ],  # TODO: profile to get max_vram
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         request_payloads=[
             # Test approximate KV routing (--no-kv-events mode)
             # Repeated requests should show cache-aware routing in nvext.
@@ -367,7 +369,7 @@ vllm_configs = {
             pytest.mark.gpu_2,
             pytest.mark.pre_merge,
         ],  # TODO: profile to get max_vram and timeout
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
@@ -389,7 +391,7 @@ vllm_configs = {
             # Move back to pre_merge once GPU tests run in parallel.
             pytest.mark.post_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         delayed_start=10,
         health_check_workers=True,
         request_payloads=[
@@ -408,7 +410,7 @@ vllm_configs = {
             pytest.mark.timeout(300),
             pytest.mark.post_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         delayed_start=10,
         health_check_workers=True,
         env={"DYN_CHAT_PROCESSOR": "vllm"},
@@ -428,7 +430,7 @@ vllm_configs = {
             pytest.mark.timeout(300),
             pytest.mark.post_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         delayed_start=10,
         health_check_workers=True,
         env={
@@ -610,7 +612,7 @@ vllm_configs = {
             # TODO: profile to get max_vram
             pytest.mark.timeout(300),
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
@@ -630,7 +632,8 @@ vllm_configs = {
             pytest.mark.timeout(220),  # 3x ~72s under new scheduler (3d1554f)
             pytest.mark.pre_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=VLLM_SMOKE_MODEL,
+        script_args=["--model", VLLM_SMOKE_MODEL],
         request_payloads=[
             chat_payload(
                 "Generate a person with name and age",
@@ -900,7 +903,7 @@ def lora_chat_payload(
 @pytest.mark.core
 @pytest.mark.e2e
 @pytest.mark.gpu_1
-@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.model(QWEN_QWEN3_0_6B)
 @pytest.mark.model("codelion/Qwen3-0.6B-accuracy-recovery-lora")
 @pytest.mark.profiled_vram_gib(4.0)  # actual nvidia-smi peak with kv-bytes cap
 @pytest.mark.requested_vllm_kv_cache_bytes(
@@ -940,7 +943,7 @@ def test_lora_aggregated(
         directory=vllm_dir,
         script_name="lora/agg_lora.sh",
         marks=[],  # markers at function-level
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         timeout=600,
         env=minio_config.get_env_vars(),
         request_payloads=[lora_payload],
@@ -961,7 +964,7 @@ def test_lora_aggregated(
 @pytest.mark.router
 @pytest.mark.e2e
 @pytest.mark.gpu_2
-@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.model(QWEN_QWEN3_0_6B)
 @pytest.mark.model("codelion/Qwen3-0.6B-accuracy-recovery-lora")
 @pytest.mark.timeout(600)
 @pytest.mark.pre_merge
@@ -1024,7 +1027,7 @@ def test_lora_aggregated_router(
         directory=vllm_dir,
         script_name="lora/agg_lora_router.sh",
         marks=[],  # markers at function-level
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         timeout=600,
         env=env_vars,
         request_payloads=[
