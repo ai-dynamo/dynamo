@@ -151,4 +151,13 @@ pub enum PickError {
     /// multiplexing means the connection cap does not bound concurrent requests.
     #[error("endpoint picker overloaded")]
     Overloaded,
+    /// The request's policy class refused admission while the fleet was saturated,
+    /// so it is shed rather than queued → 429 with `Retry-After`. Distinct from
+    /// [`Self::Overloaded`], which is this process protecting itself rather than a
+    /// per-class fleet decision.
+    #[error("policy class {policy_class} is shedding load")]
+    Saturated {
+        policy_class: String,
+        retry_after_secs: Option<u64>,
+    },
 }

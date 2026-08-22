@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Per-class load shedding, as used by the Rust EPP's decode path. Point
+# DYN_ROUTER_POLICY_CONFIG at this file.
+#
+# A request's class is the pair (policy family, uncached-ISL bucket):
+#   - The EPP names the family from request headers. `x-dynamo-meta-policy-class`
+#     names one directly; otherwise `x-dynamo-retry-attempt` or an
+#     `x-envoy-attempt-count` above 1 selects `retry`, and everything else
+#     falls through to `default_policy_family`.
+#   - The router picks the bucket from uncached ISL — the prompt tokens that
+#     still need prefilling after cache overlap, which is a better cost proxy
+#     than raw prompt length.
+#
+# A class sheds only when it sets both of:
+#   prefill_busy_threshold_frac     how much in-flight prefill work, as a
+#                                   multiple of the worker's
+#                                   max_num_batched_tokens, counts as busy.
+#                                   Lower sheds sooner. Saturation requires
+#                                   *every* eligible worker to be busy.
+#   request_queue_limit_per_worker  0 refuses the request outright. A positive
+#                                   value queues up to that many per worker
+#                                   instead, which on the EPP path means
+#                                   holding the request until admission rather
+#                                   than answering 429.
+# A class that sets no busy threshold is never shed.
+#
+# Trust model: `x-dynamo-meta-policy-class` is a self-declared hint from the
+# caller, not an authenticated claim — the EPP does not strip or gate it (see
+# `policy_class_from_headers` in epp.rs). A caller who names a *family*
+# (`first_attempt`/`retry`) still goes through this file's bucket derivation
+# by uncached ISL. The classes below are all defined by (`policy_family`,
+# `cache_bucket`), never by a bare `name:` alone, precisely so that no class
+# is directly selectable by name — every caller-supplied family still gets
+# bucketed by the router's own measurement of prompt size. Do not add a class
+# with only `name:` (no `policy_family`/`cache_bucket`) to this file unless
+# the gateway also overwrites `x-dynamo-meta-policy-class` at the edge, since
+# a caller who learns that name could select it directly and skip
+# retry/size classification.
+
+default_policy_family: first_attempt
+
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: small
+  - min_tokens: 8192
+    bucket: large
+
+policy_classes:
+  # A small first attempt is someone waiting on a live answer: always admitted.
+  - name: first_attempt_small
+    policy_family: first_attempt
+    cache_bucket: small
+    queue_policy: wspt
+    quantum: 2048
+
+  # A large first attempt is admitted until the fleet is deeply backed up, so a
+  # shallow burst never costs a long prompt its answer.
+  - name: first_attempt_large
+    policy_family: first_attempt
+    cache_bucket: large
+    queue_policy: fcfs
+    quantum: 512
+    prefill_busy_threshold_frac: 0.95
+    request_queue_limit_per_worker: 0
+
+  # Retries already have a client prepared to come back, so shed them well
+  # before first attempts rather than letting them compound the backlog.
+  - name: retry_small
+    policy_family: retry
+    cache_bucket: small
+    queue_policy: wspt
+    quantum: 2048
+    prefill_busy_threshold_frac: 0.85
+    request_queue_limit_per_worker: 0
+
+  # An oversized retry is the most expensive and least urgent work there is.
+  - name: retry_large
+    policy_family: retry
+    cache_bucket: large
+    queue_policy: fcfs
+    quantum: 512
+    prefill_busy_threshold_frac: 0.70
+    request_queue_limit_per_worker: 0

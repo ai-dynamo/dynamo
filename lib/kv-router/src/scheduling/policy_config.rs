@@ -1048,4 +1048,54 @@ policy_classes:
             "model profiles must completely replace root classes"
         );
     }
+
+    /// The shedding sample is what the EPP's per-class load shedding is
+    /// documented against, so it has to classify the way that path assumes:
+    /// the retry family comes from the caller, the size bucket from uncached
+    /// ISL, and only the shedding classes refuse to queue.
+    #[test]
+    fn documented_shedding_sample_classifies_retries_and_sizes() {
+        let config = RouterPolicyConfig::from_yaml(include_str!(
+            "../../../../examples/router/policy-class-shedding.yaml"
+        ))
+        .unwrap();
+
+        let profile = config.resolve_profile(None, None, RouterQueuePolicy::Fcfs);
+        assert_eq!(profile.default_class().name, "first_attempt_small");
+
+        for (requested, uncached_tokens, expected) in [
+            (None, 0, "first_attempt_small"),
+            (None, 8191, "first_attempt_small"),
+            (None, 8192, "first_attempt_large"),
+            (Some("retry"), 0, "retry_small"),
+            (Some("retry"), 8192, "retry_large"),
+            // An unrecognized family must fall back to the default rather than
+            // silently landing in a shedding class.
+            (Some("unknown"), 0, "first_attempt_small"),
+        ] {
+            assert_eq!(
+                profile
+                    .class(profile.resolve_class_index(requested, uncached_tokens))
+                    .name,
+                expected,
+                "requested={requested:?} uncached_tokens={uncached_tokens}"
+            );
+        }
+
+        // A class with no busy threshold can never be queued, and therefore
+        // never shed; every other class refuses rather than queues.
+        for class in profile.classes() {
+            if class.name == "first_attempt_small" {
+                assert!(!class.queueing_enabled());
+            } else {
+                assert!(class.queueing_enabled(), "{}", class.name);
+                assert_eq!(
+                    class.request_queue_limit_per_worker,
+                    Some(0),
+                    "{}",
+                    class.name
+                );
+            }
+        }
+    }
 }

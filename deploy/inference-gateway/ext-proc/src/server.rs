@@ -932,49 +932,59 @@ fn extract_candidate_subset(
 struct ExtProcError {
     status_code: StatusCode,
     message: String,
+    /// Response headers to attach to the immediate response. Empty for most
+    /// failures; carries `Retry-After` when a policy class sheds a request.
+    headers: Vec<(String, String)>,
 }
 
 impl ExtProcError {
+    fn new(status_code: StatusCode, message: String) -> Self {
+        Self {
+            status_code,
+            message,
+            headers: Vec::new(),
+        }
+    }
+
     fn from_pick_error(e: PickError) -> Self {
         match e {
-            PickError::NoEndpoints => Self {
-                status_code: StatusCode::ServiceUnavailable,
-                message: e.to_string(),
-            },
-            PickError::RoutingFailed(msg) => Self {
-                status_code: StatusCode::ServiceUnavailable,
-                message: msg,
-            },
-            PickError::TokenizationFailed(msg) => Self {
-                status_code: StatusCode::BadRequest,
-                message: msg,
-            },
+            PickError::NoEndpoints => Self::new(StatusCode::ServiceUnavailable, e.to_string()),
+            PickError::RoutingFailed(msg) => Self::new(StatusCode::ServiceUnavailable, msg),
+            PickError::TokenizationFailed(msg) => Self::new(StatusCode::BadRequest, msg),
             // Upstream tokenizer failures are not client errors: preserve their
             // semantics so clients retry appropriately. `e.to_string()` is the
             // client-safe variant message; the detailed cause is logged upstream.
-            PickError::TokenizerUnavailable => Self {
-                status_code: StatusCode::ServiceUnavailable,
-                message: e.to_string(),
-            },
-            PickError::TokenizerTimeout => Self {
-                status_code: StatusCode::GatewayTimeout,
-                message: e.to_string(),
-            },
-            PickError::TokenizerUpstreamError => Self {
-                status_code: StatusCode::BadGateway,
-                message: e.to_string(),
-            },
+            PickError::TokenizerUnavailable => {
+                Self::new(StatusCode::ServiceUnavailable, e.to_string())
+            }
+            PickError::TokenizerTimeout => Self::new(StatusCode::GatewayTimeout, e.to_string()),
+            PickError::TokenizerUpstreamError => Self::new(StatusCode::BadGateway, e.to_string()),
             // In-flight limit saturated: shed as retryable backpressure. The
             // variant message ("endpoint picker overloaded") is client-safe.
-            PickError::Overloaded => Self {
-                status_code: StatusCode::ServiceUnavailable,
-                message: e.to_string(),
-            },
+            PickError::Overloaded => Self::new(StatusCode::ServiceUnavailable, e.to_string()),
+            // A policy class refused admission. 429 is what gateway failover
+            // logic already understands, and `Retry-After` tells the client when
+            // to come back instead of leaving it to guess. The picker logs which
+            // class and limit refused the request.
+            PickError::Saturated {
+                retry_after_secs, ..
+            } => {
+                let mut err = Self::new(StatusCode::TooManyRequests, e.to_string());
+                if let Some(secs) = retry_after_secs {
+                    err.headers
+                        .push(("retry-after".to_string(), secs.to_string()));
+                }
+                err
+            }
         }
     }
 
     fn into_processing_response(self) -> ProcessingResponse {
-        envoy_helpers::build_error_response(self.status_code, Some(&self.message))
+        envoy_helpers::build_error_response_with_headers(
+            self.status_code,
+            Some(&self.message),
+            &self.headers,
+        )
     }
 }
 
@@ -1591,5 +1601,34 @@ mod tests {
     fn overloaded_pick_error_maps_to_503() {
         let err = ExtProcError::from_pick_error(PickError::Overloaded);
         assert_eq!(err.status_code, StatusCode::ServiceUnavailable);
+    }
+
+    /// A per-class shed maps to 429 and advertises `Retry-After`, which is what
+    /// gateway failover logic reads to decide when to come back.
+    #[test]
+    fn saturated_pick_error_maps_to_429_with_retry_after() {
+        let err = ExtProcError::from_pick_error(PickError::Saturated {
+            policy_class: "retry-large".to_string(),
+            retry_after_secs: Some(3),
+        });
+
+        assert_eq!(err.status_code, StatusCode::TooManyRequests);
+        assert_eq!(
+            err.headers,
+            vec![("retry-after".to_string(), "3".to_string())]
+        );
+    }
+
+    /// Without a configured delay the shed still answers 429, just with no hint,
+    /// rather than inventing a retry time.
+    #[test]
+    fn saturated_pick_error_omits_absent_retry_after() {
+        let err = ExtProcError::from_pick_error(PickError::Saturated {
+            policy_class: "retry-large".to_string(),
+            retry_after_secs: None,
+        });
+
+        assert_eq!(err.status_code, StatusCode::TooManyRequests);
+        assert!(err.headers.is_empty());
     }
 }

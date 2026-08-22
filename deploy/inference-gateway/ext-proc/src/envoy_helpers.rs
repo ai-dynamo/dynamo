@@ -278,6 +278,23 @@ pub fn build_response_trailer_response() -> ProcessingResponse {
 
 /// Build an ImmediateResponse for error cases.
 pub fn build_error_response(status_code: StatusCode, body: Option<&str>) -> ProcessingResponse {
+    build_error_response_with_headers(status_code, body, &[])
+}
+
+/// Like [`build_error_response`], but attaches response headers. Used to carry
+/// `Retry-After` on shed responses so a gateway's failover logic can honor it.
+pub fn build_error_response_with_headers(
+    status_code: StatusCode,
+    body: Option<&str>,
+    headers: &[(String, String)],
+) -> ProcessingResponse {
+    let header_mutation = (!headers.is_empty()).then(|| HeaderMutation {
+        set_headers: headers
+            .iter()
+            .map(|(key, value)| header_overwrite(key, value.as_bytes()))
+            .collect(),
+        remove_headers: Vec::new(),
+    });
     ProcessingResponse {
         response: Some(
             crate::proto::envoy::service::ext_proc::v3::processing_response::Response::ImmediateResponse(
@@ -285,6 +302,7 @@ pub fn build_error_response(status_code: StatusCode, body: Option<&str>) -> Proc
                     status: Some(HttpStatus {
                         code: status_code.into(),
                     }),
+                    headers: header_mutation,
                     body: body.map(|b| b.as_bytes().to_vec()).unwrap_or_default(),
                     ..Default::default()
                 },

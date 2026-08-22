@@ -81,6 +81,7 @@
 /examples/router/policy-class-queues.yaml                                    @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/global_router/tests/                                  @ai-dynamo/dynamo-router-codeowners
 /components/src/dynamo/thunderagent_router/                                  @ai-dynamo/dynamo-router-codeowners
+/examples/router/policy-class-shedding.yaml                                  @ai-dynamo/dynamo-router-codeowners
 
 # === backend-vllm  (@ai-dynamo/dynamo-backend-vllm-codeowners) ===
 /lib/sidecar/vllm/                                                           @ai-dynamo/dynamo-backend-vllm-codeowners

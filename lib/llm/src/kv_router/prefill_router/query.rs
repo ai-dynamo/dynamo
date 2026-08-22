@@ -19,7 +19,13 @@ where
     /// Query the best prefill worker without executing a request.
     ///
     /// This query is advisory and does not book scheduler or occupancy state;
-    /// concurrent callers may observe the same worker.
+    /// concurrent callers may observe the same worker. `policy_class` names the
+    /// policy-class family to admit the request under; `None` uses the router's
+    /// configured default family. A returned `PrefillQueryOutcome::QueueRejected`
+    /// means the class refused admission outright (its
+    /// `request_queue_limit_per_worker` is `0`) rather than queuing, so callers
+    /// that want per-class prefill shedding must treat it as a shed, not as
+    /// "prefill unavailable, fall back to aggregated."
     #[expect(clippy::too_many_arguments)]
     pub async fn query_prefill_worker(
         &self,
@@ -29,6 +35,7 @@ where
         cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
+        policy_class: Option<String>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> Result<PrefillQueryOutcome> {
@@ -44,7 +51,7 @@ where
             InnerPrefillRouter::KvRouter(router) => {
                 let outcome = router
                     .chooser
-                    .find_best_match_details(
+                    .find_best_match_details_with_policy_class(
                         None,
                         token_ids,
                         block_mm_infos,
@@ -55,6 +62,8 @@ where
                         cache_namespace,
                         priority_jump,
                         strict_priority,
+                        policy_class,
+                        None,
                         None,
                         None,
                         allowed_worker_ids,
@@ -220,6 +229,7 @@ mod tests {
                 None,
                 0.0,
                 0,
+                None,
                 None,
                 RoutingConstraints::default(),
             )

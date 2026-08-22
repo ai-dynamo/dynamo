@@ -1,0 +1,181 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Per-class load shedding on the EPP decode path. This is
+# `examples/backends/vllm/deploy/gaie/agg.yaml` in its Rust-EPP form, plus the
+# router policy config that makes the EPP answer HTTP 429 with `Retry-After` —
+# instead of routing — when a request's class is saturated. Every added line is
+# commented.
+#
+# The Epp component carries no `eppConfig`: that block configured the removed Go
+# EPP's GAIE plugin chain, and the Rust EPP is configured entirely by environment,
+# which is why the policy below arrives as a mounted file named by an env var.
+#
+# A request's class is the pair (policy family, uncached-ISL bucket):
+#   - The family comes from the caller. `x-dynamo-meta-policy-class` names one
+#     directly — the same header the selection service reads — otherwise
+#     `x-dynamo-retry-attempt` marks a retry, and an unmarked request falls
+#     through to `default_policy_family`.
+#   - The bucket comes from the router, which measures uncached ISL (the prompt
+#     tokens still needing prefill after cache overlap) itself. No header.
+#
+# Only classes that set a busy threshold can shed. `request_queue_limit_per_worker: 0`
+# is what turns saturation into a refusal rather than a queue wait.
+#
+# Aggregated serving only. The decode router deliberately stops tracking prefill
+# tokens when disaggregated, so the saturation signal is always zero there and
+# this gate never fires.
+#
+# Apply with: kubectl apply -n <ns> -f agg.yaml
+# Test:
+#   GW=$(kubectl get gateway inference-gateway -n agentgateway-system -o jsonpath='{.status.addresses[0].value}')
+#   # A retry with a long prompt is the first thing shed. Under load this
+#   # returns 429 with `Retry-After: 2` while the same prompt unmarked succeeds.
+#   curl -i http://$GW/v1/chat/completions \
+#     -H 'content-type: application/json' \
+#     -H 'x-dynamo-retry-attempt: 1' \
+#     -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"..."}]}'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: qwen-router-policy
+data:
+  # Mirrors examples/router/policy-class-shedding.yaml, retuned for a demo: a
+  # low bucket boundary and absolute thresholds, so shedding is reachable with
+  # one small worker and short prompts.
+  #
+  # Production should prefer `prefill_busy_threshold_frac`, which scales with the
+  # worker's `max_num_batched_tokens` instead of hard-coding a token count. It
+  # requires the worker to report that value; when it is unknown the router
+  # assumes an effectively unbounded budget and the fractional form never fires,
+  # which is why this demo pins absolute numbers.
+  router-policy.yaml: |
+    default_policy_family: first_attempt
+
+    uncached_isl_buckets:
+      - min_tokens: 0
+        bucket: small
+      - min_tokens: 2048
+        bucket: large
+
+    policy_classes:
+      # No busy threshold: a small first attempt is never shed.
+      - name: first_attempt_small
+        policy_family: first_attempt
+        cache_bucket: small
+        queue_policy: wspt
+        quantum: 2048
+
+      # A large first attempt survives until the worker is deeply backed up.
+      - name: first_attempt_large
+        policy_family: first_attempt
+        cache_bucket: large
+        queue_policy: fcfs
+        quantum: 512
+        prefill_busy_threshold: 8192
+        request_queue_limit_per_worker: 0
+
+      # Retries already have a caller prepared to come back, so they go first.
+      - name: retry_small
+        policy_family: retry
+        cache_bucket: small
+        queue_policy: wspt
+        quantum: 2048
+        prefill_busy_threshold: 4096
+        request_queue_limit_per_worker: 0
+
+      # The most expensive and least urgent work there is: shed soonest.
+      - name: retry_large
+        policy_family: retry
+        cache_bucket: large
+        queue_policy: fcfs
+        quantum: 512
+        prefill_busy_threshold: 1024
+        request_queue_limit_per_worker: 0
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen
+spec:
+  backendFramework: vllm
+  components:
+  - name: Epp
+    type: epp
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          env:
+          - name: DYN_KV_CACHE_BLOCK_SIZE
+            value: "128"
+          - name: DYN_MODEL_NAME
+            value: Qwen/Qwen3-0.6B
+          # Enables per-class shedding. Without this the router builds a single
+          # synthetic class, nothing sets a queue limit of zero, and the EPP
+          # behaves exactly as it does today.
+          - name: DYN_ROUTER_POLICY_CONFIG
+            value: /etc/dynamo/router-policy.yaml
+          # Seconds advertised in `Retry-After` on a shed. Defaults to 1; set to
+          # 0 to answer 429 with no hint at all.
+          - name: DYN_EPP_SHED_RETRY_AFTER_SECS
+            value: "2"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/epp-image:my-tag
+          # Surfaces the ConfigMap above at the path DYN_ROUTER_POLICY_CONFIG names.
+          volumeMounts:
+          - mountPath: /etc/dynamo
+            name: router-policy
+            readOnly: true
+        # The config is read once at startup, so editing the ConfigMap requires
+        # restarting the EPP pod to take effect.
+        volumes:
+        - name: router-policy
+          configMap:
+            name: qwen-router-policy
+  - name: VllmDecodeWorker
+    type: decode
+    replicas: 1
+    sharedMemorySize: 2Gi
+    frontendSidecar: sidecar-frontend
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          args:
+          - python3 -m dynamo.vllm --model $MODEL_PATH --served-model-name $SERVED_MODEL_NAME
+            --tensor-parallel-size 1 --data-parallel-size 1 --gpu-memory-utilization
+            0.90 --enable-prefix-caching --block-size 128 --kv-events-config '{"enable_kv_cache_events":true}'
+          command:
+          - /bin/sh
+          - -c
+          env:
+          - name: SERVED_MODEL_NAME
+            value: Qwen/Qwen3-0.6B
+          - name: MODEL_PATH
+            value: Qwen/Qwen3-0.6B
+          - name: DYN_STORE_KV
+            value: mem
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"
+          workingDir: /workspace/examples/backends/vllm
+        - name: sidecar-frontend
+          args:
+          - -m
+          - dynamo.frontend
+          - --router-mode
+          - direct
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag

@@ -300,7 +300,7 @@ fn replica_peer_error(error: ReplicaPeerError) -> Response {
 
 fn policy_class_from_headers(headers: &HeaderMap) -> Option<String> {
     headers
-        .get("x-dynamo-meta-policy-class")
+        .get(crate::protocols::HEADER_POLICY_CLASS)
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
         .filter(|value| !value.is_empty())

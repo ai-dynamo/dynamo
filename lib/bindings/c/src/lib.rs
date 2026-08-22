@@ -504,6 +504,10 @@ impl RouterHandles {
                 cache_namespace,
                 priority_jump,
                 strict_priority,
+                // No policy class on this FFI path: the caller (the standalone,
+                // runtime-free C/CGO surface) has no per-class shedding config to
+                // resolve one against.
+                None,
                 allowed_worker_ids,
                 routing_constraints,
             )

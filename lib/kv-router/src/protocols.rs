@@ -22,6 +22,11 @@ const fn default_track_prefill_tokens() -> bool {
 /// The event subject that workers publish KV cache events on.
 pub const KV_EVENT_SUBJECT: &str = "kv-events";
 
+/// Header naming the requested policy-class family, following the
+/// `x-dynamo-meta-` request-metadata prefix. Shared by every entry point that
+/// admits requests into the router so one wire name covers them all.
+pub const HEADER_POLICY_CLASS: &str = "x-dynamo-meta-policy-class";
+
 /// Seed for XXH3 hashing, consistent with indexer.rs
 pub const XXH3_SEED: u64 = 1337;
 
