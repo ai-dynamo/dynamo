@@ -196,7 +196,12 @@ async fn finish_signal_publishes_function_call_before_usage_tail() {
         let script = load_agent_fixture("fragmented-tool.sse").await.unwrap();
         let split_at = script
             .iter()
-            .position(|chunk| chunk.inner.usage.is_some())
+            .position(|chunk| {
+                chunk
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data.inner.usage.is_some())
+            })
             .expect("fragmented-tool fixture has no usage chunk");
         let (svc, gate) = HarnessService::start_with_gated_tail(script, split_at).await;
         let response = post_responses(

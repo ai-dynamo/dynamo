@@ -153,13 +153,6 @@ impl AnthropicRequestValidationError {
         }
     }
 
-    fn metric_error_type(&self) -> ErrorType {
-        match self {
-            Self::InvalidArgument(_) => ErrorType::Validation,
-            Self::NotImplemented(_) => ErrorType::NotImplemented,
-        }
-    }
-
     fn anthropic_error_type(&self) -> &'static str {
         match self {
             Self::InvalidArgument(_) => "invalid_request_error",
@@ -171,6 +164,107 @@ impl AnthropicRequestValidationError {
         match self {
             Self::InvalidArgument(message) | Self::NotImplemented(message) => message,
         }
+    }
+}
+
+#[derive(Debug)]
+struct AnthropicHandlerError {
+    status: StatusCode,
+    anthropic_error_type: &'static str,
+    message: String,
+    metric_error_type: ErrorType,
+}
+
+impl AnthropicHandlerError {
+    fn new(
+        status: StatusCode,
+        anthropic_error_type: &'static str,
+        message: impl Into<String>,
+        metric_error_type: ErrorType,
+    ) -> Self {
+        Self {
+            status,
+            anthropic_error_type,
+            message: message.into(),
+            metric_error_type,
+        }
+    }
+
+    fn validation(message: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            message,
+            ErrorType::Validation,
+        )
+    }
+
+    // Validation is reused by /v1/messages/count_tokens, which has no request-scoped
+    // guard. Attach metrics only at the /v1/messages handler boundary.
+    fn from_request_validation(error: AnthropicRequestValidationError) -> Self {
+        let metric_error_type = match &error {
+            AnthropicRequestValidationError::InvalidArgument(_) => ErrorType::Validation,
+            AnthropicRequestValidationError::NotImplemented(_) => ErrorType::NotImplemented,
+        };
+        Self::new(
+            error.status(),
+            error.anthropic_error_type(),
+            error.message().to_string(),
+            metric_error_type,
+        )
+    }
+
+    fn sanitized(
+        err: SanitizedError,
+        details: impl std::fmt::Display,
+        metric_error_type: ErrorType,
+    ) -> Self {
+        let status = err.status();
+        if err.log_as_error() {
+            tracing::error!(status = %status, "Anthropic {err}: {details}");
+        } else {
+            tracing::debug!(status = %status, "Anthropic {err}: {details}");
+        }
+        Self::new(
+            status,
+            err.anthropic_type(),
+            err.to_string(),
+            metric_error_type,
+        )
+    }
+
+    fn into_response(self) -> Response {
+        let Self {
+            status,
+            anthropic_error_type,
+            message,
+            ..
+        } = self;
+        anthropic_error(status, anthropic_error_type, &message)
+    }
+
+    fn into_marked_response(self, inflight_guard: &mut InflightGuard) -> Response {
+        let Self {
+            status,
+            anthropic_error_type,
+            message,
+            metric_error_type,
+        } = self;
+        inflight_guard.mark_error(metric_error_type);
+        anthropic_error(status, anthropic_error_type, &message)
+    }
+}
+
+fn classify_backend_status_for_metrics(status: StatusCode) -> ErrorType {
+    match status {
+        StatusCode::NOT_FOUND => ErrorType::NotFound,
+        StatusCode::NOT_IMPLEMENTED => ErrorType::NotImplemented,
+        StatusCode::TOO_MANY_REQUESTS => ErrorType::Overload,
+        StatusCode::SERVICE_UNAVAILABLE => ErrorType::Unavailable,
+        _ if status.as_u16() == 529 => ErrorType::Overload,
+        _ if status.as_u16() == 499 => ErrorType::Cancelled,
+        _ if status.is_client_error() => ErrorType::Validation,
+        _ => ErrorType::Internal,
     }
 }
 
@@ -265,29 +359,19 @@ async fn handler_anthropic_messages(
         &request_id,
     );
 
-    if let Err(error) = validate_anthropic_messages(&request.messages) {
-        inflight_guard.mark_error(error.metric_error_type());
-        return Err(anthropic_error(
-            error.status(),
-            error.anthropic_error_type(),
-            error.message(),
-        ));
-    }
-    if let Err(error) = validate_anthropic_tools(request.tools.as_deref()) {
-        inflight_guard.mark_error(error.metric_error_type());
-        return Err(anthropic_error(
-            error.status(),
-            error.anthropic_error_type(),
-            error.message(),
-        ));
-    }
+    validate_anthropic_messages(&request.messages).map_err(|error| {
+        AnthropicHandlerError::from_request_validation(error)
+            .into_marked_response(&mut inflight_guard)
+    })?;
+    validate_anthropic_tools(request.tools.as_deref()).map_err(|error| {
+        AnthropicHandlerError::from_request_validation(error)
+            .into_marked_response(&mut inflight_guard)
+    })?;
     if request.max_tokens == 0 {
-        inflight_guard.mark_error(ErrorType::Validation);
-        return Err(anthropic_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "max_tokens: must be greater than 0",
-        ));
+        return Err(
+            AnthropicHandlerError::validation("max_tokens: must be greater than 0")
+                .into_marked_response(&mut inflight_guard),
+        );
     }
     gate_anthropic_nvext(&mut request, state.nvext_enabled());
 
@@ -298,12 +382,13 @@ async fn handler_anthropic_messages(
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
     let metadata = extract_metadata_from_http(&headers).map_err(|err| {
-        inflight_guard.mark_error(ErrorType::Validation);
-        anthropic_error(
+        AnthropicHandlerError::new(
             StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
             "invalid_request_error",
-            &err.to_string(),
+            err.to_string(),
+            ErrorType::Validation,
         )
+        .into_marked_response(&mut inflight_guard)
     })?;
     let mut request = Context::with_id_and_metadata(request, request_id, metadata);
     attach_x_request_id(&mut request, &headers);
@@ -403,22 +488,20 @@ async fn anthropic_messages(
             // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's
             // canonical, customer-facing message so both APIs report the same
             // text. Anything else is a genuine missing model → 404.
-            crate::discovery::ModelManagerError::ModelUnavailable(_) => {
-                inflight_guard.mark_error(ErrorType::Unavailable);
-                anthropic_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "overloaded_error",
-                    &super::openai::model_not_ready_message(&model),
-                )
-            }
-            _ => {
-                inflight_guard.mark_error(ErrorType::NotFound);
-                anthropic_error(
-                    StatusCode::NOT_FOUND,
-                    "not_found_error",
-                    &format!("Model '{}' not found", model),
-                )
-            }
+            crate::discovery::ModelManagerError::ModelUnavailable(_) => AnthropicHandlerError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "overloaded_error",
+                super::openai::model_not_ready_message(&model),
+                ErrorType::Unavailable,
+            )
+            .into_marked_response(&mut inflight_guard),
+            _ => AnthropicHandlerError::new(
+                StatusCode::NOT_FOUND,
+                "not_found_error",
+                format!("Model '{}' not found", model),
+                ErrorType::NotFound,
+            )
+            .into_marked_response(&mut inflight_guard),
         })?;
 
     let (orig_request, context) = request.into_parts();
@@ -442,17 +525,13 @@ async fn anthropic_messages(
 
     // Convert Anthropic request -> UnifiedRequest -> Chat Completion request
     let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
-        inflight_guard.mark_error(ErrorType::Validation);
         tracing::error!(
             request_id,
             error = %e,
             "Failed to convert AnthropicCreateMessageRequest to UnifiedRequest",
         );
-        anthropic_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            &format!("Failed to convert request: {}", e),
-        )
+        AnthropicHandlerError::validation(format!("Failed to convert request: {e}"))
+            .into_marked_response(&mut inflight_guard)
     })?;
 
     // Extract the API context before consuming the UnifiedRequest — this
@@ -462,13 +541,9 @@ async fn anthropic_messages(
     let mut chat_request = unified_request.into_inner();
     apply_anthropic_header_routing_overrides(&mut chat_request, &headers, state.nvext_enabled());
     if let Err(error) = chat_request.validate() {
-        inflight_guard.mark_error(ErrorType::Validation);
         let error = invalid_argument(error.to_string());
-        return Err(anthropic_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            error.message(),
-        ));
+        return Err(AnthropicHandlerError::validation(error.message())
+            .into_marked_response(&mut inflight_guard));
     }
     // When a reasoning parser is configured and the client hasn't explicitly
     // disabled thinking, assume the model's chat template will inject `<think>`.
@@ -538,40 +613,40 @@ async fn anthropic_messages(
             state
                 .metrics_clone()
                 .inc_rejection(&model, super::metrics::Endpoint::AnthropicMessages);
-            inflight_guard.mark_error(super::metrics::ErrorType::Overload);
-            return anthropic_sanitized_error_with_details(
+            return AnthropicHandlerError::sanitized(
                 SanitizedError::Overloaded,
                 format!("{e:#}"),
-            );
+                ErrorType::Overload,
+            )
+            .into_marked_response(&mut inflight_guard);
         }
         if super::metrics::request_was_unavailable(e.as_ref()) {
-            inflight_guard.mark_error(super::metrics::ErrorType::Unavailable);
-            return anthropic_sanitized_error_with_details(
+            return AnthropicHandlerError::sanitized(
                 SanitizedError::Unavailable,
                 format!("{e:#}"),
-            );
+                ErrorType::Unavailable,
+            )
+            .into_marked_response(&mut inflight_guard);
         }
         if let Some(dynamo_err) = find_invalid_argument_in_chain(e.as_ref()) {
-            inflight_guard.mark_error(super::metrics::ErrorType::Validation);
-            return anthropic_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                dynamo_err.message(),
-            );
+            return AnthropicHandlerError::validation(dynamo_err.message())
+                .into_marked_response(&mut inflight_guard);
         }
         // Check for cancelled request (client disconnected before response was sent)
         if super::metrics::request_was_cancelled(e.as_ref()) {
-            inflight_guard.mark_error(super::metrics::ErrorType::Cancelled);
-            return anthropic_sanitized_error_with_details(
+            return AnthropicHandlerError::sanitized(
                 SanitizedError::Cancelled,
                 format!("{e:#}"),
-            );
+                ErrorType::Cancelled,
+            )
+            .into_marked_response(&mut inflight_guard);
         }
-        inflight_guard.mark_error(super::metrics::ErrorType::Internal);
-        anthropic_sanitized_error_with_details(
+        AnthropicHandlerError::sanitized(
             SanitizedError::Internal,
             format!("Failed to generate Anthropic completions: {e}"),
+            ErrorType::Internal,
         )
+        .into_marked_response(&mut inflight_guard)
     })?;
 
     let ctx = engine_stream.context();
@@ -709,11 +784,15 @@ async fn anthropic_messages(
                 // check_for_backend_error has already sanitized the body and
                 // logged the backend detail; preserve its status when
                 // re-wrapping in Anthropic format. Status classification is
-                // delegated to SanitizedError::for_backend_status so the
-                // openai and anthropic surfaces stay aligned.
+                // classified from the preserved status so OpenAI and Anthropic
+                // backend-error metrics stay aligned.
                 let details = format!("backend error event (status {})", status.as_u16());
+                let metric_error_type = classify_backend_status_for_metrics(status);
                 match SanitizedError::for_backend_status(status) {
-                    Some(variant) => anthropic_sanitized_error_with_details(variant, details),
+                    Some(variant) => {
+                        AnthropicHandlerError::sanitized(variant, details, metric_error_type)
+                            .into_marked_response(&mut inflight_guard)
+                    }
                     // 4xx (non-499): preserve the client-error status; the
                     // message is the canonical reason so we don't smuggle
                     // backend text through. The "invalid_request_error"
@@ -722,11 +801,13 @@ async fn anthropic_messages(
                     // status code itself.
                     None => {
                         tracing::error!(%status, "Anthropic backend error event");
-                        anthropic_error(
+                        AnthropicHandlerError::new(
                             status,
                             "invalid_request_error",
                             status.canonical_reason().unwrap_or("Client error"),
+                            metric_error_type,
                         )
+                        .into_marked_response(&mut inflight_guard)
                     }
                 }
             })?;
@@ -744,10 +825,12 @@ async fn anthropic_messages(
             NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
                 .await
                 .map_err(|e| {
-                    anthropic_sanitized_error_with_details(
+                    AnthropicHandlerError::sanitized(
                         SanitizedError::Internal,
                         format!("Failed to fold messages stream: {e:?}"),
+                        ErrorType::Internal,
                     )
+                    .into_marked_response(&mut inflight_guard)
                 })?;
 
         let response = chat_completion_to_anthropic_response(
@@ -773,11 +856,7 @@ async fn handler_count_tokens(
     Json(mut request): Json<AnthropicCountTokensRequest>,
 ) -> Result<Response, Response> {
     if let Err(error) = validate_anthropic_messages(&request.messages) {
-        return Err(anthropic_error(
-            error.status(),
-            error.anthropic_error_type(),
-            error.message(),
-        ));
+        return Err(AnthropicHandlerError::from_request_validation(error).into_response());
     }
     // Count Tokens does not convert or execute tools, so keep tool definitions
     // permissive here. TODO: Add validation when Anthropic server tools are supported.
