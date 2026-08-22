@@ -93,6 +93,7 @@ impl FirstTokenSource {
         })
     }
 
+    #[cfg(test)]
     fn from_publisher_result(
         worker_id: u64,
         publisher: anyhow::Result<ActiveSequenceEventPublisher>,
