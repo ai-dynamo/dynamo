@@ -863,10 +863,6 @@ async def init_llm_worker(
         else:
             needs = [needs_set] if needs_set else []
 
-        handler_config.first_token_source = await endpoint.first_token_source(
-            worker_type
-        )
-
         await register_model(
             model_input,
             model_type,
