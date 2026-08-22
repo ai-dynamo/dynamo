@@ -38,10 +38,10 @@ spec:
       spec:
         # sglang-engine as a native sidecar (initContainer + restartPolicy: Always):
         # starts before `main`, stops after. Native gRPC `--grpc-port` needs SGLang
-        # v0.5.16+ (Dynamo's sglang-runtime pins an older SGLang without it).
+        # v0.5.16+; keep this example aligned with Dynamo main's SGLang pin.
         initContainers:
         - name: sglang-engine
-          image: lmsysorg/sglang:v0.5.16
+          image: lmsysorg/sglang:v0.5.17
           restartPolicy: Always
           # gRPC HealthCheck via exec (tcpSocket/grpc: dial the pod IP, not the
           # loopback engine). startupProbe gates `main`; readinessProbe drops dead workers.

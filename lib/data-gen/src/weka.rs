@@ -4,8 +4,6 @@
 //! Local Weka/AgentX trace ingestion for typed agentic replay.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::fs::File;
-use std::io::{BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -51,6 +49,7 @@ enum SubagentMode {
 struct WekaFile {
     path: PathBuf,
     relative_path: String,
+    digest: blake3::Hash,
 }
 
 impl WekaImporter {
@@ -61,12 +60,16 @@ impl WekaImporter {
             bail!("Weka source {} contains no JSON files", path.display());
         }
 
-        let digest = corpus_digest(&files)?;
+        let mut corpus_hasher = blake3::Hasher::new();
+        corpus_hasher.update(b"dynamo-weka-corpus-v1\0");
         let mut block_size = None;
         let mut corpus_model = None;
         let mut preflighted = Vec::with_capacity(files.len());
         for (file_path, relative_path) in files {
-            let trace: WekaTrace = read_trace(&file_path)?;
+            let bytes = read_source_bytes(&file_path)?;
+            update_corpus_digest(&mut corpus_hasher, &relative_path, &bytes);
+            let digest = blake3::hash(&bytes);
+            let trace = parse_trace(&file_path, &bytes)?;
             validate_trace_header(&trace, &relative_path)?;
             let model = trace_request_model(&trace, &relative_path)?;
             match block_size {
@@ -92,8 +95,10 @@ impl WekaImporter {
             preflighted.push(WekaFile {
                 path: file_path,
                 relative_path,
+                digest,
             });
         }
+        let digest = corpus_hasher.finalize().to_hex().to_string();
 
         Ok(Self {
             root,
@@ -127,7 +132,17 @@ impl WekaImporter {
         let mut requests = 0;
         let mut raw_zero_outputs = 0;
         for file in &self.files {
-            let trace = read_trace(&file.path)?;
+            let bytes = read_source_bytes(&file.path)?;
+            let digest = blake3::hash(&bytes);
+            if digest != file.digest {
+                bail!(
+                    "Weka source {} changed after preflight: expected {}, found {}",
+                    file.relative_path,
+                    file.digest.to_hex(),
+                    digest.to_hex()
+                );
+            }
+            let trace = parse_trace(&file.path, &bytes)?;
             let lowered = lower_trace(&trace, &file.relative_path)?;
             raw_zero_outputs += lowered.raw_zero_outputs;
             requests += lowered.rows.len();
@@ -351,7 +366,12 @@ fn lower_trace(trace: &WekaTrace, relative_path: &str) -> Result<LoweredTrace> {
             .collect::<Vec<_>>();
         owner_candidates.sort_by_key(|(_, request)| request.source_order);
         let Some((owner_stream_index, owner_request)) = owner_candidates.pop() else {
-            continue;
+            bail!(
+                "Weka trace {} has subagent {} at outer index {} without a preceding parent request",
+                relative_path,
+                subagent.agent_id,
+                outer_index
+            );
         };
         if owner_candidates
             .last()
@@ -1205,9 +1225,12 @@ fn namespace(relative_path: &str) -> String {
     format!("weka:{}", &digest[..16])
 }
 
-fn read_trace(path: &Path) -> Result<WekaTrace> {
-    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    serde_json::from_reader(BufReader::new(file))
+fn read_source_bytes(path: &Path) -> Result<Vec<u8>> {
+    std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))
+}
+
+fn parse_trace(path: &Path, bytes: &[u8]) -> Result<WekaTrace> {
+    serde_json::from_slice(bytes)
         .with_context(|| format!("failed to parse Weka trace {}", path.display()))
 }
 
@@ -1285,26 +1308,12 @@ fn normalize_relative_path(path: &Path) -> Result<String> {
     Ok(parts.join("/"))
 }
 
-fn corpus_digest(files: &[(PathBuf, String)]) -> Result<String> {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"dynamo-weka-corpus-v1\0");
-    for (path, relative) in files {
-        let bytes = relative.as_bytes();
-        hasher.update(&(bytes.len() as u64).to_le_bytes());
-        hasher.update(bytes);
-        let mut file = File::open(path)?;
-        let len = file.metadata()?.len();
-        hasher.update(&len.to_le_bytes());
-        let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            let read = file.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-        }
-    }
-    Ok(hasher.finalize().to_hex().to_string())
+fn update_corpus_digest(hasher: &mut blake3::Hasher, relative_path: &str, bytes: &[u8]) {
+    let relative_path = relative_path.as_bytes();
+    hasher.update(&(relative_path.len() as u64).to_le_bytes());
+    hasher.update(relative_path);
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
 }
 
 #[cfg(test)]
@@ -1642,6 +1651,31 @@ mod tests {
     }
 
     #[test]
+    fn emission_rejects_source_changes_after_preflight() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("trace.json");
+        write_trace(&path, serde_json::json!([request(0.0, 4, 1, &[1])]));
+        let importer = WekaImporter::open(&path).unwrap();
+
+        write_trace(&path, serde_json::json!([request(0.0, 4, 1, &[2])]));
+        let mut emitted = Vec::new();
+        let error = importer
+            .for_each_row(|row| {
+                emitted.push(row);
+                Ok(())
+            })
+            .unwrap_err();
+
+        assert!(emitted.is_empty());
+        assert!(
+            error
+                .to_string()
+                .contains("Weka source trace.json changed after preflight"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
     fn corpus_preflight_rejects_mixed_request_models() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("trace.json");
@@ -1723,7 +1757,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("orphan subagents are unsupported"),
+                .contains("subagent orphan at outer index 0 without a preceding parent request"),
             "{error:#}"
         );
     }
