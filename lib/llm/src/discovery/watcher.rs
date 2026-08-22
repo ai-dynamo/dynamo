@@ -718,9 +718,14 @@ where
                 } else if let Some(tk) = tokenizer.clone() {
                     let PromptFormatter::OAI(formatter) =
                         prompt_formatter_from_mdc(card).context("prompt_formatter_from_mdc")?;
-                    let preprocessor =
-                        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, tk.clone())
-                            .context("OpenAIPreprocessor.new_with_parts")?;
+                    // Only chat pipelines use speculative prefill.
+                    let preprocessor = OpenAIPreprocessor::new_with_parts_and_cancel(
+                        card.clone(),
+                        formatter,
+                        tk.clone(),
+                        Some(self.drt.child_token()),
+                    )
+                    .context("OpenAIPreprocessor.new_with_parts_and_cancel")?;
                     Some(
                         routing
                             .build_pipeline::<
