@@ -49,7 +49,6 @@ class Config(DynamoRuntimeConfig, DynamoTrtllmConfig):
     # Routing this worker set advertises in its model card; None inherits the
     # frontend's configuration.
     router_advertisement: Optional[WorkerRouterConfig] = None
-    connector: list[str]  # Redeclare for mypy (inherited from DynamoRuntimeConfig)
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)

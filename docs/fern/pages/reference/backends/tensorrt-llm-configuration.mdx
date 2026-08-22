@@ -160,6 +160,14 @@ Each field is both a CLI flag and an environment variable. The CLI flag takes pr
   Environment variable: `DYN_TRTLLM_PUBLISH_KV_EVENTS`
 </ParamField>
 
+<ParamField path="--connector" type="string" default="null">
+  KV cache connector for the TensorRT-LLM engine. Accepts at most one value: `kvbm` enables the [KVBM](../../developer-guide/knowledge-base/modular-components/kvbm/kvbm-guide.md) integration, `none` disables it. When unset, no connector is configured. This flag is specific to TensorRT-LLM; other backends configure KV transfer through their own engine options.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>kvbm</Badge> <Badge intent="note" minimal>none</Badge></span>
+
+  Environment variable: `DYN_CONNECTOR`
+</ParamField>
+
 ## Engine args passthrough
 
 <ParamField path="--extra-engine-args" type="string" default='""'>

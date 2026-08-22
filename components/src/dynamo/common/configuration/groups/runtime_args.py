@@ -32,7 +32,6 @@ class DynamoRuntimeConfig(ConfigBase):
     request_plane: str
     event_plane: Optional[str] = None
     fpm_trace: bool = False
-    connector: list[str]
     enable_local_indexer: bool = True
 
     dyn_tool_call_parser: Optional[str] = None
@@ -208,14 +207,6 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="DYN_FPM_TRACE",
             default=False,
             help="Persist backend forward-pass metrics to rotating gzip JSONL trace files. Also enables the backend FPM instrumentation required to produce those records.",
-        )
-        add_argument(
-            g,
-            flag_name="--connector",
-            env_var="DYN_CONNECTOR",
-            default=[],
-            help="[Deprecated for vLLM] Use --kv-transfer-config instead. For TRT-LLM, options: nixl, lmcache, kvbm, null, none.",
-            nargs="*",
         )
 
         # Optional: tool/reasoning parsers (choices from dynamo._core when available)

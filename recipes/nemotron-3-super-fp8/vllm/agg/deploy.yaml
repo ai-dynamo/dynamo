@@ -5,7 +5,6 @@
 #
 # Dynamo 0.9.1 compatibility notes:
 #   - Change image tags from :1.1.1 to :0.9.1
-#   - Add `--connector none` to args (required in 0.9.1, rejected in 1.0)
 #   - Change --dyn-reasoning-parser from nemotron_nano to deepseek_r1
 #     (nemotron_nano reasoning parser is broken in 0.9.1)
 #   - With deepseek_r1 parser, enable_thinking: false will not work correctly
@@ -102,9 +101,6 @@ spec:
             # Fixed in vLLM 0.17.0 (vllm/vllm#34874). Use "align" until then.
             - --mamba-cache-mode
             - align
-            # --connector none is no longer needed in 1.0 (default is no connector).
-            # In 0.9.1, you must add: --connector none
-            #
             # Omit --kv-events-config to pair with --no-kv-events on the frontend
             # for approximate routing.
             - --dyn-tool-call-parser

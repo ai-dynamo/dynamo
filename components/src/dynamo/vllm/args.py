@@ -3,7 +3,6 @@
 
 import argparse
 import ipaddress
-import json
 import logging
 import os
 import socket
@@ -224,9 +223,6 @@ def update_dynamo_config_with_engine(
                 "Please ensure the file exists and the path is correct."
             )
 
-    # --connector is no longer supported for vLLM. Raise hard error if explicitly set.
-    _reject_connector_flag(dynamo_config)
-
     # If disaggregation mode is prefill, require explicit --kv-transfer-config
     has_kv_transfer_config = (
         hasattr(engine_config, "kv_transfer_config")
@@ -237,15 +233,11 @@ def update_dynamo_config_with_engine(
         and not has_kv_transfer_config
     ):
         raise ValueError(
-            "--connector is deprecated and the default is no longer nixl. "
             "When using --disaggregation-mode prefill, you must explicitly "
             "provide --kv-transfer-config. Example:\n"
             "  --kv-transfer-config "
             '\'{"kv_connector":"NixlConnector","kv_role":"kv_both"}\''
         )
-
-    # Clear connector list (no longer used for vLLM)
-    dynamo_config.connector = []  # type: ignore[assignment]
 
 
 def _unsupported_fpm_trace_role(dynamo_config: Config) -> Optional[str]:
@@ -495,98 +487,6 @@ def _uses_dynamo_connector(engine_config: AsyncEngineArgs) -> bool:
             ):
                 return True
     return False
-
-
-def _connector_to_kv_transfer_json(connectors: list[str]) -> str:
-    """Convert a legacy --connector list to the equivalent --kv-transfer-config JSON.
-
-    Used in error messages to help users migrate.
-    """
-    multi_connectors = []
-    for conn in connectors:
-        c = conn.lower()
-        if c == "lmcache":
-            multi_connectors.append(
-                {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}
-            )
-        elif c == "flexkv":
-            multi_connectors.append(
-                {"kv_connector": "FlexKVConnectorV1", "kv_role": "kv_both"}
-            )
-        elif c == "nixl":
-            multi_connectors.append(
-                {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
-            )
-        elif c == "kvbm":
-            multi_connectors.append(
-                {
-                    "kv_connector": "DynamoConnector",
-                    "kv_connector_module_path": "kvbm.vllm_integration.connector",
-                    "kv_role": "kv_both",
-                }
-            )
-
-    if len(multi_connectors) == 1:
-        return json.dumps(multi_connectors[0])
-
-    return json.dumps(
-        {
-            "kv_connector": "PdConnector",
-            "kv_role": "kv_both",
-            "kv_connector_extra_config": {"connectors": multi_connectors},
-            "kv_connector_module_path": "kvbm.vllm_integration.connector",
-        }
-    )
-
-
-def _reject_connector_flag(dynamo_config: Config) -> None:
-    """Raise ValueError if --connector was explicitly set (CLI or DYN_CONNECTOR env var).
-
-    The --connector flag is no longer supported for the vLLM backend.
-    Users must use --kv-transfer-config instead.
-    """
-    connector_list = dynamo_config.connector or []
-
-    # Check if --connector was explicitly provided via CLI or DYN_CONNECTOR env var
-    env_connector = os.environ.get("DYN_CONNECTOR")
-    explicitly_set = bool(connector_list) or (env_connector is not None)
-
-    if not explicitly_set:
-        return
-
-    # Normalize: "none"/"null" means no connector
-    normalized = [c.lower() for c in connector_list]
-    if normalized and all(c in ("none", "null") for c in normalized):
-        # --connector none/null: tell user it's no longer needed
-        raise ValueError(
-            "--connector is no longer supported for the vLLM backend. "
-            "'--connector none' is no longer needed — the default is already "
-            "no connector. Simply remove the --connector flag."
-        )
-
-    # Active connectors: show migration path
-    if normalized:
-        equiv = _connector_to_kv_transfer_json(normalized)
-        raise ValueError(
-            "--connector is no longer supported for the vLLM backend. "
-            "Use --kv-transfer-config instead.\n"
-            f"  Equivalent: --kv-transfer-config '{equiv}'"
-        )
-
-    # DYN_CONNECTOR env var set but parsed to empty list
-    if env_connector is not None:
-        env_values = [v.strip().lower() for v in env_connector.split() if v.strip()]
-        if env_values and not all(v in ("none", "null") for v in env_values):
-            equiv = _connector_to_kv_transfer_json(env_values)
-            raise ValueError(
-                "The DYN_CONNECTOR environment variable is no longer supported "
-                "for the vLLM backend. Use --kv-transfer-config instead.\n"
-                f"  Equivalent: --kv-transfer-config '{equiv}'"
-            )
-        raise ValueError(
-            "The DYN_CONNECTOR environment variable is no longer supported "
-            "for the vLLM backend. Use --kv-transfer-config instead."
-        )
 
 
 def get_host_ip() -> str:
