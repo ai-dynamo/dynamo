@@ -612,6 +612,7 @@ func TestCheckpointReconciler_Reconcile(t *testing.T) {
 		gms.EnsureServerSidecar(
 			&ckpt.Spec.Job.PodTemplateSpec.Spec,
 			&ckpt.Spec.Job.PodTemplateSpec.Spec.Containers[0],
+			true,
 		)
 		claimTemplate, toDelete, err := dra.GenerateResourceClaimTemplate(
 			ctx,

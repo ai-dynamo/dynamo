@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import os
 import sys
 
 import uvloop
@@ -42,7 +43,10 @@ async def worker(argv: list[str] | None = None):
     config = await parse_args(argv)
     dump_config(config.dynamo_args.dump_config_to, config)
 
-    if config.server_args.load_format == "gms":
+    if (
+        config.server_args.load_format == "gms"
+        and os.environ.get("DYN_GMS_USE_V1") != "true"
+    ):
         from gpu_memory_service.integrations.sglang import setup_gms
 
         override_server_args(

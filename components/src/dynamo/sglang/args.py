@@ -553,6 +553,14 @@ async def parse_args(args: list[str]) -> Config:
     video_generation_worker = dynamo_config.video_generation_worker
 
     # ServerArgs is read-only after resolution, so apply Dynamo defaults first.
+    # DYN_GMS_USE_V1 is operator-injected (env-only, like DYN_SNAPSHOT_CONTROL_DIR).
+    if os.environ.get("DYN_GMS_USE_V1") == "true":
+        if getattr(parsed_args, "load_format", None) == "gms":
+            raise ValueError(
+                "DYN_GMS_USE_V1=true cannot be combined with --load-format gms"
+            )
+        parsed_args.enable_memory_saver = True
+
     fpm_source = _forward_pass_metrics_source(dynamo_config)
     if fpm_source and not getattr(parsed_args, "enable_forward_pass_metrics", False):
         parsed_args.enable_forward_pass_metrics = True
