@@ -58,6 +58,28 @@ class NixlConnectorProtocol(KvConnectorProtocol):
         return prefill_response.kv_transfer_params
 
 
+class NixlPushConnectorProtocol(NixlConnectorProtocol):
+    """Push-based, but with the same ``kv_transfer_params`` shape as pull.
+
+    ``NixlPushConnector`` reverses who moves the KV blocks -- prefill WRITEs
+    into decode's pre-allocated memory instead of decode READing prefill's --
+    but that reversal is negotiated worker-to-worker over NIXL notifications,
+    not through the params the handler sets. So the prefill leg is byte-identical
+    to pull mode (``do_remote_decode`` is what marks this engine as the producer),
+    and the decode leg is still whatever the prefill response reports.
+
+    Inheriting rather than aliasing keeps the registry honest about which
+    connector is configured, and gives the divergence somewhere to land if
+    upstream ever splits the two shapes.
+
+    Note this is the *sequential* handoff, used when the frontend did not
+    pre-dispatch decode. It works -- the prefill worker holds its finished
+    blocks until decode's late registration arrives -- but it forfeits the
+    overlap push mode exists to buy. The overlapped path builds decode's params
+    in the router from discovery, and never consults this class.
+    """
+
+
 class MooncakeConnectorProtocol(KvConnectorProtocol):
     """Push-based: ``transfer_id`` is allocated up front and threaded
     through both sides; bootstrap address is published to the decode
@@ -109,8 +131,17 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
 # Keyed by ``KVTransferConfig.kv_connector``. One entry per connector.
 KV_CONNECTOR_PROTOCOLS: Dict[str, Type[KvConnectorProtocol]] = {
     "NixlConnector": NixlConnectorProtocol,
+    "NixlPushConnector": NixlPushConnectorProtocol,
     "MooncakeConnector": MooncakeConnectorProtocol,
 }
+
+# Connectors that transfer over NIXL and therefore need the side-channel host
+# resolved before the engine starts. Both directions of the transfer use the
+# same side channel, so push belongs here for the same reason pull does.
+NIXL_CONNECTOR_NAMES: Tuple[str, ...] = ("NixlConnector", "NixlPushConnector")
+
+# ``KVTransferConfig.kv_connector`` value that selects push mode.
+PUSH_CONNECTOR_NAME: str = "NixlPushConnector"
 
 # Wrapper connectors that compose sub-connectors under
 # ``kv_connector_extra_config["connectors"]``. ``PdConnector``
@@ -226,6 +257,36 @@ def _resolve_multi_connector_protocol(
     return KV_CONNECTOR_PROTOCOLS[name](
         _child_vllm_config(vllm_config, kv_cfg, sub_config)
     )
+
+
+def resolve_nixl_push_kv_transfer_config(vllm_config: Any) -> Optional[Any]:
+    """Return the ``KVTransferConfig`` the engine's ``NixlPushConnector`` runs
+    under, or ``None`` when the engine is not in push mode.
+
+    Deliberately *not* routed through :func:`make_kv_connector_protocol`: that
+    raises on any connector it doesn't recognize, which is right at request
+    setup but wrong here. Registration must stay silent for engines using
+    connectors that have no PD protocol at all (LMCache, FlexKV, KVBM alone).
+
+    Resolves through wrapper connectors so the returned config is the child's
+    view, carrying the ``engine_id`` a peer has to name -- the wrapper's would
+    not match the connector that owns the transfer.
+    """
+    kv_cfg = getattr(vllm_config, "kv_transfer_config", None)
+    if kv_cfg is None:
+        return None
+    if kv_cfg.kv_connector == PUSH_CONNECTOR_NAME:
+        return kv_cfg
+    if kv_cfg.kv_connector not in MULTI_CONNECTOR_WRAPPERS:
+        return None
+
+    extra = getattr(kv_cfg, "kv_connector_extra_config", None) or {}
+    if not isinstance(extra, dict):
+        return None
+    for sub in extra.get("connectors") or []:
+        if isinstance(sub, dict) and sub.get("kv_connector") == PUSH_CONNECTOR_NAME:
+            return _child_vllm_config(vllm_config, kv_cfg, sub).kv_transfer_config
+    return None
 
 
 def _child_vllm_config(
