@@ -227,15 +227,17 @@ Healthy signals:
 - frontend service exists
 
 **Pending-pod triage (mandatory before any waiting):** a pod `Pending` beyond one readiness-poll interval
-requires reading its scheduler events (`kubectl describe pod`), not the cluster's free-GPU count, and triaging
+requires reading its scheduler events (`kubectl --context "${KUBE_CONTEXT}" -n "${NAMESPACE}" describe pod <pod>`), not the cluster's free-GPU count, and triaging
 by category — each category has a different correct action:
 
 - **Untolerated taint / node-affinity or selector mismatch**: the manifest can NEVER schedule as written. This
-  is a FAILED DEPLOY, not a wait state: count it against the failed-deploy budget, fix the manifest (restore
+  is a FAILED DEPLOY, not a wait state: append it to the ledger's `failed_attempts` BEFORE redeploying (that is
+  how it counts against the failed-deploy budget), fix the manifest (restore
   recipe tolerations/selectors; a baseline expresses requirements like GPU type and count, never observed
   cluster state such as a specific node name), and redeploy.
 - **Insufficient GPU/CPU/memory on otherwise-eligible nodes**: genuine capacity contention. Waiting is
-  legitimate; record the evidence line and an explicit next-check interval in the ledger.
+  legitimate; record the evidence line and an explicit next-check interval in the ledger. Note: `allocated_at`
+  starts only when a GPU pod schedules, so contention waits cost wall clock but not GPU-hours.
 - **PVC unbound / quota / admission errors**: fix the dependency; neither waiting nor a manifest rewrite helps.
 
 Never report taint- or affinity-blocking as "capacity contention"; the events distinguish them explicitly.
@@ -335,7 +337,11 @@ Write `${DEPLOY_ROOT}/smoke_test_artifact.json`:
 
 Also write `deployment_ledger.json`, including the DGD name, Kubernetes context and namespace, assigned source DGD
 path and SHA256, final applied-manifest paths, compatibility patches and their reasons, readiness state, concise
-diagnostics, blockers, and cleanup commands.
+diagnostics, blockers, cleanup commands, and the budget-accounting fields per `run-artifacts.md`:
+`gpus_requested`, `allocated_at` (first GPU pod scheduled), `torn_down_at` (write into the RETIRED iteration's
+ledger at teardown time; null while live), and `failed_attempts` (one entry per scheduling-impossible or crashed
+attempt, recorded BEFORE the fix-and-redeploy — these count against the failed-deploy budget even when the
+iteration eventually succeeds).
 
 ## Out Of Scope
 

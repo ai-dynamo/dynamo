@@ -61,8 +61,12 @@ inherited layout is a candidate like any other, not a settled decision.
 topology or config family changes where the SLO-compliant operating region ends, and the frontier location is
 itself a lever: a family that wins at a fixed low concurrency but breaches the SLO earlier can lose the
 engagement to a family that carries more concurrency. After any change at this category, re-locate the SLO
-frontier (the highest measured operating point that passes) before comparing; the objective comparison between
-families is best-under-SLO versus best-under-SLO. Selecting a family from a fixed-point comparison alone is
+frontier (the highest measured operating point that passes) before comparing. Frontier re-location extends a
+family's own series within the workload's declared operating envelope; when the user pinned exact concurrency
+values, the frontier is defined over those values only and extending past them is an operator ask (per
+`concurrency-grid.md`). The cross-family judgment is a recommendation-level comparison of each family's own
+same-series best-under-SLO result - it is not a cross-series delta claim, and per-point comparisons still obey
+`series-boundaries.md`. Selecting a family from a fixed-point comparison alone is
 invalid when the families' frontiers differ. Consult the
 [model-sizing guides](../model-sizing/classification.md) and, for disaggregated serving,
 [rate matching](../rate-matching/matching.md).

@@ -87,7 +87,12 @@ runs/<EXP_ID>/
   stop-request validations (the latter bound to the submitted ledger SHA256).
 - `performance_findings.jsonl`: append-only performance findings produced from valid benchmark analyses.
 - `deployment_ledger.json`: assigned source DGD path and SHA256, manifests applied, readiness status, endpoint,
-  smoke-test result, concise diagnostics, blockers, and cleanup commands.
+  smoke-test result, concise diagnostics, blockers, cleanup commands, and the budget-accounting fields:
+  `gpus_requested` (GPUs the manifest requests), `allocated_at` (first GPU pod scheduled), `torn_down_at`
+  (null while live; the retiring role also writes it here, in the retired iteration's own ledger), and
+  `failed_attempts` (append-only list of scheduling-impossible or crashed deploy attempts within this
+  iteration, each with its scheduler-event or crash diagnosis — these count against the failed-deploy budget
+  even when a later attempt in the same iteration succeeds).
 - `smoke_test_artifact.json`: required `recipe-deployer` result containing the full smoke-test API request, full
   `api_response`, and success flag.
 - `benchmark_execution.json`: active plan path and SHA256, exact Kubernetes/AIPerf execution, status, retries, artifact

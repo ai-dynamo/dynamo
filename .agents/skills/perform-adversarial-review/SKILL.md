@@ -62,12 +62,13 @@ returning.
    informative experiment does not fit the remaining budget (reject when a deferred family with upside above the
    series' measured minimum detectable effect lacks that arithmetic, or when its estimate fits the remaining
    budget; return that family as the required follow-up); for a throughput-class objective the recommendation
-   carries saturation evidence or a recorded budget/operator reason ("still rising at the top of the measured
-   grid" is not terminal); and the stop-request's draft recommendation at `EXP_ROOT/final/recommended_config.md` carries its required
+   carries saturation evidence or a recorded budget/operator reason in `known_limitations.md` ("still rising at
+   the top of the measured grid" is not terminal); and the stop-request's draft recommendation at `EXP_ROOT/final/recommended_config.md` carries its required
    `Correctness status:` line (require that path as an input for stop-request validation).
 3. Verify the stop-request delta cites derived budget consumption (wall clock from `manifest.yaml` session start;
    failed-deploy count from the deployment ledgers; GPU-hours from GPU allocation time, per deployment ledger
-   apply-to-teardown span times its manifest's GPUs, summed across deployments) and that the cited sources
+   `allocated_at`-to-`torn_down_at` span — or to now, for a live deployment — times its `gpus_requested`,
+   summed across deployments) and that the cited sources
    support the arithmetic, whenever any granted budget is non-null.
 4. Append the verdict to `EXP_ROOT/analysis/challenger-reviews.jsonl` as for any review, binding it to the
    submitted ledger SHA256, and state in it that this is procedural validation, not independent adversarial
@@ -126,6 +127,9 @@ Attack the proposal from these directions:
   statistics or surprising gains treated cautiously?
 - **Redundancy**: Has the same semantic configuration already been tested, rejected, or left inconclusive under the
   same workload? If so, is there specific new evidence that makes this attempt different?
+- **Frontier**: When the proposal selects or rejects a topology/config family, is the judgment made at each
+  family's own SLO frontier per `tuning-hierarchy.md`? Reject a family selection argued from a single shared
+  operating point when the families' frontiers differ or the winner's frontier is unmeasured.
 - **Priority**: Compared with the existing backlog, does this candidate have competitive information value, likely
   impact on the primary objective, reversibility, GPU cost, and risk at the target operating region?
 - **Attribution**: Does the complete diff express one independently testable knob? For a coupled bundle, is every field

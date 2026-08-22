@@ -156,11 +156,14 @@ budget consumption (wall clock from `manifest.yaml`'s session start; failed depl
 
 For each family, record its coverage as `tested`, `ruled-out`, `not-applicable`, `untested-promising`, `deferred`,
 or `reopened-by-new-evidence`, plus its expected upside — recorded BOTH as a quantitative estimate and on the
-fixed ordinal scale the stop-request check reads, with cutoffs DERIVED per engagement rather than fixed
-percentages: `low` (below the series' measured minimum detectable effect — indistinguishable from noise),
-`medium` (above the MDE but below the engagement's stated practical-significance threshold from
-`comparison-uncertainty.md`), `high` (above that threshold). Record the two derived cutoffs in the ledger header
-so every reader scores against the same line — and the evidence for that disposition. A `ruled-out` row must
+ordinal scale with cutoffs DERIVED per engagement, recorded for readers of the ledger: `low` (below the
+primary objective series' measured minimum detectable effect — indistinguishable from noise), `medium` (above
+the MDE but below the engagement's practical-significance threshold), `high` (above that threshold). The
+practical-significance threshold is the user's stated smallest-delta-that-matters when the interview captured
+one; otherwise DEFAULT it to twice the measured MDE and say so. Record both derived cutoffs and their
+derivation in the ledger header (`mde:`, `practical_significance:` lines above the family table) — and the
+evidence for that disposition. A `deferred` row's cost-estimate-vs-remaining-budget numbers live in its
+`Evidence and reason` cell. A `ruled-out` row must
 cite a measurement, a sourced hard constraint, a confirmed incompatibility, or an explicit operator decision;
 expected upside below the minimum detectable effect is `deferred` (still visible, and stackable under a documented
 one-variable exception), never `ruled-out`. Compare all applicable families for potential benefit and information value before choosing one.
