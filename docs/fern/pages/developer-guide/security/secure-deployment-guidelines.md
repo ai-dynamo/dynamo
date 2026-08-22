@@ -46,7 +46,7 @@ inference API. The sections below explain how to satisfy each assumption.
 
 ![Dynamo trust boundary — untrusted clients reach the frontends only through an authenticating gateway; the internal communication planes and backend workers run on the trusted network and must be isolated from untrusted peers.](../../../assets/img/secure-deployment-trust-boundary.svg)
 
-The gateway is the only entry point into the cluster for untrusted clients; it forwards to the
+The gateway is the only entry point into the cluster for external clients; it forwards to the
 frontends (the external-facing inference API). Everything inside — the frontends,
 the internal communication planes, and the workers — runs on the trusted network
 and must be protected from any untrusted peer.
