@@ -109,7 +109,7 @@ async def init_decode(
     logging.debug(f"SGLang model load time: {load_time:.2f}s")
 
     if server_args.node_rank >= 1:
-        await handle_non_leader_node(engine, publisher, metrics_task)
+        await handle_non_leader_node(runtime, engine, publisher, metrics_task)
         return
 
     ready_event = asyncio.Event()
@@ -268,7 +268,7 @@ async def init_prefill(
     publisher.component_gauges.set_model_load_time(load_time)
 
     if server_args.node_rank >= 1:
-        await handle_non_leader_node(engine, publisher, metrics_task)
+        await handle_non_leader_node(runtime, engine, publisher, metrics_task)
         return
 
     try:

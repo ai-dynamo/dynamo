@@ -100,6 +100,14 @@ class FakeNetworkAddress:
         return f"tcp://{self.host}:{self.port}"
 
 
+class FakeRuntime:
+    def __init__(self):
+        self.health_calls = []
+
+    def set_health_status(self, ready):
+        self.health_calls.append(ready)
+
+
 def test_sglang_worker_group_id_matches_across_node_ranks(monkeypatch):
     monkeypatch.setattr(disagg_mod, "_network_address_cls", lambda: FakeNetworkAddress)
     node0_args = SimpleNamespace(nnodes=2, node_rank=0, dist_init_addr="10.0.0.1:2345")
@@ -261,10 +269,10 @@ async def test_handle_non_leader_node_resolves_worker_before_kv_publish(monkeypa
             return FakeClient()
 
     server_args = SimpleNamespace(
-        dp_size=2,
-        enable_dp_attention=True,
         nnodes=2,
         node_rank=1,
+        dp_size=8,
+        enable_dp_attention=True,
         dist_timeout=5,
         kv_events_config='{"endpoint": "tcp://*:5557"}',
     )
@@ -291,6 +299,7 @@ async def test_handle_non_leader_node_resolves_worker_before_kv_publish(monkeypa
     metrics_task = asyncio.create_task(asyncio.Event().wait())
     task = asyncio.create_task(
         handle_non_leader_node(
+            FakeRuntime(),
             SimpleNamespace(server_args=server_args),
             FakePublisher(),
             metrics_task,
@@ -323,6 +332,7 @@ async def test_handle_non_leader_node_skips_tp_only_kv_event_setup(monkeypatch):
         nnodes=2,
         node_rank=1,
     )
+    runtime = FakeRuntime()
     cleanup = Mock()
     publisher = SimpleNamespace(
         server_args=server_args,
@@ -336,6 +346,7 @@ async def test_handle_non_leader_node_skips_tp_only_kv_event_setup(monkeypatch):
     metrics_task = asyncio.create_task(asyncio.Event().wait())
     task = asyncio.create_task(
         handle_non_leader_node(
+            runtime,
             SimpleNamespace(server_args=server_args),
             publisher,
             metrics_task,
@@ -346,6 +357,7 @@ async def test_handle_non_leader_node_skips_tp_only_kv_event_setup(monkeypatch):
 
     resolve_leader.assert_not_awaited()
     kv_event_publisher.assert_not_called()
+    assert runtime.health_calls == [True]
     assert not task.done()
 
     task.cancel()
@@ -353,6 +365,7 @@ async def test_handle_non_leader_node_skips_tp_only_kv_event_setup(monkeypatch):
         await task
     cleanup.assert_called_once_with()
     assert metrics_task.cancelled()
+    assert runtime.health_calls == [True, False]
 
 
 @pytest.mark.asyncio
@@ -369,7 +382,13 @@ async def test_handle_non_leader_node_skips_kv_publish_without_resolved_worker(
 
     class FakePublisher:
         generate_endpoint = object()
-        server_args = SimpleNamespace(kv_events_config='{"endpoint": "tcp://*:5557"}')
+        server_args = SimpleNamespace(
+            nnodes=2,
+            node_rank=1,
+            dp_size=8,
+            enable_dp_attention=True,
+            kv_events_config='{"endpoint": "tcp://*:5557"}',
+        )
         dynamo_args = SimpleNamespace(use_kv_events=True)
         kv_worker_id = None
 
@@ -387,6 +406,7 @@ async def test_handle_non_leader_node_skips_kv_publish_without_resolved_worker(
     metrics_task = asyncio.create_task(asyncio.Event().wait())
     task = asyncio.create_task(
         handle_non_leader_node(
+            FakeRuntime(),
             SimpleNamespace(server_args=SimpleNamespace(node_rank=1)),
             FakePublisher(),
             metrics_task,
@@ -415,7 +435,13 @@ async def test_handle_non_leader_node_cleans_up_when_resolution_fails(monkeypatc
 
     class FakePublisher:
         generate_endpoint = object()
-        server_args = SimpleNamespace(kv_events_config='{"endpoint": "tcp://*:5557"}')
+        server_args = SimpleNamespace(
+            nnodes=2,
+            node_rank=1,
+            dp_size=8,
+            enable_dp_attention=True,
+            kv_events_config='{"endpoint": "tcp://*:5557"}',
+        )
         dynamo_args = SimpleNamespace(use_kv_events=True)
 
         def cleanup(self):
@@ -430,6 +456,7 @@ async def test_handle_non_leader_node_cleans_up_when_resolution_fails(monkeypatc
 
     with pytest.raises(RuntimeError, match="resolution failed"):
         await handle_non_leader_node(
+            FakeRuntime(),
             SimpleNamespace(server_args=SimpleNamespace(node_rank=1)),
             FakePublisher(),
             metrics_task,
@@ -437,6 +464,134 @@ async def test_handle_non_leader_node_cleans_up_when_resolution_fails(monkeypatc
 
     assert cleanup_called.is_set()
     assert metrics_task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_handle_non_leader_node_marks_ready_until_cancel(
+    monkeypatch,
+):
+    entered = asyncio.Event()
+    runtime = FakeRuntime()
+
+    async def wait_forever(generate_endpoint, server_args):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        publisher_mod, "_resolve_multinode_leader_worker_id", wait_forever
+    )
+    metrics_task = asyncio.create_task(asyncio.Event().wait())
+    task = asyncio.create_task(
+        handle_non_leader_node(
+            runtime,
+            SimpleNamespace(server_args=SimpleNamespace(node_rank=1)),
+            SimpleNamespace(
+                generate_endpoint=object(),
+                server_args=SimpleNamespace(
+                    nnodes=2,
+                    node_rank=1,
+                    dp_size=8,
+                    enable_dp_attention=True,
+                    kv_events_config=None,
+                ),
+                dynamo_args=SimpleNamespace(use_kv_events=True),
+                cleanup=lambda: None,
+            ),
+            metrics_task,
+        )
+    )
+
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    assert runtime.health_calls == [True]
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert runtime.health_calls == [True, False]
+    metrics_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await metrics_task
+
+
+@pytest.mark.asyncio
+async def test_handle_non_leader_node_clears_ready_on_error(
+    monkeypatch,
+):
+    runtime = FakeRuntime()
+
+    async def fail(generate_endpoint, server_args):
+        raise RuntimeError("non-leader failed")
+
+    monkeypatch.setattr(publisher_mod, "_resolve_multinode_leader_worker_id", fail)
+    metrics_task = asyncio.create_task(asyncio.Event().wait())
+
+    with pytest.raises(RuntimeError, match="non-leader failed"):
+        await handle_non_leader_node(
+            runtime,
+            SimpleNamespace(server_args=SimpleNamespace(node_rank=1)),
+            SimpleNamespace(
+                generate_endpoint=object(),
+                server_args=SimpleNamespace(
+                    nnodes=2,
+                    node_rank=1,
+                    dp_size=8,
+                    enable_dp_attention=True,
+                    kv_events_config=None,
+                ),
+                dynamo_args=SimpleNamespace(use_kv_events=True),
+                cleanup=lambda: None,
+            ),
+            metrics_task,
+        )
+
+    assert runtime.health_calls == [True, False]
+    metrics_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await metrics_task
+
+
+@pytest.mark.asyncio
+async def test_handle_non_leader_node_cleans_up_when_metrics_task_fails_on_cancel():
+    runtime = FakeRuntime()
+    cleanup_called = asyncio.Event()
+
+    async def fail_on_cancel():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError as exc:
+            raise RuntimeError("metrics failed during shutdown") from exc
+
+    publisher = SimpleNamespace(
+        generate_endpoint=object(),
+        server_args=SimpleNamespace(
+            nnodes=2,
+            node_rank=1,
+            dp_size=1,
+            enable_dp_attention=False,
+            kv_events_config=None,
+        ),
+        dynamo_args=SimpleNamespace(use_kv_events=True),
+        cleanup=cleanup_called.set,
+    )
+    metrics_task = asyncio.create_task(fail_on_cancel())
+    task = asyncio.create_task(
+        handle_non_leader_node(
+            runtime,
+            SimpleNamespace(server_args=SimpleNamespace(node_rank=1)),
+            publisher,
+            metrics_task,
+        )
+    )
+
+    await asyncio.sleep(0)
+    assert runtime.health_calls == [True]
+
+    task.cancel()
+    with pytest.raises(RuntimeError, match="metrics failed during shutdown"):
+        await task
+
+    assert cleanup_called.is_set()
+    assert runtime.health_calls == [True, False]
 
 
 def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):

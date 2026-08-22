@@ -565,6 +565,7 @@ async def setup_sgl_metrics(
 
 
 async def handle_non_leader_node(
+    runtime,
     engine: sgl.Engine,
     publisher: DynamoSglangPublisher,
     metrics_task: asyncio.Task,
@@ -574,15 +575,24 @@ async def handle_non_leader_node(
 
     Non-leader nodes run scheduler processes but don't handle requests directly.
     They still need:
-    - KV event publishing (subscribe to local DP ranks, forward to NATS)
+    - KV event publishing for local DP-attention ranks
     - Metrics collection from local schedulers
     - Prometheus metrics exposure
+
+    Native SGLang starts the non-zero-rank dummy health server only after
+    scheduler initialization reports ready. Dynamo disables that dummy server via
+    ``SGLANG_BLOCK_NONZERO_RANK_CHILDREN=0`` so the Engine constructor can
+    return; reaching this function means that same scheduler-ready barrier has
+    already passed. Mark the Dynamo system health ready here to preserve the
+    native rank-local readiness contract.
     """
     logging.info(
-        f"Non-leader node detected (node_rank={engine.server_args.node_rank}). "
-        "Running with metrics and KV event publishing for local DP ranks."
+        "Non-leader node detected (node_rank=%s). "
+        "Running rank-local readiness and metrics.",
+        engine.server_args.node_rank,
     )
 
+    runtime.set_health_status(True)
     try:
         if publisher.dynamo_args.use_kv_events and publishes_kv_events(
             publisher.server_args
@@ -597,9 +607,13 @@ async def handle_non_leader_node(
 
         await asyncio.Event().wait()
     finally:
-        metrics_task.cancel()
         try:
-            await metrics_task
-        except asyncio.CancelledError:
-            pass
-        publisher.cleanup()
+            metrics_task.cancel()
+            try:
+                await metrics_task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                publisher.cleanup()
+        finally:
+            runtime.set_health_status(False)

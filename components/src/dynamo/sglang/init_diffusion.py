@@ -74,7 +74,7 @@ async def init_llm_diffusion(
     assert publisher is not None, "setup_sgl_metrics returned None on chat path"
 
     if server_args.node_rank >= 1:
-        await handle_non_leader_node(engine, publisher, metrics_task)
+        await handle_non_leader_node(runtime, engine, publisher, metrics_task)
         return
 
     ready_event = asyncio.Event()
