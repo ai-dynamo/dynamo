@@ -1,0 +1,89 @@
+# Dynamo admin re-run.
+#
+# PROVIDED workflow. An admin/maintainer triggers it with a `/rerun` comment on a PR
+# (or via workflow_dispatch) to re-execute the FULL Dynamo Review pipeline on that PR.
+# Maintained centrally by the Dynamo team — please don't edit this file.
+#
+# HOW IT RE-TRIGGERS — close → reopen (do not "simplify" to a run re-run):
+#  * The Dynamo Review pointer declares `pull_request_target: types: [..., reopened, ...]`,
+#    so reopening fires a FRESH run, which resolves the reusable workflow `@main` at run
+#    creation — i.e. the CURRENT pipeline. GitHub pins `re-run` attempts to the reusable
+#    workflow SHA of the original run, which would re-execute the OLD pipeline.
+#  * REQUIRES a non-GITHUB_TOKEN credential: events created with the workflow's own
+#    GITHUB_TOKEN do not trigger other workflows (anti-recursion). Set the org secret
+#    DYNAMO_RERUN_TOKEN (PAT or App token with pull_requests:write on task repos).
+
+name: Dynamo Rerun
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to re-run the Dynamo Review on"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  rerun:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check trigger + admin access
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          ISSUE_PR_URL: ${{ github.event.issue.pull_request.html_url }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_USER: ${{ github.event.comment.user.login }}
+          REPO: ${{ github.repository }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          SHOULD=false; PRN=""
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            SHOULD=true; PRN="$INPUT_PR_NUMBER"
+          elif [ -n "$ISSUE_PR_URL" ] && [[ "$COMMENT_BODY" =~ (^|[[:space:]])/rerun([[:space:]]|$) ]]; then
+            # /rerun re-executes the whole pipeline (real LLM spend); require write/admin.
+            PERMISSION=$(gh api "repos/${REPO}/collaborators/${COMMENT_USER}/permission" --jq '.permission' 2>/dev/null || echo "none")
+            if [[ "$PERMISSION" == "admin" || "$PERMISSION" == "write" ]]; then
+              SHOULD=true; PRN="$ISSUE_NUMBER"
+            else
+              echo "User ${COMMENT_USER} lacks write access"
+            fi
+          fi
+          echo "should_run=$SHOULD" >> $GITHUB_OUTPUT
+          echo "pr_number=$PRN" >> $GITHUB_OUTPUT
+
+      - name: Acknowledge the /rerun comment (🔁)
+        if: steps.check.outputs.should_run == 'true' && github.event.comment.id != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: gh api "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" -f content='rocket' || true
+
+      - name: Close + reopen the PR (fires a fresh Dynamo Review at @main)
+        if: steps.check.outputs.should_run == 'true'
+        env:
+          # MUST be a PAT/App token: GITHUB_TOKEN-created events do not trigger workflows.
+          GH_TOKEN: ${{ secrets.DYNAMO_RERUN_TOKEN }}
+          REPO: ${{ github.repository }}
+          PRN: ${{ steps.check.outputs.pr_number }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::DYNAMO_RERUN_TOKEN org secret is not set (PAT/App with pull_requests:write). The close/reopen would not trigger workflows with GITHUB_TOKEN."
+            exit 1
+          fi
+          STATE=$(gh pr view "$PRN" -R "$REPO" --json state --jq .state)
+          [ "$STATE" = "OPEN" ] || { echo "::error::PR #$PRN is $STATE — only OPEN PRs can be re-run."; exit 1; }
+          gh pr close "$PRN" -R "$REPO"
+          sleep 2
+          gh pr reopen "$PRN" -R "$REPO"
+          gh pr comment "$PRN" -R "$REPO" -b "🔁 Admin re-run: PR cycled to re-execute the full Dynamo Review under the current pipeline. No action needed unless a check fails." || true
+          echo "Fresh Dynamo Review triggered on PR #$PRN."
