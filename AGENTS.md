@@ -31,9 +31,9 @@ to it — edit only the canonical copy. Reach for the right group first:
 **For developing Dynamo:**
 
 - `debug-session` — structured bug investigation with a persistent worklog
-- `dep-create` — create or update Dynamo Enhancement Proposals as GitHub issues
-- `dep-status` — check DEP status and list DEPs by lifecycle state or area
-- `dep-update` — advance DEP lifecycle: triage, PIC assignment, review, approval
+- `dep-create` — draft a Dynamo Enhancement Proposal and open it for review
+- `dep-status` — report where DEPs stand, by lifecycle state or area
+- `dep-update` — advance a DEP: Sponsor, review, approval, deferred and superseded
 - `dynamo-clone-hotpath-audit` — audit Rust hot-path `.clone()` calls
 - `dynamo-docs` — Fern docs-site content per the style guide
 - `dynamo-frontend-benchmark` — benchmark/profile the frontend against mock workers
@@ -216,11 +216,19 @@ cargo fmt --all && cargo clippy --workspace
 - Full CI on a PR runs only after a maintainer comments `/ok to test <sha>` with the short
   SHA of the latest commit; copy-pr-bot then creates the `pull-request/N` branch that
   triggers it. Fix failures before requesting human review.
-- Architecture changes require a Dynamo Enhancement Proposal (DEP), filed as a GitHub
-  issue on `ai-dynamo/dynamo` with `dep:*` labels (the `dep-create` skill automates this).
+- Architecture changes require a Dynamo Enhancement Proposal (DEP), which is two artifacts.
+  The design is a markdown file under `deps/` in `ai-dynamo/enhancements`, reviewed as a
+  pull request, reviewed by the Maintainers of every area it touches, and approved by a
+  two-thirds vote of the Core Maintainers. A tracking issue on
+  this repository carries the `dep:*` state label and the area that decides who is assigned,
+  and links that pull request. Keep the design in the file, not in the issue. Every DEP needs
+  a sponsoring SIG, acting through a Co-Lead or an area Maintainer.
+- Pull requests implementing an approved DEP link the DEP and skip the Contribution Request.
+  They still need their code owners and two approvals.
 
-See [`docs/contribution-guide.md`](docs/fern/pages/community/contributing/overview.md) for the full workflow
-(issue sizing, CODEOWNERS, review process).
+See [`docs/fern/pages/community/contributing/overview.md`](docs/fern/pages/community/contributing/overview.md)
+for the full workflow (issue sizing, CODEOWNERS, review process), and
+[`GOVERNANCE.md`](GOVERNANCE.md) for the contributor ladder, decision-making, and SIGs.
 
 ## Docs, Examples, Recipes
 

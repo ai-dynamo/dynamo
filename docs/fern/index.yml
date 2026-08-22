@@ -1247,6 +1247,15 @@ navigation:
       - page: Community
         icon: users
         path: pages/community/community.mdx
+      - section: Governance
+        icon: scale-balanced
+        contents:
+          - page: How Dynamo Is Governed
+            path: pages/community/governance/overview.md
+            slug: governance
+          - page: Special Interest Groups
+            path: pages/community/governance/sigs.md
+            slug: sigs
       - section: Contributing
         icon: code-pull-request
         contents:
@@ -1257,6 +1266,9 @@ navigation:
             path: pages/community/contributing/getting-started.mdx
           - page: Contribution Flow
             path: pages/community/contributing/contribution-flow.mdx
+          - page: Enhancement Proposals
+            path: pages/community/contributing/enhancement-proposals.md
+            slug: enhancement-proposals
           - page: Code Quality
             path: pages/community/contributing/code-quality.md
           - page: DCO and Licensing

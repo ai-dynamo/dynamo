@@ -12,6 +12,7 @@
 #   backend-vllm     @ai-dynamo/dynamo-backend-vllm-codeowners
 #   diffusion        @ai-dynamo/dynamo-diffusion-codeowners
 #   docs             @ai-dynamo/dynamo-docs-codeowners
+#   efa              @ai-dynamo/dynamo-efa-codeowners
 #   epp              @ai-dynamo/dynamo-epp-codeowners
 #   fault-tolerance  @ai-dynamo/dynamo-fault-tolerance-codeowners
 #   frontend         @ai-dynamo/dynamo-frontend-codeowners
@@ -38,6 +39,7 @@
 #   @ai-dynamo/dynamo-backend-vllm-codeowners
 #   @ai-dynamo/dynamo-diffusion-codeowners
 #   @ai-dynamo/dynamo-docs-codeowners
+#   @ai-dynamo/dynamo-efa-codeowners
 #   @ai-dynamo/dynamo-epp-codeowners
 #   @ai-dynamo/dynamo-fault-tolerance-codeowners
 #   @ai-dynamo/dynamo-frontend-codeowners
@@ -305,12 +307,15 @@
 /DCO.md                                                                      @ai-dynamo/dynamo-process-codeowners
 /skills                                                                      @ai-dynamo/dynamo-process-codeowners
 /LICENSE                                                                     @ai-dynamo/dynamo-process-codeowners
+/SIGS.md                                                                     @ai-dynamo/dynamo-process-codeowners
 /.agents/                                                                    @ai-dynamo/dynamo-process-codeowners
 /.claude/                                                                    @ai-dynamo/dynamo-process-codeowners
 /AGENTS.md                                                                   @ai-dynamo/dynamo-process-codeowners
 /CLAUDE.md                                                                   @ai-dynamo/dynamo-process-codeowners
 /CODEOWNERS                                                                  @ai-dynamo/dynamo-process-codeowners
 /SECURITY.md                                                                 @ai-dynamo/dynamo-process-codeowners
+/GOVERNANCE.md                                                               @ai-dynamo/dynamo-process-codeowners
+/MAINTAINERS.md                                                              @ai-dynamo/dynamo-process-codeowners
 /ATTRIBUTIONS.md                                                             @ai-dynamo/dynamo-process-codeowners
 /CONTRIBUTING.md                                                             @ai-dynamo/dynamo-process-codeowners
 /CONTRIBUTORS.md                                                             @ai-dynamo/dynamo-process-codeowners
@@ -456,6 +461,9 @@
 # === xpu  (@ai-dynamo/dynamo-xpu-codeowners) ===
 /dev/docker-observability-xpu.yml                                            @ai-dynamo/dynamo-xpu-codeowners
 
+# === efa  (@ai-dynamo/dynamo-efa-codeowners) ===
+/container/Dockerfile.aws                                                    @ai-dynamo/dynamo-efa-codeowners
+
 # --- File-type ownership defaults: unanchored patterns at any depth. ---
 # Explicit path overrides and shared rules below take precedence.
 *Dockerfile*                                                                 @ai-dynamo/dynamo-ops-codeowners
@@ -490,6 +498,7 @@
 /lib/llm/src/kv_router.rs                                                    @ai-dynamo/dynamo-router-codeowners
 /lib/llm/src/protocols.rs                                                    @ai-dynamo/dynamo-frontend-codeowners
 /lib/runtime/src/metrics/                                                    @ai-dynamo/dynamo-observability-codeowners
+/examples/deployments/EKS/                                                   @ai-dynamo/dynamo-efa-codeowners
 /lib/llm/src/entrypoint.rs                                                   @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/grpc/service/                                                   @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/http/service/                                                   @ai-dynamo/dynamo-frontend-codeowners
@@ -538,6 +547,7 @@
 /lib/llm/src/block_manager/pool.rs                                           @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/preprocessor/media.rs                                           @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/common/http/                                          @ai-dynamo/dynamo-frontend-codeowners
+/container/templates/aws.Dockerfile                                          @ai-dynamo/dynamo-efa-codeowners
 /lib/llm/src/block_manager/block.rs                                          @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager/offload/                                          @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager/state.rs                                          @ai-dynamo/dynamo-kv-memory-codeowners
@@ -595,6 +605,7 @@
 /lib/bench/kv_router/                                                        @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners
 /dev/docker-compose.yml                                                      @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/nvtx.rs                                                     @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-performance-codeowners
+/container/Dockerfile.aws                                                    @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-efa-codeowners
 /tests/gpu_memory_service/                                                   @ai-dynamo/dynamo-gms-codeowners
 /lib/llm/src/request_trace/                                                  @ai-dynamo/dynamo-agents-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/mocker/servers/sglang/                                                  @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
