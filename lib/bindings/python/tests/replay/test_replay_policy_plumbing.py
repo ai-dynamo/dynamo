@@ -1,17 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import importlib
 import json
 from types import SimpleNamespace
 
-import pytest
-
 import dynamo.replay.api as replay_api
+import pytest
 from dynamo.llm import KvRouterConfig
-from dynamo.replay import ReplayReport
-
-from .replay_utils import _require_aisimulate_distribution
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -42,40 +37,6 @@ def test_replay_api_routes_trace_file_lists(monkeypatch):
         "request-trace.0002.jsonl.gz",
     ]
     assert api_calls[1][1]["trace_format"] == "dynamo"
-
-
-@pytest.mark.planner
-def test_replay_cli_routes_trace_file_lists(monkeypatch):
-    _require_aisimulate_distribution()
-    replay_main = importlib.import_module("dynamo.replay.main")
-    cli_calls = []
-    monkeypatch.setattr(
-        replay_main,
-        "run_trace_replay",
-        lambda trace_files, **kwargs: cli_calls.append((trace_files, kwargs))
-        or ReplayReport(summary={}, per_request=None, coverage={}, planner=None),
-    )
-    monkeypatch.setattr(replay_main, "format_report_table", lambda report: "")
-    monkeypatch.setattr(
-        replay_main, "write_report_json", lambda report, path: "report.json"
-    )
-
-    assert (
-        replay_main.main(
-            [
-                "request-trace.0001.jsonl.gz",
-                "request-trace.0002.jsonl.gz",
-                "--trace-format",
-                "dynamo",
-            ]
-        )
-        == 0
-    )
-    assert cli_calls[0][0] == [
-        "request-trace.0001.jsonl.gz",
-        "request-trace.0002.jsonl.gz",
-    ]
-    assert cli_calls[0][1]["trace_block_size"] is None
 
 
 def test_planner_replay_rejects_empty_dynamo_trace_list():

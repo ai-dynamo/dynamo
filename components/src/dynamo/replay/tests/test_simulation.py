@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # Optional-dependency preflight must run before the simulation imports.
-# ruff: noqa: E402
 
 """Tests for the transitional Dynamo Sweeper replay runner."""
 
@@ -22,7 +21,6 @@ from aisimulate.sweeper.replay import (
     ReplayOutputRequirements,
     ReplaySpec,
 )
-
 from dynamo.replay import PlannerReplayDetails, ReplayReport, simulation
 
 pytestmark = [
@@ -298,6 +296,33 @@ def test_synthetic_request_rate_must_be_positive(request_rate: float) -> None:
 
     with pytest.raises(ValueError, match="positive request_rate"):
         simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+
+
+def test_direct_predict_resolves_kv_capacity_fraction(monkeypatch) -> None:
+    class CapacityArgs:
+        num_gpu_blocks = 100
+        block_size = 16
+        dp_size = 1
+
+    monkeypatch.setattr(
+        simulation.DynamoReplayRunner,
+        "_engine_args",
+        staticmethod(lambda _payload: CapacityArgs()),
+    )
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={
+            "isl": 100,
+            "osl": 20,
+            "kv_load_ratio": 0.5,
+            "num_request_ratio": 10.0,
+        },
+        goal={"target": "throughput"},
+    )
+
+    runner = simulation.DynamoReplayRunnerFactory().create(0)
+    assert runner._effective_in_flight_cap(spec) == 21
+    assert runner._synthetic_kwargs(spec)["request_count"] == 210
 
 
 def test_factory_preserves_trtllm_disagg_gate() -> None:

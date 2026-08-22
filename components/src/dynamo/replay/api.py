@@ -7,13 +7,12 @@ import json
 import os
 from typing import Any, Literal, TypedDict, overload
 
-from typing_extensions import Unpack
-
 from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_mocker_synthetic_trace_replay,
 )
 from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
 from dynamo.replay.report import PlannerReplayDetails, ReplayReport
+from typing_extensions import Unpack
 
 
 class _CommonReplayOptions(TypedDict, total=False):
@@ -64,7 +63,7 @@ def _normalize_trace_files(trace_files):
 
 
 def _planner_config_arg(planner_config):
-    """Normalize a planner config to the JSON-string form ``_prepare_planner_replay``
+    """Normalize a planner config to the JSON form ``prepare_planner_replay``
     expects: a dict is json-encoded; a str (path or inline JSON) passes through."""
     if isinstance(planner_config, dict):
         return json.dumps(planner_config)
@@ -189,12 +188,15 @@ def run_trace_replay(
             raise ValueError(
                 "planner_config replay only supports replay_mode='offline'"
             )
-        if trace_format not in ("mooncake", "dynamo"):
+        if trace_format not in (
+            "mooncake",
+            "applied_compute_agentic",
+            "dynamo",
+        ):
             raise ValueError(
-                "planner_config replay only supports trace_format='mooncake' or 'dynamo'"
+                "planner_config replay only supports trace_format='mooncake', "
+                "'applied_compute_agentic', or 'dynamo'"
             )
-        if max_sim_time_ms is not None:
-            raise ValueError("max_sim_time_ms is not supported with planner_config")
         if trace_format != "dynamo" and len(trace_files) != 1:
             raise ValueError(
                 f"planner_config replay with trace_format={trace_format!r} "
@@ -205,9 +207,9 @@ def run_trace_replay(
                 "planner_config replay with trace_format='dynamo' "
                 "requires at least one trace file"
             )
-        from dynamo.replay.main import _planner_replay_adapter
+        from dynamo.replay.planner import planner_replay_adapter
 
-        adapter_scope = _planner_replay_adapter(
+        adapter_scope = planner_replay_adapter(
             extra_engine_args=extra_engine_args,
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,
@@ -339,9 +341,9 @@ def run_synthetic_trace_replay(
             raise ValueError(
                 "planner_config replay only supports replay_mode='offline'"
             )
-        from dynamo.replay.main import _planner_replay_adapter
+        from dynamo.replay.planner import planner_replay_adapter
 
-        adapter_scope = _planner_replay_adapter(
+        adapter_scope = planner_replay_adapter(
             extra_engine_args=extra_engine_args,
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,

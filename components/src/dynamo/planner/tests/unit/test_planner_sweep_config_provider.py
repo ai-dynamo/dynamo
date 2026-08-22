@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # Optional-dependency preflight must run before the simulation imports.
-# ruff: noqa: E402
 
 """Unit tests for the Planner-owned Sweeper sweep configuration provider."""
 
@@ -17,10 +16,9 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
+import dynamo.planner.simulation.provider as planner_provider_module
 from aisimulate.sweeper.provider import CandidateContext, SweepContext
 from aisimulate.sweeper.replay import BackendDeploymentSpec
-
-import dynamo.planner.simulation.provider as planner_provider_module
 from dynamo.planner.simulation import create_provider
 from dynamo.planner.simulation.load_predictor import LoadPredictorResult
 
@@ -550,3 +548,56 @@ def test_policy_pruning_diagnostics_remain_visible(monkeypatch) -> None:
 
     assert len(messages) == 1
     assert "dropped 1 throughput-scaling policy" in messages[0]
+
+
+def test_public_policy_and_min_workers_are_independent_dimensions() -> None:
+    adapter = create_provider()
+    plan = adapter.generate_search_space(
+        {
+            "policy": {"choices": ["disabled", "enabled"]},
+            "scaling_policy": {"preset": ["load_180_5"]},
+            "fpm_sampling": {"preset": ["default"]},
+            "load_sensitivity": {"preset": ["default"]},
+            "min_workers": {"choices": [0, 2]},
+        },
+        _sweep_context(target="throughput"),
+    )
+    choices = plan.fragment.choices_by_branch["agg"]
+    assert choices["policy"] == ["disabled", "enabled"]
+    assert choices["min_workers"] == [0, 2]
+
+    common_selection = {
+        "scaling_policy": "load_180_5",
+        "fpm_sampling": "default",
+        "load_sensitivity": "default",
+        "min_workers": 2,
+    }
+    disabled = adapter.materialize_replay(
+        plan,
+        {**common_selection, "policy": "disabled"},
+        _candidate_context(),
+    )
+    enabled = adapter.materialize_replay(
+        plan,
+        {**common_selection, "policy": "enabled"},
+        _candidate_context(),
+    )
+
+    assert disabled.config == {"policy": "disabled"}
+    assert disabled.runtime_hooks == ()
+    assert enabled.config["policy"] == "enabled"
+    assert enabled.config["min_workers"] == 2
+    assert enabled.config["max_num_gpus"] == 8
+    assert enabled.runtime_hooks[0].config["planner_config"]["min_endpoint"] == 2
+
+
+def test_public_custom_predictor_preset_requires_every_knob() -> None:
+    with pytest.raises(ValueError, match="missing required keys"):
+        planner_provider_module.PlannerSearchSpace.model_validate(
+            {
+                "policy": "enabled",
+                "load_predictor": {
+                    "preset": [{"load_predictor": "arima"}],
+                },
+            }
+        )

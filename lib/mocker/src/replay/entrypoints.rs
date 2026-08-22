@@ -17,7 +17,7 @@ use super::{
     ReplayWorkerArtifacts, SlaThresholds, TraceSimulationReport,
 };
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
-use crate::loadgen::{AgenticTrace, Trace, TraceFileFormat};
+use crate::loadgen::{AgenticTrace, Trace, TraceFileFormat, load_agentic_mooncake};
 use crate::scheduler::RouterEventVisibility;
 
 /// Replay artifact KV-event timestamp visibility override.
@@ -53,6 +53,9 @@ fn load_trace_from_file(
         TraceFileFormat::AgenticMooncake => {
             bail!("agentic_mooncake trace format must be loaded as an agentic workload")
         }
+        TraceFileFormat::Weka => {
+            bail!("Weka trace format must be loaded as an agentic workload")
+        }
         TraceFileFormat::AppliedComputeAgentic => Trace::from_applied_compute_agentic(
             trace_path,
             trace_block_size,
@@ -62,6 +65,10 @@ fn load_trace_from_file(
         TraceFileFormat::Dynamo => {
             bail!("Dynamo request traces must be loaded through the multi-file replay path")
         }
+        other => bail!(
+            "trace format '{}' is not supported by Dynamo replay",
+            other.as_str()
+        ),
     }
 }
 
@@ -70,7 +77,7 @@ fn load_agentic_trace_from_file(
     trace_block_size: usize,
     arrival_speedup_ratio: f64,
 ) -> Result<AgenticTrace> {
-    AgenticTrace::from_agentic_mooncake(trace_path, trace_block_size)?
+    load_agentic_mooncake(trace_path, trace_block_size)?
         .normalize_starts()
         .speed_up_timing(arrival_speedup_ratio)
 }
@@ -2491,11 +2498,27 @@ mod tests {
             file,
             "{}",
             serde_json::json!({
+                "schema": "dynamo.agentic_mooncake",
+                "version": 2,
+                "block_size": 4,
+                "hash_id_scope": "local",
+                "source": {"format": "test", "digest": "fixture"}
+            })
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
                 "request_id": "r1",
-                "timestamp": 100.0,
+                "play_id": "play",
+                "session_id": "root",
+                "model": "model",
+                "not_before_ms": 100.0,
                 "input_length": 4,
                 "output_length": 1,
-                "hash_ids": [1]
+                "hash_ids": [1],
+                "dependencies": []
             })
         )
         .unwrap();
@@ -2504,22 +2527,28 @@ mod tests {
             "{}",
             serde_json::json!({
                 "request_id": "r2",
-                "timestamp": 130.0,
-                "delay": 10.0,
-                "tool_wait_ms": 6.0,
-                "wait_for": ["r1"],
+                "play_id": "play",
+                "session_id": "root",
+                "model": "model",
+                "not_before_ms": 130.0,
                 "input_length": 4,
                 "output_length": 1,
-                "hash_ids": [1]
+                "hash_ids": [1],
+                "dependencies": [{
+                    "request_id": "r1",
+                    "trigger": "completion",
+                    "delay_ms": 16.0,
+                    "relation": "sequence"
+                }]
             })
         )
         .unwrap();
 
         let trace = load_agentic_trace_from_file(file.path(), 4, 2.0).unwrap();
 
-        assert_eq!(trace.turns[0].first_ready_timestamp_ms, Some(0.0));
-        assert_eq!(trace.turns[1].first_ready_timestamp_ms, Some(15.0));
-        assert_eq!(trace.turns[1].delay_after_dependencies_ms, 8.0);
+        assert_eq!(trace.nodes()[0].not_before_ms(), 0.0);
+        assert_eq!(trace.nodes()[1].not_before_ms(), 15.0);
+        assert_eq!(trace.nodes()[1].dependencies()[0].delay_ms, 8.0);
 
         let report = simulate_trace_live_file_with_router_mode_and_format_and_options(
             replay_test_args(),
