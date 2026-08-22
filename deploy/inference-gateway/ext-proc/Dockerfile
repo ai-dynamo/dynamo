@@ -68,6 +68,7 @@ COPY --from=dynamo examples/router/custom-policy-example/ examples/router/custom
 
 # Copy the ext-proc crate itself
 COPY --from=dynamo deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
+COPY --from=dynamo deploy/inference-gateway/sidecar/ deploy/inference-gateway/sidecar/
 
 # Build the binary
 RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETARCH} \

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::Router;
@@ -51,11 +52,15 @@ pub struct SidecarState {
 impl SidecarState {
     pub fn new(
         decode_engine_url: Url,
+        connect_timeout: Duration,
+        read_timeout: Duration,
         adapter: Arc<dyn PdAdapter>,
     ) -> Result<Self, reqwest::Error> {
         Ok(Self {
             client: Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(connect_timeout)
+                .read_timeout(read_timeout)
                 .build()?,
             decode_engine_url,
             adapter,
@@ -197,7 +202,13 @@ mod tests {
     }
 
     fn test_state(adapter: Arc<dyn PdAdapter>, decode_engine_url: reqwest::Url) -> SidecarState {
-        SidecarState::new(decode_engine_url, adapter).unwrap()
+        SidecarState::new(
+            decode_engine_url,
+            Duration::from_secs(10),
+            Duration::from_secs(300),
+            adapter,
+        )
+        .unwrap()
     }
 
     #[tokio::test]

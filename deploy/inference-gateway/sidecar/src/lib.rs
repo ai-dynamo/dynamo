@@ -22,7 +22,12 @@ pub async fn run(config: Config, adapter: Arc<dyn PdAdapter>) -> Result<()> {
     tracing::info!(listen_addr = %config.listen_addr, "Starting EPP decode sidecar");
     axum::serve(
         listener,
-        router(SidecarState::new(config.decode_engine_url, adapter)?),
+        router(SidecarState::new(
+            config.decode_engine_url,
+            config.connect_timeout,
+            config.read_timeout,
+            adapter,
+        )?),
     )
     .with_graceful_shutdown(shutdown_signal())
     .await?;

@@ -1087,6 +1087,8 @@ impl EndpointPicker for Router {
             endpoint,
             fallbacks: vec![],
             headers,
+            // TODO(epp-prefill-endpoint): #13407 will resolve the selected prefill
+            // worker to a callable endpoint for authoritative sidecar injection.
             selected_prefill_endpoint: None,
             token_ids: Some(tokens),
             reservation_id: None,

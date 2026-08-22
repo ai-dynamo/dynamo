@@ -39,7 +39,7 @@ const SYSTEM_OWNED_HEADERS: &[&str] = &[
     "x-gateway-destination-endpoint-subset",
     "x-gateway-destination-endpoint",
     "x-gateway-destination-endpoint-served",
-    "x-prefiller-host-port",
+    metadata::PREFILLER_HOST_PORT_KEY,
     "content-length",
 ];
 
@@ -66,7 +66,7 @@ const STRIPPED_REQUEST_HEADERS: &[&str] = &[
     "x-gateway-model-name-rewrite",
     "x-gateway-destination-endpoint-subset",
     "x-gateway-destination-endpoint-served",
-    "x-prefiller-host-port",
+    metadata::PREFILLER_HOST_PORT_KEY,
 ];
 
 /// Return whether this is the client-spoofable prefill endpoint header.

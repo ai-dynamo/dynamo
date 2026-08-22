@@ -179,6 +179,15 @@ async fn test_pick_result_translates_to_ext_proc_mutations() {
             .lock()
             .unwrap()
             .iter()
+            .any(|(key, value)| key.eq_ignore_ascii_case("content-type")
+                && value == "application/json"),
+        "an unrelated request header must reach the picker"
+    );
+    assert!(
+        observed_headers
+            .lock()
+            .unwrap()
+            .iter()
             .all(|(key, _)| !key.eq_ignore_ascii_case("x-prefiller-host-port")),
         "client-supplied prefill metadata must not reach the picker"
     );

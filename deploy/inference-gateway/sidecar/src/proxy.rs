@@ -26,9 +26,7 @@ pub async fn forward(
     cancellation: &CancellationToken,
 ) -> Result<Response<Body>, SidecarError> {
     let (parts, body) = request.into_parts();
-    let mut target = base_url.clone();
-    target.set_path(parts.uri.path());
-    target.set_query(parts.uri.query());
+    let target = target_url(base_url, &parts.uri);
 
     let mut headers = parts.headers;
     strip_proxy_headers(&mut headers);
@@ -50,6 +48,16 @@ pub async fn forward(
     *response.status_mut() = status;
     *response.headers_mut() = response_headers;
     Ok(response)
+}
+
+fn target_url(base_url: &Url, request_uri: &axum::http::Uri) -> Url {
+    let mut target = base_url.clone();
+    let base_path = base_url.path().trim_end_matches('/');
+    let request_path = request_uri.path();
+    target.set_path(&format!("{base_path}{request_path}"));
+    target.set_query(request_uri.query());
+    target.set_fragment(None);
+    target
 }
 
 fn strip_proxy_headers(headers: &mut HeaderMap) {
@@ -109,4 +117,20 @@ pub fn cancel_on_response_drop(
     let (parts, body) = response.into_parts();
     let stream = CancelOnDropStream::new(body.into_data_stream(), cancellation);
     Response::from_parts(parts, Body::from_stream(stream))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_url_preserves_base_path_and_request_query() {
+        let base_url = Url::parse("http://decode:8001/engine").unwrap();
+        let request_uri = "/v1/chat/completions?stream=true".parse().unwrap();
+
+        assert_eq!(
+            target_url(&base_url, &request_uri).as_str(),
+            "http://decode:8001/engine/v1/chat/completions?stream=true"
+        );
+    }
 }

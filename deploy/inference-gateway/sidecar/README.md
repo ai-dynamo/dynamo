@@ -19,7 +19,11 @@ Empty, malformed, repeated, or comma-separated prefill endpoint values return
 
 The binary listens on `0.0.0.0:8000` and proxies to
 `http://localhost:8001` by default. Set `DYN_SIDECAR_PORT` and
-`DYN_DECODE_ENGINE_PORT` to change the ports.
+`DYN_DECODE_ENGINE_PORT` to change the ports. Upstream connections time out
+after 10 seconds by default, and stalled response reads time out after 300
+seconds without imposing a deadline on the full response stream. Configure
+these values in milliseconds with `DYN_SIDECAR_CONNECT_TIMEOUT_MS` and
+`DYN_SIDECAR_READ_TIMEOUT_MS`.
 
 Backend-specific P/D execution is implemented separately. Until an adapter is
 linked, requests containing a valid prefill endpoint return `501 Not

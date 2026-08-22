@@ -37,7 +37,7 @@ impl PrefillEndpoint {
         }
 
         let value = value.to_str().map_err(|_| InvalidEppMetadata)?;
-        if value.is_empty() || value.contains(',') || value.trim() != value {
+        if value.is_empty() || value.contains(',') || value.contains('@') || value.trim() != value {
             return Err(InvalidEppMetadata);
         }
         let authority = Authority::from_str(value).map_err(|_| InvalidEppMetadata)?;
@@ -102,6 +102,7 @@ mod tests {
             "prefill:abc",
             "2001:db8::1:8001",
             "prefill:8001,other:8001",
+            "user:pass@prefill:8001",
             " prefill:8001",
         ] {
             let mut headers = HeaderMap::new();

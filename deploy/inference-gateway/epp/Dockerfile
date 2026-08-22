@@ -83,6 +83,7 @@ COPY --from=dynamo examples/router/custom-policy-example/ examples/router/custom
 # so cargo needs its manifest on disk to resolve the workspace even when we
 # only build libdynamo_llm.
 COPY --from=dynamo deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
+COPY --from=dynamo deploy/inference-gateway/sidecar/ deploy/inference-gateway/sidecar/
 
 # Build libdynamo_llm with sccache for cross-run caching. The registry and
 # git caches are content-addressed (safe to persist); no target/ mount --
