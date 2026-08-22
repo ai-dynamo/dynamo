@@ -15,22 +15,23 @@ use crate::{
 
 use super::builtin::BuiltinWorkerSelector;
 
-/// O(1) active-request accounting behind builtin `WorkerInputs::LOAD`.
+/// O(1) active-request accounting requested through
+/// [`WorkerInputs::OCCUPANCY`](dynamo_kv_router::selector::WorkerInputs::OCCUPANCY).
 ///
 /// RoutingHost owns policy selection and the request guard owns the returned
 /// reservation. PushRouter supplies only discovery eligibility and transport.
-pub(crate) struct RoutingLoadState {
-    occupancy: Arc<RoutingOccupancyState>,
+pub(crate) struct HostedOccupancy {
+    state: Arc<RoutingOccupancyState>,
 }
 
-impl RoutingLoadState {
+impl HostedOccupancy {
     pub(crate) fn new(
         router: &PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<Self> {
-        let occupancy = router
+        let state = router
             .routing_occupancy_state()
-            .context("load-aware router has no occupancy capability")?;
-        Ok(Self { occupancy })
+            .context("occupancy-aware router has no occupancy capability")?;
+        Ok(Self { state })
     }
 
     pub(crate) fn select_and_reserve(
@@ -38,38 +39,36 @@ impl RoutingLoadState {
         router: &PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         selector: &BuiltinWorkerSelector,
         pinned_worker: Option<u64>,
-    ) -> Result<RoutingLoadSelection> {
+    ) -> Result<HostedOccupancySelection> {
         if let Some(worker_id) = pinned_worker {
             router.ensure_routable(worker_id)?;
-            let reservation = self.occupancy.reserve(worker_id);
-            return Ok(RoutingLoadSelection {
+            let reservation = self.state.reserve(worker_id);
+            return Ok(HostedOccupancySelection {
                 worker_id,
                 candidate_count: 1,
-                load: reservation.load(),
+                occupancy: reservation.load(),
                 reservation,
             });
         }
 
         let candidates = router.selectable_worker_ids()?;
         let selection = self
-            .occupancy
-            .select_and_reserve_with(&candidates, |load| {
+            .state
+            .select_and_reserve_with(&candidates, |occupancy| {
                 selector
                     .select_worker(WorkerSelectionInput::<ModelRuntimeConfig>::hosted(
                         &candidates,
-                        Some(load),
+                        Some(occupancy),
                     ))
                     .map(|selection| selection.worker.worker_id)
             })?;
-        let worker_id = selection.worker_id();
-        let candidate_count = selection.candidate_count();
-        let load = selection.load();
-        Ok(RoutingLoadSelection {
-            worker_id,
-            candidate_count,
-            load,
+        let result = HostedOccupancySelection {
+            worker_id: selection.worker_id(),
+            candidate_count: selection.candidate_count(),
+            occupancy: selection.load(),
             reservation: selection.into_reservation(),
-        })
+        };
+        Ok(result)
     }
 
     pub(crate) fn peek(
@@ -78,18 +77,16 @@ impl RoutingLoadState {
         selector: &BuiltinWorkerSelector,
     ) -> Option<u64> {
         let candidates = router.selectable_worker_ids().ok()?;
-        let load = |worker_id| self.occupancy.load(worker_id);
+        let occupancy = |worker_id| self.state.load(worker_id);
         selector
-            .peek_worker(WorkerSelectionInput::hosted(&candidates, Some(&load)))
+            .peek_worker(WorkerSelectionInput::hosted(&candidates, Some(&occupancy)))
             .ok()
     }
 }
 
-pub(crate) struct RoutingLoadSelection {
+pub(crate) struct HostedOccupancySelection {
     pub(crate) worker_id: u64,
     pub(crate) candidate_count: usize,
-    pub(crate) load: u64,
+    pub(crate) occupancy: u64,
     pub(crate) reservation: OccupancyReservation,
 }
-
-pub(crate) type RoutingLoadReservation = OccupancyReservation;

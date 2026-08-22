@@ -42,10 +42,10 @@ impl BuiltinWorkerSelector {
         &self,
         input: WorkerSelectionInput<'_, ModelRuntimeConfig>,
     ) -> Result<u64, KvSchedulerError> {
-        let (worker_ids, load) = self.hosted_inputs(input)?;
+        let (worker_ids, occupancy) = self.hosted_inputs(input)?;
         self.picker
             .peek_worker(worker_ids, |worker_id| {
-                load.map_or(0, |load| load(worker_id))
+                occupancy.map_or(0, |occupancy| occupancy(worker_id))
             })
             .ok_or(KvSchedulerError::NoEndpoints)
     }
@@ -54,23 +54,27 @@ impl BuiltinWorkerSelector {
         &self,
         input: WorkerSelectionInput<'a, ModelRuntimeConfig>,
     ) -> Result<HostedSelectionInputs<'a>, KvSchedulerError> {
-        let (worker_ids, load) = input.into_hosted()?;
-        if self.required_worker_inputs().contains(WorkerInputs::LOAD) && load.is_none() {
+        let (worker_ids, occupancy) = input.into_hosted()?;
+        if self
+            .required_worker_inputs()
+            .contains(WorkerInputs::OCCUPANCY)
+            && occupancy.is_none()
+        {
             return Err(dynamo_kv_router::WorkerSelectionPolicyError::failed(
-                "selector requires hosted LOAD input",
+                "selector requires hosted OCCUPANCY input",
             )
             .into());
         }
-        Ok((worker_ids, load))
+        Ok((worker_ids, occupancy))
     }
 }
 
 impl WorkerSelector<ModelRuntimeConfig> for BuiltinWorkerSelector {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        match self.mode {
-            RouterMode::RoundRobin | RouterMode::Random => WorkerInputs::NONE,
-            RouterMode::PowerOfTwoChoices | RouterMode::LeastLoaded => WorkerInputs::LOAD,
-            _ => unreachable!("builtin selector cannot contain a non-builtin mode"),
+        if self.mode.requires_occupancy() {
+            WorkerInputs::OCCUPANCY
+        } else {
+            WorkerInputs::NONE
         }
     }
 
@@ -78,11 +82,11 @@ impl WorkerSelector<ModelRuntimeConfig> for BuiltinWorkerSelector {
         &self,
         input: WorkerSelectionInput<'_, ModelRuntimeConfig>,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
-        let (worker_ids, load) = self.hosted_inputs(input)?;
+        let (worker_ids, occupancy) = self.hosted_inputs(input)?;
         let worker_id = self
             .picker
             .select_worker(worker_ids, |worker_id| {
-                load.map_or(0, |load| load(worker_id))
+                occupancy.map_or(0, |occupancy| occupancy(worker_id))
             })
             .ok_or(KvSchedulerError::NoEndpoints)?;
         Ok(selection(worker_id))
@@ -132,10 +136,10 @@ mod tests {
     }
 
     #[test]
-    fn load_policies_require_lazy_load_input() {
+    fn occupancy_policies_require_lazy_occupancy_input() {
         for mode in [RouterMode::PowerOfTwoChoices, RouterMode::LeastLoaded] {
             let selector = BuiltinWorkerSelector::new(mode).unwrap();
-            assert_eq!(selector.required_worker_inputs(), WorkerInputs::LOAD);
+            assert_eq!(selector.required_worker_inputs(), WorkerInputs::OCCUPANCY);
             assert!(
                 selector
                     .select_worker(WorkerSelectionInput::hosted(&[10, 20], None))
@@ -145,26 +149,29 @@ mod tests {
     }
 
     #[test]
-    fn least_loaded_reads_hosted_load() {
+    fn least_loaded_reads_hosted_occupancy() {
         let selector = BuiltinWorkerSelector::new(RouterMode::LeastLoaded).unwrap();
-        let load = |worker_id| if worker_id == 10 { 4 } else { 1 };
+        let occupancy = |worker_id| if worker_id == 10 { 4 } else { 1 };
         let selected = selector
-            .select_worker(WorkerSelectionInput::hosted(&[10, 20], Some(&load)))
+            .select_worker(WorkerSelectionInput::hosted(&[10, 20], Some(&occupancy)))
             .unwrap();
         assert_eq!(selected.worker.worker_id, 20);
     }
 
     #[test]
-    fn power_of_two_choices_reads_only_two_loads() {
+    fn power_of_two_choices_reads_only_two_occupancies() {
         let selector = BuiltinWorkerSelector::new(RouterMode::PowerOfTwoChoices).unwrap();
         let reads = Cell::new(0);
-        let load = |_| {
+        let occupancy = |_| {
             reads.set(reads.get() + 1);
             0
         };
 
         selector
-            .select_worker(WorkerSelectionInput::hosted(&[10, 20, 30, 40], Some(&load)))
+            .select_worker(WorkerSelectionInput::hosted(
+                &[10, 20, 30, 40],
+                Some(&occupancy),
+            ))
             .unwrap();
 
         assert_eq!(reads.get(), 2);

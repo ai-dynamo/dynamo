@@ -47,7 +47,7 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
 /// Host-owned inputs for one worker-selection decision.
 ///
 /// KV schedulers supply configured workers and request state. Cache-free routing
-/// hosts supply their ordered routable IDs and, when requested, a lazy load view.
+/// hosts supply their ordered routable IDs and, when requested, a lazy occupancy view.
 #[derive(Clone, Copy)]
 pub enum WorkerSelectionInput<'a, C: WorkerConfigLike> {
     Configured {
@@ -58,7 +58,7 @@ pub enum WorkerSelectionInput<'a, C: WorkerConfigLike> {
     },
     Hosted {
         worker_ids: &'a [WorkerId],
-        load: Option<&'a dyn Fn(WorkerId) -> u64>,
+        occupancy: Option<&'a dyn Fn(WorkerId) -> u64>,
     },
 }
 
@@ -86,8 +86,14 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
         }
     }
 
-    pub fn hosted(worker_ids: &'a [WorkerId], load: Option<&'a dyn Fn(WorkerId) -> u64>) -> Self {
-        Self::Hosted { worker_ids, load }
+    pub fn hosted(
+        worker_ids: &'a [WorkerId],
+        occupancy: Option<&'a dyn Fn(WorkerId) -> u64>,
+    ) -> Self {
+        Self::Hosted {
+            worker_ids,
+            occupancy,
+        }
     }
 
     pub fn into_configured(self) -> Result<ConfiguredSelectionInputs<'a, C>, KvSchedulerError> {
@@ -107,7 +113,10 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
 
     pub fn into_hosted(self) -> Result<HostedSelectionInputs<'a>, KvSchedulerError> {
         match self {
-            Self::Hosted { worker_ids, load } => Ok((worker_ids, load)),
+            Self::Hosted {
+                worker_ids,
+                occupancy,
+            } => Ok((worker_ids, occupancy)),
             Self::Configured { .. } => Err(WorkerSelectionPolicyError::failed(
                 "selector requires hosted worker inputs",
             )
