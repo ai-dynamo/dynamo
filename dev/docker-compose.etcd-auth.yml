@@ -7,6 +7,10 @@
 # (anonymous), which is convenient for local dev but leaves the discovery plane
 # open. Layer this file on top to run etcd with a root password instead:
 #
+#   # If you already ran the base compose, etcd persisted an anonymous data
+#   # volume and will reuse it, so ETCD_ROOT_PASSWORD is not applied. Remove it:
+#   docker compose -f dev/docker-compose.yml down -v
+#
 #   export ETCD_ROOT_PASSWORD=$(openssl rand -hex 16)
 #   docker compose -f dev/docker-compose.yml -f dev/docker-compose.etcd-auth.yml up
 #
@@ -18,9 +22,10 @@
 #   export ETCD_AUTH_PASSWORD=$ETCD_ROOT_PASSWORD
 #
 # The dynamo-runtime etcd client consumes ETCD_AUTH_USERNAME/ETCD_AUTH_PASSWORD
-# (see lib/runtime/src/transports/etcd.rs) and connects with password auth. For
-# mutual-TLS instead of a password, set ETCD_AUTH_CA / ETCD_AUTH_CLIENT_CERT /
-# ETCD_AUTH_CLIENT_KEY and mount the certs into the container.
+# (see lib/runtime/src/transports/etcd.rs) and connects with password auth. This
+# overlay demonstrates password authentication only; TLS/mutual-TLS additionally
+# requires configuring the etcd server's TLS listener and mounting server + client
+# certificates, which is out of scope for this example.
 
 services:
   etcd-server:

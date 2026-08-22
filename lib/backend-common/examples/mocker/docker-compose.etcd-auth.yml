@@ -7,13 +7,18 @@
 # Layer this file on top to require a root password and hand the same
 # credentials to the frontend + mocker-backend services:
 #
+#   # If you already ran the base compose, etcd persisted an anonymous data
+#   # volume and will reuse it, so ETCD_ROOT_PASSWORD is not applied. Remove it:
+#   docker compose -f docker-compose.yml down -v
+#
 #   export ETCD_ROOT_PASSWORD=$(openssl rand -hex 16)
 #   docker compose -f docker-compose.yml -f docker-compose.etcd-auth.yml up --build
 #
 # The dynamo-runtime etcd client consumes ETCD_AUTH_USERNAME/ETCD_AUTH_PASSWORD
-# (lib/runtime/src/transports/etcd.rs). For mutual-TLS instead of a password,
-# set ETCD_AUTH_CA / ETCD_AUTH_CLIENT_CERT / ETCD_AUTH_CLIENT_KEY and mount the
-# certs into each service.
+# (lib/runtime/src/transports/etcd.rs). This overlay demonstrates password
+# authentication only; TLS/mutual-TLS additionally requires configuring the etcd
+# server's TLS listener and mounting server + client certificates, which is out
+# of scope for this example.
 
 services:
   etcd-server:
