@@ -694,7 +694,7 @@ pub struct DistributedConfig {
 
 impl DistributedConfig {
     pub fn from_settings() -> DistributedConfig {
-        let request_plane = RequestPlaneMode::from_env();
+        let request_plane = RequestPlaneMode::from_env().unwrap_or_else(|err| panic!("{err}"));
 
         // Determine the discovery backend first — we need it to compute the NATS default below.
         // Valid values for DYN_DISCOVERY_BACKEND: "kubernetes", "etcd" (default), "file", "mem"
@@ -754,7 +754,7 @@ impl DistributedConfig {
             attach_lease: false,
             ..Default::default()
         };
-        let request_plane = RequestPlaneMode::from_env();
+        let request_plane = RequestPlaneMode::from_env().unwrap_or_else(|err| panic!("{err}"));
         let discovery_backend =
             DiscoveryBackend::KvStore(kv::Selector::Etcd(Box::new(etcd_config)));
         let event_transport_kind = discovery_backend.resolve_event_transport_kind();
@@ -829,17 +829,119 @@ impl std::str::FromStr for RequestPlaneMode {
 }
 
 impl RequestPlaneMode {
-    /// Get the request plane mode from environment variable (uncached)
-    /// Reads from `DYN_REQUEST_PLANE` environment variable.
-    fn from_env() -> Self {
-        std::env::var("DYN_REQUEST_PLANE")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_default()
+    /// Reads `DYN_REQUEST_PLANE`, defaulting only when it is absent or empty.
+    fn from_env() -> Result<Self> {
+        match std::env::var("DYN_REQUEST_PLANE") {
+            Err(std::env::VarError::NotPresent) => Ok(Self::default()),
+            Ok(s) if s.is_empty() => Ok(Self::default()),
+            Ok(s) => s.parse(),
+            Err(std::env::VarError::NotUnicode(raw)) => Err(anyhow::anyhow!(
+                "Invalid request plane mode: '{}' is not valid Unicode. \
+                 Valid options are: 'nats', 'tcp'",
+                raw.to_string_lossy()
+            )),
+        }
     }
 
     pub fn is_nats(&self) -> bool {
         matches!(self, RequestPlaneMode::Nats)
+    }
+}
+
+#[cfg(test)]
+mod request_plane_env_tests {
+    use super::{DistributedConfig, RequestPlaneMode};
+    use std::sync::Mutex;
+
+    // Environment variables are process-global. The panic test poisons this lock,
+    // so subsequent acquisitions recover its guard.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_request_plane<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match value {
+            Some(v) => temp_env::with_vars([("DYN_REQUEST_PLANE", Some(v))], f),
+            None => temp_env::with_vars_unset(["DYN_REQUEST_PLANE"], f),
+        }
+    }
+
+    #[test]
+    fn absent_request_plane_defaults_to_tcp() {
+        let mode = with_request_plane(None, RequestPlaneMode::from_env)
+            .expect("an absent DYN_REQUEST_PLANE must not be an error");
+        assert_eq!(mode, RequestPlaneMode::Tcp);
+    }
+
+    #[test]
+    fn empty_request_plane_defaults_to_tcp() {
+        let mode = with_request_plane(Some(""), RequestPlaneMode::from_env)
+            .expect("an empty DYN_REQUEST_PLANE must not be an error");
+        assert_eq!(mode, RequestPlaneMode::Tcp);
+    }
+
+    #[test]
+    fn valid_request_plane_values_resolve() {
+        for (value, expected) in [
+            ("nats", RequestPlaneMode::Nats),
+            ("tcp", RequestPlaneMode::Tcp),
+            ("NaTs", RequestPlaneMode::Nats),
+            ("TCP", RequestPlaneMode::Tcp),
+        ] {
+            let mode = with_request_plane(Some(value), RequestPlaneMode::from_env)
+                .unwrap_or_else(|err| panic!("DYN_REQUEST_PLANE={value} should resolve: {err}"));
+            assert_eq!(mode, expected, "DYN_REQUEST_PLANE={value}");
+        }
+    }
+
+    #[test]
+    fn invalid_request_plane_is_an_error_naming_value_and_options() {
+        let err = with_request_plane(Some("nat"), RequestPlaneMode::from_env)
+            .expect_err("a misspelled DYN_REQUEST_PLANE must not silently fall back to TCP");
+        let message = err.to_string();
+        assert!(
+            message.contains("nat"),
+            "error should name the offending value, got: {message}"
+        );
+        assert!(
+            message.contains("'nats'") && message.contains("'tcp'"),
+            "error should list the valid options, got: {message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_request_plane_is_an_error_not_a_default() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let raw = OsString::from_vec(b"nat\xff".to_vec());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let err = temp_env::with_vars(
+            [("DYN_REQUEST_PLANE", Some(&raw))],
+            RequestPlaneMode::from_env,
+        )
+        .expect_err("a non-Unicode DYN_REQUEST_PLANE must not silently fall back to TCP");
+        let message = err.to_string();
+        assert!(
+            message.contains("not valid Unicode"),
+            "error should say the value was not valid Unicode, got: {message}"
+        );
+        assert!(
+            message.contains("'nats'") && message.contains("'tcp'"),
+            "error should list the valid options, got: {message}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid request plane mode: 'nat'")]
+    fn from_settings_aborts_on_invalid_request_plane() {
+        with_request_plane(Some("nat"), || {
+            let _ = DistributedConfig::from_settings();
+        });
     }
 }
 

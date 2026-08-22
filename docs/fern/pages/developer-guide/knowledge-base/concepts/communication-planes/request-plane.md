@@ -67,7 +67,9 @@ The value is case-insensitive.
 
 ### Default Behavior
 
-If `DYN_REQUEST_PLANE` is not set or contains an invalid value, Dynamo defaults to `tcp`.
+If `DYN_REQUEST_PLANE` is not set, or is set to the empty string, Dynamo defaults to `tcp`. If it is
+set to any other unrecognized value, startup fails with an error naming the offending value and the
+valid options, rather than silently falling back to `tcp`.
 
 ## Usage Examples
 
@@ -233,7 +235,8 @@ curl http://localhost:8000/v1/chat/completions \
 **Solutions:**
 - Check `DYN_REQUEST_PLANE` spelling (valid values: `nats`, `tcp`)
 - Value is case-insensitive but must be one of the two options
-- If not set, defaults to `tcp`
+- If not set, or set to the empty string, defaults to `tcp`; any other unrecognized value is an
+  error rather than a fallback to `tcp`
 
 ### Issue: Port Conflicts
 
