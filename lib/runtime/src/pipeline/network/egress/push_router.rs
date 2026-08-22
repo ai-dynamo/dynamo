@@ -719,30 +719,24 @@ where
         Ok((decision.target.worker_id, candidates.len()))
     }
 
-    /// Select a cache-free builtin worker while preserving empty-pool error semantics.
-    pub fn select_stateless_worker(&self) -> anyhow::Result<u64> {
-        let picker = match self.router_mode {
-            RouterMode::RoundRobin => &self.round_robin_picker,
-            RouterMode::Random => &self.random_picker,
-            _ => anyhow::bail!(
-                "{:?} routing does not use stateless worker selection",
-                self.router_mode
-            ),
-        };
-        self.select_untracked_worker(picker)
-            .map(|(worker_id, _)| worker_id)
-    }
-
     /// Snapshot workers currently eligible for a new routing decision.
     ///
     /// Selection stays outside `PushRouter`; this is the discovery/admission
     /// boundary used by routing hosts that own their policy lifecycle.
     pub fn selectable_worker_ids(&self) -> anyhow::Result<Vec<u64>> {
+        self.with_selectable_worker_ids(<[u64]>::to_vec)
+    }
+
+    /// Borrow workers currently eligible for a new routing decision.
+    pub fn with_selectable_worker_ids<R>(
+        &self,
+        select: impl FnOnce(&[u64]) -> R,
+    ) -> anyhow::Result<R> {
         let routing_instances = self.client.routing_instances();
         if routing_instances.free_ids().is_empty() {
             return Err(self.empty_free_pool_error(&routing_instances));
         }
-        Ok(routing_instances.free_ids().to_vec())
+        Ok(select(routing_instances.free_ids()))
     }
 
     /// Shared O(1) occupancy capability for load-aware routing hosts.
