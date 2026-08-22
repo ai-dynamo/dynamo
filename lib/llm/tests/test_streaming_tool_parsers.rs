@@ -174,6 +174,7 @@ async fn parse_response_stream(
                 None,  // No tool_choice in this test
                 None,  // No tool_definitions in this test
                 false, // No structural_tag in this test
+                false,
                 stream,
             ))
         } else {
@@ -1998,6 +1999,7 @@ mod tests {
             None,
             None,
             false,
+            false,
             Box::pin(futures::stream::iter(chunks)),
         )
         .collect()
@@ -2078,6 +2080,7 @@ async fn run_glm47_jail(
         Some("glm47".to_string()),
         None,
         None,
+        false,
         false,
         Box::pin(stream::iter(chunks)),
     )

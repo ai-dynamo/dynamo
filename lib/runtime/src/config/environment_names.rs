@@ -379,10 +379,19 @@ pub mod llm {
     /// Accepted values: "reasoning_content" (default) or "reasoning".
     pub const DYN_REASONING_FIELD_NAME: &str = "DYN_REASONING_FIELD_NAME";
 
-    /// \[EXPERIMENTAL\] Route supported tool-call families (Qwen3-Coder, DeepSeek-V4)
-    /// through the `dynamo-parsers-v2` streaming parser for BOTH the batch and the
-    /// streaming path, bypassing the v1 tool-call jail. Off by default; when set, the
-    /// v2 parser owns incremental tool-call emission and drops values truncated at EOF.
+    /// \[EXPERIMENTAL\] Use `dynamo-parsers-v2` instead of the v1 tool-call jail, for
+    /// BOTH the batch and the streaming path. Off by default.
+    ///
+    /// Which v2 shape a request gets is decided by the configured parsers, not by a
+    /// second flag:
+    /// * tool-call parser only (Qwen3-Coder, DeepSeek-V4) -> the v2 TOOL parser owns
+    ///   incremental tool-call emission and drops values truncated at EOF.
+    /// * tool-call AND reasoning parser naming the same family (`qwen3_coder` +
+    ///   `qwen3`) -> the v2 UNIFIED parser owns reasoning, visible text and tool calls
+    ///   in one ordered stream, so reasoning that followed a tool call stays after it
+    ///   instead of being hoisted to the front and fused with the first thought.
+    ///
+    /// One switch, because both are the same decision: stop using v1.
     pub const DYN_ENABLE_EXPERIMENTAL_PARSERS_V2: &str = "DYN_ENABLE_EXPERIMENTAL_PARSERS_V2";
 
     /// Backend stream inactivity timeout in seconds.

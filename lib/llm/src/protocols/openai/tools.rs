@@ -26,6 +26,7 @@ pub enum ToolChoiceError {
 pub fn get_json_schema_from_tools(
     tool_choice: Option<&ChatCompletionToolChoiceOption>,
     tools: Option<&[ChatCompletionTool]>,
+    parallel_tool_calls: Option<bool>,
 ) -> Result<Option<Value>, ToolChoiceError> {
     let Some(choice) = tool_choice else {
         return Ok(None);
@@ -44,7 +45,7 @@ pub fn get_json_schema_from_tools(
             if tools.is_empty() {
                 return Err(ToolChoiceError::EmptyTools);
             }
-            build_required_schema(tools).map(Some)
+            build_required_schema(tools, parallel_tool_calls).map(Some)
         }
     }
 }
@@ -113,7 +114,10 @@ fn clone_parameters(function: &FunctionObject) -> Value {
 /// We extract `$defs` from each tool's schema and merge them into a global `$defs` map
 /// at the root level. If multiple tools define the same type, we verify they match to
 /// avoid conflicts.
-fn build_required_schema(tools: &[ChatCompletionTool]) -> Result<Value, ToolChoiceError> {
+fn build_required_schema(
+    tools: &[ChatCompletionTool],
+    parallel_tool_calls: Option<bool>,
+) -> Result<Value, ToolChoiceError> {
     // Accumulator for all shared type definitions ($defs) across tools
     let mut defs: BTreeMap<String, Value> = BTreeMap::new();
     let mut any_of = Vec::with_capacity(tools.len());
@@ -146,6 +150,17 @@ fn build_required_schema(tools: &[ChatCompletionTool]) -> Result<Value, ToolChoi
             "anyOf": any_of,
         },
     });
+
+    // `parallel_tool_calls: false` is otherwise enforced only downstream, by discarding
+    // tool indices above zero in the HTTP stream. That leaves the extra calls GENERATED
+    // and observable by any consumer upstream of that filter, and it wastes the tokens
+    // spent producing them. Constraining generation is the earlier, cheaper fix; the
+    // HTTP filter stays as defense in depth.
+    if parallel_tool_calls == Some(false)
+        && let Value::Object(map) = &mut result
+    {
+        map.insert("maxItems".to_string(), json!(1));
+    }
 
     // Attach the merged $defs at the root level if any were collected
     if !defs.is_empty()
@@ -315,7 +330,8 @@ mod tests {
                 },
             },
         );
-        let schema = get_json_schema_from_tools(Some(&tool_choice), Some(&tools)).expect("schema");
+        let schema =
+            get_json_schema_from_tools(Some(&tool_choice), Some(&tools), None).expect("schema");
 
         assert_eq!(
             schema.unwrap(),
@@ -336,6 +352,7 @@ mod tests {
         let schema = get_json_schema_from_tools(
             Some(&ChatCompletionToolChoiceOption::Required),
             Some(&tools),
+            None,
         )
         .expect("schema");
 
@@ -363,7 +380,7 @@ mod tests {
                 },
             },
         );
-        let err = get_json_schema_from_tools(Some(&tool_choice), Some(&tools)).unwrap_err();
+        let err = get_json_schema_from_tools(Some(&tool_choice), Some(&tools), None).unwrap_err();
         assert_eq!(err, ToolChoiceError::ToolNotFound("unknown".to_string()));
     }
 
@@ -393,10 +410,38 @@ mod tests {
         }));
 
         let tools = vec![tool, tool_with_conflict];
-        let err = build_required_schema(&tools).unwrap_err();
+        let err = build_required_schema(&tools, None).unwrap_err();
         assert_eq!(
             err,
             ToolChoiceError::ConflictingDefinition("shared".to_string())
+        );
+    }
+
+    #[test]
+    fn required_schema_is_unbounded_by_default() {
+        let tools = sample_tools();
+        let schema = build_required_schema(&tools, None).expect("schema");
+        assert_eq!(schema["minItems"], json!(1));
+        assert!(
+            schema.get("maxItems").is_none(),
+            "parallel calls stay unbounded unless the request disables them"
+        );
+        let schema = build_required_schema(&tools, Some(true)).expect("schema");
+        assert!(schema.get("maxItems").is_none());
+    }
+
+    /// `parallel_tool_calls: false` must constrain GENERATION, not just be filtered
+    /// downstream - otherwise the extra calls are still produced, still cost tokens,
+    /// and are still observable upstream of the HTTP filter.
+    #[test]
+    fn required_schema_caps_at_one_when_parallel_calls_are_disabled() {
+        let tools = sample_tools();
+        let schema = build_required_schema(&tools, Some(false)).expect("schema");
+        assert_eq!(schema["minItems"], json!(1));
+        assert_eq!(
+            schema["maxItems"],
+            json!(1),
+            "parallel_tool_calls=false must cap the array at one element"
         );
     }
 }
