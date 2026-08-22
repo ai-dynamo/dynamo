@@ -7,8 +7,12 @@
 //! approach for tracking host and disk cache hit rates.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+use dynamo_llm::block_manager::metrics_kvbm::KvbmMetrics;
+use tokio_util::sync::CancellationToken;
 
 /// Default maximum number of recent requests to track in the sliding window
 const DEFAULT_MAX_RECENT_REQUESTS: usize = 1000;
@@ -236,6 +240,50 @@ impl CacheStatsTracker {
     }
 }
 
+// Owns the periodic task; dropping it stops reporting and releases captured state.
+pub(crate) struct CacheStatsReporter {
+    cancel: CancellationToken,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl CacheStatsReporter {
+    pub(crate) fn spawn(
+        rt: &tokio::runtime::Handle,
+        cache_stats: Arc<CacheStatsTracker>,
+        metrics: KvbmMetrics,
+        period: Duration,
+    ) -> Self {
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+
+        let handle = rt.spawn(async move {
+            let mut interval = tokio::time::interval(period);
+            loop {
+                tokio::select! {
+                    _ = task_cancel.cancelled() => break,
+                    _ = interval.tick() => {
+                        let host_rate = cache_stats.host_hit_rate();
+                        let disk_rate = cache_stats.disk_hit_rate();
+                        metrics.update_cache_hit_rates(host_rate, disk_rate, 0.0);
+                        cache_stats.maybe_log();
+                    }
+                }
+            }
+        });
+
+        Self { cancel, handle }
+    }
+}
+
+impl Drop for CacheStatsReporter {
+    fn drop(&mut self) {
+        // Abort is asynchronous, so a tick arm already publishing may finish once after drop.
+        // A synchronous fence would block Drop on a runtime worker.
+        self.cancel.cancel();
+        self.handle.abort();
+    }
+}
+
 #[cfg(test)]
 impl CacheStatsTracker {
     fn new_with_capacity(max_recent_requests: usize) -> Self {
@@ -260,6 +308,89 @@ impl Default for CacheStatsTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use dynamo_llm::block_manager::metrics_kvbm::KvbmMetricsRegistry;
+
+    const TEST_PERIOD: Duration = Duration::from_millis(50);
+
+    fn test_metrics() -> KvbmMetrics {
+        KvbmMetrics::new(&KvbmMetricsRegistry::new(), false, 0)
+    }
+
+    async fn settle() {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_reporter_drop_releases_tracker() {
+        let tracker = Arc::new(CacheStatsTracker::new(None));
+        let weak = Arc::downgrade(&tracker);
+
+        let reporter = CacheStatsReporter::spawn(
+            &tokio::runtime::Handle::current(),
+            tracker,
+            test_metrics(),
+            TEST_PERIOD,
+        );
+
+        settle().await;
+        assert!(
+            weak.upgrade().is_some(),
+            "reporter task should hold the tracker while the reporter is alive"
+        );
+
+        drop(reporter);
+        settle().await;
+
+        assert!(
+            weak.upgrade().is_none(),
+            "dropping the reporter must release the tracker the task captured"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_reporter_stops_updating_metrics_after_drop() {
+        let tracker = Arc::new(CacheStatsTracker::new(None));
+        let metrics = test_metrics();
+
+        let reporter = CacheStatsReporter::spawn(
+            &tokio::runtime::Handle::current(),
+            tracker.clone(),
+            metrics.clone(),
+            TEST_PERIOD,
+        );
+
+        tracker.record(8, 2, 10);
+        tokio::time::advance(TEST_PERIOD).await;
+        settle().await;
+
+        let live_rate = metrics.host_cache_hit_rate.get();
+        assert!(
+            (live_rate - 0.8).abs() < 0.01,
+            "live reporter should have published the 80% host hit rate, got {live_rate}"
+        );
+
+        drop(reporter);
+        settle().await;
+
+        tracker.record(0, 0, 10);
+        assert!(
+            (tracker.host_hit_rate() - 0.4).abs() < 0.01,
+            "test setup: the tracker itself must now report a different rate"
+        );
+
+        tokio::time::advance(TEST_PERIOD * 5).await;
+        settle().await;
+
+        let after_drop_rate = metrics.host_cache_hit_rate.get();
+        assert!(
+            (after_drop_rate - 0.8).abs() < 0.01,
+            "gauge moved to {after_drop_rate} after the reporter was dropped; \
+             a retired reporter must not update metrics"
+        );
+    }
 
     #[test]
     fn test_cache_stats_tracking() {
