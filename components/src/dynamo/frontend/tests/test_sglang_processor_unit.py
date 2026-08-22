@@ -3335,7 +3335,15 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             return [
                 item["data"]
                 async for item in processor._generate_and_stream(
-                    "req-stop", {"model": "test-model"}, {}, [], post, context
+                    "req-stop",
+                    {
+                        "model": "test-model",
+                        "stream_options": {"include_usage": True},
+                    },
+                    {},
+                    [1, 2],
+                    post,
+                    context,
                 )
                 if "data" in item
             ]
@@ -3344,8 +3352,14 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
 
         assert chunks[0]["choices"][0]["delta"]["content"] == "A"
         assert chunks[0]["choices"][0]["finish_reason"] is None
+        assert "usage" not in chunks[0]
         assert chunks[1]["choices"][0]["delta"] == {}
         assert chunks[1]["choices"][0]["finish_reason"] == "stop"
+        assert chunks[1]["usage"] == {
+            "prompt_tokens": 2,
+            "completion_tokens": 11,
+            "total_tokens": 13,
+        }
         assert context.stopped
         assert len(chunks) == 2
 

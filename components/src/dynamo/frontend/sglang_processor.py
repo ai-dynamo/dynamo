@@ -734,7 +734,6 @@ class SglangProcessor:
                 nonlocal token_count
 
                 chunk_token_count = len(pending_token_ids)
-                usage_for_metrics = pending_usage
                 mapped_response: dict[str, Any] = {
                     "token_ids": pending_token_ids,
                     "finish_reason": finish_reason,
@@ -749,6 +748,14 @@ class SglangProcessor:
                     t_pp0 = time.monotonic()
 
                 choice = post.process_output(mapped_response)
+
+                if post.locally_finished and pending_usage is None:
+                    pending_usage = {
+                        "prompt_tokens": input_tokens,
+                        "completion_tokens": cumulative_output_tokens,
+                        "total_tokens": input_tokens + cumulative_output_tokens,
+                    }
+                usage_for_metrics = pending_usage
 
                 if self.debug_perf:
                     t_pp1 = time.monotonic()
