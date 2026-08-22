@@ -774,7 +774,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 next_count = len(text)
                 count = text_counts_per_choice.get(index, 0)
                 delta = text[count:]
-                if delta and not first_output_seen:
+                if res.get("output_ids") and not first_output_seen:
                     first_output_seen = True
                     context.notify_first_token()
 

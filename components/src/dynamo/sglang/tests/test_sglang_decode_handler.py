@@ -570,6 +570,9 @@ class _Context:
     def is_stopped(self):
         return False
 
+    def notify_first_token(self):
+        pass
+
 
 def test_build_sampling_params_passes_n_for_token_requests():
     handler = _new_decode_handler(use_sglang_tokenizer=False)

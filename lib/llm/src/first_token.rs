@@ -6,8 +6,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use dynamo_runtime::component::Endpoint;
-use dynamo_runtime::traits::DistributedRuntimeProvider;
+use dynamo_kv_router::sequences::SequencePublishQueueError;
+use dynamo_runtime::{
+    component::Endpoint, metrics::MetricsHierarchy, traits::DistributedRuntimeProvider,
+};
 use tokio::sync::watch;
 
 use crate::kv_router::sequence::ActiveSequenceEventPublisher;
@@ -20,6 +22,36 @@ const COMPLETION_CHANNEL_CAPACITY: usize = 4096;
 pub struct FirstTokenSource {
     publisher: ActiveSequenceEventPublisher,
     worker_id: u64,
+    metrics: Option<FirstTokenPublisherMetrics>,
+}
+
+#[derive(Clone)]
+struct FirstTokenPublisherMetrics {
+    enqueue_failures_total: prometheus::IntCounterVec,
+}
+
+impl FirstTokenPublisherMetrics {
+    fn for_endpoint(endpoint: &Endpoint) -> anyhow::Result<Self> {
+        Ok(Self {
+            enqueue_failures_total: endpoint.metrics().create_intcountervec(
+                "worker_prefill_completion_enqueue_failures_total",
+                "Total worker prefill-completion events rejected by the local publish queue",
+                &["reason"],
+                &[],
+            )?,
+        })
+    }
+
+    fn record_enqueue_failure(&self, error: &anyhow::Error) {
+        let reason = match error.downcast_ref::<SequencePublishQueueError>() {
+            Some(SequencePublishQueueError::Full { .. }) => "full",
+            Some(SequencePublishQueueError::Closed { .. }) => "closed",
+            None => return,
+        };
+        self.enqueue_failures_total
+            .with_label_values(&[reason])
+            .inc();
+    }
 }
 
 impl FirstTokenSource {
@@ -33,9 +65,19 @@ impl FirstTokenSource {
         }
 
         let worker_id = endpoint.drt().connection_id();
+        let metrics = match FirstTokenPublisherMetrics::for_endpoint(endpoint) {
+            Ok(metrics) => Some(metrics),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "worker prefill-completion metrics unavailable"
+                );
+                None
+            }
+        };
         let publisher =
             ActiveSequenceEventPublisher::for_endpoint(endpoint, COMPLETION_CHANNEL_CAPACITY).await;
-        Self::from_publisher_result(worker_id, publisher)
+        Self::from_publisher_result_with_metrics(worker_id, publisher, metrics)
     }
 
     #[cfg(test)]
@@ -47,6 +89,7 @@ impl FirstTokenSource {
         Self::supports_worker_type(worker_type).then_some(Self {
             publisher,
             worker_id,
+            metrics: None,
         })
     }
 
@@ -54,10 +97,19 @@ impl FirstTokenSource {
         worker_id: u64,
         publisher: anyhow::Result<ActiveSequenceEventPublisher>,
     ) -> Option<Self> {
+        Self::from_publisher_result_with_metrics(worker_id, publisher, None)
+    }
+
+    fn from_publisher_result_with_metrics(
+        worker_id: u64,
+        publisher: anyhow::Result<ActiveSequenceEventPublisher>,
+        metrics: Option<FirstTokenPublisherMetrics>,
+    ) -> Option<Self> {
         match publisher {
             Ok(publisher) => Some(Self {
                 publisher,
                 worker_id,
+                metrics,
             }),
             Err(error) => {
                 tracing::warn!(
@@ -132,11 +184,14 @@ impl FirstTokenNotifier {
             let _ = sender.send(true);
         }
         if let Some(completion) = &self.inner.completion {
-            let _ = completion.source.publisher.mark_prefill_completed(
+            let result = completion.source.publisher.mark_prefill_completed(
                 completion.request_id.clone(),
                 completion.source.worker_id,
                 completion.dp_rank,
             );
+            if let (Err(error), Some(metrics)) = (result, &completion.source.metrics) {
+                metrics.record_enqueue_failure(&error);
+            }
         }
     }
 
@@ -198,6 +253,50 @@ mod tests {
         assert_eq!(event.worker.worker_id, 7);
         assert_eq!(event.worker.dp_rank, 3);
         assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn enqueue_failures_are_counted_by_reason() {
+        let cancellation_token = CancellationToken::new();
+        let (publisher, receiver) = ActiveSequenceEventPublisher::channel(1, cancellation_token);
+        let metrics = FirstTokenPublisherMetrics {
+            enqueue_failures_total: prometheus::IntCounterVec::new(
+                prometheus::Opts::new("test_enqueue_failures_total", "test counter"),
+                &["reason"],
+            )
+            .unwrap(),
+        };
+        let source = FirstTokenSource {
+            publisher,
+            worker_id: 7,
+            metrics: Some(metrics.clone()),
+        };
+
+        FirstTokenNotifier::for_request(None, Some(&source), "accepted", Some(0))
+            .unwrap()
+            .notify();
+        FirstTokenNotifier::for_request(None, Some(&source), "full", Some(0))
+            .unwrap()
+            .notify();
+        assert_eq!(
+            metrics
+                .enqueue_failures_total
+                .with_label_values(&["full"])
+                .get(),
+            1
+        );
+
+        drop(receiver);
+        FirstTokenNotifier::for_request(None, Some(&source), "closed", Some(0))
+            .unwrap()
+            .notify();
+        assert_eq!(
+            metrics
+                .enqueue_failures_total
+                .with_label_values(&["closed"])
+                .get(),
+            1
+        );
     }
 
     #[test]
