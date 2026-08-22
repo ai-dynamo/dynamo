@@ -15,11 +15,6 @@ use crate::{
 
 use super::builtin::BuiltinWorkerSelector;
 
-/// O(1) active-request accounting requested through
-/// [`WorkerInputs::OCCUPANCY`](dynamo_kv_router::selector::WorkerInputs::OCCUPANCY).
-///
-/// RoutingHost owns policy selection and the request guard owns the returned
-/// reservation. PushRouter supplies only discovery eligibility and transport.
 pub(crate) struct HostedOccupancy {
     state: Arc<RoutingOccupancyState>,
 }

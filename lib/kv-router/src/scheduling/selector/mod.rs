@@ -26,16 +26,11 @@ use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 
-/// Low-level worker-selection contract used by the scheduler.
+/// Low-level selector used by routing hosts.
 ///
-/// Generic over `C` so that the scheduling layer does not depend on a concrete config type.
-/// External policies should compose [`WorkerScorer`] and [`WorkerPicker`] implementations with
-/// [`WorkerSelectionPolicy`] instead of implementing this trait directly.
+/// External policies should use [`WorkerSelectionPolicy`].
 pub trait WorkerSelector<C: WorkerConfigLike> {
-    /// Declare the worker-signal groups required by this selector.
-    ///
-    /// Hosts use this declaration to initialize only the routing capabilities a policy needs.
-    /// Return [`WorkerInputs::NONE`] when the selector reads no optional worker data.
+    /// Optional worker data required by this selector.
     fn required_worker_inputs(&self) -> WorkerInputs;
 
     fn select_worker(
@@ -44,10 +39,7 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
 }
 
-/// Host-owned inputs for one worker-selection decision.
-///
-/// KV schedulers supply configured workers and request state. Cache-free routing
-/// hosts supply their ordered routable IDs and, when requested, a lazy occupancy view.
+/// Inputs supplied by the selector's host.
 #[derive(Clone, Copy)]
 pub enum WorkerSelectionInput<'a, C: WorkerConfigLike> {
     Configured {

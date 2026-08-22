@@ -58,10 +58,7 @@ impl WorkerInputs {
     pub const LOAD: Self = Self(1 << 1);
     /// Request preferred-taint routing metadata.
     pub const PREFERRED_TAINT: Self = Self(1 << 2);
-    /// Request host-owned active-request occupancy.
-    ///
-    /// This input is available to selectors using [`WorkerSelectionInput::Hosted`].
-    /// Unlike [`Self::LOAD`], it does not materialize KV scheduler load rows.
+    /// Request host-owned active-request counts.
     pub const OCCUPANCY: Self = Self(1 << 5);
     pub(super) const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::PREFERRED_TAINT.0);
     pub(super) const MIN_ACTIVE_PREFILL_TOKENS: Self = Self(1 << 3);
