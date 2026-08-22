@@ -788,10 +788,8 @@ where
 /// `wrap_with_fault_detection`'s
 /// report-down / overload / migration won't fire.
 ///
-/// The removal watcher behind `on_instance_removed` / `on_instance_added` is
-/// one-per-endpoint, so only one dispatch per endpoint receives them; an impl
-/// holding per-instance state must share it per endpoint (the default cleans up
-/// shared per-runtime state, so it is unaffected).
+/// Discovery events are fanned out to every live router. These hooks must be
+/// idempotent because late subscribers replay the instances already known.
 #[async_trait::async_trait]
 pub trait StreamingDispatch<T, U>: Send + Sync
 where
