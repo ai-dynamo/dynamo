@@ -2680,8 +2680,6 @@ async fn chat_completions(
             err_response
         })?;
 
-    // A model-level parser is only active when this request permits tool calls.
-    // In particular, auto choice yields to assistant response/guided constraints.
     let tool_call_parsing_enabled =
         crate::preprocessor::OpenAIPreprocessor::tool_call_parsing_enabled(&request);
     let parsing_options = parsing_options
@@ -3275,8 +3273,6 @@ async fn responses(
             err_response
         })?;
 
-    // The Responses API is converted to the same chat request contract. Narrow
-    // the model parser before unary aggregation just as the streaming path does.
     let tool_call_parsing_enabled =
         crate::preprocessor::OpenAIPreprocessor::tool_call_parsing_enabled(&request);
     let parsing_options = parsing_options

@@ -504,9 +504,6 @@ async fn anthropic_messages(
 
     let request = context.map(|_req| chat_request);
 
-    // Anthropic requests are converted to the same chat request contract. Keep
-    // parser activation identical to the OpenAI Chat Completions and Responses
-    // entry points so content-only turns cannot be reclassified as tool calls.
     let tool_call_parsing_enabled =
         crate::preprocessor::OpenAIPreprocessor::tool_call_parsing_enabled(&request);
     let parsing_options = parsing_options

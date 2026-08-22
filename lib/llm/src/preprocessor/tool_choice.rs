@@ -19,11 +19,7 @@ fn invalid_argument(message: impl Into<String>) -> DynamoError {
 }
 
 impl OpenAIPreprocessor {
-    /// Whether this request permits model output to be interpreted as tool calls.
-    ///
-    /// A configured parser describes the model's wire format; it does not grant
-    /// every request permission to return tool calls. Assistant-output constraints
-    /// take precedence for auto choice, matching native vLLM's request handling.
+    /// Request-side gate for model-level tool-call parsing.
     pub(crate) fn tool_call_parsing_enabled(request: &NvCreateChatCompletionRequest) -> bool {
         if request.inner.tools.as_ref().is_none_or(Vec::is_empty) {
             return false;

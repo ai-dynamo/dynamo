@@ -586,12 +586,7 @@ fn convert_input_items_to_messages(
                     pending.push_reasoning(&text);
                 }
                 other => {
-                    // Unknown / unsupported variants (ComputerCall, WebSearchCall,
-                    // tool-output items other than FunctionCallOutput, etc.). We do
-                    // not have a faithful Chat Completions mapping, but silently
-                    // consuming them without flushing would let a following
-                    // FunctionCall coalesce with tool_calls from a different
-                    // semantic turn. Flush first, then skip.
+                    // Keep skipped Responses items from merging adjacent assistant/tool turns.
                     tracing::debug!(
                         "Skipping unsupported input item type during conversion: {:?}",
                         std::mem::discriminant(other)
@@ -602,10 +597,7 @@ fn convert_input_items_to_messages(
             InputItem::EasyMessage(easy) => {
                 use dynamo_protocols::types::responses::EasyInputContent;
                 match easy.role {
-                    // Chat-completions system / developer messages only accept
-                    // a plain string content; collapse any structured content
-                    // to text (drops images/files — matching the strict
-                    // `Item::Message(Input)` system/developer path above).
+                    // Chat system/developer messages are text-only.
                     ResponseRole::System | ResponseRole::Developer => {
                         let text = match &easy.content {
                             EasyInputContent::Text(t) => t.clone(),
@@ -621,12 +613,7 @@ fn convert_input_items_to_messages(
                             },
                         ));
                     }
-                    // User messages can carry multimodal content. Route a
-                    // `ContentList` through `convert_input_content_to_user_content`
-                    // so `input_image` / `input_text` parts survive into the
-                    // chat-completions message instead of being silently
-                    // dropped (mirrors the strict `Item::Message(Input::User)`
-                    // path). Issue #9468.
+                    // Preserve user multimodal content.
                     ResponseRole::User => {
                         let content = match &easy.content {
                             EasyInputContent::Text(t) => {
@@ -644,10 +631,7 @@ fn convert_input_items_to_messages(
                             },
                         ));
                     }
-                    // Prior assistant turn echoed back as input. Chat
-                    // completions has no multimodal assistant slot, so collapse
-                    // any structured content to text — same as the strict
-                    // `MessageItem::Output` path.
+                    // Chat assistant history is text-only.
                     ResponseRole::Assistant => {
                         let text = match &easy.content {
                             EasyInputContent::Text(t) => t.clone(),
@@ -659,9 +643,7 @@ fn convert_input_items_to_messages(
                     }
                 }
             }
-            InputItem::ItemReference(_) => {
-                // Skip item references
-            }
+            InputItem::ItemReference(_) => {}
         }
     }
 
@@ -677,11 +659,7 @@ fn custom_tool_output_to_text(output: &CustomToolCallOutputOutput) -> String {
     }
 }
 
-/// Convert Responses API tools to the flat Chat Completions representation.
-///
-/// Bare function names are preserved for model compatibility. Reject collisions
-/// from different origins instead of guessing which namespace to restore on the
-/// response path.
+/// Convert Responses tools to flat Chat Completions functions.
 fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
     let mut converted = Vec::new();
     let mut origins = HashMap::<String, ResponseToolOrigin>::new();
@@ -823,7 +801,6 @@ fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
                     }
                 }
             }
-            // Other hosted tools are not forwarded to Chat Completions.
             _ => {}
         }
     }
@@ -882,10 +859,7 @@ fn convert_tool_choice(tc: &ToolChoiceParam) -> ChatCompletionToolChoiceOption {
             // Hosted tools are not forwarded to chat completions
             ChatCompletionToolChoiceOption::Auto
         }
-        _ => {
-            // Other tool choice types (AllowedTools, Mcp, Custom, etc.) default to auto
-            ChatCompletionToolChoiceOption::Auto
-        }
+        _ => ChatCompletionToolChoiceOption::Auto,
     }
 }
 
@@ -918,7 +892,6 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
     fn try_from(resp: NvCreateResponse) -> Result<Self, Self::Error> {
         let mut messages = Vec::new();
 
-        // Prepend instructions as system message if present
         if let Some(instructions) = &resp.inner.instructions {
             messages.push(ChatCompletionRequestMessage::System(
                 ChatCompletionRequestSystemMessage {
@@ -928,7 +901,6 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             ));
         }
 
-        // Convert input to messages
         match &resp.inner.input {
             InputParam::Text(text) => {
                 messages.push(ChatCompletionRequestMessage::User(
@@ -944,13 +916,8 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             }
         }
 
-        // Merge any run of leading system messages into one.
-        //
-        // Some chat templates (e.g. Qwen's tool_use template) reject requests
-        // that have more than one system message at the start.  A Codex CLI
-        // first-turn request commonly produces two: one from `instructions` and
-        // one from a `developer`-role input item.  Concatenate them here with a
-        // newline separator so the backend sees exactly one system message.
+        // Qwen-style templates reject multiple leading system messages; Codex can
+        // produce one from `instructions` and one from a developer input item.
         {
             let leading_system_count = messages
                 .iter()
@@ -962,11 +929,6 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                     .map(|m| match m {
                         ChatCompletionRequestMessage::System(s) => match &s.content {
                             ChatCompletionRequestSystemMessageContent::Text(t) => t.as_str(),
-                            // Today this converter only ever builds `Text` system
-                            // content, so the merge is lossless.  Log loudly if a
-                            // non-text variant (e.g. `Array`, should async-openai
-                            // start emitting it) reaches here so the dropped
-                            // content is diagnosable instead of silently lost.
                             other => {
                                 tracing::debug!(
                                     "dropping non-text system message content during leading-system merge: {other:?}"
@@ -991,7 +953,6 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
 
         let top_logprobs = convert_top_logprobs(resp.inner.top_logprobs);
 
-        // Convert tools if present
         let tools = resp
             .inner
             .tools
@@ -1000,10 +961,8 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             .transpose()?
             .filter(|t: &Vec<_>| !t.is_empty());
 
-        // Convert tool_choice if present
         let tool_choice = resp.inner.tool_choice.as_ref().map(convert_tool_choice);
 
-        // Determine stream setting: respect caller's preference, default to true for aggregation
         let stream = resp.inner.stream.or(Some(true));
 
         // Map reasoning.effort to reasoning_effort. The upstream responses
@@ -1016,10 +975,8 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             .and_then(|r| r.effort.clone())
             .map(ChatReasoningEffort::from);
 
-        // Map text.format to response_format
         let response_format = resp.inner.text.as_ref().and_then(convert_text_format);
 
-        // Map service_tier
         let service_tier = resp.inner.service_tier.as_ref().map(convert_service_tier);
 
         Ok(NvCreateChatCompletionRequest {
@@ -1060,8 +1017,6 @@ fn convert_top_logprobs(input: Option<u8>) -> Option<u8> {
 }
 
 /// Parse `<tool_call>` blocks from model text output.
-/// Returns a list of (name, arguments_json) tuples.
-/// Returns an empty vec immediately if no `<tool_call>` tag is present.
 fn parse_tool_call_text(text: &str) -> Vec<(String, String)> {
     if !text.contains("<tool_call>") {
         return Vec::new();
@@ -1099,8 +1054,7 @@ fn parse_tool_call_text(text: &str) -> Vec<(String, String)> {
     results
 }
 
-/// Strip `<tool_call>...</tool_call>` blocks and any `<think>...</think>` blocks from text.
-/// Returns the original string (no allocation) if no tags are present.
+/// Strip tool-call and think-tag blocks from text.
 fn strip_tool_call_text(text: &str) -> std::borrow::Cow<'_, str> {
     let has_tool = text.contains("<tool_call>");
     let has_think = text.contains("<think>");
@@ -1152,19 +1106,10 @@ pub struct ResponseParams {
     pub service_tier: Option<ServiceTier>,
     pub include: Option<Vec<IncludeEnum>>,
     pub truncation: Option<Truncation>,
-    /// OpenResponses spec requires these fields on the response body. Upstream
-    /// `CreateResponse` doesn't model them on the request yet, so for now they
-    /// pass through as `None`; the response serializer defaults to 0.0 (the
-    /// effective sglang default). Wired through `ResponseParams` anyway so
-    /// that when upstream relaxes or we shadow `CreateResponse`, threading a
-    /// real value becomes a one-line change at the request-extraction site.
+    /// Required response fields not modeled on upstream `CreateResponse` yet.
     pub presence_penalty: Option<f32>,
     pub frequency_penalty: Option<f32>,
-    /// Pass-through metadata fields. Codex and other clients send these as
-    /// hints for OpenAI's caching/moderation backends; Dynamo doesn't act on
-    /// them, but the spec includes them on the response body so we echo back
-    /// what the caller sent rather than silently dropping. Echoing makes
-    /// receipt observable to the client without needing a real backend.
+    /// Spec metadata echoed back without local Dynamo behavior.
     pub prompt_cache_key: Option<String>,
     pub prompt_cache_retention: Option<PromptCacheRetention>,
     pub safety_identifier: Option<String>,
@@ -1220,11 +1165,7 @@ impl ResponseParams {
     }
 }
 
-/// Normalize tools so that `FunctionTool.strict` is always set.
-/// The upstream type uses `skip_serializing_if = "Option::is_none"` on `strict`,
-/// so `None` causes the field to be omitted during JSON serialization.
-/// Schema validators (Zod, etc.) expect `strict` to always be present.
-/// OpenAI defaults `strict` to `true`.
+/// Normalize tool JSON for clients that require `strict` to be present.
 pub(super) fn normalize_tools(tools: Vec<Tool>) -> Vec<Tool> {
     tools
         .into_iter()
@@ -1251,7 +1192,6 @@ pub(super) fn normalize_tools(tools: Vec<Tool>) -> Vec<Tool> {
         .collect()
 }
 
-/// Build an assistant text message output item.
 fn make_text_message(id: String, text: String) -> OutputItem {
     OutputItem::Message(OutputMessage {
         id,
@@ -1266,7 +1206,6 @@ fn make_text_message(id: String, text: String) -> OutputItem {
     })
 }
 
-/// Build a function call output item with generated IDs.
 fn make_function_call(name: String, arguments: String, namespace: Option<String>) -> OutputItem {
     OutputItem::FunctionCall(FunctionToolCall {
         arguments,
@@ -1329,8 +1268,7 @@ fn make_custom_tool_call(
     ))
 }
 
-/// Convert a ChatCompletion response into a Responses API response object,
-/// echoing back the actual request parameters from `params`.
+/// Convert Chat Completions output into a Responses object.
 pub fn chat_completion_to_response(
     nv_resp: NvCreateChatCompletionResponse,
     params: &ResponseParams,
@@ -1364,7 +1302,6 @@ pub fn chat_completion_to_response(
             }));
         }
 
-        // Handle structured tool calls
         if let Some(tool_calls) = choice.message.tool_calls {
             for tc in &tool_calls {
                 match params.tool_origin(&tc.function.name) {
@@ -1390,8 +1327,6 @@ pub fn chat_completion_to_response(
             }
         }
 
-        // Handle text content -- also parse <tool_call> blocks from models
-        // that emit tool calls as text (e.g. Qwen3)
         let content_text = match choice.message.content {
             Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(text)) => Some(text),
             Some(dynamo_protocols::types::ChatCompletionMessageContent::Parts(_)) => {
@@ -1468,9 +1403,7 @@ pub fn chat_completion_to_response(
         Status::Completed
     };
     if output_limit_reached {
-        // Unary responses do not expose explicit phase boundaries. A message
-        // or function call proves reasoning finished before the terminal item
-        // exhausted the output budget.
+        // Unary output has no phase events; later items imply reasoning completed.
         let reasoning_completed = output.iter().any(|item| {
             matches!(
                 item,
@@ -1502,7 +1435,7 @@ pub fn chat_completion_to_response(
         },
         status,
         output,
-        // Spec-required defaults (OpenResponses requires these as non-null)
+        // OpenResponses-required defaults.
         background: Some(false),
         metadata: Some(HashMap::new()),
         parallel_tool_calls: params.parallel_tool_calls.or(Some(true)),
@@ -1524,7 +1457,7 @@ pub fn chat_completion_to_response(
         ),
         top_p: params.top_p.or(Some(1.0)),
         truncation: Some(params.truncation.unwrap_or(Truncation::Disabled)),
-        // Nullable but required to be present (null is valid)
+        // Required nullable fields.
         billing: None,
         conversation: None,
         error: None,

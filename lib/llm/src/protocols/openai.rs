@@ -386,9 +386,7 @@ impl ParsingOptions {
         self
     }
 
-    /// Disable request-level tool parsing while preserving independent reasoning
-    /// parsing. `tool_call_parser` originates in model configuration, so HTTP
-    /// handlers must narrow it to requests that actually permit tool calls.
+    /// Disable request-level tool parsing without disabling reasoning parsing.
     pub fn with_tool_call_parsing_enabled(mut self, enabled: bool) -> Self {
         if !enabled {
             self.tool_call_parser = None;
