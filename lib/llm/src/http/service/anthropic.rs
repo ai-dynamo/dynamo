@@ -24,14 +24,17 @@ use axum::{
     },
     routing::{get, post},
 };
+use dynamo_runtime::config::environment_names::llm::DYN_HTTP_STREAM_MAX_DURATION_MS;
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use futures::StreamExt;
+use tokio::time::Instant;
 use tracing::Instrument;
 
 use super::{
     RouteDoc, apply_request_tool_call_parsing_options,
     disconnect::{
         ConnectionHandle, create_connection_monitor, monitor_for_disconnects_with_activity,
+        stream_max_duration,
     },
     metrics::{
         CancellationLabels, Endpoint, ErrorType, InflightGuard,
@@ -44,7 +47,8 @@ use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
 use crate::protocols::anthropic::types::{
     AnthropicContentBlock, AnthropicCountTokensRequest, AnthropicCountTokensResponse,
     AnthropicCreateMessageRequest, AnthropicErrorBody, AnthropicErrorResponse, AnthropicMessage,
-    AnthropicMessageContent, AnthropicTool, SystemContent, chat_completion_to_anthropic_response,
+    AnthropicMessageContent, AnthropicStopReason, AnthropicTool, SystemContent,
+    chat_completion_to_anthropic_response,
 };
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
@@ -613,6 +617,21 @@ async fn anthropic_messages(
         let cancel_ctx = ctx.clone();
 
         let (activity_tx, activity_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Wall-clock budget for one streaming response. An egress proxy that caps
+        // total request duration severs the connection long after the `200` has
+        // been committed, so the client can never receive an HTTP status — it just
+        // hangs. Truncate ourselves first, as a spec-valid short turn. Captured at
+        // entry (not as a relative sleep inside the stream body) so it is bounded in
+        // total, matching the pre-commit error peek in openai.rs — an
+        // `async_stream::stream!` body only starts on first poll, so a relative
+        // sleep would start counting late under load.
+        let stream_budget = stream_max_duration();
+        let stream_deadline = stream_budget.map(|d| Instant::now() + d);
+        // Only capture what the truncation path needs, and only when the deadline
+        // is enabled — the default (disabled) path must not allocate per request.
+        let truncation_ctx = stream_deadline.map(|_| (state.metrics_clone(), model.clone()));
+
         let full_stream = async_stream::stream! {
             let mut events = Vec::with_capacity(4);
             converter.append_start_events(&mut events);
@@ -622,13 +641,34 @@ async fn anthropic_messages(
 
             let mut saw_error = false;
             let mut cancelled = false;
+            let mut truncated = false;
 
             // Keep a single cancellation future alive across chunks — recreating
             // it per token churns the underlying Notify (see disconnect.rs).
             let stopped = cancel_ctx.stopped();
             tokio::pin!(stopped);
 
+            // Unset -> a future that never resolves, matching the opt-in shape of
+            // backend_stream_timeout() in disconnect.rs. No behaviour change by default.
+            let budget = async move {
+                match stream_deadline {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::pin!(budget);
+
             loop {
+                // Enforce the wall-clock budget before draining another chunk.
+                // The select below is `biased`, so a backend whose `next()` is
+                // always immediately ready wins every poll and the `budget` arm
+                // would never be reached — the cap would silently never fire
+                // under exactly the fast-backend load it exists to bound.
+                if stream_deadline.is_some_and(|at| Instant::now() >= at) {
+                    truncated = true;
+                    break;
+                }
+
                 tokio::select! {
                     // Prefer draining a ready backend chunk before honoring a
                     // cancel so no already-generated token is dropped.
@@ -664,12 +704,51 @@ async fn anthropic_messages(
                         cancelled = true;
                         break;
                     }
+                    _ = &mut budget => {
+                        // Wall-clock deadline reached while the backend was idle.
+                        truncated = true;
+                        break;
+                    }
                 }
+            }
+
+            if truncated {
+                // Stop the GPU: tokens produced after this point can never reach
+                // the client. stop_generating (not kill) so usage accounting and
+                // disagg RDMA teardown still run — see ai-dynamo/dynamo#12292
+                // and #10923. Shared by both truncation exits above.
+                tracing::warn!(
+                    env = DYN_HTTP_STREAM_MAX_DURATION_MS,
+                    budget_ms = stream_budget.map(|d| d.as_millis() as u64).unwrap_or_default(),
+                    output_tokens = converter.output_tokens(),
+                    "stream deadline reached; truncating with a spec-valid terminal event"
+                );
+                cancel_ctx.stop_generating();
             }
 
             if saw_error {
                 converter.append_error_events(&mut events);
             } else {
+                if truncated {
+                    // Drop any tool block still mid-JSON so we never flush a
+                    // malformed `tool_use` the client would replay as HTTP 400.
+                    let dropped = converter.drop_incomplete_tool_blocks();
+                    // MaxTokens is the only stop reason the client already knows how
+                    // to continue from. Stop would assert the turn finished; an error
+                    // event after visible output is not retried by Claude Code at all.
+                    // Only applied if the backend has not already reported a real
+                    // finish reason — see set_stop_reason_if_unset.
+                    converter.set_stop_reason_if_unset(AnthropicStopReason::MaxTokens);
+                    if let Some((metrics, model)) = &truncation_ctx {
+                        metrics.inc_stream_truncated(model, Endpoint::AnthropicMessages);
+                    }
+                    if dropped > 0 {
+                        tracing::warn!(
+                            dropped_tool_blocks = dropped,
+                            "dropped tool blocks with incomplete JSON args on truncation"
+                        );
+                    }
+                }
                 converter.append_end_events(&mut events);
             }
             for event in events.drain(..) {

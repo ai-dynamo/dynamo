@@ -62,6 +62,23 @@ The Rust HTTP server also reads these environment variables, which are not expos
   Unset, `0`, invalid, or unrepresentable values disable keep-alive comments.
 </ParamField>
 
+<ParamField path="DYN_HTTP_STREAM_MAX_DURATION_MS" type="integer" default="0">
+  Hard wall-clock cap, in milliseconds, on a single streaming response. On expiry the
+  frontend stops generation and closes the stream with a spec-valid terminal event
+  (`message_delta` with `stop_reason` plus `message_stop`) rather than severing it.
+  Intended for deployments behind an egress proxy that caps total request duration; set
+  it below that cap with enough margin for the terminal events to flush. Unlike
+  `DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS` this is not an inactivity timer and does not
+  reset when tokens arrive. Unset, `0`, or invalid values disable the cap.
+
+  <Note>
+    This cap is currently honored only by the Anthropic Messages endpoint
+    (`/v1/messages`). The OpenAI-compatible streaming endpoints
+    (`/v1/chat/completions`, `/v1/responses`) ignore it, so setting it does not protect
+    those paths.
+  </Note>
+</ParamField>
+
 ## Router
 
 This section is the canonical CLI and environment-variable reference for the frontend's embedded

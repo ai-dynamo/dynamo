@@ -6,12 +6,14 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use dynamo_llm::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
 use dynamo_protocols::types::{
     ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessageContent,
 };
 use dynamo_runtime::config::environment_names::llm::{
     DYN_ENABLE_ANTHROPIC_API, DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+    DYN_HTTP_STREAM_MAX_DURATION_MS,
 };
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -262,6 +264,519 @@ async fn finish_signal_publishes_tool_block_before_usage_tail() {
                 .filter(|event| event.event == "message_delta")
                 .count(),
             1
+        );
+
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+/// Vars for the wall-clock-deadline tests: base Anthropic env plus a short
+/// `DYN_HTTP_STREAM_MAX_DURATION_MS` so the frontend deadline fires well before
+/// any real timeout while the backend stream is gated (and never released).
+const DEADLINE_ENV: [(&str, Option<&str>); 3] = [
+    (DYN_ENABLE_ANTHROPIC_API, Some("1")),
+    (DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0")),
+    (DYN_HTTP_STREAM_MAX_DURATION_MS, Some("300")),
+];
+
+/// When the wall-clock deadline expires mid-stream (backend still open), the
+/// frontend must close the response as a spec-valid short turn:
+/// `content_block_stop` for the open text block, `message_delta` with
+/// `stop_reason:"max_tokens"`, then `message_stop` + `[DONE]` — and NOT an
+/// `event: error`. The `text.sse` head (`role`, `"Pong."`) streams immediately;
+/// the finish/usage tail is gated and never released, so only the deadline can
+/// terminate the stream.
+#[tokio::test]
+#[serial]
+async fn stream_deadline_truncates_open_text_block_with_max_tokens() {
+    temp_env::async_with_vars(DEADLINE_ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        // Split after the two content chunks (role + "Pong.") so the finish and
+        // usage chunks are gated; the text block is left open.
+        let split_at = 2;
+        let (svc, _gate) = HarnessService::start_with_gated_tail(script, split_at).await;
+        let response = post_messages(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "max_tokens": 128,
+                "stream": true,
+                "messages": [{"role": "user", "content": "Ping"}]
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        // The deadline is 300ms; give it generous slack. Without the fix this
+        // would hang until the test timeout.
+        let raw = tokio::time::timeout(Duration::from_secs(10), response.text())
+            .await
+            .expect("stream did not terminate at the wall-clock deadline")
+            .expect("failed to read truncated SSE body");
+
+        let events = parse_json_sse(&raw).await.unwrap();
+
+        // Exactly one terminal message_delta, carrying max_tokens.
+        let deltas: Vec<_> = events
+            .iter()
+            .filter(|event| event.event == "message_delta")
+            .collect();
+        assert_eq!(deltas.len(), 1, "expected one message_delta: {raw}");
+        assert_eq!(deltas[0].data["delta"]["stop_reason"], "max_tokens");
+
+        // A spec-valid terminal turn: message_stop + [DONE], no error frame.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event == "message_stop")
+                .count(),
+            1
+        );
+        assert_eq!(raw.matches("data: [DONE]").count(), 1);
+        assert!(
+            !events.iter().any(|event| event.event == "error"),
+            "truncation must not surface an error event: {raw}"
+        );
+
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+/// Opt-in guarantee: with `DYN_HTTP_STREAM_MAX_DURATION_MS` unset, a gated stream
+/// does NOT self-terminate — no `message_delta` arrives within a window that is
+/// comfortably longer than the deadline used above. This proves the deadline is
+/// what produced the terminal turn in the test above, not some other timer.
+#[tokio::test]
+#[serial]
+async fn stream_without_deadline_does_not_self_truncate() {
+    // Base ENV only: no DYN_HTTP_STREAM_MAX_DURATION_MS.
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let (svc, gate) = HarnessService::start_with_gated_tail(script, 2).await;
+        let response = post_messages(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "max_tokens": 128,
+                "stream": true,
+                "messages": [{"role": "user", "content": "Ping"}]
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        let mut body = response.bytes_stream();
+        let mut parser = IncrementalSseParser::default();
+        let mut saw_message_delta = false;
+        // Read for well past the 300ms deadline used above; nothing should
+        // finalize because no deadline is configured.
+        let _ = tokio::time::timeout(Duration::from_millis(800), async {
+            while let Some(bytes) = body.next().await {
+                let bytes = bytes.expect("failed to read SSE bytes");
+                for event in parser.push(&bytes).expect("failed to parse SSE") {
+                    saw_message_delta |= event == "message_delta";
+                }
+            }
+        })
+        .await;
+        assert!(
+            !saw_message_delta,
+            "stream self-truncated without a configured deadline"
+        );
+
+        gate.release();
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+/// A deadline that fires while a tool call's arguments are still mid-JSON must not
+/// flush a malformed `tool_use` (which the client would replay as HTTP 400). The
+/// `fragmented-tool.sse` head streams the tool id/name and the first arg fragment
+/// (`{"path"` — incomplete JSON); the fragment that closes the JSON is gated. On
+/// truncation the incomplete block is dropped: no `tool_use` content block is
+/// emitted, only the spec-valid `max_tokens` terminal turn.
+#[tokio::test]
+#[serial]
+async fn stream_deadline_drops_incomplete_tool_use() {
+    temp_env::async_with_vars(DEADLINE_ENV, async {
+        let script = load_agent_fixture("fragmented-tool.sse").await.unwrap();
+        // Immediate: role, tool id/name, and the first arg fragment leaving args
+        // at `{"path"` (incomplete JSON). Gated: the fragment that completes the
+        // JSON, plus finish/usage. So at the deadline the buffered tool args do
+        // not parse and the block must be dropped.
+        let split_at = 3;
+        let (svc, _gate) = HarnessService::start_with_gated_tail(script, split_at).await;
+        let response = post_messages(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "max_tokens": 128,
+                "stream": true,
+                "tools": [tool("list_directory")],
+                "messages": [{"role": "user", "content": "List /tmp"}]
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        let raw = tokio::time::timeout(Duration::from_secs(10), response.text())
+            .await
+            .expect("stream did not terminate at the wall-clock deadline")
+            .expect("failed to read truncated SSE body");
+        let events = parse_json_sse(&raw).await.unwrap();
+
+        // No tool_use content block was flushed (the args JSON was incomplete).
+        assert!(
+            !events.iter().any(|event| {
+                event.event == "content_block_start"
+                    && event.data["content_block"]["type"] == "tool_use"
+            }),
+            "an incomplete tool_use must not be emitted on truncation: {raw}"
+        );
+        // Still a spec-valid truncated turn.
+        let deltas: Vec<_> = events
+            .iter()
+            .filter(|event| event.event == "message_delta")
+            .collect();
+        assert_eq!(deltas.len(), 1, "expected one message_delta: {raw}");
+        assert_eq!(deltas[0].data["delta"]["stop_reason"], "max_tokens");
+        assert_eq!(raw.matches("data: [DONE]").count(), 1);
+
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+/// A deadline that fires before the backend has ever produced a single chunk must
+/// still close the response as a spec-valid, non-empty turn: `message_start` (which
+/// is emitted unconditionally before the backend is first polled) followed directly
+/// by the terminal `message_delta{stop_reason:"max_tokens"}` + `message_stop`. No
+/// content block was ever opened, so none should appear closed either. This is the
+/// edge case the upstream contribution plan (docs/issues §10.5) calls out as
+/// required in addition to the mid-block case: the finalizer must not assume at
+/// least one block was ever started.
+#[tokio::test]
+#[serial]
+async fn stream_deadline_before_any_backend_chunk_still_emits_valid_terminal_turn() {
+    temp_env::async_with_vars(DEADLINE_ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        // Gate everything: not even the role/text head chunk is released, so the
+        // deadline must fire while the converter has emitted nothing but the
+        // unconditional message_start.
+        let (svc, _gate) = HarnessService::start_with_gated_tail(script, 0).await;
+        let response = post_messages(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "max_tokens": 128,
+                "stream": true,
+                "messages": [{"role": "user", "content": "Ping"}]
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        let raw = tokio::time::timeout(Duration::from_secs(10), response.text())
+            .await
+            .expect("stream did not terminate at the wall-clock deadline")
+            .expect("failed to read truncated SSE body");
+        let events = parse_json_sse(&raw).await.unwrap();
+
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event == "message_start")
+                .count(),
+            1,
+            "message_start must still be emitted when the deadline fires before any backend chunk: {raw}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event.starts_with("content_block")),
+            "no content block was ever opened, so none should appear in the truncated turn: {raw}"
+        );
+        let deltas: Vec<_> = events
+            .iter()
+            .filter(|event| event.event == "message_delta")
+            .collect();
+        assert_eq!(deltas.len(), 1, "expected one message_delta: {raw}");
+        assert_eq!(deltas[0].data["delta"]["stop_reason"], "max_tokens");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event == "message_stop")
+                .count(),
+            1
+        );
+        assert_eq!(raw.matches("data: [DONE]").count(), 1);
+        assert!(
+            !events.iter().any(|event| event.event == "error"),
+            "truncation must not surface an error event: {raw}"
+        );
+
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+/// Truncation must be observable through `stream_truncated_total`, not just through
+/// the SSE body — otherwise a deployment cannot distinguish a proxy-deadline
+/// truncation from a genuine `max_tokens` turn (docs/issues §7 "Observability nên
+/// thêm").
+#[tokio::test]
+#[serial]
+async fn stream_deadline_increments_truncation_metric() {
+    temp_env::async_with_vars(DEADLINE_ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let (svc, _gate) = HarnessService::start_with_gated_tail(script, 2).await;
+        assert_eq!(
+            svc.metrics
+                .get_stream_truncated_count(MODEL, Endpoint::AnthropicMessages),
+            0
+        );
+
+        let response = post_messages(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "max_tokens": 128,
+                "stream": true,
+                "messages": [{"role": "user", "content": "Ping"}]
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let _raw = tokio::time::timeout(Duration::from_secs(10), response.text())
+            .await
+            .expect("stream did not terminate at the wall-clock deadline")
+            .expect("failed to read truncated SSE body");
+
+        assert_eq!(
+            svc.metrics
+                .get_stream_truncated_count(MODEL, Endpoint::AnthropicMessages),
+            1,
+            "wall-clock truncation must increment stream_truncated_total"
+        );
+
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+/// The whole point of truncating server-side is to stop the backend from wasting
+/// GPU cycles decoding tokens the client can never receive (docs/issues TL;DR: "vẫn
+/// decode — GPU cháy vô ích"). Assert `stop_generating()` actually reaches the
+/// backend's engine context, not just that the client-visible SSE looks correct.
+#[tokio::test]
+#[serial]
+async fn stream_deadline_calls_stop_generating_on_backend_context() {
+    temp_env::async_with_vars(DEADLINE_ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let (svc, _gate) = HarnessService::start_with_gated_tail(script, 2).await;
+        let response = post_messages(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "max_tokens": 128,
+                "stream": true,
+                "messages": [{"role": "user", "content": "Ping"}]
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        let _raw = tokio::time::timeout(Duration::from_secs(10), response.text())
+            .await
+            .expect("stream did not terminate at the wall-clock deadline")
+            .expect("failed to read truncated SSE body");
+
+        assert!(
+            svc.engine.last_context_stopped().await,
+            "wall-clock deadline must call stop_generating() on the backend context \
+             so the worker stops producing tokens the client can never receive"
+        );
+
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+/// A genuine client disconnect must still be recorded as `cancelled`, never folded
+/// into the `truncated` path, even when a wall-clock deadline is configured and has
+/// not yet expired. This pins the invariant the implementation comment calls out
+/// directly: "cancelled" parks on `pending()` so the outer `monitor_for_disconnects`
+/// records the request as cancelled, while "truncated" ends normally and is recorded
+/// OK — the two must never be conflated (docs/issues §6.3(d)).
+#[tokio::test]
+#[serial]
+async fn client_disconnect_is_not_misclassified_as_truncation_when_deadline_configured() {
+    // A deadline generous enough that it cannot fire before this test's assertions
+    // run, so any termination we observe must come from the disconnect path.
+    const GENEROUS_DEADLINE_ENV: [(&str, Option<&str>); 3] = [
+        (DYN_ENABLE_ANTHROPIC_API, Some("1")),
+        (DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0")),
+        (DYN_HTTP_STREAM_MAX_DURATION_MS, Some("60000")),
+    ];
+    temp_env::async_with_vars(GENEROUS_DEADLINE_ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let (svc, _gate) = HarnessService::start_with_gated_tail(script, 2).await;
+        let response = post_messages(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "max_tokens": 128,
+                "stream": true,
+                "messages": [{"role": "user", "content": "Ping"}]
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        // Read the immediately-available head chunk, then drop the response body to
+        // simulate a client disconnect (same technique as the existing
+        // client-disconnect coverage in tests/http-service.rs).
+        let mut body = response.bytes_stream();
+        let _ = body.next().await;
+        drop(body);
+
+        // Give the connection monitor time to detect the drop and record it.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if svc.metrics.get_request_counter(
+                    MODEL,
+                    &Endpoint::AnthropicMessages,
+                    &RequestType::Stream,
+                    &Status::Error,
+                    &ErrorType::Cancelled,
+                ) == 1
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("client disconnect was not recorded as cancelled");
+
+        assert_eq!(
+            svc.metrics
+                .get_stream_truncated_count(MODEL, Endpoint::AnthropicMessages),
+            0,
+            "a client disconnect must never be recorded as a wall-clock truncation"
+        );
+
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+/// Regression: the deadline must not relabel a turn the backend already finished.
+///
+/// `text.sse` chunk 2 carries `finish_reason:"stop"`, so by the time the gated
+/// usage-only tail (chunk 3) is still in flight the converter already holds a real
+/// terminal reason (`end_turn`). If the deadline fires in that window the handler
+/// still takes the truncation path — but overwriting the recorded reason with
+/// `max_tokens` tells the client a complete answer was cut short, and a client such
+/// as Claude Code will continue a turn that already ended. Truncation bookkeeping
+/// (metric, warn) is still correct here; only the client-visible label must be
+/// preserved.
+#[tokio::test]
+#[serial]
+async fn stream_deadline_preserves_finish_reason_already_reported_by_backend() {
+    temp_env::async_with_vars(DEADLINE_ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        // Head = role + content + finish_reason chunks; only the usage-only chunk
+        // is gated, so the deadline fires *after* a genuine finish was recorded.
+        let (svc, _gate) = HarnessService::start_with_gated_tail(script, 3).await;
+        let response = post_messages(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "max_tokens": 128,
+                "stream": true,
+                "messages": [{"role": "user", "content": "Ping"}]
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        let raw = tokio::time::timeout(Duration::from_secs(10), response.text())
+            .await
+            .expect("stream did not terminate at the wall-clock deadline")
+            .expect("failed to read SSE body");
+
+        let events = parse_json_sse(&raw).await.unwrap();
+        let deltas: Vec<_> = events
+            .iter()
+            .filter(|event| event.event == "message_delta")
+            .collect();
+        assert_eq!(deltas.len(), 1, "expected one message_delta: {raw}");
+        assert_eq!(
+            deltas[0].data["delta"]["stop_reason"], "end_turn",
+            "a turn the backend already finished must not be relabelled max_tokens: {raw}"
+        );
+
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+/// Regression: a backend that is always ready must not starve the deadline.
+///
+/// The select loop is `biased`, so the backend-chunk arm is polled first by design
+/// (an already-generated token must never be dropped in favour of a cancel). With a
+/// backend whose `next()` is *always* immediately ready, that ordering means the
+/// budget arm is never reached and `DYN_HTTP_STREAM_MAX_DURATION_MS` is never
+/// enforced — exactly the fast-backend load the cap exists to bound. Multi-threaded
+/// so the client side can still make progress while the server task spins.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn stream_deadline_fires_against_a_continuously_ready_backend() {
+    temp_env::async_with_vars(DEADLINE_ENV, async {
+        // Reuse the fixture's first chunk (a role-only delta) as filler: it keeps
+        // the select loop permanently fed without accumulating output, so this test
+        // isolates scheduling starvation.
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let filler = script
+            .into_iter()
+            .next()
+            .expect("text.sse must contain at least one chunk");
+        let svc = HarnessService::start_endless(filler).await;
+        let response = post_messages(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "max_tokens": 128,
+                "stream": true,
+                "messages": [{"role": "user", "content": "Ping"}]
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        // The deadline is 300ms. Without enforcement ahead of chunk processing the
+        // backend arm wins every poll and this never returns.
+        let raw = tokio::time::timeout(Duration::from_secs(10), response.text())
+            .await
+            .expect("deadline was starved by a continuously-ready backend")
+            .expect("failed to read truncated SSE body");
+
+        let events = parse_json_sse(&raw).await.unwrap();
+        let deltas: Vec<_> = events
+            .iter()
+            .filter(|event| event.event == "message_delta")
+            .collect();
+        assert_eq!(deltas.len(), 1, "expected one message_delta: {raw}");
+        assert_eq!(deltas[0].data["delta"]["stop_reason"], "max_tokens");
+        assert_eq!(
+            svc.metrics
+                .get_stream_truncated_count(MODEL, Endpoint::AnthropicMessages),
+            1,
+            "deadline truncation must be recorded"
         );
 
         svc.shutdown().await;
