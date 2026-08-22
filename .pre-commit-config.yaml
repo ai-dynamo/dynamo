@@ -180,6 +180,7 @@ repos:
         - pyyaml
         - prometheus_client>=0.23.1
         - openai
+        - redis>=5.0.0,<6.0
     - id: validate-skills
       name: Validate .agents/skills SKILL.md frontmatter and AGENTS.md index
       entry: python3 scripts/validate_skills.py

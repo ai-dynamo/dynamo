@@ -281,3 +281,70 @@ def test_gpu_refresh_validates_required_widths(
 
     with pytest.raises(DeploymentValidationError, match=missing_field):
         environment._refresh_gpu_counts()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_calls_controller_and_fpm_provider():
+    controller = _controller()
+    controller.shutdown = AsyncMock()
+    fpm_provider = _fpm_provider()
+    environment = PlannerEnvironmentImpl(
+        config=_config(),
+        controller=controller,
+        require_prefill=True,
+        require_decode=True,
+        fpm_provider=fpm_provider,
+    )
+
+    await environment.shutdown()
+
+    controller.shutdown.assert_awaited_once()
+    fpm_provider.shutdown.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_still_releases_fpm_provider_if_controller_shutdown_raises():
+    """A connector's own shutdown failing must not leak the fpm provider's
+    resources -- it should still get its chance to clean up."""
+    controller = _controller()
+    controller.shutdown = AsyncMock(side_effect=RuntimeError("boom"))
+    fpm_provider = _fpm_provider()
+    environment = PlannerEnvironmentImpl(
+        config=_config(),
+        controller=controller,
+        require_prefill=True,
+        require_decode=True,
+        fpm_provider=fpm_provider,
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await environment.shutdown()
+
+    fpm_provider.shutdown.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_skips_controller_call_when_connector_has_no_shutdown():
+    """Existing connectors (Kubernetes/Virtual/GlobalPlanner) have no
+    shutdown method; the environment must not assume one exists.
+
+    ``controller.shutdown = None`` (rather than leaving it unset) is
+    deliberate: a bare MagicMock auto-vivifies any accessed attribute as a
+    callable child mock, which would falsely satisfy this code's
+    ``callable(getattr(...))`` check and mask exactly the bug this test
+    guards against.
+    """
+    controller = _controller()
+    controller.shutdown = None
+    fpm_provider = _fpm_provider()
+    environment = PlannerEnvironmentImpl(
+        config=_config(),
+        controller=controller,
+        require_prefill=True,
+        require_decode=True,
+        fpm_provider=fpm_provider,
+    )
+
+    await environment.shutdown()
+
+    fpm_provider.shutdown.assert_awaited_once()
