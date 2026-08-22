@@ -459,6 +459,25 @@ fn server_info() -> pb::ServerInfo {
     }
 }
 
+#[test]
+fn discovered_model_advertises_token_native_generate() {
+    let model = DiscoveredModel::from_proto(model_info(), server_info()).expect("valid discovery");
+    assert_eq!(
+        model
+            .engine_config()
+            .runtime_data
+            .get("vllm_inference_v1_generate"),
+        Some(&serde_json::Value::Bool(true))
+    );
+    assert!(
+        !model
+            .engine_config()
+            .runtime_data
+            .contains_key("vllm_exact_mm_routing"),
+        "feature transport must not advertise exact routing"
+    );
+}
+
 fn sequence_response(
     terminal: bool,
     logprobs: bool,
@@ -489,6 +508,7 @@ fn sequence_response(
                 kv_transfer_params,
                 ec_transfer_params: None,
             }),
+            routed_experts: None,
         }),
     }
 }
@@ -586,6 +606,30 @@ fn zero_output_logprobs_omits_top_logprobs() {
 }
 
 #[test]
+fn all_logprobs_use_the_proto_all_selector() {
+    let mut request = request();
+    request.output_options.logprobs = Some(u32::MAX);
+    request.output_options.prompt_logprobs = Some(u32::MAX);
+
+    let wire = build_generate_request(
+        request,
+        "all-logprobs".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("build request");
+    let response = wire.response.expect("response options");
+
+    assert!(matches!(
+        response.output_candidates.and_then(|value| value.select),
+        Some(pb::candidate_tokens::Select::All(true))
+    ));
+    assert!(matches!(
+        response.prompt_candidates.and_then(|value| value.select),
+        Some(pb::candidate_tokens::Select::All(true))
+    ));
+}
+
+#[test]
 fn oversized_logprob_counts_are_rejected() {
     let oversized = i32::MAX as u32 + 1;
 
@@ -608,6 +652,500 @@ fn oversized_logprob_counts_are_rejected() {
     )
     .expect_err("oversized prompt logprobs must fail");
     assert!(prompt_error.to_string().contains("must fit in i32"));
+}
+
+#[test]
+fn token_native_compatibility_envelope_is_accepted_when_fields_are_projected() {
+    let mut request = request();
+    request.output_options.skip_special_tokens = Some(false);
+    request.routing.as_mut().unwrap().priority = Some(-7);
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {
+                "temperature": 0.2,
+                "top_p": 0.9,
+                "top_k": 4,
+                "min_p": 0.1,
+                "seed": 123,
+                "max_tokens": 1,
+                "min_tokens": 1,
+                "presence_penalty": 0.3,
+                "frequency_penalty": 0.4,
+                "repetition_penalty": 1.1,
+                "stop": ["done"],
+                "stop_token_ids": [2],
+                "ignore_eos": true,
+                "logprobs": 1,
+                "prompt_logprobs": 1,
+                "cache_salt": "cache-salt",
+                "skip_reading_prefix_cache": true,
+                "skip_special_tokens": false,
+                "include_stop_str_in_output": true,
+                "return_token_ids": true
+            },
+            "model": "served-model",
+            "stream": false,
+            "cache_salt": "cache-salt",
+            "priority": 7,
+            "kv_transfer_params": {
+                "connector_data": {"values": [1, true, null]}
+            }
+        }
+    }));
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("projected compatibility envelope");
+
+    assert_eq!(wire.temperature, Some(0.2));
+    assert_eq!(wire.stopping.as_ref().unwrap().stop_token_ids, [2]);
+    assert_eq!(wire.stopping.as_ref().unwrap().stop_strings, ["done"]);
+    assert!(wire.stopping.as_ref().unwrap().include_stop_strings);
+    assert_eq!(
+        wire.response.as_ref().unwrap().skip_special_tokens,
+        Some(false)
+    );
+    assert!(wire.response.as_ref().unwrap().output_logprobs);
+    assert_eq!(
+        wire.kv.as_ref().unwrap().cache_salt,
+        "dynamo-cache-salt:cache-salt"
+    );
+    assert!(wire.kv.as_ref().unwrap().bypass_prefix_cache);
+    assert!(wire.kv.as_ref().unwrap().kv_transfer_params.is_some());
+    assert_eq!(wire.priority, 7);
+}
+
+#[test]
+fn token_native_compatibility_envelope_rejects_disabled_token_ids() {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {"max_tokens": 1, "return_token_ids": false},
+            "stream": false,
+            "priority": 0
+        }
+    }));
+
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("the token-native sidecar always returns token IDs");
+
+    assert!(
+        error
+            .to_string()
+            .contains("sampling_params.return_token_ids must be true")
+    );
+}
+
+#[test]
+fn token_native_compatibility_envelope_rejects_conflicting_cache_salt() {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {"max_tokens": 1, "cache_salt": "different-policy-version"},
+            "cache_salt": "cache-salt",
+            "stream": false,
+            "priority": 0
+        }
+    }));
+
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("duplicate cache salts must match the canonical routing salt");
+
+    assert!(
+        error
+            .to_string()
+            .contains("sampling_params.cache_salt must match the canonical cache_salt")
+    );
+}
+
+#[test]
+fn token_native_compatibility_envelope_rejects_conflicting_prefix_cache_aliases() {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "bypass_prefix_cache": true,
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {"skip_reading_prefix_cache": false},
+            "stream": false,
+            "priority": 0
+        }
+    }));
+
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("prefix-cache aliases must agree");
+
+    assert!(
+        error
+            .to_string()
+            .contains("conflicts with extra_args.bypass_prefix_cache")
+    );
+}
+
+#[test]
+fn token_native_compatibility_envelope_treats_optional_nulls_as_omitted() {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {
+                "skip_reading_prefix_cache": null,
+                "skip_special_tokens": null
+            },
+            "stream": false,
+            "priority": 0
+        }
+    }));
+
+    build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("optional nulls should be omitted");
+}
+
+#[test]
+fn token_native_compatibility_envelope_rejects_unprojected_fields() {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {"max_tokens": 1, "future_sampling_field": true},
+            "stream": false,
+            "priority": 0
+        }
+    }));
+
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("unprojected compatibility fields must fail closed");
+
+    assert!(
+        error
+            .to_string()
+            .contains("extra_args.vllm_tito.sampling_params.future_sampling_field")
+    );
+}
+
+fn request_with_preprocessed_features(features: serde_json::Value) -> PreprocessedRequest {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {},
+            "stream": false,
+            "priority": 0,
+            "features": features
+        }
+    }));
+    request
+}
+
+const VALID_MM_KWARGS_BASE64: &str =
+    "gaxwaXhlbF92YWx1ZXOCpGRhdGGTpXVpbnQ4kQPHAwMBAgOlZmllbGSSp2JhdGNoZWSBq2tlZXBfb25fY3B1wg==";
+
+fn image_features(kwargs: serde_json::Value) -> serde_json::Value {
+    json!({
+        "mm_hashes": {"image": ["producer-controlled-hash"]},
+        "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+        "kwargs_data": {"image": [kwargs]}
+    })
+}
+
+#[test]
+fn preprocessed_multimodal_features_use_vllm_derived_identifiers() {
+    let request = request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64)));
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("preprocessed feature should be forwarded");
+
+    let feature = match wire.media[0].source.as_ref() {
+        Some(pb::media_item::Source::Features(feature)) => feature,
+        other => panic!("expected preprocessed features, got {other:?}"),
+    };
+    assert_eq!(feature.kwargs.as_ref().map(Vec::len), Some(64));
+    assert_eq!(
+        feature.identifier,
+        "grpc-mm:eb917f9e320304a5c5fc538e0de431ccc7237ba302a2aa8b6f0dd39bde78509f"
+    );
+    assert_eq!(
+        feature.mm_hash.as_deref(),
+        Some(feature.identifier.as_str())
+    );
+    assert_eq!((feature.offset, feature.length), (1, 2));
+}
+
+#[test]
+fn preprocessed_multimodal_features_reject_unknown_nested_fields() {
+    let mut features = image_features(json!(VALID_MM_KWARGS_BASE64));
+    features["future_field"] = json!(true);
+    let root_error = build_generate_request(
+        request_with_preprocessed_features(features),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("unknown feature fields must fail closed");
+    assert!(root_error.to_string().contains("future_field"));
+
+    let mut features = image_features(json!(VALID_MM_KWARGS_BASE64));
+    features["mm_placeholders"]["image"][0]["future_field"] = json!(true);
+    let placeholder_error = build_generate_request(
+        request_with_preprocessed_features(features),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("unknown placeholder fields must fail closed");
+    assert!(placeholder_error.to_string().contains("future_field"));
+}
+
+#[test]
+fn preprocessed_multimodal_features_require_inline_kwargs() {
+    for kwargs in [
+        serde_json::Value::Null,
+        serde_json::Value::String(String::new()),
+    ] {
+        let error = build_generate_request(
+            request_with_preprocessed_features(image_features(kwargs)),
+            "request-1".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .expect_err("cache-only or empty feature kwargs must be rejected");
+        assert!(error.to_string().contains("kwargs_data"));
+    }
+}
+
+#[test]
+fn preprocessed_multimodal_features_bound_producer_hashes() {
+    let mut features = image_features(json!(VALID_MM_KWARGS_BASE64));
+    features["mm_hashes"]["image"][0] = json!("h".repeat(257));
+    let error = build_generate_request(
+        request_with_preprocessed_features(features),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("unused producer hashes must still be bounded");
+    assert!(error.to_string().contains("between 1 and 256 bytes"));
+}
+
+#[test]
+fn preprocessed_multimodal_features_enforce_count_and_byte_limits() {
+    let hashes = vec!["producer-controlled-hash"; 65];
+    let placeholders = (0..65)
+        .map(|offset| json!({"offset": offset, "length": 1}))
+        .collect::<Vec<_>>();
+    let kwargs = vec![VALID_MM_KWARGS_BASE64; 65];
+    let too_many = json!({
+        "mm_hashes": {"image": hashes},
+        "mm_placeholders": {"image": placeholders},
+        "kwargs_data": {"image": kwargs}
+    });
+    let count_error = build_generate_request(
+        request_with_preprocessed_features(too_many),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("feature count must be bounded");
+    assert!(count_error.to_string().contains("at most 64"));
+
+    let oversized = "AAAA".repeat((16 * 1024 * 1024) / 3 + 1);
+    let byte_error = build_generate_request(
+        request_with_preprocessed_features(image_features(json!(oversized))),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("decoded feature bytes must be bounded");
+    assert!(byte_error.to_string().contains("16 MiB"));
+}
+
+#[test]
+fn preprocessed_multimodal_features_accept_transport_boundaries() {
+    let hashes = vec!["producer-controlled-hash"; 64];
+    let placeholders = (0..64)
+        .map(|offset| json!({"offset": offset, "length": 1}))
+        .collect::<Vec<_>>();
+    let kwargs = vec![VALID_MM_KWARGS_BASE64; 64];
+    let mut count_request = request_with_preprocessed_features(json!({
+        "mm_hashes": {"image": hashes},
+        "mm_placeholders": {"image": placeholders},
+        "kwargs_data": {"image": kwargs}
+    }));
+    count_request.token_ids = vec![1; 64];
+    let count_wire = build_generate_request(
+        count_request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("64 features should be accepted");
+    assert_eq!(count_wire.media.len(), 64);
+
+    let exact_limit = format!("{}AA==", "AAAA".repeat((16 * 1024 * 1024) / 3));
+    build_generate_request(
+        request_with_preprocessed_features(image_features(json!(exact_limit))),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("exactly 16 MiB of decoded kwargs should be accepted");
+}
+
+#[test]
+fn preprocessed_multimodal_features_validate_alignment_and_ranges() {
+    let cases = [
+        (
+            json!({
+                "mm_hashes": {"image": ["hash"]},
+                "mm_placeholders": {"video": [{"offset": 1, "length": 1}]},
+                "kwargs_data": {"image": [VALID_MM_KWARGS_BASE64]}
+            }),
+            "same modalities",
+        ),
+        (
+            json!({
+                "mm_hashes": {"image": ["hash", "hash-2"]},
+                "mm_placeholders": {"image": [{"offset": 1, "length": 1}]},
+                "kwargs_data": {"image": [VALID_MM_KWARGS_BASE64]}
+            }),
+            "equal lengths",
+        ),
+        (image_features(json!("not base64")), "not valid base64"),
+        (
+            json!({
+                "mm_hashes": {"image": ["hash", "hash-2"]},
+                "mm_placeholders": {"image": [
+                    {"offset": 0, "length": 2},
+                    {"offset": 1, "length": 2}
+                ]},
+                "kwargs_data": {"image": [VALID_MM_KWARGS_BASE64, VALID_MM_KWARGS_BASE64]}
+            }),
+            "cannot overlap",
+        ),
+        (
+            json!({
+                "mm_hashes": {"image": ["hash"]},
+                "mm_placeholders": {"image": [{"offset": 2, "length": 2}]},
+                "kwargs_data": {"image": [VALID_MM_KWARGS_BASE64]}
+            }),
+            "exceeds the prompt token count",
+        ),
+        (
+            json!({
+                "mm_hashes": {"image": ["hash"]},
+                "mm_placeholders": {"image": [{
+                    "offset": 1,
+                    "length": 2,
+                    "is_embed": [true]
+                }]},
+                "kwargs_data": {"image": [VALID_MM_KWARGS_BASE64]}
+            }),
+            "is_embed must match length",
+        ),
+    ];
+
+    for (features, expected) in cases {
+        let error = build_generate_request(
+            request_with_preprocessed_features(features),
+            "request-1".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .expect_err(expected);
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected:?}, got {error}"
+        );
+    }
+}
+
+#[test]
+fn preprocessed_multimodal_features_cannot_mix_with_raw_media() {
+    let mut request =
+        request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64)));
+    request.multi_modal_data = Some(std::collections::HashMap::from([(
+        "image_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "data:image/png;base64,iVBORw0KGgo=".to_string(),
+        )],
+    )]));
+
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("raw media and preprocessed features must not be mixed");
+
+    assert!(error.to_string().contains("cannot be mixed"));
+}
+
+#[tokio::test]
+async fn preprocessed_multimodal_features_require_model_support() {
+    let engine = engine(
+        "http://127.0.0.1:9",
+        DisaggregationMode::Aggregated,
+        1,
+        model_info(),
+    );
+    let context = dynamo_backend_common::testing::mock_context();
+    let result = engine
+        .generate(
+            request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64))),
+            GenerateContext::new(context, None),
+        )
+        .await;
+    let error = match result {
+        Ok(_) => panic!("a text-only model must reject preprocessed media before RPC submission"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("does not advertise multimodal support")
+    );
+}
+
+#[test]
+fn skip_special_tokens_false_is_forwarded_to_vllm() {
+    let mut request = request();
+    request.output_options.skip_special_tokens = Some(false);
+
+    let mapped = build_generate_request(
+        request,
+        "skip-special-tokens".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("skip_special_tokens=false should be supported");
+
+    assert_eq!(
+        mapped
+            .response
+            .expect("response options")
+            .skip_special_tokens,
+        Some(false)
+    );
 }
 
 struct FakeServer {
@@ -1284,6 +1822,99 @@ async fn multimodal_image_is_forwarded_with_uuid() {
     assert!(
         decode_kv["_dynamo_sidecar_multimodal_prompt_token_ids"].is_null(),
         "sidecar metadata must not reach vLLM"
+    );
+}
+
+#[tokio::test]
+async fn preprocessed_multimodal_features_preserve_disaggregated_handoff() {
+    let service = FakeVllm::default();
+    let mut discovered = model_info();
+    discovered.supports_multimodal = true;
+    *service.model_info_override.lock().await = Some(discovered.clone());
+    let server = FakeServer::start(service).await;
+    let prefill = engine(
+        &server.endpoint,
+        DisaggregationMode::Prefill,
+        1,
+        discovered.clone(),
+    );
+    let decode = engine(&server.endpoint, DisaggregationMode::Decode, 1, discovered);
+    prefill.start(1).await.expect("start prefill");
+    decode.start(2).await.expect("start decode");
+
+    let mut feature_request =
+        request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64)));
+    feature_request.output_options.prompt_logprobs = None;
+    let prefill_context = dynamo_backend_common::testing::mock_context();
+    feature_request.extra_args.as_mut().unwrap()["vllm_tito"]["request_id"] =
+        json!(prefill_context.id());
+    let prefill_outputs = prefill
+        .generate(
+            feature_request.clone(),
+            GenerateContext::new(prefill_context, None),
+        )
+        .await
+        .expect("prefill generate")
+        .map(|item| item.expect("prefill output"))
+        .collect::<Vec<_>>()
+        .await;
+    let handoff = prefill_outputs[0]
+        .disaggregated_params
+        .clone()
+        .expect("preprocessed multimodal handoff");
+    assert_eq!(
+        handoff["_dynamo_sidecar_multimodal_prompt_token_ids"]
+            .as_array()
+            .expect("expanded prompt token IDs")
+            .len(),
+        601
+    );
+
+    let mut decode_request = feature_request;
+    decode_request.prefill_result = Some(PrefillResult {
+        disaggregated_params: handoff,
+        prompt_tokens_details: None,
+    });
+    let decode_context = dynamo_backend_common::testing::mock_context();
+    decode_request.extra_args.as_mut().unwrap()["vllm_tito"]["request_id"] =
+        json!(decode_context.id());
+    let decode_outputs = decode
+        .generate(decode_request, GenerateContext::new(decode_context, None))
+        .await
+        .expect("decode generate")
+        .map(|item| item.expect("decode output"))
+        .collect::<Vec<_>>()
+        .await;
+    assert_eq!(
+        decode_outputs[0]
+            .completion_usage
+            .as_ref()
+            .expect("decode usage")
+            .prompt_tokens,
+        601
+    );
+
+    let requests = server.service.requests.lock().await;
+    let prefill_wire = &requests[requests.len() - 2];
+    let decode_wire = &requests[requests.len() - 1];
+    assert_eq!(prefill_wire.media.len(), 1);
+    assert!(matches!(
+        prefill_wire.media[0].source.as_ref(),
+        Some(pb::media_item::Source::Features(_))
+    ));
+    assert!(
+        prefill_wire
+            .response
+            .as_ref()
+            .expect("prefill response options")
+            .prompt_token_ids
+    );
+    assert!(decode_wire.media.is_empty());
+    assert_eq!(
+        decode_wire.prompt.as_ref(),
+        Some(&pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+            ids: (0..601).collect(),
+        }))
     );
 }
 
