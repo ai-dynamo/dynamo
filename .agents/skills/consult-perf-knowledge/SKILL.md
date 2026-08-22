@@ -144,7 +144,7 @@ Maintain one persistent search-calibration ledger for the engagement at
 hypothesis; each iteration's `knowledge-consult.md` records only the delta applied to it. The ledger is the
 authoritative family table. When submitting a stop-request, record in `knowledge-consult.md` the ledger path and
 the SHA256 of the ledger state being submitted, plus — whenever any granted budget is non-null — the derived
-budget consumption (wall clock from `manifest.yaml`'s session start; failed deploys from deployment ledgers marked failed; GPU-hours from summed `benchmark_execution.json` durations times the deployed GPU count); do not modify the ledger while that validation is pending. Before each hypothesis, update the ledger by delta, re-reviewing every row whose evidence regime changed
+budget consumption (wall clock from `manifest.yaml`'s session start; failed deploys from deployment ledgers marked failed; GPU-hours from GPU allocation time (per deployment ledger: first successful apply to teardown, or to now if live, times the GPUs its manifest requests, summed across deployments)); do not modify the ledger while that validation is pending. Before each hypothesis, update the ledger by delta, re-reviewing every row whose evidence regime changed
 (a topology adoption, new variance data, an answered ask). The ledger explicitly covers:
 
 1. deployment topology and fit, including model fit, parallelism, replication, aggregated versus disaggregated
