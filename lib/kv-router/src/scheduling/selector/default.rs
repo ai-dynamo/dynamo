@@ -10,9 +10,9 @@ use parking_lot::Mutex;
 
 use super::policy::WorkerSelectionPolicyStateRef;
 use super::{
-    LogitWeights, ScoredWorkerCandidate, WorkerCandidate, WorkerInputView, WorkerInputs,
-    WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionInput, WorkerSelector,
-    select_worker_with_policy,
+    LogitWeights, MaterializedSelectionInput, ScoredWorkerCandidate, WorkerCandidate,
+    WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer, WorkerSelectionContext,
+    WorkerSelectionInput, WorkerSelector, select_worker_with_policy,
 };
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use crate::scheduling::config::KvRouterConfig;
@@ -397,7 +397,7 @@ fn minimum_cost_index(
 pub(super) fn pick_default_worker<C: WorkerConfigLike>(
     scorer: &DefaultWorkerScorer<&KvRouterConfig>,
     picker: &DefaultWorkerPicker,
-    input: &WorkerSelectionInput<'_>,
+    input: &MaterializedSelectionInput<'_>,
     workers: &HashMap<WorkerId, C>,
     request: &SchedulingRequest,
     eligibility: RoutingEligibility<'_>,
@@ -574,11 +574,9 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
     #[inline(always)]
     fn select_worker(
         &self,
-        workers: &HashMap<WorkerId, C>,
-        request: &SchedulingRequest,
-        eligibility: RoutingEligibility<'_>,
-        block_size: u32,
+        input: WorkerSelectionInput<'_, C>,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+        let (workers, request, eligibility, block_size) = input.into_configured()?;
         select_worker_with_policy(
             &self.kv_router_config,
             self.worker_type,
@@ -611,7 +609,7 @@ mod tests {
         weights: LogitWeights,
     ) -> f64 {
         let workers = HashMap::from([(worker.worker_id, TaintedWorkerConfig::default())]);
-        let input = WorkerSelectionInput::new(
+        let input = MaterializedSelectionInput::new(
             &workers,
             request,
             request.eligibility(),
@@ -656,7 +654,7 @@ mod tests {
         };
 
         let input = |inputs| {
-            WorkerSelectionInput::new(
+            MaterializedSelectionInput::new(
                 &workers,
                 &request,
                 request.eligibility(),
@@ -733,7 +731,12 @@ mod tests {
 
         for _ in 0..120 {
             let result = selector
-                .select_worker(&workers, &request, request.eligibility(), 16)
+                .select_worker(WorkerSelectionInput::configured(
+                    &workers,
+                    &request,
+                    request.eligibility(),
+                    16,
+                ))
                 .unwrap();
             match result.worker.worker_id {
                 10 => selected[0] = true,
@@ -797,7 +800,12 @@ mod tests {
             let first_sequence = (0..64)
                 .map(|_| {
                     first
-                        .select_worker(&first_workers, &request, request.eligibility(), 16)
+                        .select_worker(WorkerSelectionInput::configured(
+                            &first_workers,
+                            &request,
+                            request.eligibility(),
+                            16,
+                        ))
                         .unwrap()
                         .worker
                 })
@@ -805,7 +813,12 @@ mod tests {
             let second_sequence = (0..64)
                 .map(|_| {
                     second
-                        .select_worker(&second_workers, &request, request.eligibility(), 16)
+                        .select_worker(WorkerSelectionInput::configured(
+                            &second_workers,
+                            &request,
+                            request.eligibility(),
+                            16,
+                        ))
                         .unwrap()
                         .worker
                 })
@@ -863,7 +876,12 @@ mod tests {
         };
         let select = |request: &SchedulingRequest| {
             DefaultWorkerSelector::new_seeded(Some(config.clone()), "test", 42)
-                .select_worker(&workers, request, request.eligibility(), 1)
+                .select_worker(WorkerSelectionInput::configured(
+                    &workers,
+                    request,
+                    request.eligibility(),
+                    1,
+                ))
                 .unwrap()
                 .worker
         };
@@ -931,12 +949,12 @@ mod tests {
 
         let overloaded_worker_ids = HashSet::from([0]);
         let result = selector
-            .select_worker(
+            .select_worker(WorkerSelectionInput::configured(
                 &workers,
                 &request,
                 request.eligibility_with_overloaded(Some(&overloaded_worker_ids)),
                 16,
-            )
+            ))
             .unwrap();
 
         assert_eq!(result.worker.worker_id, 1);
@@ -960,12 +978,12 @@ mod tests {
         let request = base_request(16);
         let overloaded_worker_ids = HashSet::from([0, 1]);
 
-        let result = selector.select_worker(
+        let result = selector.select_worker(WorkerSelectionInput::configured(
             &workers,
             &request,
             request.eligibility_with_overloaded(Some(&overloaded_worker_ids)),
             16,
-        );
+        ));
 
         assert!(matches!(
             result,
@@ -986,12 +1004,12 @@ mod tests {
         request.pinned_worker = Some(WorkerWithDpRank::from_worker_id(0));
         let overloaded_worker_ids = HashSet::from([0]);
 
-        let result = selector.select_worker(
+        let result = selector.select_worker(WorkerSelectionInput::configured(
             &workers,
             &request,
             request.eligibility_with_overloaded(Some(&overloaded_worker_ids)),
             16,
-        );
+        ));
 
         assert!(matches!(
             result,
@@ -1040,7 +1058,12 @@ mod tests {
             resp_tx: None,
         };
 
-        let result = selector.select_worker(&workers, &request, request.eligibility(), 16);
+        let result = selector.select_worker(WorkerSelectionInput::configured(
+            &workers,
+            &request,
+            request.eligibility(),
+            16,
+        ));
         assert!(matches!(result, Err(KvSchedulerError::NoEndpoints)));
     }
 
@@ -1094,7 +1117,12 @@ mod tests {
         };
 
         let result = selector
-            .select_worker(&workers, &request, request.eligibility(), 16)
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
             .unwrap();
         assert_eq!(result.worker.worker_id, 20);
     }
@@ -1165,7 +1193,12 @@ mod tests {
             };
 
             let result = selector
-                .select_worker(&workers, &request, request.eligibility(), 16)
+                .select_worker(WorkerSelectionInput::configured(
+                    &workers,
+                    &request,
+                    request.eligibility(),
+                    16,
+                ))
                 .unwrap();
             assert_eq!(
                 result.worker.worker_id, expected_worker_id,
@@ -1234,7 +1267,12 @@ mod tests {
         };
 
         let result = selector
-            .select_worker(&workers, &request, request.eligibility(), 16)
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
             .unwrap();
         assert_eq!(result.worker.worker_id, 10);
     }
@@ -1299,7 +1337,12 @@ mod tests {
         };
 
         let result = selector
-            .select_worker(&workers, &request, request.eligibility(), 16)
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
             .unwrap();
         assert_eq!(result.worker.worker_id, 20);
     }
@@ -1377,7 +1420,12 @@ mod tests {
         };
 
         let result = selector
-            .select_worker(&workers, &request, request.eligibility(), block_size)
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                block_size,
+            ))
             .unwrap();
 
         // Worker 0 should win: logit 1.0 < 2.0
@@ -1449,7 +1497,12 @@ mod tests {
         };
 
         let result = selector
-            .select_worker(&workers, &request, request.eligibility(), block_size)
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                block_size,
+            ))
             .unwrap();
 
         assert_eq!(
@@ -1505,14 +1558,24 @@ mod tests {
 
         assert_eq!(
             normal_credit
-                .select_worker(&workers, &request, request.eligibility(), block_size)
+                .select_worker(WorkerSelectionInput::configured(
+                    &workers,
+                    &request,
+                    request.eligibility(),
+                    block_size
+                ))
                 .unwrap()
                 .worker,
             cold_worker
         );
         assert_eq!(
             amplified_credit
-                .select_worker(&workers, &request, request.eligibility(), block_size)
+                .select_worker(WorkerSelectionInput::configured(
+                    &workers,
+                    &request,
+                    request.eligibility(),
+                    block_size
+                ))
                 .unwrap()
                 .worker,
             warm_worker
@@ -1653,14 +1716,24 @@ mod tests {
 
         assert_eq!(
             no_decay
-                .select_worker(&workers, &request, request.eligibility(), block_size)
+                .select_worker(WorkerSelectionInput::configured(
+                    &workers,
+                    &request,
+                    request.eligibility(),
+                    block_size
+                ))
                 .unwrap()
                 .worker,
             warm_worker
         );
         assert_eq!(
             with_decay
-                .select_worker(&workers, &request, request.eligibility(), block_size)
+                .select_worker(WorkerSelectionInput::configured(
+                    &workers,
+                    &request,
+                    request.eligibility(),
+                    block_size
+                ))
                 .unwrap()
                 .worker,
             cold_worker
@@ -1725,7 +1798,12 @@ mod tests {
         };
 
         let result = selector
-            .select_worker(&workers, &request, request.eligibility(), block_size)
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                block_size,
+            ))
             .unwrap();
 
         assert_eq!(
@@ -1743,7 +1821,7 @@ mod tests {
         #[allow(clippy::single_range_in_vec_init)]
         let shared_hits = SharedCacheHits::from_ranges(vec![0..4]);
         request.shared_cache_hits = Some(shared_hits);
-        let default_input = WorkerSelectionInput::new(
+        let default_input = MaterializedSelectionInput::new(
             &workers,
             &request,
             request.eligibility(),
@@ -1756,7 +1834,7 @@ mod tests {
             },
             WorkerInputs::CACHE | WorkerInputs::DEFAULT_POLICY_CACHE,
         );
-        let custom_input = WorkerSelectionInput::new(
+        let custom_input = MaterializedSelectionInput::new(
             &workers,
             &request,
             request.eligibility(),
@@ -1827,7 +1905,12 @@ mod tests {
         };
 
         let result = selector
-            .select_worker(&workers, &request, request.eligibility(), block_size)
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                block_size,
+            ))
             .unwrap();
 
         assert_eq!(result.worker, worker0);

@@ -26,7 +26,7 @@ use super::{
 };
 use crate::{
     discovery::ModelManager,
-    kv_router::{BuiltinRoutingPolicy, KvRouter, RoutingHost, WorkerSelectorFactory},
+    kv_router::{KvRouter, RoutingHost, WorkerSelectorFactory, is_builtin_router_mode},
     local_model::runtime_config::ModelRuntimeConfig,
     model_card::ModelDeploymentCard,
     protocols::common::{
@@ -404,9 +404,7 @@ where
             )
             .await?;
 
-            let router = if affinity.is_none()
-                && BuiltinRoutingPolicy::from_router_mode(prefill_router_mode).is_some()
-            {
+            let router = if affinity.is_none() && is_builtin_router_mode(prefill_router_mode) {
                 InnerPrefillRouter::RoutingHost(Arc::new(RoutingHost::<Sel>::new_builtin(
                     push_router,
                 )?))
