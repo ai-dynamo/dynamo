@@ -35,11 +35,13 @@ from dynamo.llm import (
     EngineType,
     EntrypointArgs,
     FrontendRoute,
+    PythonAsyncEngine,
     make_engine,
     run_input,
 )
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.workflow import WorkflowTokenEngine, load_workflow_orchestrator
 
 from .frontend_args import FrontendArgGroup, FrontendConfig
 
@@ -398,6 +400,8 @@ async def async_main():
         kwargs["model_name"] = config.model_name
     if config.model_path:
         kwargs["model_path"] = config.model_path
+    if config.custom_jinja_template:
+        kwargs["custom_template_path"] = config.custom_jinja_template
     if config.tls_cert_path:
         kwargs["tls_cert_path"] = config.tls_cert_path
     if config.tls_key_path:
@@ -440,7 +444,18 @@ async def async_main():
     if config.router_prefill_load_model == "aic":
         kwargs["aic_perf_config"] = AicPerfConfig(**config.aic_perf_kwargs())
 
-    e = EntrypointArgs(EngineType.Dynamic, **kwargs)
+    engine_type = EngineType.Dynamic
+    if config.workflow_provider is not None:
+        orchestrator = await load_workflow_orchestrator(
+            config.workflow_provider, runtime
+        )
+        token_engine = WorkflowTokenEngine(orchestrator)
+        kwargs["in_process_token_engine"] = PythonAsyncEngine(
+            token_engine.generate, loop
+        )
+        engine_type = EngineType.InProcessTokens
+
+    e = EntrypointArgs(engine_type, **kwargs)
     engine = await make_engine(runtime, e)
     # Validate mode compatibility before loading extensions, so an incompatible
     # mode fails fast without importing/executing third-party provider code.

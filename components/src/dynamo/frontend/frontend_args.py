@@ -44,12 +44,24 @@ def validate_model_name(value: str) -> str:
 
 
 def validate_model_path(value: str) -> str:
-    """Validate that model-path is a valid directory on disk."""
-    if not os.path.isdir(value):
+    """Validate a local model directory or remote model identifier."""
+
+    if not isinstance(value, str) or not value.strip():
         raise argparse.ArgumentTypeError(
-            f"model-path must be a valid directory on disk, got: {value}"
+            f"model-path must be a non-empty path or model identifier, got: {value}"
         )
-    return value
+    return value.strip()
+
+
+def validate_custom_jinja_template(value: str) -> str:
+    """Resolve and validate a custom chat-template file."""
+
+    expanded = os.path.abspath(os.path.expanduser(os.path.expandvars(value)))
+    if not os.path.isfile(expanded):
+        raise argparse.ArgumentTypeError(
+            f"custom-jinja-template must be a readable file, got: {value}"
+        )
+    return expanded
 
 
 class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
@@ -74,6 +86,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     migration_max_seq_len: Optional[int]
     model_name: Optional[str]
     model_path: Optional[str]
+    custom_jinja_template: Optional[str]
     metrics_prefix: Optional[str] = None
 
     kserve_grpc_server: bool
@@ -96,6 +109,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     tokenizer_fallback: bool
     trust_remote_code: bool
     frontend_route_extensions: list[str]
+    workflow_provider: Optional[str]
 
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
 
@@ -133,6 +147,29 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
                 f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
             )
+        if self.workflow_provider is not None:
+            if ":" not in self.workflow_provider:
+                raise ValueError(
+                    "--workflow-provider must use a 'module:callable' path"
+                )
+            if self.model_path is None:
+                raise ValueError("--workflow-provider requires --model-path")
+            if self.chat_processor != "dynamo":
+                raise ValueError(
+                    "--workflow-provider currently requires --dyn-chat-processor=dynamo"
+                )
+            if self.interactive or self.kserve_grpc_server:
+                raise ValueError(
+                    "--workflow-provider currently supports HTTP frontend mode only"
+                )
+            if self.router_mode != "round-robin":
+                raise ValueError(
+                    "--workflow-provider currently requires --router-mode=round-robin"
+                )
+            if self.migration_limit != 0:
+                raise ValueError(
+                    "--workflow-provider currently requires --migration-limit=0"
+                )
         if self.router_prefill_load_model == "aic":
             if self.router_mode != "kv":
                 raise ValueError(
@@ -392,8 +429,19 @@ class FrontendArgGroup(ArgGroup):
             flag_name="--model-path",
             env_var="DYN_MODEL_PATH",
             default=None,
-            help="Path to model directory on disk (e.g., /tmp/model_cache/llama3.2_1B/)",
+            help=(
+                "Local model directory or remote model identifier used for "
+                "frontend preprocessing."
+            ),
             arg_type=validate_model_path,
+        )
+        add_argument(
+            g,
+            flag_name="--custom-jinja-template",
+            env_var="DYN_CUSTOM_JINJA_TEMPLATE",
+            default=None,
+            help="Path to a custom Jinja chat template used by the frontend.",
+            arg_type=validate_custom_jinja_template,
         )
         add_argument(
             g,
@@ -444,6 +492,17 @@ class FrontendArgGroup(ArgGroup):
                 "'dynamo.frontend.routes' entry-point group, or a 'module:function' "
                 "path. May be repeated. DYN_FRONTEND_ROUTE_EXTENSIONS accepts "
                 "whitespace-separated values."
+            ),
+        )
+
+        add_argument(
+            g,
+            flag_name="--workflow-provider",
+            env_var="DYN_WORKFLOW_PROVIDER",
+            default=None,
+            help=(
+                "Trusted 'module:callable' that authors and binds a workflow "
+                "for in-process token execution."
             ),
         )
 
