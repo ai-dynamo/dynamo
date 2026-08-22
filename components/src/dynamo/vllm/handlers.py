@@ -1517,14 +1517,44 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     self.node_ip: str = d["NodeManagerAddress"]
                     self.node_id: str = d["NodeID"]
 
-            original_list_nodes = _ray_util_state.list_nodes
+            async def _scale_engine(size: int) -> None:
+                # add_dp_placement_groups calls ray.util.state.list_nodes();
+                # patch it to the GCS API for the duration of the reconfigure.
+                original_list_nodes = _ray_util_state.list_nodes
+                try:
+                    _ray_util_state.list_nodes = lambda **kw: [
+                        _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
+                    ]
+                    await self.engine_client.scale_elastic_ep(size)
+                finally:
+                    _ray_util_state.list_nodes = original_list_nodes
+
             try:
-                _ray_util_state.list_nodes = lambda **kw: [
-                    _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
-                ]
-                await self.engine_client.scale_elastic_ep(new_dp_size)
-            finally:
-                _ray_util_state.list_nodes = original_list_nodes
+                await _scale_engine(new_dp_size)
+            except EngineDeadError as dead_err:
+                # Engine died mid-grow. Restart it the same way every other engine
+                # path here does, so it comes back clean and re-registers.
+                logger.error(
+                    "[ElasticEP] Engine died during scale to dp=%s: %s",
+                    new_dp_size,
+                    dead_err,
+                )
+                self._shutdown_on_engine_dead(dead_err)  # NoReturn: restarts worker
+            except Exception as grow_err:
+                # Fail fast: vLLM does no rollback or cleanup on a failed scale (its
+                # _scale_up_elastic_ep has no except and its /scale_elastic_ep
+                # endpoint just returns 500), so a failed grow leaves the engine
+                # partial/wedged with no safe way to recover in process. Restart the
+                # worker so it comes back clean, rather than fake a recovery that
+                # nothing acts on.
+                logger.error(
+                    "[ElasticEP] Scaling to dp=%s failed: %s. vLLM does not roll "
+                    "back a failed scale; restarting the worker to recover a clean "
+                    "state.",
+                    new_dp_size,
+                    grow_err,
+                )
+                self._shutdown_worker()  # NoReturn: runtime.shutdown() + os._exit(1)
 
             logger.info(f"[ElasticEP] Scaling to dp={new_dp_size} complete")
             return {

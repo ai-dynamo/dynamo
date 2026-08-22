@@ -1,6 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Unit tests for BaseWorkerHandler.scale_elastic_ep.
+
+Two concerns: input validation (the TP-derived EP-size floor) and fail-fast
+handling of a failed grow. vLLM does no rollback on a failed scale, so the
+handler restarts the worker instead of recovering in process; the fail-fast
+tests assert the restart is actually triggered (via ``_WorkerShutdown``), not
+just that a value was returned.
+
+``ray`` is stubbed via the ``stub_ray`` fixture (the scale path imports it
+lazily and CI lacks it).
+"""
+
 import asyncio
 import sys
 from types import SimpleNamespace
@@ -10,6 +22,8 @@ import pytest
 
 pytest.importorskip("torch")
 pytest.importorskip("vllm.config")
+
+from vllm.v1.engine.exceptions import EngineDeadError  # noqa: E402
 
 from dynamo.vllm.handlers import BaseWorkerHandler  # noqa: E402
 
@@ -29,6 +43,7 @@ class _TestWorkerHandler(BaseWorkerHandler):
 def _make_handler(
     tensor_parallel_size: int,
     prefill_context_parallel_size: int = 1,
+    data_parallel_size: int = 1,
 ) -> _TestWorkerHandler:
     handler = _TestWorkerHandler.__new__(_TestWorkerHandler)
     handler.engine_client = SimpleNamespace(
@@ -36,6 +51,9 @@ def _make_handler(
             parallel_config=SimpleNamespace(
                 tensor_parallel_size=tensor_parallel_size,
                 prefill_context_parallel_size=prefill_context_parallel_size,
+                # Captured up front by the rollback path before the grow; real
+                # vLLM engines always set it.
+                data_parallel_size=data_parallel_size,
             ),
         ),
         scale_elastic_ep=AsyncMock(),
@@ -56,6 +74,11 @@ def stub_ray(monkeypatch):
     monkeypatch.setitem(sys.modules, "ray.util", util)
     monkeypatch.setitem(sys.modules, "ray.util.state", state)
     return state
+
+
+# --------------------------------------------------------------------------- #
+# Input validation and the TP-derived EP-size floor.
+# --------------------------------------------------------------------------- #
 
 
 @pytest.mark.asyncio
@@ -153,3 +176,128 @@ async def test_prefill_context_parallelism_is_rejected(size):
     assert result["status"] == "error"
     assert "prefill_context_parallel_size" in result["message"]
     handler.engine_client.scale_elastic_ep.assert_not_awaited()
+
+
+# --------------------------------------------------------------------------- #
+# Fail-fast handling of a failed grow.
+# --------------------------------------------------------------------------- #
+
+
+class _WorkerShutdown(BaseException):
+    """Stand-in for the NoReturn _shutdown_worker / _shutdown_on_engine_dead.
+    BaseException (not Exception) so the handler's broad ``except Exception``
+    can't swallow it -- the test sees the restart as production does: control
+    leaves scale_elastic_ep without reporting success.
+    """
+
+
+_RESTARTED = object()  # sentinel: handler restarted the worker instead of returning
+
+
+class _FakeVllmEngine:
+    """Stand-in engine client: scaling to a ``fail_sizes`` size raises
+    ``RuntimeError`` and to a ``dead_sizes`` size raises ``EngineDeadError``.
+    ``tensor_parallel_size`` is set so the TP floor check passes and the grow is
+    actually attempted.
+    """
+
+    def __init__(self, prev_dp, fail_sizes=(), dead_sizes=(), tensor_parallel_size=1):
+        self.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                data_parallel_size=prev_dp,
+                tensor_parallel_size=tensor_parallel_size,
+            )
+        )
+        self._fail_sizes = list(fail_sizes)
+        self._dead_sizes = list(dead_sizes)
+        self.calls: list[int] = []  # every requested size, in order
+
+    async def scale_elastic_ep(self, size: int) -> None:
+        self.calls.append(size)
+        if size in self._dead_sizes:
+            raise EngineDeadError()
+        if size in self._fail_sizes:
+            raise RuntimeError(f"scale to {size} failed")
+        self.vllm_config.parallel_config.data_parallel_size = size
+
+
+def _make_self(engine: _FakeVllmEngine, shutdown_log: list) -> SimpleNamespace:
+    def _shutdown_worker():
+        shutdown_log.append("worker")
+        raise _WorkerShutdown()
+
+    def _shutdown_on_engine_dead(err):
+        shutdown_log.append("engine_dead")
+        raise _WorkerShutdown()
+
+    return SimpleNamespace(
+        _scale_ep_lock=asyncio.Lock(),
+        _scale_ep_in_progress=False,
+        engine_client=engine,
+        _shutdown_worker=_shutdown_worker,
+        _shutdown_on_engine_dead=_shutdown_on_engine_dead,
+    )
+
+
+def _run(engine: _FakeVllmEngine, body: dict):
+    """Drive scale_elastic_ep. Returns ``(result, shutdown_log)``; ``result`` is
+    ``_RESTARTED`` when the handler restarted the worker instead of returning."""
+    shutdown_log: list[str] = []
+
+    async def _coro():
+        fake_self = _make_self(engine, shutdown_log)
+        return await BaseWorkerHandler.scale_elastic_ep(fake_self, body)
+
+    try:
+        result = asyncio.run(_coro())
+    except _WorkerShutdown:
+        result = _RESTARTED
+    return result, shutdown_log
+
+
+def test_scale_success(stub_ray):
+    engine = _FakeVllmEngine(prev_dp=2)
+
+    result, shutdown = _run(engine, {"new_data_parallel_size": 3})
+
+    assert shutdown == []  # no restart on success
+    assert result["status"] == "ok"
+    assert result["new_data_parallel_size"] == 3
+    assert engine.calls == [3]
+
+
+def test_validation_error_does_not_restart_the_worker(stub_ray):
+    # Fail-fast is scoped to real scale failures: a request rejected up front
+    # (dp=1 at TP=1 collapses the EP world) returns an error and must NOT restart
+    # the worker or touch the engine.
+    engine = _FakeVllmEngine(prev_dp=2, tensor_parallel_size=1)
+
+    result, shutdown = _run(engine, {"new_data_parallel_size": 1})
+
+    assert shutdown == []  # no restart on a rejected request
+    assert result["status"] == "error"
+    assert engine.calls == []  # never reached the engine
+
+
+def test_failed_grow_restarts_the_worker(stub_ray):
+    # vLLM does not roll back a failed scale, so a failed grow must fail fast:
+    # restart the worker rather than report a recovery that no caller acts on.
+    engine = _FakeVllmEngine(prev_dp=2, fail_sizes=[3])
+
+    result, shutdown = _run(engine, {"new_data_parallel_size": 3})
+
+    assert result is _RESTARTED  # never returned a success/recovery dict
+    assert shutdown == ["worker"]  # worker restart was triggered
+    assert engine.calls == [3]  # grow attempted once; no rollback call
+
+
+def test_engine_dead_restarts_the_worker(stub_ray):
+    # A dead engine routes through the same _shutdown_on_engine_dead path the rest
+    # of the handler uses for engine death.
+    engine = _FakeVllmEngine(prev_dp=2, dead_sizes=[3])
+
+    result, shutdown = _run(engine, {"new_data_parallel_size": 3})
+
+    assert result is _RESTARTED
+    assert shutdown == ["engine_dead"]
+    assert engine.calls == [3]  # no rollback call
