@@ -11,7 +11,7 @@ from dynamo.common.lora.manager import LoRAInfo
 
 try:
     from PIL import Image
-    from vllm.sampling_params import SamplingParams
+    from vllm.sampling_params import RequestOutputKind, SamplingParams
     from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
     from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
@@ -22,7 +22,11 @@ try:
     from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
     from dynamo.vllm.omni.main import _register_lora_engine_routes
     from dynamo.vllm.omni.omni_handler import EngineInputs, OmniHandler
-    from dynamo.vllm.omni.utils import build_original_prompt, parse_omni_request
+    from dynamo.vllm.omni.utils import (
+        build_original_prompt,
+        parse_omni_request,
+        streaming_sampling_params,
+    )
 except ImportError:
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
@@ -30,6 +34,7 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
     pytest.mark.gpu_0,
+    pytest.mark.multimodal,
     pytest.mark.pre_merge,
 ]
 
@@ -95,6 +100,23 @@ class TestEngineInputs:
         assert ei.sampling_params_list is None
         assert ei.response_format is None
         assert ei.output_format is None
+        assert ei.stream_audio is False
+
+
+def test_streaming_sampling_params_preserves_request_overrides():
+    engine_client = SimpleNamespace(
+        default_sampling_params_list=[SamplingParams(temperature=0.1, max_tokens=8)]
+    )
+    requested = SamplingParams(temperature=0.7, max_tokens=42, top_p=0.8)
+
+    result = streaming_sampling_params(engine_client, [requested])
+
+    assert result is not None
+    assert result[0].temperature == 0.7
+    assert result[0].max_tokens == 42
+    assert result[0].top_p == 0.8
+    assert result[0].output_kind == RequestOutputKind.DELTA
+    assert requested.output_kind == RequestOutputKind.CUMULATIVE
 
 
 class TestBuildEngineInputs:

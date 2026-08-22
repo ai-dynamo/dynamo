@@ -11,8 +11,10 @@ output without creating an engine or loading model weights.
 import asyncio
 import base64
 import logging
+import struct
 import time
 import uuid
+from dataclasses import dataclass, field
 from io import BytesIO
 from typing import Any, Dict, Optional
 
@@ -35,6 +37,25 @@ from dynamo.vllm.handlers import build_prompt_tokens_details
 from dynamo.vllm.omni.utils import is_empty_payload
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class AudioStreamState:
+    """Request-local state for incremental audio output."""
+
+    emitted_chunks: int = 0
+    sample_rate: int | None = None
+    num_channels: int | None = None
+
+
+@dataclass
+class AudioAggregateState:
+    """Request-local raw audio accumulated for one final encode."""
+
+    chunks: list[np.ndarray] = field(default_factory=list)
+    sample_rate: int | None = None
+    emitted_chunks: int = 0
+    num_channels: int | None = None
 
 
 class TextFormatter:
@@ -284,12 +305,16 @@ class AudioFormatter:
     async def format(
         self, stage_output: Any, request_id: str, **ctx: Any
     ) -> Dict[str, Any] | None:
+        stream_state = ctx.get("audio_stream_state")
+        aggregate_state = ctx.get("audio_aggregate_state")
         mm_output = (
             stage_output.multimodal_output
             if hasattr(stage_output, "multimodal_output")
             else stage_output
         )
         if is_empty_payload(mm_output):
+            if stream_state is not None or aggregate_state is not None:
+                return None
             return self._error_response(request_id, "No audio generated")
 
         response_format = ctx.get("response_format")
@@ -298,18 +323,37 @@ class AudioFormatter:
 
         try:
             start_time = time.time()
-            audio_np, sample_rate = self._extract_audio_tensor(mm_output)
-
-            encode_fmt = "wav" if output_format is None else output_format
-            assert encode_fmt is not None
-            audio_bytes, media_type = await asyncio.to_thread(
-                self._encode_audio, audio_np, sample_rate, encode_fmt, speed
+            audio_np, sample_rate = self._extract_audio_tensor(
+                mm_output,
+                chunk_state=(
+                    stream_state if stream_state is not None else aggregate_state
+                ),
             )
+            if audio_np.size == 0:
+                return None
 
-            logger.info(
+            if aggregate_state is not None:
+                self._append_audio_chunk(aggregate_state, audio_np, sample_rate)
+                return None
+
+            encode_fmt = (output_format or "wav").lower()
+            if stream_state is not None:
+                audio_bytes, _ = await asyncio.to_thread(
+                    self._encode_audio_chunk,
+                    audio_np,
+                    sample_rate,
+                    encode_fmt,
+                    stream_state,
+                )
+            else:
+                audio_bytes, _ = await asyncio.to_thread(
+                    self._encode_audio, audio_np, sample_rate, encode_fmt, speed
+                )
+
+            logger.debug(
                 "Audio encoded for request %s: %d samples, sr=%d, %d bytes %s",
                 request_id,
-                len(audio_np),
+                audio_np.shape[-1],
                 sample_rate,
                 len(audio_bytes),
                 encode_fmt,
@@ -345,7 +389,55 @@ class AudioFormatter:
             logger.error("Failed to process audio for request %s: %s", request_id, e)
             return self._error_response(request_id, str(e))
 
-    def _extract_audio_tensor(self, mm_output: Dict[str, Any]) -> tuple:
+    async def finish_aggregate(
+        self, request_id: str, aggregate_state: AudioAggregateState, **ctx: Any
+    ) -> Dict[str, Any]:
+        """Encode all buffered raw chunks as one complete audio file."""
+        if not aggregate_state.chunks or aggregate_state.sample_rate is None:
+            return self._error_response(request_id, "No audio generated")
+
+        audio_np = np.concatenate(aggregate_state.chunks, axis=-1)
+        response = await self.format(
+            {"audio": audio_np, "sr": aggregate_state.sample_rate},
+            request_id,
+            **ctx,
+        )
+        if response is None:
+            return self._error_response(request_id, "No audio generated")
+        return response
+
+    def _append_audio_chunk(
+        self,
+        state: AudioAggregateState,
+        audio_np: np.ndarray,
+        sample_rate: int,
+    ) -> None:
+        audio_np, num_channels = self._channel_first_audio(audio_np)
+        self._validate_audio_metadata(state, sample_rate, num_channels)
+        state.chunks.append(audio_np)
+
+    @staticmethod
+    def _validate_audio_metadata(
+        state: AudioStreamState | AudioAggregateState,
+        sample_rate: int,
+        num_channels: int,
+    ) -> None:
+        if state.sample_rate is not None and state.sample_rate != sample_rate:
+            raise ValueError(
+                f"Audio sample rate changed from {state.sample_rate} to {sample_rate}"
+            )
+        if state.num_channels is not None and state.num_channels != num_channels:
+            raise ValueError("Audio channel count changed while generating")
+
+        state.sample_rate = sample_rate
+        state.num_channels = num_channels
+
+    def _extract_audio_tensor(
+        self,
+        mm_output: Dict[str, Any],
+        *,
+        chunk_state: AudioStreamState | AudioAggregateState | None = None,
+    ) -> tuple[np.ndarray, int]:
         audio_key = "audio" if "audio" in mm_output else "model_outputs"
         audio_val = mm_output.get(audio_key)
         if audio_val is None:
@@ -354,6 +446,12 @@ class AudioFormatter:
             )
 
         if isinstance(audio_val, list):
+            if chunk_state is not None:
+                new_audio = audio_val[chunk_state.emitted_chunks :]
+                chunk_state.emitted_chunks = len(audio_val)
+                audio_val = new_audio
+                if not audio_val:
+                    return np.empty(0, dtype=np.float32), self._sample_rate(mm_output)
             audio_val = torch.cat(audio_val, dim=-1)
 
         if hasattr(audio_val, "float"):
@@ -363,19 +461,93 @@ class AudioFormatter:
         else:
             audio_np = np.array(audio_val, dtype=np.float32)
 
-        if audio_np.ndim > 1:
-            audio_np = audio_np.squeeze()
+        return audio_np, self._sample_rate(mm_output)
 
+    @staticmethod
+    def _sample_rate(mm_output: Dict[str, Any]) -> int:
         sr_raw = mm_output.get("sr", 24000)
         if isinstance(sr_raw, list):
             sr_raw = sr_raw[-1] if sr_raw else 24000
-        sample_rate = sr_raw.item() if hasattr(sr_raw, "item") else int(sr_raw)
+        return sr_raw.item() if hasattr(sr_raw, "item") else int(sr_raw)
 
-        return audio_np, sample_rate
+    def _encode_audio_chunk(
+        self,
+        audio_np: np.ndarray,
+        sample_rate: int,
+        fmt: str,
+        stream_state: AudioStreamState,
+    ) -> tuple[bytes, str]:
+        audio_np, num_channels = self._normalize_audio_layout(audio_np)
+        first_chunk = stream_state.sample_rate is None
+        self._validate_audio_metadata(stream_state, sample_rate, num_channels)
+        pcm_bytes, _ = self._write_audio(audio_np, sample_rate, "pcm")
+        if fmt == "wav" and first_chunk:
+            pcm_bytes = self._wav_stream_header(sample_rate, num_channels) + pcm_bytes
+        return pcm_bytes, "audio/wav" if fmt == "wav" else "audio/pcm"
+
+    @staticmethod
+    def _channel_first_audio(audio_np: np.ndarray) -> tuple[np.ndarray, int]:
+        """Normalize mono or stereo audio to vLLM-Omni's channel-first layout."""
+        if audio_np.ndim == 3:
+            if audio_np.shape[0] != 1:
+                raise ValueError(
+                    f"Expected one audio batch, got shape {audio_np.shape}"
+                )
+            audio_np = audio_np[0]
+
+        if audio_np.ndim == 1:
+            return audio_np, 1
+
+        if audio_np.ndim != 2:
+            raise ValueError(f"Unexpected audio shape {audio_np.shape}")
+
+        # Prefer vLLM-Omni's channel-first contract for ambiguous small shapes,
+        # while retaining compatibility with soundfile-style frame-major output.
+        if audio_np.shape[0] in (1, 2):
+            return audio_np, int(audio_np.shape[0])
+        if audio_np.shape[1] in (1, 2):
+            return audio_np.T, int(audio_np.shape[1])
+
+        raise ValueError(f"Expected mono or stereo audio, got shape {audio_np.shape}")
+
+    @classmethod
+    def _normalize_audio_layout(cls, audio_np: np.ndarray) -> tuple[np.ndarray, int]:
+        """Convert supported audio layouts to soundfile's frame-major layout."""
+        audio_np, num_channels = cls._channel_first_audio(audio_np)
+        if audio_np.ndim == 2:
+            audio_np = audio_np.T
+        return audio_np, num_channels
+
+    @staticmethod
+    def _wav_stream_header(
+        sample_rate: int, num_channels: int = 1, bits_per_sample: int = 16
+    ) -> bytes:
+        """Build a PCM WAV header whose payload length is not known yet."""
+        byte_rate = sample_rate * num_channels * bits_per_sample // 8
+        block_align = num_channels * bits_per_sample // 8
+        placeholder_size = 0xFFFFFFFF
+
+        return struct.pack(
+            "<4sI4s4sIHHIIHH4sI",
+            b"RIFF",
+            placeholder_size,
+            b"WAVE",
+            b"fmt ",
+            16,
+            1,
+            num_channels,
+            sample_rate,
+            byte_rate,
+            block_align,
+            bits_per_sample,
+            b"data",
+            placeholder_size,
+        )
 
     def _encode_audio(
         self, audio_np: Any, sample_rate: int, fmt: str = "wav", speed: float = 1.0
-    ) -> tuple:
+    ) -> tuple[bytes, str]:
+        audio_np, _ = self._channel_first_audio(audio_np)
         if speed != 1.0:
             try:
                 import librosa
@@ -384,6 +556,14 @@ class AudioFormatter:
             except ImportError:
                 logger.warning("librosa not installed, ignoring speed adjustment")
 
+        if audio_np.ndim == 2:
+            audio_np = audio_np.T
+        return self._write_audio(audio_np, sample_rate, fmt)
+
+    @staticmethod
+    def _write_audio(
+        audio_np: np.ndarray, sample_rate: int, fmt: str
+    ) -> tuple[bytes, str]:
         fmt = (fmt or "wav").lower()
         format_map = {
             "wav": ("WAV", "audio/wav", {}),
@@ -500,4 +680,14 @@ class OutputFormatter:
 
         return await formatter.format(
             stage_output, request_id, request_type=request_type, **ctx
+        )
+
+    async def finish_audio(
+        self,
+        request_id: str,
+        aggregate_state: AudioAggregateState,
+        **ctx: Any,
+    ) -> Dict[str, Any]:
+        return await self._formatters["audio"].finish_aggregate(
+            request_id, aggregate_state, **ctx
         )

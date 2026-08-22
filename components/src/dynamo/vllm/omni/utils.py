@@ -11,6 +11,7 @@ import torch
 from vllm.sampling_params import SamplingParams
 from vllm_omni.distributed.omni_connectors.utils.serialization import OmniSerializer
 from vllm_omni.entrypoints.stage_utils import shm_read_bytes
+from vllm_omni.entrypoints.utils import coerce_param_message_types
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo.common.utils.output_modalities import RequestType, parse_request_type
@@ -18,6 +19,20 @@ from dynamo.common.utils.video_utils import compute_num_frames, parse_size
 
 DEFAULT_IMAGE_SIZE = "1024x1024"
 DEFAULT_VIDEO_SIZE = "832x480"
+
+
+def streaming_sampling_params(
+    engine_client: Any, sampling_params_list: list[Any] | None = None
+) -> list[Any] | None:
+    """Return request parameters or engine defaults configured for streaming."""
+    source = (
+        sampling_params_list
+        if sampling_params_list is not None
+        else engine_client.default_sampling_params_list
+    )
+    if not source:
+        return None
+    return coerce_param_message_types(list(source), is_streaming=True)
 
 
 def shm_deserialize(shm_meta: dict) -> Any:
