@@ -37,6 +37,11 @@ from dynamo.common.forward_pass_metrics import (
 from dynamo.llm import AicPerfConfig, KvRouterConfig
 from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay, run_trace_replay
+from dynamo.replay.deprecation import (
+    suppress_engine_only_api_warning,
+    uses_dynamo_integration,
+    warn_engine_only_replay,
+)
 from dynamo.replay.reporting import format_report_table, write_report_json
 
 
@@ -654,6 +659,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
 
+    if not uses_dynamo_integration(
+        replay_mode=base_config.replay_mode,
+        router_mode=args.router_mode,
+        router_config=router_config,
+        planner_config=args.planner_config,
+    ):
+        warn_engine_only_replay(
+            "python -m dynamo.replay",
+            "python -m aisimulate.replay",
+        )
+
     if args.planner_config is not None:
         if args.replay_mode != "offline":
             parser.error("--planner-config only supports --replay-mode=offline")
@@ -687,31 +703,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         "capture_per_request": capture_per_request,
     }
 
-    if using_trace_file:
-        report = run_trace_replay(
-            list(base_config.trace_files),
-            trace_block_size=workload.get("trace_block_size"),
-            trace_format=workload.get("trace_format", "mooncake"),
-            trace_shared_prefix_ratio=workload.get("trace_shared_prefix_ratio", 0.0),
-            trace_num_prefix_groups=workload.get("trace_num_prefix_groups", 0),
-            report_jsonl_path=per_request_jsonl,
-            max_sim_time_ms=workload.get("max_sim_time_ms"),
-            **replay_options,
-        )
-    else:
-        report = run_synthetic_trace_replay(
-            workload["isl"],
-            workload["osl"],
-            workload["request_count"],
-            request_rate=workload.get("request_rate"),
-            arrival_interval_ms=workload.get("arrival_interval_ms"),
-            arrival_seed=workload.get("arrival_seed", 42),
-            turns_per_session=workload.get("turns_per_session", 1),
-            shared_prefix_ratio=workload.get("shared_prefix_ratio", 0.0),
-            num_prefix_groups=workload.get("num_prefix_groups", 0),
-            inter_turn_delay_ms=workload.get("inter_turn_delay_ms", 0.0),
-            **replay_options,
-        )
+    with suppress_engine_only_api_warning():
+        if using_trace_file:
+            report = run_trace_replay(
+                list(base_config.trace_files),
+                trace_block_size=workload.get("trace_block_size"),
+                trace_format=workload.get("trace_format", "mooncake"),
+                trace_shared_prefix_ratio=workload.get(
+                    "trace_shared_prefix_ratio", 0.0
+                ),
+                trace_num_prefix_groups=workload.get("trace_num_prefix_groups", 0),
+                report_jsonl_path=per_request_jsonl,
+                max_sim_time_ms=workload.get("max_sim_time_ms"),
+                **replay_options,
+            )
+        else:
+            report = run_synthetic_trace_replay(
+                workload["isl"],
+                workload["osl"],
+                workload["request_count"],
+                request_rate=workload.get("request_rate"),
+                arrival_interval_ms=workload.get("arrival_interval_ms"),
+                arrival_seed=workload.get("arrival_seed", 42),
+                turns_per_session=workload.get("turns_per_session", 1),
+                shared_prefix_ratio=workload.get("shared_prefix_ratio", 0.0),
+                num_prefix_groups=workload.get("num_prefix_groups", 0),
+                inter_turn_delay_ms=workload.get("inter_turn_delay_ms", 0.0),
+                **replay_options,
+            )
 
     if base_config.replay_mode == "online":
         summary = report
