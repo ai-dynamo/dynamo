@@ -2428,6 +2428,7 @@ dependencies = [
  "clap",
  "dynamo-llm",
  "dynamo-protocols",
+ "dynamo-rl",
  "dynamo-runtime",
  "futures",
  "opentelemetry",
@@ -2440,7 +2441,6 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "url",
 ]
 
 [[package]]
@@ -2914,6 +2914,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]

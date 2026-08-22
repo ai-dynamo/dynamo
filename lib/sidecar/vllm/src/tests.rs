@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use dynamo_backend_common::engine::RoutingHints;
 use dynamo_backend_common::{
     DisaggregationMode, FinishReason, GenerateContext, LLMEngine, MultimodalData, OutputOptions,
-    PrefillResult, PreprocessedRequest, SamplingOptions, StopConditions,
+    PrefillResult, PreprocessedRequest, RlAdminBaseUrl, RlWorkerMetadata, SamplingOptions,
+    StopConditions,
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
@@ -24,7 +25,7 @@ use tonic_health::ServingStatus as HealthServingStatus;
 
 use crate::client::{CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
 use crate::convert::{ResponseState, build_generate_request};
-use crate::engine::VllmSidecarEngine;
+use crate::engine::{VllmSidecarEngine, parse_http_endpoint_arg};
 use crate::json::{json_to_struct, struct_to_json};
 use crate::model::DiscoveredModel;
 use crate::proto as pb;
@@ -444,6 +445,7 @@ fn server_info() -> pb::ServerInfo {
             data_parallel_size: 2,
             data_parallel_rank: 0,
             decode_context_parallel_size: 1,
+            world_size: 2,
         }),
         max_model_len: 8192,
         kv_block_size: 16,
@@ -456,6 +458,105 @@ fn server_info() -> pb::ServerInfo {
             sleep_mode_enabled: true,
             draft_weight_updates_enabled: true,
         }),
+    }
+}
+
+#[test]
+fn rl_worker_metadata_identifies_zero_parallelism_dimensions() {
+    for (dimension, expected) in [
+        ("tensor", "tensor-parallel size of zero"),
+        ("pipeline", "pipeline-parallel size of zero"),
+    ] {
+        let mut server = server_info();
+        let parallelism = server.parallelism.as_mut().expect("parallelism metadata");
+        match dimension {
+            "tensor" => parallelism.tensor_parallel_size = 0,
+            "pipeline" => parallelism.pipeline_parallel_size = 0,
+            _ => unreachable!(),
+        }
+        let model = DiscoveredModel::from_proto(model_info(), server).expect("valid discovery");
+        let error = model.rl_worker_metadata(None).unwrap_err();
+        assert!(error.to_string().contains(expected));
+    }
+}
+
+#[test]
+fn rl_worker_metadata_includes_prefill_context_parallelism() {
+    let mut server = server_info();
+    let parallelism = server.parallelism.as_mut().expect("parallelism metadata");
+    parallelism.tensor_parallel_size = 2;
+    parallelism.pipeline_parallel_size = 3;
+    parallelism.data_parallel_size = 5;
+    parallelism.world_size = 12;
+
+    let model = DiscoveredModel::from_proto(model_info(), server).expect("valid discovery");
+    assert_eq!(
+        model.rl_worker_metadata(None).expect("valid RL metadata"),
+        RlWorkerMetadata::new(60, None).expect("valid expected metadata")
+    );
+}
+
+#[test]
+fn rl_worker_metadata_rejects_missing_engine_world_size() {
+    let mut server = server_info();
+    server
+        .parallelism
+        .as_mut()
+        .expect("parallelism metadata")
+        .world_size = 0;
+
+    let model = DiscoveredModel::from_proto(model_info(), server).expect("valid discovery");
+    let error = model.rl_worker_metadata(None).unwrap_err();
+    assert!(error.to_string().contains("engine world size"));
+}
+
+#[test]
+fn http_admin_endpoint_accepts_http_https_and_path_prefixes() {
+    for endpoint in [
+        "http://worker:8120",
+        "https://worker.example.com",
+        "https://worker.example.com/admin/v1",
+    ] {
+        assert_eq!(
+            parse_http_endpoint_arg(endpoint)
+                .expect("valid HTTP admin endpoint")
+                .as_str(),
+            endpoint
+        );
+    }
+}
+
+#[test]
+fn http_admin_endpoint_rejects_invalid_values() {
+    for endpoint in ["", "worker:8120", "grpc://worker:8120", "https:///admin"] {
+        let error = parse_http_endpoint_arg(endpoint).unwrap_err();
+        assert!(error.to_string().contains("--vllm-http-endpoint"));
+    }
+}
+
+#[test]
+fn startup_compatibility_rejects_tensor_or_pipeline_parallelism_change() {
+    let bootstrap = DiscoveredModel::from_proto(model_info(), server_info())
+        .expect("valid bootstrap discovery");
+
+    for dimension in ["tensor", "pipeline"] {
+        let mut changed_server = server_info();
+        let parallelism = changed_server
+            .parallelism
+            .as_mut()
+            .expect("parallelism metadata");
+        match dimension {
+            "tensor" => parallelism.tensor_parallel_size += 1,
+            "pipeline" => parallelism.pipeline_parallel_size += 1,
+            _ => unreachable!(),
+        }
+        let observed = DiscoveredModel::from_proto(model_info(), changed_server)
+            .expect("valid startup discovery");
+
+        assert!(
+            bootstrap.ensure_startup_compatible(&observed).is_err(),
+            "{dimension} parallelism change should be rejected"
+        );
     }
 }
 
@@ -761,6 +862,9 @@ async fn engine_from_args(
         "dynamo-vllm-sidecar".to_string(),
         "--vllm-endpoint".to_string(),
         endpoint.to_string(),
+        "--vllm-http-endpoint".to_string(),
+        "http://worker:8120".to_string(),
+        "--enable-rl".to_string(),
         "--grpc-connections".to_string(),
         "2".to_string(),
         "--grpc-startup-deadline-secs".to_string(),
@@ -835,6 +939,16 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     assert_eq!(worker.served_model_name.as_deref(), Some("served-model"));
     assert!(worker.reasoning_parser.is_none());
     assert!(worker.tool_call_parser.is_none());
+    assert_eq!(
+        worker.rl_metadata,
+        Some(
+            RlWorkerMetadata::new(
+                4,
+                Some(RlAdminBaseUrl::parse("http://worker:8120").expect("valid admin base URL"),),
+            )
+            .expect("valid RL metadata")
+        )
+    );
     let config = engine.start(0).await.expect("start");
     assert_eq!(config.model, "model-source");
     assert_eq!(config.served_model_name.as_deref(), Some("served-model"));

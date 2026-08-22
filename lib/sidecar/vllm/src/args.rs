@@ -15,4 +15,8 @@ pub(crate) struct Args {
     /// vLLM gRPC endpoint as host:port or an http:// URL.
     #[arg(long, env = "VLLM_GRPC_ENDPOINT")]
     pub vllm_endpoint: String,
+
+    /// Optional controller-routable vLLM HTTP base URL for RL compatibility operations.
+    #[arg(long, env = "VLLM_HTTP_ENDPOINT")]
+    pub vllm_http_endpoint: Option<String>,
 }
