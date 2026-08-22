@@ -127,11 +127,10 @@ echo "Starting T2V Worker ($WAN_SIZE)..."
 python3 -m dynamo.sglang \
     --model-path "$MODEL_PATH" \
     --served-model-name "$MODEL_PATH" \
-    --tp "$TP_SIZE" \
+    --tp-size "$TP_SIZE" \
     --video-generation-worker \
     --media-output-fs-url "$FS_URL" \
     --trust-remote-code \
-    --skip-tokenizer-init \
     --enable-metrics \
     "${EXTRA_ARGS[@]}" &
 

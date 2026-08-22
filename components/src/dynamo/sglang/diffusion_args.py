@@ -90,17 +90,8 @@ def _existing_option_strings(parser: argparse.ArgumentParser) -> set:
     return {opt for action in parser._actions for opt in action.option_strings}
 
 
-def parse_diffusion_args(
-    unknown_args: List[str],
-) -> Tuple[argparse.Namespace, DiffusionWorkerArgs]:
-    """Parse worker args against SGLang's native diffusion ServerArgs CLI.
-
-    Args:
-        unknown_args: Argument strings left over after Dynamo's own parser.
-
-    Returns:
-        (parsed argparse namespace, DiffusionWorkerArgs adapter)
-    """
+def _import_diffusion_server_args():
+    """Import sglang's diffusion ServerArgs (lazily; layout varies by version)."""
     # Imported lazily: only diffusion/video workers need the multimodal_gen
     # extra, and importing it pulls in heavy dependencies. server_args became
     # a package in newer SGLang releases; older ones expose it as a module.
@@ -112,6 +103,17 @@ def parse_diffusion_args(
         from sglang.multimodal_gen.runtime.server_args import (
             ServerArgs as DiffusionServerArgs,  # type: ignore[no-redef]
         )
+    return DiffusionServerArgs
+
+
+def build_diffusion_parser() -> Tuple[argparse.ArgumentParser, List[str]]:
+    """Build the diffusion worker CLI: native engine args + Dynamo-side flags.
+
+    Returns:
+        (parser, dynamo_side_dests) where dynamo_side_dests names the flags
+        registered by Dynamo rather than the engine.
+    """
+    DiffusionServerArgs = _import_diffusion_server_args()
 
     try:
         from sglang.multimodal_gen.utils import FlexibleArgumentParser
@@ -120,6 +122,7 @@ def parse_diffusion_args(
 
     parser = FlexibleArgumentParser(
         description="Dynamo SGLang diffusion worker configuration",
+        add_help=False,
     )
     DiffusionServerArgs.add_cli_args(parser)
 
@@ -132,6 +135,22 @@ def parse_diffusion_args(
             continue
         action = dynamo_group.add_argument(*spec["flags"], **spec["kwargs"])
         dynamo_side_dests.append(action.dest)
+    return parser, dynamo_side_dests
+
+
+def parse_diffusion_args(
+    unknown_args: List[str],
+) -> Tuple[argparse.Namespace, DiffusionWorkerArgs]:
+    """Parse worker args against SGLang's native diffusion ServerArgs CLI.
+
+    Args:
+        unknown_args: Argument strings left over after Dynamo's own parser.
+
+    Returns:
+        (parsed argparse namespace, DiffusionWorkerArgs adapter)
+    """
+    DiffusionServerArgs = _import_diffusion_server_args()
+    parser, dynamo_side_dests = build_diffusion_parser()
 
     parsed, remaining = parser.parse_known_args(unknown_args)
 
@@ -145,13 +164,48 @@ def parse_diffusion_args(
     # from_cli_args distinguishes explicitly-set flags from argparse defaults
     # by scanning sys.argv — correct for a worker process, but wrong for any
     # caller that passes an argument list (tests, embedding). Communicate the
-    # exact flags we parsed through the side channel the engine parser
-    # supports, so resolution never depends on process argv.
-    explicit_names = {
-        arg.split("=", 1)[0].replace("-", "_").lstrip("_")
-        for arg in unknown_args
-        if arg.startswith("--")
-    } - set(dynamo_side_dests)
+    # flags we parsed through the side channel the engine parser supports, so
+    # resolution never depends on process argv. Each raw flag is resolved to
+    # its parser destination (not its raw spelling): argparse accepts
+    # abbreviations and aliases (e.g. --tp for --tp-size), and recording the
+    # raw text would make the engine treat the real field as unspecified.
+    option_to_dest = {
+        opt: action.dest for action in parser._actions for opt in action.option_strings
+    }
+
+    def _resolve_dest(raw_flag: str) -> Optional[str]:
+        if raw_flag in option_to_dest:
+            return option_to_dest[raw_flag]
+        # argparse allows unambiguous prefixes; mirror that resolution.
+        matches = {d for o, d in option_to_dest.items() if o.startswith(raw_flag)}
+        return matches.pop() if len(matches) == 1 else None
+
+    explicit_names = set()
+    for arg in unknown_args:
+        if not arg.startswith("--"):
+            continue
+        raw = arg.split("=", 1)[0]
+        dest = _resolve_dest(raw)
+        if dest is None:
+            # Not a registered option (e.g. dynamic --<component>-path flags
+            # the engine resolves itself): keep the normalized raw name.
+            dest = raw.replace("-", "_").lstrip("_")
+        explicit_names.add(dest)
+    explicit_names -= set(dynamo_side_dests)
+
+    # The engine defaults num_gpus to 1 and does not derive it from
+    # parallelism degrees, so tp/dp without an explicit --num-gpus would
+    # under-allocate. Preserve the historical num_gpus = tp * dp behavior.
+    if "num_gpus" not in explicit_names:
+        tp = getattr(parsed, "tp_size", None) or 1
+        dp = getattr(parsed, "dp_size", None) or 1
+        if tp * dp > 1:
+            parsed.num_gpus = tp * dp
+            explicit_names.add("num_gpus")
+            logger.info(
+                "Derived num_gpus=%d from tp_size=%d * dp_size=%d", tp * dp, tp, dp
+            )
+
     if hasattr(parsed, "_sglang_explicit_arg_names"):
         explicit_names |= set(parsed._sglang_explicit_arg_names)
     parsed._sglang_explicit_arg_names = tuple(sorted(explicit_names))

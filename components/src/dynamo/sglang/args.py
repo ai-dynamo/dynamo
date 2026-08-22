@@ -326,6 +326,18 @@ async def parse_args(args: list[str]) -> Config:
     Raises:
         SystemExit: If arguments are invalid or incompatible.
     """
+    # Help must match the parser the worker will actually use. Diffusion
+    # workers parse engine args with sglang's diffusion ServerArgs, so route
+    # --help through that parser instead of letting the Dynamo/LLM parsers
+    # print LLM engine options that a diffusion worker would reject. Checked
+    # on the raw strings because argparse exits on -h in whichever parser
+    # sees it first.
+    if ("-h" in args or "--help" in args) and (
+        "--image-diffusion-worker" in args or "--video-generation-worker" in args
+    ):
+        _print_diffusion_worker_help()
+        sys.exit(0)
+
     runtime_argspec = DynamoRuntimeArgGroup()
     dynamo_sglang_argspec = DynamoSGLangArgGroup()
 
@@ -600,6 +612,27 @@ async def parse_args(args: list[str]) -> Config:
     logging.debug(f"Dynamo configs: {dynamo_config}")
 
     return Config(server_args, dynamo_config)
+
+
+def _print_diffusion_worker_help() -> None:
+    """Print combined Dynamo + native diffusion engine options."""
+    from dynamo.sglang.diffusion_args import build_diffusion_parser
+
+    dynamo_parser = argparse.ArgumentParser(
+        prog="dynamo.sglang",
+        description="Dynamo SGLang diffusion worker configuration",
+        formatter_class=argparse.RawTextHelpFormatter,
+        add_help=False,
+    )
+    DynamoRuntimeArgGroup().add_arguments(dynamo_parser)
+    DynamoSGLangArgGroup().add_arguments(dynamo_parser)
+    print(dynamo_parser.format_help())
+    print(
+        "SGLang Diffusion Engine Options (native sglang diffusion ServerArgs;"
+        " every option below is forwarded to the engine):\n"
+    )
+    diffusion_parser, _ = build_diffusion_parser()
+    print(diffusion_parser.format_help())
 
 
 async def _resolve_diffusion_worker_config(

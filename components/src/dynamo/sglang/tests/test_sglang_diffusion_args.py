@@ -39,12 +39,14 @@ class FakeEngineArgs:
     enable_trace: bool = False
     attention_backend: Optional[str] = None
     performance_mode: str = "auto"
+    num_gpus: int = 1
 
     @staticmethod
     def add_cli_args(parser):
         parser.add_argument("--model-path", type=str)
         parser.add_argument("--tp-size", type=int, default=None)
         parser.add_argument("--dp-size", type=int, default=1)
+        parser.add_argument("--num-gpus", type=int, default=1)
         parser.add_argument("--log-level", type=str, default="info")
         parser.add_argument("--enable-trace", action="store_true")
         parser.add_argument("--attention-backend", type=str, default=None)
@@ -61,7 +63,13 @@ class FakeEngineArgs:
 
 
 def _install_fake_sglang(monkeypatch, engine_cls=FakeEngineArgs):
-    """Register fake sglang.multimodal_gen modules for the lazy imports."""
+    """Override the sglang.multimodal_gen leaf modules with fakes.
+
+    Only the leaves are faked: parent packages stay real (other dynamo
+    modules import e.g. sglang.srt at module level), and Python resolves a
+    fully dotted name from sys.modules directly, so leaf overrides suffice.
+    Missing parents (envs without the multimodal extra) get bare stubs.
+    """
     server_args_mod = ModuleType(
         "sglang.multimodal_gen.runtime.server_args.server_args"
     )
@@ -70,17 +78,27 @@ def _install_fake_sglang(monkeypatch, engine_cls=FakeEngineArgs):
     utils_mod = ModuleType("sglang.multimodal_gen.utils")
     utils_mod.FlexibleArgumentParser = argparse.ArgumentParser
 
-    for name, mod in {
-        "sglang": ModuleType("sglang"),
-        "sglang.multimodal_gen": ModuleType("sglang.multimodal_gen"),
-        "sglang.multimodal_gen.runtime": ModuleType("sglang.multimodal_gen.runtime"),
-        "sglang.multimodal_gen.runtime.server_args": ModuleType(
-            "sglang.multimodal_gen.runtime.server_args"
-        ),
-        "sglang.multimodal_gen.runtime.server_args.server_args": server_args_mod,
-        "sglang.multimodal_gen.utils": utils_mod,
-    }.items():
-        monkeypatch.setitem(sys.modules, name, mod)
+    import importlib
+
+    for parent in (
+        "sglang",
+        "sglang.multimodal_gen",
+        "sglang.multimodal_gen.runtime",
+        "sglang.multimodal_gen.runtime.server_args",
+    ):
+        if parent in sys.modules:
+            continue
+        try:
+            importlib.import_module(parent)
+        except ImportError:
+            monkeypatch.setitem(sys.modules, parent, ModuleType(parent))
+
+    monkeypatch.setitem(
+        sys.modules,
+        "sglang.multimodal_gen.runtime.server_args.server_args",
+        server_args_mod,
+    )
+    monkeypatch.setitem(sys.modules, "sglang.multimodal_gen.utils", utils_mod)
 
 
 class TestDiffusionWorkerArgs:
@@ -207,6 +225,58 @@ class TestParseDiffusionArgs:
         )
         assert adapter.engine_args.served_model_name == "native-name"
         assert adapter.served_model_name == "native-name"
+
+    def test_abbreviated_flag_resolves_to_destination(self, monkeypatch):
+        """--tp (abbreviation of --tp-size) must be recorded under its parser
+        destination in the explicit-args side channel, not its raw spelling,
+        or the engine treats tp_size as unspecified and defaults to 1."""
+        _install_fake_sglang(monkeypatch)
+        from dynamo.sglang.diffusion_args import parse_diffusion_args
+
+        parsed, adapter = parse_diffusion_args(
+            ["--model-path", "org/model", "--tp", "2"]
+        )
+        assert adapter.engine_args.tp_size == 2
+        assert "tp_size" in parsed._sglang_explicit_arg_names
+        assert "tp" not in parsed._sglang_explicit_arg_names
+
+    def test_num_gpus_derived_from_parallelism(self, monkeypatch):
+        """Without --num-gpus, tp*dp > 1 must derive num_gpus (the engine
+        defaults it to 1 and does not derive it itself)."""
+        _install_fake_sglang(monkeypatch)
+        from dynamo.sglang.diffusion_args import parse_diffusion_args
+
+        parsed, adapter = parse_diffusion_args(
+            ["--model-path", "org/model", "--tp-size", "2", "--dp-size", "2"]
+        )
+        assert adapter.engine_args.num_gpus == 4
+        assert "num_gpus" in parsed._sglang_explicit_arg_names
+
+    def test_explicit_num_gpus_not_overridden(self, monkeypatch):
+        """An explicit --num-gpus wins over the tp*dp derivation."""
+        _install_fake_sglang(monkeypatch)
+        from dynamo.sglang.diffusion_args import parse_diffusion_args
+
+        _, adapter = parse_diffusion_args(
+            ["--model-path", "org/model", "--tp-size", "2", "--num-gpus", "8"]
+        )
+        assert adapter.engine_args.num_gpus == 8
+
+    def test_help_routed_to_diffusion_parser(self, monkeypatch, capsys):
+        """--help on a diffusion worker must show the diffusion engine's
+        options (and Dynamo's), not the LLM engine's."""
+        import asyncio
+
+        _install_fake_sglang(monkeypatch)
+        from dynamo.sglang.args import parse_args
+
+        with pytest.raises(SystemExit) as excinfo:
+            asyncio.run(parse_args(["--image-diffusion-worker", "--help"]))
+        assert excinfo.value.code == 0
+        out = capsys.readouterr().out
+        assert "--performance-mode" in out  # engine option visible
+        assert "--served-model-name" in out  # dynamo-side option visible
+        assert "--image-diffusion-worker" in out  # dynamo worker flag visible
 
     def test_unknown_flag_rejected(self, monkeypatch):
         """Typos and unsupported flags fail loudly instead of being silently

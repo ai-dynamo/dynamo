@@ -107,7 +107,6 @@ python3 -m dynamo.sglang \
     --media-output-fs-url "$FS_URL" \
     "${HTTP_URL_ARGS[@]}" \
     --trust-remote-code \
-    --skip-tokenizer-init \
     --enable-metrics \
     "${EXTRA_ARGS[@]}" &
 
