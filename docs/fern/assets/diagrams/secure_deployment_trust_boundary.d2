@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+direction: right
+
+untrusted: Untrusted network {
+  style: { fill: "#fdecea"; stroke: "#ea4335"; font-color: "#3c1a17"; border-radius: 8 }
+  clients: Clients { shape: person; style.fill: "#ffffff"; style.stroke: "#ea4335" }
+}
+
+gateway: |md
+  ### Gateway / ingress
+  authentication · TLS · rate limiting
+| {
+  shape: hexagon
+  style: { fill: "#fff4ce"; stroke: "#f9ab00"; font-color: "#4a3600" }
+}
+
+cluster: Trusted cluster  —  isolate all internal traffic from untrusted networks {
+  style: { fill: "#e9f6ee"; stroke: "#34a853"; font-color: "#123024"; border-radius: 8 }
+
+  fe: |md
+    ### Frontends
+    external-facing inference API
+  | { style.fill: "#ffffff"; style.stroke: "#34a853" }
+
+  planes: Internal communication planes {
+    style: { fill: "#eaf1fb"; stroke: "#4a90e2"; font-color: "#0e2a4d"; border-radius: 8 }
+    disc: |md
+      **Discovery**
+      K8s RBAC / authenticated etcd
+    | { style.fill: "#ffffff"; style.stroke: "#4a90e2" }
+    evt: |md
+      **Event**
+      NATS auth+TLS / isolated ZMQ
+    | { style.fill: "#ffffff"; style.stroke: "#4a90e2" }
+    req: |md
+      **Request**
+      mTLS · NIXL / RDMA
+    | { style.fill: "#ffffff"; style.stroke: "#4a90e2" }
+  }
+
+  workers: Backend workers { style.fill: "#ffffff"; style.stroke: "#34a853" }
+
+  fe -> planes
+  planes -> workers
+}
+
+untrusted.clients -> gateway: HTTPS
+gateway -> cluster.fe: only entry point { style.stroke: "#f9ab00" }
