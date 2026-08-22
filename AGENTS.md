@@ -179,6 +179,10 @@ cargo test                  # Rust
 pytest -m unit tests/       # Python unit tests
 ```
 
+On macOS, run `dynamo-llm` checks and targeted tests with `--no-default-features` unless the
+target explicitly requires `block-manager`. The default feature enables Linux/CUDA-oriented NIXL,
+NUMA, and `O_DIRECT` code that is not a valid general-purpose macOS validation path.
+
 Markers are strict (`--strict-markers`); the full marker list lives in
 [`pyproject.toml`](pyproject.toml) `[tool.pytest.ini_options]`, including GPU gating
 (`gpu_0` … `gpu_8`). Read [`.ai/pytest-guidelines.md`](.ai/pytest-guidelines.md) and
