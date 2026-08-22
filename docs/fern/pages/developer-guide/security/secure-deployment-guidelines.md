@@ -11,7 +11,7 @@ parts — a frontend, backend workers, a KV router, and internal communication
 planes for discovery, events, and requests — across a cluster. This guide
 describes Dynamo's trust model and how to secure each part of a deployment.
 
-Dynamo assumes it runs inside a trusted network boundary: untrusted clients reach
+Dynamo assumes it runs inside a trusted network boundary: external clients reach
 only the frontend, through an authenticating gateway, while the internal
 communication planes and infrastructure run on a network the operator isolates.
 The sections below explain that boundary and how to harden each component and
@@ -37,19 +37,19 @@ The security posture rests on two assumptions:
 
 1. The **internal communication planes and infrastructure services** are deployed by the
    operator in a secure fashion and reside within a **trusted network** that
-   untrusted clients cannot reach.
-2. **Untrusted clients reach only the frontend**, and only through a gateway or
+   external clients cannot reach.
+2. **External clients reach only the frontend**, and only through a gateway or
    proxy that terminates authentication and TLS.
 
 If both hold, the externally reachable surface is limited to the frontend's
 inference API. The sections below explain how to satisfy each assumption.
 
-![Dynamo trust boundary — untrusted clients reach the frontends only through an authenticating gateway; the internal communication planes and backend workers run on the trusted network and must be isolated from untrusted peers.](../../../assets/img/secure-deployment-trust-boundary.svg)
+![Dynamo trust boundary — external clients reach the frontends only through an authenticating gateway; the internal communication planes and backend workers run on the trusted network and must be isolated from outside the cluster.](../../../assets/img/secure-deployment-trust-boundary.svg)
 
 The gateway is the only entry point into the cluster for external clients; it forwards to the
 frontends (the external-facing inference API). Everything inside — the frontends,
 the internal communication planes, and the workers — runs on the trusted network
-and must be protected from any untrusted peer.
+and must be protected from access outside the cluster.
 
 ## Securing the External-Facing Inference API
 
@@ -163,7 +163,8 @@ reachable.
 - **Client-controlled routing (`nvext`).** By default the frontend honors an
   `nvext` request extension and routing-override headers that let a client pin a
   request to a specific worker instance. In a multi-tenant or untrusted-client
-  setting, set `DYN_DISABLE_FRONTEND_NVEXT=1` so clients cannot target individual
+  setting, operators may want to set `DYN_DISABLE_FRONTEND_NVEXT=1` so clients cannot
+  target individual
   workers. This drops `request.nvext` at handler entry and ignores the
   routing-override headers.
 - **Admin API.** The frontend's HTTP admin API (for example,
