@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: q32b-1p1d-cloud-provider
+spec:
+  services:
+    PrefillWorker:
+      extraPodSpec:
+        nodeSelector: &a4NodeSelector
+          cloud.google.com/gke-accelerator: nvidia-b200
+        tolerations: &a4Tolerations
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+        resourceClaims: &rdmaPodClaims
+          - name: rdma
+            resourceClaimTemplateName: q32b-a4-rdma-4
+        mainContainer:
+          env: &a4RdmaEnvironment
+            # Use only reliable-connected RoCE and CUDA memory support; do not fall back to TCP or CUDA IPC.
+            - name: UCX_TLS
+              value: rc_x,rc,cuda_copy
+            - name: UCX_IB_GPU_DIRECT_RDMA
+              value: "yes"
+            - name: UCX_MAX_RNDV_RAILS
+              value: "4"
+            - name: UCX_RNDV_SCHEME
+              value: get_zcopy
+            - name: UCX_PROTO_INFO
+              value: "y"
+            - name: UCX_LOG_LEVEL
+              value: info
+            - name: NIXL_LOG_LEVEL
+              value: INFO
+          resources:
+            claims: &rdmaContainerClaims
+              - name: rdma
+          securityContext: &a4SecurityContext
+            $patch: replace
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              add:
+                - IPC_LOCK
+                - SYS_RESOURCE
+    DecodeWorker:
+      extraPodSpec:
+        # One A4 node has exactly enough GPUs and RDMA NICs for the 4P/4D split.
+        affinity:
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchExpressions:
+                    - key: nvidia.com/dynamo-graph-deployment-name
+                      operator: In
+                      values:
+                        - q32b-1p1d-cloud-provider
+                    - key: nvidia.com/dynamo-sub-component-type
+                      operator: In
+                      values:
+                        - prefill
+                topologyKey: kubernetes.io/hostname
+        nodeSelector: *a4NodeSelector
+        tolerations: *a4Tolerations
+        resourceClaims: *rdmaPodClaims
+        mainContainer:
+          env: *a4RdmaEnvironment
+          resources:
+            claims: *rdmaContainerClaims
+          securityContext: *a4SecurityContext

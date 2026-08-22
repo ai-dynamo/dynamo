@@ -1,0 +1,303 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Generated file. For repository contributors, do not edit this checked-in copy.
+# Regenerate every public overlay and rendered manifest of this matrix (from the repository root):
+#   scripts/kustomize-matrix.py unfold recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml
+#   scripts/kustomize-matrix.py render recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml
+# Inspect only this Kustomize overlay (from the repository root):
+#   kustomize build recipes/qwen3-32b/vllm/cloud-providers/kustomize/overlays/gke-a4-dranet
+# You may edit a copy before applying it.
+
+# Qwen3-32B BF16 disagg, 1 prefill + 1 decode, with provider-specific RDMA in overlays.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: q32b-1p1d-cloud-provider
+spec:
+  pvcs:
+  - create: false
+    name: model-cache
+  services:
+    DecodeWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      extraPodMetadata:
+        annotations:
+          prometheus.io/path: /metrics
+          prometheus.io/port: "19090"
+          prometheus.io/scrape: "true"
+      extraPodSpec:
+        # One A4 node has exactly enough GPUs and RDMA NICs for the 4P/4D split.
+        affinity:
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - q32b-1p1d-cloud-provider
+                - key: nvidia.com/dynamo-sub-component-type
+                  operator: In
+                  values:
+                  - prefill
+              topologyKey: kubernetes.io/hostname
+        imagePullSecrets:
+        - name: nvcr-pull-secret
+        mainContainer:
+          args:
+          - |
+            exec python3 -m dynamo.vllm \
+              --model "${MODEL_NAME}" \
+              --served-model-name "${SERVED_MODEL_NAME}" \
+              --disaggregation-mode decode \
+              --kv-transfer-config "${KV_TRANSFER_CONFIG}" \
+              --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" \
+              --no-enable-log-requests \
+              --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
+              --no-enable-prefix-caching \
+              --async-scheduling \
+              --block-size "${BLOCK_SIZE}" \
+              --hf-overrides "${HF_OVERRIDES}" \
+              --max-model-len "${MAX_MODEL_LEN}"
+          command:
+          - /bin/sh
+          - -lc
+          env:
+          - name: UCX_TLS
+            value: rc_x,rc,cuda_copy
+          - name: UCX_IB_GPU_DIRECT_RDMA
+            value: "yes"
+          - name: UCX_MAX_RNDV_RAILS
+            value: "4"
+          - name: UCX_RNDV_SCHEME
+            value: get_zcopy
+          - name: UCX_PROTO_INFO
+            value: "y"
+          - name: UCX_LOG_LEVEL
+            value: info
+          - name: NIXL_LOG_LEVEL
+            value: INFO
+          - name: KV_TRANSFER_CONFIG
+            value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - name: NIXL_TELEMETRY_ENABLE
+            value: "y"
+          - name: NIXL_TELEMETRY_EXPORTER
+            value: prometheus
+          - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+            value: "19090"
+          - name: NCCL_DEBUG
+            value: WARN
+          - name: MODEL_NAME
+            value: Qwen/Qwen3-32B
+          - name: SERVED_MODEL_NAME
+            value: Qwen/Qwen3-32B
+          - name: TENSOR_PARALLEL_SIZE
+            value: "4"
+          - name: GPU_MEMORY_UTILIZATION
+            value: "0.90"
+          - name: BLOCK_SIZE
+            value: "64"
+          - name: HF_OVERRIDES
+            value: '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+          - name: MAX_MODEL_LEN
+            value: "131072"
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: "false"
+          - name: HF_HOME
+            value: /model-cache
+          - name: VLLM_LOGGING_LEVEL
+            value: INFO
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          resources:
+            claims:
+            - name: rdma
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_RESOURCE
+            runAsUser: 0
+          volumeMounts:
+          - mountPath: /model-cache
+            name: model-cache
+          workingDir: /workspace
+        nodeSelector:
+          cloud.google.com/gke-accelerator: nvidia-b200
+        resourceClaims:
+        - name: rdma
+          resourceClaimTemplateName: q32b-a4-rdma-4
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          custom:
+            ephemeral-storage: 2Gi
+          gpu: "4"
+      subComponentType: decode
+    Frontend:
+      componentType: frontend
+      envs:
+      - name: HF_HOME
+        value: /model-cache
+      extraPodSpec:
+        imagePullSecrets:
+        - name: nvcr-pull-secret
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+          - mountPath: /model-cache
+            name: model-cache
+          workingDir: /workspace
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+      replicas: 1
+      resources:
+        limits:
+          cpu: "8"
+        requests:
+          cpu: "4"
+      subComponentType: null
+    # Provider Components target backend-neutral worker service keys.
+    PrefillWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      extraPodMetadata:
+        annotations:
+          prometheus.io/path: /metrics
+          prometheus.io/port: "19090"
+          prometheus.io/scrape: "true"
+      extraPodSpec:
+        imagePullSecrets:
+        - name: nvcr-pull-secret
+        mainContainer:
+          args:
+          - |
+            exec python3 -m dynamo.vllm \
+              --model "${MODEL_NAME}" \
+              --served-model-name "${SERVED_MODEL_NAME}" \
+              --disaggregation-mode prefill \
+              --kv-transfer-config "${KV_TRANSFER_CONFIG}" \
+              --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" \
+              --no-enable-log-requests \
+              --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
+              --async-scheduling \
+              --block-size "${BLOCK_SIZE}" \
+              --hf-overrides "${HF_OVERRIDES}" \
+              --max-model-len "${MAX_MODEL_LEN}"
+          command:
+          - /bin/sh
+          - -lc
+          env:
+          # Use only reliable-connected RoCE and CUDA memory support; do not fall back to TCP or CUDA IPC.
+          - name: UCX_TLS
+            value: rc_x,rc,cuda_copy
+          - name: UCX_IB_GPU_DIRECT_RDMA
+            value: "yes"
+          - name: UCX_MAX_RNDV_RAILS
+            value: "4"
+          - name: UCX_RNDV_SCHEME
+            value: get_zcopy
+          - name: UCX_PROTO_INFO
+            value: "y"
+          - name: UCX_LOG_LEVEL
+            value: info
+          - name: NIXL_LOG_LEVEL
+            value: INFO
+          - name: KV_TRANSFER_CONFIG
+            value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - name: NIXL_TELEMETRY_ENABLE
+            value: "y"
+          - name: NIXL_TELEMETRY_EXPORTER
+            value: prometheus
+          - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+            value: "19090"
+          - name: NCCL_DEBUG
+            value: WARN
+          - name: MODEL_NAME
+            value: Qwen/Qwen3-32B
+          - name: SERVED_MODEL_NAME
+            value: Qwen/Qwen3-32B
+          - name: TENSOR_PARALLEL_SIZE
+            value: "4"
+          - name: GPU_MEMORY_UTILIZATION
+            value: "0.90"
+          - name: BLOCK_SIZE
+            value: "64"
+          - name: HF_OVERRIDES
+            value: '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768},"max_position_embeddings":131072}'
+          - name: MAX_MODEL_LEN
+            value: "131072"
+          - name: DYN_HEALTH_CHECK_ENABLED
+            value: "false"
+          - name: HF_HOME
+            value: /model-cache
+          - name: VLLM_LOGGING_LEVEL
+            value: INFO
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          resources:
+            claims:
+            - name: rdma
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_RESOURCE
+            runAsUser: 0
+          volumeMounts:
+          - mountPath: /model-cache
+            name: model-cache
+          workingDir: /workspace
+        nodeSelector:
+          cloud.google.com/gke-accelerator: nvidia-b200
+        resourceClaims:
+        - name: rdma
+          resourceClaimTemplateName: q32b-a4-rdma-4
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          custom:
+            ephemeral-storage: 2Gi
+          gpu: "4"
+      subComponentType: prefill
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: q32b-a4-rdma-4
+spec:
+  spec:
+    devices:
+      requests:
+      - exactly:
+          allocationMode: ExactCount
+          # Each worker uses four of the A4 node's eight GPU-aligned RDMA NICs.
+          count: 4
+          deviceClassName: mrdma.google.com
+        name: rdma

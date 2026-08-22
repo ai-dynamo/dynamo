@@ -17,6 +17,11 @@ matrix:
         - ../../../kustomize/components/disagg-workers/gke-roce
         - ../../../kustomize/components/vllm-disagg/nixl-default
         - kustomize/components/gke-image-pull-secret
+    - name: gke-a4-dranet
+      components:
+        - ../../../kustomize/components/vllm-disagg/nixl-default
+        - kustomize/components/gke-image-pull-secret
+        - kustomize/components/gke-a4-dranet
     - name: nebius-ib
       components:
         - ../../../kustomize/components/disagg-workers/nebius-ib

@@ -43,15 +43,32 @@ Neither path requires regeneration.
 |-------------------|-----------------|---------|
 | `deploy-aks-ib.yaml` | Azure AKS InfiniBand | `kustomize/overlays/aks-ib/` |
 | `deploy-aws-p5.48xlarge.yaml` | AWS EFA + libfabric on `p5.48xlarge`, 16 EFA per worker | `kustomize/overlays/aws-p5.48xlarge/` |
+| `deploy-gke-a4-dranet.yaml` | GKE A4 managed DRANET with four RDMA NICs per worker | `kustomize/overlays/gke-a4-dranet/` |
 | `deploy-gke-roce.yaml` | GKE RoCE | `kustomize/overlays/gke-roce/` |
 | `deploy-nebius-ib.yaml` | Nebius InfiniBand | `kustomize/overlays/nebius-ib/` |
 | `deploy-nscale-ib.yaml` | Nscale InfiniBand | `kustomize/overlays/nscale-ib/` |
 
-For example, apply the GKE RoCE composition directly from its checked-in
+The `gke-a4-dranet` variant targets an `a4-highgpu-8g` node. It requires GKE
+Standard 1.34.1-gke.1829001 or later, Dataplane V2, and a node pool with
+[GKE managed Dynamic Resource Allocation for Networking
+(DRANET)](https://cloud.google.com/kubernetes-engine/docs/how-to/allocate-network-resources-dra)
+enabled. Each worker Pod creates a claim for four of the node's eight
+`mrdma.google.com` RDMA NICs. The Decode worker has required Pod affinity with
+the Prefill worker, placing the 4-GPU workers on the same A4 node. Its UCX
+transport allowlist omits TCP and CUDA IPC so a missing RDMA path fails instead
+of silently using a slower transport.
+
+Verify the DeviceClass before applying the variant:
+
+```bash
+kubectl get deviceclass mrdma.google.com
+```
+
+Apply the GKE A4 DRANET composition directly from its checked-in
 Kustomization:
 
 ```bash
-kubectl apply -k kustomize/overlays/gke-roce -n ${NAMESPACE}
+kubectl apply -k kustomize/overlays/gke-a4-dranet -n ${NAMESPACE}
 ```
 
 To make a local, uncommitted composition, create your own `kustomization.yaml` in
