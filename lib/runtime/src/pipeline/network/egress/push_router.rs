@@ -281,6 +281,38 @@ fn p2c_select_from(occupancy_state: &RoutingOccupancyState, instance_ids: &[u64]
         .worker_id
 }
 
+/// Ratio of accelerator to CPU capacity used when weighting device-aware
+/// routing candidates.
+const DEFAULT_ENCODER_CUDA_TO_CPU_RATIO: usize = 8;
+
+static ENCODER_CUDA_TO_CPU_RATIO: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// Read the encoder accelerator-to-CPU ratio once and share it across the
+/// device-aware routing paths.
+///
+/// Both callers sit on the per-request routing path, so reading the variable
+/// there charged every routed request a `std::env::var` lookup and the `String`
+/// it allocates. Resolving once also removes the second copy of this parsing,
+/// which had to be kept in step with the first by hand.
+fn encoder_cuda_to_cpu_ratio() -> usize {
+    *ENCODER_CUDA_TO_CPU_RATIO.get_or_init(|| {
+        parse_encoder_cuda_to_cpu_ratio(
+            std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+/// Split out from the environment read so the parsing contract can be tested
+/// without mutating process state, which would race the `OnceLock` above.
+fn parse_encoder_cuda_to_cpu_ratio(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value >= 1)
+        .unwrap_or(DEFAULT_ENCODER_CUDA_TO_CPU_RATIO)
+}
+
 /// At most one `list_and_watch` per endpoint, across all `PushRouter`
 /// instances. Entry removed on watcher exit so a later router can re-arm.
 static ENDPOINT_WATCHER_ACTIVE: std::sync::OnceLock<dashmap::DashMap<EndpointId, ()>> =
@@ -1080,11 +1112,7 @@ where
                 (instance.instance_id, device)
             })
             .collect::<HashMap<_, _>>();
-        let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|value| *value >= 1)
-            .unwrap_or(8);
+        let cuda_to_cpu_ratio = encoder_cuda_to_cpu_ratio();
 
         let (request_cache_keys, cache_matched_candidates) =
             if let (Some(indexer), Some(extractor)) = (
@@ -1244,11 +1272,7 @@ where
                     .iter()
                     .map(|instance| (instance.instance_id, instance.device_type.clone()))
                     .collect();
-                let cuda_to_cpu_ratio = std::env::var("DYN_ENCODER_CUDA_TO_CPU_RATIO")
-                    .ok()
-                    .and_then(|value| value.parse::<usize>().ok())
-                    .filter(|value| *value >= 1)
-                    .unwrap_or(8);
+                let cuda_to_cpu_ratio = encoder_cuda_to_cpu_ratio();
                 let candidates = instance_ids
                     .iter()
                     .map(|worker_id| RouteCandidate {
@@ -1837,6 +1861,26 @@ impl<U: Data + MaybeError> crate::engine::AsyncEngineStream<U> for OccupancyTrac
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn encoder_cuda_to_cpu_ratio_parsing_matches_the_previous_inline_copies() {
+        // Pins the contract the two former inline copies shared, so the default
+        // and the >= 1 floor cannot drift now that there is a single owner.
+        assert_eq!(parse_encoder_cuda_to_cpu_ratio(Some("4")), 4);
+        assert_eq!(parse_encoder_cuda_to_cpu_ratio(Some("1")), 1);
+        assert_eq!(
+            parse_encoder_cuda_to_cpu_ratio(None),
+            DEFAULT_ENCODER_CUDA_TO_CPU_RATIO
+        );
+        // Zero, negatives and junk all fall back rather than disabling the ratio.
+        for rejected in ["0", "-1", "", "eight", "2.5"] {
+            assert_eq!(
+                parse_encoder_cuda_to_cpu_ratio(Some(rejected)),
+                DEFAULT_ENCODER_CUDA_TO_CPU_RATIO,
+                "{rejected:?} should fall back to the default"
+            );
+        }
+    }
     use super::*;
     use crate::{
         DistributedRuntime, Runtime,
