@@ -15,6 +15,8 @@ from typing import Any, Dict, Optional
 import aiohttp
 import pytest
 
+from dynamo.llm import KvRouter, KvRouterConfig
+from tests.router.common import _create_kv_router_with_timeout
 from tests.router.e2e_harness import (
     ManagedEngineProcessMixin,
     run_basic_router_test,
@@ -26,7 +28,10 @@ from tests.router.helper import (
     generate_random_suffix,
     get_kv_indexer_command,
     get_kv_indexer_test_env,
+    managed_runtime,
+    send_request_via_python_kv_router,
     wait_for_indexer_workers_active,
+    wait_for_workers_ready,
 )
 from tests.utils.constants import DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
@@ -40,6 +45,7 @@ from tests.utils.port_utils import (
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+DCP_MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
 
 pytestmark = [
     pytest.mark.e2e,
@@ -65,6 +71,19 @@ VLLM_ARGS_NO_BLOCK_SIZE: Dict[str, Any] = {
     "gpu_memory_utilization": 0.4,  # Limit VRAM allocation per worker
     "max_model_len": 1024,  # Limit context length to reduce KV cache size
     "enforce_eager": True,  # Disable CUDA graphs for faster startup & lower memory
+}
+
+VLLM_DCP2_ARGS: Dict[str, Any] = {
+    **VLLM_ARGS,
+    "model": DCP_MODEL_NAME,
+    "tensor_parallel_size": 4,
+    "decode_context_parallel_size": 2,
+}
+VLLM_DCP4_ARGS: Dict[str, Any] = {
+    **VLLM_ARGS,
+    "model": DCP_MODEL_NAME,
+    "tensor_parallel_size": 8,
+    "decode_context_parallel_size": 4,
 }
 
 
@@ -110,6 +129,8 @@ class VLLMProcess(ManagedEngineProcessMixin):
                 - num_gpu_blocks_override: Cap on number of KV cache blocks (optional)
                 - max_model_len: Maximum sequence length (optional)
                 - enforce_eager: Disable CUDA graphs (default: False)
+                - tensor_parallel_size: GPUs assigned to each TP worker (default: 1)
+                - decode_context_parallel_size: DCP ranks per worker (default: 1)
             num_workers: Number of vLLM worker processes
             single_gpu: If True, all workers share GPU 0
             data_parallel_size: If set, enables data parallelism with this many ranks (num_workers must equal data_parallel_size)
@@ -194,6 +215,8 @@ class VLLMProcess(ManagedEngineProcessMixin):
         num_gpu_blocks_override = vllm_args.get("num_gpu_blocks_override")
         max_model_len = vllm_args.get("max_model_len")
         enforce_eager = vllm_args.get("enforce_eager", False)
+        tensor_parallel_size = vllm_args.get("tensor_parallel_size", 1)
+        decode_context_parallel_size = vllm_args.get("decode_context_parallel_size", 1)
 
         self.model_name = model
         self.block_size = vllm_args.get("block_size", BLOCK_SIZE)
@@ -210,18 +233,17 @@ class VLLMProcess(ManagedEngineProcessMixin):
             if single_gpu:
                 # Force all processes to GPU 0 (for single-GPU testing)
                 gpu_device = str(gpu_start_index)
-            elif data_parallel_size is not None:
-                # Worker sees dp_rank GPUs (each DP rank gets its own GPU)
-                worker_start_gpu = gpu_start_index + worker_idx * data_parallel_size
+            else:
+                # DP and TP tests each launch one process that owns a contiguous
+                # GPU group. The test suite does not combine DP and TP here.
+                worker_gpu_count = data_parallel_size or tensor_parallel_size
+                worker_start_gpu = gpu_start_index + worker_idx * worker_gpu_count
                 gpu_device = ",".join(
                     str(i)
                     for i in range(
-                        worker_start_gpu, worker_start_gpu + data_parallel_size
+                        worker_start_gpu, worker_start_gpu + worker_gpu_count
                     )
                 )
-            else:
-                # No DP; worker sees one GPU
-                gpu_device = str(gpu_start_index + worker_idx)
 
             command = ["python3", "-m", "dynamo.vllm", "--model", model]
 
@@ -252,6 +274,17 @@ class VLLMProcess(ManagedEngineProcessMixin):
             if num_gpu_blocks_override is not None:
                 command.extend(
                     ["--num-gpu-blocks-override", str(num_gpu_blocks_override)]
+                )
+
+            if tensor_parallel_size > 1:
+                command.extend(["--tensor-parallel-size", str(tensor_parallel_size)])
+
+            if decode_context_parallel_size > 1:
+                command.extend(
+                    [
+                        "--decode-context-parallel-size",
+                        str(decode_context_parallel_size),
+                    ]
                 )
 
             if data_parallel_size is not None:
@@ -331,7 +364,8 @@ class VLLMProcess(ManagedEngineProcessMixin):
                 )
             else:
                 logger.info(
-                    f"Created vLLM worker {worker_idx} on GPU {gpu_device} "
+                    f"Created vLLM worker {worker_idx} on GPU(s) {gpu_device} "
+                    f"(tp={tensor_parallel_size}, dcp={decode_context_parallel_size}) "
                     f"(gpu_mem={gpu_memory_utilization}, system_port={system_port}) "
                     f"with endpoint: {self.endpoint}"
                 )
@@ -515,6 +549,94 @@ class VLLMProcess(ManagedEngineProcessMixin):
     init_delay_reason = "initialize NIXL before starting next worker"
 
 
+def run_dcp_event_delivery_test(
+    request,
+    model_name: str,
+    vllm_args: Dict[str, Any],
+    event_block_size: int,
+    num_requests: int,
+    request_plane: str,
+) -> None:
+    """Require full DCP-sized blocks to reach a real Dynamo KV router."""
+    process = VLLMProcess(
+        request,
+        vllm_args,
+        num_workers=1,
+        single_gpu=False,
+        request_plane=request_plane,
+    )
+
+    with process as engine_workers, managed_runtime(
+        request_plane=request_plane
+    ) as runtime:
+        endpoint = runtime.endpoint(
+            f"{engine_workers.namespace}.{engine_workers.component_name}.generate"
+        )
+
+        async def run_test() -> int:
+            kv_router = _create_kv_router_with_timeout(
+                router_factory=lambda: KvRouter(
+                    endpoint=endpoint,
+                    block_size=event_block_size,
+                    kv_router_config=KvRouterConfig(
+                        use_kv_events=True,
+                        router_event_threads=4,
+                    ),
+                ),
+                num_workers=1,
+                engine_workers=engine_workers,
+                timeout=300,
+            )
+            worker_ids = await wait_for_workers_ready(
+                endpoint,
+                kv_router,
+                expected_num_workers=1,
+                model_name=model_name,
+            )
+
+            blocks_per_request = 3
+            for request_idx in range(num_requests):
+                token_ids = [
+                    (request_idx * blocks_per_request * event_block_size + offset)
+                    % 10000
+                    + 1
+                    for offset in range(blocks_per_request * event_block_size)
+                ]
+                await send_request_via_python_kv_router(
+                    kv_python_router=kv_router,
+                    model_name=model_name,
+                    token_ids=token_ids,
+                    stop_conditions={"ignore_eos": True, "max_tokens": 2},
+                    worker_id=worker_ids[0],
+                )
+
+            expected_blocks = num_requests * blocks_per_request
+            stored_blocks = 0
+            for _ in range(100):
+                events = json.loads(await kv_router.dump_events())
+                stored_blocks = sum(
+                    len(
+                        event.get("event", {})
+                        .get("data", {})
+                        .get("stored", {})
+                        .get("blocks", [])
+                    )
+                    for event in events
+                )
+                if stored_blocks >= expected_blocks:
+                    return stored_blocks
+                await asyncio.sleep(0.1)
+
+            return stored_blocks
+
+        stored_blocks = asyncio.run(run_test())
+        expected_blocks = num_requests * 3
+        assert stored_blocks >= expected_blocks, (
+            f"Expected at least {expected_blocks} DCP-sized stored blocks, "
+            f"but the router received {stored_blocks}"
+        )
+
+
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
 @pytest.mark.profiled_vram_gib(6.9)  # actual profiled peak with kv-bytes
@@ -602,7 +724,7 @@ def test_router_decisions_vllm_multiple_workers(
 
 
 @pytest.mark.h100
-@pytest.mark.gpu_2
+@pytest.mark.gpu_4
 @pytest.mark.nightly
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)
@@ -633,6 +755,80 @@ def test_router_decisions_vllm_dp(
         single_gpu=False,
         test_dp_rank=True,
         extra_process_kwargs={"data_parallel_size": 2},
+    )
+
+
+@pytest.mark.h100
+@pytest.mark.gpu_4
+@pytest.mark.nightly
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.timeout(900)
+def test_vllm_dcp2_basic(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
+):
+    """Deliver KV events from one TP4/DCP2 worker."""
+    run_dcp_event_delivery_test(
+        request=request,
+        model_name=DCP_MODEL_NAME,
+        vllm_args=VLLM_DCP2_ARGS,
+        event_block_size=BLOCK_SIZE * 2,
+        num_requests=4,
+        request_plane=request_plane,
+    )
+
+
+@pytest.mark.h100
+@pytest.mark.gpu_8
+@pytest.mark.nightly
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.timeout(900)
+def test_router_decisions_vllm_dcp(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
+):
+    """Validate DCP-aware KV events and prefix routing across two TP4 workers."""
+    run_router_decisions_test(
+        engine_process_cls=VLLMProcess,
+        engine_args_name="vllm_args",
+        engine_args=VLLM_DCP2_ARGS,
+        request=request,
+        request_plane=request_plane,
+        model_name=DCP_MODEL_NAME,
+        block_size=BLOCK_SIZE * 2,
+        component_name="backend",
+        num_workers=2,
+        single_gpu=False,
+        test_dp_rank=False,
+    )
+
+
+@pytest.mark.h100
+@pytest.mark.gpu_8
+@pytest.mark.nightly
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.timeout(1200)
+def test_vllm_dcp4_basic(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
+):
+    """Deliver KV events from one TP8/DCP4 worker at scale."""
+    run_dcp_event_delivery_test(
+        request=request,
+        model_name=DCP_MODEL_NAME,
+        vllm_args=VLLM_DCP4_ARGS,
+        event_block_size=BLOCK_SIZE * 4,
+        num_requests=16,
+        request_plane=request_plane,
     )
 
 
