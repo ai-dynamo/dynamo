@@ -2460,6 +2460,7 @@ def run_mocker_trace_replay(
         "mooncake_delta",
         "agentic_mooncake",
         "agentic-mooncake",
+        "weka",
         "applied_compute_agentic",
         "dynamo",
     ] = "mooncake",
@@ -2474,6 +2475,7 @@ def run_mocker_trace_replay(
     capture_per_request: bool = False,
     capture_planner_details: bool = True,
     scaling_policy: Optional[Any] = None,
+    agentic_lanes: Optional[int] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 

@@ -39,6 +39,7 @@ class _CommonReplayOptions(TypedDict, total=False):
 
 
 class _TraceReplayOptions(_CommonReplayOptions, total=False):
+    agentic_lanes: int | None
     trace_block_size: int | None
     trace_format: str
     trace_shared_prefix_ratio: float
@@ -126,6 +127,7 @@ def run_trace_replay(
     num_prefill_workers=1,
     num_decode_workers=1,
     replay_concurrency=None,
+    agentic_lanes=None,
     replay_mode="offline",
     router_mode="round_robin",
     arrival_speedup_ratio=1.0,
@@ -160,6 +162,7 @@ def run_trace_replay(
         "num_prefill_workers": num_prefill_workers,
         "num_decode_workers": num_decode_workers,
         "replay_concurrency": replay_concurrency,
+        "agentic_lanes": agentic_lanes,
         "replay_mode": replay_mode,
         "router_mode": router_mode,
         "arrival_speedup_ratio": arrival_speedup_ratio,

@@ -17,7 +17,11 @@ use crate::common::protocols::{
     DirectRequest, EngineType, MockEngineArgs, PreemptionMode, SglangArgs,
 };
 use crate::live::ObservedAdmission;
-use crate::loadgen::{AgenticTrace, AgenticTurnTrace, SessionTrace, Trace, TurnTrace};
+use crate::loadgen::{
+    AGENTIC_MOONCAKE_SCHEMA, AGENTIC_MOONCAKE_VERSION, AgenticDependency,
+    AgenticDependencyRelation, AgenticDependencyTrigger, AgenticHashIdScope, AgenticMooncakeHeader,
+    AgenticMooncakeRow, AgenticSourceProvenance, AgenticTrace, SessionTrace, Trace, TurnTrace,
+};
 use crate::replay::{ReplayRouterMode, ReplayTerminalStatus, SlaThresholds};
 
 use super::entrypoints::{
@@ -115,7 +119,7 @@ async fn admission_timestamp_is_preserved_when_forwarding_is_delayed() {
         })
         .unwrap();
     drop(recorder_tx);
-    let report = recorder.finish(500.0).await.unwrap();
+    let report = recorder.finish(500.0, None, None).await.unwrap();
     let record = &report.per_request[0];
     assert_eq!(record.first_admit_ms, Some(0.0));
     assert!(record.first_admit_ms <= record.first_token_ms);
@@ -286,33 +290,49 @@ fn online_report_options_populate_request_goodput_and_capacity_metrics() {
 
 #[test]
 fn online_agentic_trace_releases_dependency_after_parent_completion() {
-    let trace = AgenticTrace {
-        block_size: 64,
-        turns: vec![
-            AgenticTurnTrace {
+    let trace = AgenticTrace::from_agentic_mooncake_rows(
+        AgenticMooncakeHeader {
+            schema: AGENTIC_MOONCAKE_SCHEMA.to_string(),
+            version: AGENTIC_MOONCAKE_VERSION,
+            block_size: 64,
+            hash_id_scope: AgenticHashIdScope::Local,
+            source: AgenticSourceProvenance {
+                format: "test".to_string(),
+                digest: "online-agentic-dependency".to_string(),
+            },
+        },
+        vec![
+            AgenticMooncakeRow {
                 request_id: "root".to_string(),
+                play_id: "play".to_string(),
                 session_id: "root".to_string(),
-                input_length: 64,
-                max_output_tokens: 2,
-                hash_ids: vec![1],
-                first_ready_timestamp_ms: Some(0.0),
-                prefix_reset: true,
+                model: "model".to_string(),
+                input_length: Some(64),
+                output_length: Some(2),
+                hash_ids: Some(vec![1]),
+                not_before_ms: 0.0,
                 ..Default::default()
             },
-            AgenticTurnTrace {
+            AgenticMooncakeRow {
                 request_id: "dependent".to_string(),
+                play_id: "play".to_string(),
                 session_id: "dependent".to_string(),
-                input_length: 64,
-                max_output_tokens: 2,
-                hash_ids: vec![2],
-                first_ready_timestamp_ms: Some(0.0),
-                delay_after_dependencies_ms: 5.0,
-                wait_for: vec!["root".to_string()],
-                prefix_reset: true,
+                model: "model".to_string(),
+                input_length: Some(64),
+                output_length: Some(2),
+                hash_ids: Some(vec![2]),
+                not_before_ms: 0.0,
+                dependencies: vec![AgenticDependency {
+                    request_id: "root".to_string(),
+                    trigger: AgenticDependencyTrigger::Completion,
+                    delay_ms: 5.0,
+                    relation: AgenticDependencyRelation::Sequence,
+                }],
                 ..Default::default()
             },
         ],
-    };
+    )
+    .unwrap();
     let report = simulate_agentic_trace_workload(
         replay_config(
             replay_args(),
@@ -324,6 +344,7 @@ fn online_agentic_trace_releases_dependency_after_parent_completion() {
             },
         ),
         trace,
+        None,
     )
     .unwrap();
 

@@ -696,6 +696,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             trace_num_prefix_groups=workload.get("trace_num_prefix_groups", 0),
             report_jsonl_path=per_request_jsonl,
             max_sim_time_ms=workload.get("max_sim_time_ms"),
+            agentic_lanes=workload.get("agentic_lanes"),
             **replay_options,
         )
     else:

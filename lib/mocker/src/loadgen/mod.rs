@@ -7,7 +7,7 @@ mod dynamo;
 mod router;
 
 pub use aisimulate_core::replay::loadgen::*;
-pub use dynamo::DynamoRequestTrace;
+pub use dynamo::{DynamoRequestTrace, load_weka_trace};
 pub(crate) use router::local_block_hashes;
 pub use router::{DynamoTraceRouterExt, RouterSequence, SequenceHashMode, to_router_sequences};
 

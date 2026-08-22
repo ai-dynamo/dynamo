@@ -72,7 +72,12 @@ router-test-support = [
   "dep:tracing-subscriber",
 ]
 satf = ["dep:dynamo-data-gen"]
-request-trace-to-mooncake = ["dep:dynamo-data-gen", "dep:tempfile"]
+request-trace-to-mooncake = ["dep:blake3", "dep:dynamo-data-gen", "dep:tempfile"]
+weka-to-agentic-mooncake = [
+  "dep:dynamo-data-gen",
+  "dep:dynamo-mocker",
+  "dep:tempfile",
+]
 test-support = [
   "router-test-support",
   "dynamo-mocker/test-support",
@@ -104,6 +109,11 @@ required-features = ["satf"]
 name = "request_trace_to_mooncake"
 path = "request_trace_to_mooncake.rs"
 required-features = ["request-trace-to-mooncake"]
+
+[[bin]]
+name = "weka_to_agentic_mooncake"
+path = "weka_to_agentic_mooncake.rs"
+required-features = ["weka-to-agentic-mooncake"]
 
 [[test]]
 name = "request_trace_to_mooncake"
