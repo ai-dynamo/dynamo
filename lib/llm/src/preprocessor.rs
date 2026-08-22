@@ -46,14 +46,14 @@ use std::{
     any::Any,
     collections::{HashMap, HashSet},
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, Mutex, OnceLock},
 };
 use tracing;
 
 use crate::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
-use crate::model_card::{ModelDeploymentCard, ModelInfo};
+use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact};
 use crate::preprocessor::media::MediaLoader;
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, MultimodalUuidMap, PreprocessedRequestBuilder, RoutingHints,
@@ -220,17 +220,88 @@ fn image_content_part_url(
     part.image_url.as_ref().map(|image| image.url.as_str())
 }
 
-/// Encode a slice of `f32` values as a base64 string per the OpenAI
-/// `encoding_format=base64` spec: the raw little-endian byte
-/// representation of each `f32` is concatenated and the resulting byte
-/// buffer is base64-encoded with the standard alphabet.
-fn encode_floats_to_base64(floats: &[f32]) -> String {
+/// Decode a base64-encoded little-endian f32 byte string back into a float
+/// vector. The byte length must be a multiple of 4; trailing bytes are
+/// rejected. Shared by the tokens-path postprocessor and the HTTP embedding
+/// handler, which converts leftover Base64 payloads to Float when requested.
+pub(crate) fn decode_base64_to_floats(encoded: &str) -> Result<Vec<f32>, String> {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
-    let mut bytes = Vec::with_capacity(std::mem::size_of_val(floats));
-    for f in floats {
-        bytes.extend_from_slice(&f.to_le_bytes());
+    let bytes = STANDARD
+        .decode(encoded)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() % std::mem::size_of::<f32>() != 0 {
+        return Err(format!(
+            "base64-decoded embedding byte length {} is not a multiple of 4",
+            bytes.len()
+        ));
     }
-    STANDARD.encode(&bytes)
+    Ok(bytes
+        .chunks_exact(std::mem::size_of::<f32>())
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect())
+}
+
+#[cfg(test)]
+mod embedding_base64_transport_tests {
+    use super::{OpenAIPreprocessor, decode_base64_to_floats};
+    use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
+    use crate::protocols::openai::embeddings::NvCreateEmbeddingRequest;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use dynamo_runtime::protocols::annotated::Annotated;
+    use futures::StreamExt;
+    use futures::stream;
+
+    #[test]
+    fn portable_embedding_bytes_decode() {
+        let expected = vec![0.0, 1.0, -1.0, 2.5, -42.5, 3.25, f32::MIN, f32::MAX];
+        let bytes = expected
+            .iter()
+            .flat_map(|value: &f32| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let encoded = STANDARD.encode(bytes);
+        assert_eq!(decode_base64_to_floats(&encoded).unwrap(), expected);
+    }
+
+    #[test]
+    fn portable_embedding_bytes_reject_invalid_base64() {
+        assert!(decode_base64_to_floats("not!valid!base64").is_err());
+    }
+
+    #[test]
+    fn portable_embedding_bytes_reject_partial_float() {
+        let encoded = STANDARD.encode([0_u8; 5]);
+        let error = decode_base64_to_floats(&encoded).unwrap_err();
+        assert!(error.contains("not a multiple of 4"));
+    }
+
+    #[test]
+    fn empty_embeddings_engine_output_surfaces_as_error() {
+        let request: NvCreateEmbeddingRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "input": "hello"
+        }))
+        .unwrap();
+        let output = Annotated::from_data(EmbeddingsEngineOutput {
+            embeddings: vec![],
+            prompt_tokens: 0,
+            total_tokens: 0,
+        });
+        let items = futures::executor::block_on(
+            OpenAIPreprocessor::transform_embedding_postprocessor_stream(
+                stream::iter(vec![output]),
+                request,
+            )
+            .collect::<Vec<_>>(),
+        );
+        assert_eq!(items.len(), 1);
+        let item = items.into_iter().next().unwrap();
+        assert!(item.is_error(), "empty embeddings must be a stream error");
+        let err = item.into_result().unwrap_err();
+        assert!(
+            err.to_string().contains("empty `embeddings` field"),
+            "error should name the empty embeddings field, got: {err}"
+        );
+    }
 }
 
 pub const ANNOTATION_FORMATTED_PROMPT: &str = "formatted_prompt";
@@ -696,6 +767,79 @@ static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
 pub(crate) const PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY: &str =
     "dynamo.llm.preserve_omitted_max_tokens";
 
+const EMBEDDING_ADD_SPECIAL_TOKENS_ENV: &str = "DYN_EMBEDDING_TOKENIZATION_ADD_SPECIAL_TOKENS";
+
+fn parse_embedding_add_special_tokens(value: &str) -> Option<bool> {
+    parse_bool_opt(value)
+}
+
+fn embedding_add_special_tokens_env() -> Result<Option<bool>> {
+    match std::env::var(EMBEDDING_ADD_SPECIAL_TOKENS_ENV) {
+        Ok(value) => match parse_embedding_add_special_tokens(&value) {
+            Some(value) => Ok(Some(value)),
+            None => bail!(
+                "invalid value {value:?} for {EMBEDDING_ADD_SPECIAL_TOKENS_ENV}; \
+                 expected true/false/on/off/yes/no/1/0"
+            ),
+        },
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => bail!(
+            "{EMBEDDING_ADD_SPECIAL_TOKENS_ENV} must be valid Unicode and one of \
+             true/false/on/off/yes/no/1/0"
+        ),
+    }
+}
+
+#[cfg(test)]
+mod embedding_add_special_tokens_env_tests {
+    use super::parse_embedding_add_special_tokens;
+
+    #[test]
+    fn parser_uses_the_documented_truth_table() {
+        for value in ["1", "true", "on", "yes", " TRUE ", "On", "Yes"] {
+            assert_eq!(parse_embedding_add_special_tokens(value), Some(true));
+        }
+        for value in ["0", "false", "off", "no", " FALSE ", "Off", "No"] {
+            assert_eq!(parse_embedding_add_special_tokens(value), Some(false));
+        }
+        for value in ["", "yes-please"] {
+            assert_eq!(parse_embedding_add_special_tokens(value), None);
+        }
+    }
+}
+
+fn embedding_chat_template_present(mdc: &ModelDeploymentCard) -> Result<bool> {
+    if mdc.chat_template_file.is_some() {
+        return Ok(true);
+    }
+
+    let Some(artifact) = mdc.prompt_formatter.as_ref() else {
+        return Ok(false);
+    };
+    let PromptFormatterArtifact::HfTokenizerConfigJson(checked_file) = artifact else {
+        return Ok(true);
+    };
+    let Some(path) = checked_file.path() else {
+        return Ok(true);
+    };
+
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("fs:read_to_string '{}'", path.display()))?;
+    let config: serde_json::Value = serde_json::from_str(&contents)
+        .with_context(|| format!("Failed to parse '{}'", path.display()))?;
+    Ok(config
+        .get("chat_template")
+        .is_some_and(|template| !template.is_null()))
+}
+
+fn embedding_prompt_formatter(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
+    match prompt_formatter_from_mdc(mdc) {
+        Ok(formatter) => Ok(formatter),
+        Err(_) if !embedding_chat_template_present(mdc)? => Ok(PromptFormatter::no_op()),
+        Err(err) => Err(err),
+    }
+}
+
 fn attach_agent_context_from_context(
     request: &mut PreprocessedRequest,
     context: &PipelineContext<()>,
@@ -810,10 +954,58 @@ struct PreprocessRequestOptions {
     preserve_omitted_max_tokens: bool,
 }
 
+struct EmbeddingTokenizerState {
+    model_card: ModelDeploymentCard,
+    with_special_tokens: OnceLock<Arc<dyn Tokenizer>>,
+    without_special_tokens: OnceLock<Arc<dyn Tokenizer>>,
+    initialization_lock: Mutex<()>,
+    add_special_tokens_default: Option<bool>,
+}
+
+impl EmbeddingTokenizerState {
+    fn new(model_card: &ModelDeploymentCard) -> Result<Self> {
+        Ok(Self {
+            model_card: model_card.clone(),
+            with_special_tokens: OnceLock::new(),
+            without_special_tokens: OnceLock::new(),
+            initialization_lock: Mutex::new(()),
+            add_special_tokens_default: embedding_add_special_tokens_env()?,
+        })
+    }
+
+    fn tokenizer(&self, add_special_tokens: bool) -> Result<Arc<dyn Tokenizer>> {
+        let tokenizer = if add_special_tokens {
+            &self.with_special_tokens
+        } else {
+            &self.without_special_tokens
+        };
+        if let Some(tokenizer) = tokenizer.get() {
+            return Ok(tokenizer.clone());
+        }
+
+        let _guard = self
+            .initialization_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("embedding tokenizer initialization lock was poisoned"))?;
+        if let Some(tokenizer) = tokenizer.get() {
+            return Ok(tokenizer.clone());
+        }
+
+        let initialized = self.model_card.embedding_tokenizer_with_options(
+            crate::tokenizers::TokenizerOptions { add_special_tokens },
+        )?;
+        let initialized: Arc<dyn Tokenizer> = (*initialized).clone();
+        Ok(tokenizer.get_or_init(|| initialized).clone())
+    }
+}
+
 pub struct OpenAIPreprocessor {
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
     tokenizer: Arc<dyn Tokenizer>,
+    /// Present only for token-input embedding pipelines. The two Hugging Face
+    /// tokenizer variants are initialized independently on demand.
+    embedding_tokenizers: Option<EmbeddingTokenizerState>,
     model_info: Arc<dyn ModelInfo>,
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
@@ -829,6 +1021,8 @@ pub struct OpenAIPreprocessor {
     media_loader: Option<MediaLoader>,
     /// Engine-published request-token admission policy.
     token_budget: Option<TokenBudget>,
+    /// Model context limit used by the embedding truncation contract.
+    context_length: u32,
     /// Per-image token-count engine. `None` when the feature is disabled, the
     /// model isn't covered by the registry, or `preprocessor_config.json` is
     /// unreadable.
@@ -1475,10 +1669,31 @@ impl OpenAIPreprocessor {
         }
     }
 
+    /// Build the preprocessor used by token-input embedding pipelines.
+    pub fn new_for_embeddings(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
+        if !mdc.model_type.supports_embedding() {
+            anyhow::bail!("embedding preprocessor requires an embedding-capable model");
+        }
+
+        let tokenizer = mdc.tokenizer()?;
+        let PromptFormatter::OAI(formatter) = embedding_prompt_formatter(&mdc)?;
+        let embedding_tokenizers = EmbeddingTokenizerState::new(&mdc)?;
+        Self::new_with_parts_inner(mdc, formatter, tokenizer, Some(embedding_tokenizers))
+    }
+
     pub fn new_with_parts(
         mdc: ModelDeploymentCard,
         formatter: Arc<dyn OAIPromptFormatter>,
         tokenizer: crate::tokenizers::Tokenizer,
+    ) -> Result<Arc<Self>> {
+        Self::new_with_parts_inner(mdc, formatter, tokenizer, None)
+    }
+
+    fn new_with_parts_inner(
+        mdc: ModelDeploymentCard,
+        formatter: Arc<dyn OAIPromptFormatter>,
+        tokenizer: crate::tokenizers::Tokenizer,
+        embedding_tokenizers: Option<EmbeddingTokenizerState>,
     ) -> Result<Arc<Self>> {
         let mdcsum = mdc.mdcsum().to_string();
         let tokenizer: Arc<dyn Tokenizer> = (*tokenizer).clone();
@@ -1514,6 +1729,7 @@ impl OpenAIPreprocessor {
             }
         };
         let kv_cache_block_size = mdc.kv_cache_block_size as usize;
+        let context_length = mdc.effective_context_length();
 
         // Capture MM-routing inputs before mdc is partially moved into MediaLoader.
         // model_type comes from config.json (e.g. "qwen3_vl") and lets the
@@ -1690,6 +1906,7 @@ impl OpenAIPreprocessor {
         Ok(Arc::new(Self {
             formatter,
             tokenizer,
+            embedding_tokenizers,
             model_info,
             mdcsum,
             lora_name,
@@ -1699,6 +1916,7 @@ impl OpenAIPreprocessor {
             normalize_tool_call_args,
             media_loader,
             token_budget,
+            context_length,
             #[cfg(feature = "mm-routing")]
             image_token_counter,
             #[cfg(feature = "mm-routing")]
@@ -3136,26 +3354,44 @@ impl OpenAIPreprocessor {
         let mut annotations = HashMap::new();
         let mut builder = PreprocessedEmbeddingRequest::builder();
 
-        let all_token_ids = match &request.inner.input {
+        let embedding_tokenizers = self.embedding_tokenizers.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "embedding tokenization is unavailable; construct the preprocessor with \
+                 OpenAIPreprocessor::new_for_embeddings"
+            )
+        })?;
+        let effective_add_special_tokens = request
+            .add_special_tokens
+            .or(embedding_tokenizers.add_special_tokens_default)
+            .unwrap_or(true);
+        let is_text_input = matches!(
+            &request.inner.input,
+            dynamo_protocols::types::EmbeddingInput::String(_)
+                | dynamo_protocols::types::EmbeddingInput::StringArray(_)
+        );
+        let truncation_limit =
+            self.embedding_truncation_limit(request.truncate_prompt_tokens, is_text_input)?;
+        let mut all_token_ids = match &request.inner.input {
             dynamo_protocols::types::EmbeddingInput::String(s) => {
-                let encoding = self.tokenizer.encode(s)?;
+                let tokenizer = embedding_tokenizers.tokenizer(effective_add_special_tokens)?;
+                let encoding = tokenizer.encode(s)?;
                 vec![encoding.token_ids().to_vec()]
             }
             dynamo_protocols::types::EmbeddingInput::StringArray(arr) => {
+                let tokenizer = embedding_tokenizers.tokenizer(effective_add_special_tokens)?;
                 let input_strs: Vec<String> = arr.to_vec();
                 let encodings = tokio::task::spawn_blocking({
-                    let tokenizer = self.tokenizer.clone();
+                    let tokenizer = tokenizer.clone();
                     let strs = input_strs.clone();
                     move || {
                         tokenizer.encode_batch(&strs.iter().map(|s| s.as_str()).collect::<Vec<_>>())
                     }
                 })
                 .await??;
-                let token_arrays: Vec<Vec<u32>> = encodings
+                encodings
                     .into_iter()
                     .map(|encoding| encoding.token_ids().to_vec())
-                    .collect();
-                token_arrays
+                    .collect()
             }
             dynamo_protocols::types::EmbeddingInput::IntegerArray(token_ids) => {
                 vec![token_ids.clone()]
@@ -3164,6 +3400,13 @@ impl OpenAIPreprocessor {
                 token_arrays.clone()
             }
         };
+        if let Some(limit) = truncation_limit {
+            for token_ids in &mut all_token_ids {
+                // This integration intentionally follows right truncation:
+                // preserve the first N tokens.
+                token_ids.truncate(limit);
+            }
+        }
 
         // Handle annotations
         if request.has_annotation(ANNOTATION_TOKEN_IDS) {
@@ -3179,12 +3422,56 @@ impl OpenAIPreprocessor {
             EncodingFormat::Float => "float".to_string(),
             EncodingFormat::Base64 => "base64".to_string(),
         }));
+        builder.truncate_prompt_tokens(request.truncate_prompt_tokens);
         builder.dimensions(request.inner.dimensions);
 
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
 
         Ok((builder.build()?, annotations))
+    }
+
+    fn embedding_truncation_limit(
+        &self,
+        requested: Option<i64>,
+        is_text_input: bool,
+    ) -> Result<Option<usize>> {
+        let Some(requested) = requested else {
+            return Ok(None);
+        };
+
+        if requested < -1 {
+            return Err(invalid_argument_error(format!(
+                "truncate_prompt_tokens must be >= -1, got {requested}"
+            )));
+        }
+
+        // Caller-supplied token IDs are already preprocessed; do not mutate them.
+        if !is_text_input {
+            return Ok(None);
+        }
+
+        let model_limit = self.context_length as usize;
+        if requested == -1 {
+            if model_limit == 0 {
+                return Err(invalid_argument_error(
+                    "truncate_prompt_tokens=-1 requires a configured model context length",
+                ));
+            }
+            return Ok(Some(model_limit));
+        }
+
+        let requested = usize::try_from(requested).map_err(|_| {
+            invalid_argument_error("truncate_prompt_tokens is too large for this platform")
+        })?;
+        if model_limit > 0 && requested > model_limit {
+            return Err(invalid_argument_error(format!(
+                "truncate_prompt_tokens={requested} cannot be greater than \
+                 max_model_len={model_limit}. Please request a smaller truncation size."
+            )));
+        }
+
+        Ok(Some(requested))
     }
 
     pub fn postprocessor_parsing_stream<S>(
@@ -3846,38 +4133,36 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<EmbeddingsEngineOutput>> + Send + 'static,
     {
-        // Honor the OpenAI `encoding_format` field. The default is `Float`;
-        // `Base64` encodes the raw little-endian f32 bytes of each
-        // per-input vector. The engine always returns floats, so the
-        // base64 path runs at the postprocessor seam where we still have
-        // the original request shape in scope.
+        // The worker always returns base64-encoded little-endian f32 bytes.
+        // Pass base64 through, or decode to floats (the public default).
         let encode_base64 = matches!(
             original_request.inner.encoding_format,
             Some(dynamo_protocols::types::EncodingFormat::Base64)
         );
         stream.map(move |output| {
             output.map_data(|engine_output| {
-                // Convert engine output to OpenAI response format
+                if engine_output.embeddings.is_empty() {
+                    return Err("embedding worker returned an empty `embeddings` field".to_string());
+                }
                 let embeddings: Vec<dynamo_protocols::types::Embedding> = engine_output
                     .embeddings
                     .into_iter()
                     .enumerate()
-                    .map(|(index, embedding)| {
-                        let floats: Vec<f32> = embedding.into_iter().map(|f| f as f32).collect();
+                    .map(|(index, encoded)| {
                         let value = if encode_base64 {
-                            dynamo_protocols::types::EmbeddingVector::Base64(
-                                encode_floats_to_base64(&floats),
-                            )
+                            dynamo_protocols::types::EmbeddingVector::Base64(encoded)
                         } else {
-                            dynamo_protocols::types::EmbeddingVector::Float(floats)
+                            dynamo_protocols::types::EmbeddingVector::Float(
+                                decode_base64_to_floats(&encoded)?,
+                            )
                         };
-                        dynamo_protocols::types::Embedding {
+                        Ok::<_, String>(dynamo_protocols::types::Embedding {
                             index: index as u32,
                             object: "embedding".to_string(),
                             embedding: value,
-                        }
+                        })
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, String>>()?;
 
                 let response = NvCreateEmbeddingResponse {
                     inner: dynamo_protocols::types::CreateEmbeddingResponse {

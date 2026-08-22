@@ -934,7 +934,8 @@ where
                 ManyOut<Annotated<NvCreateEmbeddingResponse>>,
             >::new();
 
-            let preprocessor = OpenAIPreprocessor::new(card.clone())?.into_operator();
+            let preprocessor =
+                OpenAIPreprocessor::new_for_embeddings(card.clone())?.into_operator();
             let backend = Backend::from_mdc(card).into_operator();
 
             let router = PushRouter::<

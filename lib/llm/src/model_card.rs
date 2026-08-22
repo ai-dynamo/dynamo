@@ -1244,7 +1244,26 @@ impl ModelDeploymentCard {
     ///   per-turn tokenization cost flat instead of growing with history. Set to `0` to
     ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
-        let tokenizer_backend = self.runtime_config.effective_tokenizer_backend();
+        self.tokenizer_with_options(Default::default(), false)
+    }
+
+    pub(crate) fn embedding_tokenizer_with_options(
+        &self,
+        options: crate::tokenizers::TokenizerOptions,
+    ) -> anyhow::Result<crate::tokenizers::Tokenizer> {
+        self.tokenizer_with_options(options, true)
+    }
+
+    fn tokenizer_with_options(
+        &self,
+        options: crate::tokenizers::TokenizerOptions,
+        force_hugging_face: bool,
+    ) -> anyhow::Result<crate::tokenizers::Tokenizer> {
+        let tokenizer_backend = if force_hugging_face {
+            TokenizerBackend::Default
+        } else {
+            self.runtime_config.effective_tokenizer_backend()
+        };
         let is_fallback_enabled = self.runtime_config.is_tokenizer_fallback_enabled()?;
 
         let cache_enabled =
@@ -1321,9 +1340,13 @@ impl ModelDeploymentCard {
                     Vec::new()
                 };
 
-                // Merge already applied above; just wrap.
-                let wrap_hf =
-                    |hf: HfTokenizer| crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf);
+                // Merge already applied above; just wrap. Embedding
+                // tokenizers use the HF post-processor to apply BOS/EOS when
+                // requested; normal tokenizers keep their existing defaults.
+                let wrap_hf = |hf: HfTokenizer| {
+                    let tokenizer = crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf);
+                    crate::tokenizers::traits::Tokenizer::with_options(tokenizer, options)
+                };
 
                 // Pick the inner backend.
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = match tokenizer_backend {
@@ -1398,7 +1421,7 @@ impl ModelDeploymentCard {
                     }
                 };
 
-                if cache_enabled {
+                if cache_enabled && !options.add_special_tokens {
                     tracing::info!(
                         cache_bytes,
                         cache_extend,
@@ -1413,6 +1436,10 @@ impl ModelDeploymentCard {
                         self.name(),
                     )?
                 } else {
+                    // The prefix cache encodes text in boundary-delimited
+                    // segments. Applying the HF post-processor to every segment
+                    // could add BOS/EOS more than once, so embedding special-token
+                    // mode bypasses that cache.
                     raw
                 }
             }

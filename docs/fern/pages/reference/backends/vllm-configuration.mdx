@@ -120,7 +120,7 @@ These flags control which role this worker plays in a disaggregated deployment. 
 ## Tokenizer and multimodal
 
 <ParamField path="--use-vllm-tokenizer" type="boolean" default="false">
-  Use vLLM's tokenizer for pre- and post-processing. This bypasses Dynamo's preprocessor; only the `/v1/chat/completions` endpoint will be available through the Dynamo frontend.
+  Use vLLM's tokenizer for pre- and post-processing. This bypasses Dynamo's preprocessor; only the `/v1/chat/completions` endpoint will be available through the Dynamo frontend. Dedicated embedding workers currently ignore this option and use vLLM tokenization by default. To enable Dynamo frontend tokenization for text embeddings, set `--embedding-frontend-tokenization`.
 
   Environment variable: `DYN_VLLM_USE_TOKENIZER`
 </ParamField>
@@ -163,6 +163,14 @@ These flags control which role this worker plays in a disaggregated deployment. 
   Run as a text-embedding worker. The vLLM engine must be started with `--runner pooling`. KV-event publishing, KV router registration, and `InstrumentedScheduler` injection are all skipped, as they do not apply to pooling models.
 
   Environment variable: `DYN_VLLM_EMBEDDING_WORKER`
+</ParamField>
+
+<ParamField path="--embedding-frontend-tokenization" type="boolean" default="false">
+  Use Dynamo frontend tokenization for raw-text inputs to a dedicated embedding worker. The default preserves existing behavior: vLLM tokenizes embedding text. This option requires `--embedding-worker` and cannot be combined with `--use-vllm-tokenizer`.
+
+  This temporary compatibility gate is planned for removal in a future release, when pooling workers will use `--use-vllm-tokenizer` consistently.
+
+  Environment variable: `DYN_VLLM_EMBEDDING_FRONTEND_TOKENIZATION`
 </ParamField>
 
 ## Other

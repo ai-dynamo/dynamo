@@ -1111,3 +1111,448 @@ mod context_length_validation {
         assert_eq!(preprocessed.stop_conditions.max_tokens, None);
     }
 }
+
+mod embedding_without_chat_template {
+    use dynamo_llm::model_card::ModelDeploymentCard;
+    use dynamo_llm::model_type::ModelType;
+    use dynamo_llm::preprocessor::OpenAIPreprocessor;
+    use dynamo_llm::preprocessor::prompt::prompt_formatter_from_mdc;
+    use dynamo_llm::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
+    use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+    use dynamo_llm::protocols::openai::embeddings::NvCreateEmbeddingRequest;
+    use dynamo_renderer::PromptFormatter;
+    use serde::Deserialize;
+    use serde_json::json;
+    use serial_test::serial;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    const MODEL_PATH: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
+    const PARITY_MODEL_PATH: &str = "tests/data/sample-models/TinyLlama_v1.1";
+    const ADD_SPECIAL_TOKENS_ENV: &str = "DYN_EMBEDDING_TOKENIZATION_ADD_SPECIAL_TOKENS";
+
+    #[derive(Debug, Deserialize)]
+    struct TokenizationParityFixture {
+        text: String,
+        bos_token_id: u32,
+        cases: Vec<TokenizationParityCase>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct TokenizationParityCase {
+        name: String,
+        add_special_tokens: bool,
+        truncate_prompt_tokens: Option<i64>,
+        max_model_len: u32,
+        expected_token_ids: Vec<u32>,
+    }
+
+    fn tokenization_parity_fixture() -> TokenizationParityFixture {
+        serde_json::from_str(include_str!(
+            "data/sample-models/TinyLlama_v1.1/embedding_right_truncation_parity.json"
+        ))
+        .unwrap()
+    }
+
+    fn model_bos_token_id(model_path: &str) -> u32 {
+        let model_config: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(std::path::Path::new(model_path).join("config.json")).unwrap(),
+        )
+        .unwrap();
+        model_config["bos_token_id"].as_u64().unwrap() as u32
+    }
+
+    fn mock_tokenizer_bos_token_id() -> u32 {
+        model_bos_token_id(MODEL_PATH)
+    }
+
+    fn model_copy_with_chat_template(chat_template: Option<&str>) -> TempDir {
+        let temp_dir = tempfile::tempdir().unwrap();
+        for filename in [
+            "config.json",
+            "generation_config.json",
+            "tokenizer_config.json",
+            "tokenizer.json",
+        ] {
+            std::fs::copy(
+                std::path::Path::new(MODEL_PATH).join(filename),
+                temp_dir.path().join(filename),
+            )
+            .unwrap();
+        }
+
+        let config_path = temp_dir.path().join("tokenizer_config.json");
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        match chat_template {
+            Some(template) => config["chat_template"] = json!(template),
+            None => {
+                config.as_object_mut().unwrap().remove("chat_template");
+            }
+        }
+        std::fs::write(config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+        temp_dir
+    }
+
+    fn embedding_mdc(path: impl AsRef<std::path::Path>) -> ModelDeploymentCard {
+        let mut mdc = ModelDeploymentCard::load_from_disk(path, None).unwrap();
+        mdc.model_type = ModelType::Embedding;
+        mdc
+    }
+
+    fn embedding_preprocessor_without_template() -> Arc<OpenAIPreprocessor> {
+        let mut mdc = embedding_mdc(MODEL_PATH);
+        mdc.prompt_formatter = None;
+        mdc.chat_template_file = None;
+        OpenAIPreprocessor::new_for_embeddings(mdc).unwrap()
+    }
+
+    fn chat_request() -> NvCreateChatCompletionRequest {
+        let messages: Vec<dynamo_protocols::types::ChatCompletionRequestMessage> =
+            serde_json::from_str(r#"[{"role":"user","content":"hello"}]"#).unwrap();
+        let inner = dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
+            .model("test-model")
+            .messages(messages)
+            .build()
+            .unwrap();
+        NvCreateChatCompletionRequest {
+            inner,
+            common: Default::default(),
+            nvext: None,
+            chat_template_args: None,
+            thinking: None,
+            media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
+            unsupported_fields: Default::default(),
+        }
+    }
+
+    #[test]
+    fn embedding_preprocessor_does_not_require_chat_template() {
+        let model_dir = model_copy_with_chat_template(None);
+        let mdc = embedding_mdc(model_dir.path());
+
+        assert!(
+            OpenAIPreprocessor::new(mdc.clone()).is_err(),
+            "the general chat preprocessor should still require a prompt formatter"
+        );
+        OpenAIPreprocessor::new_for_embeddings(mdc)
+            .expect("embedding-only preprocessing must not require a chat template");
+    }
+
+    #[test]
+    fn embedding_preprocessor_uses_chat_template_when_present() {
+        let preprocessor =
+            OpenAIPreprocessor::new_for_embeddings(embedding_mdc(MODEL_PATH)).unwrap();
+        let rendered = preprocessor
+            .apply_template(&chat_request())
+            .unwrap()
+            .unwrap();
+        assert!(
+            rendered
+                .as_str()
+                .contains("<|start_header_id|>user<|end_header_id|>")
+        );
+    }
+
+    #[test]
+    fn hybrid_general_constructor_does_not_initialize_embedding_tokenizers() {
+        let model_dir = model_copy_with_chat_template(Some(
+            "{% for message in messages %}{{ message['content'] }}{% endfor %}",
+        ));
+        let mut mdc = embedding_mdc(model_dir.path());
+        mdc.model_type = ModelType::Chat | ModelType::Embedding;
+        let tokenizer = mdc.tokenizer().unwrap();
+        let PromptFormatter::OAI(formatter) = prompt_formatter_from_mdc(&mdc).unwrap();
+
+        std::fs::remove_file(model_dir.path().join("tokenizer.json")).unwrap();
+        let preprocessor = OpenAIPreprocessor::new_with_parts(mdc, formatter, tokenizer)
+            .expect("general construction must not load embedding-only tokenizers");
+        let rendered = preprocessor
+            .apply_template(&chat_request())
+            .unwrap()
+            .unwrap();
+        assert_eq!(rendered.as_str(), "hello");
+    }
+
+    #[test]
+    fn embedding_preprocessor_rejects_malformed_chat_template() {
+        let model_dir = model_copy_with_chat_template(Some("{% invalid template %}"));
+        assert!(OpenAIPreprocessor::new_for_embeddings(embedding_mdc(model_dir.path())).is_err());
+    }
+
+    #[test]
+    fn embedding_constructor_rejects_non_embedding_model() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(MODEL_PATH, None).unwrap();
+        mdc.model_type = ModelType::Chat;
+
+        let err = match OpenAIPreprocessor::new_for_embeddings(mdc) {
+            Ok(_) => panic!("non-embedding models must use the general constructor"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("requires an embedding-capable model")
+        );
+    }
+
+    fn embedding_request_with_options(
+        input: serde_json::Value,
+        add_special_tokens: Option<bool>,
+        truncate_prompt_tokens: Option<i64>,
+    ) -> NvCreateEmbeddingRequest {
+        let mut value = json!({
+            "model": "test-model",
+            "input": input
+        });
+        if let Some(value_) = add_special_tokens {
+            value["add_special_tokens"] = json!(value_);
+        }
+        if let Some(value_) = truncate_prompt_tokens {
+            value["truncate_prompt_tokens"] = json!(value_);
+        }
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn embedding_request(add_special_tokens: Option<bool>) -> NvCreateEmbeddingRequest {
+        embedding_request_with_options(json!("hello"), add_special_tokens, None)
+    }
+
+    async fn preprocess_embedding(
+        preprocessor: &OpenAIPreprocessor,
+        input: serde_json::Value,
+        truncate_prompt_tokens: Option<i64>,
+    ) -> anyhow::Result<PreprocessedEmbeddingRequest> {
+        Ok(preprocessor
+            .preprocess_embedding_request(&embedding_request_with_options(
+                input,
+                None,
+                truncate_prompt_tokens,
+            ))
+            .await?
+            .0)
+    }
+
+    async fn token_ids(
+        preprocessor: &OpenAIPreprocessor,
+        add_special_tokens: Option<bool>,
+    ) -> Vec<Vec<u32>> {
+        preprocessor
+            .preprocess_embedding_request(&embedding_request(add_special_tokens))
+            .await
+            .unwrap()
+            .0
+            .token_ids
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn request_add_special_tokens_defaults_to_true() {
+        temp_env::async_with_vars([(ADD_SPECIAL_TOKENS_ENV, None::<&str>)], async {
+            let preprocessor = embedding_preprocessor_without_template();
+            let omitted = token_ids(&preprocessor, None).await;
+            let explicit_false = token_ids(&preprocessor, Some(false)).await;
+            let explicit_true = token_ids(&preprocessor, Some(true)).await;
+
+            assert_eq!(omitted, explicit_true);
+            assert_ne!(omitted, explicit_false);
+            let bos_token_id = mock_tokenizer_bos_token_id();
+            assert_eq!(explicit_true[0][0], bos_token_id, "explicit true adds BOS");
+            assert_ne!(explicit_false[0].first(), Some(&bos_token_id));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn embedding_tokenizer_variants_initialize_on_demand() {
+        temp_env::async_with_vars([(ADD_SPECIAL_TOKENS_ENV, None::<&str>)], async {
+            let model_dir = model_copy_with_chat_template(None);
+            let preprocessor =
+                OpenAIPreprocessor::new_for_embeddings(embedding_mdc(model_dir.path())).unwrap();
+
+            let expected = token_ids(&preprocessor, None).await;
+            std::fs::remove_file(model_dir.path().join("tokenizer.json")).unwrap();
+
+            assert_eq!(token_ids(&preprocessor, None).await, expected);
+            let error = preprocessor
+                .preprocess_embedding_request(&embedding_request(Some(false)))
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("tokenizer.json"),
+                "the unselected tokenizer variant should initialize only when requested: {error}"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn env_add_special_tokens_is_default_and_request_wins() {
+        temp_env::async_with_vars([(ADD_SPECIAL_TOKENS_ENV, Some("true"))], async {
+            let preprocessor = embedding_preprocessor_without_template();
+            let bos_token_id = mock_tokenizer_bos_token_id();
+            assert_eq!(token_ids(&preprocessor, None).await[0][0], bos_token_id);
+            assert_ne!(
+                token_ids(&preprocessor, Some(false)).await[0].first(),
+                Some(&bos_token_id)
+            );
+        })
+        .await;
+
+        temp_env::async_with_vars([(ADD_SPECIAL_TOKENS_ENV, Some("false"))], async {
+            let preprocessor = embedding_preprocessor_without_template();
+            let env_false = token_ids(&preprocessor, None).await;
+            let request_false = token_ids(&preprocessor, Some(false)).await;
+            assert_eq!(env_false, request_false);
+            assert_eq!(
+                token_ids(&preprocessor, Some(true)).await[0][0],
+                mock_tokenizer_bos_token_id()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn invalid_env_add_special_tokens_fails_construction() {
+        temp_env::async_with_vars([(ADD_SPECIAL_TOKENS_ENV, Some("yes-please"))], async {
+            let mut mdc = embedding_mdc(MODEL_PATH);
+            mdc.prompt_formatter = None;
+            mdc.chat_template_file = None;
+            let err = match OpenAIPreprocessor::new_for_embeddings(mdc) {
+                Ok(_) => panic!("invalid environment value must fail construction"),
+                Err(err) => err,
+            };
+            assert!(
+                err.to_string()
+                    .contains("expected true/false/on/off/yes/no/1/0")
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn frontend_tokenization_matches_vllm_right_truncation_fixture() {
+        temp_env::async_with_vars([(ADD_SPECIAL_TOKENS_ENV, None::<&str>)], async {
+            let fixture = tokenization_parity_fixture();
+            assert_eq!(fixture.bos_token_id, model_bos_token_id(PARITY_MODEL_PATH));
+
+            for case in fixture.cases {
+                let mut mdc = embedding_mdc(PARITY_MODEL_PATH);
+                mdc.prompt_formatter = None;
+                mdc.chat_template_file = None;
+                mdc.runtime_config.context_length = Some(case.max_model_len);
+                let preprocessor = OpenAIPreprocessor::new_for_embeddings(mdc).unwrap();
+                let request = embedding_request_with_options(
+                    json!(fixture.text),
+                    Some(case.add_special_tokens),
+                    case.truncate_prompt_tokens,
+                );
+                let actual = preprocessor
+                    .preprocess_embedding_request(&request)
+                    .await
+                    .unwrap()
+                    .0
+                    .token_ids;
+
+                assert_eq!(
+                    actual,
+                    vec![case.expected_token_ids],
+                    "vLLM right-truncation parity case {:?}",
+                    case.name
+                );
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn frontend_right_truncation_keeps_the_token_prefix() {
+        temp_env::async_with_vars([(ADD_SPECIAL_TOKENS_ENV, None::<&str>)], async {
+            let preprocessor = embedding_preprocessor_without_template();
+            let input = json!("<|eot_id|><|eot_id|><|eot_id|>");
+            let full = preprocess_embedding(&preprocessor, input.clone(), None)
+                .await
+                .unwrap()
+                .token_ids;
+
+            for limit in [0, 2] {
+                let truncated = preprocess_embedding(&preprocessor, input.clone(), Some(limit))
+                    .await
+                    .unwrap()
+                    .token_ids;
+                assert_eq!(truncated[0], full[0][..limit as usize]);
+            }
+            assert_eq!(
+                full[0][0],
+                mock_tokenizer_bos_token_id(),
+                "BOS is added before truncation"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn frontend_truncation_handles_batches_and_preserves_token_inputs() {
+        temp_env::async_with_vars([(ADD_SPECIAL_TOKENS_ENV, None::<&str>)], async {
+            let preprocessor = embedding_preprocessor_without_template();
+            let input = json!([
+                "<|eot_id|><|eot_id|><|eot_id|>",
+                "<|eot_id|><|eot_id|><|eot_id|><|eot_id|>"
+            ]);
+            let full = preprocess_embedding(&preprocessor, input.clone(), None)
+                .await
+                .unwrap()
+                .token_ids;
+            let truncated = preprocess_embedding(&preprocessor, input, Some(3))
+                .await
+                .unwrap()
+                .token_ids;
+            for (actual, expected) in truncated.iter().zip(&full) {
+                assert_eq!(actual, &expected[..3]);
+            }
+
+            let caller_tokens = preprocess_embedding(&preprocessor, json!([11, 12, 13]), Some(2))
+                .await
+                .unwrap();
+            assert_eq!(caller_tokens.token_ids, vec![vec![11, 12, 13]]);
+            assert_eq!(caller_tokens.truncate_prompt_tokens, Some(2));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn frontend_truncation_validates_model_limits() {
+        temp_env::async_with_vars([(ADD_SPECIAL_TOKENS_ENV, None::<&str>)], async {
+            let mut mdc = embedding_mdc(MODEL_PATH);
+            mdc.prompt_formatter = None;
+            mdc.chat_template_file = None;
+            mdc.runtime_config.context_length = Some(3);
+            let preprocessor = OpenAIPreprocessor::new_for_embeddings(mdc).unwrap();
+            let input = json!("<|eot_id|><|eot_id|><|eot_id|><|eot_id|>");
+
+            let truncated = preprocess_embedding(&preprocessor, input.clone(), Some(-1))
+                .await
+                .unwrap()
+                .token_ids;
+            assert_eq!(truncated[0].len(), 3);
+
+            for (limit, message) in [
+                (-2, "must be >= -1"),
+                (4, "cannot be greater than max_model_len=3"),
+            ] {
+                let error = preprocess_embedding(&preprocessor, input.clone(), Some(limit))
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains(message), "{error}");
+            }
+        })
+        .await;
+    }
+}

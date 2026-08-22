@@ -30,6 +30,7 @@ from typing import (
     cast,
 )
 
+import numpy as np
 import torch
 from vllm import PoolingParams
 from vllm.config import ModelConfig
@@ -3932,12 +3933,21 @@ class EmbeddingWorkerHandler:
         serialized as a base64-encoded string of little-endian ``f32`` bytes
         per the OpenAI spec, so the byte count matches the (possibly reduced)
         dimensionality. Optional ``truncate_prompt_tokens`` is forwarded to
-        vLLM's tokenizer path for raw-text inputs.
+        vLLM's tokenizer path for raw-text inputs. Optional
+        ``add_special_tokens`` is also forwarded for raw text; when omitted,
+        vLLM's embedding default is retained. Rust-preprocessed and
+        caller-supplied token IDs are never modified.
         """
         model_name = request.get("model") or self.config.served_model_name or ""
-        input_field = request.get("input")
+        # Raw OpenAI requests carry 'input'. Rust-preprocessed embedding
+        # requests carry the same logical batch as 'token_ids'.
+        token_ids_batch = request.get("token_ids")
+        is_tokens_path = token_ids_batch is not None
+        input_field = token_ids_batch if is_tokens_path else request.get("input")
         if input_field is None:
-            raise ValueError("Embedding request missing required 'input' field")
+            raise ValueError(
+                "Embedding request missing required 'input' or 'token_ids' field"
+            )
 
         # Per OpenAI spec, `input` can be:
         #   - str           : single text prompt
@@ -3959,7 +3969,12 @@ class EmbeddingWorkerHandler:
         if dimensions is not None and dimensions < 1:
             raise ValueError(f"dimensions must be >= 1, got {dimensions}")
 
-        encoding_format = request.get("encoding_format", "float")
+        # Rust's preprocessed request represents an omitted client format as
+        # ``None``. Treat both an absent key and an explicit internal null as
+        # the OpenAI default while continuing to reject invalid non-null values.
+        encoding_format = request.get("encoding_format")
+        if encoding_format is None:
+            encoding_format = "float"
         if encoding_format not in ("float", "base64"):
             raise ValueError(
                 f"Invalid 'encoding_format' value {encoding_format!r}; "
@@ -3967,7 +3982,7 @@ class EmbeddingWorkerHandler:
             )
 
         truncate_prompt_tokens = request.get("truncate_prompt_tokens")
-        tokenization_kwargs: dict[str, Any] | None = None
+        tokenization_kwargs: dict[str, Any] = {}
         if truncate_prompt_tokens is not None:
             if not isinstance(truncate_prompt_tokens, int) or isinstance(
                 truncate_prompt_tokens, bool
@@ -3981,9 +3996,16 @@ class EmbeddingWorkerHandler:
                     "truncate_prompt_tokens must be >= -1, "
                     f"got {truncate_prompt_tokens}"
                 )
-            tokenization_kwargs = {
-                "truncate_prompt_tokens": truncate_prompt_tokens,
-            }
+            tokenization_kwargs["truncate_prompt_tokens"] = truncate_prompt_tokens
+
+        add_special_tokens = request.get("add_special_tokens")
+        if add_special_tokens is not None:
+            if not isinstance(add_special_tokens, bool):
+                raise TypeError(
+                    "Invalid 'add_special_tokens' type "
+                    f"{type(add_special_tokens).__name__}; expected bool"
+                )
+            tokenization_kwargs["add_special_tokens"] = add_special_tokens
 
         # Request the pooled sentence embedding. With no task, vLLM's
         # encode() resolves to per-token output (the full ``n_tokens x
@@ -4030,7 +4052,7 @@ class EmbeddingWorkerHandler:
                     "pooling_params": pooling_params,
                     "request_id": request_id,
                 }
-                if tokenization_kwargs is not None and isinstance(encode_arg, str):
+                if tokenization_kwargs and isinstance(encode_arg, str):
                     encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
 
                 async for out in self.engine_client.encode(**encode_kwargs):
@@ -4062,26 +4084,34 @@ class EmbeddingWorkerHandler:
                 await asyncio.gather(*pending, return_exceptions=True)
 
         embedding_objects: list[Dict[str, Any]] = []
+        token_embeddings: list[str] = []
         prompt_tokens = 0
         for idx, final_output in enumerate(outputs):
-            # vLLM has already applied any ``dimensions`` Matryoshka reduction
-            # (truncate + re-normalize) inside the pooler, so this is the
-            # final per-input vector -- no post-hoc truncation here.
-            embedding = _pooling_output_to_list(final_output.outputs.data)
+            embedding_row = final_output.outputs.data
+            token_ids = getattr(final_output, "prompt_token_ids", None) or []
+            prompt_tokens += len(token_ids)
 
             # vLLM rejects an unsupported ``dimensions`` for models that
             # declare a ``matryoshka_dimensions`` list, but a model enabled
             # via ``--hf-overrides '{"is_matryoshka": true}'`` (no explicit
             # list) is only validated for ``dimensions >= 1`` -- the pooler
-            # then silently clamps an oversized request to the model's native
-            # size (``embeddings[..., :dimensions]``). Surface the same clear
-            # error the old post-hoc path raised instead of returning a
-            # shorter-than-requested vector.
-            if dimensions is not None and len(embedding) < dimensions:
-                raise ValueError(
-                    f"dimensions={dimensions} exceeds model embedding "
-                    f"dimension {len(embedding)}"
+            # then silently clamps an oversized request to the model's
+            # native size (``embeddings[..., :dimensions]``). Surface the
+            # same clear error the old post-hoc path raised instead of
+            # returning a shorter-than-requested vector to the client.
+            # ``.numel()`` is O(1) on a tensor; the non-tensor fallback
+            # pays a one-time list conversion, which is rare in practice.
+            if dimensions is not None:
+                actual_dim = (
+                    embedding_row.numel()
+                    if isinstance(embedding_row, torch.Tensor)
+                    else len(_pooling_output_to_list(embedding_row))
                 )
+                if actual_dim < dimensions:
+                    raise ValueError(
+                        f"dimensions={dimensions} exceeds model embedding "
+                        f"dimension {actual_dim}"
+                    )
 
             # Always emit base64 over the worker->frontend wire format. The
             # Rust frontend decodes back to float when the client's
@@ -4090,15 +4120,26 @@ class EmbeddingWorkerHandler:
             # Rust serde parse; base64 bytes are ~3x smaller and ~10x faster
             # to (de)serialize. Client-visible wire format is preserved
             # because Rust converts at the HTTP boundary.
+            encoded = _pooling_output_to_base64(embedding_row)
+            if is_tokens_path:
+                token_embeddings.append(encoded)
+                continue
+
             embedding_objects.append(
                 {
                     "object": "embedding",
-                    "embedding": _encode_floats_to_base64(embedding),
+                    "embedding": encoded,
                     "index": idx,
                 }
             )
-            token_ids = getattr(final_output, "prompt_token_ids", None) or []
-            prompt_tokens += len(token_ids)
+
+        if is_tokens_path:
+            yield {
+                "embeddings": token_embeddings,
+                "prompt_tokens": prompt_tokens,
+                "total_tokens": prompt_tokens,
+            }
+            return
 
         yield {
             "object": "list",
@@ -4186,16 +4227,37 @@ def _classify_embedding_input(input_field: Any) -> list[Any]:
     )
 
 
+def _flatten_pooling_tensor(data: "torch.Tensor") -> "np.ndarray":
+    """Flatten pooling output to a 1-D little-endian float32 NumPy array.
+
+    Shared by :func:`_pooling_output_to_list` and
+    :func:`_pooling_output_to_base64` so the detach/cpu/flatten/cast step isn't
+    duplicated. Explicit little-endian ``float32`` matches the OpenAI base64
+    wire format. The endian conversion is zero-copy on little-endian hosts and
+    performs the required byte swap on a big-endian host.
+
+    vLLM's pooling pipeline can return a tensor with a singleton batch dim
+    (shape ``(1, hidden_dim)``) instead of a 1D vector; we flatten unconditionally.
+    """
+    return (
+        data.detach()
+        .cpu()
+        .flatten()
+        .to(torch.float32)
+        .contiguous()
+        .numpy()
+        .astype("<f4", copy=False)
+    )
+
+
 def _pooling_output_to_list(data: Any) -> list[float]:
     """Convert a vLLM PoolingOutput.data tensor (or list) to a flat list[float].
 
-    vLLM's pooling pipeline can return a tensor with a singleton batch dim
-    (shape ``(1, hidden_dim)``) instead of a 1D vector (shape ``(hidden_dim,)``).
     The OpenAI ``/v1/embeddings`` response expects ``data[].embedding`` to be a
-    flat array of floats, so we flatten unconditionally.
+    flat array of floats.
     """
     if isinstance(data, torch.Tensor):
-        return data.detach().cpu().flatten().tolist()
+        return _flatten_pooling_tensor(data).tolist()
     if isinstance(data, (list, tuple)):
         # Already a list — flatten one level if it's a list-of-lists.
         if data and isinstance(data[0], (list, tuple)):
@@ -4212,9 +4274,22 @@ def _encode_floats_to_base64(floats: list[float]) -> str:
     ``encoding_format=base64`` spec: raw little-endian ``float32`` bytes
     are concatenated and base64-encoded with the standard alphabet.
 
-    Mirrors the Rust ``encode_floats_to_base64`` helper in
-    ``lib/llm/src/preprocessor.rs`` so the two backend code paths
-    produce identical bytes for the same input.
+    The Rust frontend decodes this format when the client requests JSON floats.
     """
     packed = struct.pack(f"<{len(floats)}f", *floats)
     return base64.b64encode(packed).decode("ascii")
+
+
+def _pooling_output_to_base64(data: Any) -> str:
+    """Serialize a vLLM ``PoolingOutput.data`` tensor straight to a base64
+    float32 string, skipping the intermediate Python ``list[float]`` and the
+    ``struct.pack("<{N}f", *floats)`` varargs expansion.
+
+    ``torch -> numpy.tobytes -> base64`` keeps the heavy work in C; output bytes
+    are identical to the ``struct``-based path on little-endian hosts.
+    """
+    if isinstance(data, torch.Tensor):
+        vec = _flatten_pooling_tensor(data)
+        return base64.b64encode(vec.tobytes()).decode("ascii")
+    # Fallback for non-tensor pooling outputs (rare): reuse the list path.
+    return _encode_floats_to_base64(_pooling_output_to_list(data))
