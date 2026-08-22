@@ -48,9 +48,16 @@ __all__ = [
 ]
 
 
-def __getattr__(name: str) -> Any:
-    if name == "GrpcTransport":
-        from dynamo.planner.plugins.transport.grpc_remote import GrpcTransport
+# Hidden from the type checker on purpose. A module-level `__getattr__` tells
+# mypy this package may have any attribute, so a typo such as
+# `from ... transport import GrpcTranport` would check clean in every module
+# that imports from here. The `TYPE_CHECKING` block above already declares
+# `GrpcTransport`, so the checker loses nothing by not seeing this.
+if not TYPE_CHECKING:
 
-        return GrpcTransport
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    def __getattr__(name: str) -> Any:
+        if name == "GrpcTransport":
+            from dynamo.planner.plugins.transport.grpc_remote import GrpcTransport
+
+            return GrpcTransport
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
