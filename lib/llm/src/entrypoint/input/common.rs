@@ -192,6 +192,7 @@ where
                     model_manager.lora_load_estimator_for(endpoint_id),
                     router_mode,
                 )),
+                None if affinity.is_none() => Arc::new(RoutingHost::<Sel>::new_builtin(router)?),
                 None => Arc::new(SessionAffinityPushRouter::new_with_coordinator(
                     router, affinity, false,
                 )),
