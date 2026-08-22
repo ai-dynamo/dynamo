@@ -968,6 +968,12 @@ impl Client {
             loop {
                 let discovery_event = tokio::select! {
                     _ = watch_tx.closed() => {
+                        tracing::debug!(
+                            exit_reason = "receivers_dropped",
+                            preserved_instances = map.len(),
+                            "endpoint_watcher: all snapshot receivers dropped; stopping for discovery query: {:?}",
+                            discovery_query,
+                        );
                         break;
                     }
                     discovery_event = discovery_stream.next() => {
@@ -976,10 +982,23 @@ impl Client {
                                 event
                             },
                             Some(Err(e)) => {
-                                tracing::error!("endpoint_watcher: discovery stream error: {}; shutting down for discovery query: {:?}", e, discovery_query);
+                                tracing::error!(
+                                    exit_reason = "discovery_stream_error",
+                                    preserved_instances = map.len(),
+                                    "endpoint_watcher: discovery stream error: {}; shutting down for discovery query: {:?}. The last known instance snapshot is preserved; this is a local watcher failure, not an observed endpoint removal",
+                                    e,
+                                    discovery_query,
+                                );
                                 break;
                             }
                             None => {
+                                // Stream termination is not an observed endpoint removal.
+                                tracing::debug!(
+                                    exit_reason = "discovery_stream_ended",
+                                    preserved_instances = map.len(),
+                                    "endpoint_watcher: discovery stream ended (local watcher cancellation or backend teardown); preserving the last instance snapshot for discovery query: {:?}",
+                                    discovery_query,
+                                );
                                 break;
                             }
                         }
@@ -1003,12 +1022,18 @@ impl Client {
                     }
                 }
 
+                // Observed removals publish an authoritative empty set here.
                 let instances: Vec<Instance> = map.values().cloned().collect();
                 if watch_tx.send(instances).is_err() {
+                    tracing::debug!(
+                        exit_reason = "receivers_dropped",
+                        preserved_instances = map.len(),
+                        "endpoint_watcher: snapshot publish found no receivers; stopping for discovery query: {:?}",
+                        discovery_query,
+                    );
                     break;
                 }
             }
-            let _ = watch_tx.send(vec![]);
         });
 
         sources.insert(endpoint.clone(), Arc::downgrade(&discovery_source));
@@ -1766,6 +1791,87 @@ mod tests {
         }
 
         assert_eq!(state.load(worker_id), 0);
+
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_local_watcher_cancellation_preserves_last_instance_snapshot() {
+        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
+        const OBSERVE_WINDOW: Duration = Duration::from_secs(2);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_watcher_cancel_preserves".to_string())
+            .unwrap();
+        let component = ns.component("synthetic_component".to_string()).unwrap();
+        let endpoint = component.endpoint("synthetic_endpoint".to_string());
+
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let discovered = client.wait_for_instances().await.unwrap();
+        let instance_id = discovered[0].id();
+
+        // End the watch without emitting DiscoveryEvent::Removed.
+        drt.primary_token().cancel();
+
+        let deadline = tokio::time::Instant::now() + OBSERVE_WINDOW;
+        while tokio::time::Instant::now() < deadline {
+            if client.instances().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        assert_eq!(
+            client.instance_ids(),
+            vec![instance_id],
+            "cancelling the runtime primary token must not publish an empty instance \
+             list; local watcher teardown is not an authoritative discovery removal"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_authoritative_removal_still_publishes_empty_snapshot() {
+        const TEST_RECONCILE_INTERVAL: Duration = Duration::from_millis(50);
+        const OBSERVE_WINDOW: Duration = Duration::from_secs(2);
+
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let ns = drt
+            .namespace("test_watcher_authoritative_empty".to_string())
+            .unwrap();
+        let component = ns.component("synthetic_component".to_string()).unwrap();
+        let endpoint = component.endpoint("synthetic_endpoint".to_string());
+
+        let client = Client::with_reconcile_interval(endpoint.clone(), TEST_RECONCILE_INTERVAL)
+            .await
+            .unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        client.wait_for_instances().await.unwrap();
+
+        endpoint.unregister_endpoint_instance().await.unwrap();
+
+        let deadline = tokio::time::Instant::now() + OBSERVE_WINDOW;
+        while tokio::time::Instant::now() < deadline {
+            if client.instances().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        assert!(
+            client.instances().is_empty(),
+            "an observed removal draining the last instance must still publish an \
+             empty snapshot"
+        );
 
         rt.shutdown();
     }
