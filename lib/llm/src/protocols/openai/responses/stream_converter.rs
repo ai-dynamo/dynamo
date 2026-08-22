@@ -18,14 +18,15 @@ use dynamo_protocols::types::responses::{
     OutputContent, OutputItem, OutputMessage, OutputMessageContent, OutputStatus,
     OutputTextContent, OutputTokenDetails, ReasoningItem, Response, ResponseCompletedEvent,
     ResponseContentPartAddedEvent, ResponseContentPartDoneEvent, ResponseCreatedEvent,
-    ResponseFailedEvent, ResponseFunctionCallArgumentsDeltaEvent,
-    ResponseFunctionCallArgumentsDoneEvent, ResponseInProgressEvent, ResponseIncompleteEvent,
-    ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent,
-    ResponseReasoningSummaryPartAddedEvent, ResponseReasoningSummaryPartDoneEvent,
-    ResponseReasoningSummaryTextDeltaEvent, ResponseReasoningSummaryTextDoneEvent,
-    ResponseStreamEvent, ResponseTextDeltaEvent, ResponseTextDoneEvent, ResponseTextParam,
-    ResponseUsage, ServiceTier, Status, SummaryPart, SummaryTextContent,
-    TextResponseFormatConfiguration, ToolChoiceOptions, ToolChoiceParam, Truncation,
+    ResponseCustomToolCallInputDoneEvent, ResponseFailedEvent,
+    ResponseFunctionCallArgumentsDeltaEvent, ResponseFunctionCallArgumentsDoneEvent,
+    ResponseInProgressEvent, ResponseIncompleteEvent, ResponseOutputItemAddedEvent,
+    ResponseOutputItemDoneEvent, ResponseReasoningSummaryPartAddedEvent,
+    ResponseReasoningSummaryPartDoneEvent, ResponseReasoningSummaryTextDeltaEvent,
+    ResponseReasoningSummaryTextDoneEvent, ResponseStreamEvent, ResponseTextDeltaEvent,
+    ResponseTextDoneEvent, ResponseTextParam, ResponseUsage, ServiceTier, Status, SummaryPart,
+    SummaryTextContent, TextResponseFormatConfiguration, ToolChoiceOptions, ToolChoiceParam,
+    Truncation,
 };
 use serde::{
     Serialize,
@@ -35,7 +36,10 @@ use uuid::Uuid;
 
 use dynamo_protocols::types::{ChatCompletionMessageContent, FinishReason};
 
-use super::ResponseParams;
+use super::{
+    ResponseParams, ResponseToolOrigin, custom_input_from_synthetic_arguments,
+    make_custom_tool_call_item,
+};
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use crate::protocols::unified::ResponsesContext;
 
@@ -75,6 +79,7 @@ struct FunctionCallState {
     call_id: String,
     name: String,
     namespace: Option<String>,
+    origin: Option<ResponseToolOrigin>,
     accumulated_args: String,
     pending_arg_deltas: Vec<String>,
     output_index: Option<u32>,
@@ -406,6 +411,7 @@ impl ResponseStreamConverter {
                             call_id: String::new(),
                             name: String::new(),
                             namespace: None,
+                            origin: None,
                             accumulated_args: String::new(),
                             pending_arg_deltas: Vec::new(),
                             output_index: None,
@@ -421,8 +427,15 @@ impl ResponseStreamConverter {
                     if let Some(func) = &tc.function {
                         if let Some(name) = &func.name {
                             self.function_call_items[tc_index].name = name.clone();
-                            self.function_call_items[tc_index].namespace =
-                                self.params.namespace_for_function(name);
+                            let origin = self.params.tool_origin(name);
+                            self.function_call_items[tc_index].namespace = match &origin {
+                                Some(ResponseToolOrigin::Function { namespace })
+                                | Some(ResponseToolOrigin::Custom { namespace }) => {
+                                    namespace.clone()
+                                }
+                                None => None,
+                            };
+                            self.function_call_items[tc_index].origin = origin;
                         }
                         if let Some(args) = &func.arguments {
                             self.function_call_items[tc_index]
@@ -461,6 +474,7 @@ impl ResponseStreamConverter {
                                 state.call_id.clone(),
                                 state.name.clone(),
                                 state.namespace.clone(),
+                                state.origin.clone(),
                                 output_index,
                             ))
                         } else {
@@ -473,43 +487,59 @@ impl ResponseStreamConverter {
                         };
                         (
                             item_added,
-                            state
-                                .output_index
-                                .map(|output_index| (state.item_id.clone(), output_index)),
+                            state.output_index.map(|output_index| {
+                                (state.item_id.clone(), output_index, state.origin.clone())
+                            }),
                             argument_deltas,
                         )
                     };
 
-                    if let Some((item_id, call_id, name, namespace, output_index)) = item_added {
+                    if let Some((item_id, call_id, name, namespace, origin, output_index)) =
+                        item_added
+                    {
+                        let item = match origin {
+                            Some(ResponseToolOrigin::Custom { .. }) => {
+                                OutputItem::CustomToolCall(make_custom_tool_call_item(
+                                    item_id,
+                                    call_id,
+                                    namespace,
+                                    name,
+                                    String::new(),
+                                ))
+                            }
+                            _ => OutputItem::FunctionCall(FunctionToolCall {
+                                id: Some(item_id),
+                                call_id,
+                                namespace,
+                                name,
+                                arguments: String::new(),
+                                status: Some(OutputStatus::InProgress),
+                            }),
+                        };
                         let item_added = ResponseStreamEvent::ResponseOutputItemAdded(
                             ResponseOutputItemAddedEvent {
                                 sequence_number: self.next_seq(),
                                 output_index,
-                                item: OutputItem::FunctionCall(FunctionToolCall {
-                                    id: Some(item_id),
-                                    call_id,
-                                    namespace,
-                                    name,
-                                    arguments: String::new(),
-                                    status: Some(OutputStatus::InProgress),
-                                }),
+                                item,
                             },
                         );
                         events.push(self.make_sse_event(&item_added));
                     }
 
-                    if let Some((item_id, output_index)) = argument_target {
-                        for delta in argument_deltas {
-                            let args_delta =
-                                ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(
-                                    ResponseFunctionCallArgumentsDeltaEvent {
-                                        sequence_number: self.next_seq(),
-                                        item_id: item_id.clone(),
-                                        output_index,
-                                        delta,
-                                    },
-                                );
-                            events.push(self.make_sse_event(&args_delta));
+                    if let Some((item_id, output_index, origin)) = argument_target {
+                        if !matches!(origin, Some(ResponseToolOrigin::Custom { .. })) {
+                            for delta in argument_deltas {
+                                let args_delta =
+                                    ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(
+                                        ResponseFunctionCallArgumentsDeltaEvent {
+                                            sequence_number: self.next_seq(),
+                                            item_id: item_id.clone(),
+                                            output_index,
+                                            delta,
+                                        },
+                                    );
+                                events.push(self.make_sse_event(&args_delta));
+                            }
                         }
                     }
                 }
@@ -601,15 +631,42 @@ impl ResponseStreamConverter {
                     fc.call_id.clone(),
                     fc.name.clone(),
                     fc.namespace.clone(),
+                    fc.origin.clone(),
                     fc.output_index
                         .expect("started function call is missing an output index"),
                     fc.accumulated_args.clone(),
                 )
             })
             .collect();
-        pending.sort_unstable_by_key(|(_, _, _, _, output_index, _)| *output_index);
+        pending.sort_unstable_by_key(|(_, _, _, _, _, output_index, _)| *output_index);
 
-        for (item_id, call_id, fc_name, namespace, output_index, accumulated_args) in pending {
+        for (item_id, call_id, fc_name, namespace, origin, output_index, accumulated_args) in
+            pending
+        {
+            if matches!(origin, Some(ResponseToolOrigin::Custom { .. })) {
+                let input = custom_input_from_synthetic_arguments(&accumulated_args);
+                let input_done = ResponseStreamEvent::ResponseCustomToolCallInputDone(
+                    ResponseCustomToolCallInputDoneEvent {
+                        sequence_number: self.next_seq(),
+                        output_index,
+                        item_id: item_id.clone(),
+                        input: input.clone(),
+                    },
+                );
+                events.push(self.make_sse_event(&input_done));
+
+                let item_done =
+                    ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
+                        sequence_number: self.next_seq(),
+                        output_index,
+                        item: OutputItem::CustomToolCall(make_custom_tool_call_item(
+                            item_id, call_id, namespace, fc_name, input,
+                        )),
+                    });
+                events.push(self.make_sse_event(&item_done));
+                continue;
+            }
+
             let args_done = ResponseStreamEvent::ResponseFunctionCallArgumentsDone(
                 ResponseFunctionCallArgumentsDoneEvent {
                     sequence_number: self.next_seq(),
@@ -689,9 +746,17 @@ impl ResponseStreamConverter {
         }
         for function_call in &self.function_call_items {
             if let Some(output_index) = function_call.output_index {
-                output.push((
-                    output_index,
-                    OutputItem::FunctionCall(FunctionToolCall {
+                let item = match &function_call.origin {
+                    Some(ResponseToolOrigin::Custom { .. }) => {
+                        OutputItem::CustomToolCall(make_custom_tool_call_item(
+                            function_call.item_id.clone(),
+                            function_call.call_id.clone(),
+                            function_call.namespace.clone(),
+                            function_call.name.clone(),
+                            custom_input_from_synthetic_arguments(&function_call.accumulated_args),
+                        ))
+                    }
+                    _ => OutputItem::FunctionCall(FunctionToolCall {
                         id: Some(function_call.item_id.clone()),
                         call_id: function_call.call_id.clone(),
                         namespace: function_call.namespace.clone(),
@@ -699,7 +764,8 @@ impl ResponseStreamConverter {
                         arguments: function_call.accumulated_args.clone(),
                         status: Some(output_status),
                     }),
-                ));
+                };
+                output.push((output_index, item));
             }
         }
         output.sort_unstable_by_key(|(output_index, _)| *output_index);
@@ -2001,6 +2067,49 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn test_custom_tool_call_stream_maps_to_custom_events() {
+        let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n+hello\n*** End Patch";
+        let args = serde_json::json!({ "input": patch }).to_string();
+        let params = ResponseParams {
+            tools: Some(
+                serde_json::from_value(serde_json::json!([{
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "description": "Apply a patch",
+                    "format": {"type": "text"},
+                }]))
+                .unwrap(),
+            ),
+            ..Default::default()
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+        let _ = conv.emit_start_events();
+
+        let chunk_types = event_types(&conv.process_chunk(&tool_call_chunk(
+            0,
+            Some("call_patch"),
+            Some("apply_patch"),
+            Some(&args),
+        )));
+        assert!(chunk_types.contains(&"response.output_item.added".to_string()));
+        assert!(!chunk_types.contains(&"response.function_call_arguments.delta".to_string()));
+        assert!(!chunk_types.contains(&"response.custom_tool_call_input.done".to_string()));
+
+        let finish_types = event_types(&conv.process_chunk(&finish_chunk(FinishReason::ToolCalls)));
+        assert!(finish_types.contains(&"response.custom_tool_call_input.done".to_string()));
+        assert!(finish_types.contains(&"response.output_item.done".to_string()));
+        assert!(!finish_types.contains(&"response.function_call_arguments.done".to_string()));
+
+        let output = conv.completed_output();
+        let OutputItem::CustomToolCall(call) = &output[0] else {
+            panic!("expected custom tool call");
+        };
+        assert_eq!(call.call_id, "call_patch");
+        assert_eq!(call.name, "apply_patch");
+        assert_eq!(call.input, patch);
     }
 
     /// Text-only response: no tool-related events at all.
