@@ -113,6 +113,9 @@ struct RequestedSendConnection {
 struct RequestedRecvConnection {
     context: Arc<dyn AsyncEngineContext>,
     connection: oneshot::Sender<Result<StreamReceiver, String>>,
+    /// Remains addressable after the worker's TCP call-home so discovery
+    /// removal can interrupt a stalled response prologue.
+    cancellation: tokio_util::sync::CancellationToken,
     /// Capacity of the per-stream mpsc buffer between the socket task and the
     /// engine consumer; carried from the registration [`StreamOptions`].
     send_buffer_count: usize,
@@ -151,6 +154,9 @@ fn data_plane_channel<T>(send_buffer_count: usize) -> (mpsc::Sender<T>, mpsc::Re
 struct State {
     tx_subjects: HashMap<String, RequestedSendConnection>,
     rx_subjects: HashMap<String, RequestedRecvConnection>,
+    /// Response registrations remain cancellable after `rx_subjects` is
+    /// consumed by call-home and until the response prologue is accepted.
+    rx_cancellations: HashMap<String, tokio_util::sync::CancellationToken>,
     /// subject UUID -> EndpointInstanceId. Full 4-field key isolates services
     /// that share an endpoint name across namespaces/components.
     subject_instance: HashMap<String, EndpointInstanceId>,
@@ -164,6 +170,17 @@ struct State {
     /// after [`TOMBSTONE_TTL`].
     removed_instances: HashMap<EndpointInstanceId, Instant>,
     handle: Option<tokio::task::JoinHandle<Result<()>>>,
+}
+
+struct ResponseRegistrationGuard {
+    state: Arc<Mutex<State>>,
+    subject: String,
+}
+
+impl Drop for ResponseRegistrationGuard {
+    fn drop(&mut self) {
+        TcpStreamServer::finish_response_stream(&self.state, &self.subject);
+    }
 }
 
 /// Drop tombstones older than [`TOMBSTONE_TTL`]. Called lazily on every
@@ -281,6 +298,9 @@ impl TcpStreamServer {
                 "Cancelling subject immediately: instance already removed (tombstoned)"
             );
             state.rx_subjects.remove(recv_subject);
+            if let Some(token) = state.rx_cancellations.remove(recv_subject) {
+                token.cancel();
+            }
             if let Some(s) = send_subject {
                 state.tx_subjects.remove(s);
             }
@@ -305,6 +325,9 @@ impl TcpStreamServer {
     pub async fn cancel_recv_stream(&self, subject: &str) {
         let mut state = self.state.lock();
         state.rx_subjects.remove(subject);
+        if let Some(token) = state.rx_cancellations.remove(subject) {
+            token.cancel();
+        }
         if let Some(key) = state.subject_instance.remove(subject)
             && let Some(subjects) = state.instance_subjects.get_mut(&key)
         {
@@ -333,8 +356,8 @@ impl TcpStreamServer {
         }
     }
 
-    /// Cancel all pending streams for an instance — both response-side and
-    /// request-side halves of any bidirectional sessions tracked by
+    /// Cancel all pending stream handshakes for an instance — both response-
+    /// side and request-side halves of any bidirectional sessions tracked by
     /// `associate_instance` — and tombstone the id so any racing associate
     /// for the same id cancels too. Returns the number of streams cancelled.
     pub async fn cancel_instance_streams(&self, id: &EndpointInstanceId) -> usize {
@@ -351,6 +374,9 @@ impl TcpStreamServer {
             match kind {
                 StreamType::Response => {
                     state.rx_subjects.remove(subject);
+                    if let Some(token) = state.rx_cancellations.remove(subject) {
+                        token.cancel();
+                    }
                 }
                 StreamType::Request => {
                     state.tx_subjects.remove(subject);
@@ -434,7 +460,10 @@ impl TcpStreamServer {
     }
 
     fn insert_response_stream(&self, subject: String, connection: RequestedRecvConnection) {
-        self.state.lock().rx_subjects.insert(subject, connection);
+        let cancellation = connection.cancellation.clone();
+        let mut state = self.state.lock();
+        state.rx_subjects.insert(subject.clone(), connection);
+        state.rx_cancellations.insert(subject, cancellation);
     }
 
     fn take_request_stream(state: &Mutex<State>, subject: &str) -> Option<RequestedSendConnection> {
@@ -455,8 +484,14 @@ impl TcpStreamServer {
         state: &Mutex<State>,
         subject: &str,
     ) -> Option<RequestedRecvConnection> {
+        state.lock().rx_subjects.remove(subject)
+    }
+
+    /// Finish tracking a response registration after its prologue is accepted
+    /// or its connection handler exits.
+    fn finish_response_stream(state: &Mutex<State>, subject: &str) {
         let mut state = state.lock();
-        let connection = state.rx_subjects.remove(subject);
+        state.rx_cancellations.remove(subject);
         if let Some(key) = state.subject_instance.remove(subject)
             && let Some(subjects) = state.instance_subjects.get_mut(&key)
         {
@@ -465,7 +500,6 @@ impl TcpStreamServer {
                 state.instance_subjects.remove(&key);
             }
         }
-        connection
     }
 }
 
@@ -553,6 +587,7 @@ impl ResponseService for TcpStreamServer {
             let connection_info = RequestedRecvConnection {
                 context: options.context.clone(),
                 connection: pending_recver_tx,
+                cancellation: tokio_util::sync::CancellationToken::new(),
                 send_buffer_count: options.send_buffer_count,
             };
 
@@ -573,6 +608,9 @@ impl ResponseService for TcpStreamServer {
                 tokio::spawn(async move {
                     let mut state = cleanup_state.lock();
                     state.rx_subjects.remove(&cleanup_subject);
+                    if let Some(token) = state.rx_cancellations.remove(&cleanup_subject) {
+                        token.cancel();
+                    }
                     if let Some(key) = state.subject_instance.remove(&cleanup_subject)
                         && let Some(subjects) = state.instance_subjects.get_mut(&key)
                     {
@@ -1075,16 +1113,21 @@ async fn tcp_listener(
         subject: String,
         state: Arc<Mutex<State>>,
         mut reader: FramedRead<BoxRead, TwoPartCodec>,
-        writer: FramedWrite<BoxWrite, TwoPartCodec>,
+        mut writer: FramedWrite<BoxWrite, TwoPartCodec>,
     ) -> Result<()> {
         let response_stream = TcpStreamServer::take_response_stream(&state, &subject).ok_or_else(|| {
             error!("Subject not found: {}; upstream publisher specified a subject unknown to the downsteam subscriber", subject)
         })?;
+        let registration_guard = ResponseRegistrationGuard {
+            state: state.clone(),
+            subject: subject.clone(),
+        };
 
         // unwrap response_stream
         let RequestedRecvConnection {
             context,
             connection,
+            cancellation,
             send_buffer_count,
         } = response_stream;
 
@@ -1092,10 +1135,30 @@ async fn tcp_listener(
         // there must be a second control message it indicate the other segment's generate method was successful
         // No timeout here: the worker sends the prologue only after generate() setup completes,
         // which can take arbitrarily long (model load, queue delay, cold start).
-        let prologue = reader
-            .next()
-            .await
-            .ok_or(error!("Connection closed without a ControlMessge"))??;
+        let prologue: Result<TwoPartMessage> = tokio::select! {
+            _ = cancellation.cancelled() => {
+                // Dropping `connection` resolves the requester with RecvError,
+                // which the addressed router maps to `Disconnected`.
+                // Tell a still-live worker to stop the in-flight generation;
+                // discovery removal only means it is no longer routable.
+                if let Ok(bytes) = serde_json::to_vec(&ControlMessage::Kill) {
+                    let _ = writer
+                        .send(TwoPartMessage::from_header(bytes.into()))
+                        .await;
+                }
+                let mut inner = writer.into_inner();
+                let _ = inner.shutdown().await;
+                return Ok(());
+            }
+            item = reader.next() => {
+                match item {
+                    Some(Ok(message)) => Ok(message),
+                    Some(Err(err)) => Err(err.into()),
+                    None => Err(error!("Connection closed without a ControlMessage")),
+                }
+            }
+        };
+        let prologue = prologue?;
 
         // deserialize prologue
         let prologue = match prologue.into_message_type() {
@@ -1125,6 +1188,11 @@ async fn tcp_listener(
             let _ = connection.send(Err(error.clone()));
             return Err(error!("Received error prologue: {}", error));
         }
+
+        // Discovery removal prevents new work but does not abort an established
+        // response stream. From this point normal transport failure or the
+        // request context owns cancellation.
+        drop(registration_guard);
 
         // Buffer size is driven by the registration options
         // ([`StreamOptions::send_buffer_count`]) rather than hard-coded; the
@@ -1859,6 +1927,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_dropped_registered_stream_wait_cleans_instance_indexes() {
+        let server = test_server().await;
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+
+        let pending = server.register(options).await;
+        let recv_stream = pending.recv_stream.unwrap();
+        let tcp_info: TcpStreamConnectionInfo =
+            recv_stream.connection_info.clone().try_into().unwrap();
+        let subject = tcp_info.subject;
+        let instance = make_eid("ns", "comp", "generate", 42);
+        assert!(server.associate_instance(&subject, None, &instance).await);
+
+        let wait = recv_stream.wait();
+        drop(wait);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let cleaned = {
+                    let state = server.state.lock();
+                    !state.rx_subjects.contains_key(&subject)
+                        && !state.rx_cancellations.contains_key(&subject)
+                        && !state.subject_instance.contains_key(&subject)
+                        && !state.instance_subjects.contains_key(&instance)
+                };
+                if cleaned {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled wait did not clean response registration indexes");
+    }
+
+    #[tokio::test]
     async fn test_associate_after_cancel_is_immediately_cancelled() {
         // Simulates the race: cancel_instance_streams fires before associate_instance.
         let server = test_server().await;
@@ -2217,6 +2326,54 @@ mod tests {
             recv_control_message(&mut framed_reader).await,
             ControlMessage::Kill,
             "unexpected control message should kill only this stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tcp_stream_server_sends_kill_when_prologue_wait_is_cancelled() {
+        let server = test_server().await;
+        let context = Context::new(());
+        let options = StreamOptions::builder()
+            .context(context.context())
+            .enable_request_stream(false)
+            .enable_response_stream(true)
+            .build()
+            .unwrap();
+        let pending = server.register(options).await;
+        let registered_stream = pending.recv_stream.unwrap();
+        let (connection_info, stream_provider) = registered_stream.into_parts();
+        let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+        let subject = tcp_info.subject.clone();
+
+        let stream = TcpStream::connect(&tcp_info.address).await.unwrap();
+        let (read_half, write_half) = tokio::io::split(stream);
+        let mut framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
+        let mut framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+        let handshake = CallHomeHandshake {
+            subject: subject.clone(),
+            stream_type: StreamType::Response,
+        };
+        framed_writer
+            .send(TwoPartMessage::from_header(
+                serde_json::to_vec(&handshake).unwrap().into(),
+            ))
+            .await
+            .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while server.state.lock().rx_subjects.contains_key(&subject) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("server did not accept response call-home");
+
+        server.cancel_recv_stream(&subject).await;
+        assert!(stream_provider.await.is_err());
+        assert_eq!(
+            recv_control_message(&mut framed_reader).await,
+            ControlMessage::Kill,
+            "cancelling the prologue wait should stop worker generation"
         );
     }
 
