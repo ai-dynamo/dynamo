@@ -30,6 +30,10 @@ mod recovery;
 pub mod remote;
 mod side;
 
+// Serializes tests that share the process-wide ZeroMQ context.
+#[cfg(test)]
+pub(crate) static ZMQ_TEST_ISOLATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub use self::embedding_cache::{
     EmbeddingCacheIndexer, preprocessed_multimodal_cache_keys, try_build_cache_indexer,
 };

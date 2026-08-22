@@ -2864,6 +2864,8 @@ mod tests {
 
     #[tokio::test]
     async fn direct_zmq_multi_node_replacement_isolated_by_global_rank() {
+        // Waiting for the shared ZeroMQ context is outside this test's timeout.
+        let _zmq_gate = crate::kv_router::indexer::ZMQ_TEST_ISOLATION.lock().await;
         tokio::time::timeout(Duration::from_secs(30), async {
             let store = tempfile::tempdir().unwrap();
             let frontend_drt = shared_drt(store.path()).await;

@@ -820,20 +820,10 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
         .await
     }
 
-    async fn unregister_endpoint(&self, endpoint_name: &str) -> Result<()> {
-        // With multiple workers per process, each registers with a unique key
-        // "{instance_id}/{endpoint_name}". Find and remove all matching entries.
-        let suffix = format!("/{endpoint_name}");
-        let keys_to_remove: Vec<String> = self
-            .handlers
-            .iter()
-            .filter(|entry| entry.key().ends_with(&suffix))
-            .map(|entry| entry.key().clone())
-            .collect();
-
-        for key in keys_to_remove {
-            self.unregister_endpoint(&key, endpoint_name).await;
-        }
+    async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
+        let endpoint_path = format!("{instance_id:x}/{endpoint_name}");
+        self.unregister_endpoint(&endpoint_path, endpoint_name)
+            .await;
         Ok(())
     }
 
@@ -919,6 +909,52 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn request_plane_unregisters_only_the_requested_instance() {
+        let server =
+            SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), CancellationToken::new()).unwrap();
+        let system_health = Arc::new(Mutex::new(SystemHealth::new(
+            crate::HealthStatus::Ready,
+            vec![],
+            false,
+            "/health".to_string(),
+            "/live".to_string(),
+        )));
+
+        for instance_id in [1, 2] {
+            crate::pipeline::network::ingress::unified_server::RequestPlaneServer::register_endpoint(
+                server.as_ref(),
+                "shared".to_string(),
+                Arc::new(SlowMockHandler::new(Duration::ZERO)),
+                instance_id,
+                "test".to_string(),
+                "component".to_string(),
+                Arc::clone(&system_health),
+            )
+            .await
+            .unwrap();
+        }
+
+        crate::pipeline::network::ingress::unified_server::RequestPlaneServer::unregister_endpoint(
+            server.as_ref(),
+            "shared",
+            1,
+        )
+        .await
+        .unwrap();
+
+        assert!(!server.handlers.contains_key("1/shared"));
+        assert!(server.handlers.contains_key("2/shared"));
+
+        crate::pipeline::network::ingress::unified_server::RequestPlaneServer::unregister_endpoint(
+            server.as_ref(),
+            "shared",
+            2,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
