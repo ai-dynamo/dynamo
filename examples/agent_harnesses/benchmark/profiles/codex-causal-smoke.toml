@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version = 4
+agent = "codex"
+seed = 42
+
+[load]
+num_sessions = 2
+concurrent_sessions = 2
+startup_interval_ms = 0
+restart_delay_ms = { kind = "fixed", value = 0 }
+
+[trajectory]
+turns = { kind = "fixed", value = 2 }
+think_time_ms = { kind = "fixed", value = 25 }
+output_tokens = { kind = "fixed", value = 16 }
+
+[tokens]
+block_size = 16
+system_prefix_tokens = { kind = "fixed", value = 64 }
+tool_catalog_tokens = { kind = "fixed", value = 64 }
+repository_tokens = { kind = "fixed", value = 64 }
+session_tokens = { kind = "fixed", value = 32 }
+user_tokens = { kind = "fixed", value = 32 }
+tool_result_tokens = { kind = "fixed", value = 32 }
+context_window_tokens = 4096
+
+[behavior]
+tool_probability = 0.0
+parallel_tool_probability = 0.0
+subagent_probability = 0.0
+swarm_probability = 0.0
+completion_probability = 0.0
+
+[compaction]
+enabled = false
+
+[limits]
+max_nodes = 4
+max_sessions = 2
+max_total_input_tokens = 4096
