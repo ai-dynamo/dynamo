@@ -24,7 +24,7 @@ jobs:
     permissions:
       issues: write
       pull-requests: write
-    runs-on: ubuntu-latest
+    runs-on: &internal_pr_runner ${{ github.event.pull_request.head.repo.full_name == github.repository && 'prod-default-small-v2' || 'ubuntu-latest' }}
     steps:
       - name: Check for trusted contributor
         id: contributor_check

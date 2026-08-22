@@ -11,7 +11,7 @@ on:
 jobs:
   conventional-commits:
     name: Validate PR title and add label
-    runs-on: ubuntu-latest
+    runs-on: &internal_pr_runner ${{ github.event.pull_request.head.repo.full_name == github.repository && 'prod-default-small-v2' || 'ubuntu-latest' }}
     steps:
       - uses:  ytanikin/pr-conventional-commits@b628c5a234cc32513014b7bfdd1e47b532124d98
         with:
