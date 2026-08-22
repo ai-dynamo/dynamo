@@ -384,3 +384,32 @@ async def test_tensor_registration_preserves_distinct_source_path(temp_file_stor
         assert "lora" not in matching_cards[0]["card_json"]
     finally:
         rt.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_audio_registration_skips_huggingface_fetch(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("DYN_FILE_KV", str(tmp_path))
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    rt = _runtime()
+    try:
+        ep = rt.endpoint("test.audio.generate")
+        await ep.register_endpoint_instance()
+
+        model_name = "external/audio-proxy"
+        await register_model(
+            ModelInput.Text,
+            ModelType.Audios,
+            ep,
+            model_name,
+            worker_type=WorkerType.Aggregated,
+        )
+
+        model_card_files = tmp_path.glob("v1/mdc/**/*")
+        cards = [
+            json.loads(path.read_text()) for path in model_card_files if path.is_file()
+        ]
+        assert any(card["card_json"]["display_name"] == model_name for card in cards)
+    finally:
+        rt.shutdown()

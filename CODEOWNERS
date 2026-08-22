@@ -159,6 +159,7 @@
 /benchmarks/omni/                                                            @ai-dynamo/dynamo-multimodal-codeowners
 /benchmarks/multimodal/                                                      @ai-dynamo/dynamo-multimodal-codeowners
 /examples/custom_encoder/                                                    @ai-dynamo/dynamo-multimodal-codeowners
+/examples/nemotron_speech_cascaded_pipeline/                                 @ai-dynamo/dynamo-multimodal-codeowners
 
 # === diffusion  (@ai-dynamo/dynamo-diffusion-codeowners) ===
 /examples/diffusers/                                                         @ai-dynamo/dynamo-diffusion-codeowners
