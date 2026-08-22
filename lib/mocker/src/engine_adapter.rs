@@ -87,6 +87,16 @@ pub(crate) fn engine_components(
     };
     let (timing_model, timing) = match args.perf_model.as_ref() {
         PerfModel::Polynomial => (TimingModelConfig::Polynomial, None),
+        PerfModel::Fixed {
+            prefill_ms,
+            decode_ms,
+        } => (
+            TimingModelConfig::Fixed {
+                prefill_ms: *prefill_ms,
+                decode_ms: *decode_ms,
+            },
+            None,
+        ),
         PerfModel::Interpolated { .. } | PerfModel::Aiconfigurator { .. } => (
             TimingModelConfig::External {
                 provider: "dynamo_perf_model".to_string(),
@@ -329,6 +339,24 @@ mod tests {
             .unwrap()
             .build(0)
             .unwrap();
+    }
+
+    #[test]
+    fn public_fixed_timing_materializes_as_builtin_engine_timing() {
+        let args = MockEngineArgs::from_json_str(
+            r#"{"timing_model":{"type":"fixed","prefill_ms":2.5,"decode_ms":0.5}}"#,
+        )
+        .unwrap();
+        let components = engine_components(args, false, false).unwrap();
+
+        assert_eq!(
+            components.rank.timing_model,
+            TimingModelConfig::Fixed {
+                prefill_ms: 2.5,
+                decode_ms: 0.5,
+            }
+        );
+        assert!(components.timing.is_none());
     }
 
     #[test]

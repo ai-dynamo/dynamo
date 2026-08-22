@@ -23,8 +23,8 @@ pytestmark = [
 def _aisimulate_replay_modules():
     _require_aisimulate_distribution()
     replay_aic = importlib.import_module("aisimulate.aic")
-    replay_main = importlib.import_module("dynamo.replay.main")
-    return replay_aic, replay_main
+    replay_config = importlib.import_module("dynamo.replay.config")
+    return replay_aic, replay_config
 
 
 def _direct_aic_replay_args() -> MockEngineArgs:
@@ -59,7 +59,7 @@ def _run_direct_aic_replay():
 
 @pytest.mark.planner
 def test_load_engine_args_materializes_unset_aic_blocks(monkeypatch):
-    replay_aic, replay_main = _aisimulate_replay_modules()
+    replay_aic, replay_config = _aisimulate_replay_modules()
     # Keep capacity estimation at the config boundary. A full replay also builds
     # the independent Rust latency engine, which requires real model/perf data.
     calls = []
@@ -72,7 +72,7 @@ def test_load_engine_args_materializes_unset_aic_blocks(monkeypatch):
         replay_aic, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks
     )
 
-    engine_args = replay_main._load_engine_args(
+    engine_args = replay_config.load_engine_args(
         json.dumps(
             {
                 "aic_backend": "vllm",
@@ -115,7 +115,7 @@ def test_load_engine_args_materializes_unset_aic_blocks(monkeypatch):
 
 @pytest.mark.planner
 def test_resolve_aic_blocks_preserves_explicit_zero_inputs(monkeypatch):
-    replay_aic, replay_main = _aisimulate_replay_modules()
+    replay_aic, replay_config = _aisimulate_replay_modules()
     calls = []
 
     def fake_estimate_num_gpu_blocks(**kwargs):
@@ -139,7 +139,7 @@ def test_resolve_aic_blocks_preserves_explicit_zero_inputs(monkeypatch):
         "sglang": {"page_size": 0},
     }
 
-    replay_main._resolve_aic_num_gpu_blocks(raw)
+    replay_config.resolve_aic_num_gpu_blocks(raw)
 
     assert raw["num_gpu_blocks"] == 46000
     assert calls[0]["tp_size"] == 0
@@ -152,7 +152,7 @@ def test_resolve_aic_blocks_preserves_explicit_zero_inputs(monkeypatch):
 
 @pytest.mark.planner
 def test_resolve_aic_blocks_keeps_per_rank_capacity_for_attention_dp(monkeypatch):
-    replay_aic, replay_main = _aisimulate_replay_modules()
+    replay_aic, replay_config = _aisimulate_replay_modules()
     # estimate_num_gpu_blocks returns a per-rank count. Offline replay mirrors the live
     # mocker by creating one scheduler and KV pool per DP rank, so the block count remains
     # per-rank while attention_dp_size selects the runtime topology.
@@ -169,7 +169,7 @@ def test_resolve_aic_blocks_keeps_per_rank_capacity_for_attention_dp(monkeypatch
         }
         if dp is not None:
             raw["aic_attention_dp_size"] = dp
-        replay_main._resolve_aic_num_gpu_blocks(raw)
+        replay_config.resolve_aic_num_gpu_blocks(raw)
         return raw["num_gpu_blocks"], raw.get("dp_size")
 
     assert _resolve(8) == (1000, 8)
