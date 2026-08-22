@@ -31,7 +31,13 @@ metadata:
   name: glm52-bench
 spec:
   backoffLimit: 1
-  activeDeadlineSeconds: 10800
+  # NOTE (issue #12971): with ignore_eos:true a full-trace replay must generate the
+  # trace's entire output-token sum, and the OSL tails dominate wall-clock (the traces'
+  # nominal OSL is a median, not a mean). The Job now defaults to a bounded
+  # NUM_REQUESTS=400 run (minutes); a full-trace replay is opt-in (NUM_REQUESTS=0) and
+  # this deadline is sized for it. Divide the trace's total output tokens by your
+  # system tok/s before opting in: the full agentic trace forces ~57.2M output tokens.
+  activeDeadlineSeconds: 43200
   completions: 1
   parallelism: 1
   template:
@@ -128,6 +134,13 @@ spec:
           # Warmup
           WARMUP_DIR="${ROOT_DIR}/warmup"
           /busybox/mkdir -p "$WARMUP_DIR"
+          # NUM_REQUESTS (default 400) bounds the run; the first N trace rows are identical
+          # across runs (content-identical paired A/B). NUM_REQUESTS=0 replays the full
+          # trace - see the activeDeadlineSeconds note before opting in.
+          REQS="${NUM_REQUESTS:-400}"
+          TOTAL_ROWS=$(/busybox/wc -l < "${TRACE_FILE}")
+          if [ "${REQS}" -le 0 ] || [ "${REQS}" -gt "${TOTAL_ROWS}" ]; then REQS="${TOTAL_ROWS}"; fi
+
           aiperf profile \
             -m "$TARGET_MODEL" \
             --tokenizer "$TARGET_MODEL" \
@@ -154,7 +167,7 @@ spec:
             --custom-dataset-type mooncake_trace \
             --synthesis-max-isl "$SYNTHESIS_MAX_ISL" \
             --synthesis-max-osl 12000 \
-            --num-requests $(/busybox/wc -l < "${TRACE_FILE}") \
+            --num-requests "${REQS}" \
             --dataset-sampling-strategy sequential \
             --url "http://$ENDPOINT" \
             --streaming \
@@ -181,6 +194,9 @@ spec:
           value: "500000"
         - name: CONCURRENCY
           value: "64"
+        - name: NUM_REQUESTS
+          # 400 = bounded default (minutes). 0 = full-trace replay (hours; see deadline note).
+          value: "400"
         # --- The remainder is shared across all four variants. ---
         - name: TARGET_MODEL
           value: zai-org/GLM-5.2
