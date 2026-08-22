@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -49,14 +50,17 @@ impl Default for RecorderOptions {
 /// A generic recorder for events that streams directly to a JSONL file
 #[derive(Debug)]
 pub struct Recorder<T> {
-    /// A sender for events that can be cloned and shared with producers
-    event_tx: mpsc::Sender<T>,
+    /// Taken only by the consuming [`Recorder::close`] path.
+    event_tx: Option<mpsc::Sender<T>>,
     /// A cancellation token for managing shutdown
     cancel: CancellationToken,
+    /// Prevents abrupt cancellation from interrupting a graceful drain.
+    closing: CancellationToken,
     /// Counter for the number of events written
     event_count: Arc<Mutex<usize>>,
     /// Time when the first event was received
     first_event_time: Arc<Mutex<Option<Instant>>>,
+    writer_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl<T> Recorder<T>
@@ -108,6 +112,8 @@ where
         let event_count = Arc::new(Mutex::new(0));
         let event_count_clone = event_count.clone();
         let cancel_clone = token.clone();
+        let closing = CancellationToken::new();
+        let closing_clone = closing.clone();
         let start_time = Instant::now();
         let first_event_time = Arc::new(Mutex::new(None));
         let first_event_time_clone = first_event_time.clone();
@@ -131,7 +137,7 @@ where
         let file_path = output_path.as_ref().to_path_buf();
 
         // Spawn a task to receive events and write them to the file
-        tokio::spawn(async move {
+        let writer_task = tokio::spawn(async move {
             let start_time = start_time;
             let mut writer = BufWriter::with_capacity(options.buffer_bytes.max(1), file);
             let mut line_count = 0;
@@ -167,7 +173,8 @@ where
                 tokio::select! {
                     biased;
 
-                    _ = cancel_clone.cancelled() => {
+                    // Graceful close disables this higher-priority abrupt path.
+                    _ = cancel_clone.cancelled(), if !closing_clone.is_cancelled() => {
                         // Flush any pending writes before shutting down
                         if let Err(e) = writer.flush().await {
                             tracing::error!("Failed to flush on shutdown: {}", e);
@@ -183,7 +190,17 @@ where
                         }
                     }
 
-                    Some(event) = event_rx.recv() => {
+                    event = event_rx.recv() => {
+                        // An explicit `None` arm lets close await the final flush.
+                        let Some(event) = event else {
+                            if let Err(e) = writer.flush().await {
+                                tracing::error!("Failed to flush on channel close: {}", e);
+                            }
+
+                            tracing::debug!("Recorder task shutting down after channel close");
+                            return;
+                        };
+
                         // Update first_event_time if this is the first event
                         {
                             let mut first_time = first_event_time_clone.lock().await;
@@ -279,16 +296,21 @@ where
         });
 
         Ok(Self {
-            event_tx,
+            event_tx: Some(event_tx),
             cancel: token,
+            closing,
             event_count,
             first_event_time,
+            writer_task: Some(writer_task),
         })
     }
 
     /// Get a sender that can be used to send events to the recorder
     pub fn event_sender(&self) -> mpsc::Sender<T> {
-        self.event_tx.clone()
+        self.event_tx
+            .as_ref()
+            .expect("event_tx is only taken by close(), which consumes the recorder")
+            .clone()
     }
 
     /// Get the count of recorded events
@@ -307,9 +329,35 @@ where
         }
     }
 
-    /// Shutdown the recorder
+    /// Cancels the writer after flushing buffered bytes; queued events may be lost.
     pub fn shutdown(&self) {
         self.cancel.cancel();
+    }
+
+    /// Drains queued events and flushes the writer.
+    ///
+    /// Sender clones must be dropped first. Cancellation after close begins does
+    /// not interrupt the drain.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the writer task panicked or cancellation preceded close.
+    pub async fn close(mut self) -> anyhow::Result<()> {
+        // Disable abrupt cancellation before closing the channel.
+        self.closing.cancel();
+        let cancelled_before_close = self.cancel.is_cancelled();
+
+        drop(self.event_tx.take());
+        if let Some(writer_task) = self.writer_task.take() {
+            writer_task.await.context("recorder writer task panicked")?;
+        }
+
+        anyhow::ensure!(
+            !cancelled_before_close,
+            "recorder was already cancelled when close was called; \
+             events still queued at that point were abandoned"
+        );
+        Ok(())
     }
 
     /// Send events from a JSONL file to the provided event sender
@@ -718,5 +766,128 @@ mod tests {
         );
 
         println!("Load test with file rotation completed successfully");
+    }
+
+    /// Parks the writer inside `Serialize` without timing assumptions.
+    struct BarrierGate {
+        parked_tx: mpsc::UnboundedSender<()>,
+        release_rx: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    /// Event that can block during serialization.
+    #[derive(Clone, Deserialize)]
+    struct BarrierEvent {
+        id: u64,
+        #[serde(skip)]
+        gate: Option<Arc<BarrierGate>>,
+    }
+
+    impl Serialize for BarrierEvent {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeStruct;
+            if let Some(gate) = &self.gate {
+                gate.parked_tx.send(()).expect("test still listening");
+                // Ignore the result: a dropped release sender also releases us.
+                let _ = gate.release_rx.lock().unwrap().recv();
+            }
+            let mut state = serializer.serialize_struct("BarrierEvent", 1)?;
+            state.serialize_field("id", &self.id)?;
+            state.end()
+        }
+    }
+
+    fn recorded_ids(path: &Path) -> Vec<u64> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let entry: serde_json::Value = serde_json::from_str(line).unwrap();
+                entry["event"]["id"].as_u64().unwrap()
+            })
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_drains_even_when_cancelled_mid_drain() {
+        const EVENTS: u64 = 32;
+
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("cancel_during_close.jsonl");
+
+        let token = CancellationToken::new();
+        let recorder: Recorder<BarrierEvent> = Recorder::new_with_options(
+            token.clone(),
+            &file_path,
+            RecorderOptions {
+                buffer_bytes: 1024 * 1024,
+                flush_interval: None,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let event_tx = recorder.event_sender();
+
+        let (parked_tx, mut parked_rx) = mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let gate = Arc::new(BarrierGate {
+            parked_tx,
+            release_rx: std::sync::Mutex::new(release_rx),
+        });
+
+        event_tx
+            .send(BarrierEvent {
+                id: 1,
+                gate: Some(gate),
+            })
+            .await
+            .unwrap();
+        parked_rx.recv().await.expect("writer task parked");
+
+        for id in 2..=EVENTS {
+            event_tx
+                .send(BarrierEvent { id, gate: None })
+                .await
+                .expect("send accepted while the writer is busy");
+        }
+        drop(event_tx);
+
+        // Poll once so close disables abrupt cancellation before the token fires.
+        let mut close_fut = Box::pin(recorder.close());
+        assert!(
+            futures::poll!(close_fut.as_mut()).is_pending(),
+            "close cannot finish while the writer task is parked"
+        );
+
+        token.cancel();
+        release_tx.send(()).expect("writer task waiting on release");
+
+        close_fut
+            .await
+            .expect("close after a mid-drain cancellation");
+
+        assert_eq!(
+            recorded_ids(&file_path),
+            (1..=EVENTS).collect::<Vec<_>>(),
+            "every accepted event must survive a cancellation raised during close"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_reports_a_cancellation_that_preceded_it() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("cancelled_before_close.jsonl");
+
+        let token = CancellationToken::new();
+        let recorder = TestEventRecorder::new(token.clone(), &file_path, None, None, None)
+            .await
+            .unwrap();
+
+        token.cancel();
+
+        recorder
+            .close()
+            .await
+            .expect_err("close must not claim success after an earlier cancellation");
     }
 }
