@@ -113,31 +113,34 @@ impl DeltaGenerator {
             .collect::<Vec<f32>>();
 
         let return_as_ids = self.options.return_tokens_as_token_ids;
-        let content = top_logprobs.map(|top_logprobs| {
-            toks.iter()
-                .zip(tok_lps)
-                .zip(top_logprobs)
-                .map(|(((t, tid), lp), top_lps)| {
-                    let token_str = if return_as_ids {
-                        format!("token_id:{}", tid)
-                    } else {
-                        t.clone()
-                    };
-                    let converted =
-                        convert_backend_top_logprobs(&top_lps, t, *tid, lp, return_as_ids);
-                    dynamo_protocols::types::ChatCompletionTokenLogprob {
-                        token: token_str.clone(),
-                        logprob: lp,
-                        token_id: Some(*tid),
-                        bytes: token_to_utf8_bytes(&token_str),
-                        top_logprobs: converted,
-                    }
-                })
-                .collect()
-        });
+        let content = toks
+            .iter()
+            .zip(tok_lps)
+            .enumerate()
+            .map(|(index, ((t, tid), lp))| {
+                let top_lps = top_logprobs
+                    .as_ref()
+                    .and_then(|positions| positions.get(index))
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                let token_str = if return_as_ids {
+                    format!("token_id:{}", tid)
+                } else {
+                    t.clone()
+                };
+                let converted = convert_backend_top_logprobs(top_lps, t, *tid, lp, return_as_ids);
+                dynamo_protocols::types::ChatCompletionTokenLogprob {
+                    token: token_str.clone(),
+                    logprob: lp,
+                    token_id: Some(*tid),
+                    bytes: token_to_utf8_bytes(&token_str),
+                    top_logprobs: converted,
+                }
+            })
+            .collect();
 
         Some(dynamo_protocols::types::ChatChoiceLogprobs {
-            content,
+            content: Some(content),
             refusal: None,
         })
     }
@@ -575,6 +578,31 @@ mod tests {
             response_json["choices"][0]["logprobs"]["content"][0]["token_id"],
             1
         );
+    }
+
+    #[test]
+    fn test_chat_logprobs_without_top_logprobs_include_sampled_token() {
+        let mut request = create_test_request();
+        request.inner.logprobs = Some(true);
+        let mut generator = request.response_generator("req-sampled-logprob".to_string());
+        let mut output = final_backend_output();
+        output.log_probs = Some(vec![-0.5]);
+        output.top_logprobs = None;
+
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("choice generation");
+
+        let content = response.inner.choices[0]
+            .logprobs
+            .as_ref()
+            .expect("logprobs")
+            .content
+            .as_ref()
+            .expect("logprob content");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0].token_id, Some(1));
+        assert_eq!(content[0].logprob, -0.5);
     }
 
     fn create_test_request_with_extra_fields(fields: Vec<String>) -> NvCreateChatCompletionRequest {

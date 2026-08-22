@@ -3047,7 +3047,25 @@ impl OpenAIPreprocessor {
             }
         }
 
+        Self::capture_prompt_token_ids(request, tracker, &tokens_out);
+
         Ok((tokens_out, annotations))
+    }
+
+    /// Retain the authoritative rendered prompt only for clients that request
+    /// the named response field. Ordinary requests do not clone the token list.
+    fn capture_prompt_token_ids<R: NvExtProvider>(
+        request: &R,
+        tracker: Option<&RequestTracker>,
+        token_ids: &[TokenIdType],
+    ) {
+        let requested = request
+            .nvext()
+            .and_then(|nvext| nvext.extra_fields.as_ref())
+            .is_some_and(|fields| fields.iter().any(|field| field == "prompt_token_ids"));
+        if requested && let Some(tracker) = tracker {
+            tracker.set_prompt_token_ids(token_ids.to_vec());
+        }
     }
 
     fn prompt_overflow_error(token_count: usize, combined_limit: usize) -> DynamoError {
@@ -6560,6 +6578,33 @@ mod tests {
             extra_args["sampling_options"]["logprob_token_ids"],
             serde_json::json!([14, 15])
         );
+    }
+
+    #[test]
+    fn capture_prompt_token_ids_is_exact_and_opt_in() {
+        let requested: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "nvext": {"extra_fields": ["prompt_token_ids"]}
+        }))
+        .unwrap();
+        let tracker = RequestTracker::new();
+
+        OpenAIPreprocessor::capture_prompt_token_ids(&requested, Some(&tracker), &[101, 102, 103]);
+        assert_eq!(tracker.prompt_token_ids(), Some(&[101u32, 102, 103][..]));
+
+        let ordinary: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        let ordinary_tracker = RequestTracker::new();
+        OpenAIPreprocessor::capture_prompt_token_ids(
+            &ordinary,
+            Some(&ordinary_tracker),
+            &[201, 202],
+        );
+        assert!(ordinary_tracker.prompt_token_ids().is_none());
     }
 
     fn chat_request_with_args(
