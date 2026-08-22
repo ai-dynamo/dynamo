@@ -704,7 +704,7 @@ fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
         origins: &mut HashMap<String, ResponseToolOrigin>,
         name: &str,
         description: Option<String>,
-        parameters: serde_json::Value,
+        parameters: Option<serde_json::Value>,
         strict: Option<bool>,
         origin: ResponseToolOrigin,
     ) -> anyhow::Result<()> {
@@ -723,7 +723,7 @@ fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
             function: FunctionObject {
                 name: name.to_owned(),
                 description,
-                parameters: Some(parameters),
+                parameters,
                 strict,
             },
         });
@@ -744,7 +744,7 @@ fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
             origins,
             name,
             description,
-            parameters.unwrap_or_else(|| serde_json::json!({"type": "object"})),
+            parameters,
             strict,
             ResponseToolOrigin::Function {
                 namespace: namespace.map(str::to_owned),
@@ -797,7 +797,7 @@ fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
             origins,
             &custom.name,
             Some(custom_tool_description(custom)),
-            serde_json::json!({
+            Some(serde_json::json!({
                 "type": "object",
                 "properties": {
                     "input": {
@@ -807,7 +807,7 @@ fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
                 },
                 "required": ["input"],
                 "additionalProperties": false
-            }),
+            })),
             Some(true),
             ResponseToolOrigin::Custom {
                 namespace: namespace.map(str::to_owned),
@@ -836,7 +836,7 @@ fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
                     }
                 }
             }
-            // Other hosted tools are not forwarded to Chat Completions.
+            // Other Responses tools are not forwarded to Chat Completions.
             _ => {}
         }
     }
@@ -883,22 +883,11 @@ fn convert_tool_choice(tc: &ToolChoiceParam) -> ChatCompletionToolChoiceOption {
                 },
             })
         }
-        ToolChoiceParam::ApplyPatch => {
-            ChatCompletionToolChoiceOption::Named(ChatCompletionNamedToolChoice {
-                r#type: ChatCompletionToolType::Function,
-                function: FunctionName {
-                    name: "apply_patch".to_string(),
-                },
-            })
-        }
         ToolChoiceParam::Hosted(_) => {
             // Hosted tools are not forwarded to chat completions
             ChatCompletionToolChoiceOption::Auto
         }
-        _ => {
-            // Other tool choice types (AllowedTools, Mcp, Custom, etc.) default to auto
-            ChatCompletionToolChoiceOption::Auto
-        }
+        _ => ChatCompletionToolChoiceOption::Auto,
     }
 }
 
@@ -1292,10 +1281,15 @@ fn make_function_call(name: String, arguments: String, namespace: Option<String>
 }
 
 pub(super) fn custom_input_from_synthetic_arguments(arguments: &str) -> String {
+    complete_custom_input_from_synthetic_arguments(arguments)
+        .unwrap_or_else(|| arguments.to_owned())
+}
+
+pub(super) fn complete_custom_input_from_synthetic_arguments(arguments: &str) -> Option<String> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) else {
-        return arguments.to_owned();
+        return None;
     };
-    match value {
+    Some(match value {
         serde_json::Value::Object(map) => {
             if let Some(input) = map.get("input").and_then(|input| input.as_str()) {
                 input.to_owned()
@@ -1305,7 +1299,7 @@ pub(super) fn custom_input_from_synthetic_arguments(arguments: &str) -> String {
         }
         serde_json::Value::String(input) => input,
         other => other.to_string(),
-    }
+    })
 }
 
 pub(super) fn make_custom_tool_call_item(
@@ -1314,7 +1308,7 @@ pub(super) fn make_custom_tool_call_item(
     namespace: Option<String>,
     name: String,
     input: String,
-) -> CustomToolCall {
+) -> anyhow::Result<CustomToolCall> {
     let mut value = serde_json::json!({
         "id": id,
         "call_id": call_id,
@@ -1324,7 +1318,7 @@ pub(super) fn make_custom_tool_call_item(
     if let Some(namespace) = namespace {
         value["namespace"] = serde_json::Value::String(namespace);
     }
-    serde_json::from_value(value).expect("CustomToolCall fields should match upstream schema")
+    serde_json::from_value(value).map_err(Into::into)
 }
 
 fn make_custom_tool_call(
@@ -1332,14 +1326,14 @@ fn make_custom_tool_call(
     arguments: String,
     namespace: Option<String>,
     call_id: String,
-) -> OutputItem {
-    OutputItem::CustomToolCall(make_custom_tool_call_item(
+) -> anyhow::Result<OutputItem> {
+    Ok(OutputItem::CustomToolCall(make_custom_tool_call_item(
         format!("ctc_{}", Uuid::new_v4().simple()),
         call_id,
         namespace,
         name,
         custom_input_from_synthetic_arguments(&arguments),
-    ))
+    )?))
 }
 
 /// Convert a ChatCompletion response into a Responses API response object,
@@ -1387,7 +1381,7 @@ pub fn chat_completion_to_response(
                             tc.function.arguments.clone(),
                             namespace,
                             tc.id.clone(),
-                        ));
+                        )?);
                     }
                     _ => {
                         output.push(OutputItem::FunctionCall(FunctionToolCall {
@@ -1428,7 +1422,7 @@ pub fn chat_completion_to_response(
                                 arguments,
                                 namespace,
                                 format!("call_{}", Uuid::new_v4().simple()),
-                            ));
+                            )?);
                         }
                         _ => {
                             let namespace = params.namespace_for_function(&name);
@@ -2789,13 +2783,16 @@ mod tests {
                         role: InputRole::User,
                         status: None,
                     }))),
-                    InputItem::Item(Item::CustomToolCall(make_custom_tool_call_item(
-                        "ctc_1".into(),
-                        "call_patch".into(),
-                        None,
-                        "apply_patch".into(),
-                        patch.into(),
-                    ))),
+                    InputItem::Item(Item::CustomToolCall(
+                        make_custom_tool_call_item(
+                            "ctc_1".into(),
+                            "call_patch".into(),
+                            None,
+                            "apply_patch".into(),
+                            patch.into(),
+                        )
+                        .unwrap(),
+                    )),
                     InputItem::Item(Item::CustomToolCallOutput(CustomToolCallOutput {
                         call_id: "call_patch".into(),
                         output: CustomToolCallOutputOutput::Text("Done".into()),
@@ -2937,6 +2934,23 @@ mod tests {
     }
 
     #[test]
+    fn test_function_tool_without_parameters_stays_omitted() {
+        let mut req = make_response_with_input("hello");
+        req.inner.tools = Some(
+            serde_json::from_value(serde_json::json!([{
+                "type": "function",
+                "name": "ping"
+            }]))
+            .unwrap(),
+        );
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let tools = chat_req.inner.tools.expect("tools should reach backend");
+        assert_eq!(tools[0].function.name, "ping");
+        assert!(tools[0].function.parameters.is_none());
+    }
+
+    #[test]
     fn test_custom_tools_convert_to_synthetic_backend_functions() {
         let mut req = make_response_with_input("patch the file");
         req.inner.tools = Some(
@@ -2981,6 +2995,18 @@ mod tests {
             tools[0].function.parameters.as_ref().unwrap()["required"],
             serde_json::json!(["input"])
         );
+    }
+
+    #[test]
+    fn test_native_apply_patch_tool_choice_does_not_force_missing_backend_tool() {
+        let mut req = make_response_with_input("patch the file");
+        req.inner.tool_choice = Some(ToolChoiceParam::ApplyPatch);
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        assert!(matches!(
+            chat_req.inner.tool_choice,
+            Some(ChatCompletionToolChoiceOption::Auto)
+        ));
     }
 
     #[test]
