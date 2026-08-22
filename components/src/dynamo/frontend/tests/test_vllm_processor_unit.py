@@ -765,6 +765,50 @@ async def test_prepare_mm_routing_skips_single_modality_transfer_for_mixed_featu
 
 
 @pytest.mark.asyncio
+async def test_prepare_mm_routing_does_not_forward_hashes_without_exact_routing(
+    vllm_processor_module,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "build_mm_routing_info_from_features",
+        lambda *_, **__: None,
+    )
+
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+    processor.block_size = 16
+    processor.nixl_mm_enabled = False
+    processor.use_shm_transfer = True
+    processor._sender = None
+
+    vllm_preproc = SimpleNamespace(
+        prompt_token_ids=list(range(16)),
+        mm_features=[
+            SimpleNamespace(
+                modality="image",
+                mm_hash="a" * 64,
+                data=object(),
+                mm_position=SimpleNamespace(offset=0, length=16),
+            )
+        ],
+    )
+    dynamo_preproc = {}
+
+    mm_routing_info, cleanup_items, transferred = await processor._prepare_mm_routing(
+        vllm_preproc,
+        dynamo_preproc,
+    )
+
+    assert mm_routing_info is None
+    assert cleanup_items == []
+    assert transferred is False
+    assert "mm_hashes" not in dynamo_preproc["extra_args"]
+    assert "mm_hashes_by_modality" not in dynamo_preproc["extra_args"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.multimodal
 async def test_prepare_mm_routing_opaque_uuid_skips_routing_and_transfer(
     vllm_processor_module,

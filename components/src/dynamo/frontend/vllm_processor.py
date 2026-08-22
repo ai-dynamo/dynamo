@@ -393,11 +393,15 @@ class VllmProcessor:
             ) = _group_mm_feature_metadata(vllm_preproc.mm_features)
             if "extra_args" not in dynamo_preproc:
                 dynamo_preproc["extra_args"] = {}
-            dynamo_preproc["extra_args"]["mm_hashes"] = mm_hashes_list
+            # Forward hashes only when this frontend built the matching exact
+            # routing sequence. Their presence is the worker's request-time
+            # readiness signal; transfer-only metadata is deliberately separate.
+            if mm_routing_info is not None:
+                dynamo_preproc["extra_args"]["mm_hashes"] = mm_hashes_list
+                dynamo_preproc["extra_args"][
+                    "mm_hashes_by_modality"
+                ] = mm_hashes_by_modality
             dynamo_preproc["extra_args"]["mm_placeholders"] = mm_placeholders_list
-            dynamo_preproc["extra_args"][
-                "mm_hashes_by_modality"
-            ] = mm_hashes_by_modality
             dynamo_preproc["extra_args"][
                 "mm_placeholders_by_modality"
             ] = mm_placeholders_by_modality
