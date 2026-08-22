@@ -40,6 +40,7 @@ const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 /// Global cap on concurrent per-worker probes (across all in-flight discovery
 /// requests), so a large fleet or many concurrent callers can't fan out without bound.
 const DEFAULT_MAX_CONCURRENT_PROBES: usize = 32;
+const RL_WORKERS_PROTOCOL_VERSION: u32 = 1;
 
 type ModelKey = (String, String, u64);
 
@@ -104,14 +105,19 @@ pub struct RlWorkerInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub admin_base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     pub routes: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub world_size: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RlWorkersResponse {
+    pub protocol_version: u32,
     pub namespace: String,
     pub workers: Vec<RlWorkerInfo>,
 }
@@ -195,6 +201,7 @@ pub fn rl_router(state: RlDiscoveryState) -> Router {
 async fn workers_handler(State(state): State<RlDiscoveryState>) -> impl IntoResponse {
     match list_workers(&state).await {
         Ok(workers) => Json(RlWorkersResponse {
+            protocol_version: RL_WORKERS_PROTOCOL_VERSION,
             namespace: state.config.namespace.clone(),
             workers,
         })
@@ -229,8 +236,7 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
         .list(DiscoveryQuery::NamespacedModels {
             namespace: config.namespace.clone(),
         })
-        .await
-        .unwrap_or_default();
+        .await?;
 
     let models = model_map(model_instances);
     let rl_endpoints = endpoint_instances
@@ -246,6 +252,13 @@ async fn list_workers(state: &RlDiscoveryState) -> anyhow::Result<Vec<RlWorkerIn
                 .as_ref()
                 .map(|components| components.iter().any(|c| c == &endpoint.component))
                 .unwrap_or(true)
+        })
+        .filter(|endpoint| {
+            models.contains_key(&(
+                endpoint.namespace.clone(),
+                endpoint.component.clone(),
+                endpoint.instance_id,
+            ))
         })
         .collect::<Vec<_>>();
 
@@ -315,13 +328,17 @@ async fn describe_worker(
         call_worker_routes(state, &endpoint, timeout).await
     };
     match tokio::time::timeout(timeout, probe).await {
-        Ok(Ok(routes)) => worker_info(endpoint, model, routes.routes, routes.system_url, None),
-        Ok(Err(err)) => worker_info(endpoint, model, Vec::new(), None, Some(err.to_string())),
+        Ok(Ok(routes)) => worker_info(endpoint, model, routes, None),
+        Ok(Err(err)) => worker_info(
+            endpoint,
+            model,
+            WorkerRoutes::default(),
+            Some(err.to_string()),
+        ),
         Err(_) => worker_info(
             endpoint,
             model,
-            Vec::new(),
-            None,
+            WorkerRoutes::default(),
             Some(format!(
                 "worker discovery timed out after {}s",
                 timeout.as_secs()
@@ -334,6 +351,8 @@ async fn describe_worker(
 struct WorkerRoutes {
     routes: Vec<String>,
     system_url: Option<String>,
+    admin_base_url: Option<String>,
+    world_size: Option<u32>,
 }
 
 async fn call_worker_routes(
@@ -440,18 +459,41 @@ fn parse_worker_routes(value: serde_json::Value) -> anyhow::Result<WorkerRoutes>
         .filter(|url| !url.is_empty())
         .map(ToString::to_string);
 
-    Ok(WorkerRoutes { routes, system_url })
+    let admin_base_url = value
+        .get("admin_base_url")
+        .and_then(|url| url.as_str())
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(ToString::to_string);
+
+    let world_size = value
+        .get("world_size")
+        .map(|value| {
+            let value = value.as_u64().ok_or_else(|| {
+                anyhow::anyhow!("worker routes response has invalid 'world_size'")
+            })?;
+            u32::try_from(value)
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| anyhow::anyhow!("worker routes response has invalid 'world_size'"))
+        })
+        .transpose()?;
+    Ok(WorkerRoutes {
+        routes,
+        system_url,
+        admin_base_url,
+        world_size,
+    })
 }
 
 fn worker_info(
     endpoint: Instance,
     model: Option<String>,
-    mut routes: Vec<String>,
-    system_url: Option<String>,
+    mut discovered: WorkerRoutes,
     error: Option<String>,
 ) -> RlWorkerInfo {
-    routes.sort();
-    routes.dedup();
+    discovered.routes.sort();
+    discovered.routes.dedup();
 
     RlWorkerInfo {
         request_plane_url: request_plane_url(&endpoint),
@@ -460,9 +502,11 @@ fn worker_info(
         endpoint: endpoint.endpoint,
         instance_id: endpoint.instance_id,
         transport: endpoint.transport,
-        system_url,
+        system_url: discovered.system_url,
+        admin_base_url: discovered.admin_base_url,
         model,
-        routes,
+        routes: discovered.routes,
+        world_size: discovered.world_size,
         error,
     }
 }
@@ -537,12 +581,17 @@ mod tests {
         let parsed = parse_worker_routes(json!({
             "routes": ["pause_generation", "resume_generation"],
             "system_url": "  http://worker:8080  ",
+            "admin_base_url": "  http://worker:8120  ",
+            "world_size": 4,
+            "weight_transfer_backend": "nccl",
         }))
         .expect("valid payload");
         let routes: Vec<&str> = parsed.routes.iter().map(String::as_str).collect();
         assert_eq!(routes, ["pause_generation", "resume_generation"]);
         // system_url is trimmed.
         assert_eq!(parsed.system_url.as_deref(), Some("http://worker:8080"));
+        assert_eq!(parsed.admin_base_url.as_deref(), Some("http://worker:8120"));
+        assert_eq!(parsed.world_size, Some(4));
     }
 
     #[test]
@@ -570,6 +619,12 @@ mod tests {
     fn parse_worker_routes_rejects_empty_entry() {
         let err = parse_worker_routes(json!({ "routes": ["pause", ""] })).unwrap_err();
         assert!(err.to_string().contains("empty route entry"));
+    }
+
+    #[test]
+    fn parse_worker_routes_rejects_invalid_rl_metadata() {
+        let zero = parse_worker_routes(json!({ "routes": [], "world_size": 0 })).unwrap_err();
+        assert!(zero.to_string().contains("world_size"));
     }
 
     #[test]
