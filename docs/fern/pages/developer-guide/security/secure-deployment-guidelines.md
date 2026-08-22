@@ -46,7 +46,7 @@ inference API. The sections below explain how to satisfy each assumption.
 
 ![Dynamo trust boundary — untrusted clients reach the frontends only through an authenticating gateway; the internal communication planes and backend workers run on the trusted network and must be isolated from untrusted peers.](../../../assets/img/secure-deployment-trust-boundary.svg)
 
-The gateway is the only entry point into the cluster; it forwards to the
+The gateway is the only entry point into the cluster for untrusted clients; it forwards to the
 frontends (the external-facing inference API). Everything inside — the frontends,
 the internal communication planes, and the workers — runs on the trusted network
 and must be protected from any untrusted peer.
@@ -103,21 +103,24 @@ Components exchange coordination events — including the KV-cache events used f
 KV-aware routing — over the event plane. Dynamo supports two event transports,
 selected by `DYN_EVENT_PLANE`:
 
-- **NATS** (preferred where the event plane must be authenticated). Enable
-  **NATS authentication and TLS**. Running NATS without authentication is
-  acceptable only on a private segment that untrusted parties cannot reach.
-- **ZMQ.** The event plane can run over ZMQ, and some backends (for example,
-  vLLM) publish KV-cache events over ZMQ natively regardless of the selected
-  transport. **ZMQ traffic in Dynamo is neither authenticated nor encrypted**
-  (plain TCP sockets), so a ZMQ event plane relies entirely on network isolation.
-  Keep every ZMQ endpoint on the trusted network: bind the broker
-  (`ZMQ_BROKER_XSUB_BIND` / `ZMQ_BROKER_XPUB_BIND`) and the advertised KV-event
-  host to cluster-internal addresses, keep intra-node sockets on loopback, and
-  restrict the ports with NetworkPolicy.
+- **NATS** (preferred where the event plane must be authenticated). Enable NATS
+  authentication — `NATS_AUTH_USERNAME`/`NATS_AUTH_PASSWORD`, or
+  `NATS_AUTH_TOKEN`, `NATS_AUTH_NKEY`, or `NATS_AUTH_CREDENTIALS_FILE` — and TLS
+  (`NATS_TLS_CA_CERT_PATH`). Whether the NATS server *requires* these is enforced
+  by the NATS server configuration (for example `tls { ca_file: …; verify: true }`),
+  not by Dynamo, so harden the server config as well.
+- **ZMQ** is the default event transport in configurations without NATS, and some
+  backends (for example, vLLM) publish KV-cache events over ZMQ natively. ZMQ
+  carries KV-cache **event metadata**, not request or response content, and has no
+  built-in authentication or encryption, so keep every ZMQ endpoint on the trusted
+  network: bind the broker (`ZMQ_BROKER_XSUB_BIND` / `ZMQ_BROKER_XPUB_BIND`) and
+  the advertised KV-event host to cluster-internal addresses, keep intra-node
+  sockets on loopback, and restrict the ports with NetworkPolicy. Authenticated
+  encryption for ZMQ is possible future hardening but requires additional
+  key-management infrastructure.
 
-**Why it matters:** an unauthenticated peer that can reach an event socket can
-subscribe to KV-cache event metadata (information disclosure) and, on the
-subscribe and replay sockets, inject forged events. Prefer NATS with
+**Why it matters:** keep the event plane on the trusted network so peers cannot
+subscribe to KV-cache event metadata or inject events. Prefer NATS with
 authentication and TLS wherever the event plane crosses a trust boundary. See the
 [Event Plane](../knowledge-base/concepts/communication-planes/event-plane.md)
 reference.
@@ -127,22 +130,26 @@ reference.
 Requests and KV-cache data move between components over the request plane (TCP,
 and the NIXL/RDMA fabric for data transfer).
 
-> [!NOTE]
-> Mutual TLS for the TCP request plane and NATS is available once transport mTLS
-> support lands; the settings below apply from that release onward. Until then,
-> keep the request plane on the trusted network.
-
-- Enable **mutual TLS (mTLS)** on the TCP request plane and NATS so both ends of
-  every connection authenticate. A server configured with a client CA
-  (`DYN_TCP_TLS_CLIENT_CA_CERT_PATH`) rejects any client that does not present a
-  valid certificate; clients present an identity via
-  `DYN_TCP_TLS_CLIENT_CERT_PATH`/`_KEY_PATH` (and
-  `NATS_TLS_CLIENT_CERT_PATH`/`_KEY_PATH` for NATS).
+- **Encrypt the request plane with TLS (available today).** Enable TLS on the TCP
+  request plane with `DYN_TCP_TLS_CERT_PATH` + `DYN_TCP_TLS_KEY_PATH` (server side);
+  clients verify the server with `DYN_TCP_TLS_CA_CERT_PATH` (and
+  `DYN_TCP_TLS_SERVER_NAME` to pin the expected name). This protects the
+  confidentiality and integrity of request-plane traffic in transit.
 - Keep the **NIXL/RDMA** data-transfer fabric on the trusted network.
 
+> [!NOTE]
+> Server TLS above encrypts the request plane but does not *authenticate* the
+> client. Mutual TLS (both ends present certificates, so an unauthenticated client
+> is rejected at the handshake), along with Helm-based setup of the TCP and NATS
+> certificates, is in progress
+> ([#13528](https://github.com/ai-dynamo/dynamo/pull/13528),
+> [#10809](https://github.com/ai-dynamo/dynamo/issues/10809)). Until it lands,
+> authenticate the request plane by keeping it on the trusted network.
+
 **Why it matters:** without mutual authentication, any peer that can reach a
-worker on the request plane can deliver requests or data-transfer payloads to it.
-See the [Request Plane](../knowledge-base/concepts/communication-planes/request-plane.md)
+worker on the request plane can deliver requests or data-transfer payloads to it,
+so network isolation is required in addition to TLS encryption. See the
+[Request Plane](../knowledge-base/concepts/communication-planes/request-plane.md)
 reference.
 
 ## Restrict or Disable Optional Surfaces

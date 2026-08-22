@@ -256,12 +256,6 @@ navigation:
           - page: LoRA Adapters
             path: pages/kubernetes/operations/lora-adapters.md
 
-      - section: Security
-        icon: shield-halved
-        collapsed: true
-        contents:
-          - page: Secure Deployment Guidelines
-            path: pages/developer-guide/security/secure-deployment-guidelines.md
 
   # ==================== CLI Guide ====================
   - tab: cli-guide
@@ -599,6 +593,13 @@ navigation:
 
   - tab: developer-guide
     layout:
+      - section: Security
+        icon: shield-halved
+        collapsed: true
+        contents:
+          - page: Secure Deployment Guidelines
+            path: pages/developer-guide/security/secure-deployment-guidelines.md
+
       # ==================== Knowledge Base ====================
       - section: Knowledge Base
         icon: book-open

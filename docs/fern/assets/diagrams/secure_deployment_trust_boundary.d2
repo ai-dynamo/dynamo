@@ -36,7 +36,7 @@ cluster: Trusted cluster  —  isolate all internal traffic from untrusted netwo
     | { style.fill: "#ffffff"; style.stroke: "#4a90e2" }
     req: |md
       **Request**
-      mTLS · NIXL / RDMA
+      TLS today; mTLS planned · NIXL / RDMA
     | { style.fill: "#ffffff"; style.stroke: "#4a90e2" }
   }
 
@@ -47,4 +47,4 @@ cluster: Trusted cluster  —  isolate all internal traffic from untrusted netwo
 }
 
 untrusted.clients -> gateway: HTTPS
-gateway -> cluster.fe: only entry point { style.stroke: "#f9ab00" }
+gateway -> cluster.fe: only entry point for untrusted clients { style.stroke: "#f9ab00" }
