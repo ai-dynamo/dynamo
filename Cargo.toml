@@ -38,6 +38,7 @@ members = [
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "deploy/inference-gateway/ext-proc",
+    "deploy/inference-gateway/sidecar",
 ]
 resolver = "3"
 
@@ -213,4 +214,3 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
-
