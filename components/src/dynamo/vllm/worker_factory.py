@@ -1730,6 +1730,7 @@ class WorkerFactory:
         runtime.register_engine_route(
             "control/scale_elastic_ep", handler.scale_elastic_ep
         )
+        runtime.register_engine_route("control/ep_capacity", handler.get_ep_capacity)
 
         rl_routes: dict = {
             "liveness_probe": handler.liveness_probe,
@@ -1765,7 +1766,8 @@ class WorkerFactory:
 
         logger.info(
             "Registered engine routes: control/sleep, control/wake_up, "
-            "control/scale_elastic_ep, control/start_profile, control/stop_profile, "
+            "control/scale_elastic_ep, control/ep_capacity, "
+            "control/start_profile, control/stop_profile, "
             "and RL admin routes: %s%s",
             ", ".join(sorted(rl_routes)),
             " (LoRA routes: load_lora, unload_lora)" if lora_enabled else "",
