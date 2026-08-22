@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # Optional-dependency preflight must run before replay CLI imports.
-# ruff: noqa: E402
 
 """Regression tests for planner replay warmup wiring."""
 
@@ -15,7 +14,8 @@ pytest.importorskip(
 )
 
 import dynamo.planner.offline.replay_adapter as replay_adapter_module
-import dynamo.replay.main as replay_main
+import dynamo.replay.planner as replay_planner
+from dynamo.mocker import MockEngineArgs
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -73,10 +73,8 @@ def test_planner_replay_passes_configured_dynamo_warmup_observations(
         fake_create_replay_planner_adapter,
     )
 
-    result = replay_main._prepare_planner_replay(
-        extra_engine_args=replay_main.MockEngineArgs(
-            block_size=64, speedup_ratio=1000.0
-        ),
+    result = replay_planner.prepare_planner_replay(
+        extra_engine_args=MockEngineArgs(block_size=64, speedup_ratio=1000.0),
         prefill_engine_args=None,
         decode_engine_args=None,
         planner_config_arg=json.dumps(

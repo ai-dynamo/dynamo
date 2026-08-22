@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # Optional-dependency preflight must run before replay CLI imports.
-# ruff: noqa: E402
 
 """Regression tests for planner replay FPM handling."""
 
@@ -28,7 +27,7 @@ from dynamo.planner.offline.replay_adapter import (
     _update_fpm_cache,
 )
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
-from dynamo.replay.main import _engine_caps
+from dynamo.replay.planner import _engine_caps
 
 pytestmark = [
     pytest.mark.gpu_0,

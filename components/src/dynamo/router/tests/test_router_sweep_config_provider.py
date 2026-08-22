@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # Optional-dependency preflight must run before the simulation imports.
-# ruff: noqa: E402
 
 """Parity tests for the Router-owned Sweeper sweep configuration provider."""
 
@@ -14,10 +13,10 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
+import dynamo.router.simulation.provider as router_provider_module
+from aisimulate.config_adapter import PredictionAdapterContext
 from aisimulate.sweeper.provider import CandidateContext, SweepContext
 from aisimulate.sweeper.replay import BackendDeploymentSpec
-
-import dynamo.router.simulation.provider as router_provider_module
 from dynamo.router.simulation import create_provider
 
 pytestmark = [
@@ -140,3 +139,63 @@ def test_provider_owns_its_adapter_and_hook_abi_versions() -> None:
     assert router_provider_module._PROVIDER_API_VERSION == 1
     assert router_provider_module._ROUTER_HOOK_API_VERSION == 1
     assert adapter.api_version == router_provider_module._PROVIDER_API_VERSION
+
+
+def test_public_router_search_accepts_custom_values_and_emits_public_config() -> None:
+    adapter = create_provider()
+    plan = adapter.generate_search_space(
+        {
+            "policy": {"choices": ["round_robin", "kv_router"]},
+            "prefill_load_model": {"type": "none"},
+            "overlap_score_credit": {"choices": [0.1]},
+            "prefill_load_scale": {"choices": [3.0]},
+            "temperature": {"choices": [0.1]},
+        },
+        _sweep_context(),
+    )
+
+    choices = plan.fragment.choices_by_branch["agg"]
+    assert choices["mode"] == ["round_robin", "kv_router"]
+    assert choices["temperature"] == [0.1]
+    replay_spec = adapter.materialize_replay(
+        plan,
+        {
+            "mode": "kv_router",
+            "prefill_load_model_type": "none",
+            "overlap_score_credit": 0.1,
+            "prefill_load_scale": 3.0,
+            "temperature": 0.1,
+        },
+        _candidate_context(),
+    )
+
+    assert replay_spec.config == {
+        "policy": "kv_router",
+        "prefill_load_model": {"type": "none"},
+        "overlap_score_credit": 0.1,
+        "prefill_load_scale": 3.0,
+        "temperature": 0.1,
+    }
+    assert replay_spec.runtime_hooks[0].config["aic_perf_config"] is None
+
+
+def test_public_router_prediction_materializes_runtime_hook() -> None:
+    replay_spec = create_provider().materialize_prediction(
+        {
+            "policy": "kv_router",
+            "prefill_load_model": {"type": "none"},
+            "temperature": 0.1,
+        },
+        PredictionAdapterContext(
+            engine={},
+            traffic={},
+            evaluation={},
+        ),
+    )
+
+    assert replay_spec.config["policy"] == "kv_router"
+    assert replay_spec.runtime_hooks[0].config["router_config"] == {
+        "overlap_score_credit": 1.0,
+        "prefill_load_scale": 1.0,
+        "router_temperature": 0.1,
+    }
