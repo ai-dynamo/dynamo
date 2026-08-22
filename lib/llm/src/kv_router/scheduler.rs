@@ -70,6 +70,11 @@ where
             workers_with_configs.borrow().clone();
 
         let router_id = endpoint.drt().discovery().instance_id();
+        // Bind to this endpoint's component so the observed metrics carry this
+        // namespace's labels. A frontend serving several namespaces runs one
+        // scheduler per namespace.
+        let request_metrics = RouterRequestMetrics::from_component(endpoint.component());
+        let metric_namespace = endpoint.component().namespace().name().to_string();
         let slots = create_multi_worker_sequences(
             endpoint,
             block_size as usize,
@@ -94,7 +99,14 @@ where
         let queue_metrics = profile
             .classes()
             .iter()
-            .map(|class| ROUTER_QUEUE_METRICS.handles(metric_model, worker_type, &class.name))
+            .map(|class| {
+                ROUTER_QUEUE_METRICS.handles(
+                    metric_model,
+                    &metric_namespace,
+                    worker_type,
+                    &class.name,
+                )
+            })
             .collect::<Vec<_>>();
         let queue_metric_indices = profile
             .classes()
@@ -123,9 +135,8 @@ where
             let locality_observer: NonMaxOverlapSelectionObserver =
                 Arc::new(move |request_id, selection| {
                     let overlap_blocks_lost = selection.overlap_blocks_lost();
-                    if let Some(metrics) = RouterRequestMetrics::get() {
-                        metrics.observe_non_max_overlap_selection(worker_type, overlap_blocks_lost);
-                    }
+                    request_metrics
+                        .observe_non_max_overlap_selection(worker_type, overlap_blocks_lost);
                     tracing::debug!(
                         request_id,
                         worker_type,
@@ -484,7 +495,7 @@ mod tests {
     #[test]
     fn queue_metrics_are_updated_by_class_index() {
         let handles = ["latency", "bulk"]
-            .map(|class| ROUTER_QUEUE_METRICS.handles("index-test", "decode", class));
+            .map(|class| ROUTER_QUEUE_METRICS.handles("index-test", "ns-test", "decode", class));
         let stats = [
             dynamo_kv_router::queue::ClassQueueStats {
                 pending_count: 2,

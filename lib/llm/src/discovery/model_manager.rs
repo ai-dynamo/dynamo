@@ -20,7 +20,7 @@ use dynamo_kv_router::{
 
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
-    KvSourceMembershipWatch, Model, RuntimeConfigWatch, WorkerSet,
+    KvSourceMembershipWatch, Model, RuntimeConfigWatch, Selected, WorkerSet,
     kv_source_watch::KvSourceMembershipCoordinator, runtime_config_watch,
 };
 
@@ -146,6 +146,9 @@ type EndpointLoraProjection = HashMap<EndpointId, HashMap<WorkerWithDpRank, Lora
 pub(crate) struct RemovedDiscoveryGroup {
     pub(crate) representative: ModelDeploymentCard,
     pub(crate) cards: Vec<ModelDeploymentCard>,
+    /// The group's Dynamo namespace, needed to identify which per-deployment
+    /// metric series this removal retires.
+    pub(crate) namespace: String,
 }
 
 /// Central manager for model engines, routing, and configuration.
@@ -920,6 +923,7 @@ impl ModelManager {
         let removed = RemovedDiscoveryGroup {
             representative,
             cards,
+            namespace: topology_namespace.clone(),
         };
         let lora_after = self.lora_projection_locked();
         self.publish_lora_projection_locked(Self::union_lora_projection(&lora_before, &lora_after));
@@ -1018,6 +1022,42 @@ impl ModelManager {
         } else {
             UNKNOWN_METRIC_MODEL
         }
+    }
+
+    /// Whether `model` already has a WorkerSet deployed in `namespace`.
+    ///
+    /// Distinct from [`Self::get_committed_model`], which only answers whether the
+    /// model exists anywhere. Callers that maintain per-(model, namespace) state --
+    /// notably the frontend's per-deployment config gauges -- need the narrower
+    /// question, or a model already committed from one namespace suppresses the
+    /// bookkeeping for every later namespace.
+    pub fn model_has_worker_set_in_namespace(&self, model: &str, namespace: &str) -> bool {
+        self.catalog.load().models.get(model).is_some_and(|m| {
+            m.distinct_namespaces_sorted()
+                .iter()
+                .any(|ns| ns == namespace)
+        })
+    }
+
+    /// Whether `model` still has a WorkerSet in the `(namespace, worker_type)`
+    /// deployment that the frontend's per-deployment gauges are keyed by.
+    ///
+    /// Removing one discovery group does not necessarily retire a deployment:
+    /// two components in the same namespace can back the same `(model,
+    /// worker_type)`, so the series must survive until the last one leaves.
+    pub fn model_has_deployment(&self, model: &str, namespace: &str, worker_type: &str) -> bool {
+        self.catalog
+            .load()
+            .models
+            .get(model)
+            .is_some_and(|m| m.has_deployment(namespace, worker_type))
+    }
+
+    /// The Dynamo namespace of a committed discovery group, if it exists.
+    pub(crate) fn discovery_group_namespace(&self, group_id: &str) -> Option<String> {
+        self.discovery_groups
+            .get(group_id)
+            .map(|group| group.namespace.clone())
     }
 
     /// Whether `model` has at least one WorkerSet that can serve an inference
@@ -1200,7 +1240,7 @@ impl ModelManager {
     pub fn get_embeddings_engine(
         &self,
         model: &str,
-    ) -> Result<OpenAIEmbeddingsStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<OpenAIEmbeddingsStreamingEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1212,7 +1252,7 @@ impl ModelManager {
     pub fn get_classify_engine(
         &self,
         model: &str,
-    ) -> Result<OpenAIClassifyStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<OpenAIClassifyStreamingEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1224,7 +1264,7 @@ impl ModelManager {
     pub fn get_pooling_engine(
         &self,
         model: &str,
-    ) -> Result<OpenAIPoolingStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<OpenAIPoolingStreamingEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1236,7 +1276,7 @@ impl ModelManager {
     pub fn get_completions_engine(
         &self,
         model: &str,
-    ) -> Result<OpenAICompletionsStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<OpenAICompletionsStreamingEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1248,7 +1288,7 @@ impl ModelManager {
     pub fn get_chat_completions_engine(
         &self,
         model: &str,
-    ) -> Result<OpenAIChatCompletionsStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<OpenAIChatCompletionsStreamingEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1260,7 +1300,7 @@ impl ModelManager {
     pub fn get_tensor_engine(
         &self,
         model: &str,
-    ) -> Result<TensorStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<TensorStreamingEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1272,7 +1312,7 @@ impl ModelManager {
     pub fn get_images_engine(
         &self,
         model: &str,
-    ) -> Result<OpenAIImagesStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<OpenAIImagesStreamingEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1284,7 +1324,7 @@ impl ModelManager {
     pub fn get_videos_engine(
         &self,
         model: &str,
-    ) -> Result<OpenAIVideosStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<OpenAIVideosStreamingEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1296,7 +1336,7 @@ impl ModelManager {
     pub fn get_audios_engine(
         &self,
         model: &str,
-    ) -> Result<OpenAIAudiosStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<OpenAIAudiosStreamingEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1308,7 +1348,7 @@ impl ModelManager {
     pub fn get_realtime_engine(
         &self,
         model: &str,
-    ) -> Result<RealtimeBidirectionalEngine, ModelManagerError> {
+    ) -> Result<Selected<RealtimeBidirectionalEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1320,7 +1360,7 @@ impl ModelManager {
     pub fn get_generate_engine(
         &self,
         model: &str,
-    ) -> Result<GenerateStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<GenerateStreamingEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1333,7 +1373,7 @@ impl ModelManager {
         &self,
         model: &str,
         capability: &str,
-    ) -> Result<GenerateStreamingEngine, ModelManagerError> {
+    ) -> Result<Selected<GenerateStreamingEngine>, ModelManagerError> {
         self.catalog
             .load()
             .models
@@ -1348,10 +1388,10 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<
-        (
+        Selected<(
             OpenAIChatCompletionsStreamingEngine,
             crate::protocols::openai::ParsingOptions,
-        ),
+        )>,
         ModelManagerError,
     > {
         self.catalog
@@ -1366,10 +1406,10 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<
-        (
+        Selected<(
             OpenAICompletionsStreamingEngine,
             crate::protocols::openai::ParsingOptions,
-        ),
+        )>,
         ModelManagerError,
     > {
         self.catalog
@@ -1384,10 +1424,10 @@ impl ModelManager {
         &self,
         model: &str,
     ) -> Result<
-        (
+        Selected<(
             GenerateStreamingEngine,
             crate::protocols::openai::ParsingOptions,
-        ),
+        )>,
         ModelManagerError,
     > {
         self.catalog
@@ -2469,6 +2509,78 @@ mod tests {
             mdcsum.to_string(),
             ModelDeploymentCard::default(),
         )
+    }
+
+    /// The predicate that gates `ModelUpdate::DeploymentRemoved`. A group
+    /// teardown must only retire the per-deployment gauge series when the last
+    /// WorkerSet for that `(namespace, worker_type)` is gone -- two components
+    /// in one namespace can back the same deployment identity.
+    #[test]
+    fn model_has_deployment_is_keyed_by_namespace_and_worker_type() {
+        let mm = ModelManager::new();
+
+        let worker_set = |namespace: &str, worker_type: WorkerType| {
+            let mut card = ModelDeploymentCard::default();
+            card.worker_type = Some(worker_type);
+            WorkerSet::new(namespace.to_string(), "ck".to_string(), card)
+        };
+
+        // Two components in ns-a both serving decode, plus a prefill role.
+        assert!(mm.add_worker_set("m", "ns-a::c1", worker_set("ns-a", WorkerType::Decode)));
+        assert!(mm.add_worker_set("m", "ns-a::c2", worker_set("ns-a", WorkerType::Decode)));
+        assert!(mm.add_worker_set("m", "ns-a::p", worker_set("ns-a", WorkerType::Prefill)));
+        assert!(mm.add_worker_set("m", "ns-b::c1", worker_set("ns-b", WorkerType::Decode)));
+
+        assert!(mm.model_has_deployment("m", "ns-a", "decode"));
+        assert!(mm.model_has_deployment("m", "ns-a", "prefill"));
+        assert!(mm.model_has_deployment("m", "ns-b", "decode"));
+        assert!(
+            !mm.model_has_deployment("m", "ns-b", "prefill"),
+            "worker_type is part of the deployment identity"
+        );
+        assert!(
+            !mm.model_has_deployment("m", "ns-c", "decode"),
+            "namespace is part of the deployment identity"
+        );
+        assert!(!mm.model_has_deployment("other-model", "ns-a", "decode"));
+
+        // One of the two ns-a decode components goes away: the deployment
+        // survives, so its series must be kept.
+        mm.remove_worker_set("m", "ns-a::c1");
+        assert!(
+            mm.model_has_deployment("m", "ns-a", "decode"),
+            "a sibling component still backs this deployment"
+        );
+
+        // The last one goes away: now the series is stale.
+        mm.remove_worker_set("m", "ns-a::c2");
+        assert!(!mm.model_has_deployment("m", "ns-a", "decode"));
+        assert!(
+            mm.model_has_deployment("m", "ns-a", "prefill"),
+            "retiring decode must not retire the other role in the same namespace"
+        );
+        assert!(
+            mm.model_has_deployment("m", "ns-b", "decode"),
+            "retiring ns-a must not retire the same role in another namespace"
+        );
+    }
+
+    /// A legacy card leaves `worker_type` unset. The add side stamps the label
+    /// via `effective_worker_type`, so the remove side must resolve it the same
+    /// way or the series would never be retired.
+    #[test]
+    fn model_has_deployment_resolves_legacy_cards_like_the_add_side() {
+        let mm = ModelManager::new();
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = None;
+        card.model_type = crate::model_type::ModelType::Chat;
+        let ws = WorkerSet::new("ns-a".to_string(), "ck".to_string(), card);
+        assert!(mm.add_worker_set("m", "ns-a::c1", ws));
+
+        assert!(
+            mm.model_has_deployment("m", "ns-a", "aggregated"),
+            "an unset worker_type on a non-prefill card resolves to aggregated"
+        );
     }
 
     fn insert_runtime_configs(
@@ -3593,5 +3705,59 @@ mod tests {
             ),
             "incomplete-but-engine-present model must be ModelUnavailable (503), not 404"
         );
+    }
+
+    // -- namespace propagation through the ModelManager accessors --
+
+    /// In-process (non-discovery) models register under a synthetic namespace.
+    /// That value is what ends up in `dynamo_namespace`, so pin it: the HTTP
+    /// integration test in tests/http_metrics.rs asserts the same string.
+    #[test]
+    fn local_chat_model_reports_synthetic_namespace() {
+        let mm = ModelManager::new();
+        mm.add_chat_completions_model("local-model", "abc", make_chat_engine())
+            .unwrap();
+
+        let selected = mm.get_chat_completions_engine("local-model").unwrap();
+        assert_eq!(selected.namespace, "__local_chat_local-model");
+        assert!(
+            !selected.namespace.is_empty(),
+            "an empty namespace would collapse all in-process models into one series"
+        );
+    }
+
+    /// A model name served from two namespaces must report the namespace of the
+    /// WorkerSet that actually produced the engine, on every draw.
+    #[test]
+    fn manager_propagates_selected_namespace_for_multi_namespace_model() {
+        let mm = ModelManager::new();
+
+        let mut sets = Vec::new();
+        for ns in ["ns-a", "ns-b"] {
+            let mut ws = WorkerSet::new(
+                ns.to_string(),
+                "abc".to_string(),
+                ModelDeploymentCard::default(),
+            );
+            ws.chat_engine = Some(make_chat_engine());
+            let engine = ws.chat_engine.clone().unwrap();
+            assert!(mm.add_worker_set("shared", ns, ws));
+            sets.push((ns, engine));
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..300 {
+            let selected = mm.get_chat_completions_engine("shared").unwrap();
+            let (owner_ns, _) = sets
+                .iter()
+                .find(|(_, e)| Arc::ptr_eq(&selected.value, e))
+                .expect("engine must belong to a registered namespace");
+            assert_eq!(
+                &selected.namespace, owner_ns,
+                "metrics would be attributed to the wrong deployment"
+            );
+            seen.insert(selected.namespace);
+        }
+        assert_eq!(seen.len(), 2, "both namespaces must be reachable: {seen:?}");
     }
 }

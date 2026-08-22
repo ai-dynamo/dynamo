@@ -11,7 +11,7 @@ use axum::{
 use dynamo_runtime::{
     config::environment_names::llm::metrics as env_metrics,
     metrics::prometheus_names::{
-        frontend_service, name_prefix, sanitize_frontend_prometheus_prefix,
+        frontend_service, labels, name_prefix, sanitize_frontend_prometheus_prefix,
     },
 };
 use prometheus::{
@@ -68,6 +68,41 @@ use super::RouteDoc;
 pub use crate::discovery::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 const UNSET_DP_RANK_LABEL: &str = "none";
 const ITL_LOCAL_FLUSH_TOKENS: u64 = 64;
+
+/// `dynamo_namespace` value for a model served by an in-process engine rather
+/// than by a discovered deployment.
+///
+/// In-process models (`--engine-type echo`, single-process serving) have no
+/// Dynamo namespace: nothing registers in etcd and no worker is addressed over
+/// the network. They still need a `WorkerSet` map key, so
+/// `ModelManager::add_*_model` fabricates one per endpoint family
+/// (`__local_chat_{model}`, `__local_completions_{model}`, ...) because
+/// `Model::add_worker_set` replaces rather than merges, and the matching
+/// `remove_*_model` calls -- public through the Python bindings -- delete
+/// exactly their own family's set.
+///
+/// That key is an implementation detail, so it is collapsed here instead of
+/// being published as a label: one local model is one series, the redundant
+/// copy of the model name is dropped, and the per-family split stays invisible.
+/// The leading underscores keep it distinguishable from an operator-chosen
+/// namespace.
+pub const LOCAL_METRIC_NAMESPACE: &str = "__local__";
+
+/// Prefix of the synthetic `WorkerSet` keys minted by the in-process
+/// `ModelManager::add_*_model` helpers.
+const LOCAL_NAMESPACE_PREFIX: &str = "__local_";
+
+/// Map a `WorkerSet` namespace onto the value published as `dynamo_namespace`.
+///
+/// Discovery-backed namespaces pass through untouched; synthetic in-process
+/// keys collapse to [`LOCAL_METRIC_NAMESPACE`]. See that constant for why.
+pub(crate) fn metrics_namespace(namespace: &str) -> &str {
+    if namespace.starts_with(LOCAL_NAMESPACE_PREFIX) {
+        LOCAL_METRIC_NAMESPACE
+    } else {
+        namespace
+    }
+}
 
 /// Global Prometheus gauge for last observed TTFT per worker (in seconds)
 /// Labels: worker_id, dp_rank, worker_type
@@ -543,11 +578,16 @@ pub enum ErrorType {
 pub struct ResponseMetricCollector {
     metrics: Arc<Metrics>,
     model: String,
-    // Per-model metric handles cached for the request. Most are resolved at construction;
-    // ITL is resolved lazily on its first observation so requests that never produce ITL
-    // do not allocate a local histogram. Caching avoids re-hashing the `model` label on
-    // every chunk or output token. Each handle shares the underlying metric with its vec,
-    // so observations are equivalent.
+    /// Namespace of the WorkerSet selected to serve this request. A frontend that
+    /// discovers one model in several namespaces load-balances across them per
+    /// request, so this — not the frontend's own identity — is what attributes a
+    /// response to a deployment.
+    namespace: String,
+    // Per-(model, namespace) metric handles cached for the request. Most are resolved at
+    // construction; ITL is resolved lazily on its first observation so requests that never
+    // produce ITL do not allocate a local histogram. Caching avoids re-hashing the `model`
+    // and `dynamo_namespace` labels on every chunk or output token. Each handle shares the
+    // underlying metric with its vec, so observations are equivalent.
     output_tokens_counter: prometheus::IntCounter,
     time_to_first_token: prometheus::Histogram,
     inter_token_latency: Option<prometheus::local::LocalHistogram>,
@@ -753,7 +793,7 @@ impl Metrics {
                 "Input sequence length in tokens",
             )
             .buckets(input_sequence_buckets.clone()),
-            &["model"],
+            &["model", labels::NAMESPACE],
         )
         .unwrap();
 
@@ -768,7 +808,7 @@ impl Metrics {
                 "Output sequence length in tokens",
             )
             .buckets(output_sequence_buckets),
-            &["model"],
+            &["model", labels::NAMESPACE],
         )
         .unwrap();
 
@@ -777,7 +817,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::OUTPUT_TOKENS_TOTAL),
                 "Total number of output tokens generated (updates in real-time)",
             ),
-            &["model"],
+            &["model", labels::NAMESPACE],
         )
         .unwrap();
 
@@ -792,7 +832,7 @@ impl Metrics {
                 "Time to first token in seconds",
             )
             .buckets(time_to_first_token_buckets),
-            &["model"],
+            &["model", labels::NAMESPACE],
         )
         .unwrap();
 
@@ -806,7 +846,7 @@ impl Metrics {
                 "Inter-token latency in seconds",
             )
             .buckets(inter_token_latency_buckets),
-            &["model"],
+            &["model", labels::NAMESPACE],
         )
         .unwrap();
 
@@ -842,7 +882,7 @@ impl Metrics {
                 "Number of image_url content parts per request",
             )
             .buckets(multimodal_count_buckets.clone()),
-            &["model"],
+            &["model", labels::NAMESPACE],
         )
         .unwrap();
 
@@ -852,7 +892,7 @@ impl Metrics {
                 "Number of video_url content parts per request",
             )
             .buckets(multimodal_count_buckets.clone()),
-            &["model"],
+            &["model", labels::NAMESPACE],
         )
         .unwrap();
 
@@ -862,7 +902,7 @@ impl Metrics {
                 "Number of audio_url content parts per request",
             )
             .buckets(multimodal_count_buckets),
-            &["model"],
+            &["model", labels::NAMESPACE],
         )
         .unwrap();
 
@@ -880,7 +920,7 @@ impl Metrics {
                  processor overrides are absent",
             )
             .buckets(image_token_buckets),
-            &["model"],
+            &["model", labels::NAMESPACE],
         )
         .unwrap();
 
@@ -890,7 +930,7 @@ impl Metrics {
                 "Number of cached tokens (prefix cache hits) per request",
             )
             .buckets(input_sequence_buckets.clone()),
-            &["model"],
+            &["model", labels::NAMESPACE],
         )
         .unwrap();
 
@@ -915,7 +955,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::MODEL_TOTAL_KV_BLOCKS),
                 "Total KV cache blocks available for a worker serving the model",
             ),
-            &["model"],
+            &["model", labels::NAMESPACE, labels::WORKER_TYPE],
         )
         .unwrap();
 
@@ -924,7 +964,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::MODEL_MAX_NUM_SEQS),
                 "Maximum number of sequences for a worker serving the model",
             ),
-            &["model"],
+            &["model", labels::NAMESPACE, labels::WORKER_TYPE],
         )
         .unwrap();
 
@@ -933,7 +973,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::MODEL_MAX_NUM_BATCHED_TOKENS),
                 "Maximum number of batched tokens for a worker serving the model",
             ),
-            &["model"],
+            &["model", labels::NAMESPACE, labels::WORKER_TYPE],
         )
         .unwrap();
 
@@ -942,7 +982,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::MODEL_CONTEXT_LENGTH),
                 "Maximum context length in tokens for a worker serving the model",
             ),
-            &["model"],
+            &["model", labels::NAMESPACE, labels::WORKER_TYPE],
         )
         .unwrap();
 
@@ -951,7 +991,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::MODEL_KV_CACHE_BLOCK_SIZE),
                 "KV cache block size in tokens for a worker serving the model",
             ),
-            &["model"],
+            &["model", labels::NAMESPACE, labels::WORKER_TYPE],
         )
         .unwrap();
 
@@ -960,7 +1000,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::MODEL_MIGRATION_LIMIT),
                 "Maximum number of request migrations allowed for the model",
             ),
-            &["model"],
+            &["model", labels::NAMESPACE, labels::WORKER_TYPE],
         )
         .unwrap();
 
@@ -1214,55 +1254,108 @@ impl Metrics {
         Ok(())
     }
 
-    /// Update runtime configuration metrics for a model
-    /// This should be called when model runtime configuration is available or updated
+    /// Update runtime configuration metrics for a model in one namespace.
+    ///
+    /// `namespace` and `worker_type` are both required because these are
+    /// per-role, per-deployment facts. The same model name served from two
+    /// namespaces can be configured differently, and within one namespace a
+    /// disaggregated deployment's prefill and decode cards advertise different
+    /// batch and sequence limits. Dropping either label lets the card that
+    /// happens to be committed last silently overwrite the others.
     pub fn update_runtime_config_metrics(
         &self,
         model_name: &str,
+        namespace: &str,
+        worker_type: &str,
         runtime_config: &ModelRuntimeConfig,
     ) {
+        let lv: [&str; 3] = [model_name, namespace, worker_type];
         if let Some(total_kv_blocks) = runtime_config.total_kv_blocks {
             self.model_total_kv_blocks
-                .with_label_values(&[model_name])
+                .with_label_values(&lv)
                 .set(clamp_u64_to_i64(total_kv_blocks));
         }
 
         if let Some(max_num_seqs) = runtime_config.max_num_seqs {
             self.model_max_num_seqs
-                .with_label_values(&[model_name])
+                .with_label_values(&lv)
                 .set(clamp_u64_to_i64(max_num_seqs));
         }
 
         if let Some(max_batched_tokens) = runtime_config.max_num_batched_tokens {
             self.model_max_num_batched_tokens
-                .with_label_values(&[model_name])
+                .with_label_values(&lv)
                 .set(clamp_u64_to_i64(max_batched_tokens));
         }
     }
 
     /// Update metrics from a ModelDeploymentCard
     /// This updates both runtime config metrics and MDC-specific metrics
-    pub fn update_metrics_from_mdc(&self, card: &ModelDeploymentCard) -> anyhow::Result<()> {
-        self.update_runtime_config_metrics(&card.display_name, &card.runtime_config);
+    pub fn update_metrics_from_mdc(
+        &self,
+        card: &ModelDeploymentCard,
+        namespace: &str,
+        worker_type: &str,
+    ) -> anyhow::Result<()> {
+        let namespace = metrics_namespace(namespace);
+        self.update_runtime_config_metrics(
+            &card.display_name,
+            namespace,
+            worker_type,
+            &card.runtime_config,
+        );
 
+        let lv: [&str; 3] = [&card.display_name, namespace, worker_type];
         self.model_context_length
-            .with_label_values(&[&card.display_name])
+            .with_label_values(&lv)
             .set(card.effective_context_length() as i64);
 
         self.model_kv_cache_block_size
-            .with_label_values(&[&card.display_name])
+            .with_label_values(&lv)
             .set(card.kv_cache_block_size as i64);
 
         self.model_migration_limit
-            .with_label_values(&[&card.display_name])
+            .with_label_values(&lv)
             .set(card.migration_limit as i64);
 
         tracing::debug!(
             model = %card.display_name,
+            namespace = %namespace,
+            worker_type = %worker_type,
             "Successfully updated MDC metrics"
         );
 
         Ok(())
+    }
+
+    /// Drop the six per-deployment gauge series for a `(model, namespace,
+    /// worker_type)` deployment that no longer exists.
+    ///
+    /// These gauges publish a point-in-time configuration, not a cumulative
+    /// count, so a retained child keeps advertising a torn-down deployment's
+    /// settings as if they were current: a removed deployment with a larger
+    /// `model_context_length` keeps winning `max by (model)`, and a removed
+    /// deployment's capacity keeps inflating `sum by (model)`. Counters and
+    /// histograms are deliberately *not* removed -- their history is the point.
+    ///
+    /// This does not erase samples already scraped into Prometheus; it stops
+    /// the frontend from continuing to export a stale one.
+    pub fn remove_deployment_metrics(&self, model: &str, namespace: &str, worker_type: &str) {
+        let lv: [&str; 3] = [model, metrics_namespace(namespace), worker_type];
+        for gauge in [
+            &self.model_total_kv_blocks,
+            &self.model_max_num_seqs,
+            &self.model_max_num_batched_tokens,
+            &self.model_context_length,
+            &self.model_kv_cache_block_size,
+            &self.model_migration_limit,
+        ] {
+            // Errors when the child was never created -- the runtime-config
+            // gauges are only set for fields the card actually reported, so a
+            // deployment that never advertised `max_num_seqs` has no series to
+            // drop. Nothing to do either way.
+            let _ = gauge.remove_label_values(&lv);
+        }
     }
 
     /// Increment the migration counter for a new request migration
@@ -1395,8 +1488,16 @@ impl Metrics {
     }
 
     /// Create a new [`ResponseMetricCollector`] for collecting per-response metrics (i.e., TTFT, ITL)
-    pub fn create_response_collector(self: Arc<Self>, model: &str) -> ResponseMetricCollector {
-        ResponseMetricCollector::new(self, model.to_string())
+    pub fn create_response_collector(
+        self: Arc<Self>,
+        model: &str,
+        namespace: &str,
+    ) -> ResponseMetricCollector {
+        ResponseMetricCollector::new(
+            self,
+            model.to_string(),
+            metrics_namespace(namespace).to_string(),
+        )
     }
 
     /// Create a new [`HttpQueueGuard`] for tracking HTTP processing queue
@@ -1633,22 +1734,23 @@ impl std::fmt::Display for ErrorType {
 }
 
 impl ResponseMetricCollector {
-    fn new(metrics: Arc<Metrics>, model: String) -> Self {
-        // Resolve the per-model handles once (cheap clones of the vec entries) so the
-        // per-chunk / per-token hot path in `observe_response` does no label hashing.
-        let output_tokens_counter = metrics.output_tokens_counter.with_label_values(&[&model]);
-        let time_to_first_token = metrics.time_to_first_token.with_label_values(&[&model]);
-        let input_sequence_length = metrics.input_sequence_length.with_label_values(&[&model]);
-        let cached_tokens = metrics.cached_tokens.with_label_values(&[&model]);
-        let images_per_request = metrics.images_per_request.with_label_values(&[&model]);
-        let videos_per_request = metrics.videos_per_request.with_label_values(&[&model]);
-        let audio_per_request = metrics.audio_per_request.with_label_values(&[&model]);
-        let image_tokens_per_request = metrics
-            .image_tokens_per_request
-            .with_label_values(&[&model]);
+    fn new(metrics: Arc<Metrics>, model: String, namespace: String) -> Self {
+        // Resolve the per-(model, namespace) handles once (cheap clones of the vec
+        // entries) so the per-chunk / per-token hot path in `observe_response` does no
+        // label hashing.
+        let lv: [&str; 2] = [&model, &namespace];
+        let output_tokens_counter = metrics.output_tokens_counter.with_label_values(&lv);
+        let time_to_first_token = metrics.time_to_first_token.with_label_values(&lv);
+        let input_sequence_length = metrics.input_sequence_length.with_label_values(&lv);
+        let cached_tokens = metrics.cached_tokens.with_label_values(&lv);
+        let images_per_request = metrics.images_per_request.with_label_values(&lv);
+        let videos_per_request = metrics.videos_per_request.with_label_values(&lv);
+        let audio_per_request = metrics.audio_per_request.with_label_values(&lv);
+        let image_tokens_per_request = metrics.image_tokens_per_request.with_label_values(&lv);
         ResponseMetricCollector {
             metrics,
             model,
+            namespace,
             output_tokens_counter,
             time_to_first_token,
             inter_token_latency: None,
@@ -1741,13 +1843,9 @@ impl ResponseMetricCollector {
 
     fn local_inter_token_latency(&mut self) -> &mut prometheus::local::LocalHistogram {
         let metrics = &self.metrics;
-        let model = self.model.as_str();
-        self.inter_token_latency.get_or_insert_with(|| {
-            metrics
-                .inter_token_latency
-                .with_label_values(&[model])
-                .local()
-        })
+        let lv: [&str; 2] = [self.model.as_str(), self.namespace.as_str()];
+        self.inter_token_latency
+            .get_or_insert_with(|| metrics.inter_token_latency.with_label_values(&lv).local())
     }
 
     /// Observe the current output sequence length
@@ -1963,7 +2061,7 @@ impl Drop for ResponseMetricCollector {
         if self.osl > 0 {
             self.metrics
                 .output_sequence_length
-                .with_label_values(&[&self.model])
+                .with_label_values(&[&self.model, &self.namespace])
                 .observe(self.osl as f64);
         }
 
@@ -2464,7 +2562,7 @@ mod tests {
         let registry = prometheus::Registry::new();
         metrics.register(&registry).unwrap();
         let model = "test-model";
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = metrics.clone().create_response_collector(model, "test_ns");
         let mut guard = None;
 
         #[allow(deprecated)]
@@ -2507,7 +2605,7 @@ mod tests {
         assert_eq!(
             metrics
                 .output_tokens_counter
-                .with_label_values(&[model])
+                .with_label_values(&[model, "test_ns"])
                 .get(),
             4,
             "tokens on a non-renderable chunk must still be counted"
@@ -2523,7 +2621,7 @@ mod tests {
         let model = "test-model";
 
         // Create response collector
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = metrics.clone().create_response_collector(model, "test_ns");
 
         // Simulate first chunk (5 tokens)
         collector.observe_response(100, 5);
@@ -2531,7 +2629,7 @@ mod tests {
         // Verify counter incremented by 5
         let counter_value = metrics
             .output_tokens_counter
-            .with_label_values(&[model])
+            .with_label_values(&[model, "test_ns"])
             .get();
         assert_eq!(counter_value, 5);
 
@@ -2541,7 +2639,7 @@ mod tests {
         // Verify counter incremented to 15
         let counter_value = metrics
             .output_tokens_counter
-            .with_label_values(&[model])
+            .with_label_values(&[model, "test_ns"])
             .get();
         assert_eq!(counter_value, 15);
 
@@ -2551,7 +2649,7 @@ mod tests {
         // Verify counter incremented to 22
         let counter_value = metrics
             .output_tokens_counter
-            .with_label_values(&[model])
+            .with_label_values(&[model, "test_ns"])
             .get();
         assert_eq!(counter_value, 22);
     }
@@ -2560,8 +2658,10 @@ mod tests {
     fn test_local_itl_histogram_is_initialized_lazily() {
         let metrics = Arc::new(Metrics::new());
         let model = "lazy-local-itl-model";
-        let global = metrics.inter_token_latency.with_label_values(&[model]);
-        let mut collector = metrics.create_response_collector(model);
+        let global = metrics
+            .inter_token_latency
+            .with_label_values(&[model, "test_ns"]);
+        let mut collector = metrics.create_response_collector(model, "test_ns");
 
         assert!(collector.inter_token_latency.is_none());
 
@@ -2602,7 +2702,7 @@ mod tests {
         metrics.register(&registry).unwrap();
         let model = "cached-handle-model";
 
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = metrics.clone().create_response_collector(model, "test_ns");
         // First chunk (3 tokens): TTFT + ISL observed once; no ITL yet.
         collector.observe_response(42, 3);
         // Second chunk (4 tokens): ITL observed once per token via the cached handle.
@@ -2612,20 +2712,26 @@ mod tests {
         assert_eq!(
             metrics
                 .inter_token_latency
-                .with_label_values(&[model])
+                .with_label_values(&[model, "test_ns"])
                 .get_sample_count(),
             0
         );
         drop(collector);
 
-        let ttft = metrics.time_to_first_token.with_label_values(&[model]);
+        let ttft = metrics
+            .time_to_first_token
+            .with_label_values(&[model, "test_ns"]);
         assert_eq!(ttft.get_sample_count(), 1, "TTFT observed once");
 
-        let isl = metrics.input_sequence_length.with_label_values(&[model]);
+        let isl = metrics
+            .input_sequence_length
+            .with_label_values(&[model, "test_ns"]);
         assert_eq!(isl.get_sample_count(), 1, "ISL observed once");
         assert_eq!(isl.get_sample_sum(), 42.0);
 
-        let itl = metrics.inter_token_latency.with_label_values(&[model]);
+        let itl = metrics
+            .inter_token_latency
+            .with_label_values(&[model, "test_ns"]);
         assert_eq!(
             itl.get_sample_count(),
             4,
@@ -2634,7 +2740,7 @@ mod tests {
 
         let out = metrics
             .output_tokens_counter
-            .with_label_values(&[model])
+            .with_label_values(&[model, "test_ns"])
             .get();
         assert_eq!(out, 7, "output tokens = 3 + 4 via cached counter handle");
     }
@@ -2647,9 +2753,11 @@ mod tests {
         let registry = prometheus::Registry::new();
         metrics.register(&registry).unwrap();
         let model = "local-itl-flush-model";
-        let global = metrics.inter_token_latency.with_label_values(&[model]);
+        let global = metrics
+            .inter_token_latency
+            .with_label_values(&[model, "test_ns"]);
 
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = metrics.clone().create_response_collector(model, "test_ns");
         collector.observe_response(10, 1); // TTFT only.
         assert!(collector.inter_token_latency.is_none());
         collector.observe_response(10, 63);
@@ -2691,7 +2799,7 @@ mod tests {
     #[test]
     fn test_worker_metadata_is_latched_without_replacement() {
         let metrics = Arc::new(Metrics::new());
-        let mut collector = metrics.create_response_collector("worker-latch-model");
+        let mut collector = metrics.create_response_collector("worker-latch-model", "test_ns");
         let first = LLMMetricAnnotation {
             prefill_worker_id: Some(11),
             prefill_dp_rank: Some(1),
@@ -2739,27 +2847,35 @@ mod tests {
         metrics.register(&registry).unwrap();
         let model = "mm-counts-model";
 
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = metrics.clone().create_response_collector(model, "test_ns");
         // Repeated calls simulate the same counts arriving on each streamed chunk.
         collector.observe_multimodal_metrics(2, 1, 0, Some(1290));
         collector.observe_multimodal_metrics(2, 1, 0, Some(1290));
         // A later, differing value must not override the latched counts.
         collector.observe_multimodal_metrics(99, 99, 99, Some(9999));
 
-        let img = metrics.images_per_request.with_label_values(&[model]);
+        let img = metrics
+            .images_per_request
+            .with_label_values(&[model, "test_ns"]);
         assert_eq!(img.get_sample_count(), 1, "image histogram observed once");
         assert_eq!(img.get_sample_sum(), 2.0, "image _sum == cumulative volume");
-        let vid = metrics.videos_per_request.with_label_values(&[model]);
+        let vid = metrics
+            .videos_per_request
+            .with_label_values(&[model, "test_ns"]);
         assert_eq!(vid.get_sample_count(), 1, "video histogram observed once");
         assert_eq!(vid.get_sample_sum(), 1.0);
-        let aud = metrics.audio_per_request.with_label_values(&[model]);
+        let aud = metrics
+            .audio_per_request
+            .with_label_values(&[model, "test_ns"]);
         assert_eq!(
             aud.get_sample_count(),
             1,
             "audio histogram observes even a 0 (text-only distribution)"
         );
         assert_eq!(aud.get_sample_sum(), 0.0);
-        let image_tokens = metrics.image_tokens_per_request.with_label_values(&[model]);
+        let image_tokens = metrics
+            .image_tokens_per_request
+            .with_label_values(&[model, "test_ns"]);
         assert_eq!(
             image_tokens.get_sample_count(),
             1,
@@ -2777,13 +2893,17 @@ mod tests {
         metrics.register(&registry).unwrap();
         let model = "text-only-model";
 
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = metrics.clone().create_response_collector(model, "test_ns");
         collector.observe_multimodal_counts(0, 0, 0);
 
-        let img = metrics.images_per_request.with_label_values(&[model]);
+        let img = metrics
+            .images_per_request
+            .with_label_values(&[model, "test_ns"]);
         assert_eq!(img.get_sample_count(), 1);
         assert_eq!(img.get_sample_sum(), 0.0);
-        let image_tokens = metrics.image_tokens_per_request.with_label_values(&[model]);
+        let image_tokens = metrics
+            .image_tokens_per_request
+            .with_label_values(&[model, "test_ns"]);
         assert_eq!(
             image_tokens.get_sample_count(),
             0,
@@ -2805,7 +2925,7 @@ mod tests {
         // Distinctive worker id so this never collides with other tests on the
         // process-global WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.
         let worker_id: u64 = 9_876_543_210;
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = metrics.clone().create_response_collector(model, "test_ns");
         collector.set_worker_info(
             None,
             None,
@@ -2842,7 +2962,7 @@ mod tests {
         metrics.register(&registry).unwrap();
 
         let model = "test-model";
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = metrics.clone().create_response_collector(model, "test_ns");
 
         // Simulate chunk with zero tokens (should not increment)
         collector.observe_response(100, 0);
@@ -2850,7 +2970,7 @@ mod tests {
         // Verify counter remains 0
         let counter_value = metrics
             .output_tokens_counter
-            .with_label_values(&[model])
+            .with_label_values(&[model, "test_ns"])
             .get();
         assert_eq!(counter_value, 0);
 
@@ -2859,7 +2979,7 @@ mod tests {
         assert_eq!(
             metrics
                 .output_tokens_counter
-                .with_label_values(&[model])
+                .with_label_values(&[model, "test_ns"])
                 .get(),
             5
         );
@@ -2869,7 +2989,7 @@ mod tests {
         assert_eq!(
             metrics
                 .output_tokens_counter
-                .with_label_values(&[model])
+                .with_label_values(&[model, "test_ns"])
                 .get(),
             5
         );
@@ -2885,22 +3005,22 @@ mod tests {
         let model2 = "model-2";
 
         // Create collectors for different models
-        let mut collector1 = metrics.clone().create_response_collector(model1);
-        let mut collector2 = metrics.clone().create_response_collector(model2);
+        let mut collector1 = metrics.clone().create_response_collector(model1, "test_ns");
+        let mut collector2 = metrics.clone().create_response_collector(model2, "test_ns");
 
         // Increment model1
         collector1.observe_response(100, 10);
         assert_eq!(
             metrics
                 .output_tokens_counter
-                .with_label_values(&[model1])
+                .with_label_values(&[model1, "test_ns"])
                 .get(),
             10
         );
         assert_eq!(
             metrics
                 .output_tokens_counter
-                .with_label_values(&[model2])
+                .with_label_values(&[model2, "test_ns"])
                 .get(),
             0
         );
@@ -2910,14 +3030,14 @@ mod tests {
         assert_eq!(
             metrics
                 .output_tokens_counter
-                .with_label_values(&[model1])
+                .with_label_values(&[model1, "test_ns"])
                 .get(),
             10
         );
         assert_eq!(
             metrics
                 .output_tokens_counter
-                .with_label_values(&[model2])
+                .with_label_values(&[model2, "test_ns"])
                 .get(),
             20
         );
@@ -2927,14 +3047,14 @@ mod tests {
         assert_eq!(
             metrics
                 .output_tokens_counter
-                .with_label_values(&[model1])
+                .with_label_values(&[model1, "test_ns"])
                 .get(),
             15
         );
         assert_eq!(
             metrics
                 .output_tokens_counter
-                .with_label_values(&[model2])
+                .with_label_values(&[model2, "test_ns"])
                 .get(),
             20
         );
@@ -2948,10 +3068,10 @@ mod tests {
 
         let model = "test-model";
         let expected_metric_name = "dynamo_frontend_cached_tokens";
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = metrics.clone().create_response_collector(model, "test_ns");
 
         // Create histogram handle first
-        let _histogram = metrics.cached_tokens.with_label_values(&[model]);
+        let _histogram = metrics.cached_tokens.with_label_values(&[model, "test_ns"]);
 
         // First call should observe and record 1 sample
         collector.observe_cached_tokens(Some(100));
@@ -3008,7 +3128,7 @@ mod tests {
         let model = "test-model";
         let expected_metric_name = "dynamo_frontend_cached_tokens";
         let expected_tokenizer_metric_name = "dynamo_frontend_tokenizer_latency_ms";
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = metrics.clone().create_response_collector(model, "test_ns");
 
         // Create a metrics annotation event (event without SSE data payload)
         let mut annotated = Annotated::<
@@ -3117,7 +3237,9 @@ mod tests {
         let metrics = Arc::new(Metrics::new());
         let registry = prometheus::Registry::new();
         metrics.register(&registry).unwrap();
-        let mut collector = metrics.clone().create_response_collector("test-model");
+        let mut collector = metrics
+            .clone()
+            .create_response_collector("test-model", "test_ns");
 
         let llm_metrics = LLMMetricAnnotation {
             input_tokens: 7,
@@ -3221,7 +3343,7 @@ mod tests {
         let model = "test-model";
         let expected_metric_name = "dynamo_frontend_cached_tokens";
         let expected_tokenizer_metric_name = "dynamo_frontend_tokenizer_latency_ms";
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = metrics.clone().create_response_collector(model, "test_ns");
         let mut annotated = make_chat_stream_annotated("hello");
         annotated.data.as_mut().unwrap().llm_metrics = Some(LLMMetricAnnotation {
             input_tokens: 10,
@@ -3337,7 +3459,7 @@ mod tests {
         let model = "test-model";
         let expected_metric_name = "dynamo_frontend_cached_tokens";
         let expected_tokenizer_metric_name = "dynamo_frontend_tokenizer_latency_ms";
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = metrics.clone().create_response_collector(model, "test_ns");
 
         // Create a metrics annotation event
         let mut annotated = Annotated::<
@@ -3618,7 +3740,7 @@ mod tests {
             true,
             "req-case",
         );
-        let mut collector = metrics.clone().create_response_collector(model);
+        let mut collector = metrics.clone().create_response_collector(model, "test_ns");
         collector.observe_response(100, 1);
         let _queue = metrics.clone().create_http_queue_guard(model);
 
@@ -3781,7 +3903,8 @@ mod tests {
         annotated: crate::types::Annotated<String>,
     ) -> Result<Option<Event>, axum::Error> {
         let metrics = Arc::new(Metrics::new());
-        let mut collector = ResponseMetricCollector::new(metrics, "test-model".to_string());
+        let mut collector =
+            ResponseMetricCollector::new(metrics, "test-model".to_string(), "test_ns".to_string());
         let mut http_queue_guard: Option<HttpQueueGuard> = None;
         process_response_using_event_converter_and_observe_metrics(
             EventConverter::from(annotated),
@@ -3796,7 +3919,8 @@ mod tests {
         >,
     ) -> Result<Option<Event>, axum::Error> {
         let metrics = Arc::new(Metrics::new());
-        let mut collector = ResponseMetricCollector::new(metrics, "test-model".to_string());
+        let mut collector =
+            ResponseMetricCollector::new(metrics, "test-model".to_string(), "test_ns".to_string());
         let mut http_queue_guard: Option<HttpQueueGuard> = None;
         process_chat_response_using_event_converter_and_observe_metrics(
             EventConverter::from(annotated),
@@ -4043,6 +4167,656 @@ mod tests {
         assert!(
             found,
             "embedding_latency_seconds histogram must be registered with the registry"
+        );
+    }
+
+    // -- dynamo_namespace label: clobber, aggregation and cardinality --
+
+    /// Encode a registry to the Prometheus text exposition format.
+    fn encode_registry(registry: &prometheus::Registry) -> String {
+        let encoder = prometheus::TextEncoder::new();
+        let mut buf = Vec::new();
+        encoder.encode(&registry.gather(), &mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    /// All label pairs of the named family, as sorted `k=v` strings per series.
+    fn series_labels(registry: &prometheus::Registry, name: &str) -> Vec<Vec<(String, String)>> {
+        registry
+            .gather()
+            .iter()
+            .filter(|mf| mf.name() == name)
+            .flat_map(|mf| {
+                mf.get_metric().iter().map(|m| {
+                    let mut lv: Vec<(String, String)> = m
+                        .get_label()
+                        .iter()
+                        .map(|l| (l.name().to_string(), l.value().to_string()))
+                        .collect();
+                    lv.sort();
+                    lv
+                })
+            })
+            .collect()
+    }
+
+    /// Two namespaces serving the same model name with DIFFERENT deployment
+    /// cards must produce two independent gauge series. Before the namespace
+    /// label these silently overwrote each other.
+    /// A disaggregated deployment commits one discovery group per role — the
+    /// worker-set key includes the worker type — so prefill and decode each emit
+    /// their own `ModelUpdate::Added` with the *same* model and namespace. Their
+    /// runtime-config values genuinely differ, so without `worker_type` in the
+    /// label set the second card silently overwrites the first.
+    #[test]
+    fn config_gauges_do_not_clobber_across_roles_in_one_namespace() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let mut prefill = ModelDeploymentCard::default();
+        prefill.display_name = "disagg-model".to_string();
+        prefill.kv_cache_block_size = 16;
+        prefill.runtime_config.max_num_batched_tokens = Some(8192);
+        prefill.runtime_config.max_num_seqs = Some(4);
+
+        let mut decode = prefill.clone();
+        decode.kv_cache_block_size = 64;
+        decode.runtime_config.max_num_batched_tokens = Some(512);
+        decode.runtime_config.max_num_seqs = Some(256);
+
+        metrics
+            .update_metrics_from_mdc(&prefill, "ns-a", "prefill")
+            .unwrap();
+        metrics
+            .update_metrics_from_mdc(&decode, "ns-a", "decode")
+            .unwrap();
+
+        let batched = |role: &str| {
+            metrics
+                .model_max_num_batched_tokens
+                .with_label_values(&["disagg-model", "ns-a", role])
+                .get()
+        };
+        assert_eq!(
+            batched("prefill"),
+            8192,
+            "decode must not overwrite prefill"
+        );
+        assert_eq!(batched("decode"), 512);
+
+        let seqs = |role: &str| {
+            metrics
+                .model_max_num_seqs
+                .with_label_values(&["disagg-model", "ns-a", role])
+                .get()
+        };
+        assert_eq!(seqs("prefill"), 4);
+        assert_eq!(seqs("decode"), 256);
+
+        let block = |role: &str| {
+            metrics
+                .model_kv_cache_block_size
+                .with_label_values(&["disagg-model", "ns-a", role])
+                .get()
+        };
+        assert_eq!(block("prefill"), 16);
+        assert_eq!(block("decode"), 64);
+    }
+
+    #[test]
+    fn mdc_metrics_do_not_clobber_across_namespaces() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        // NOTE: ModelDeploymentCard has private fields, so a struct literal with
+        // `..Default::default()` will not compile from this module; default-then-assign
+        // is the only option here.
+        let mut card_a = ModelDeploymentCard::default();
+        card_a.display_name = "shared-model".to_string();
+        card_a.runtime_config.context_length = Some(4096);
+        card_a.kv_cache_block_size = 16;
+        card_a.migration_limit = 1;
+
+        let mut card_b = card_a.clone();
+        card_b.runtime_config.context_length = Some(8192);
+        card_b.kv_cache_block_size = 64;
+        card_b.migration_limit = 7;
+
+        metrics
+            .update_metrics_from_mdc(&card_a, "ns-a", "decode")
+            .unwrap();
+        metrics
+            .update_metrics_from_mdc(&card_b, "ns-b", "decode")
+            .unwrap();
+
+        let ctx = |ns: &str| {
+            metrics
+                .model_context_length
+                .with_label_values(&["shared-model", ns, "decode"])
+                .get()
+        };
+        assert_eq!(ctx("ns-a"), 4096, "ns-a context length must survive ns-b");
+        assert_eq!(ctx("ns-b"), 8192);
+
+        assert_eq!(
+            metrics
+                .model_kv_cache_block_size
+                .with_label_values(&["shared-model", "ns-a", "decode"])
+                .get(),
+            16
+        );
+        assert_eq!(
+            metrics
+                .model_kv_cache_block_size
+                .with_label_values(&["shared-model", "ns-b", "decode"])
+                .get(),
+            64
+        );
+        assert_eq!(
+            metrics
+                .model_migration_limit
+                .with_label_values(&["shared-model", "ns-a", "decode"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            metrics
+                .model_migration_limit
+                .with_label_values(&["shared-model", "ns-b", "decode"])
+                .get(),
+            7
+        );
+
+        // Both series must be exposed, each carrying dynamo_namespace.
+        let labels = series_labels(&registry, "dynamo_frontend_model_context_length");
+        assert_eq!(labels.len(), 2, "one series per namespace; got {labels:?}");
+        for l in &labels {
+            assert!(
+                l.iter().any(|(k, _)| k == labels::NAMESPACE),
+                "every series must carry {}: {l:?}",
+                labels::NAMESPACE
+            );
+        }
+    }
+
+    /// Runtime-config gauges are additive across a model's deployments: summing
+    /// the per-namespace series must reproduce the old single-series total.
+    #[test]
+    fn runtime_config_gauges_are_per_namespace_and_sum_to_total() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let cfg = |blocks: u64, seqs: u64, batched: u64| ModelRuntimeConfig {
+            total_kv_blocks: Some(blocks),
+            max_num_seqs: Some(seqs),
+            max_num_batched_tokens: Some(batched),
+            ..Default::default()
+        };
+        metrics.update_runtime_config_metrics("m", "ns-a", "decode", &cfg(100, 8, 1024));
+        metrics.update_runtime_config_metrics("m", "ns-b", "decode", &cfg(250, 16, 2048));
+
+        assert_eq!(
+            metrics
+                .model_total_kv_blocks
+                .with_label_values(&["m", "ns-a", "decode"])
+                .get(),
+            100
+        );
+        assert_eq!(
+            metrics
+                .model_total_kv_blocks
+                .with_label_values(&["m", "ns-b", "decode"])
+                .get(),
+            250
+        );
+
+        let total: i64 = registry
+            .gather()
+            .iter()
+            .filter(|mf| mf.name() == "dynamo_frontend_model_total_kv_blocks")
+            .flat_map(|mf| mf.get_metric().iter().map(|m| m.get_gauge().value() as i64))
+            .sum();
+        assert_eq!(total, 350, "sum(namespaces) must recover the fleet total");
+    }
+
+    /// Two collectors for the same model in different namespaces must not share
+    /// series, and the per-namespace values must aggregate back to the totals a
+    /// single-series build would have reported.
+    #[test]
+    fn response_metrics_are_per_namespace_and_aggregate_to_total() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let model = "agg-model";
+
+        {
+            let mut a = metrics.clone().create_response_collector(model, "ns-a");
+            a.observe_response(10, 1);
+            a.observe_response(10, 2);
+            a.observe_current_osl(3);
+            let mut b = metrics.clone().create_response_collector(model, "ns-b");
+            b.observe_response(30, 1);
+            b.observe_response(30, 4);
+            b.observe_current_osl(5);
+        }
+
+        let out_a = metrics
+            .output_tokens_counter
+            .with_label_values(&[model, "ns-a"])
+            .get();
+        let out_b = metrics
+            .output_tokens_counter
+            .with_label_values(&[model, "ns-b"])
+            .get();
+        assert_eq!((out_a, out_b), (3, 5), "counters must not be shared");
+        assert_eq!(out_a + out_b, 8, "sum recovers the old single-series total");
+
+        // ISL histogram: one observation per request in each namespace.
+        let isl_a = metrics
+            .input_sequence_length
+            .with_label_values(&[model, "ns-a"]);
+        let isl_b = metrics
+            .input_sequence_length
+            .with_label_values(&[model, "ns-b"]);
+        assert_eq!(isl_a.get_sample_count(), 1);
+        assert_eq!(isl_b.get_sample_count(), 1);
+        assert_eq!(
+            isl_a.get_sample_sum() + isl_b.get_sample_sum(),
+            40.0,
+            "histogram _sum aggregates across namespaces"
+        );
+
+        // TTFT: one observation each.
+        assert_eq!(
+            metrics
+                .time_to_first_token
+                .with_label_values(&[model, "ns-a"])
+                .get_sample_count()
+                + metrics
+                    .time_to_first_token
+                    .with_label_values(&[model, "ns-b"])
+                    .get_sample_count(),
+            2
+        );
+
+        // ITL: 2 tokens in ns-a, 4 in ns-b.
+        let itl_a = metrics
+            .inter_token_latency
+            .with_label_values(&[model, "ns-a"]);
+        let itl_b = metrics
+            .inter_token_latency
+            .with_label_values(&[model, "ns-b"]);
+        assert_eq!(
+            (itl_a.get_sample_count(), itl_b.get_sample_count()),
+            (2, 4),
+            "lazily-resolved ITL handle must use the collector's own namespace"
+        );
+
+        // OSL is written in Drop; both namespaces must have their own series.
+        let osl_a = metrics
+            .output_sequence_length
+            .with_label_values(&[model, "ns-a"]);
+        let osl_b = metrics
+            .output_sequence_length
+            .with_label_values(&[model, "ns-b"]);
+        assert_eq!(osl_a.get_sample_count(), 1, "Drop wrote ns-a OSL");
+        assert_eq!(osl_b.get_sample_count(), 1, "Drop wrote ns-b OSL");
+        assert_eq!(osl_a.get_sample_sum() + osl_b.get_sample_sum(), 8.0);
+
+        // Histogram buckets must aggregate too: le=+Inf count == total samples.
+        let text = encode_registry(&registry);
+        assert!(
+            text.contains("dynamo_frontend_output_sequence_tokens_count{dynamo_namespace=\"ns-a\",model=\"agg-model\"} 1"),
+            "OSL must be exposed with a dynamo_namespace label; got:\n{text}"
+        );
+    }
+
+    /// Every family the collector owns must accept a `[model, namespace]`
+    /// lookup. A definition/write-site cardinality mismatch panics with
+    /// `InconsistentCardinality`, so drive each write path at least once.
+    #[test]
+    fn all_collector_owned_families_accept_two_labels() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let model = "cardinality-model";
+        let ns = "cardinality-ns";
+
+        {
+            let mut c = metrics.clone().create_response_collector(model, ns);
+            c.observe_response(5, 1); // TTFT + ISL
+            c.observe_response(5, 3); // ITL (lazy handle)
+            c.observe_cached_tokens(Some(2));
+            c.observe_multimodal_metrics(1, 1, 1, Some(64));
+            c.observe_current_osl(4);
+            // Drop -> output_sequence_length
+        }
+
+        for family in [
+            "dynamo_frontend_output_tokens_total",
+            "dynamo_frontend_time_to_first_token_seconds",
+            "dynamo_frontend_inter_token_latency_seconds",
+            "dynamo_frontend_input_sequence_tokens",
+            "dynamo_frontend_output_sequence_tokens",
+            "dynamo_frontend_cached_tokens",
+            "dynamo_frontend_images_per_request",
+            "dynamo_frontend_videos_per_request",
+            "dynamo_frontend_audio_per_request",
+            "dynamo_frontend_image_tokens_per_request",
+        ] {
+            let series = series_labels(&registry, family);
+            assert!(!series.is_empty(), "{family} produced no series");
+            for l in &series {
+                assert_eq!(
+                    l,
+                    &vec![
+                        (labels::NAMESPACE.to_string(), ns.to_string()),
+                        ("model".to_string(), model.to_string()),
+                    ],
+                    "{family} labels"
+                );
+            }
+        }
+    }
+
+    /// A namespace can in principle be empty or contain characters that need
+    /// escaping. Neither may panic nor emit an invalid label. Synthetic
+    /// in-process namespaces are covered separately -- they are collapsed
+    /// before they reach a label, see
+    /// [`synthetic_local_namespaces_collapse_but_real_ones_pass_through`].
+    #[test]
+    fn awkward_namespaces_are_valid_labels() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        for ns in ["", "ns/with-slash", "ns with space"] {
+            let mut c = metrics.clone().create_response_collector("weird", ns);
+            c.observe_response(1, 1);
+            c.observe_response(1, 1);
+            drop(c);
+            assert_eq!(
+                metrics
+                    .output_tokens_counter
+                    .with_label_values(&["weird", ns])
+                    .get(),
+                2,
+                "namespace {ns:?} must get its own series"
+            );
+        }
+
+        // The encoder must produce parseable output (label values are escaped).
+        let text = encode_registry(&registry);
+        assert!(
+            text.contains("dynamo_namespace=\"\""),
+            "empty namespace series must be exposed; got:\n{text}"
+        );
+        assert!(
+            text.contains("dynamo_namespace=\"ns with space\""),
+            "a namespace needing escaping must round-trip; got:\n{text}"
+        );
+    }
+
+    /// Pin the deliberate gap: InflightGuard-owned families are created before
+    /// engine selection and therefore carry NO namespace label. If this test
+    /// fails, the gap was closed — update it deliberately rather than deleting.
+    #[test]
+    fn inflight_families_deliberately_have_no_namespace_label() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        drop(metrics.clone().create_inflight_guard(
+            "no-ns-model",
+            Endpoint::ChatCompletions,
+            true,
+            "req-1",
+        ));
+
+        for family in [
+            "dynamo_frontend_requests_total",
+            "dynamo_frontend_request_duration_seconds",
+            "dynamo_frontend_inflight_requests",
+        ] {
+            let series = series_labels(&registry, family);
+            assert!(!series.is_empty(), "{family} produced no series");
+            for l in &series {
+                assert!(
+                    !l.iter().any(|(k, _)| k == labels::NAMESPACE),
+                    "{family} is documented as namespace-free (created before engine \
+                     selection) but now has one: {l:?}"
+                );
+            }
+        }
+    }
+
+    /// Per-response and per-deployment-config families must expose the SAME
+    /// label set so a dashboard can join them with
+    /// `on(model, dynamo_namespace)`. If one side gains or loses a label the
+    /// join silently returns nothing.
+    #[test]
+    fn response_and_config_families_share_a_join_key() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let mut card = ModelDeploymentCard::default();
+        card.display_name = "join-model".to_string();
+        metrics
+            .update_metrics_from_mdc(&card, "ns-a", "decode")
+            .unwrap();
+        let mut c = metrics
+            .clone()
+            .create_response_collector("join-model", "ns-a");
+        c.observe_response(1, 1);
+        drop(c);
+
+        let key = |family: &str| -> Vec<String> {
+            let mut names: Vec<String> = series_labels(&registry, family)
+                .first()
+                .unwrap_or_else(|| panic!("{family} produced no series"))
+                .iter()
+                .map(|(k, _)| k.clone())
+                .collect();
+            names.sort();
+            names
+        };
+        // The config gauges carry `worker_type` on top of the join key, because a
+        // disaggregated deployment's roles advertise different limits. A join on
+        // (model, dynamo_namespace) therefore still resolves -- with group_left /
+        // group_right for the extra dimension -- so assert the join key is common
+        // to both rather than that the label sets are identical.
+        let join_key = ["dynamo_namespace".to_string(), "model".to_string()];
+        let response_labels = key("dynamo_frontend_output_tokens_total");
+        let config_labels = key("dynamo_frontend_model_context_length");
+        for label in &join_key {
+            assert!(
+                response_labels.contains(label),
+                "response metrics must carry {label}; got {response_labels:?}"
+            );
+            assert!(
+                config_labels.contains(label),
+                "config gauges must carry {label}; got {config_labels:?}"
+            );
+        }
+        assert_eq!(
+            response_labels, join_key,
+            "response metrics should carry exactly the join key"
+        );
+        assert!(
+            config_labels.contains(&"worker_type".to_string()),
+            "config gauges are per-role and must carry worker_type; got {config_labels:?}"
+        );
+    }
+
+    /// A retired deployment must stop exporting its per-deployment gauges, or
+    /// `sum by (model)` keeps counting a dead deployment's capacity and
+    /// `max by (model)` keeps returning a dead deployment's configuration.
+    #[test]
+    fn removed_deployment_drops_its_per_deployment_gauges() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let cfg = |blocks: u64| ModelRuntimeConfig {
+            total_kv_blocks: Some(blocks),
+            ..Default::default()
+        };
+        metrics.update_runtime_config_metrics("m", "ns-gone", "decode", &cfg(100));
+        metrics.update_runtime_config_metrics("m", "ns-live", "decode", &cfg(200));
+
+        let total = |registry: &prometheus::Registry| -> i64 {
+            registry
+                .gather()
+                .iter()
+                .filter(|mf| mf.name() == "dynamo_frontend_model_total_kv_blocks")
+                .flat_map(|mf| mf.get_metric().iter().map(|m| m.get_gauge().value() as i64))
+                .sum()
+        };
+        assert_eq!(total(&registry), 300, "both deployments are live");
+
+        metrics.remove_deployment_metrics("m", "ns-gone", "decode");
+        assert_eq!(
+            total(&registry),
+            200,
+            "the retired deployment's series must be gone, leaving the live one"
+        );
+    }
+
+    /// Removal is keyed by the full `(model, namespace, worker_type)` triple.
+    /// A disaggregated deployment retiring its prefill role must not take the
+    /// decode role's series with it.
+    #[test]
+    fn removed_deployment_leaves_sibling_roles_and_namespaces_intact() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let cfg = |blocks: u64| ModelRuntimeConfig {
+            total_kv_blocks: Some(blocks),
+            ..Default::default()
+        };
+        metrics.update_runtime_config_metrics("m", "ns-a", "prefill", &cfg(10));
+        metrics.update_runtime_config_metrics("m", "ns-a", "decode", &cfg(20));
+        metrics.update_runtime_config_metrics("m", "ns-b", "prefill", &cfg(40));
+
+        metrics.remove_deployment_metrics("m", "ns-a", "prefill");
+
+        let blocks = |ns: &str, role: &str| {
+            metrics
+                .model_total_kv_blocks
+                .get_metric_with_label_values(&["m", ns, role])
+                .expect("label cardinality matches the gauge")
+                .get()
+        };
+        assert_eq!(
+            blocks("ns-a", "decode"),
+            20,
+            "the same namespace's other role is a different deployment"
+        );
+        assert_eq!(
+            blocks("ns-b", "prefill"),
+            40,
+            "another namespace's same role is a different deployment"
+        );
+    }
+
+    /// Removing a deployment that never reported a runtime-config field, or
+    /// that was never registered at all, is a no-op rather than a panic. The
+    /// watcher calls this on every group teardown, including groups whose cards
+    /// carried no runtime config.
+    #[test]
+    fn removing_an_unregistered_deployment_is_a_no_op() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        metrics.remove_deployment_metrics("never-registered", "ns", "decode");
+
+        let card = ModelDeploymentCard::default();
+        metrics
+            .update_metrics_from_mdc(&card, "ns", "decode")
+            .unwrap();
+        // context_length is always written; total_kv_blocks is not, because the
+        // default card reports no runtime config. Removing must tolerate both.
+        metrics.remove_deployment_metrics(&card.display_name, "ns", "decode");
+        let reborn = metrics
+            .model_context_length
+            .get_metric_with_label_values(&[&card.display_name, "ns", "decode"])
+            .expect("label cardinality matches the gauge")
+            .get();
+        assert_eq!(
+            reborn, 0,
+            "the child should have been dropped, so a fresh lookup starts at zero"
+        );
+    }
+
+    /// In-process models have no Dynamo namespace. Their synthetic WorkerSet
+    /// keys are an implementation detail of `ModelManager::add_*_model` and must
+    /// not reach the exposition; a discovery namespace must pass through
+    /// untouched.
+    #[test]
+    fn synthetic_local_namespaces_collapse_but_real_ones_pass_through() {
+        assert_eq!(
+            metrics_namespace("__local_chat_mymodel"),
+            LOCAL_METRIC_NAMESPACE
+        );
+        assert_eq!(
+            metrics_namespace("__local_completions_mymodel"),
+            LOCAL_METRIC_NAMESPACE,
+            "one local model is one series, not one per endpoint family"
+        );
+        assert_eq!(
+            metrics_namespace("__local_prefill_mymodel"),
+            LOCAL_METRIC_NAMESPACE
+        );
+        assert_eq!(
+            metrics_namespace("dynamo_cloud_vllm_v1_disagg_router_071de157"),
+            "dynamo_cloud_vllm_v1_disagg_router_071de157"
+        );
+        assert_eq!(
+            metrics_namespace("local"),
+            "local",
+            "a namespace an operator could plausibly choose must not be captured"
+        );
+        assert_eq!(metrics_namespace(""), "");
+    }
+
+    /// The collapse has to happen at the label, not at the WorkerSet key: two
+    /// endpoint families of one local model must land on a single series.
+    #[test]
+    fn local_response_metrics_share_one_namespace_series() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        for ns in ["__local_chat_m", "__local_completions_m"] {
+            let mut collector = metrics.clone().create_response_collector("m", ns);
+            collector.observe_current_osl(3);
+            drop(collector);
+        }
+
+        let series: Vec<String> = registry
+            .gather()
+            .iter()
+            .filter(|mf| mf.name() == "dynamo_frontend_output_sequence_tokens")
+            .flat_map(|mf| {
+                mf.get_metric().iter().map(|m| {
+                    m.get_label()
+                        .iter()
+                        .find(|l| l.name() == "dynamo_namespace")
+                        .map(|l| l.value().to_string())
+                        .unwrap_or_default()
+                })
+            })
+            .collect();
+        assert_eq!(
+            series,
+            vec![LOCAL_METRIC_NAMESPACE.to_string()],
+            "both endpoint families must collapse onto one local series"
         );
     }
 }

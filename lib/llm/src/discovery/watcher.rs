@@ -171,14 +171,47 @@ const GENERATE_MIGRATION_LIMIT: u32 = 0;
 /// from old *aggregated* workers on the wire, so they resolve to `Aggregated`;
 /// the readiness path handles that by not topology-gating namespaces that
 /// still contain legacy cards — see `Model::is_workers_ready`.)
-fn effective_worker_type(worker_type: Option<WorkerType>, model_type: ModelType) -> WorkerType {
+pub(crate) fn effective_worker_type(
+    worker_type: Option<WorkerType>,
+    model_type: ModelType,
+) -> WorkerType {
     ModelDeploymentCard::resolve_worker_type(worker_type, model_type)
 }
 
 #[derive(Debug, Clone)]
 pub enum ModelUpdate {
-    Added(ModelDeploymentCard),
+    /// A model became servable in `namespace` as `worker_type`. Both are carried
+    /// because the per-deployment metrics (context length, KV block size,
+    /// migration limit, and the runtime-config gauges) are keyed by them.
+    ///
+    /// One frontend can serve the same model name from several namespaces, and
+    /// within one namespace a disaggregated deployment commits a separate group
+    /// per role — `worker_set_key` includes the worker type — so each role emits
+    /// its own `Added`. Keying on model alone, or on model plus namespace, lets
+    /// the later card silently overwrite the earlier one's values. The
+    /// runtime-config gauges in particular are genuinely per-role: prefill and
+    /// decode advertise different batch and sequence limits.
+    Added {
+        card: ModelDeploymentCard,
+        namespace: String,
+        worker_type: String,
+    },
     Removed(ModelDeploymentCard),
+    /// Every WorkerSet backing the `(model, namespace, worker_type)` deployment
+    /// is gone, so its per-deployment metric series are now stale.
+    ///
+    /// Distinct from `Removed`, which is an *availability* signal: it fires when
+    /// a model stops being servable at all, and one namespace losing its workers
+    /// does not make a model unavailable while another namespace still serves
+    /// it. The per-deployment gauges are keyed finer than that, so they need
+    /// their own lifecycle signal. Consumers that act on model availability
+    /// (endpoint enablement) ignore this variant; consumers that own
+    /// `(model, namespace, worker_type)` series act on it.
+    DeploymentRemoved {
+        model: String,
+        namespace: String,
+        worker_type: String,
+    },
 }
 
 pub struct ModelWatcher<Sel = DefaultWorkerSelector>
@@ -997,6 +1030,43 @@ where
         Ok(PreparedWorkerSet::new(worker_set, card.clone()))
     }
 
+    /// Emit `DeploymentRemoved` for each `(model, worker_type)` in `cards` whose
+    /// last WorkerSet in `namespace` has just gone away.
+    ///
+    /// Called after the manager has been mutated, so `model_has_deployment`
+    /// reflects what survives: a group teardown that leaves a sibling group
+    /// backing the same `(model, namespace, worker_type)` retires nothing. The
+    /// worker type is taken per card, matching what `commit_group` stamped on
+    /// the corresponding `Added`.
+    fn emit_deployment_removals<'a>(
+        &self,
+        namespace: &str,
+        cards: impl Iterator<Item = &'a ModelDeploymentCard>,
+    ) {
+        let mut seen = HashSet::new();
+        for card in cards {
+            let worker_type = effective_worker_type(card.worker_type, card.model_type)
+                .as_str()
+                .to_string();
+            let deployment = (card.name().to_string(), worker_type);
+            if !seen.insert(deployment.clone()) {
+                continue;
+            }
+            let (model, worker_type) = deployment;
+            if self
+                .manager
+                .model_has_deployment(&model, namespace, &worker_type)
+            {
+                continue;
+            }
+            self.emit_update(ModelUpdate::DeploymentRemoved {
+                model,
+                namespace: namespace.to_string(),
+                worker_type,
+            });
+        }
+    }
+
     fn emit_update(&self, update: ModelUpdate) {
         if let Some(dispatch) = self.model_update_dispatch.lock().as_ref() {
             let _ = dispatch.send(update);
@@ -1064,14 +1134,23 @@ where
         members: &[DesiredInstance],
         adapters: &[DesiredInstance],
     ) -> anyhow::Result<()> {
+        // Keyed by (adapter, namespace): availability dedup is global, but the
+        // per-deployment metrics are not. An adapter already committed from one
+        // namespace must still emit `Added` when it appears in a second, or the
+        // config gauges for (adapter, namespace-B) never exist even though
+        // requests can be served from B.
         let adapter_was_available = adapters
             .iter()
             .map(|adapter| {
                 (
-                    adapter.card.name().to_string(),
-                    self.manager
-                        .get_committed_model(adapter.card.name())
-                        .is_some(),
+                    (
+                        adapter.card.name().to_string(),
+                        adapter.endpoint_id.namespace.clone(),
+                    ),
+                    self.manager.model_has_worker_set_in_namespace(
+                        adapter.card.name(),
+                        &adapter.endpoint_id.namespace,
+                    ),
                 )
             })
             .collect::<HashMap<_, _>>();
@@ -1099,16 +1178,35 @@ where
                 .map(|adapter| (adapter.key.clone(), adapter.card.clone()))
                 .collect(),
         )?;
-        self.emit_update(ModelUpdate::Added(prepared.card.clone()));
+        self.emit_update(ModelUpdate::Added {
+            card: prepared.card.clone(),
+            namespace: spec.representative.endpoint_id.namespace.clone(),
+            worker_type: effective_worker_type(prepared.card.worker_type, prepared.card.model_type)
+                .as_str()
+                .to_string(),
+        });
         let mut adapter_names = HashSet::new();
         for adapter in adapters {
-            if adapter_names.insert(adapter.card.name().to_string())
+            let adapter_key = (
+                adapter.card.name().to_string(),
+                adapter.endpoint_id.namespace.clone(),
+            );
+            if adapter_names.insert(adapter_key.clone())
                 && !adapter_was_available
-                    .get(adapter.card.name())
+                    .get(&adapter_key)
                     .copied()
                     .unwrap_or(false)
             {
-                self.emit_update(ModelUpdate::Added(adapter.card.clone()));
+                self.emit_update(ModelUpdate::Added {
+                    card: adapter.card.clone(),
+                    namespace: adapter.endpoint_id.namespace.clone(),
+                    worker_type: effective_worker_type(
+                        adapter.card.worker_type,
+                        adapter.card.model_type,
+                    )
+                    .as_str()
+                    .to_string(),
+                });
             }
         }
         if prepared.card.model_type.supports_chat() {
@@ -1130,6 +1228,10 @@ where
         adapters: &[DesiredInstance],
     ) -> anyhow::Result<()> {
         let group_id = key.id();
+        // Read before the replace: the namespace is a property of the group's
+        // WorkerSet and does not change across a replace, but the lookup goes
+        // away once the group has been rewritten.
+        let group_namespace = self.manager.discovery_group_namespace(&group_id);
         let previous = self
             .manager
             .discovery_group_adapter_cards(&group_id)
@@ -1138,7 +1240,12 @@ where
             .collect::<HashMap<_, _>>();
         let desired = adapters
             .iter()
-            .map(|adapter| (adapter.card.name().to_string(), adapter.card.clone()))
+            .map(|adapter| {
+                (
+                    adapter.card.name().to_string(),
+                    (adapter.card.clone(), adapter.endpoint_id.namespace.clone()),
+                )
+            })
             .collect::<HashMap<_, _>>();
         let was_available = previous
             .keys()
@@ -1161,12 +1268,30 @@ where
                 .map(|adapter| (adapter.key.clone(), adapter.card.clone()))
                 .collect(),
         )?;
-        for (name, card) in &desired {
+        for (name, (card, namespace)) in &desired {
             if !was_available.get(name).copied().unwrap_or(false)
                 && self.manager.get_committed_model(name).is_some()
             {
-                self.emit_update(ModelUpdate::Added(card.clone()));
+                self.emit_update(ModelUpdate::Added {
+                    card: card.clone(),
+                    namespace: namespace.clone(),
+                    worker_type: effective_worker_type(card.worker_type, card.model_type)
+                        .as_str()
+                        .to_string(),
+                });
             }
+        }
+        // An adapter dropped from this group loses its per-deployment series in
+        // this namespace even when the model as a whole stays available -- it
+        // may still be served from another namespace, or by another group here.
+        if let Some(namespace) = group_namespace.as_deref() {
+            self.emit_deployment_removals(
+                namespace,
+                previous
+                    .iter()
+                    .filter(|(name, _)| !desired.contains_key(*name))
+                    .map(|(_, card)| card),
+            );
         }
         for (name, card) in previous {
             if was_available.get(&name).copied().unwrap_or(false)
@@ -1183,6 +1308,10 @@ where
             return;
         };
         let removed_members = removed.cards.len();
+        self.emit_deployment_removals(
+            &removed.namespace,
+            std::iter::once(&removed.representative).chain(removed.cards.iter()),
+        );
         let mut removed_adapter_names = HashSet::new();
         for removed_card in &removed.cards {
             if removed_card.lora.is_some()

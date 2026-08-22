@@ -283,7 +283,9 @@ async fn handler(
         .manager()
         .get_generate_engine_for_capability(&model, SGLANG_GENERATE_CAPABILITY)
     {
-        Ok(engine) => engine,
+        // This path records no per-response metrics, so the selected namespace
+        // is not needed here.
+        Ok(selected) => selected.into_value(),
         Err(error) => {
             let status = match error {
                 crate::discovery::ModelManagerError::ModelUnavailable(_) => {

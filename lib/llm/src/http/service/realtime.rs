@@ -459,7 +459,8 @@ where
             continue;
         };
         match state.manager().get_realtime_engine(model_name) {
-            Ok(engine) => return Some((engine, session_update)),
+            // Realtime records no per-response metrics; namespace unused.
+            Ok(selected) => return Some((selected.into_value(), session_update)),
             Err(ModelManagerError::ModelNotFound(_)) => {
                 send_error_event(
                     ws_tx,

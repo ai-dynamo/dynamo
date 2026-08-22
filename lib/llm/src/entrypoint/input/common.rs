@@ -401,7 +401,8 @@ pub async fn prepare_engine(
             let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
             let engine = loop {
                 match model_manager.get_chat_completions_engine(&model_service_name) {
-                    Ok(engine) => break engine,
+                    // Text/interactive input records no per-response metrics.
+                    Ok(selected) => break selected.into_value(),
                     Err(crate::discovery::ModelManagerError::ModelUnavailable(_))
                         if tokio::time::Instant::now() < deadline =>
                     {

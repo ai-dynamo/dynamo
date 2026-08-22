@@ -5,7 +5,11 @@ title: Metrics Catalog
 subtitle: Every dynamo_* metric emitted by the frontend, backend workers, and router — name, type, and meaning.
 ---
 
-Dynamo exposes metrics in Prometheus exposition format at the `/metrics` HTTP endpoint. All Dynamo-generated metrics use the `dynamo_*` prefix and carry the hierarchy labels documented in [Metric Labels](metric-labels.mdx). This page is the field catalog; for setup and dashboards see the [Metrics guide](../../cli/operations/observability.mdx#view-metrics-and-dashboards).
+Dynamo exposes metrics in Prometheus exposition format at the `/metrics` HTTP endpoint. All Dynamo-generated metrics use the `dynamo_*` prefix. Metrics registered through the runtime hierarchy carry the hierarchy labels documented in [Metric Labels](metric-labels.mdx); frontend metrics live on the frontend's own registry and carry only the labels noted on each field below. This page is the field catalog; for setup and dashboards see the [Metrics guide](../../cli/operations/observability.mdx#view-metrics-and-dashboards).
+
+<Note>
+A frontend can serve one model name from several namespaces at once, so some `dynamo_frontend_*` families carry a `dynamo_namespace` label identifying the deployment a series belongs to and others deliberately do not. See [Frontend metrics and the namespace label](metric-labels.mdx#frontend-metrics-and-the-namespace-label) for the split, why each family falls where it does, and how to aggregate each kind.
+</Note>
 
 ## Metric types
 
@@ -173,7 +177,7 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
 
 ### Model configuration metrics
 
-`dynamo_frontend_model_*` gauges are populated from worker backend registration and all carry a `model` label. When multiple workers register the same model name, only the first instance's configuration is recorded.
+`dynamo_frontend_model_*` gauges are populated from worker backend registration and carry `model`, `dynamo_namespace`, and `worker_type`. One series exists per deployment role, so a frontend serving one model name from several namespaces — or a disaggregated deployment whose prefill and decode cards advertise different limits — keeps them separate rather than letting the last registration win. A series is dropped once the last worker set backing that `(model, dynamo_namespace, worker_type)` deployment goes away, so a torn-down deployment stops being reported as current. See [Frontend metrics and the namespace label](metric-labels.mdx#frontend-metrics-and-the-namespace-label) for how to aggregate each kind.
 
 <ParamField path="dynamo_frontend_model_total_kv_blocks" type="gauge">
   Total KV blocks available for a worker serving the model.
@@ -297,7 +301,7 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 
 ### Per-request routing overhead
 
-`dynamo_router_overhead_*` histograms (milliseconds) track time spent in each phase of the routing decision. Registered on the frontend port with a `router_id` label (the frontend's discovery instance ID). Created only when the frontend has DRT discovery enabled (`--router-mode kv`); absent in non-KV modes and on the standalone router.
+`dynamo_router_overhead_*` histograms (milliseconds) track time spent in each phase of the routing decision. Registered on the frontend port with a `router_id` label (the frontend's discovery instance ID) and a `dynamo_namespace` label identifying the router that did the work, so a frontend serving one model from several namespaces keeps their quantiles separate. Created only when the frontend has DRT discovery enabled (`--router-mode kv`); absent in non-KV modes and on the standalone router.
 
 <ParamField path="dynamo_router_overhead_block_hashing_ms" type="histogram">
   Time computing block hashes.
@@ -321,7 +325,7 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 
 ### Router queue metrics
 
-The frontend registers these metrics when queueing is enabled by `--router-queue-threshold` or a threshold in `--router-policy-config`. They carry `model`, `worker_type`, and `policy_class`. With policy-family or cache-bucket configuration, `policy_class` is the resolved physical queue.
+The frontend registers these metrics when queueing is enabled by `--router-queue-threshold` or a threshold in `--router-policy-config`. They carry `model`, `dynamo_namespace`, `worker_type`, and `policy_class`. Each namespace's scheduler owns its own queue, so the namespace label keeps a multi-namespace frontend from reporting whichever scheduler happened to update last. With policy-family or cache-bucket configuration, `policy_class` is the resolved physical queue.
 
 <ParamField path="dynamo_frontend_router_queue_pending_requests" type="gauge">
   Requests pending in the router scheduler queue.
