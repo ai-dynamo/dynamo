@@ -546,22 +546,24 @@ class DeploymentSpec:
             enable_jsonl: Enable JSON line logging (sets DYN_LOGGING_JSONL=true)
             log_level: Set log level (sets DYN_LOG to specified level)
         """
-        spec = self._deployment_spec
-        if "envs" not in spec["spec"]:
-            spec["spec"]["envs"] = []
+        spec = self._deployment_spec["spec"]
+        env_key = "env" if self._schema == SCHEMA_V1BETA1 else "envs"
+        envs = spec.setdefault(env_key, [])
 
         # Remove any existing logging env vars to avoid duplicates
-        spec["spec"]["envs"] = [
+        envs = [
             env
-            for env in spec["spec"]["envs"]
+            for env in envs
             if env.get("name") not in ["DYN_LOGGING_JSONL", "DYN_LOG"]
         ]
 
         if enable_jsonl:
-            spec["spec"]["envs"].append({"name": "DYN_LOGGING_JSONL", "value": "true"})
+            envs.append({"name": "DYN_LOGGING_JSONL", "value": "true"})
 
         if log_level:
-            spec["spec"]["envs"].append({"name": "DYN_LOG", "value": log_level})
+            envs.append({"name": "DYN_LOG", "value": log_level})
+
+        spec[env_key] = envs
 
     def get_logging_config(self) -> dict:
         """Get current logging configuration
@@ -569,7 +571,8 @@ class DeploymentSpec:
         Returns:
             dict with 'jsonl_enabled' and 'log_level' keys
         """
-        envs = self._deployment_spec.get("spec", {}).get("envs", [])
+        env_key = "env" if self._schema == SCHEMA_V1BETA1 else "envs"
+        envs = self._deployment_spec.get("spec", {}).get(env_key, [])
 
         jsonl_enabled = False
         log_level = None
