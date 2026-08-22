@@ -7,6 +7,7 @@ from dynamo.workflow import (
     DeploymentSpec,
     ExecutionPlan,
     InlineBinding,
+    RemoteBinding,
     StageContract,
     Workflow,
     WorkflowValidationError,
@@ -58,3 +59,69 @@ def test_execution_plan_rejects_missing_stage_bindings() -> None:
             workflow=plan.workflow,
             bindings={},
         )
+
+
+def test_remote_plan_records_remote_binding() -> None:
+    plan = compile_workflow(
+        _workflow(),
+        DeploymentSpec.remote(normalize="workflows.normalize.generate"),
+    )
+
+    assert plan.remote
+    assert plan.bindings == {"normalize": RemoteBinding("workflows.normalize.generate")}
+
+
+def test_mixed_placement_records_each_stage_binding() -> None:
+    contract = StageContract(
+        id="text-stage",
+        inputs={"text"},
+        outputs={"text"},
+    )
+    workflow = Workflow("mixed-placement")
+    value = workflow.input("text")
+    first = workflow.stage("first", contract, text=value)
+    second = workflow.stage("second", contract, text=first.text)
+    workflow.output("text", second.text)
+
+    plan = compile_workflow(
+        workflow,
+        DeploymentSpec(
+            {
+                "first": InlineBinding("first"),
+                "second": RemoteBinding("workflows.second.generate"),
+            }
+        ),
+    )
+
+    assert plan.bindings == {
+        "first": InlineBinding("first"),
+        "second": RemoteBinding("workflows.second.generate"),
+    }
+
+
+def test_remote_planning_does_not_assume_a_runtime_value_type() -> None:
+    contract = StageContract(
+        id="opaque-stage",
+        inputs={"value"},
+        outputs={"result"},
+    )
+    workflow = Workflow("remote-opaque-value")
+    value = workflow.input("value")
+    result = workflow.stage("stage", contract, value=value)
+    workflow.output("result", result.result)
+
+    plan = compile_workflow(
+        workflow,
+        DeploymentSpec.remote(stage="workflows.stage.generate"),
+    )
+
+    assert plan.bindings == {"stage": RemoteBinding("workflows.stage.generate")}
+
+
+def test_remote_endpoint_id_is_a_stable_discovery_identity() -> None:
+    assert RemoteBinding("namespace.component.endpoint").endpoint_id == (
+        "namespace.component.endpoint"
+    )
+
+    with pytest.raises(WorkflowValidationError, match="namespace.component.endpoint"):
+        RemoteBinding("component.endpoint")
