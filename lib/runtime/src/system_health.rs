@@ -33,6 +33,32 @@ pub struct HealthCheckTarget {
     pub payload: serde_json::Value,
 }
 
+#[derive(Clone, Debug)]
+struct RegisteredHealthCheckTarget {
+    target: HealthCheckTarget,
+    registration: u64,
+    notifier: Arc<tokio::sync::Notify>,
+}
+
+/// The target, notifier, and identity for one canary registration.
+#[derive(Clone)]
+pub struct CanaryHandles {
+    pub target: HealthCheckTarget,
+    pub notifier: Arc<tokio::sync::Notify>,
+    pub registration: ProbedRegistration,
+}
+
+/// Identifies the registration a canary verdict describes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProbedRegistration(u64);
+
+/// Identifies one health-check registration for later release.
+#[derive(Debug)]
+pub struct HealthCheckRegistration {
+    subject: String,
+    registration: u64,
+}
+
 /// Current Health Status
 /// If use_endpoint_health_status is set then
 /// initialize the endpoint_health hashmap to the
@@ -41,10 +67,10 @@ pub struct HealthCheckTarget {
 pub struct SystemHealth {
     system_health: HealthStatus,
     endpoint_health: Arc<std::sync::RwLock<HashMap<String, HealthStatus>>>,
-    /// Maps endpoint subject to health check target (instance + payload)
-    health_check_targets: Arc<std::sync::RwLock<HashMap<String, HealthCheckTarget>>>,
-    /// Maps endpoint subject to its specific health check notifier
-    health_check_notifiers: Arc<std::sync::RwLock<HashMap<String, Arc<tokio::sync::Notify>>>>,
+    /// Registrations by subject in insertion order; the last entry is current.
+    health_check_targets: Arc<std::sync::RwLock<HashMap<String, Vec<RegisteredHealthCheckTarget>>>>,
+    /// Supplies unique registration identities.
+    next_registration: Arc<std::sync::atomic::AtomicU64>,
     /// Channel for new endpoint registrations
     /// This solves the race condition where HealthCheckManager starts before endpoints are registered
     /// Using a channel ensures no registrations are lost.
@@ -84,7 +110,7 @@ impl SystemHealth {
             system_health: starting_health_status,
             endpoint_health: Arc::new(std::sync::RwLock::new(endpoint_health)),
             health_check_targets: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            health_check_notifiers: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            next_registration: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             new_endpoint_tx: tx,
             new_endpoint_rx: Arc::new(parking_lot::Mutex::new(Some(rx))),
             use_endpoint_health_status,
@@ -117,6 +143,33 @@ impl SystemHealth {
         endpoint_health.insert(endpoint.to_string(), status);
     }
 
+    /// Record a verdict only if the probed registration is still current.
+    pub fn set_endpoint_health_status_for(
+        &self,
+        endpoint: &str,
+        probed: ProbedRegistration,
+        status: HealthStatus,
+    ) -> bool {
+        // Hold both locks so release cannot race the status write.
+        let targets = self.health_check_targets.read().unwrap();
+        let current = targets
+            .get(endpoint)
+            .and_then(|outstanding| outstanding.last())
+            .map(|registered| registered.registration);
+        if current != Some(probed.0) {
+            tracing::debug!(
+                "Discarding health check verdict for '{endpoint}': the registration it was \
+                 issued against is no longer serving the subject"
+            );
+            return false;
+        }
+        self.endpoint_health
+            .write()
+            .unwrap()
+            .insert(endpoint.to_string(), status);
+        true
+    }
+
     /// Returns the overall health status and endpoint health statuses
     /// System health is determined by ALL endpoints that have registered health checks
     pub fn get_health_status(&self) -> (bool, HashMap<String, String>) {
@@ -146,7 +199,7 @@ impl SystemHealth {
             if !health_check_targets.is_empty() {
                 health_check_targets
                     .iter()
-                    .all(|(endpoint_subject, _target)| {
+                    .all(|(endpoint_subject, _outstanding)| {
                         endpoint_health
                             .get(endpoint_subject)
                             .is_some_and(|status| *status == HealthStatus::Ready)
@@ -160,49 +213,44 @@ impl SystemHealth {
         (healthy, endpoints)
     }
 
-    /// Register a health check target for an endpoint
+    /// Register a target and return the receipt required to release it.
     pub fn register_health_check_target(
         &self,
         endpoint_subject: &str,
         instance: component::Instance,
         payload: serde_json::Value,
-    ) {
+    ) -> HealthCheckRegistration {
         let key = endpoint_subject.to_owned();
+        let registration = self
+            .next_registration
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Atomically check+insert under a single write lock to avoid races.
-        let inserted = {
+        let replaced = {
             let mut targets = self.health_check_targets.write().unwrap();
-            match targets.entry(key.clone()) {
-                std::collections::hash_map::Entry::Occupied(_) => false,
-                std::collections::hash_map::Entry::Vacant(v) => {
-                    v.insert(HealthCheckTarget { instance, payload });
-                    true
-                }
-            }
+            let outstanding = targets.entry(key.clone()).or_default();
+            let replaced = !outstanding.is_empty();
+            outstanding.push(RegisteredHealthCheckTarget {
+                target: HealthCheckTarget { instance, payload },
+                registration,
+                notifier: Arc::new(tokio::sync::Notify::new()),
+            });
+            replaced
         };
 
-        if !inserted {
-            tracing::warn!(
-                "Attempted to re-register health check for endpoint '{}'; ignoring.",
-                key
-            );
-            return;
+        if replaced {
+            tracing::debug!("Re-registering health check for endpoint '{key}'; replacing target.");
         }
 
-        // Create and store a unique notifier for this endpoint (idempotent).
-        {
-            let mut notifiers = self.health_check_notifiers.write().unwrap();
-            notifiers
-                .entry(key.clone())
-                .or_insert_with(|| Arc::new(tokio::sync::Notify::new()));
-        }
-
-        // Initialize endpoint health status conservatively to NotReady.
+        // Without a canary, no later probe can lift a re-exposed target from NotReady.
         {
             let mut endpoint_health = self.endpoint_health.write().unwrap();
-            endpoint_health
-                .entry(key.clone())
-                .or_insert(HealthStatus::NotReady);
+            if replaced && self.health_check_enabled {
+                endpoint_health.insert(key.clone(), HealthStatus::NotReady);
+            } else {
+                endpoint_health
+                    .entry(key.clone())
+                    .or_insert(HealthStatus::NotReady);
+            }
         }
 
         if let Err(e) = self.new_endpoint_tx.send(key.clone()) {
@@ -213,6 +261,69 @@ impl SystemHealth {
                 e
             );
         }
+
+        HealthCheckRegistration {
+            subject: key,
+            registration,
+        }
+    }
+
+    /// Release one target registration without disturbing newer registrations.
+    pub fn release_health_check_target(&self, registration: HealthCheckRegistration) {
+        let HealthCheckRegistration {
+            subject,
+            registration,
+        } = registration;
+
+        let (subject_vacated, re_exposed) = {
+            let mut targets = self.health_check_targets.write().unwrap();
+            let Some(outstanding) = targets.get_mut(&subject) else {
+                return;
+            };
+            let Some(position) = outstanding
+                .iter()
+                .position(|registered| registered.registration == registration)
+            else {
+                return;
+            };
+            let was_current = position + 1 == outstanding.len();
+            outstanding.remove(position);
+            if outstanding.is_empty() {
+                targets.remove(&subject);
+                (true, false)
+            } else {
+                (false, was_current)
+            }
+        };
+
+        if !subject_vacated {
+            if re_exposed && self.health_check_enabled {
+                self.endpoint_health
+                    .write()
+                    .unwrap()
+                    .insert(subject.clone(), HealthStatus::NotReady);
+            }
+            tracing::debug!(
+                "Released one health check registration for endpoint '{subject}'; other \
+                 registrations still hold the subject."
+            );
+            return;
+        }
+
+        // Configured endpoint names remain visible after their final target is released.
+        {
+            let mut endpoint_health = self.endpoint_health.write().unwrap();
+            if self
+                .use_endpoint_health_status
+                .iter()
+                .any(|configured| configured == &subject)
+            {
+                endpoint_health.insert(subject.clone(), HealthStatus::NotReady);
+            } else {
+                endpoint_health.remove(&subject);
+            }
+        }
+        tracing::debug!("Deregistered health check target for endpoint '{subject}'");
     }
 
     /// Get all health check targets
@@ -220,7 +331,11 @@ impl SystemHealth {
         let targets = self.health_check_targets.read().unwrap();
         targets
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .filter_map(|(subject, outstanding)| {
+                outstanding
+                    .last()
+                    .map(|registered| (subject.clone(), registered.target.clone()))
+            })
             .collect()
     }
 
@@ -236,10 +351,13 @@ impl SystemHealth {
         targets.keys().cloned().collect()
     }
 
-    /// Get health check target for a specific endpoint
+    /// Get the current health-check target for an endpoint.
     pub fn get_health_check_target(&self, endpoint: &str) -> Option<HealthCheckTarget> {
         let targets = self.health_check_targets.read().unwrap();
-        targets.get(endpoint).cloned()
+        targets
+            .get(endpoint)
+            .and_then(|outstanding| outstanding.last())
+            .map(|registered| registered.target.clone())
     }
 
     /// Get the endpoint health status (Ready/NotReady)
@@ -248,13 +366,29 @@ impl SystemHealth {
         endpoint_health.get(endpoint).cloned()
     }
 
-    /// Get the endpoint-specific health check notifier
+    /// Get the notifier belonging to the current target registration.
     pub fn get_endpoint_health_check_notifier(
         &self,
         endpoint_subject: &str,
     ) -> Option<Arc<tokio::sync::Notify>> {
-        let notifiers = self.health_check_notifiers.read().unwrap();
-        notifiers.get(endpoint_subject).cloned()
+        let targets = self.health_check_targets.read().unwrap();
+        targets
+            .get(endpoint_subject)
+            .and_then(|outstanding| outstanding.last())
+            .map(|registered| registered.notifier.clone())
+    }
+
+    /// Read the current target, notifier, and identity under one lock.
+    pub fn get_canary_handles(&self, endpoint_subject: &str) -> Option<CanaryHandles> {
+        let targets = self.health_check_targets.read().unwrap();
+        targets
+            .get(endpoint_subject)
+            .and_then(|outstanding| outstanding.last())
+            .map(|registered| CanaryHandles {
+                target: registered.target.clone(),
+                notifier: registered.notifier.clone(),
+                registration: ProbedRegistration(registered.registration),
+            })
     }
 
     /// Take the receiver for new endpoint registrations (can only be called once)
@@ -307,11 +441,16 @@ mod tests {
     const ENDPOINT: &str = "generate";
 
     fn system_health(health_check_enabled: bool) -> SystemHealth {
+        configured_system_health(health_check_enabled, Vec::new())
+    }
+
+    fn configured_system_health(
+        health_check_enabled: bool,
+        use_endpoint_health_status: Vec<String>,
+    ) -> SystemHealth {
         SystemHealth::new(
             HealthStatus::NotReady,
-            // Deprecated and ignored in practice (see RuntimeConfig::from_settings),
-            // so the realistic case is an empty vector.
-            Vec::new(),
+            use_endpoint_health_status,
             health_check_enabled,
             "/health".to_string(),
             "/live".to_string(),
@@ -409,5 +548,472 @@ mod tests {
             health.get_health_status().0,
             "after the canary marks it ready the worker is healthy"
         );
+    }
+
+    #[test]
+    fn re_registration_installs_the_restarts_target_and_withholds_ready() {
+        let health = system_health(true);
+        health.register_health_check_target(
+            ENDPOINT,
+            instance(),
+            serde_json::json!({"generation": "first"}),
+        );
+        health.set_endpoint_health_status(ENDPOINT, HealthStatus::Ready);
+        assert!(health.get_health_status().0);
+
+        let mut restarted = instance();
+        restarted.instance_id = 2;
+        health.register_health_check_target(
+            ENDPOINT,
+            restarted,
+            serde_json::json!({"generation": "second"}),
+        );
+
+        let target = health
+            .get_health_check_target(ENDPOINT)
+            .expect("the restart is the registered target");
+        assert_eq!(target.payload, serde_json::json!({"generation": "second"}));
+        assert_eq!(target.instance.instance_id, 2);
+        assert!(
+            !health.get_health_status().0,
+            "the previous incarnation's canary verdict must not carry over to the restart"
+        );
+    }
+
+    #[test]
+    fn re_registration_is_announced_to_the_health_check_manager() {
+        let health = system_health(true);
+        let mut rx = health
+            .take_new_endpoint_receiver()
+            .expect("the receiver is available before the manager takes it");
+
+        health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+
+        assert_eq!(rx.try_recv().ok().as_deref(), Some(ENDPOINT));
+        assert_eq!(
+            rx.try_recv().ok().as_deref(),
+            Some(ENDPOINT),
+            "the restart must reach the manager as well as the first registration"
+        );
+    }
+
+    #[test]
+    fn releasing_a_stopped_endpoints_registration_releases_the_worker() {
+        let mut health = system_health(true);
+        health.set_health_status(HealthStatus::Ready);
+        let registration =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        assert!(
+            !health.get_health_status().0,
+            "an unverified target holds the worker unhealthy"
+        );
+
+        health.release_health_check_target(registration);
+
+        assert!(health.get_health_check_target(ENDPOINT).is_none());
+        assert!(
+            health
+                .get_endpoint_health_check_notifier(ENDPOINT)
+                .is_none(),
+            "the notifier is endpoint-scoped state and goes with the target"
+        );
+        assert!(health.get_endpoint_health_status(ENDPOINT).is_none());
+        let (healthy, endpoints) = health.get_health_status();
+        assert!(
+            healthy,
+            "with the stopped endpoint's target gone the worker is judged on what remains"
+        );
+        assert!(!endpoints.contains_key(ENDPOINT));
+        assert!(!health.has_health_check_targets());
+        assert!(health.get_health_check_targets().is_empty());
+    }
+
+    #[test]
+    fn releasing_a_displaced_registration_leaves_the_live_endpoint_alone() {
+        let health = system_health(true);
+        let displaced = health.register_health_check_target(
+            ENDPOINT,
+            instance(),
+            serde_json::json!({"generation": "first"}),
+        );
+        let mut live_instance = instance();
+        live_instance.instance_id = 2;
+        health.register_health_check_target(
+            ENDPOINT,
+            live_instance,
+            serde_json::json!({"generation": "second"}),
+        );
+        health.set_endpoint_health_status(ENDPOINT, HealthStatus::Ready);
+
+        health.release_health_check_target(displaced);
+
+        let target = health
+            .get_health_check_target(ENDPOINT)
+            .expect("the live registration still holds the subject");
+        assert_eq!(target.payload, serde_json::json!({"generation": "second"}));
+        assert_eq!(target.instance.instance_id, 2);
+        assert!(
+            health
+                .get_endpoint_health_check_notifier(ENDPOINT)
+                .is_some(),
+            "the live endpoint's handler still signals through this notifier"
+        );
+        assert_eq!(
+            health.get_endpoint_health_status(ENDPOINT),
+            Some(HealthStatus::Ready),
+            "the live endpoint's canary verdict must survive the other one's release"
+        );
+        assert!(health.get_health_status().0);
+    }
+
+    #[test]
+    fn releasing_the_probed_registration_withholds_ready_from_the_one_it_re_exposes() {
+        let mut health = system_health(true);
+        health.set_health_status(HealthStatus::Ready);
+        let earlier = health.register_health_check_target(
+            ENDPOINT,
+            instance(),
+            serde_json::json!({"generation": "first"}),
+        );
+        let mut probed_instance = instance();
+        probed_instance.instance_id = 2;
+        let probed = health.register_health_check_target(
+            ENDPOINT,
+            probed_instance,
+            serde_json::json!({"generation": "second"}),
+        );
+        health.set_endpoint_health_status(ENDPOINT, HealthStatus::Ready);
+        assert!(health.get_health_status().0);
+
+        health.release_health_check_target(probed);
+
+        let target = health
+            .get_health_check_target(ENDPOINT)
+            .expect("the earlier registration is outstanding and takes the subject back");
+        assert_eq!(target.payload, serde_json::json!({"generation": "first"}));
+        assert_eq!(
+            health.get_endpoint_health_status(ENDPOINT),
+            Some(HealthStatus::NotReady),
+            "the departing registration's verdict says nothing about the re-exposed target"
+        );
+        assert!(
+            !health.get_health_status().0,
+            "the worker must not report ready over a target no canary has probed"
+        );
+
+        health.set_endpoint_health_status(ENDPOINT, HealthStatus::Ready);
+        assert!(health.get_health_status().0);
+        health.release_health_check_target(earlier);
+        assert!(health.get_health_check_target(ENDPOINT).is_none());
+    }
+
+    #[test]
+    fn releasing_out_of_order_cannot_reinstate_a_released_registration() {
+        let mut health = system_health(true);
+        health.set_health_status(HealthStatus::Ready);
+
+        let first = health.register_health_check_target(
+            ENDPOINT,
+            instance(),
+            serde_json::json!({"generation": "first"}),
+        );
+        let mut second_instance = instance();
+        second_instance.instance_id = 2;
+        let second = health.register_health_check_target(
+            ENDPOINT,
+            second_instance,
+            serde_json::json!({"generation": "second"}),
+        );
+
+        health.release_health_check_target(first);
+        health.release_health_check_target(second);
+
+        assert!(
+            health.get_health_check_target(ENDPOINT).is_none(),
+            "both registrations are released, so nothing may hold the subject"
+        );
+        assert!(
+            health
+                .get_endpoint_health_check_notifier(ENDPOINT)
+                .is_none()
+        );
+        assert!(health.get_endpoint_health_status(ENDPOINT).is_none());
+        assert!(
+            health.get_health_status().0,
+            "a phantom target would hold the worker unhealthy forever"
+        );
+    }
+
+    #[test]
+    fn releasing_in_order_also_clears_the_subject() {
+        let health = system_health(true);
+        let first =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let second =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+
+        health.release_health_check_target(second);
+        assert!(
+            health.get_health_check_target(ENDPOINT).is_some(),
+            "the older registration is still outstanding and takes the subject back"
+        );
+
+        health.release_health_check_target(first);
+        assert!(health.get_health_check_target(ENDPOINT).is_none());
+        assert!(
+            health
+                .get_endpoint_health_check_notifier(ENDPOINT)
+                .is_none()
+        );
+        assert!(health.get_endpoint_health_status(ENDPOINT).is_none());
+    }
+
+    #[test]
+    fn a_repeated_release_does_not_disturb_a_later_registration() {
+        let health = system_health(true);
+        let registration =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let subject = registration.subject.clone();
+        let id = registration.registration;
+        health.release_health_check_target(registration);
+
+        health.register_health_check_target(
+            ENDPOINT,
+            instance(),
+            serde_json::json!({"generation": "restart"}),
+        );
+        health.release_health_check_target(HealthCheckRegistration {
+            subject,
+            registration: id,
+        });
+
+        let target = health
+            .get_health_check_target(ENDPOINT)
+            .expect("the restart's registration is untouched by the stale release");
+        assert_eq!(target.payload, serde_json::json!({"generation": "restart"}));
+    }
+
+    #[test]
+    fn a_re_exposed_registration_keeps_its_readiness_when_the_canary_is_off() {
+        let health = system_health(false);
+        let live = health.register_health_check_target(
+            ENDPOINT,
+            instance(),
+            serde_json::json!({"generation": "live"}),
+        );
+        health.set_endpoint_registered(ENDPOINT);
+        let mut departing_instance = instance();
+        departing_instance.instance_id = 2;
+        let departing = health.register_health_check_target(
+            ENDPOINT,
+            departing_instance,
+            serde_json::json!({"generation": "departing"}),
+        );
+        health.set_endpoint_registered(ENDPOINT);
+        assert!(health.get_health_status().0);
+
+        health.release_health_check_target(departing);
+
+        assert_eq!(
+            health.get_endpoint_health_status(ENDPOINT),
+            Some(HealthStatus::Ready),
+            "no canary will ever lift a reset, so the still-serving endpoint keeps its verdict"
+        );
+        assert!(
+            health.get_health_status().0,
+            "a worker must not be pulled from rotation by another endpoint's departure"
+        );
+
+        health.release_health_check_target(live);
+    }
+
+    #[test]
+    fn a_rolled_back_start_leaves_the_endpoint_it_displaced_ready_when_the_canary_is_off() {
+        let health = system_health(false);
+        let live = health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        health.set_endpoint_registered(ENDPOINT);
+
+        let rolled_back =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        health.release_health_check_target(rolled_back);
+
+        assert_eq!(
+            health.get_endpoint_health_status(ENDPOINT),
+            Some(HealthStatus::Ready),
+            "the rollback must leave the process as it found it"
+        );
+        assert!(health.get_health_status().0);
+
+        health.release_health_check_target(live);
+    }
+
+    #[test]
+    fn a_re_exposed_registration_is_still_reset_when_the_canary_is_on() {
+        let health = system_health(true);
+        let live = health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let departing =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        health.set_endpoint_health_status(ENDPOINT, HealthStatus::Ready);
+
+        health.release_health_check_target(departing);
+
+        assert_eq!(
+            health.get_endpoint_health_status(ENDPOINT),
+            Some(HealthStatus::NotReady)
+        );
+        health.release_health_check_target(live);
+    }
+
+    #[test]
+    fn a_configured_endpoint_stays_in_the_status_map_after_its_last_release() {
+        let health = configured_system_health(false, vec![ENDPOINT.to_string()]);
+        let registration =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        health.set_endpoint_registered(ENDPOINT);
+        assert!(health.get_health_status().0);
+
+        health.release_health_check_target(registration);
+
+        assert_eq!(
+            health.get_endpoint_health_status(ENDPOINT),
+            Some(HealthStatus::NotReady),
+            "a configured endpoint whose target is gone is not ready, not unknown"
+        );
+        let (healthy, endpoints) = health.get_health_status();
+        assert!(
+            !healthy,
+            "a configured endpoint with no target cannot be ready"
+        );
+        assert_eq!(
+            endpoints.get(ENDPOINT).map(String::as_str),
+            Some("notready")
+        );
+    }
+
+    #[test]
+    fn an_unconfigured_endpoint_leaves_the_status_map_after_its_last_release() {
+        let health = system_health(false);
+        let registration =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+
+        health.release_health_check_target(registration);
+
+        assert_eq!(health.get_endpoint_health_status(ENDPOINT), None);
+        assert!(!health.get_health_status().1.contains_key(ENDPOINT));
+    }
+
+    #[test]
+    fn overlapping_registrations_get_their_own_notifiers() {
+        let health = system_health(true);
+        let earlier =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let earlier_notifier = health
+            .get_endpoint_health_check_notifier(ENDPOINT)
+            .expect("the first registration's handler needs a notifier");
+
+        let later =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let later_notifier = health
+            .get_endpoint_health_check_notifier(ENDPOINT)
+            .expect("the displacing registration's handler needs one of its own");
+        assert!(
+            !Arc::ptr_eq(&earlier_notifier, &later_notifier),
+            "a restart's handler must not be handed the outgoing incarnation's notifier"
+        );
+
+        health.release_health_check_target(later);
+        let re_exposed = health
+            .get_endpoint_health_check_notifier(ENDPOINT)
+            .expect("the re-exposed registration still has its notifier");
+        assert!(
+            Arc::ptr_eq(&re_exposed, &earlier_notifier),
+            "the re-exposed registration is signalled on the notifier its own handler holds"
+        );
+
+        health.release_health_check_target(earlier);
+        assert!(
+            health
+                .get_endpoint_health_check_notifier(ENDPOINT)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_verdict_for_a_released_registration_is_discarded() {
+        let health = system_health(true);
+        let probed =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let handles = health
+            .get_canary_handles(ENDPOINT)
+            .expect("the registration was just installed");
+
+        health.release_health_check_target(probed);
+        let successor =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+
+        assert!(
+            !health.set_endpoint_health_status_for(
+                ENDPOINT,
+                handles.registration,
+                HealthStatus::Ready
+            ),
+            "a verdict about a released registration must not be filed"
+        );
+        assert!(
+            !health.get_health_status().0,
+            "the successor must still wait for a canary of its own"
+        );
+
+        let current = health
+            .get_canary_handles(ENDPOINT)
+            .expect("the successor is serving");
+        assert!(health.set_endpoint_health_status_for(
+            ENDPOINT,
+            current.registration,
+            HealthStatus::Ready
+        ));
+        assert!(health.get_health_status().0);
+        health.release_health_check_target(successor);
+    }
+
+    #[test]
+    fn a_verdict_for_the_serving_registration_is_filed() {
+        let health = system_health(true);
+        let displaced =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let serving =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+
+        let handles = health
+            .get_canary_handles(ENDPOINT)
+            .expect("the displacing registration is serving");
+        assert!(health.set_endpoint_health_status_for(
+            ENDPOINT,
+            handles.registration,
+            HealthStatus::Ready
+        ));
+        assert!(health.get_health_status().0);
+
+        health.release_health_check_target(serving);
+        health.release_health_check_target(displaced);
+    }
+
+    #[test]
+    fn a_verdict_for_a_vacated_subject_is_discarded() {
+        let health = system_health(true);
+        let registration =
+            health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let handles = health
+            .get_canary_handles(ENDPOINT)
+            .expect("the registration was just installed");
+        health.release_health_check_target(registration);
+
+        assert!(!health.set_endpoint_health_status_for(
+            ENDPOINT,
+            handles.registration,
+            HealthStatus::Ready
+        ));
+        assert!(health.get_canary_handles(ENDPOINT).is_none());
     }
 }

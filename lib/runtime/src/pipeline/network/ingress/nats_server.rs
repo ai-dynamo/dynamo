@@ -177,20 +177,30 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
         // Store task info for later cleanup
-        self.handlers.insert(
-            endpoint_name.clone(),
-            EndpointTask {
-                cancel_token: endpoint_cancel,
-                join_handle,
-                _endpoint_name: endpoint_name,
-            },
-        );
+        let task = EndpointTask {
+            cancel_token: endpoint_cancel,
+            join_handle,
+            _endpoint_name: endpoint_name.clone(),
+        };
+        let duplicate = match self.handlers.entry(endpoint_with_id.clone()) {
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(task);
+                None
+            }
+            dashmap::mapref::entry::Entry::Occupied(_) => Some(task),
+        };
+        if let Some(task) = duplicate {
+            task.cancel_token.cancel();
+            let _ = task.join_handle.await;
+            anyhow::bail!("Endpoint '{endpoint_name}' is already registered for this instance");
+        }
 
         Ok(())
     }
 
-    async fn unregister_endpoint(&self, endpoint_name: &str) -> Result<()> {
-        if let Some((_, task)) = self.handlers.remove(endpoint_name) {
+    async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
+        let endpoint_with_id = format!("{endpoint_name}-{instance_id:x}");
+        if let Some((_, task)) = self.handlers.remove(&endpoint_with_id) {
             tracing::info!(
                 endpoint_name = %endpoint_name,
                 "Unregistering NATS endpoint"
