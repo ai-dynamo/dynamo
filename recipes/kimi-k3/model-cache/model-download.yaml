@@ -39,6 +39,7 @@ spec:
               set -eux
               pip install --no-cache-dir huggingface_hub==1.16.4
               hf download moonshotai/Kimi-K3
+              hf download RadixArk/Kimi-K3-DSpark
           volumeMounts:
             - name: model-cache
               mountPath: /model-cache

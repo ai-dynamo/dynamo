@@ -92,8 +92,30 @@ targets:
     asset: recipes/kimi-k3/vllm/disagg-gb300-agentic/deploy.yaml
   expected_performance:
     available: false
+- id: sglang-agg-gb300
+  recommended: false
+  hardware:
+    gpu: GB300
+    count: 24
+  runtime:
+    framework: sglang
+  topology: aggregated
+  techniques:
+  - mxfp4
+  - fp8-kv-cache
+  - dspark-speculative-decoding
+  workload:
+    type: agentic
+    traffic: 64K input / 400 output / 90% KV-reuse Mooncake trace replay, 15% subset at concurrency 64
+  deploy:
+    asset: recipes/kimi-k3/sglang/agg-gb300-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/kimi-k3/perf/perf.yaml
+  expected_performance:
+    available: false
 related_benchmarks: []
 maintainer: null
 gaps:
-- GB200 manifests mount weights via node-local hostPath (GKE pattern); all four targets pin the public NGC image (1.4.0-kimi-k3-dev.1)
-- No perf assets in the recipe tree; no validated expected-performance numbers (Day-0)
+- GB200 manifests mount weights via node-local hostPath (GKE pattern); all four vLLM targets pin the public NGC image (1.4.0-kimi-k3-dev.1)
+- The SGLang perf asset has no validated expected-performance numbers; the vLLM targets have no perf assets

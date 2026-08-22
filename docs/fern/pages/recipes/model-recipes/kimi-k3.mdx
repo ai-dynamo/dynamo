@@ -2,17 +2,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Kimi-K3"
-subtitle: "Serve Kimi-K3 with Dynamo and vLLM on GB200 or GB300, aggregated or disaggregated over NVLink."
+subtitle: "Serve Kimi-K3 with Dynamo on GB200 or GB300, aggregated or disaggregated over NVLink."
 ---
 
 import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Each target below is a Dynamo + vLLM deployment of Moonshot AI's Kimi-K3 — a multimodal MoE model serving up to 1M-token context — with KV-aware routing, MXFP4-packed routed experts, and FP8 KV cache, running aggregated or with prefill/decode disaggregation on GB200 and GB300 NVL72 racks. KV transfer and tensor parallelism run over NVLink (MNNVL) using Kubernetes ComputeDomains. Pick your GPU architecture and serving topology; every command on this page updates to match.
+Each target below is a Dynamo + vLLM or SGLang deployment of Moonshot AI's Kimi-K3 — a multimodal MoE model serving up to 1M-token context — with MXFP4-packed routed experts and FP8 KV cache, running aggregated or with prefill/decode disaggregation on GB200 and GB300 NVL72 racks. KV transfer and model parallelism run over NVLink (MNNVL) using Kubernetes ComputeDomains. Pick your framework, GPU architecture and serving topology; every command on this page updates to match.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Framework</span>
+<input type="radio" id="recipe-framework-vllm" name="recipe-framework" value="vllm" defaultChecked />
+<label htmlFor="recipe-framework-vllm">vLLM</label>
+<input type="radio" id="recipe-framework-sglang" name="recipe-framework" value="sglang" />
+<label htmlFor="recipe-framework-sglang">SGLang</label>
+</div>
 <div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">GPU</span>
 <input type="radio" id="recipe-sku-gb200" name="recipe-sku" value="gb200" defaultChecked />
@@ -27,39 +34,55 @@ Each target below is a Dynamo + vLLM deployment of Moonshot AI's Kimi-K3 — a m
 <input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
 <label htmlFor="recipe-variant-disagg">Disaggregated</label>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="gb200" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb200" data-variant="agg">
 <span><b>Checkpoint</b> moonshotai/Kimi-K3</span>
 <span><b>Precision</b> MXFP4 experts + BF16 dense, FP8 KV</span>
 <span><b>GPUs</b> 16x GB200 (4 nodes), one worker</span>
 <span><b>Parallelism</b> TP16 over MNNVL</span>
 <span><b>Routing</b> KV-aware</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="gb200" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb200" data-variant="disagg">
 <span><b>Checkpoint</b> moonshotai/Kimi-K3</span>
 <span><b>Precision</b> MXFP4 experts + BF16 dense, FP8 KV</span>
 <span><b>GPUs</b> 16x GB200 prefill + 16x GB200 decode (1P1D)</span>
 <span><b>Parallelism</b> TP16 / TP16 over MNNVL</span>
 <span><b>Routing</b> KV-aware, NIXL KV transfer over RDMA</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="gb300" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb300" data-variant="agg">
 <span><b>Checkpoint</b> moonshotai/Kimi-K3</span>
 <span><b>Precision</b> MXFP4 experts + BF16 dense, FP8 KV</span>
 <span><b>GPUs</b> 16x GB300 — two 8-GPU replicas</span>
 <span><b>Parallelism</b> TP8 per replica, KV-routed</span>
 <span><b>Routing</b> KV-aware across replicas</span>
 </div>
-<div className="dynamo-target-picker-summary" data-sku="gb300" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb300" data-variant="disagg">
 <span><b>Checkpoint</b> moonshotai/Kimi-K3</span>
 <span><b>Precision</b> MXFP4 experts + BF16 dense, FP8 KV</span>
 <span><b>GPUs</b> 8x GB300 prefill + 16x GB300 decode (1P2D)</span>
 <span><b>Parallelism</b> TP8 per replica over MNNVL</span>
 <span><b>Routing</b> KV-aware, NIXL/MNNVL KV transfer</span>
 </div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb300" data-variant="agg">
+<span><b>Checkpoint</b> moonshotai/Kimi-K3</span>
+<span><b>Precision</b> MXFP4 experts + BF16 dense, FP8 KV</span>
+<span><b>GPUs</b> 24x GB300 — three 8-GPU replicas</span>
+<span><b>Parallelism</b> DCP8 attention, TP8 MoE</span>
+<span><b>Routing</b> Load-aware</span>
+<span><b>Speculative decoding</b> DSPARK</span>
 </div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb200" data-variant="agg disagg">
+<span><b>Status</b> No recipe available for this combination</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb300" data-variant="disagg">
+<span><b>Status</b> No recipe available for this combination</span>
+</div>
+</div>
+
+<div className="dynamo-kimi-k3-content">
 
 ## Prerequisites
 
-<div data-sku="gb200">
+<div data-recipe-framework="vllm" data-sku="gb200">
 
 - A Kubernetes cluster with the Dynamo platform installed and GB200 GPUs available — 16x (4 nodes) for aggregated, 32x (8 nodes, 4 prefill + 4 decode) for disaggregated. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
 - The NVIDIA DRA driver with ComputeDomain support installed (required for multi-node NVLink).
@@ -67,11 +90,19 @@ Each target below is a Dynamo + vLLM deployment of Moonshot AI's Kimi-K3 — a m
 
 </div>
 
-<div data-sku="gb300">
+<div data-recipe-framework="vllm" data-sku="gb300">
 
 - A Kubernetes cluster with the Dynamo platform installed and GB300 GPUs available — 16x (4 nodes) for aggregated, 24x (6 nodes) for disaggregated. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
 - The NVIDIA DRA driver with ComputeDomain support installed (required for multi-node NVLink).
 - A Hugging Face token with access to `moonshotai/Kimi-K3`.
+
+</div>
+
+<div data-recipe-framework="sglang" data-sku="gb300" data-variant="agg">
+
+- A Kubernetes cluster with the Dynamo platform installed and 24x GB300 GPUs available across 6 nodes (3 replicas). See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
+- The NVIDIA DRA driver with ComputeDomain support installed (required for multi-node NVLink).
+- A Hugging Face token with access to `moonshotai/Kimi-K3` and `RadixArk/Kimi-K3-DSpark`.
 
 </div>
 
@@ -86,10 +117,18 @@ kubectl create secret generic hf-token-secret \
 ```
 
 <Warning>
-If you use the `model-cache` PVC (required on GB300, optional on GB200), edit `storageClassName` in `model-cache/model-cache.yaml` to a ReadWriteMany storage class on your cluster (`kubectl get storageclass`) before applying it. Review namespace, image tags, node selectors, and resource claims in the manifests as well.
+If you use the `model-cache` PVC, edit `storageClassName` in `model-cache/model-cache.yaml` to a ReadWriteMany storage class on your cluster (`kubectl get storageclass`) before applying it. Review namespace, image tags, node selectors, and resource claims in the manifests as well.
+</Warning>
+
+<Warning title="MNNVL rack selection">
+This recipe ensures correct MNNVL placement by using a `ComputeDomain` together with a clique selector `nodeSelectorTerms`. Modify the DGD `nvidia.com/gpu.clique` value to match a clique ID in your cluster.
+
+As an alternative, if your cluster is set up with [Grove](https://github.com/ai-dynamo/grove/): [Auto MNNVL](https://github.com/ai-dynamo/grove/blob/main/docs/user-guide/auto-mnnvl.md) or [topology-aware scheduling](https://github.com/ai-dynamo/grove/blob/main/docs/user-guide/topology-aware-scheduling.md) can be used.
 </Warning>
 
 ## Deploy
+
+<div data-recipe-framework="vllm">
 
 The two SKUs source the checkpoint differently, so follow the block for your target.
 
@@ -127,6 +166,7 @@ Then deploy the target DGD:
 <div data-sku="gb200" data-variant="agg">
 
 ```bash
+export DGD=kimi-k3-agg
 kubectl apply -f recipes/kimi-k3/vllm/agg-gb200-agentic/deploy.yaml -n ${NAMESPACE}
 ```
 
@@ -135,6 +175,7 @@ kubectl apply -f recipes/kimi-k3/vllm/agg-gb200-agentic/deploy.yaml -n ${NAMESPA
 <div data-sku="gb200" data-variant="disagg">
 
 ```bash
+export DGD=kimi-k3-disagg
 kubectl apply -f recipes/kimi-k3/vllm/disagg-gb200-agentic/deploy.yaml -n ${NAMESPACE}
 ```
 
@@ -143,6 +184,7 @@ kubectl apply -f recipes/kimi-k3/vllm/disagg-gb200-agentic/deploy.yaml -n ${NAME
 <div data-sku="gb300" data-variant="agg">
 
 ```bash
+export DGD=kimi-k3-agg
 kubectl apply -f recipes/kimi-k3/vllm/agg-gb300-agentic/deploy.yaml -n ${NAMESPACE}
 ```
 
@@ -151,6 +193,7 @@ kubectl apply -f recipes/kimi-k3/vllm/agg-gb300-agentic/deploy.yaml -n ${NAMESPA
 <div data-sku="gb300" data-variant="disagg">
 
 ```bash
+export DGD=kimi-k3-disagg
 kubectl apply -f recipes/kimi-k3/vllm/disagg-gb300-agentic/deploy.yaml -n ${NAMESPACE}
 ```
 
@@ -158,44 +201,40 @@ kubectl apply -f recipes/kimi-k3/vllm/disagg-gb300-agentic/deploy.yaml -n ${NAME
 
 First worker launch loads weights and captures CUDA graphs and can take tens of minutes.
 
+</div>
+
+<div data-recipe-framework="sglang" data-sku="gb300" data-variant="agg">
+
+
+Create the `model-cache` PVC and download both the Kimi-K3 checkpoint and the DSPARK draft model. The download can take several hours on a cold cache:
+
+```bash
+kubectl apply -f recipes/kimi-k3/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/kimi-k3/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=14400s
+```
+
+
+Deploy the SGLang DynamoGraphDeployment (DGD):
+
+```bash
+export DGD=kimi-k3-sglang-gb300-agg-agentic
+kubectl apply -f recipes/kimi-k3/sglang/agg-gb300-agentic/deploy.yaml -n ${NAMESPACE}
+```
+
+First worker launch loads weights and captures CUDA graphs and can take tens of minutes.
+
+</div>
+
 ## Smoke Test
 
-Send a test request to verify the deployment serves traffic. First forward the frontend port for your target:
-
-
-<div data-sku="gb200" data-variant="agg">
+Send a test request to verify the selected deployment serves traffic. The deploy command sets `DGD` to its resource name. Forward the frontend port:
 
 ```bash
-kubectl port-forward svc/kimi-k3-agg-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/${DGD}-frontend 8000:8000 -n ${NAMESPACE}
 ```
 
-</div>
-
-<div data-sku="gb200" data-variant="disagg">
-
-```bash
-kubectl port-forward svc/kimi-k3-disagg-frontend 8000:8000 -n ${NAMESPACE}
-```
-
-</div>
-
-<div data-sku="gb300" data-variant="agg">
-
-```bash
-kubectl port-forward svc/kimi-k3-agg-frontend 8000:8000 -n ${NAMESPACE}
-```
-
-</div>
-
-<div data-sku="gb300" data-variant="disagg">
-
-```bash
-kubectl port-forward svc/kimi-k3-disagg-frontend 8000:8000 -n ${NAMESPACE}
-```
-
-</div>
-
-All targets serve under the same model name, `moonshotai/Kimi-K3`:
+All Kimi-K3 recipes serve under the same model name, `moonshotai/Kimi-K3`:
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
@@ -205,28 +244,52 @@ curl http://localhost:8000/v1/chat/completions \
 
 Kimi-K3 reasons before answering, and tool calling is supported — the deployment uses the `kimi_k3` reasoning and tool-call parsers at the frontend.
 
+## Benchmark
+
+See [perf/README.md](https://github.com/milesial/dynamo/blob/docs/kimi-k3-framework-selector/recipes/kimi-k3/perf/README.md) for the full benchmark workflow: staging the trace on the PVC, running the AIPerf trace-replay Job, running a concurrency sweep, and fetching artifacts.
+
+### Optimization Targets
+
+Recipes are optimized for the following agentic workload and target user interactivity:
+
+| Workload | Median ISL | Median OSL | KV cache hit rate | User output tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| Agentic | 64k | 400 | 90% | 50 |
+
+The benchmark replays the Mooncake-format agentic trace described in [perf/README.md](https://github.com/milesial/dynamo/blob/docs/kimi-k3-framework-selector/recipes/kimi-k3/perf/README.md).
+
+### Performance Results
+
+| Workload | Framework | Recipe | SKU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| Agentic (15% subset) | SGLang | Aggregated (&lt;N&gt; workers) | GB200 | | | | |
+| Agentic (15% subset) | SGLang | Disaggregated (&lt;N&gt;P&lt;M&gt;D) | GB200 | | | | |
+| Agentic (15% subset) | SGLang | Aggregated (3 workers) | GB300 | 54 | 84.397 | 51.276 | 572.670 |
+| Agentic (15% subset) | SGLang | Disaggregated (1P1D) | GB300 | | 61.032 | 75.929 | 4,809 |
+| Agentic (15% subset) | vLLM | Aggregated (&lt;N&gt; workers) | GB200 | | | | |
+| Agentic (15% subset) | vLLM | Disaggregated (&lt;N&gt;P&lt;M&gt;D) | GB200 | | | | |
+| Agentic (15% subset) | vLLM | Aggregated (&lt;N&gt; workers) | GB300 | | | | |
+| Agentic (15% subset) | vLLM | Disaggregated (&lt;N&gt;P&lt;M&gt;D) | GB300 | | | | |
+
 ## Compare All Targets
 
-All four targets serve Kimi-K3 on vLLM with FP8 KV cache, KV-aware routing, prefix caching, and the FlashInfer TRT-LLM MoE backend, with tensor parallelism over NVLink (MNNVL):
+| | vLLM GB200 aggregated | vLLM GB200 disaggregated | vLLM GB300 aggregated | vLLM GB300 disaggregated | SGLang GB200 aggregated | SGLang GB200 disaggregated | SGLang GB300 aggregated | SGLang GB300 disaggregated |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **GPUs** | | | | | | | | |
+| **Workers** | | | | | | | | |
+| **Parallelism** | | | | | | | | |
+| **KV transfer** | | | | | | | | |
+| **Attention** | | | | | | | | |
+| **Precision** | | | | | | | | |
+| **Max context** | | | | | | | | |
 
-| | GB200 aggregated | GB200 disaggregated | GB300 aggregated | GB300 disaggregated |
-|---|---|---|---|---|
-| **GPUs** | 16x GB200 (4 nodes) | 16x prefill + 16x decode | 16x GB300 (2 replicas) | 8x prefill + 16x decode |
-| **Workers** | 1 | 1P + 1D | 2 (KV-routed) | 1P + 2D |
-| **Parallelism** | TP16 | TP16 / TP16 | TP8 per replica | TP8 per replica |
-| **KV transfer** | — | NIXL over RDMA (IB) | — | NIXL over MNNVL |
-| **Attention** | FlashInfer MLA | FlashInfer MLA | FlashInfer MLA | FlashInfer MLA |
-| **Precision** | MXFP4 + BF16, FP8 KV | MXFP4 + BF16, FP8 KV | MXFP4 + BF16, FP8 KV | MXFP4 + BF16, FP8 KV |
-| **Max context** | 1,048,576 | 1,048,576 | 1,048,576 | 1,048,576 |
+## Limitations
 
-## Notes
-
-- All targets use KV-aware routing at the Dynamo frontend with prefix caching and KV events enabled.
-- Kimi-K3 is multimodal — the deployments enable the multimodal encoder (`--enable-multimodal`) with data-parallel encoder sharding.
-- Multi-node tensor parallelism runs over NVLink (MNNVL) via Kubernetes ComputeDomains (DRA). Disaggregated KV transfer uses NIXL — over NVLink on GB300, over RDMA InfiniBand on GB200 (`UCX_TLS=^cuda_ipc`, GKE `rdma-*` network resources).
-- Kimi-K3 support requires the updated Dynamo frontend (tokenizer, `kimi_k3` reasoning and tool-call parsers) that ships with this release.
+- With JSON structured decoding, output for non-object top-level items can appear in `reasoning_content` instead of `content`.
 
 ## Source
+
+<div data-recipe-framework="vllm">
 
 - Source README: [recipes/kimi-k3/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/README.md)
 - Aggregated GB200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/vllm/agg-gb200-agentic/deploy.yaml)
@@ -234,3 +297,16 @@ All four targets serve Kimi-K3 on vLLM with FP8 KV cache, KV-aware routing, pref
 - Aggregated GB300: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/vllm/agg-gb300-agentic/deploy.yaml)
 - Disaggregated GB300: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/vllm/disagg-gb300-agentic/deploy.yaml)
 - Setup assets: [model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/model-cache/model-cache.yaml) and [model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/model-cache/model-download.yaml)
+
+</div>
+
+<div data-recipe-framework="sglang">
+
+- Aggregated GB300: [deploy.yaml](https://github.com/milesial/dynamo/blob/docs/kimi-k3-framework-selector/recipes/kimi-k3/sglang/agg-gb300-agentic/deploy.yaml)
+- Benchmark instructions: [recipes/kimi-k3/perf/README.md](https://github.com/milesial/dynamo/blob/docs/kimi-k3-framework-selector/recipes/kimi-k3/perf/README.md)
+- Benchmark Job: [perf.yaml](https://github.com/milesial/dynamo/blob/docs/kimi-k3-framework-selector/recipes/kimi-k3/perf/perf.yaml)
+- Setup assets: [model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/model-cache/model-cache.yaml) and [model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/model-cache/model-download.yaml)
+
+</div>
+
+</div>

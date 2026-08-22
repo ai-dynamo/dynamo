@@ -52,7 +52,7 @@ spec:
             value: '1'
           - name: VLLM_USE_V2_MODEL_RUNNER
             value: '0'
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-181a088d750c896fe0a575ebdbe72d7f000bfc4d-vllm-runtime
           imagePullPolicy: IfNotPresent
           name: main
           securityContext:
@@ -104,12 +104,12 @@ spec:
               --mm-encoder-attn-backend TORCH_SDPA \
               --attention-backend FLASHINFER_MLA \
               --attention-config '{"mla_prefill_backend":"TRTLLM_RAGGED","use_prefill_query_quantization":true}' \
-              --moe-backend flashinfer_trtllm \
+              --moe-backend auto \
               --kda-prefill-backend flashkda \
               --kernel-config '{"enable_cutedsl_warmup":true}' \
-              --max-num-seqs 256 \
-              --max-num-batched-tokens 16384 \
-              --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":8192,"cudagraph_capture_sizes":[1,2,4,8,12,16,24,32,64,128,256,512,1024,2048,4096,5120,6144,6656,7168,7680,8192]}' \
+              --max-num-seqs 1907 \
+              --max-num-batched-tokens 32768 \
+              --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":1024,"cudagraph_capture_sizes":[1,2,4,8,12,16,24,32,64,128,256,512,1024]}' \
               --block-size 64 \
               --no-enable-flashinfer-autotune \
               --skip-mm-profiling \
@@ -117,6 +117,7 @@ spec:
               --disable-custom-all-reduce \
               --enable-prefix-caching \
               --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' \
+              --dyn-enable-structural-tag \
               --cpu-distributed-timeout-seconds 1800 \
               --scheduler-cls vllm.v1.core.sched.async_scheduler.AsyncScheduler \
               --dyn-tool-call-parser kimi_k3 \
@@ -139,6 +140,9 @@ spec:
           - name: VLLM_USE_V2_MODEL_RUNNER
             value: '0'
           - name: VLLM_USE_NCCL_SYMM_MEM
+            value: '0'
+          # Disables CUDA graph memory estimation; restores 7 GiB KV cache stolen by the vLLM 0.27.1 default.
+          - name: VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
             value: '0'
           # TP all-reduce over MNNVL via FlashInfer — reduces collective latency vs NCCL.
           - name: VLLM_ALLREDUCE_USE_FLASHINFER
@@ -163,7 +167,12 @@ spec:
             value: '1'
           - name: PYTORCH_ALLOC_CONF
             value: expandable_segments:True
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-kimi-k3-dev.1
+          - name: DD_TRACE_ENABLED
+            value: 'false'
+          # Disables cuDNN for Conv2d in MoonViT patch-embed; prevents a cudnnCreate crash on GB200.
+          - name: GP_DISABLE_CUDNN
+            value: '1'
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-181a088d750c896fe0a575ebdbe72d7f000bfc4d-vllm-runtime
           imagePullPolicy: IfNotPresent
           name: main
           resources:
@@ -196,6 +205,11 @@ spec:
         - name: acr-token-secret
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-GB200
+          # On clusters with multiple NVLink domains (cliques), all worker pods must land
+          # on the same clique or MNNVL rendezvous fails at model load. Find your clique:
+          #   kubectl get nodes -L nvidia.com/gpu.clique
+          # Then uncomment and set the label below:
+          # nvidia.com/gpu.clique: <clique-uuid>
         tolerations:
         - effect: NoSchedule
           key: kubernetes.io/arch

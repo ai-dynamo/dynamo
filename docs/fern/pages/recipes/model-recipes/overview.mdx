@@ -69,13 +69,13 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
 </div>
 
 <div className="dynamo-model-grid" data-recipe-card-grid>
-  <div className="dynamo-model-card" data-recipe-card data-provider="moonshot" data-runtime="vllm" data-hardware="gb200 gb300" data-technique="aggregated disaggregated kv-routing" data-workload="agentic-coding">
+  <div className="dynamo-model-card" data-recipe-card data-provider="moonshot" data-runtime="vllm sglang" data-hardware="gb200 gb300" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/moonshotai.webp" alt="" />
       <div><h3>Kimi-K3</h3><p>Moonshot / NVIDIA</p></div>
     </div>
-    <p className="dynamo-model-summary">Day-0 vLLM recipes for Moonshot's Kimi-K3 on GB200 and GB300, aggregated or with prefill/decode disaggregation and KV-aware routing.</p>
-    <div className="dynamo-model-tags"><span>vLLM</span><span>GB200 · GB300</span><span>Day-0</span></div>
+    <p className="dynamo-model-summary">Kimi-K3 recipes for vLLM on GB200 and GB300, plus SGLang aggregated serving with DSPARK on GB300.</p>
+    <div className="dynamo-model-tags"><span>vLLM · SGLang</span><span>GB200 · GB300</span><span>Day-0</span></div>
   <a className="dynamo-card-link" href="kimi-k3.mdx" aria-label="Open the Kimi-K3 recipe">Open recipe</a>
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="zai" data-runtime="sglang" data-hardware="b200 h200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">

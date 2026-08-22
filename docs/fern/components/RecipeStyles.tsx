@@ -2031,11 +2031,12 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 
 /* ---------------------------------------------------------------------------
    Recipe target picker (variant selector on multi-target recipe pages).
-   Pages opt in by rendering hidden radio inputs named "recipe-sku" /
-   "recipe-usecase" with an adjacent label, and tagging variant-scoped blocks
-   with data-sku / data-usecase (space-separated values allowed). Content is
-   hidden via body:has(), so browsers without :has() degrade to showing all
-   variants. Pages without a picker are unaffected.
+   Pages opt in by rendering hidden radio inputs named "recipe-framework" /
+   "recipe-sku" / "recipe-usecase" with an adjacent label, and tagging
+   variant-scoped blocks with data-recipe-framework / data-sku / data-usecase
+   (space-separated values allowed). Content is hidden via body:has(), so
+   browsers without :has() degrade to showing all variants. Pages without a
+   picker are unaffected.
 --------------------------------------------------------------------------- */
 
 .dynamo-target-picker {
@@ -2158,7 +2159,9 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
     color: var(--grayscale-a9, #777);
 }
 
-/* Variant visibility: hide blocks that do not match the checked sku/usecase */
+/* Variant visibility: hide blocks that do not match the checked framework/sku/usecase */
+body:has(input[name="recipe-framework"][value="vllm"]:checked) [data-recipe-framework]:not([data-recipe-framework~="vllm"]),
+body:has(input[name="recipe-framework"][value="sglang"]:checked) [data-recipe-framework]:not([data-recipe-framework~="sglang"]),
 body:has(input[name="recipe-sku"][value="b200"]:checked) [data-sku]:not([data-sku~="b200"]),
 body:has(input[name="recipe-sku"][value="h200"]:checked) [data-sku]:not([data-sku~="h200"]),
 body:has(input[name="recipe-sku"][value="h100"]:checked) [data-sku]:not([data-sku~="h100"]),
@@ -2166,6 +2169,14 @@ body:has(input[name="recipe-sku"][value="gb200"]:checked) [data-sku]:not([data-s
 body:has(input[name="recipe-sku"][value="gb300"]:checked) [data-sku]:not([data-sku~="gb300"]),
 body:has(input[name="recipe-usecase"][value="chat"]:checked) [data-usecase]:not([data-usecase~="chat"]),
 body:has(input[name="recipe-usecase"][value="agentic"]:checked) [data-usecase]:not([data-usecase~="agentic"]) {
+    display: none;
+}
+
+/* Kimi-K3 currently publishes only the SGLang GB300 aggregated recipe. Keep
+   the picker empty-state visible while hiding the remainder of the page for
+   unavailable SGLang combinations. */
+body:has(#recipe-framework-sglang:checked):has(#recipe-sku-gb200:checked) .dynamo-kimi-k3-content,
+body:has(#recipe-framework-sglang:checked):has(#recipe-sku-gb300:checked):has(#recipe-variant-disagg:checked) .dynamo-kimi-k3-content {
     display: none;
 }
 
