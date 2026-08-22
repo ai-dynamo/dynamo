@@ -113,12 +113,24 @@ class frontend_service:
     OUTPUT_SEQUENCE_TOKENS = "output_sequence_tokens"
     # Predicted KV cache hit rate at routing time (0.0-1.0)
     KV_HIT_RATE = "kv_hit_rate"
+    # Predicted effective KV overlap accumulated across routed input blocks
+    KV_HIT_EFFECTIVE_OVERLAP_BLOCKS_TOTAL = "kv_hit_effective_overlap_blocks_total"
+    # Selected-worker device KV overlap accumulated across routed input blocks
+    KV_HIT_DEVICE_OVERLAP_BLOCKS_TOTAL = "kv_hit_device_overlap_blocks_total"
+    # Input blocks accumulated for predicted KV hit accounting
+    KV_HIT_INPUT_BLOCKS_TOTAL = "kv_hit_input_blocks_total"
     # Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
     KV_TRANSFER_ESTIMATED_LATENCY_SECONDS = "kv_transfer_estimated_latency_seconds"
     # Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
     SHARED_CACHE_HIT_RATE = "shared_cache_hit_rate"
     # Shared cache blocks beyond device overlap for the selected worker
     SHARED_CACHE_BEYOND_BLOCKS = "shared_cache_beyond_blocks"
+    # Shared-cache hit blocks accumulated across lookups
+    SHARED_CACHE_HIT_BLOCKS_TOTAL = "shared_cache_hit_blocks_total"
+    # Full input blocks checked in the shared cache
+    SHARED_CACHE_QUERIED_BLOCKS_TOTAL = "shared_cache_queried_blocks_total"
+    # Shared-cache hit blocks beyond selected-worker overlap
+    SHARED_CACHE_BEYOND_BLOCKS_TOTAL = "shared_cache_beyond_blocks_total"
     # Scheduler selections with less overlap than another eligible worker
     NON_MAX_OVERLAP_SELECTIONS_TOTAL = "non_max_overlap_selections_total"
     # Effective KV overlap blocks lost by non-max-overlap selections
@@ -464,10 +476,24 @@ class router:
     OUTPUT_SEQUENCE_TOKENS = "router_output_sequence_tokens"
     # Predicted KV cache hit rate at routing time (0.0-1.0)
     KV_HIT_RATE = "router_kv_hit_rate"
+    # Predicted effective KV overlap accumulated across routed input blocks
+    KV_HIT_EFFECTIVE_OVERLAP_BLOCKS_TOTAL = (
+        "router_kv_hit_effective_overlap_blocks_total"
+    )
+    # Selected-worker device KV overlap accumulated across routed input blocks
+    KV_HIT_DEVICE_OVERLAP_BLOCKS_TOTAL = "router_kv_hit_device_overlap_blocks_total"
+    # Input blocks accumulated for predicted KV hit accounting
+    KV_HIT_INPUT_BLOCKS_TOTAL = "router_kv_hit_input_blocks_total"
     # Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
     SHARED_CACHE_HIT_RATE = "router_shared_cache_hit_rate"
     # Shared cache blocks beyond device overlap for the selected worker
     SHARED_CACHE_BEYOND_BLOCKS = "router_shared_cache_beyond_blocks"
+    # Shared-cache hit blocks accumulated across lookups
+    SHARED_CACHE_HIT_BLOCKS_TOTAL = "router_shared_cache_hit_blocks_total"
+    # Full input blocks checked in the shared cache
+    SHARED_CACHE_QUERIED_BLOCKS_TOTAL = "router_shared_cache_queried_blocks_total"
+    # Shared-cache hit blocks beyond selected-worker overlap
+    SHARED_CACHE_BEYOND_BLOCKS_TOTAL = "router_shared_cache_beyond_blocks_total"
     # Scheduler selections with less overlap than another eligible worker
     NON_MAX_OVERLAP_SELECTIONS_TOTAL = "router_non_max_overlap_selections_total"
     # Effective KV overlap blocks lost by non-max-overlap selections

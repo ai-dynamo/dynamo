@@ -132,9 +132,28 @@ pub(crate) struct MigrationState {
 struct MigrationStateInner {
     excluded_worker_ids: Vec<WorkerId>,
     last_error: Option<DynamoError>,
+    router_metrics_observed: bool,
 }
 
 impl MigrationState {
+    /// Claim the request-scoped router metrics observation.
+    ///
+    /// Returns `true` exactly once across all migration attempts sharing this
+    /// state. Trackerless requests use this instead of constructing a full
+    /// `RequestTracker` solely for deduplication.
+    pub(crate) fn claim_router_metrics_observation(&self) -> bool {
+        let mut inner = self
+            .inner
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if inner.router_metrics_observed {
+            return false;
+        }
+        inner.router_metrics_observed = true;
+        true
+    }
+
     pub(crate) fn record_failure(&self, worker_id: WorkerId, error: Option<DynamoError>) {
         let mut inner = self
             .inner
