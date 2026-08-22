@@ -353,6 +353,73 @@ async fn converted_validation_errors_are_returned_before_streaming_headers() {
 
 #[tokio::test]
 #[serial]
+async fn chat_tool_argument_type_errors_are_rejected_before_backend_dispatch() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start(Vec::new()).await;
+
+        for stream in [false, true] {
+            let response = post_json(
+                &svc,
+                "/v1/chat/completions",
+                json!({
+                    "model": MODEL,
+                    "stream": stream,
+                    "messages": [
+                        {"role": "user", "content": "weather?"},
+                        {
+                            "role": "assistant",
+                            "tool_calls": [{
+                                "id": "call_weather",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_weather",
+                                    "arguments": "{\"location\":123}"
+                                }
+                            }]
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": "call_weather",
+                            "content": "sunny"
+                        },
+                        {"role": "user", "content": "thanks"}
+                    ],
+                    "tools": [{
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "location": {"type": "string"}
+                                },
+                                "required": ["location"]
+                            }
+                        }
+                    }]
+                }),
+            )
+            .await;
+            assert_openai_error(response, ExpectedError::Validation, "must be of type").await;
+        }
+
+        for request_type in [RequestType::Unary, RequestType::Stream] {
+            assert_error_metrics(
+                &svc,
+                &Endpoint::ChatCompletions,
+                &request_type,
+                &[(ErrorType::Validation, 1), (ErrorType::Internal, 0)],
+            );
+        }
+
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
 async fn responses_reject_empty_input_and_required_tool_choice_without_tools() {
     temp_env::async_with_vars(BASE_ENV, async {
         let svc = HarnessService::start(Vec::new()).await;

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{fmt::Display, sync::LazyLock};
+use std::{collections::HashMap, fmt::Display, sync::LazyLock};
 
 use dynamo_runtime::config::{
     env_is_truthy, environment_names::llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
@@ -482,36 +482,262 @@ pub fn validate_messages(
     if messages.is_empty() {
         anyhow::bail!("Messages array cannot be empty");
     }
-    // Prior assistant tool-call messages in the request must carry arguments
-    // as a JSON object string; reject bad non-empty shapes before chat-template rendering.
-    // This was caught in MiniMax-M3 multi-turn tool-call tests
+    Ok(())
+}
+
+/// Validates prior assistant tool calls against matching tools in this request.
+///
+/// Arguments must always be JSON object strings. When the current request also
+/// supplies a matching tool with a parameters schema, this additionally checks
+/// the schema's basic JSON types, required properties, nested object/array
+/// properties, and `additionalProperties: false`. Tool calls without a matching
+/// current definition retain syntax-only validation, which allows clients to
+/// replay history after removing or renaming a tool.
+pub fn validate_tool_call_arguments(
+    messages: &[dynamo_protocols::types::ChatCompletionRequestMessage],
+    tools: Option<&[dynamo_protocols::types::ChatCompletionTool]>,
+) -> Result<(), anyhow::Error> {
+    let mut schemas_by_name = HashMap::new();
+    if let Some(tools) = tools {
+        for tool in tools {
+            if let Some(parameters) = &tool.function.parameters {
+                // Preserve the first definition, matching `iter().find()` semantics
+                // without an O(messages * tools) scan.
+                schemas_by_name
+                    .entry(tool.function.name.as_str())
+                    .or_insert(parameters);
+            }
+        }
+    }
+
     for (message_index, message) in messages.iter().enumerate() {
         if let dynamo_protocols::types::ChatCompletionRequestMessage::Assistant(assistant) = message
             && let Some(tool_calls) = &assistant.tool_calls
         {
             for (tool_call_index, tool_call) in tool_calls.iter().enumerate() {
-                validate_json_object_string(
-                    &tool_call.function.arguments,
-                    format!(
-                        "`messages[{message_index}].tool_calls[{tool_call_index}].function.arguments`"
-                    ),
-                )?;
+                let field = format!(
+                    "messages[{message_index}].tool_calls[{tool_call_index}].function.arguments"
+                );
+                let Some(arguments) =
+                    parse_json_object_string(&tool_call.function.arguments, &field)?
+                else {
+                    continue;
+                };
+
+                if let Some(schema) = schemas_by_name.get(tool_call.function.name.as_str()) {
+                    validate_basic_json_schema(&arguments, schema, &field)?;
+                }
             }
         }
     }
     Ok(())
 }
 
-fn validate_json_object_string(value: &str, field: String) -> Result<(), anyhow::Error> {
+fn parse_json_object_string(
+    value: &str,
+    field: &str,
+) -> Result<Option<serde_json::Value>, anyhow::Error> {
     if value.trim().is_empty() {
+        return Ok(None);
+    }
+    let parsed: serde_json::Value = serde_json::from_str(value).map_err(|error| {
+        anyhow::anyhow!("`{field}` must be a valid JSON object string: {error}")
+    })?;
+    if !parsed.is_object() {
+        anyhow::bail!("`{field}` must be a valid JSON object string");
+    }
+    Ok(Some(parsed))
+}
+
+fn validate_basic_json_schema(
+    value: &serde_json::Value,
+    schema: &serde_json::Value,
+    field: &str,
+) -> Result<(), anyhow::Error> {
+    if schema == &serde_json::Value::Bool(true) {
         return Ok(());
     }
-    let parsed: serde_json::Value = serde_json::from_str(value)
-        .map_err(|error| anyhow::anyhow!("{field} must be a valid JSON object string: {error}"))?;
-    if !parsed.is_object() {
-        anyhow::bail!("{field} must be a valid JSON object string");
+    if schema == &serde_json::Value::Bool(false) {
+        anyhow::bail!("`{field}` is not allowed by the tool parameters schema");
     }
+
+    let Some(schema) = schema.as_object() else {
+        // Top-level parameter schemas are checked by `validate_tools`. Ignore
+        // malformed nested schemas here rather than treating them as data types.
+        return Ok(());
+    };
+
+    if let Some(expected) = schema.get("type")
+        && !matches_json_schema_type(value, expected)
+    {
+        anyhow::bail!(
+            "`{field}` must be of type {}, got {}",
+            display_schema_type(expected),
+            json_type_name(value),
+        );
+    }
+
+    if let Some(object) = value.as_object() {
+        if let Some(required) = schema.get("required").and_then(serde_json::Value::as_array) {
+            for property in required.iter().filter_map(serde_json::Value::as_str) {
+                if !object.contains_key(property) {
+                    anyhow::bail!("`{field}.{property}` is required");
+                }
+            }
+        }
+
+        let properties = schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object);
+        let pattern_properties = schema
+            .get("patternProperties")
+            .and_then(serde_json::Value::as_object)
+            .map(|patterns| {
+                patterns
+                    .iter()
+                    .map(|(pattern, property_schema)| {
+                        regex::Regex::new(pattern)
+                            .map(|regex| (regex, property_schema))
+                            .map_err(|error| {
+                                anyhow::anyhow!(
+                                    "`{field}` has invalid patternProperties pattern {pattern:?}: {error}"
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+
+        for (property, property_value) in object {
+            let mut matched_schema = false;
+            if let Some(property_schema) = properties.and_then(|values| values.get(property)) {
+                validate_basic_json_schema(
+                    property_value,
+                    property_schema,
+                    &format!("{field}.{property}"),
+                )?;
+                matched_schema = true;
+            }
+
+            for (pattern, property_schema) in &pattern_properties {
+                if pattern.is_match(property) {
+                    validate_basic_json_schema(
+                        property_value,
+                        property_schema,
+                        &format!("{field}.{property}"),
+                    )?;
+                    matched_schema = true;
+                }
+            }
+
+            if matched_schema {
+                continue;
+            }
+
+            match schema.get("additionalProperties") {
+                Some(serde_json::Value::Bool(false)) => {
+                    anyhow::bail!("`{field}.{property}` is not allowed")
+                }
+                Some(additional_schema @ serde_json::Value::Object(_)) => {
+                    validate_basic_json_schema(
+                        property_value,
+                        additional_schema,
+                        &format!("{field}.{property}"),
+                    )?;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if let Some(array) = value.as_array() {
+        let prefix_len = if let Some(prefix_items) = schema
+            .get("prefixItems")
+            .and_then(serde_json::Value::as_array)
+        {
+            for (index, (item, item_schema)) in array.iter().zip(prefix_items.iter()).enumerate() {
+                validate_basic_json_schema(item, item_schema, &format!("{field}[{index}]"))?;
+            }
+            prefix_items.len()
+        } else {
+            0
+        };
+
+        if let Some(item_schema) = schema.get("items") {
+            for (index, item) in array.iter().enumerate().skip(prefix_len) {
+                validate_basic_json_schema(item, item_schema, &format!("{field}[{index}]"))?;
+            }
+        }
+    }
+
     Ok(())
+}
+
+fn matches_json_schema_type(value: &serde_json::Value, expected: &serde_json::Value) -> bool {
+    match expected {
+        serde_json::Value::String(expected) => matches_json_type(value, expected),
+        serde_json::Value::Array(expected) => expected.iter().any(|expected| {
+            expected
+                .as_str()
+                .is_some_and(|expected| matches_json_type(value, expected))
+        }),
+        // `type` itself is malformed, so leave schema-shape validation to a
+        // future full JSON Schema validator instead of rejecting arguments.
+        _ => true,
+    }
+}
+
+fn matches_json_type(value: &serde_json::Value, expected: &str) -> bool {
+    match expected {
+        "null" => value.is_null(),
+        "boolean" => value.is_boolean(),
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "number" => value.is_number(),
+        "integer" => {
+            value.as_i64().is_some()
+                || value.as_u64().is_some()
+                || value
+                    .as_f64()
+                    .is_some_and(|number| number.is_finite() && number.fract() == 0.0)
+        }
+        "string" => value.is_string(),
+        // Unknown type names belong to schema validation, not argument
+        // validation. Ignoring them preserves compatibility with extensions.
+        _ => true,
+    }
+}
+
+fn display_schema_type(expected: &serde_json::Value) -> String {
+    match expected {
+        serde_json::Value::String(expected) => format!("\"{expected}\""),
+        serde_json::Value::Array(expected) => {
+            let values = expected
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(|value| format!("\"{value}\""))
+                .collect::<Vec<_>>()
+                .join(" or ");
+            if values.is_empty() {
+                "the declared JSON type".to_string()
+            } else {
+                values
+            }
+        }
+        _ => "the declared JSON type".to_string(),
+    }
+}
+
+fn json_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
 /// Validates top_logprobs parameter
