@@ -7,12 +7,13 @@ import json
 import os
 from typing import Any, Literal, TypedDict, overload
 
+from typing_extensions import Unpack
+
 from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_mocker_synthetic_trace_replay,
 )
 from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
 from dynamo.replay.report import PlannerReplayDetails, ReplayReport
-from typing_extensions import Unpack
 
 
 class _CommonReplayOptions(TypedDict, total=False):

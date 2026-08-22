@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import msgspec
+
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
     ScheduledRequestMetrics,

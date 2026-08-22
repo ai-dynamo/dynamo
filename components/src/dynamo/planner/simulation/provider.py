@@ -131,9 +131,7 @@ def _independent_preset_mappings(
     specifications: dict[str, tuple[dict[str, Any], list[Any]]] = {
         "scaling_policy": (
             {
-                "enable_throughput_scaling": planner.get(
-                    "enable_throughput_scaling"
-                ),
+                "enable_throughput_scaling": planner.get("enable_throughput_scaling"),
                 "enable_load_scaling": planner.get("enable_load_scaling"),
                 "throughput_adjustment_interval_seconds": planner.get(
                     "throughput_adjustment_interval_seconds"
@@ -432,12 +430,13 @@ class PlannerSearchSpace(BaseModel):
                 upgraded.pop(group)
             elif preset is False or preset == {}:
                 upgraded[group] = {
-                    "preset": _independent_preset_mappings(
-                        group, control, upgraded
-                    )
+                    "preset": _independent_preset_mappings(group, control, upgraded)
                 }
         for public_knob in (
-            _SCALING_KEYS | _FPM_KEYS | _LOAD_KEYS | (_PREDICTOR_KEYS - {"load_predictor"})
+            _SCALING_KEYS
+            | _FPM_KEYS
+            | _LOAD_KEYS
+            | (_PREDICTOR_KEYS - {"load_predictor"})
         ):
             upgraded.pop(public_knob, None)
         legacy_fields: list[str] = []
@@ -476,9 +475,7 @@ class PlannerSearchSpace(BaseModel):
                     f"got {invalid}"
                 )
         if self.planner_target not in (None, "throughput", "latency", "sla", "load"):
-            raise ValueError(
-                "planner.target must be throughput, latency, sla, or load"
-            )
+            raise ValueError("planner.target must be throughput, latency, sla, or load")
         domains = (
             ("min_workers", self.public_min_workers, 0),
             ("prefill_min_workers", self.public_prefill_min_workers, 1),
@@ -490,9 +487,7 @@ class PlannerSearchSpace(BaseModel):
             if not values:
                 raise ValueError(f"planner.{name} choices cannot be empty")
             invalid = [
-                value
-                for value in values
-                if value is not None and value < minimum
+                value for value in values if value is not None and value < minimum
             ]
             if invalid:
                 raise ValueError(
@@ -640,9 +635,7 @@ class DynamoPlannerSweepConfigProvider:
             "scaling_policy": _json_choices(kept)
         }
         if space.public_policy is not None:
-            local_choices["policy"] = cast(
-                list[JSONValue], list(space.public_policy)
-            )
+            local_choices["policy"] = cast(list[JSONValue], list(space.public_policy))
         if scaling_possible:
             local_choices["fpm_sampling"] = _json_choices(space.fpm_sampling.preset)
             local_choices["load_sensitivity"] = _json_choices(
@@ -682,8 +675,7 @@ class DynamoPlannerSweepConfigProvider:
                 (_HOOK,)
                 if scaling_possible
                 or (
-                    space.public_policy is not None
-                    and "enabled" in space.public_policy
+                    space.public_policy is not None and "enabled" in space.public_policy
                 )
                 else ()
             ),
@@ -724,11 +716,7 @@ class DynamoPlannerSweepConfigProvider:
         )
         if not policy_enabled:
             return AdapterReplaySpec(
-                config=(
-                    {"policy": "disabled"}
-                    if public_schema
-                    else candidate_config
-                )
+                config=({"policy": "disabled"} if public_schema else candidate_config)
             )
 
         if scaling_enabled:
@@ -869,9 +857,7 @@ def _prediction_sample(engine: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
             raise TypeError(f"Planner prediction requires {role} parallelism")
         prefix = "" if role == "aggregated" else f"{role}_"
         sample[f"{prefix}tp"] = int(parallel.get("tensor", 1))
-        sample[f"{prefix}attention_dp"] = int(
-            parallel.get("attention_data", 1)
-        )
+        sample[f"{prefix}attention_dp"] = int(parallel.get("attention_data", 1))
     return sample
 
 

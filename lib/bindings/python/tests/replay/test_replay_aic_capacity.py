@@ -4,8 +4,9 @@
 import importlib
 import json
 
-import dynamo._internal.aic as aic_helpers
 import pytest
+
+import dynamo._internal.aic as aic_helpers
 from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay
 
