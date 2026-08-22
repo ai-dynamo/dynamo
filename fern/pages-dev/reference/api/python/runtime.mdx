@@ -16,7 +16,7 @@ A client capable of calling served instances of an endpoint
 from dynamo.runtime import Client
 ```
 
-[`lib/bindings/python/src/dynamo/_core.pyi#L288`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L288)
+[`lib/bindings/python/src/dynamo/_core.pyi#L290`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L290)
 
 **Public methods**
 
@@ -32,7 +32,7 @@ Get list of current instance IDs.
 
 - `List[int]` — A list of currently available instance IDs
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L295)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L297)
 
 <h4 id="api-dynamo-core-client-instances">instances</h4>
 
@@ -51,7 +51,7 @@ instances exist.
 - `List[Instance]` — A list of ``Instance`` for the currently available instances,
 - `List[Instance]` — across all transports (TCP, NATS, ...).
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L304)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L306)
 
 <h4 id="api-dynamo-core-client-wait-for-instances">wait_for_instances</h4>
 
@@ -65,7 +65,7 @@ Wait for instances to be available for work and return their IDs.
 
 - `List[int]` — A list of instance IDs that are available for work
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L318)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L320)
 
 <h4 id="api-dynamo-core-client-wait-for-instance-by-runtime-data">wait_for_instance_by_runtime_data</h4>
 
@@ -75,7 +75,7 @@ wait_for_instance_by_runtime_data(key: str, value: str, timeout_s: float | None 
 
 Wait for exactly one instance whose MDC runtime_data contains the given string value.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L327)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L329)
 
 <h4 id="api-dynamo-core-client-random">random</h4>
 
@@ -85,7 +85,7 @@ random(request: JsonLike, annotated: bool | None = True, context: Context | None
 
 Pick a random instance of the endpoint and issue the request
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L338)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L340)
 
 <h4 id="api-dynamo-core-client-round-robin">round_robin</h4>
 
@@ -95,7 +95,7 @@ round_robin(request: JsonLike, annotated: bool | None = True, context: Context |
 
 Pick the next instance of the endpoint in a round-robin fashion
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L349)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L351)
 
 <h4 id="api-dynamo-core-client-direct">direct</h4>
 
@@ -105,7 +105,7 @@ direct(request: JsonLike, instance_id: int, annotated: bool | None = True, conte
 
 Pick a specific instance of the endpoint
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L360)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L362)
 
 <h4 id="api-dynamo-core-client-generate">generate</h4>
 
@@ -115,7 +115,7 @@ generate(request: JsonLike, annotated: bool | None = True, context: Context | No
 
 Generate a response from the endpoint
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L372)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L374)
 </Accordion>
 
 <Accordion id="api-dynamo-core-context" title="Context (class)">
@@ -129,7 +129,7 @@ from dynamo.runtime import Context
 Context(id: Optional[str] = None, metadata: Optional[Dict[str, str]] = None) -> None
 ```
 
-[`lib/bindings/python/src/dynamo/_core.pyi#L460`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L460)
+[`lib/bindings/python/src/dynamo/_core.pyi#L468`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L468)
 
 **Public methods**
 
@@ -150,7 +150,7 @@ Optional request ID. If None, a default ID will be generated.
 Optional propagated metadata map.
 </ParamField>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L466)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L474)
 
 <h4 id="api-dynamo-core-context-is-stopped">is_stopped</h4>
 
@@ -164,7 +164,7 @@ Check if the context has been stopped (synchronous).
 
 - `bool` — True if the context is stopped, False otherwise.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L480)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L488)
 
 <h4 id="api-dynamo-core-context-is-killed">is_killed</h4>
 
@@ -178,7 +178,7 @@ Check if the context has been killed (synchronous).
 
 - `bool` — True if the context is killed, False otherwise.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L489)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L497)
 
 <h4 id="api-dynamo-core-context-stop-generating">stop_generating</h4>
 
@@ -188,7 +188,7 @@ stop_generating() -> None
 
 Issue a stop generating signal to the context.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L498)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L506)
 
 <h4 id="api-dynamo-core-context-id">id</h4>
 
@@ -202,7 +202,7 @@ Get the context ID.
 
 - `str` — The context identifier string.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L504)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L512)
 
 <h4 id="api-dynamo-core-context-detached">detached</h4>
 
@@ -212,7 +212,7 @@ detached(id: str) -> Context
 
 Create a context with a fresh cancellation controller and request ID while preserving trace parentage and a metadata snapshot.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L513)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L521)
 
 <h4 id="api-dynamo-core-context-async-killed-or-stopped">async_killed_or_stopped</h4>
 
@@ -226,7 +226,7 @@ Asynchronously wait until the context is killed or stopped.
 
 - `asyncio.Future[bool]` — True when the context is killed or stopped.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L520)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L528)
 
 <h4 id="api-dynamo-core-context-notify-first-token">notify_first_token</h4>
 
@@ -236,7 +236,7 @@ notify_first_token() -> None
 
 Fire the first-token signal so the framework can release any deferred ``engine.abort()``. Idempotent; no-op on non-decode requests. Engines normally don't need this — the framework auto-fires on the first non-empty chunk in the response stream.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L529)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L537)
 
 <h4 id="api-dynamo-core-context-trace-headers">trace_headers</h4>
 
@@ -253,7 +253,7 @@ Build W3C trace headers for propagating to downstream inference engines.
 - `Optional[dict[str, str]]` — ``x-request-id``, ``request-id`` when upstream propagated them.
 - `Optional[dict[str, str]]` — Forward unchanged to the inference engine's ``trace_headers`` kwarg.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L576)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L584)
 
 <h4 id="api-dynamo-core-context-current-span">current_span</h4>
 
@@ -266,7 +266,7 @@ Handle on the framework's ``engine.generate`` span. Use it to ``set_attribute`` 
 Engines normally reach this through
 ``dynamo.common.backend.telemetry.current_span(context)``.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L588)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L596)
 
 <h4 id="api-dynamo-core-context-start-span">start_span</h4>
 
@@ -279,7 +279,7 @@ Open a child span under ``engine.generate`` with a dynamic name. The returned ``
 Engines normally reach this through
 ``dynamo.common.backend.telemetry.start_span(context, name)``.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L600)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L608)
 </Accordion>
 
 <Accordion id="api-dynamo-core-distributedruntime" title="DistributedRuntime (class)">
@@ -388,6 +388,16 @@ from dynamo.runtime import Endpoint
 
 **Public methods**
 
+<h4 id="api-dynamo-core-endpoint-first-token-source">first_token_source</h4>
+
+```python
+first_token_source(worker_type: WorkerType) -> Optional[FirstTokenSource]
+```
+
+No summary available.
+
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L151)
+
 <h4 id="api-dynamo-core-endpoint-serve-endpoint">serve_endpoint</h4>
 
 ```python
@@ -412,7 +422,7 @@ Optional dict containing the health check request payload
 that will be used to verify endpoint health
 </ParamField>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L151)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L153)
 
 <h4 id="api-dynamo-core-endpoint-serve-bidirectional-endpoint">serve_bidirectional_endpoint</h4>
 
@@ -447,7 +457,7 @@ Whether to wait for inflight requests to complete during shutdown (default: True
 Optional list of metrics labels to add to the metrics
 </ParamField>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L165)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L167)
 
 <h4 id="api-dynamo-core-endpoint-client">client</h4>
 
@@ -459,7 +469,7 @@ Create a `Client` capable of calling served instances of this endpoint.
 
 By default this uses round-robin routing when `router_mode` is not provided.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L194)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L196)
 
 <h4 id="api-dynamo-core-endpoint-connection-id">connection_id</h4>
 
@@ -469,7 +479,7 @@ connection_id() -> int
 
 Opaque unique ID for this worker. May change over worker lifetime.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L202)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L204)
 
 <h4 id="api-dynamo-core-endpoint-unregister-endpoint-instance">unregister_endpoint_instance</h4>
 
@@ -483,7 +493,7 @@ This removes the endpoint from the instances bucket, preventing the router
 from sending requests to this worker. Use this when a worker is sleeping
 and should not receive any requests.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L218)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L220)
 
 <h4 id="api-dynamo-core-endpoint-register-endpoint-instance">register_endpoint_instance</h4>
 
@@ -497,7 +507,7 @@ This adds the endpoint back to the instances bucket, allowing the router
 to send requests to this worker again. Use this when a worker wakes up
 and should start receiving requests.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L228)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L230)
 </Accordion>
 
 <Accordion id="api-dynamo-runtime-logging-loghandler" title="LogHandler (class)">
@@ -534,7 +544,7 @@ raises `StopAsyncIteration`, the caller has merely stopped sending
 input. The engine should keep yielding response chunks until it
 chooses to return or observes `context.is_stopped()`.
 
-[`lib/bindings/python/src/dynamo/_core.pyi#L238`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L238)
+[`lib/bindings/python/src/dynamo/_core.pyi#L240`](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/_core.pyi#L240)
 </Accordion>
 
 <Accordion id="api-dynamo-runtime-logging-vllmcolorformatter" title="VllmColorFormatter (class)">
