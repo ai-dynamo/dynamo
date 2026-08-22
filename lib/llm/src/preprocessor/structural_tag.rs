@@ -22,13 +22,16 @@ fn is_kimi_k2_parser(parser_name: Option<&str>) -> bool {
 
 fn requires_intrinsic_structural_tag(parser_name: Option<&str>, tool_choice: &ToolChoice) -> bool {
     // K2 forced calls and K3 named calls cannot use Dynamo's generic JSON-schema
-    // fallback because both families emit native, marker-delimited formats.
-    // Treat their structural tags as part of implementing these standard OpenAI
-    // request shapes, not as an operator opt-in. K3 required remains on its
-    // intentional prompt-level XTML path.
+    // fallback because both families emit native, marker-delimited formats. K3
+    // auto also needs its model-native tag: the tag keeps the tools channel
+    // optional, but constrains a call after the model chooses to start one.
+    // Treat these tags as part of implementing the standard OpenAI request
+    // shapes, not as an operator opt-in. K3 required remains on its intentional
+    // prompt-level XTML path.
     (is_kimi_k2_parser(parser_name)
         && matches!(tool_choice, ToolChoice::Required | ToolChoice::Named(_)))
-        || (is_kimi_k3_parser(parser_name) && matches!(tool_choice, ToolChoice::Named(_)))
+        || (is_kimi_k3_parser(parser_name)
+            && matches!(tool_choice, ToolChoice::Auto | ToolChoice::Named(_)))
 }
 
 fn should_skip_tool_call_ban(exclude_tools_when_none: bool, tool_choice: &ToolChoice) -> bool {
@@ -46,8 +49,9 @@ impl OpenAIPreprocessor {
         preprocessed_request: &mut PreprocessedRequest,
     ) -> Result<bool, DynamoError> {
         let parser_name = self.tool_call_parser.as_deref();
+        let intrinsic_structural_tag = requires_intrinsic_structural_tag(parser_name, tool_choice);
         if self.runtime_config.structural_tag_mode == StructuralTagMode::Off
-            && !requires_intrinsic_structural_tag(parser_name, tool_choice)
+            && !intrinsic_structural_tag
         {
             return Ok(false);
         }
@@ -81,12 +85,14 @@ impl OpenAIPreprocessor {
             return Self::apply_tool_call_ban(builder, preprocessed_request);
         }
 
-        if !Self::should_apply_tool_call_format(
-            self.runtime_config.structural_tag_scope,
-            tool_choice,
-            tools,
-            parallel_tool_calls,
-        ) {
+        if !intrinsic_structural_tag
+            && !Self::should_apply_tool_call_format(
+                self.runtime_config.structural_tag_scope,
+                tool_choice,
+                tools,
+                parallel_tool_calls,
+            )
+        {
             return Ok(false);
         }
 
@@ -318,7 +324,15 @@ mod tests {
     }
 
     #[test]
-    fn named_kimi_k3_is_intrinsic_even_when_global_mode_is_off() {
+    fn auto_and_named_kimi_k3_are_intrinsic_even_when_global_mode_is_off() {
+        assert!(requires_intrinsic_structural_tag(
+            Some("kimi_k3"),
+            &ToolChoice::Auto
+        ));
+        assert!(requires_intrinsic_structural_tag(
+            Some("kimi-k3"),
+            &ToolChoice::Auto
+        ));
         let named = ToolChoice::Named("get_weather".to_string());
         assert!(requires_intrinsic_structural_tag(Some("kimi_k3"), &named));
         assert!(requires_intrinsic_structural_tag(Some("kimi-k3"), &named));
@@ -431,6 +445,76 @@ mod tests {
 
         assert!(!applied);
         assert!(request.sampling_options.guided_decoding.is_none());
+    }
+
+    #[test]
+    fn kimi_k3_auto_installs_native_tag_when_global_mode_is_off() {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        mdc.runtime_config.structural_tag_mode = StructuralTagMode::Off;
+        mdc.runtime_config.structural_tag_scope = StructuralTagScope::Auto;
+        mdc.runtime_config.tool_call_parser = Some("kimi_k3".to_string());
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let tools = [ToolDefinition {
+            name: "get_weather".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"location": {"type": "string"}},
+                "required": ["location"]
+            })),
+            // K3 auto must be constrained even when the caller does not opt in
+            // to OpenAI strict schema enforcement.
+            strict: None,
+        }];
+        let mut request = preprocessed_request();
+
+        let applied = preprocessor
+            .apply_tool_choice_structural_tag(&ToolChoice::Auto, &tools, None, false, &mut request)
+            .unwrap();
+
+        assert!(applied);
+        let format = &request
+            .sampling_options
+            .guided_decoding
+            .as_ref()
+            .unwrap()
+            .structural_tag
+            .as_ref()
+            .unwrap()["format"];
+        assert_eq!(format["type"], "triggered_tags");
+        assert_eq!(format["at_least_one"], false);
+        assert_eq!(
+            format["triggers"],
+            serde_json::json!(["<|open|>tools<|sep|>"])
+        );
+        assert_eq!(
+            format["excludes"],
+            serde_json::json!([
+                "<|open|>think<|sep|>",
+                "<|close|>think<|sep|>",
+                "<|open|>call"
+            ])
+        );
+        let tools_part = &format["tags"][0];
+        assert_eq!(tools_part["begin"], "<|open|>tools<|sep|>");
+        assert_eq!(tools_part["content"]["at_least_one"], true);
+        assert_eq!(
+            tools_part["content"]["tags"][0]["begin"],
+            "<|open|>call tool=\"get_weather\" index=\""
+        );
+        let arguments = &tools_part["content"]["tags"][0]["content"]["elements"][2];
+        assert_eq!(arguments["type"], "sequence");
+        assert_eq!(
+            arguments["elements"][0]["begin"],
+            "<|open|>argument key=\"location\" type=\"string\"<|sep|>"
+        );
+        assert!(
+            arguments["elements"][0]["content"]["pattern"]
+                .as_str()
+                .is_some_and(|pattern| pattern.ends_with('+')),
+            "the required location argument must be non-empty"
+        );
     }
 
     #[test]
