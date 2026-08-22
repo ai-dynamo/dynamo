@@ -405,7 +405,7 @@ where
             .await?;
 
             let router = if affinity.is_none()
-                && BuiltinRoutingPolicy::from_router_mode(context.router_mode).is_some()
+                && BuiltinRoutingPolicy::from_router_mode(prefill_router_mode).is_some()
             {
                 InnerPrefillRouter::RoutingHost(Arc::new(RoutingHost::<Sel>::new_builtin(
                     push_router,
