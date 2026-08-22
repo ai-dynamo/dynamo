@@ -14,17 +14,17 @@ pub(crate) struct RoutePicker {
     round_robin_cursor: AtomicU64,
 }
 
-/// Concurrent picker for cache-free policies.
+/// Concurrent picker for first-party routing policies.
 ///
-/// This exposes the same round-robin and random implementation used by
+/// This exposes the same first-party policy implementations used by
 /// [`PushRouter`](crate::pipeline::PushRouter) without coupling policy hosts to
 /// transport dispatch.
 #[derive(Debug)]
-pub struct StatelessRoutePicker {
+pub struct BuiltinRoutePicker {
     inner: RoutePicker,
 }
 
-impl StatelessRoutePicker {
+impl BuiltinRoutePicker {
     pub const fn round_robin() -> Self {
         Self {
             inner: RoutePicker::new(RoutePolicy::RoundRobin),
@@ -37,18 +37,38 @@ impl StatelessRoutePicker {
         }
     }
 
-    /// Select one row and advance any policy state.
-    pub fn select_index(&self, candidate_count: usize) -> Option<usize> {
-        let mut samples = RandomSamples;
-        self.inner
-            .choose_stateless_index(candidate_count, true, &mut samples)
+    pub const fn power_of_two_choices() -> Self {
+        Self {
+            inner: RoutePicker::new(RoutePolicy::PowerOfTwoChoices),
+        }
     }
 
-    /// Inspect the next row without advancing round-robin state.
-    pub fn peek_index(&self, candidate_count: usize) -> Option<usize> {
-        let mut samples = RandomSamples;
+    pub const fn least_loaded() -> Self {
+        Self {
+            inner: RoutePicker::new(RoutePolicy::LeastLoaded),
+        }
+    }
+
+    /// Select one worker and advance any policy state.
+    pub fn select_worker(&self, worker_ids: &[u64], load: impl Fn(u64) -> u64) -> Option<u64> {
         self.inner
-            .choose_stateless_index(candidate_count, false, &mut samples)
+            .select(
+                CandidateView::Workers(worker_ids),
+                RouteContext::default(),
+                load,
+            )
+            .map(|decision| decision.target.worker_id)
+    }
+
+    /// Inspect the next worker without advancing round-robin state.
+    pub fn peek_worker(&self, worker_ids: &[u64], load: impl Fn(u64) -> u64) -> Option<u64> {
+        self.inner
+            .peek(
+                CandidateView::Workers(worker_ids),
+                RouteContext::default(),
+                load,
+            )
+            .map(|decision| decision.target.worker_id)
     }
 }
 

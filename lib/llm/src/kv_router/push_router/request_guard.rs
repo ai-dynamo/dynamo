@@ -7,14 +7,12 @@ use dynamo_kv_router::{protocols::WorkerWithDpRank, selector::WorkerSelector};
 use dynamo_runtime::{
     error::DynamoError,
     metrics::frontend_perf::{STAGE_DISPATCH, StageGuard},
+    pipeline::OccupancyReservation,
     protocols::annotated::Annotated,
 };
 
 use crate::{
-    kv_router::{
-        KvRouter, metrics::RouterRequestMetrics, push_router::load::RoutingLoadReservation,
-        scheduler::DefaultWorkerSelector,
-    },
+    kv_router::{KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector},
     local_model::runtime_config::ModelRuntimeConfig,
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -122,9 +120,9 @@ where
     Stateless {
         worker_id: u64,
     },
-    Load {
+    Occupancy {
         worker_id: u64,
-        reservation: Option<RoutingLoadReservation>,
+        reservation: Option<OccupancyReservation>,
     },
 }
 
@@ -136,7 +134,7 @@ where
         match self {
             Self::Kv(cleanup) => cleanup.worker.worker_id,
             Self::Stateless { worker_id } => *worker_id,
-            Self::Load { worker_id, .. } => *worker_id,
+            Self::Occupancy { worker_id, .. } => *worker_id,
         }
     }
 
@@ -150,15 +148,15 @@ where
                 *current = worker_id;
                 None
             }
-            Self::Load {
+            Self::Occupancy {
                 worker_id: current,
                 reservation,
             } => {
-                let load = reservation
+                let occupancy = reservation
                     .as_mut()
                     .map(|reservation| reservation.retarget(worker_id));
                 *current = worker_id;
-                load
+                occupancy
             }
         }
     }
@@ -166,7 +164,7 @@ where
     async fn finish(&mut self) {
         match self {
             Self::Kv(cleanup) => cleanup.finish().await,
-            Self::Load { reservation, .. } => drop(reservation.take()),
+            Self::Occupancy { reservation, .. } => drop(reservation.take()),
             Self::Stateless { .. } => {}
         }
     }
@@ -403,13 +401,13 @@ where
     pub(super) fn new_builtin(
         request_metrics: Arc<RouterRequestMetrics>,
         worker_id: u64,
-        load_reservation: Option<RoutingLoadReservation>,
+        occupancy_reservation: Option<OccupancyReservation>,
         request: &PreprocessedRequest,
     ) -> Self {
         request_metrics.requests_started_total().inc();
         Self {
-            cleanup: match load_reservation {
-                Some(reservation) => RequestCleanup::Load {
+            cleanup: match occupancy_reservation {
+                Some(reservation) => RequestCleanup::Occupancy {
                     worker_id,
                     reservation: Some(reservation),
                 },

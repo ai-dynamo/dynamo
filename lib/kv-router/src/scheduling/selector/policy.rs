@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::ops::BitOr;
 
 use super::{
-    DefaultWorkerPicker, LogitWeights, WorkerSelectionInput, WorkerSelector,
-    select_worker_with_policy,
+    DefaultWorkerPicker, LogitWeights, MaterializedSelectionInput, WorkerSelectionInput,
+    WorkerSelector, select_worker_with_policy,
 };
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use crate::scheduling::config::KvRouterConfig;
@@ -58,6 +58,8 @@ impl WorkerInputs {
     pub const LOAD: Self = Self(1 << 1);
     /// Request preferred-taint routing metadata.
     pub const PREFERRED_TAINT: Self = Self(1 << 2);
+    /// Request host-owned active-request counts.
+    pub const OCCUPANCY: Self = Self(1 << 5);
     pub(super) const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::PREFERRED_TAINT.0);
     pub(super) const MIN_ACTIVE_PREFILL_TOKENS: Self = Self(1 << 3);
     pub(super) const DEFAULT_POLICY_CACHE: Self = Self(1 << 4);
@@ -470,7 +472,7 @@ fn push_scored_candidate(
 
 pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
     state: &mut CustomWorkerSelectionState,
-    input: &mut WorkerSelectionInput<'_>,
+    input: &mut MaterializedSelectionInput<'_>,
     workers: &HashMap<WorkerId, C>,
     request: &SchedulingRequest,
     eligibility: RoutingEligibility<'_>,
@@ -625,11 +627,9 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
     #[inline(always)]
     fn select_worker(
         &self,
-        workers: &HashMap<WorkerId, C>,
-        request: &SchedulingRequest,
-        eligibility: RoutingEligibility<'_>,
-        block_size: u32,
+        input: WorkerSelectionInput<'_, C>,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+        let (workers, request, eligibility, block_size) = input.into_configured()?;
         let state = match &self.state {
             WorkerSelectionPolicyState::Default(picker) => {
                 WorkerSelectionPolicyStateRef::Default(picker)
@@ -681,11 +681,21 @@ mod tests {
         };
 
         let expected = DefaultWorkerSelector::new(Some(config.clone()), "test")
-            .select_worker(&workers, &request, request.eligibility(), 16)
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
             .unwrap();
         let policy = WorkerSelectionPolicy::default(config, "test");
         let actual = policy
-            .select_worker(&workers, &request, request.eligibility(), 16)
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
             .unwrap();
 
         assert_eq!(actual.worker, expected.worker);
@@ -746,7 +756,12 @@ mod tests {
         );
 
         let selected = policy
-            .select_worker(&workers, &request, request.eligibility(), 16)
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
             .unwrap();
         assert_eq!(selected.worker, worker1);
     }
@@ -810,7 +825,12 @@ mod tests {
             WorkerInputs::PREFERRED_TAINT
         );
         policy
-            .select_worker(&workers, &request, request.eligibility(), 16)
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
             .unwrap();
     }
 
@@ -875,7 +895,12 @@ mod tests {
         );
 
         policy
-            .select_worker(&workers, &request, request.eligibility(), 16)
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
             .unwrap();
         // Eligibility checks required taints once. The preference multiplier must not perform a
         // second lookup when no policy component declares it.
@@ -916,7 +941,12 @@ mod tests {
         );
 
         policy
-            .select_worker(&workers, &request, request.eligibility(), 16)
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
             .unwrap();
     }
 
@@ -966,7 +996,12 @@ mod tests {
         );
 
         policy
-            .select_worker(&workers, &request, request.eligibility(), 16)
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
             .unwrap();
     }
 
@@ -1014,7 +1049,12 @@ mod tests {
         );
 
         assert!(matches!(
-            policy.select_worker(&workers, &request, request.eligibility(), 16),
+            policy.select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16
+            )),
             Err(KvSchedulerError::AllEligibleWorkersFiltered)
         ));
     }
@@ -1084,7 +1124,12 @@ mod tests {
         );
 
         let selected = policy
-            .select_worker(&workers, &request, request.eligibility(), 16)
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
             .unwrap();
         assert_eq!(selected.worker, worker1);
     }
@@ -1118,7 +1163,12 @@ mod tests {
             Box::new(DefaultWorkerPicker::new(0.0)),
         );
         no_filter_policy
-            .select_worker(&workers, &request, request.eligibility(), 16)
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
             .unwrap();
         let WorkerSelectionPolicyState::Custom(state) = &no_filter_policy.state else {
             panic!("expected custom policy state");
@@ -1137,7 +1187,12 @@ mod tests {
             Box::new(DefaultWorkerPicker::new(0.0)),
         );
         filtered_policy
-            .select_worker(&workers, &request, request.eligibility(), 16)
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
             .unwrap();
         let WorkerSelectionPolicyState::Custom(state) = &filtered_policy.state else {
             panic!("expected custom policy state");
