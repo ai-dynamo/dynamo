@@ -42,6 +42,8 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `dynamo-kv-replay-parity` — validate offline KV replay parity and performance
 - `dynamo-agent-harness` — drive persistent Claude Code, Codex, or OpenCode sessions through Dynamo over ACP
 - `graham-code-review` — strict Rust/systems review in Graham King's style
+- `issue-create` — open upstream issues using the repository's GitHub issue forms
+- `pr-create` — open an upstream pull request with compliant title, body, and DCO checks
 - `pr-monitor` — CI health check, failure root-cause, and skip analysis
 - `visual-review` — interactive HTML code-review dashboards with diagrams and annotated diffs
 
