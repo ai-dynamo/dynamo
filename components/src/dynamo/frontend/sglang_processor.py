@@ -137,6 +137,15 @@ def _routing_from_agent_hints(nvext: dict[str, Any]) -> dict[str, Any] | None:
     return routing or None
 
 
+def _request_stop_strings(request: dict[str, Any]) -> set[str]:
+    stop = request.get("stop")
+    if isinstance(stop, str):
+        return {stop}
+    if isinstance(stop, list):
+        return {item for item in stop if isinstance(item, str)}
+    return set()
+
+
 def _tokenizer_eos_token_ids(tokenizer: Any) -> list[int]:
     eos_token_ids = _normalize_eos_token_ids(getattr(tokenizer, "eos_token_ids", None))
     if eos_token_ids:
@@ -599,6 +608,7 @@ class SglangProcessor:
             tool_call_parser_name=self.tool_call_parser_name,
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=pre.prompt_token_ids,
+            stop_strings=_request_stop_strings(request),
         )
 
         async for item in self._generate_and_stream(
@@ -657,6 +667,7 @@ class SglangProcessor:
             tool_call_parser_name=self.tool_call_parser_name,
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=preproc_result.prompt_token_ids,
+            stop_strings=_request_stop_strings(request),
         )
 
         async for item in self._generate_and_stream(
@@ -723,10 +734,10 @@ class SglangProcessor:
                 nonlocal token_count
 
                 chunk_token_count = len(pending_token_ids)
-                usage_for_metrics = pending_usage
                 mapped_response: dict[str, Any] = {
                     "token_ids": pending_token_ids,
                     "finish_reason": finish_reason,
+                    "stop_reason": stop_reason,
                 }
                 if pending_log_probs is not None:
                     mapped_response["log_probs"] = pending_log_probs
@@ -737,6 +748,14 @@ class SglangProcessor:
                     t_pp0 = time.monotonic()
 
                 choice = post.process_output(mapped_response)
+
+                if post.locally_finished and pending_usage is None:
+                    pending_usage = {
+                        "prompt_tokens": input_tokens,
+                        "completion_tokens": cumulative_output_tokens,
+                        "total_tokens": input_tokens + cumulative_output_tokens,
+                    }
+                usage_for_metrics = pending_usage
 
                 if self.debug_perf:
                     t_pp1 = time.monotonic()
@@ -755,10 +774,16 @@ class SglangProcessor:
                     if pending_usage:
                         dynamo_out["usage"] = pending_usage
                     response_nvext: dict[str, Any] = {}
-                    if stop_reason is not None and nvext_extra_field_requested(
-                        request, "stop_reason"
+                    effective_stop_reason = (
+                        stop_reason
+                        if stop_reason is not None
+                        else post.local_stop_reason
+                    )
+                    if (
+                        effective_stop_reason is not None
+                        and nvext_extra_field_requested(request, "stop_reason")
                     ):
-                        response_nvext["stop_reason"] = stop_reason
+                        response_nvext["stop_reason"] = effective_stop_reason
                     if engine_data is not None and nvext_extra_field_requested(
                         request, "engine_data"
                     ):
@@ -840,8 +865,7 @@ class SglangProcessor:
 
                 chunk_tokens = len(new_ids)
                 cumulative_output_tokens += chunk_tokens
-                raw_finish = engine_response.get("finish_reason")
-                finish_reason = _map_finish_reason(raw_finish)
+                finish_reason = _map_finish_reason(engine_response.get("finish_reason"))
                 stop_reason = engine_response.get("stop_reason")
 
                 if usage := engine_response.get("completion_usage"):
@@ -860,13 +884,20 @@ class SglangProcessor:
 
                 # Flush on finish or when we've accumulated enough tokens.
                 # First chunk flushes immediately (si=1) to minimize TTFT.
-                flush_threshold = 1 if first_chunk else stream_interval
+                flush_threshold = (
+                    1 if first_chunk or post.has_pending_stop_text else stream_interval
+                )
                 if finish_reason or len(pending_token_ids) >= flush_threshold:
-                    yield flush_pending(
+                    envelope = flush_pending(
                         finish_reason=finish_reason,
                         stop_reason=stop_reason,
                         engine_data=engine_data,
                     )
+                    if post.locally_finished and context is not None:
+                        context.stop_generating()
+                    yield envelope
+                    if post.locally_finished:
+                        break
         except Unknown:
             raise
         except Exception as e:

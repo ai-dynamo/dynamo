@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use super::{NvCreateCompletionRequest, NvCreateCompletionResponse};
 use crate::{
@@ -43,6 +43,7 @@ pub struct DeltaGenerator {
     model: String,
     system_fingerprint: Option<String>,
     usage: dynamo_protocols::types::CompletionUsage,
+    backend_completion_tokens: HashMap<u32, u32>,
     options: DeltaGeneratorOptions,
     tracker: Arc<RequestTracker>,
 }
@@ -57,6 +58,7 @@ impl DeltaGenerator {
             model,
             system_fingerprint: None,
             usage,
+            backend_completion_tokens: HashMap::new(),
             options,
             tracker,
         }
@@ -219,6 +221,15 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         if let Some(completion_usage) = delta.completion_usage.as_ref() {
             // Update prompt_tokens from worker if provided (e.g., for embeddings)
             self.usage.prompt_tokens = completion_usage.prompt_tokens;
+            self.backend_completion_tokens
+                .insert(delta.index.unwrap_or(0), completion_usage.completion_tokens);
+            let backend_completion_tokens = self
+                .backend_completion_tokens
+                .values()
+                .copied()
+                .fold(0, u32::saturating_add);
+            self.usage.completion_tokens =
+                self.usage.completion_tokens.max(backend_completion_tokens);
 
             // Propagate completion token details if provided
             if let Some(completion_details) = completion_usage.completion_tokens_details.as_ref() {
@@ -336,7 +347,7 @@ mod tests {
     use super::*;
     use crate::protocols::common::{self, llm_backend::BackendOutput, timing::WORKER_TYPE_PREFILL};
     use crate::protocols::openai::DeltaGeneratorExt;
-    use dynamo_protocols::types::{CreateCompletionRequestArgs, Prompt};
+    use dynamo_protocols::types::{CompletionUsage, CreateCompletionRequestArgs, Prompt};
 
     fn create_test_request() -> NvCreateCompletionRequest {
         let inner = CreateCompletionRequestArgs::default()
@@ -384,6 +395,85 @@ mod tests {
             encoder_result: None,
             routing_data: None,
         }
+    }
+
+    #[test]
+    fn test_completion_tokens_use_backend_usage_when_higher() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-backend-usage".to_string());
+
+        let mut backend_output = final_backend_output();
+        backend_output.token_ids.clear();
+        backend_output.tokens.clear();
+        backend_output.completion_usage = Some(CompletionUsage {
+            prompt_tokens: 5,
+            completion_tokens: 1,
+            total_tokens: 6,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        });
+
+        generator
+            .choice_from_postprocessor(backend_output)
+            .expect("choice generation");
+
+        let usage = generator.get_usage();
+        assert_eq!(usage.prompt_tokens, 5);
+        assert_eq!(usage.completion_tokens, 1);
+        assert_eq!(usage.total_tokens, 6);
+    }
+
+    #[test]
+    fn test_completion_tokens_sum_backend_usage_across_choices() {
+        let mut request = create_test_request();
+        request.inner.n = Some(2);
+        let mut generator = request.response_generator("req-multi-choice-usage".to_string());
+
+        for index in 0..2 {
+            let mut backend_output = final_backend_output();
+            backend_output.index = Some(index);
+            backend_output.token_ids.clear();
+            backend_output.tokens.clear();
+            backend_output.completion_usage = Some(CompletionUsage {
+                prompt_tokens: 5,
+                completion_tokens: 1,
+                total_tokens: 6,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            });
+            generator
+                .choice_from_postprocessor(backend_output)
+                .expect("choice generation");
+        }
+
+        let usage = generator.get_usage();
+        assert_eq!(usage.prompt_tokens, 5);
+        assert_eq!(usage.completion_tokens, 2);
+        assert_eq!(usage.total_tokens, 7);
+    }
+
+    #[test]
+    fn test_completion_tokens_keep_aggregated_count_when_backend_usage_is_zero() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-backend-zero-usage".to_string());
+
+        let mut backend_output = final_backend_output();
+        backend_output.completion_usage = Some(CompletionUsage {
+            prompt_tokens: 5,
+            completion_tokens: 0,
+            total_tokens: 5,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        });
+
+        generator
+            .choice_from_postprocessor(backend_output)
+            .expect("choice generation");
+
+        let usage = generator.get_usage();
+        assert_eq!(usage.prompt_tokens, 5);
+        assert_eq!(usage.completion_tokens, 1);
+        assert_eq!(usage.total_tokens, 6);
     }
 
     fn create_test_request_with_extra_fields(fields: Vec<String>) -> NvCreateCompletionRequest {
