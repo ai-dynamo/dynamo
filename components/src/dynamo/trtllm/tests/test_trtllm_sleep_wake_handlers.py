@@ -65,7 +65,6 @@ def _make_handler() -> _ConcreteHandler:
     handler._no_inflight_requests = asyncio.Event()
     handler._no_inflight_requests.set()
     handler._reject_new_requests = False
-    handler.first_token_source = None
     # Mock the pause controller that release/resume delegate to.
     # pause side_effect mirrors the real implementation;
     # tests don't need to manually update state after a release call.
