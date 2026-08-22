@@ -404,7 +404,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen3.5-2b-custom-encoder",
         topologies={
             "agg_custom_qwen3_5": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                marks=[pytest.mark.nightly, pytest.mark.h100],
                 timeout_s=900,
                 # Single-pass H100 peak: 44.5 GiB. Keep this sequential until a
                 # bounded --kv-cache-memory-bytes profile is available.
