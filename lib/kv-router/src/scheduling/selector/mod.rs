@@ -45,6 +45,17 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
         eligibility: RoutingEligibility<'_>,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
+
+    /// Select from a cache-free host's ordered worker-ID snapshot.
+    ///
+    /// Selectors that implement this path must require [`WorkerInputs::NONE`].
+    /// The default keeps existing configured-worker selectors source-compatible.
+    fn select_worker_from_ids(
+        &self,
+        _worker_ids: &[WorkerId],
+    ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+        Err(WorkerSelectionPolicyError::failed("selector requires configured worker inputs").into())
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

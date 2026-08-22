@@ -198,6 +198,9 @@ where
                 )),
             }
         }
+        RouterMode::PowerOfTwoChoices | RouterMode::LeastLoaded if affinity.is_none() => {
+            Arc::new(RoutingHost::<Sel>::new_builtin(router)?)
+        }
         RouterMode::PowerOfTwoChoices
         | RouterMode::LeastLoaded
         | RouterMode::DeviceAwareWeighted => {

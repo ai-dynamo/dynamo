@@ -4,10 +4,7 @@
 use super::{AsyncEngineContextProvider, ResponseStream};
 use crate::error::{BackendError, DynamoError, ErrorType, match_error_chain};
 use crate::{
-    component::{
-        Client, DeviceType, Endpoint, Instance, RoutingInstances, RoutingOccupancyState,
-        get_or_create_routing_occupancy_state,
-    },
+    component::{Client, DeviceType, Endpoint, Instance, RoutingInstances},
     discovery::EndpointInstanceId,
     dynamo_nvtx_range,
     engine::{AsyncEngine, AsyncEngineContext, Data},
@@ -18,8 +15,9 @@ use crate::{
     },
     protocols::{EndpointId, maybe_error::MaybeError},
     routing_policy::{
-        CandidateView, RouteCandidate, RouteContext, RouteDevice, RoutePicker, RoutePolicy,
-        RouteTarget,
+        CandidateView, OccupancyReservation, RouteCandidate, RouteContext, RouteDevice,
+        RoutePicker, RoutePolicy, RouteTarget, RoutingOccupancyState,
+        get_or_create_routing_occupancy_state,
     },
     traits::DistributedRuntimeProvider,
 };
@@ -30,10 +28,7 @@ use std::{
     collections::{HashMap, HashSet},
     marker::PhantomData,
     pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, atomic::AtomicU64},
     task::Poll,
     time::Instant,
 };
@@ -72,16 +67,14 @@ fn response_inactivity_timeout() -> Option<std::time::Duration> {
 /// [`RoutingOccupancyState`]. The counter is incremented at construction; the
 /// matching decrement is emitted on drop (or by [`Self::into_tracked_stream`]).
 struct OccupancyPermit {
-    state: Arc<RoutingOccupancyState>,
-    instance_id: u64,
-    counter: Arc<AtomicU64>,
-    armed: bool,
+    reservation: Option<OccupancyReservation>,
 }
 
 impl OccupancyPermit {
     fn acquire(state: Arc<RoutingOccupancyState>, instance_id: u64) -> Self {
-        let counter = state.increment(instance_id);
-        Self::from_counter(state, instance_id, counter)
+        Self {
+            reservation: Some(state.reserve(instance_id)),
+        }
     }
 
     fn from_counter(
@@ -90,43 +83,30 @@ impl OccupancyPermit {
         counter: Arc<AtomicU64>,
     ) -> Self {
         Self {
-            state,
-            instance_id,
-            counter,
-            armed: true,
+            reservation: Some(OccupancyReservation::from_counter(
+                state,
+                instance_id,
+                counter,
+            )),
         }
     }
 
     fn retarget(&mut self, instance_id: u64) {
-        if self.instance_id == instance_id {
-            return;
-        }
-        let counter = self.state.increment(instance_id);
-        RoutingOccupancyState::decrement_counter(self.counter.as_ref());
-        self.instance_id = instance_id;
-        self.counter = counter;
+        self.reservation
+            .as_mut()
+            .expect("occupancy permit must be armed before stream tracking")
+            .retarget(instance_id);
     }
 
     fn into_tracked_stream<U: Data + MaybeError>(mut self, stream: ManyOut<U>) -> ManyOut<U> {
-        self.armed = false;
         let engine_ctx = stream.context();
         ResponseStream::new(
             Box::pin(OccupancyTrackedStream {
                 inner: stream,
-                instance_id: self.instance_id,
-                counter: self.counter.clone(),
-                released: false,
+                reservation: self.reservation.take(),
             }),
             engine_ctx,
         )
-    }
-}
-
-impl Drop for OccupancyPermit {
-    fn drop(&mut self) {
-        if self.armed {
-            RoutingOccupancyState::decrement_counter(self.counter.as_ref());
-        }
     }
 }
 
@@ -739,18 +719,29 @@ where
         Ok((decision.target.worker_id, candidates.len()))
     }
 
-    /// Select a cache-free builtin worker while preserving empty-pool error semantics.
-    pub fn select_stateless_worker(&self) -> anyhow::Result<u64> {
-        let picker = match self.router_mode {
-            RouterMode::RoundRobin => &self.round_robin_picker,
-            RouterMode::Random => &self.random_picker,
-            _ => anyhow::bail!(
-                "{:?} routing does not use stateless worker selection",
-                self.router_mode
-            ),
-        };
-        self.select_untracked_worker(picker)
-            .map(|(worker_id, _)| worker_id)
+    /// Snapshot workers currently eligible for a new routing decision.
+    ///
+    /// Selection stays outside `PushRouter`; this is the discovery/admission
+    /// boundary used by routing hosts that own their policy lifecycle.
+    pub fn selectable_worker_ids(&self) -> anyhow::Result<Vec<u64>> {
+        self.with_selectable_worker_ids(<[u64]>::to_vec)
+    }
+
+    /// Borrow workers currently eligible for a new routing decision.
+    pub fn with_selectable_worker_ids<R>(
+        &self,
+        select: impl FnOnce(&[u64]) -> R,
+    ) -> anyhow::Result<R> {
+        let routing_instances = self.client.routing_instances();
+        if routing_instances.free_ids().is_empty() {
+            return Err(self.empty_free_pool_error(&routing_instances));
+        }
+        Ok(select(routing_instances.free_ids()))
+    }
+
+    /// Shared O(1) occupancy capability for load-aware routing hosts.
+    pub fn routing_occupancy_state(&self) -> Option<Arc<RoutingOccupancyState>> {
+        self.occupancy_state.clone()
     }
 
     /// Reject an exact target that local fault detection has removed from routing.
@@ -767,6 +758,20 @@ where
             "instance_id={instance_id} not found for endpoint {}",
             self.client.endpoint.id()
         )
+    }
+
+    fn ensure_discovered_for_dispatch(&self, instance_id: u64) -> anyhow::Result<()> {
+        if self.client.instance_ids().contains(&instance_id) {
+            return Ok(());
+        }
+        Err(DynamoError::builder()
+            .error_type(ErrorType::CannotConnect)
+            .message(format!(
+                "instance_id={instance_id} not found for endpoint {}",
+                self.client.endpoint.id()
+            ))
+            .build()
+            .into())
     }
 
     /// Issue a request to the next available instance in a round-robin fashion
@@ -914,29 +919,71 @@ where
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
-        // Fallback-enabled dispatch still honors a selected worker while it remains in
-        // discovery. Local inhibition only filters worker selection owned by this router;
-        // fallback is considered only if the selected worker disappears after this check.
-        if !self.client.instance_ids().contains(&instance_id) {
-            return Err(DynamoError::builder()
-                .error_type(ErrorType::CannotConnect)
-                .message(format!(
-                    "instance_id={instance_id} not found for endpoint {}",
-                    self.client.endpoint.id()
-                ))
-                .build()
-                .into());
-        }
+        let fallback = allowed_fallback
+            .map(TransportFallback::Within)
+            .unwrap_or(TransportFallback::Allow);
+        self.direct_prepared_with_fallback(instance_id, request, fallback, prepare)
+            .await
+    }
 
+    /// Dispatch a worker already selected by a routing host.
+    ///
+    /// `PushRouter` may still resolve transport fallback if the selected worker
+    /// disappears before dispatch. The callback receives that final worker so
+    /// the caller can retarget its own reservation and telemetry.
+    pub async fn dispatch_preselected_prepared<M, F>(
+        &self,
+        request: SingleIn<T>,
+        instance_id: u64,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        self.dispatch_preselected_with_fallback(
+            instance_id,
+            request,
+            TransportFallback::Allow,
+            prepare,
+        )
+        .await
+    }
+
+    async fn direct_prepared_with_fallback<M, F>(
+        &self,
+        instance_id: u64,
+        request: SingleIn<T>,
+        fallback: TransportFallback<'_>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        self.ensure_discovered_for_dispatch(instance_id)?;
         tracing::info!(
             router_mode = "direct",
             worker_id = instance_id,
             "Selected worker"
         );
+        self.generate_with_fault_detection_prepared(instance_id, request, fallback, prepare)
+            .await
+    }
 
-        let fallback = allowed_fallback
-            .map(TransportFallback::Within)
-            .unwrap_or(TransportFallback::Allow);
+    async fn dispatch_preselected_with_fallback<M, F>(
+        &self,
+        instance_id: u64,
+        request: SingleIn<T>,
+        fallback: TransportFallback<'_>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        // Fallback-enabled dispatch still honors a selected worker while it remains in
+        // discovery. Local inhibition only filters worker selection owned by this router;
+        // fallback is considered only if the selected worker disappears after this check.
+        self.ensure_discovered_for_dispatch(instance_id)?;
+
         self.generate_with_fault_detection_prepared(instance_id, request, fallback, prepare)
             .await
     }
@@ -1815,18 +1862,12 @@ where
 
 struct OccupancyTrackedStream<U: Data + MaybeError> {
     inner: ManyOut<U>,
-    instance_id: u64,
-    counter: Arc<AtomicU64>,
-    released: bool,
+    reservation: Option<OccupancyReservation>,
 }
 
 impl<U: Data + MaybeError> OccupancyTrackedStream<U> {
     fn release(&mut self) {
-        if self.released {
-            return;
-        }
-        RoutingOccupancyState::decrement_counter(self.counter.as_ref());
-        self.released = true;
+        drop(self.reservation.take());
     }
 }
 
@@ -1839,7 +1880,13 @@ impl<U: Data + MaybeError> Drop for OccupancyTrackedStream<U> {
 impl<U: Data + MaybeError> std::fmt::Debug for OccupancyTrackedStream<U> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OccupancyTrackedStream")
-            .field("instance_id", &self.instance_id)
+            .field(
+                "instance_id",
+                &self
+                    .reservation
+                    .as_ref()
+                    .map(OccupancyReservation::worker_id),
+            )
             .finish()
     }
 }
@@ -1872,6 +1919,8 @@ impl<U: Data + MaybeError> crate::engine::AsyncEngineStream<U> for OccupancyTrac
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
+
     use crate::{
         DistributedRuntime, Runtime,
         distributed::DistributedConfig,
@@ -2069,22 +2118,25 @@ mod tests {
     }
 
     #[test]
-    fn old_reservation_cannot_decrement_readded_worker_counter() {
+    fn same_id_readd_keeps_existing_permit_accounting() {
         let state = Arc::new(RoutingOccupancyState::default());
+        state.retain(&[7]);
         let old_counter = state.increment(7);
         let old_permit = OccupancyPermit::from_counter(state.clone(), 7, old_counter);
 
         state.retain(&[]);
-        let new_counter = state.increment(7);
         assert_eq!(state.load(7), 1);
+        state.retain(&[7]);
+        let new_permit = OccupancyPermit::acquire(state.clone(), 7);
+        assert_eq!(state.load(7), 2);
 
         drop(old_permit);
         assert_eq!(
             state.load(7),
             1,
-            "dropping an old incarnation must not touch the replacement counter"
+            "re-added worker must retain the still-live request"
         );
-        RoutingOccupancyState::decrement_counter(new_counter.as_ref());
+        drop(new_permit);
         assert_eq!(state.load(7), 0);
     }
 
