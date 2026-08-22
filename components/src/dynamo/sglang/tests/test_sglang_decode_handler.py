@@ -1235,6 +1235,37 @@ async def test_process_text_stream_tracks_delta_per_choice_index():
 
 
 @pytest.mark.asyncio
+async def test_process_text_stream_notifies_for_empty_decoded_token():
+    handler = _new_decode_handler()
+
+    class Context(_Context):
+        def __init__(self):
+            self.notifications = 0
+
+        def notify_first_token(self):
+            self.notifications += 1
+
+    context = Context()
+
+    async def token_stream():
+        yield {
+            "output_ids": [101],
+            "text": "",
+            "meta_info": {"id": "request-1", "finish_reason": None},
+        }
+        assert context.notifications == 1
+        yield {
+            "output_ids": [102],
+            "text": "a",
+            "meta_info": {"id": "request-1", "finish_reason": None},
+        }
+
+    await _collect(handler._process_text_stream(token_stream(), context))
+
+    assert context.notifications == 1
+
+
+@pytest.mark.asyncio
 async def test_process_text_stream_stop_reason_uses_response_nvext():
     handler = _new_decode_handler()
 
