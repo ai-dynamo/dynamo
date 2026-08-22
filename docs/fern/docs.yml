@@ -462,8 +462,10 @@ redirects:
     destination: "/dynamo/dev/kubernetes/getting-started/quickstart"
   - source: "/dynamo/kubernetes-deployment/start-here/minikube-setup"
     destination: "/dynamo/dev/cli/installation/minikube-setup"
+  # The Examples reference page was an empty stub and has been removed. Worked, runnable
+  # deployments live in the recipes catalog, so both Examples URLs land there.
   - source: "/dynamo/resources/examples"
-    destination: "/dynamo/dev/reference/examples"
+    destination: "/dynamo/dev/recipes/browse"
   - source: "/dynamo/resources/feature-matrix"
     destination: "/dynamo/dev/reference/compatibility"
   - source: "/dynamo/resources/glossary"
@@ -640,7 +642,14 @@ redirects:
   - source: "/dynamo/dev/getting-started/release-artifacts"
     destination: "/dynamo/dev/reference/release-artifacts"
   - source: "/dynamo/dev/getting-started/examples"
-    destination: "/dynamo/dev/reference/examples"
+    destination: "/dynamo/dev/recipes/browse"
+  # The Examples reference page was an empty stub and is gone; keep its dev URL
+  # serving. No redirect for the Model Storage overview: unlike Examples it is
+  # a live 41-line page, still listed at index.yml:110, so redirecting it would
+  # bounce readers off working content to the AKS provider guide and make the
+  # overview unreachable.
+  - source: "/dynamo/dev/reference/examples"
+    destination: "/dynamo/dev/recipes/browse"
   - source: "/dynamo/dev/fastokens-tokenizer"
     destination: "/dynamo/dev/advanced-customizations/fastokens-tokenizer"
   - source: "/dynamo/v1.0.1/getting-started/support-matrix"

@@ -25,6 +25,14 @@
 all:
   - '**'
 
+# Gates four jobs in pre-merge.yml: Docs Lint, Fern Configuration Check, Docs
+# Website Composition Check, Fern Broken Links Check. Keep it to sources those
+# jobs actually read. Repo-wide catch-alls like '**/*.md' used to live here for
+# coverage classification, which meant editing any README in the repo ran all
+# four -- including the composition check, the most expensive of them -- while
+# Docs Lint scans docs/ and never looked at the file that triggered it. Those
+# patterns moved to `ignore`, which counts for coverage and gates nothing.
+
 # Fern component sources only. The docs filter matches 458 of the last 1172
 # commits on main, but only 21 of those touched a component source, so a step
 # that only exercises components wastes ~95% of its runs on that filter.
@@ -43,14 +51,6 @@ docs:
   - 'docs/**'
   - 'fern/**'
   - '.github/workflows/fern-docs.yml'
-  - '**/*.md'
-  - '**/*.txt'
-  - '**/.gitignore'
-  - '**/.helmignore'
-  - '**/.gitattributes'
-  - 'LICENSE'
-  - 'CODEOWNERS'
-  - '.coveragerc'
   - '.claude/**'
   - '.agents/**'
   # Codex role configs for the optimization skill pack; agent guidance, no CI surface.
@@ -95,7 +95,18 @@ examples:
   - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeploymentrequests.yaml'
 
 ignore:
-  # CI filter documentation does not affect any CI job.
+  # Classification-only, moved out of `docs`: these match files anywhere in the
+  # repo and must satisfy the coverage check without gating the Fern jobs.
+  - '**/*.md'
+  - '**/*.txt'
+  - '**/.gitignore'
+  - '**/.helmignore'
+  - '**/.gitattributes'
+  - 'LICENSE'
+  - 'CODEOWNERS'
+  - '.coveragerc'
+  # CI filter documentation does not affect any CI job, and `**` skips dotfile
+  # directories, so the '**/*.md' rule above misses this one.
   - '.github/FILTERS.md'
   - '.lycheeignore'
   - '.pre-commit-config.yaml'

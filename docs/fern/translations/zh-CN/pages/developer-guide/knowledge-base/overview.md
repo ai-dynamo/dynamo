@@ -29,7 +29,7 @@ Dynamo 旨在同时满足以下目标：
 
 - **Prefill/decode 不均衡** 会在流量组合变化时导致 GPU 利用率不足（[DistServe](https://arxiv.org/abs/2401.09670)）。
 - **KV 重新计算** 会在路由忽略缓存重叠时增加 TTFT 并浪费计算资源（[DeepSeek](https://arxiv.org/abs/2501.12948)）。
-- 来自长上下文和并发的 **内存压力** 在没有多层缓存管理的情况下会超出 HBM 容量（[KVBM](https://docs.nvidia.com/dynamo/components/kvbm)、[Mooncake](https://kvcache-ai.github.io/Mooncake/design/mooncake-store.html)、[AIBrix](https://blog.vllm.ai/2025/02/21/aibrix-release.html)、[FlexKV](https://github.com/taco-project/FlexKV)、[LMCache](https://lmcache.ai/)）。
+- 来自长上下文和并发的 **内存压力** 在没有多层缓存管理的情况下会超出 HBM 容量（[KVBM](modular-components/kvbm/overview.md)、[Mooncake](https://kvcache-ai.github.io/Mooncake/design/mooncake-store.html)、[AIBrix](https://blog.vllm.ai/2025/02/21/aibrix-release.html)、[FlexKV](https://github.com/taco-project/FlexKV)、[LMCache](https://lmcache.ai/)）。
 - **动态需求** 会打破静态资源预置的假设（[AzureTrace](https://github.com/Azure/AzurePublicDataset)）。
 - **真实世界故障**（pod 重启、分区、热点过载）需要一等的恢复行为。
 

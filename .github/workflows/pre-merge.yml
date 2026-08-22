@@ -47,9 +47,32 @@ jobs:
         with:
           gh_token: ${{ github.token }}
 
+  # Structural docs rules the Fern CLI does not cover: SPDX headers, frontmatter, body H1,
+  # link scope, dangling nav paths, and internal references. Read-only, so it reports through
+  # the job summary rather than a pull request comment.
+  #
+  # The step summary lists every finding; that is the surface to point readers at.
+  # Inline annotations are best-effort on top of it, for two reasons: GitHub caps
+  # workflow-command annotations at 10 per level per step, so a PR introducing 15
+  # errors surfaces only 10 in the diff, and the step scans all of docs/ rather
+  # than the changed files, so a finding outside the diff has no line to attach to
+  # and appears only in the run log.
+  docs-lint:
+    name: Docs Lint
+    needs: changed-files
+    if: needs.changed-files.outputs.docs == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+    - name: Lint docs structure
+      run: python3 docs/fern/scripts/docs_lint.py --scan docs --github
+
   pre-merge-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, pre-commit, recipe-check, api-docs, fern-check, fern-broken-links, operator, rust-tests, rust-clippy, docs-website-composition]
+    needs: [changed-files, pre-commit, recipe-check, api-docs, fern-check, fern-broken-links, docs-lint, operator, rust-tests, rust-clippy, docs-website-composition]
     if: always()
     steps:
       - name: "Check all dependent jobs"
