@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: 'Setup Gaudi runner'
+description: |
+  Detect Intel Gaudi (HPU) accelerators on the runner and emit the docker
+  flags needed to pass them through into a container.
+
+inputs:
+  min_gpus:
+    description: 'Minimum number of Gaudi accelerators required'
+    required: false
+    default: '1'
+
+outputs:
+  hpu_count:
+    description: 'Number of Gaudi accelerators detected'
+    value: ${{ steps.detect.outputs.hpu_count }}
+  docker_device_flags:
+    description: 'docker run flags for Gaudi device passthrough'
+    value: ${{ steps.detect.outputs.docker_device_flags }}
+  docker_env_flags:
+    description: 'docker run -e flags for Gaudi runtime'
+    value: ${{ steps.detect.outputs.docker_env_flags }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Detect Gaudi accelerators
+      id: detect
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        echo "=== Gaudi Detection ==="
+
+        # Detect Gaudi devices via hl-smi or /dev/accel
+        HPU_COUNT=0
+        if command -v hl-smi >/dev/null 2>&1; then
+          HPU_COUNT=$(hl-smi -Q name -f csv,noheader 2>/dev/null | wc -l || echo 0)
+          echo "Detected ${HPU_COUNT} Gaudi device(s) via hl-smi"
+          hl-smi 2>/dev/null | head -20 || true
+        elif [ -d /dev/accel ]; then
+          HPU_COUNT=$(ls /dev/accel/accel* 2>/dev/null | wc -l || echo 0)
+          echo "Detected ${HPU_COUNT} Gaudi device(s) via /dev/accel"
+          ls -la /dev/accel/ || true
+        else
+          echo "WARNING: No Gaudi devices found (no hl-smi, no /dev/accel)"
+        fi
+
+        if [ "${HPU_COUNT}" -lt "${{ inputs.min_gpus }}" ]; then
+          echo "ERROR: Job requires ${{ inputs.min_gpus }} Gaudi device(s), found ${HPU_COUNT}"
+          exit 1
+        fi
+
+        # Docker flags for Gaudi passthrough
+        # The habana runtime handles device mapping automatically
+        DOCKER_DEVICE_FLAGS="--runtime=habana"
+        DOCKER_ENV_FLAGS="-e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none"
+
+        echo "hpu_count=${HPU_COUNT}" >> "${GITHUB_OUTPUT}"
+        echo "docker_device_flags=${DOCKER_DEVICE_FLAGS}" >> "${GITHUB_OUTPUT}"
+        echo "docker_env_flags=${DOCKER_ENV_FLAGS}" >> "${GITHUB_OUTPUT}"
