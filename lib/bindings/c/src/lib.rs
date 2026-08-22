@@ -7,8 +7,8 @@ use once_cell::sync::OnceCell;
 use std::borrow::Cow;
 use std::ffi::CStr;
 use std::ptr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use dynamo_kv_router::{
@@ -39,6 +39,57 @@ static WK: OnceCell<Worker> = OnceCell::new();
 static DRT: AsyncOnceCell<DistributedRuntime> = AsyncOnceCell::new();
 // [FIXME] shouldn't the publisher be instance passing between API calls?
 static KV_PUB: OnceCell<KvEventPublisher> = OnceCell::new();
+
+// The OnceCell-backed runtime state cannot be restarted after shutdown.
+static LIFECYCLE: Mutex<LifecycleState> = Mutex::new(LifecycleState::Uninitialized);
+
+// Serialize initialization without blocking shutdown during discovery.
+static INIT: Mutex<()> = Mutex::new(());
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EndpointConfig {
+    namespace: String,
+    component: String,
+    endpoint: String,
+    kv_block_size: u32,
+}
+
+impl EndpointConfig {
+    fn differing_fields(&self, other: &Self) -> Vec<&'static str> {
+        let mut fields = Vec::new();
+        if self.namespace != other.namespace {
+            fields.push("namespace");
+        }
+        if self.component != other.component {
+            fields.push("component");
+        }
+        if self.endpoint != other.endpoint {
+            fields.push("endpoint");
+        }
+        if self.kv_block_size != other.kv_block_size {
+            fields.push("kv_block_size");
+        }
+        fields
+    }
+}
+
+#[derive(Debug)]
+enum LifecycleState {
+    Uninitialized,
+    Initialized(EndpointConfig),
+    ShutDown,
+}
+
+fn lifecycle() -> MutexGuard<'static, LifecycleState> {
+    // Recover poison because a panic crossing extern "C" aborts the process.
+    LIFECYCLE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn is_shut_down() -> bool {
+    matches!(&*lifecycle(), LifecycleState::ShutDown)
+}
 
 struct DiscoveredModelBootstrap {
     preprocessor: Arc<OpenAIPreprocessor>,
@@ -78,6 +129,7 @@ fn initialize_tracing() {
 }
 
 #[repr(u32)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum DynamoLlmResult {
     OK = 0,
     ERR = 1,
@@ -113,50 +165,26 @@ async fn wait_for_discovery_sync(drt: &DistributedRuntime) -> usize {
 }
 
 /// # Safety
-/// the namespace_c_str, component_c_str, and endpoint_c_str are passed as pointers to C strings
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn dynamo_llm_init(
+/// Each pointer must be NULL or point at a NUL-terminated C string.
+unsafe fn parse_endpoint_config(
     namespace_c_str: *const c_char,
     component_c_str: *const c_char,
     endpoint_c_str: *const c_char,
     kv_block_size: u32,
-) -> DynamoLlmResult {
-    initialize_tracing();
-    let wk = match WK.get_or_try_init(Worker::from_settings) {
-        Ok(wk) => wk.clone(),
-        Err(e) => {
-            tracing::error!(error = ?e, "Failed to initialize runtime (Worker::from_settings)");
-            return DynamoLlmResult::ERR;
-        }
-    };
-    let rt = wk.runtime();
-    let secondary = rt.secondary().clone();
-    let result = secondary.block_on(async {
-        // Initialize the distributed runtime
-        match DRT
-            .get_or_try_init(async { DistributedRuntime::from_settings(rt.clone()).await })
-            .await
-        {
-            Ok(drt) => {
-                // Wait for discovery to sync before returning.
-                // This is needed because dynamo_create_worker_selection_pipeline() is called
-                // immediately after, and it needs discovery.list() to return data.
-                // The discovery daemon takes time to query K8s and returns async, so we need to wait.
-                // Note: This waits indefinitely - the K8s StartupProbe is the timeout mechanism.
-                wait_for_discovery_sync(drt).await;
-                Ok(())
-            }
-            Err(e) => {
-                tracing::error!(error = ?e, "Failed to initialize distributed runtime");
-                Err(DynamoLlmResult::ERR)
-            }
-        }
-    });
+) -> Option<EndpointConfig> {
+    if namespace_c_str.is_null() {
+        tracing::error!("Namespace is required");
+        return None;
+    }
     let namespace = match unsafe { CStr::from_ptr(namespace_c_str) }.to_str() {
-        Ok(s) => s.to_string(),
+        Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
+        Ok(_) => {
+            tracing::error!("Namespace must not be empty");
+            return None;
+        }
         Err(e) => {
             tracing::error!(error = ?e, "Failed to convert C string to Rust string (namespace)");
-            return DynamoLlmResult::ERR;
+            return None;
         }
     };
 
@@ -168,36 +196,175 @@ pub unsafe extern "C" fn dynamo_llm_init(
 
     if endpoint_c_str.is_null() {
         tracing::error!("Serving endpoint name is required");
-        return DynamoLlmResult::ERR;
+        return None;
     }
     let endpoint = match unsafe { CStr::from_ptr(endpoint_c_str) }.to_str() {
         Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
         Ok(_) => {
             tracing::error!("Serving endpoint name must not be empty");
-            return DynamoLlmResult::ERR;
+            return None;
         }
         Err(error) => {
             tracing::error!(?error, "Failed to convert serving endpoint name to UTF-8");
-            return DynamoLlmResult::ERR;
+            return None;
         }
     };
 
-    match result {
-        Ok(_) => match KV_PUB.get_or_try_init(move || {
-            dynamo_create_kv_publisher(namespace, component, endpoint, kv_block_size)
-        }) {
-            Ok(_) => DynamoLlmResult::OK,
+    Some(EndpointConfig {
+        namespace,
+        component,
+        endpoint,
+        kv_block_size,
+    })
+}
+
+/// # Safety
+/// the namespace_c_str, component_c_str, and endpoint_c_str are passed as pointers to C strings
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dynamo_llm_init(
+    namespace_c_str: *const c_char,
+    component_c_str: *const c_char,
+    endpoint_c_str: *const c_char,
+    kv_block_size: u32,
+) -> DynamoLlmResult {
+    initialize_tracing();
+
+    let config = match unsafe {
+        parse_endpoint_config(
+            namespace_c_str,
+            component_c_str,
+            endpoint_c_str,
+            kv_block_size,
+        )
+    } {
+        Some(config) => config,
+        None => return DynamoLlmResult::ERR,
+    };
+
+    let _init_guard = INIT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    {
+        let state = lifecycle();
+        match &*state {
+            LifecycleState::Uninitialized => {}
+            LifecycleState::Initialized(previous) if *previous == config => {
+                tracing::info!(
+                    namespace = %config.namespace,
+                    component = %config.component,
+                    endpoint = %config.endpoint,
+                    "dynamo_llm_init called again with identical arguments; keeping the existing runtime and KV publisher"
+                );
+                return DynamoLlmResult::OK;
+            }
+            LifecycleState::Initialized(previous) => {
+                tracing::error!(
+                    changed_fields = ?previous.differing_fields(&config),
+                    ?previous,
+                    requested = ?config,
+                    "dynamo_llm_init cannot change the endpoint of an initialized process; the existing runtime and KV publisher are kept"
+                );
+                return DynamoLlmResult::ERR;
+            }
+            LifecycleState::ShutDown => {
+                tracing::error!(
+                    "dynamo_llm_init called after dynamo_llm_shutdown; the C API is process-once and the runtime cannot be restarted"
+                );
+                return DynamoLlmResult::ERR;
+            }
+        }
+    }
+    // Do not hold LIFECYCLE across the unbounded discovery wait.
+
+    let wk = match WK.get_or_try_init(Worker::from_settings) {
+        Ok(wk) => wk.clone(),
+        Err(e) => {
+            tracing::error!(error = ?e, "Failed to initialize runtime (Worker::from_settings)");
+            return DynamoLlmResult::ERR;
+        }
+    };
+    let rt = wk.runtime();
+    let shutdown = rt.child_token();
+    let secondary = rt.secondary().clone();
+    let result = secondary.block_on(async {
+        // Initialize the distributed runtime
+        match DRT
+            .get_or_try_init(async { DistributedRuntime::from_settings(rt.clone()).await })
+            .await
+        {
+            Ok(drt) => {
+                tokio::select! {
+                    _ = shutdown.cancelled() => {
+                        tracing::error!("dynamo_llm_shutdown interrupted initialization during discovery");
+                        Err(DynamoLlmResult::ERR)
+                    }
+                    _ = wait_for_discovery_sync(drt) => Ok(()),
+                }
+            }
             Err(e) => {
                 tracing::error!(error = ?e, "Failed to initialize distributed runtime");
-                DynamoLlmResult::ERR
+                Err(DynamoLlmResult::ERR)
             }
-        },
-        Err(e) => e,
+        }
+    });
+
+    if let Err(e) = result {
+        return e;
+    }
+
+    // Hold LIFECYCLE through publisher installation so shutdown cannot retire the runtime between
+    // the final state check and KV_PUB initialization.
+    let mut state = lifecycle();
+    if matches!(&*state, LifecycleState::ShutDown) {
+        tracing::error!(
+            "dynamo_llm_shutdown ran while dynamo_llm_init was waiting for discovery; the runtime is canceled"
+        );
+        return DynamoLlmResult::ERR;
+    }
+
+    if let Err(e) = KV_PUB.get_or_try_init(|| {
+        dynamo_create_kv_publisher(
+            config.namespace.clone(),
+            config.component.clone(),
+            config.endpoint.clone(),
+            config.kv_block_size,
+        )
+    }) {
+        tracing::error!(error = ?e, "Failed to initialize KV publisher");
+        return DynamoLlmResult::ERR;
+    }
+
+    match &*state {
+        LifecycleState::Uninitialized => {
+            *state = LifecycleState::Initialized(config);
+            DynamoLlmResult::OK
+        }
+        LifecycleState::Initialized(previous) if *previous == config => DynamoLlmResult::OK,
+        LifecycleState::Initialized(previous) => {
+            tracing::error!(
+                ?previous,
+                requested = ?config,
+                "recorded config no longer matches this call after initialization; this call did not take effect"
+            );
+            DynamoLlmResult::ERR
+        }
+        LifecycleState::ShutDown => {
+            tracing::error!(
+                "dynamo_llm_shutdown ran while dynamo_llm_init was waiting for discovery; the runtime is canceled"
+            );
+            DynamoLlmResult::ERR
+        }
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn dynamo_llm_shutdown() -> DynamoLlmResult {
+    let mut state = lifecycle();
+
+    if matches!(&*state, LifecycleState::ShutDown) {
+        tracing::debug!("dynamo_llm_shutdown called again; runtime is already shut down");
+        return DynamoLlmResult::OK;
+    }
+
     let wk = match WK.get() {
         Some(wk) => wk,
         None => {
@@ -207,6 +374,7 @@ pub extern "C" fn dynamo_llm_shutdown() -> DynamoLlmResult {
     };
 
     wk.runtime().shutdown();
+    *state = LifecycleState::ShutDown;
 
     DynamoLlmResult::OK
 }
@@ -387,7 +555,21 @@ pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
         parent_hash,
         lora_name,
     };
-    let publisher = KV_PUB.get().unwrap();
+    if is_shut_down() {
+        tracing::error!(
+            "dynamo_llm_shutdown has already run; refusing to publish a stored KV event against the retired runtime"
+        );
+        return DynamoLlmResult::ERR;
+    }
+    let publisher = match KV_PUB.get() {
+        Some(publisher) => publisher,
+        None => {
+            tracing::error!(
+                "KV publisher is not initialized; dynamo_llm_init must succeed before publishing stored KV events"
+            );
+            return DynamoLlmResult::ERR;
+        }
+    };
     let event = kv_event_create_stored_from_parts(kv_params, publisher.kv_block_size());
     match publisher.publish(event) {
         Ok(_) => DynamoLlmResult::OK,
@@ -404,7 +586,21 @@ pub extern "C" fn dynamo_kv_event_publish_removed(
     block_ids: *const u64,
     num_blocks: usize,
 ) -> DynamoLlmResult {
-    let publisher = KV_PUB.get().unwrap();
+    if is_shut_down() {
+        tracing::error!(
+            "dynamo_llm_shutdown has already run; refusing to publish a removed KV event against the retired runtime"
+        );
+        return DynamoLlmResult::ERR;
+    }
+    let publisher = match KV_PUB.get() {
+        Some(publisher) => publisher,
+        None => {
+            tracing::error!(
+                "KV publisher is not initialized; dynamo_llm_init must succeed before publishing removed KV events"
+            );
+            return DynamoLlmResult::ERR;
+        }
+    };
     let event = kv_event_create_removed_from_parts(event_id, block_ids, num_blocks);
     match publisher.publish(event) {
         Ok(_) => DynamoLlmResult::OK,
@@ -1759,6 +1955,183 @@ async fn fetch_preprocessor_from_discovery(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CString;
+    use std::time::Instant;
+
+    fn c_string(value: &str) -> CString {
+        CString::new(value).expect("test string must not contain an interior NUL")
+    }
+
+    fn endpoint_config(endpoint: &str, kv_block_size: u32) -> EndpointConfig {
+        EndpointConfig {
+            namespace: "ns_a".to_string(),
+            component: "comp_a".to_string(),
+            endpoint: endpoint.to_string(),
+            kv_block_size,
+        }
+    }
+
+    #[test]
+    fn init_is_process_once_and_rejects_incompatible_reinitialization() {
+        let namespace = c_string("ns_a");
+        let component = c_string("comp_a");
+        let endpoint_a = c_string("ep_a");
+        let endpoint_b = c_string("ep_b");
+
+        *lifecycle() = LifecycleState::Uninitialized;
+
+        let started = Instant::now();
+        let missing_endpoint = unsafe {
+            dynamo_llm_init(namespace.as_ptr(), component.as_ptr(), std::ptr::null(), 32)
+        };
+        let elapsed = started.elapsed();
+        assert_eq!(missing_endpoint, DynamoLlmResult::ERR);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "init with a NULL endpoint must fail promptly, took {elapsed:?}"
+        );
+        assert!(
+            matches!(&*lifecycle(), LifecycleState::Uninitialized),
+            "a rejected argument must leave the process initializable"
+        );
+        assert!(
+            WK.get().is_none(),
+            "argument validation must run before the runtime is constructed"
+        );
+
+        let missing_namespace = unsafe {
+            dynamo_llm_init(
+                std::ptr::null(),
+                component.as_ptr(),
+                endpoint_a.as_ptr(),
+                32,
+            )
+        };
+        assert_eq!(missing_namespace, DynamoLlmResult::ERR);
+
+        assert_eq!(dynamo_llm_shutdown(), DynamoLlmResult::ERR);
+
+        *lifecycle() = LifecycleState::Initialized(endpoint_config("ep_a", 32));
+
+        let repeated_identical = unsafe {
+            dynamo_llm_init(
+                namespace.as_ptr(),
+                component.as_ptr(),
+                endpoint_a.as_ptr(),
+                32,
+            )
+        };
+        assert_eq!(repeated_identical, DynamoLlmResult::OK);
+
+        let started = Instant::now();
+        let changed_endpoint = unsafe {
+            dynamo_llm_init(
+                namespace.as_ptr(),
+                component.as_ptr(),
+                endpoint_b.as_ptr(),
+                32,
+            )
+        };
+        let elapsed = started.elapsed();
+        assert_eq!(changed_endpoint, DynamoLlmResult::ERR);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "re-init with a different endpoint must fail promptly, took {elapsed:?}"
+        );
+
+        let changed_block_size = unsafe {
+            dynamo_llm_init(
+                namespace.as_ptr(),
+                component.as_ptr(),
+                endpoint_a.as_ptr(),
+                64,
+            )
+        };
+        assert_eq!(changed_block_size, DynamoLlmResult::ERR);
+
+        assert_eq!(
+            match &*lifecycle() {
+                LifecycleState::Initialized(config) => config.clone(),
+                other => panic!("a refused re-init must not disturb the recorded state: {other:?}"),
+            },
+            endpoint_config("ep_a", 32)
+        );
+        assert!(
+            WK.get().is_none(),
+            "a refused re-init must return before any runtime work"
+        );
+
+        WK.get_or_try_init(Worker::from_settings)
+            .expect("Worker::from_settings must succeed once per process");
+
+        assert_eq!(dynamo_llm_shutdown(), DynamoLlmResult::OK);
+        assert!(
+            matches!(&*lifecycle(), LifecycleState::ShutDown),
+            "shutdown must record that the runtime is retired"
+        );
+
+        assert_eq!(dynamo_llm_shutdown(), DynamoLlmResult::OK);
+
+        let started = Instant::now();
+        let init_after_shutdown = unsafe {
+            dynamo_llm_init(
+                namespace.as_ptr(),
+                component.as_ptr(),
+                endpoint_b.as_ptr(),
+                64,
+            )
+        };
+        let elapsed = started.elapsed();
+        assert_eq!(init_after_shutdown, DynamoLlmResult::ERR);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "init after shutdown must fail promptly, took {elapsed:?}"
+        );
+        assert!(
+            DRT.get().is_none(),
+            "init after shutdown must not reach distributed-runtime construction or discovery"
+        );
+
+        let reinit_same_args = unsafe {
+            dynamo_llm_init(
+                namespace.as_ptr(),
+                component.as_ptr(),
+                endpoint_a.as_ptr(),
+                32,
+            )
+        };
+        assert_eq!(reinit_same_args, DynamoLlmResult::ERR);
+
+        assert!(
+            matches!(&*lifecycle(), LifecycleState::ShutDown),
+            "the shut-down state is terminal"
+        );
+    }
+
+    #[test]
+    fn publishing_without_an_initialized_publisher_returns_err() {
+        let block_ids: [u64; 0] = [];
+        let token_ids: [u32; 0] = [];
+        let block_token_counts: [usize; 0] = [];
+
+        assert_eq!(
+            dynamo_kv_event_publish_removed(1, block_ids.as_ptr(), block_ids.len()),
+            DynamoLlmResult::ERR
+        );
+
+        let stored = unsafe {
+            dynamo_kv_event_publish_stored(
+                2,
+                token_ids.as_ptr(),
+                block_token_counts.as_ptr(),
+                block_ids.as_ptr(),
+                block_ids.len(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(stored, DynamoLlmResult::ERR);
+    }
 
     #[test]
     fn priority_jump_lifted_from_agent_hints_priority() {
