@@ -93,10 +93,40 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 		logger.V(logutil.VERBOSE).Info("DynPrefillScorer: prefill not enabled, returning zero scores")
 		return uniformScores(endpoints, 0)
 	}
+	if req == nil {
+		logger.V(logutil.DEFAULT).Error(nil, "DynPrefillScorer: request is nil")
+		clearPrefillReservation(cycleState)
+		return uniformScores(endpoints, 0)
+	}
+
+	if reservation := readPrefillReservation(cycleState); reservation != nil && reservation.ID != "" {
+		if req.Headers == nil {
+			req.Headers = map[string]string{}
+		}
+		req.Headers[PrefillReservationIDHeader] = reservation.ID
+		req.Headers[PrefillWorkerIDHeader] = reservation.WorkerID
+		if reservation.HasDpRank {
+			req.Headers[PrefillDpRankHeader] = strconv.FormatUint(uint64(reservation.DpRank), 10)
+		} else {
+			delete(req.Headers, PrefillDpRankHeader)
+		}
+		logger.V(logutil.VERBOSE).Info("DynPrefillScorer: reusing cycle reservation",
+			"prefillWorkerID", reservation.WorkerID)
+		return uniformScores(endpoints, 1.0)
+	}
+
+	// Dynamo routing headers are EPP-owned. Discard untrusted or stale values
+	// before creating the first reservation for this scheduling cycle.
+	if req.Headers != nil {
+		delete(req.Headers, PrefillReservationIDHeader)
+		delete(req.Headers, PrefillWorkerIDHeader)
+		delete(req.Headers, PrefillDpRankHeader)
+	}
 
 	requestJSON, err := buildRequestJSON(req)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "DynPrefillScorer: failed to build request")
+		clearPrefillReservation(cycleState)
 		return uniformScores(endpoints, 0)
 	}
 
@@ -105,10 +135,17 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 		"endpointCount", len(endpoints),
 		"endpointsJSON", string(endpointsJSON))
 
-	result, err := dynscorer.CallRoutePrefillRequest(requestJSON, endpointsJSON)
+	reservationID, err := newPrefillReservationID()
+	if err != nil {
+		logger.V(logutil.DEFAULT).Error(err, "DynPrefillScorer: failed to create reservation")
+		clearPrefillReservation(cycleState)
+		return uniformScores(endpoints, 0)
+	}
+
+	result, err := dynscorer.CallRoutePrefillRequestWithRequestID(reservationID, requestJSON, endpointsJSON)
 	if err != nil {
 		logger.V(logutil.DEFAULT).Error(err, "DynPrefillScorer: FFI prefill routing failed")
-		cycleState.Write(PrefillEnabledStateKey, &PrefillEnabledState{Enabled: false})
+		clearPrefillReservation(cycleState)
 		return uniformScores(endpoints, 0)
 	}
 
@@ -121,11 +158,25 @@ func (s *DynPrefillScorer) Score(ctx context.Context, cycleState *schedtypes.Cyc
 	if req.Headers == nil {
 		req.Headers = map[string]string{}
 	}
+	req.Headers[PrefillReservationIDHeader] = reservationID
 	req.Headers[PrefillWorkerIDHeader] = prefillWorkerID
-	if result.DpRank != dynscorer.UnsetDpRank {
+	hasDpRank := result.DpRank != dynscorer.UnsetDpRank
+	if hasDpRank {
 		req.Headers[PrefillDpRankHeader] = strconv.FormatUint(uint64(result.DpRank), 10)
 	} else {
 		delete(req.Headers, PrefillDpRankHeader)
+	}
+	cycleState.Write(PrefillReservationStateKey, &PrefillReservationState{
+		ID:        reservationID,
+		WorkerID:  prefillWorkerID,
+		DpRank:    result.DpRank,
+		HasDpRank: hasDpRank,
+	})
+	if err := ctx.Err(); err != nil {
+		logger.V(logutil.VERBOSE).Info("DynPrefillScorer: scheduling cancelled after prefill reservation",
+			"error", err.Error())
+		rollbackPrefillReservationAtTerminal(ctx, cycleState, req, "scheduling cancelled after prefill reservation")
+		return uniformScores(endpoints, 0)
 	}
 
 	return uniformScores(endpoints, 1.0)

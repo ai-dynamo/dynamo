@@ -71,6 +71,12 @@ query_router_result_t route_prefill_request(RouterHandles *handle,
                                             const char *pods_json,
                                             CRoutingResult *out_result);
 
+query_router_result_t route_prefill_request_with_request_id(RouterHandles *handle,
+                                                            const char *request_id,
+                                                            const char *request_json,
+                                                            const char *pods_json,
+                                                            CRoutingResult *out_result);
+
 query_router_result_t route_decode_request(RouterHandles *handle,
                                            const char *request_json,
                                            const char *pods_json,
@@ -439,9 +445,23 @@ func extractCacheNamespace(result *C.CRoutingResult) string {
 	return ""
 }
 
-// CallRoutePrefillRequest routes a request to the best prefill worker.
-// It tokenizes the request and queries only the prefill router.
+// CallRoutePrefillRequest queries the best prefill worker without reserving
+// scheduler load. Existing advisory callers retain their original behavior.
 func CallRoutePrefillRequest(requestJSON string, podsJSON string) (*RoutingResult, error) {
+	return callRoutePrefillRequest(nil, requestJSON, podsJSON)
+}
+
+// CallRoutePrefillRequestWithRequestID atomically selects a prefill worker and
+// reserves its scheduler load under requestID. The reservation is released by
+// CallMarkPrefillComplete / CallFreeRequest.
+func CallRoutePrefillRequestWithRequestID(requestID string, requestJSON string, podsJSON string) (*RoutingResult, error) {
+	if requestID == "" {
+		return nil, fmt.Errorf("request ID is required for prefill load reservation")
+	}
+	return callRoutePrefillRequest(&requestID, requestJSON, podsJSON)
+}
+
+func callRoutePrefillRequest(requestID *string, requestJSON string, podsJSON string) (*RoutingResult, error) {
 	if !routerInitialized {
 		return nil, fmt.Errorf("dynamo router not initialized")
 	}
@@ -463,9 +483,22 @@ func CallRoutePrefillRequest(requestJSON string, podsJSON string) (*RoutingResul
 	}
 
 	var result C.CRoutingResult
-	rc := C.route_prefill_request(router, cRequestJSON, cPodsJSON, &result)
+	var rc C.query_router_result_t
+	if requestID == nil {
+		rc = C.route_prefill_request(router, cRequestJSON, cPodsJSON, &result)
+	} else {
+		cRequestID := C.CString(*requestID)
+		defer C.free(unsafe.Pointer(cRequestID))
+		rc = C.route_prefill_request_with_request_id(
+			router,
+			cRequestID,
+			cRequestJSON,
+			cPodsJSON,
+			&result,
+		)
+	}
 	if rc != C.QUERY_ROUTER_OK {
-		return nil, fmt.Errorf("route_prefill_request failed with code %d", rc)
+		return nil, fmt.Errorf("prefill routing failed with code %d", rc)
 	}
 
 	tokens := extractTokenData(&result)

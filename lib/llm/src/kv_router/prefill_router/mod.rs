@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use anyhow::Result;
 use arc_swap::ArcSwapOption;
@@ -15,7 +17,7 @@ use dynamo_kv_router::{
     PrefillLoadEstimator,
     conditional_disagg::ConditionalDisaggPolicy,
     config::RouterConfigOverride,
-    protocols::RoutingConstraints,
+    protocols::{RoutingConstraints, WorkerWithDpRank},
     scheduling::QueueRejection,
     selector::{DefaultWorkerSelector, WorkerSelector},
 };
@@ -30,7 +32,7 @@ use futures::stream::{self, StreamExt};
 
 use crate::{
     discovery::ModelManager,
-    kv_router::WorkerSelectorFactory,
+    kv_router::{KvRouter, WorkerSelectorFactory},
     local_model::runtime_config::ModelRuntimeConfig,
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
@@ -124,7 +126,7 @@ struct PreparedPrefill {
     topology_constraints: Option<RoutingConstraints>,
 }
 
-/// Advisory prefill worker selection result.
+/// Prefill worker selection result for advisory queries or tracked reservations.
 pub enum PrefillQueryOutcome {
     Routed {
         worker_id: u64,
@@ -184,6 +186,9 @@ where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     binding: ArcSwapOption<PrefillBinding<Sel>>,
+    /// External reservations retain the exact chooser that admitted them so a
+    /// target rebind cannot redirect lifecycle cleanup to a different router.
+    tracked_reservations: Mutex<HashMap<String, TrackedPrefillLease<Sel>>>,
     target: Mutex<Option<EndpointId>>,
     target_tx: Option<watch::Sender<Option<dynamo_runtime::component::Endpoint>>>,
     /// Reference to the decode-side `KvRouter` so conditional disagg can peek
@@ -226,6 +231,43 @@ where
     /// `PrefillRouter` because it is unknowable until a target is discovered,
     /// and changes when the binding is rebuilt.
     prefill_router_mode: RouterMode,
+}
+
+struct TrackedPrefillLease<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    chooser: Arc<KvRouter<Sel>>,
+    generation: Arc<()>,
+    state: TrackedPrefillLeaseState,
+    updated_at: Instant,
+}
+
+#[derive(Clone, Copy)]
+enum TrackedPrefillLeaseState {
+    Pending,
+    Active(WorkerWithDpRank),
+    /// A release claimed this generation. `worker` is populated once admission
+    /// returns. While `admission_pending` is true this entry must not be pruned
+    /// or replaced by another generation with the same request ID.
+    Releasing {
+        worker: Option<WorkerWithDpRank>,
+        admission_pending: bool,
+    },
+}
+
+impl<Sel> Clone for TrackedPrefillLease<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            chooser: self.chooser.clone(),
+            generation: self.generation.clone(),
+            state: self.state,
+            updated_at: self.updated_at,
+        }
+    }
 }
 
 struct PrefillBuildContext<Sel>
