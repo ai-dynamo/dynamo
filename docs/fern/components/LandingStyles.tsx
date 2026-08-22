@@ -2036,8 +2036,16 @@ article:has(.dynamo-community-page) { margin-bottom: 0; }
      doing. The previous form hardcoded the 1200px column width, so it only
      landed correctly while the column was exactly that wide, and it drifted
      back inward once the viewport fell below 1200px. 50% is half the
-     containing block (the centred column), so 50% - 50vw is the offset from
-     the column's right edge out to the viewport's. */
+     containing block, so 50% - 50vw is the offset from the containing block's
+     right edge out to the viewport's, and the column's own width and padding
+     cancel out of the result.
+
+     This holds only while the containing block is centred in the viewport.
+     It is: the containing block is .dynamo-welcome above, and it fills
+     article:has(.dynamo-welcome), which sets max-width with margin-inline:
+     auto and symmetric padding-inline. If that article ever becomes offset
+     rather than centred -- a sidebar returning to this layout, say -- this
+     offset drifts by exactly that asymmetry and wants revisiting. */
   right: calc(50% - 50vw + 1rem);
   z-index: 30;
   display: flex;
