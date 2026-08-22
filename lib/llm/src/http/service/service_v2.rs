@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::http::Response;
+use axum::http::{Response, header::HeaderName};
 use axum::response::IntoResponse;
 
 use super::Metrics;
@@ -53,6 +53,7 @@ use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
 use crate::local_model::runtime_config::{
     SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
 };
+use crate::protocols::agents::HEADER_DYNAMO_SESSION_ID;
 
 /// Middleware that echoes `x-request-id` from request to response headers.
 async fn echo_request_id_header(
@@ -143,6 +144,7 @@ pub struct State {
     frontend_api_config: FrontendApiConfig,
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
+    session_affinity_header_name: HeaderName,
 }
 
 /// Typed config needed only to construct HTTP shared state.
@@ -154,6 +156,7 @@ struct StateConfig {
     frontend_api_config: FrontendApiConfig,
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
+    session_affinity_header_name: HeaderName,
 }
 
 fn parse_sse_keep_alive(value: Result<String, std::env::VarError>) -> Option<Duration> {
@@ -487,6 +490,7 @@ impl State {
             cancel_token,
             frontend_api_config: config.frontend_api_config,
             sse_keep_alive: config.sse_keep_alive,
+            session_affinity_header_name: config.session_affinity_header_name,
         }
     }
 
@@ -551,6 +555,12 @@ impl State {
     #[inline]
     pub fn nvext_enabled(&self) -> bool {
         self.nvext_enabled
+    }
+
+    /// Header used to derive the router-local session-affinity key.
+    #[inline]
+    pub fn session_affinity_header_name(&self) -> &HeaderName {
+        &self.session_affinity_header_name
     }
 
     /// Get the cancellation token
@@ -692,6 +702,10 @@ pub struct HttpServiceConfig {
     #[builder(default)]
     frontend_api_config: FrontendApiConfig,
 
+    /// HTTP header used for router-local session affinity.
+    #[builder(default = "None")]
+    session_affinity_header_key: Option<String>,
+
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
 
@@ -745,6 +759,12 @@ fn default_rl_port() -> u16 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(8001)
+}
+
+fn parse_session_affinity_header_name(header_key: Option<&str>) -> Result<HeaderName> {
+    let header_key = header_key.unwrap_or(HEADER_DYNAMO_SESSION_ID);
+    HeaderName::from_bytes(header_key.as_bytes())
+        .map_err(|_| anyhow::anyhow!("invalid session affinity header name: {header_key:?}"))
 }
 
 impl HttpService {
@@ -1124,6 +1144,8 @@ impl HttpServiceConfigBuilder {
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
+        let session_affinity_header_name =
+            parse_session_affinity_header_name(config.session_affinity_header_key.as_deref())?;
 
         let model_manager = Arc::new(ModelManager::new());
         let cancel_token = config.cancel_token.unwrap_or_default();
@@ -1151,6 +1173,7 @@ impl HttpServiceConfigBuilder {
                 frontend_api_config,
                 nvext_enabled,
                 sse_keep_alive: config.sse_keep_alive,
+                session_affinity_header_name,
             },
         ));
         state
@@ -1548,6 +1571,28 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn session_affinity_header_name_defaults_and_validates() {
+        assert_eq!(
+            parse_session_affinity_header_name(None).unwrap(),
+            HeaderName::from_static(HEADER_DYNAMO_SESSION_ID)
+        );
+        assert_eq!(
+            parse_session_affinity_header_name(Some("X-Customer-Session")).unwrap(),
+            HeaderName::from_static("x-customer-session")
+        );
+        assert!(parse_session_affinity_header_name(Some("x customer session")).is_err());
+
+        let service = HttpService::builder()
+            .session_affinity_header_key(Some("X-Customer-Session".to_string()))
+            .build()
+            .unwrap();
+        assert_eq!(
+            service.state().session_affinity_header_name(),
+            &HeaderName::from_static("x-customer-session")
+        );
+    }
 
     async fn wait_for_service_stage(state: &State, expected: ServiceStage) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);

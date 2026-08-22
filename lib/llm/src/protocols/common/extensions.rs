@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, header::HeaderName};
 use derive_builder::Builder;
 use dynamo_protocols::types::StopReason;
 use serde::{Deserialize, Serialize};
@@ -341,8 +341,11 @@ pub fn agent_context_from_headers(headers: &HeaderMap) -> Option<AgentContext> {
     agent_context_header_values(headers).map(AgentContext::from)
 }
 
-pub fn session_affinity_from_headers(headers: &HeaderMap) -> Option<SessionAffinityId> {
-    session_affinity_header_value(headers).map(SessionAffinityId::new)
+pub fn session_affinity_from_headers(
+    headers: &HeaderMap,
+    header_name: &HeaderName,
+) -> Option<SessionAffinityId> {
+    session_affinity_header_value(headers, header_name).map(SessionAffinityId::new)
 }
 
 /// Apply HTTP routing header overrides to nvext.
@@ -1158,7 +1161,12 @@ mod tests {
             Some("codex-root")
         );
         assert_eq!(
-            session_affinity_from_headers(&headers).unwrap().as_str(),
+            session_affinity_from_headers(
+                &headers,
+                &HeaderName::from_static(HEADER_DYNAMO_SESSION_ID),
+            )
+            .unwrap()
+            .as_str(),
             "codex-child"
         );
     }
@@ -1185,7 +1193,13 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("session-id", "codex-run".parse().unwrap());
         assert!(agent_context_from_headers(&headers).is_none());
-        assert!(session_affinity_from_headers(&headers).is_none());
+        assert!(
+            session_affinity_from_headers(
+                &headers,
+                &HeaderName::from_static(HEADER_DYNAMO_SESSION_ID),
+            )
+            .is_none()
+        );
 
         headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
         assert_eq!(
@@ -1197,6 +1211,7 @@ mod tests {
     #[test]
     fn session_affinity_prefers_dynamo_header_over_agent_mappings() {
         let mut headers = HeaderMap::new();
+        let header_name = HeaderName::from_static(HEADER_DYNAMO_SESSION_ID);
         headers.insert(
             HEADER_CLAUDE_CODE_SESSION_ID,
             "claude-session".parse().unwrap(),
@@ -1209,28 +1224,58 @@ mod tests {
         // Without a canonical header, affinity falls back to the first matching
         // agent mapping. Claude precedes Codex and OpenCode in AGENT_HEADER_MAPPINGS.
         assert_eq!(
-            session_affinity_from_headers(&headers).unwrap().as_str(),
+            session_affinity_from_headers(&headers, &header_name)
+                .unwrap()
+                .as_str(),
             "claude-session"
         );
 
         // The explicit Dynamo session header always wins over agent mappings.
         headers.insert(HEADER_DYNAMO_SESSION_ID, "canonical".parse().unwrap());
         assert_eq!(
-            session_affinity_from_headers(&headers).unwrap().as_str(),
+            session_affinity_from_headers(&headers, &header_name)
+                .unwrap()
+                .as_str(),
             "canonical"
         );
 
         // A blank Dynamo header is ignored and affinity falls back to the mapping.
         headers.insert(HEADER_DYNAMO_SESSION_ID, "   ".parse().unwrap());
         assert_eq!(
-            session_affinity_from_headers(&headers).unwrap().as_str(),
+            session_affinity_from_headers(&headers, &header_name)
+                .unwrap()
+                .as_str(),
             "claude-session"
         );
     }
 
     #[test]
+    fn session_affinity_uses_configured_custom_header_only() {
+        let mut headers = HeaderMap::new();
+        let header_name = HeaderName::from_static("x-customer-session");
+        headers.insert(
+            HEADER_CLAUDE_CODE_SESSION_ID,
+            "claude-session".parse().unwrap(),
+        );
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "canonical".parse().unwrap());
+        assert!(session_affinity_from_headers(&headers, &header_name).is_none());
+
+        headers.insert(&header_name, "customer-session".parse().unwrap());
+        assert_eq!(
+            session_affinity_from_headers(&headers, &header_name)
+                .unwrap()
+                .as_str(),
+            "customer-session"
+        );
+
+        headers.insert(&header_name, "   ".parse().unwrap());
+        assert!(session_affinity_from_headers(&headers, &header_name).is_none());
+    }
+
+    #[test]
     fn session_affinity_uses_agent_child_session_when_present() {
         let mut headers = HeaderMap::new();
+        let header_name = HeaderName::from_static(HEADER_DYNAMO_SESSION_ID);
         headers.insert(
             HEADER_CLAUDE_CODE_SESSION_ID,
             "claude-session".parse().unwrap(),
@@ -1242,7 +1287,9 @@ mod tests {
         let agent_context = agent_context_from_headers(&headers).unwrap();
         assert_eq!(agent_context.session_id, "claude-agent");
         assert_eq!(
-            session_affinity_from_headers(&headers).unwrap().as_str(),
+            session_affinity_from_headers(&headers, &header_name)
+                .unwrap()
+                .as_str(),
             "claude-agent"
         );
 
@@ -1254,7 +1301,9 @@ mod tests {
         let agent_context = agent_context_from_headers(&headers).unwrap();
         assert_eq!(agent_context.session_id, "affinity-session");
         assert_eq!(
-            session_affinity_from_headers(&headers).unwrap().as_str(),
+            session_affinity_from_headers(&headers, &header_name)
+                .unwrap()
+                .as_str(),
             "affinity-session"
         );
     }
@@ -1262,11 +1311,12 @@ mod tests {
     #[test]
     fn session_affinity_absent_without_any_session_header() {
         let mut headers = HeaderMap::new();
-        assert!(session_affinity_from_headers(&headers).is_none());
+        let header_name = HeaderName::from_static(HEADER_DYNAMO_SESSION_ID);
+        assert!(session_affinity_from_headers(&headers, &header_name).is_none());
 
         // A blank canonical header with no agent headers yields no affinity.
         headers.insert(HEADER_DYNAMO_SESSION_ID, "   ".parse().unwrap());
-        assert!(session_affinity_from_headers(&headers).is_none());
+        assert!(session_affinity_from_headers(&headers, &header_name).is_none());
     }
 
     #[test]

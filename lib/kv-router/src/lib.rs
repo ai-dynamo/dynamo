@@ -17,6 +17,7 @@ pub mod identity;
 pub mod indexer;
 pub mod protocols;
 pub mod recovery;
+pub mod rendezvous;
 pub mod router_hint;
 pub mod scheduling;
 pub mod sequences;

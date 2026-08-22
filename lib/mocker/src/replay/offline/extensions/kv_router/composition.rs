@@ -15,6 +15,7 @@ use super::{KvReplayMetadata, KvRouterPlacement};
 use crate::common::protocols::MockEngineArgs;
 use crate::replay::ReplayPrefillLoadEstimator;
 use crate::replay::offline::extensions::kv_events::RouterEventObservation;
+use crate::replay::session_affinity::ReplaySessionSimulationOptions;
 
 /// Round-robin placement with an optional Dynamo Planner scaling policy.
 pub(in crate::replay) struct RoundRobinReplayComposition {
@@ -95,6 +96,7 @@ pub(in crate::replay) struct KvReplayComposition {
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     scaling_enabled: bool,
     determinism: ReplayDeterminism,
+    session_options: ReplaySessionSimulationOptions,
 }
 
 impl KvReplayComposition {
@@ -116,6 +118,7 @@ impl KvReplayComposition {
             scaling_policy,
             scaling_enabled,
             determinism: ReplayDeterminism::Random,
+            session_options: ReplaySessionSimulationOptions::default(),
         }
     }
 
@@ -141,7 +144,16 @@ impl KvReplayComposition {
             scaling_policy,
             scaling_enabled,
             determinism: ReplayDeterminism::Random,
+            session_options: ReplaySessionSimulationOptions::default(),
         }
+    }
+
+    pub(in crate::replay) fn with_session_options(
+        mut self,
+        session_options: ReplaySessionSimulationOptions,
+    ) -> Self {
+        self.session_options = session_options;
+        self
     }
 }
 
@@ -171,12 +183,13 @@ impl ReplayComposition for KvReplayComposition {
             bail!("disaggregated Router composition used for aggregated replay");
         };
         validate_runtime_topology("aggregated", args, *num_workers, dp_size, &topology)?;
-        KvRouterPlacement::new_with_selector_seed(
+        KvRouterPlacement::new_with_selector_seed_and_session_options(
             args,
             self.router_config.take(),
             self.prefill_load_estimator.take(),
             topology.len(),
             self.determinism.selector_seed(),
+            self.session_options,
         )
     }
 
