@@ -226,6 +226,20 @@ Healthy signals:
 - every component and replica declared by the selected DGD is `Running` and ready
 - frontend service exists
 
+**Pending-pod triage (mandatory before any waiting):** a pod `Pending` beyond one readiness-poll interval
+requires reading its scheduler events (`kubectl describe pod`), not the cluster's free-GPU count, and triaging
+by category — each category has a different correct action:
+
+- **Untolerated taint / node-affinity or selector mismatch**: the manifest can NEVER schedule as written. This
+  is a FAILED DEPLOY, not a wait state: count it against the failed-deploy budget, fix the manifest (restore
+  recipe tolerations/selectors; a baseline expresses requirements like GPU type and count, never observed
+  cluster state such as a specific node name), and redeploy.
+- **Insufficient GPU/CPU/memory on otherwise-eligible nodes**: genuine capacity contention. Waiting is
+  legitimate; record the evidence line and an explicit next-check interval in the ledger.
+- **PVC unbound / quota / admission errors**: fix the dependency; neither waiting nor a manifest rewrite helps.
+
+Never report taint- or affinity-blocking as "capacity contention"; the events distinguish them explicitly.
+
 On failure, inspect the DGD status, events, and logs for the affected component before making a minimal run-scoped
 compatibility patch. Record the readiness state, diagnosis, relevant error excerpt, and patch in `deployment_ledger.json`.
 Do not generate broad Kubernetes snapshots, endpoint-response copies, successful pod logs, or other evidence files.
