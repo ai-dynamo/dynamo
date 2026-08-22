@@ -6,6 +6,7 @@
 package discovery
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -88,4 +89,19 @@ func TestGetK8sDiscoveryResourcesUseCappedLabel(t *testing.T) {
 			t.Fatalf("label %q length=%d, want <= %d", label, len(label), maxLabelValueLen)
 		}
 	}
+}
+
+func TestGetK8sDiscoveryRoleCanReadLeases(t *testing.T) {
+	t.Parallel()
+
+	role := GetK8sDiscoveryRole("test-dgd", "default")
+	for _, rule := range role.Rules {
+		if slices.Contains(rule.APIGroups, "coordination.k8s.io") &&
+			slices.Contains(rule.Resources, "leases") &&
+			slices.Contains(rule.Verbs, "get") {
+			return
+		}
+	}
+
+	t.Fatal("discovery role does not grant get on coordination.k8s.io leases")
 }
