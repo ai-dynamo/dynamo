@@ -114,6 +114,7 @@ async def warmup_engine(engine: sgl.Engine, server_args: Any) -> None:
 
 async def prepare_snapshot_engine(
     server_args,
+    response_handler: Any | None = None,
 ) -> EngineSnapshotController[sgl.Engine] | None:
     """Single entry point for Dynamo Snapshot integration.
 
@@ -149,7 +150,10 @@ async def prepare_snapshot_engine(
         server_args.enable_weights_cpu_backup = True
 
     start_time = time.time()
-    engine = sgl.Engine(server_args=server_args)
+    engine_kwargs = (
+        {"response_handler": response_handler} if response_handler is not None else {}
+    )
+    engine = sgl.Engine(server_args=server_args, **engine_kwargs)
     logger.info(
         f"SGLang engine loaded in {time.time() - start_time:.2f}s (snapshot mode)"
     )

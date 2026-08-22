@@ -28,6 +28,7 @@ from dynamo.sglang.init_multimodal import (
     init_multimodal_prefill_worker,
     init_multimodal_worker,
 )
+from dynamo.sglang.request_handlers.llm.response_handler import create_response_handler
 from dynamo.sglang.shutdown import install_graceful_shutdown
 from dynamo.sglang.snapshot import prepare_snapshot_engine
 
@@ -48,7 +49,24 @@ async def worker(argv: list[str] | None = None):
 
     # Snapshot mode: engine must be created before runtime so CRIU captures no
     # NATS/etcd connections.
-    snapshot_controller = await prepare_snapshot_engine(config.server_args)
+    is_llm_decode_worker = (
+        config.serving_mode != DisaggregationMode.PREFILL
+        and not any(
+            (
+                config.dynamo_args.image_diffusion_worker,
+                config.dynamo_args.video_generation_worker,
+                config.dynamo_args.embedding_worker,
+                config.dynamo_args.multimodal_encode_worker,
+                config.dynamo_args.multimodal_worker,
+                config.dynamo_args.diffusion_worker,
+            )
+        )
+    )
+    response_handler = create_response_handler() if is_llm_decode_worker else None
+    snapshot_controller = await prepare_snapshot_engine(
+        config.server_args,
+        response_handler=response_handler,
+    )
 
     dynamo_args = config.dynamo_args
     snapshot_engine = None
@@ -133,6 +151,7 @@ async def worker(argv: list[str] | None = None):
             shutdown_endpoints,
             run_deferred_handlers,
             snapshot_engine=snapshot_engine,
+            response_handler=response_handler,
         )
     else:
         await init_prefill(
