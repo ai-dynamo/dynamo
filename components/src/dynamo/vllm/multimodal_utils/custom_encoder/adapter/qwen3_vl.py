@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Native external-multimodal adapter for Qwen3-VL decoders."""
+"""Native external-multimodal adapter for supported Qwen decoders."""
 
 from dataclasses import dataclass
 from typing import Any, Sequence
@@ -14,18 +14,21 @@ from dynamo.vllm.multimodal_utils.custom_encoder.adapter.base import (
 )
 from dynamo.vllm.multimodal_utils.model_config import _model_architectures
 
-_QWEN3_VL_ARCHITECTURES = frozenset(
+# Only these registered Qwen VLM wrappers can consume external image features
+# through TokensPrompt. Text-only Qwen decoders must use LinearEmbedsAdapter.
+_NATIVE_QWEN_VLM_ARCHITECTURES = frozenset(
     {
         "Qwen3VLForConditionalGeneration",
         "Qwen3VLMoeForConditionalGeneration",
+        "Qwen3_5ForConditionalGeneration",
     }
 )
 
 
-def _is_qwen3_vl_model(model_config: Any) -> bool:
-    """Whether vLLM resolved a supported dense or MoE Qwen3-VL model."""
+def _is_native_qwen_vlm(model_config: Any) -> bool:
+    """Whether vLLM resolved a supported native Qwen VLM wrapper."""
     return any(
-        architecture in _QWEN3_VL_ARCHITECTURES
+        architecture in _NATIVE_QWEN_VLM_ARCHITECTURES
         for architecture in _model_architectures(model_config)
     )
 
@@ -35,20 +38,20 @@ def _spatial_merge_size(model_config: Any) -> int:
     vision_config = getattr(hf_config, "vision_config", None)
     value = getattr(vision_config, "spatial_merge_size", None)
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-        raise ValueError("Qwen3-VL could not resolve spatial_merge_size")
+        raise ValueError("Qwen decoder could not resolve spatial_merge_size")
     return value
 
 
 @dataclass(frozen=True)
 class Qwen3VLImageEncoding:
-    """Packed Qwen3-VL image features and their pre-merge grid."""
+    """Packed Qwen image features and their pre-merge grid."""
 
     embeddings: torch.Tensor
     grid_thw: tuple[int, int, int]
 
 
 class Qwen3VLNativeAdapter(CustomEncoderAdapter[Qwen3VLImageEncoding]):
-    """Build a native external-MM ``TokensPrompt`` for Qwen3-VL."""
+    """Build a native external-MM ``TokensPrompt`` for Qwen3-VL or Qwen3.5."""
 
     def __init__(self, model_config: Any) -> None:
         self._spatial_merge_size = _spatial_merge_size(model_config)
@@ -59,13 +62,13 @@ class Qwen3VLNativeAdapter(CustomEncoderAdapter[Qwen3VLImageEncoding]):
         artifacts: Sequence[Qwen3VLImageEncoding],
     ) -> TokensPrompt:
         if not artifacts:
-            raise ValueError("Qwen3-VL CustomEncoder artifacts must not be empty")
+            raise ValueError("Qwen CustomEncoder artifacts must not be empty")
 
         encodings: list[Qwen3VLImageEncoding] = []
         for index, artifact in enumerate(artifacts):
             if not isinstance(artifact, Qwen3VLImageEncoding):
                 raise TypeError(
-                    "Qwen3-VL CustomEncoder must return Qwen3VLImageEncoding; "
+                    "Qwen CustomEncoder must return Qwen3VLImageEncoding; "
                     f"result {index} is {type(artifact).__name__}"
                 )
             self._validate_encoding(index, artifact)
@@ -90,16 +93,16 @@ class Qwen3VLNativeAdapter(CustomEncoderAdapter[Qwen3VLImageEncoding]):
     def _validate_encoding(self, index: int, encoding: Qwen3VLImageEncoding) -> None:
         embeddings = encoding.embeddings
         if not isinstance(embeddings, torch.Tensor):
-            raise TypeError(f"Qwen3-VL image {index} embeddings must be a tensor")
+            raise TypeError(f"Qwen image {index} embeddings must be a tensor")
         if embeddings.dim() != 2:
             raise ValueError(
-                f"Qwen3-VL image {index} embeddings must be 2D; "
+                f"Qwen image {index} embeddings must be 2D; "
                 f"got shape {tuple(embeddings.shape)}"
             )
         if embeddings.shape[0] < 1:
-            raise ValueError(f"Qwen3-VL image {index} has no embedding rows")
+            raise ValueError(f"Qwen image {index} has no embedding rows")
         if embeddings.device.type != "cpu":
-            raise ValueError(f"Qwen3-VL image {index} embeddings must be on CPU")
+            raise ValueError(f"Qwen image {index} embeddings must be on CPU")
 
         grid = encoding.grid_thw
         if (
@@ -111,19 +114,19 @@ class Qwen3VLNativeAdapter(CustomEncoderAdapter[Qwen3VLImageEncoding]):
             or any(value < 1 for value in grid)
         ):
             raise ValueError(
-                f"Qwen3-VL image {index} grid_thw must contain three positive integers"
+                f"Qwen image {index} grid_thw must contain three positive integers"
             )
 
         temporal, height, width = grid
         merge_size = self._spatial_merge_size
         if height % merge_size or width % merge_size:
             raise ValueError(
-                f"Qwen3-VL image {index} grid H/W must be divisible by "
+                f"Qwen image {index} grid H/W must be divisible by "
                 f"spatial_merge_size={merge_size}"
             )
         expected_rows = temporal * height * width // merge_size**2
         if embeddings.shape[0] != expected_rows:
             raise ValueError(
-                f"Qwen3-VL image {index} has {embeddings.shape[0]} embedding rows; "
+                f"Qwen image {index} has {embeddings.shape[0]} embedding rows; "
                 f"grid {grid} requires {expected_rows}"
             )
