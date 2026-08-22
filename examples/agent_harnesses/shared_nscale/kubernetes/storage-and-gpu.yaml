@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agent-well-lit-model-cache
+  namespace: anish-agent-well-lit-path
+  labels:
+    app.kubernetes.io/part-of: agent-well-lit-path
+    dynamo.nvidia.com/owner: anish-maddipoti
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: vast
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: agent-well-lit-nvidia-1-gpu
+  namespace: anish-agent-well-lit-path
+  labels:
+    app.kubernetes.io/part-of: agent-well-lit-path
+    dynamo.nvidia.com/owner: anish-maddipoti
+spec:
+  spec:
+    devices:
+      requests:
+        - name: gpu
+          exactly:
+            allocationMode: ExactCount
+            count: 1
+            deviceClassName: gpu.nvidia.com

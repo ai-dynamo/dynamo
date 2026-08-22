@@ -1,0 +1,103 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: agent-well-lit-benchmark-stock
+  namespace: anish-agent-well-lit-path
+  labels:
+    app.kubernetes.io/name: agent-well-lit-benchmark-stock
+    app.kubernetes.io/part-of: agent-well-lit-path
+    dynamo.nvidia.com/branch: agent-well-lit-shared
+    dynamo.nvidia.com/owner: anish-maddipoti
+    dynamo.nvidia.com/qualification: routing-load
+spec:
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        metadata:
+          labels:
+            app.kubernetes.io/name: agent-well-lit-benchmark-frontend
+            app.kubernetes.io/part-of: agent-well-lit-path
+            dynamo.nvidia.com/owner: anish-maddipoti
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime@sha256:effd250754b8a70517c27eab8f18463b395a7b2a8e868fd919226c3180636939
+              command: ["python3", "-m", "dynamo.frontend"]
+              args: ["--http-port", "8000"]
+              envFrom:
+                - configMapRef:
+                    name: agent-well-lit-benchmark-router
+              workingDir: /workspace
+              resources:
+                requests:
+                  cpu: "1"
+                  memory: 1Gi
+                limits:
+                  cpu: "2"
+                  memory: 2Gi
+    - name: VllmDecodeWorker
+      type: worker
+      replicas: 2
+      podTemplate:
+        metadata:
+          labels:
+            app.kubernetes.io/name: agent-well-lit-benchmark-worker
+            app.kubernetes.io/part-of: agent-well-lit-path
+            dynamo.nvidia.com/owner: anish-maddipoti
+        spec:
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      app.kubernetes.io/name: agent-well-lit-benchmark-worker
+                      app.kubernetes.io/part-of: agent-well-lit-path
+                  topologyKey: kubernetes.io/hostname
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime@sha256:effd250754b8a70517c27eab8f18463b395a7b2a8e868fd919226c3180636939
+              command: ["python3", "-m", "dynamo.vllm"]
+              args:
+                - --model
+                - Qwen/Qwen3-0.6B
+                - --served-model-name
+                - Qwen/Qwen3-0.6B
+                - --revision
+                - c1899de289a04d12100db370d81485cdf75e47ca
+                - --gpu-memory-utilization
+                - "0.60"
+                - --max-model-len
+                - "4096"
+                - --enable-prefix-caching
+                - --kv-events-config
+                - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+                - --no-enable-log-requests
+              env:
+                - name: HF_HOME
+                  value: /opt/models
+              workingDir: /workspace/examples/backends/vllm
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 8Gi
+                  nvidia.com/gpu: "1"
+                limits:
+                  cpu: "4"
+                  memory: 16Gi
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /opt/models
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Exists
+              effect: NoSchedule
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: agent-well-lit-model-cache

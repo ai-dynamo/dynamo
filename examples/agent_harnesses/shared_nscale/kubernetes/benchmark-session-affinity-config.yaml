@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-well-lit-benchmark-router
+  namespace: anish-agent-well-lit-path
+  labels:
+    app.kubernetes.io/part-of: agent-well-lit-path
+    dynamo.nvidia.com/owner: anish-maddipoti
+    dynamo.nvidia.com/router: stock-kv-session-affinity
+data:
+  DYN_ROUTER_MODE: kv
+  DYN_ROUTER_MIN_INITIAL_WORKERS: "2"
+  DYN_ROUTER_SESSION_AFFINITY_TTL_SECS: "300"
+  DYN_ROUTER_USE_KV_EVENTS: "true"
