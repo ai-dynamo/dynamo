@@ -66,9 +66,9 @@ returning.
    grid" is not terminal); and the stop-request's draft recommendation at `EXP_ROOT/final/recommended_config.md` carries its required
    `Correctness status:` line (require that path as an input for stop-request validation).
 3. Verify the stop-request delta cites derived budget consumption (wall clock from `manifest.yaml` session start;
-   failed-deploy count from the deployment ledgers; GPU-hours from summed `benchmark_execution.json` durations
-   times deployed GPU count) and that the cited sources support the arithmetic, whenever any granted budget is
-   non-null.
+   failed-deploy count from the deployment ledgers; GPU-hours from GPU allocation time, per deployment ledger
+   apply-to-teardown span times its manifest's GPUs, summed across deployments) and that the cited sources
+   support the arithmetic, whenever any granted budget is non-null.
 4. Append the verdict to `EXP_ROOT/analysis/challenger-reviews.jsonl` as for any review, binding it to the
    submitted ledger SHA256, and state in it that this is procedural validation, not independent adversarial
    assurance. A validated stop-request returns to the PARENT with state `STOP_REQUESTED` for operator grant; it is

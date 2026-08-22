@@ -59,6 +59,10 @@ Do:
 
 - Base the proposal on valid AIPerf analysis and applicable performance guidance. Use same-series runs for direct
   comparisons and cross-series results only as context.
+- When a candidate changes topology or config family, re-locate that family's SLO frontier (highest measured
+  operating point that still passes) before judging it: families are compared best-under-SLO versus
+  best-under-SLO, per `tuning-hierarchy.md`. A family that wins at one fixed operating point but breaches the
+  SLO earlier than its rival is not the winner.
 - Select one independently testable knob, or one justified coupled mechanism.
 - State the knob owner and exact target setting so the change can be materialized without guessing.
 - State the performance question the candidate should answer, its target operating region, and the expected measurable

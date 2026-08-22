@@ -55,7 +55,15 @@ other hardware supports a structural mismatch. Sibling recipes are hypothesis pr
 when their checkpoint or hardware is incompatible, their parallelism and serving-mode choices transfer as candidates.
 Rank candidate layouts cheaply (sizing arithmetic, projections, published same-model recipes) before spending a
 deployment on one, and revisit topology after baseline characterization and whenever the measured regime changes; an
-inherited layout is a candidate like any other, not a settled decision. Consult the
+inherited layout is a candidate like any other, not a settled decision.
+
+**Compare config families at each family's own SLO frontier, never at a single shared operating point.** A
+topology or config family changes where the SLO-compliant operating region ends, and the frontier location is
+itself a lever: a family that wins at a fixed low concurrency but breaches the SLO earlier can lose the
+engagement to a family that carries more concurrency. After any change at this category, re-locate the SLO
+frontier (the highest measured operating point that passes) before comparing; the objective comparison between
+families is best-under-SLO versus best-under-SLO. Selecting a family from a fixed-point comparison alone is
+invalid when the families' frontiers differ. Consult the
 [model-sizing guides](../model-sizing/classification.md) and, for disaggregated serving,
 [rate matching](../rate-matching/matching.md).
 
