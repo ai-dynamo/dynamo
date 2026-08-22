@@ -41,6 +41,7 @@ from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
+from dynamo.common.utils.media_decoder import build_frontend_image_decoder_options
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_embedding_cache_metrics,
@@ -824,7 +825,7 @@ async def init_llm_worker(
         media_fetcher = None
         if config.frontend_decoding:
             media_decoder = MediaDecoder()
-            media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+            media_decoder.enable_image(build_frontend_image_decoder_options())
             media_fetcher = MediaFetcher()
             media_fetcher.timeout_ms(30000)
             allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"

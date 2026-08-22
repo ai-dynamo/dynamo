@@ -1,4 +1,4 @@
-# Tokenizer Benchmarks
+# LLM Benchmarks
 
 ## tokenizer_simple
 
@@ -59,6 +59,20 @@ RUN_BENCH=1 BATCH_SIZE=64 cargo bench --bench tokenizer_dataset -p dynamo-llm
 | `DATASET` | `zai-org/LongBench-v2` | HuggingFace dataset name (`zai-org/LongBench-v2` or `RyokoAI/ShareGPT52K`) |
 | `MAX_SAMPLES` | `503` | Maximum number of samples to process |
 | `BATCH_SIZE` | unset | If set, runs batched mode instead of sequential |
+
+## image_decode
+
+Compares Rust `image::ImageReader` with the default libjpeg-turbo path for JPEG
+decoding. The benchmark measures a synthetic 2400x1080 RGB JPEG:
+
+```bash
+cargo bench --bench image_decode -p dynamo-llm
+```
+
+For the reproducible 3840x2160, 100-image concurrency sweep at C1, C8, and C32,
+use the [media decode benchmark runner](../../../benchmarks/multimodal/media_decode/README.md).
+The sweep is opt-in so `cargo test --all-targets` does not execute the workload
+in CI.
 
 ## request_trace_finish_metadata
 

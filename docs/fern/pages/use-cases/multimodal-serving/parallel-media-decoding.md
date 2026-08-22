@@ -68,6 +68,14 @@ registers the model.
 | [SGLang](../../developer-guide/knowledge-base/modular-components/backends/sglang/reference-guide.md) | `--frontend-decoding` |
 | [TensorRT-LLM](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/reference-guide.md) | `--enable-multimodal --frontend-decoding` |
 
+### JPEG Decoder
+
+The Rust frontend uses libjpeg-turbo for JPEG inputs by default. Set
+`DYN_MM_ENABLE_LIBJPEG=0` to use `image::ImageReader` instead. Dynamo backend
+runtime images include `libturbojpeg`; custom images must provide
+`libturbojpeg.so.0`. If the library is unavailable, Dynamo logs a one-time
+warning and falls back to `image::ImageReader`.
+
 ## Requirements and Limitations
 
 - The published `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.0` image installs
