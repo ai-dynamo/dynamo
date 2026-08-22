@@ -12,17 +12,25 @@ All tests run inside containers. See the [Container Development Guide](../contai
 
 ## CI model registry and selection
 
-All Hugging Face repositories referenced by files under `tests/` must have a
-`ModelSpec` in [`tests/utils/model_registry.py`](utils/model_registry.py). The
+All model dependencies declared with `@pytest.mark.model` anywhere in the root
+pytest collection must have a `ModelSpec` in
+[`tests/utils/model_registry.py`](utils/model_registry.py). Quoted Hugging Face
+repository IDs under `tests/` are also scanned, covering launch scripts and
+other assets that pytest does not collect. Strings used only as protocol or
+metadata fixtures do not need registry entries unless a test loads them. The
 registry records snapshot size, model kind, architecture characteristics,
 runtime support, parameter count, context length, license, and whether access
-is gated. A unit test rejects new unregistered model literals and models over
-the 20 GiB default snapshot cap unless they carry a documented exception.
+is gated. A unit test rejects unregistered dependencies and models over the
+20 GiB default snapshot cap unless they carry a documented exception.
 
 Prefer a role from `tests.utils.constants` when the test needs any compatible
 model. Keep an exact registry constant when the behavior is architecture- or
 checkpoint-specific (for example a Qwen reasoning parser, a LoRA adapter/base
 pair, MLA, or EAGLE speculative decoding).
+
+Set `DYN_CI_MODEL` to replace every generic smoke role in one CI invocation.
+A role-specific variable from the table below takes precedence. KV-transfer
+and architecture-specific coverage deliberately ignore the global override.
 
 | Role | Override | Compatibility constraint |
 |---|---|---|
@@ -51,6 +59,13 @@ To compare a compatible model in a role without editing tests:
 ```bash
 DYN_CI_VLLM_SMOKE_MODEL=ibm-granite/granite-4.0-h-350m \
   python3 -m pytest -m 'vllm and pre_merge' tests/
+```
+
+To compare one cross-backend candidate across all generic smoke coverage:
+
+```bash
+DYN_CI_MODEL=google/gemma-3-270m-it \
+  python3 -m pytest -m 'pre_merge and (vllm or sglang or trtllm)' tests/
 ```
 
 See [Fast vLLM startup in CI](VLLM_STARTUP.md) for measured H100 startup and

@@ -43,7 +43,9 @@ container, model length 2,048, maximum 8 sequences, maximum 2,048 batched
 tokens, and a 512 MiB explicit KV cache. Time-to-ready is from process launch
 to the `HTTP server started` log. A four-to-eight-token chat request verified
 each candidate returned HTTP 200; this benchmark did not attempt to rank model
-quality.
+quality. These measurements use upstream `vllm serve` to isolate the engine
+and API server. Dynamo's removed scheduler/stagger delays are separate
+orchestration savings and are not included in the table.
 
 | Model/configuration | Cache state | Ready (s) | Engine init (s) | GPU memory (MiB) | First request (s) |
 |---|---:|---:|---:|---:|---:|

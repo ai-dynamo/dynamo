@@ -12,6 +12,7 @@ from tests.conftest import _collect_models_to_download
 from tests.utils import model_registry
 from tests.utils.model_registry import (
     DEFAULT_CI_MODEL_SNAPSHOT_CAP_GIB,
+    GLOBAL_CI_MODEL_OVERRIDE_ENV_VAR,
     MODEL_PROFILES,
     MODEL_REGISTRY,
     MODEL_SPECS,
@@ -156,7 +157,9 @@ def test_model_registry_invariants_and_size_policy():
     assert model_registry.downloadable_model_ids([model_registry.QWEN_QWEN3_32B]) == ()
 
 
-def test_characteristic_selection_is_smallest_first_and_profiles_are_safe():
+def test_characteristic_selection_is_smallest_first_and_profiles_are_safe(
+    monkeypatch,
+):
     candidates = select_models(
         ModelQuery(
             kind="llm",
@@ -182,6 +185,29 @@ def test_characteristic_selection_is_smallest_first_and_profiles_are_safe():
             "trtllm_smoke", override=model_registry.GOOGLE_GEMMA_3_270M_IT
         )
         == model_registry.GOOGLE_GEMMA_3_270M_IT
+    )
+
+    monkeypatch.setenv(
+        GLOBAL_CI_MODEL_OVERRIDE_ENV_VAR, model_registry.GOOGLE_GEMMA_3_270M_IT
+    )
+    for profile_name in (
+        "cross_backend_smoke",
+        "sglang_smoke",
+        "trtllm_smoke",
+        "vllm_smoke",
+    ):
+        assert (
+            resolve_model_profile(profile_name) == model_registry.GOOGLE_GEMMA_3_270M_IT
+        )
+    assert resolve_model_profile("kv_transfer") == model_registry.QWEN_QWEN3_0_6B
+
+    monkeypatch.setenv(
+        "DYN_CI_VLLM_SMOKE_MODEL",
+        model_registry.IBM_GRANITE_GRANITE_4_0_H_350M,
+    )
+    assert (
+        resolve_model_profile("vllm_smoke")
+        == model_registry.IBM_GRANITE_GRANITE_4_0_H_350M
     )
     with pytest.raises(ValueError, match="does not satisfy"):
         resolve_model_profile(

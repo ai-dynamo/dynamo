@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 DEFAULT_CI_MODEL_SNAPSHOT_CAP_GIB = 20.0
+GLOBAL_CI_MODEL_OVERRIDE_ENV_VAR = "DYN_CI_MODEL"
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,7 @@ class ModelProfile:
     default_repo_id: str
     query: ModelQuery
     override_env_var: str
+    allow_global_override: bool = True
 
 
 QWEN_QWEN_IMAGE = "Qwen/Qwen-Image"
@@ -560,6 +562,7 @@ MODEL_PROFILES: dict[str, ModelProfile] = {
             max_parameter_count_millions=700,
         ),
         override_env_var="DYN_CI_KV_TRANSFER_MODEL",
+        allow_global_override=False,
     ),
     "sglang_smoke": ModelProfile(
         default_repo_id=QWEN_QWEN3_0_6B,
@@ -679,8 +682,16 @@ def resolve_model_profile(profile_name: str, *, override: str | None = None) -> 
             f"Unknown CI model profile {profile_name!r}; choose {choices}"
         ) from exc
 
-    repo_id = override or os.environ.get(
-        profile.override_env_var, profile.default_repo_id
+    global_override = (
+        os.environ.get(GLOBAL_CI_MODEL_OVERRIDE_ENV_VAR)
+        if profile.allow_global_override
+        else None
+    )
+    repo_id = (
+        override
+        or os.environ.get(profile.override_env_var)
+        or global_override
+        or profile.default_repo_id
     )
     spec = get_model_spec(repo_id)
     if not model_matches_query(spec, profile.query):
