@@ -15,8 +15,8 @@ Covers (after realignment to the merged TRT-LLM PR #13199):
   * Attention-DP fanout emits one FPM per attentionDpRank; queued fields are
     forwarded from the stat row as-is, so they remain nonzero only on the
     rank-0 row produced by TRT-LLM.
-  * iterLatencyMS (top-level milliseconds) is converted to wall_time_secs
-    (seconds) at the boundary.
+  * gpuForwardTimeMS (top-level milliseconds) is preferred for wall_time_secs;
+    older stats without it retain iterLatencyMS as a compatibility fallback.
   * First-stat schema probe disables the publisher when the nested IBS dict
     is missing or any of the 11 required fields is absent — protecting
     against silent planner poison when running against pre-#13199 TRT-LLM.
@@ -100,6 +100,12 @@ def _invoke_handler(stat, fpm_publisher):
     )
     attention_dp_rank = stat.get("attentionDpRank")
     dp_rank = int(attention_dp_rank) if attention_dp_rank is not None else 0
+    gpu_forward_time_ms = stat.get("gpuForwardTimeMS")
+    wall_time_ms = (
+        gpu_forward_time_ms
+        if gpu_forward_time_ms is not None
+        else stat.get("iterLatencyMS", 0.0)
+    )
     fpm_publisher.publish(
         dp_rank=dp_rank,
         scheduled_num_prefill_requests=int(ibs.get("numContextRequests", 0)),
@@ -111,7 +117,7 @@ def _invoke_handler(stat, fpm_publisher):
         queued_sum_prefill_tokens=int(ibs.get("numQueuedCtxTokens", 0)),
         queued_num_decode_requests=queued_num_decode,
         queued_sum_decode_kv_tokens=queued_sum_decode_kv_tokens,
-        wall_time_secs=float(stat.get("iterLatencyMS", 0.0)) / 1000.0,
+        wall_time_secs=float(wall_time_ms) / 1000.0,
     )
 
 
@@ -554,6 +560,40 @@ async def test_stats_polling_processes_complete_drain_through_batch_handler():
         0,
         1,
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.core
+async def test_stats_polling_prefers_batch_matched_gpu_forward_time():
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub._stop_event = threading.Event()
+    pub.engine = MagicMock()
+    pub.metrics_publisher = MagicMock()
+    pub.component_gauges = MagicMock()
+    pub.metrics_collector = None
+    pub.fpm_publisher = MagicMock()
+    pub._fpm_schema_checked = False
+
+    async def fetch_stats(timeout):
+        assert timeout == publisher_mod._STATS_TIMEOUT_SEC
+        yield _build_fake_stat(iterLatencyMS=9999.0, gpuForwardTimeMS=7.5)
+        # Older TRT-LLM perf-stat records predate gpuForwardTimeMS, so they
+        # retain the existing iterLatencyMS behavior for compatibility.
+        yield _build_fake_stat(iterLatencyMS=1234.5)
+
+    def publish_metric(*_args, **_kwargs):
+        if pub.metrics_publisher.publish.call_count == 2:
+            pub._stop_event.set()
+
+    pub.engine.llm.get_stats_async = fetch_stats
+    pub.metrics_publisher.publish.side_effect = publish_metric
+
+    assert await pub._publish_stats_task() is True
+    wall_times = [
+        call.kwargs["wall_time_secs"]
+        for call in pub.fpm_publisher.publish.call_args_list
+    ]
+    assert wall_times == pytest.approx([0.0075, 1.2345])
 
 
 @pytest.mark.asyncio

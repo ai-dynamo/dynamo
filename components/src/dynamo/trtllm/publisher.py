@@ -756,8 +756,16 @@ class Publisher:
                     queued_sum_decode_kv_tokens = int(
                         ibs.get("numPausedKvTokens", 0)
                     ) + int(ibs.get("numQueuedGenKvTokens", 0))
-                    # iterLatencyMS is ms; the Rust snapshot expects seconds.
-                    wall_time_secs = float(stat.get("iterLatencyMS", 0.0)) / 1000.0
+                    # gpuForwardTimeMS is the batch-matched CUDA forward time.
+                    # Older TRT-LLM stats omit it, so preserve the existing
+                    # iterLatencyMS behavior as a compatibility fallback.
+                    gpu_forward_time_ms = stat.get("gpuForwardTimeMS")
+                    wall_time_ms = (
+                        gpu_forward_time_ms
+                        if gpu_forward_time_ms is not None
+                        else stat.get("iterLatencyMS", 0.0)
+                    )
+                    wall_time_secs = float(wall_time_ms) / 1000.0
                     attention_dp_rank = stat.get("attentionDpRank")
                     dp_rank = (
                         int(attention_dp_rank) if attention_dp_rank is not None else 0
