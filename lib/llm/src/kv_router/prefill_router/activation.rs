@@ -26,7 +26,7 @@ use super::{
 };
 use crate::{
     discovery::ModelManager,
-    kv_router::{KvPushRouter, KvRouter, WorkerSelectorFactory},
+    kv_router::{KvRouter, RoutingHost, WorkerSelectorFactory},
     local_model::runtime_config::ModelRuntimeConfig,
     model_card::ModelDeploymentCard,
     protocols::common::{
@@ -378,9 +378,9 @@ where
             )
             .await?;
 
-            // Wrap it in KvPushRouter
+            // Wrap it in the shared routing host.
             (
-                InnerPrefillRouter::KvRouter(Arc::new(KvPushRouter::new_with_coordinator(
+                InnerPrefillRouter::KvRouter(Arc::new(RoutingHost::new_with_coordinator(
                     push_router,
                     kv_chooser,
                     affinity,
