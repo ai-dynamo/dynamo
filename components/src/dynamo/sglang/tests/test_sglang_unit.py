@@ -18,6 +18,7 @@ from sglang.srt.managers.io_struct import ProfileReq
 
 import dynamo.sglang._compat as sglang_compat
 import dynamo.sglang.args as sglang_args
+import dynamo.sglang.snapshot as sglang_snapshot
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.sglang._compat import (
@@ -416,6 +417,40 @@ def test_compat_filters_async_generate_kwargs_for_older_engines():
     assert filter_supported_async_generate_kwargs(OldEngine(), kwargs) == {
         "input_ids": [1, 2, 3]
     }
+
+
+@pytest.mark.asyncio
+async def test_snapshot_disables_forward_pass_metrics_before_engine_init(
+    monkeypatch, caplog
+):
+    class EngineCreated(Exception):
+        pass
+
+    server_args = SimpleNamespace(enable_forward_pass_metrics=True)
+    events = []
+
+    def update_server_args(args, source, **fields):
+        events.append(("update", source, fields))
+        for name, value in fields.items():
+            setattr(args, name, value)
+
+    def create_engine(*, server_args):
+        events.append(("engine", server_args.enable_forward_pass_metrics))
+        raise EngineCreated
+
+    monkeypatch.setattr(sglang_snapshot.SnapshotConfig, "from_env", lambda: object())
+    monkeypatch.setattr(sglang_snapshot, "configure_snapshot_capture_env", lambda: None)
+    monkeypatch.setattr(sglang_snapshot, "override_server_args", update_server_args)
+    monkeypatch.setattr(sglang_snapshot.sgl, "Engine", create_engine)
+
+    with caplog.at_level(logging.WARNING), pytest.raises(EngineCreated):
+        await sglang_snapshot.prepare_snapshot_engine(server_args)
+
+    assert events[0][0] == "update"
+    assert events[0][1] == "dynamo.snapshot"
+    assert events[0][2]["enable_forward_pass_metrics"] is False
+    assert events[1] == ("engine", False)
+    assert "Forward pass metrics disabled in snapshot mode" in caplog.text
 
 
 def test_compat_keeps_async_generate_kwargs_for_newer_engines():
