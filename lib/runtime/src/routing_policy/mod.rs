@@ -10,6 +10,7 @@ pub use occupancy::{
     OccupancyPolicy, OccupancyReservation, OccupancySelection, RoutingOccupancyState,
 };
 pub(crate) use picker::RoutePicker;
+pub use picker::StatelessRoutePicker;
 pub use types::RouteTarget;
 pub(crate) use types::{
     AdmissionKind, CandidateView, RouteCandidate, RouteContext, RouteDecision, RouteDevice,
