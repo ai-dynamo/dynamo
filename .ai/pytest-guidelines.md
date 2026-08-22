@@ -340,6 +340,10 @@ Timing comments let AI/automation understand requirements when shuffling test su
   fixture reads these to download only what's needed.
 - `slow` -- known slow test.
 - `parallel` -- safe to run with pytest-xdist.
+- `gpu_parallel_exclusive` -- reserve one GPU from other VRAM-consuming tests in
+  the custom GPU-parallel scheduler. Zero-VRAM tests may continue on that GPU.
+  Use only for measured startup/resource contention; keep `profiled_vram_gib`
+  at the actual profiled peak.
 - `h100` -- requires H100 hardware.
 - `deploy`, `planner` -- additional component markers (alongside `core` / `multimodal` /
   `router` / `kvbm` / `fault_tolerance`).
@@ -584,4 +588,3 @@ vllm_configs = {
 
 Configs are parametrized into test functions via `params_with_model_mark()`, which
 auto-applies the `model` marker from the config's model field.
-
