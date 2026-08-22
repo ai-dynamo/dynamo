@@ -45,7 +45,7 @@ from .utils import (
     handle_engine_error,
     make_internal_error,
     nvext_extra_field_requested,
-    random_uuid,
+    request_id_from_context,
     read_jinja_chat_template,
     resolve_chat_template,
     worker_warmup,
@@ -537,7 +537,7 @@ class SglangProcessor:
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Single-process path: preprocess, dispatch, stream post-process."""
-        request_id = random_uuid()
+        request_id = request_id_from_context(context)
 
         try:
             if self.debug_perf:
@@ -610,7 +610,7 @@ class SglangProcessor:
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Pool path: preprocess in worker, stream in main process."""
-        request_id = random_uuid()
+        request_id = request_id_from_context(context)
 
         # --- Phase 1: Preprocess (semaphore held) ---
         assert self._worker_semaphore is not None
@@ -679,6 +679,7 @@ class SglangProcessor:
         context: Any | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Shared streaming logic for both single-process and pool paths."""
+        request_id = request_id_from_context(context) if context is not None else request_id
         token_count = 0
         post_proc_total_ms = 0.0
         created_ts = int(time.time())

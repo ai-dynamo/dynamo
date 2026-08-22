@@ -47,7 +47,7 @@ from .utils import (
     extract_mm_urls,
     handle_engine_error,
     make_internal_error,
-    random_uuid,
+    request_id_from_context,
     resolve_chat_template,
 )
 
@@ -510,7 +510,7 @@ class VllmProcessor:
     async def _generator_inner(
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
-        request_id = random_uuid()
+        request_id = request_id_from_context(context)
 
         messages = request.get("messages") or []
         _normalize_vllm_image_parts(messages)
@@ -769,6 +769,7 @@ class VllmProcessor:
         mm_routing_info: dict[str, Any] | None = None,
         context: Any | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
+        request_id = request_id_from_context(context) if context is not None else request_id
         sp = vllm_preproc.sampling_params
         output_request_ids: dict[int, str]
         registered_request_ids: list[str]

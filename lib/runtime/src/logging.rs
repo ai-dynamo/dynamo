@@ -2546,6 +2546,33 @@ pub mod tests {
     }
 
     #[test]
+    fn inject_trace_headers_preserves_request_ids() {
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::registry().with(DistributedTraceIdLayer),
+        );
+        let span = tracing::info_span!(
+            "root",
+            trace_id = "11111111111111111111111111111111",
+            span_id = "2222222222222222",
+            request_id = "dynamo-req-1",
+            x_request_id = "external-req-1"
+        );
+        let _enter = span.enter();
+        let mut headers = std::collections::HashMap::new();
+
+        inject_trace_headers_into_map(&mut headers);
+
+        assert_eq!(
+            headers.get("request-id").map(String::as_str),
+            Some("dynamo-req-1")
+        );
+        assert_eq!(
+            headers.get("x-request-id").map(String::as_str),
+            Some("external-req-1")
+        );
+    }
+
+    #[test]
     fn request_span_preserves_inbound_trace_flags() {
         // Use the core `set_default` (not `SubscriberInitExt::set_default`, which
         // also installs the global `log` LogTracer and would poison a later

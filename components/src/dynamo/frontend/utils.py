@@ -61,6 +61,17 @@ def random_uuid() -> str:
     return f"{uuid.uuid4().int & _MASK_64_BITS:016x}"
 
 
+def request_id_from_context(context: Any | None) -> str:
+    """Use the Dynamo context id when available, otherwise generate a local id."""
+    if context is not None:
+        context_id = getattr(context, "id", None)
+        if callable(context_id):
+            context_id = context_id()
+        if context_id:
+            return str(context_id)
+    return random_uuid()
+
+
 def random_call_id() -> str:
     """Generate a random tool call ID in OpenAI format."""
     return f"call_{uuid.uuid4().int & _MASK_64_BITS:016x}"
