@@ -443,6 +443,43 @@ def make_custom_encoder_payload() -> ChatPayload:
     )
 
 
+def make_qwen35_custom_encoder_payload() -> ChatPayload:
+    """Single-image semantic check for the native Qwen3.5 custom encoder."""
+    return chat_payload(
+        [
+            {
+                "type": "text",
+                "text": "What color is the large square? Answer with one color.",
+            },
+            {"type": "image_url", "image_url": {"url": MULTIMODAL_IMG_URL}},
+        ],
+        repeat_count=1,
+        expected_response=["green"],
+        expected_log=["Qwen35VisionEncoder", "Qwen3VLNativeAdapter"],
+        max_tokens=16,
+        temperature=0.0,
+    )
+
+
+def make_qwen35_custom_encoder_multi_image_payload() -> ChatPayload:
+    """Two-image check for artifact ordering and placeholder expansion."""
+    return chat_payload(
+        [
+            {
+                "type": "text",
+                "text": "How many images are provided? Answer with only the number.",
+            },
+            {"type": "image_url", "image_url": {"url": MULTIMODAL_IMG_URL}},
+            {"type": "image_url", "image_url": {"url": MULTIMODAL_IMG_URL}},
+        ],
+        repeat_count=1,
+        expected_response=["2", "two"],
+        expected_log=["Qwen35VisionEncoder", "Qwen3VLNativeAdapter"],
+        max_tokens=16,
+        temperature=0.0,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Config dataclasses
 # ---------------------------------------------------------------------------

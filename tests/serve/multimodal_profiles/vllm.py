@@ -21,6 +21,8 @@ from tests.utils.multimodal import (
     make_image_payload_b64,
     make_image_payload_cached_tokens,
     make_image_payload_uuid_passthrough,
+    make_qwen35_custom_encoder_multi_image_payload,
+    make_qwen35_custom_encoder_payload,
     make_video_payload,
 )
 from tests.utils.payload_builder import (
@@ -78,10 +80,11 @@ VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "epd": "disagg_multimodal_epd.sh",
     "epd_video": "disagg_multimodal_epd.sh",
     "p_d": "disagg_multimodal_p_d.sh",
-    # CustomEncoder: a custom in-process vision encoder on a text-only LM
+    # CustomEncoder: a custom in-process vision encoder beside the decoder
     # (no separate encode worker, no NIXL). Lives in examples/custom_encoder,
     # not examples/backends/vllm — the TopologyConfig sets `directory` to match.
     "agg_custom": "agg_custom.sh",
+    "agg_custom_qwen3_5": "agg_qwen3_5_native.sh",
 }
 
 VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
@@ -379,6 +382,33 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                             prompt_filler_repeats=120,
                         )
                     )
+                ],
+            ),
+        },
+    ),
+    MultimodalModelProfile(
+        name="Qwen/Qwen3.5-2B",
+        short_name="qwen3.5-2b-custom-encoder",
+        topologies={
+            "agg_custom_qwen3_5": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=900,
+                # Single-pass H100 peak: 44.5 GiB. Keep this sequential until a
+                # bounded --kv-cache-memory-bytes profile is available.
+                directory=os.path.join(WORKSPACE_DIR, "examples/custom_encoder"),
+                env={
+                    "DYN_WORKER_GPU": "0",
+                    "PYTHONPATH": str(WORKSPACE_DIR),
+                },
+                tests=[
+                    MmCase(
+                        suffix="single_image",
+                        payload=make_qwen35_custom_encoder_payload(),
+                    ),
+                    MmCase(
+                        suffix="multi_image",
+                        payload=make_qwen35_custom_encoder_multi_image_payload(),
+                    ),
                 ],
             ),
         },
