@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any, Protocol
 
 from aisimulate.aic import materialize_aic_num_gpu_blocks
+
 from dynamo.mocker import MockEngineArgs
 
 
@@ -63,9 +64,7 @@ def load_engine_args(
         elif worker_type == "decode":
             raw["is_decode"] = True
         elif worker_type != "aggregated":
-            raise ValueError(
-                "worker_type must be aggregated, prefill, or decode"
-            )
+            raise ValueError("worker_type must be aggregated, prefill, or decode")
     if "planner_profile_data" in raw:
         profile = raw["planner_profile_data"]
         if profile is None:

@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 # Optional-dependency preflight must run before the simulation imports.
 
 """Tests for the transitional Dynamo Sweeper replay runner."""
@@ -21,6 +22,7 @@ from aisimulate.sweeper.replay import (
     ReplayOutputRequirements,
     ReplaySpec,
 )
+
 from dynamo.replay import PlannerReplayDetails, ReplayReport, simulation
 
 pytestmark = [

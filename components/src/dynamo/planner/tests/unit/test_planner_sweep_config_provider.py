@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 # Optional-dependency preflight must run before the simulation imports.
 
 """Unit tests for the Planner-owned Sweeper sweep configuration provider."""
@@ -16,9 +17,10 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-import dynamo.planner.simulation.provider as planner_provider_module
 from aisimulate.sweeper.provider import CandidateContext, SweepContext
 from aisimulate.sweeper.replay import BackendDeploymentSpec
+
+import dynamo.planner.simulation.provider as planner_provider_module
 from dynamo.planner.simulation import create_provider
 from dynamo.planner.simulation.load_predictor import LoadPredictorResult
 

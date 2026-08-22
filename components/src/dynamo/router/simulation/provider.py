@@ -73,9 +73,7 @@ class RouterSearchSpace(BaseModel):
         public = dict(value)
         normalized = {
             "public_schema": True,
-            "mode": _domain_choices(
-                public.pop("policy"), ["kv_router", "round_robin"]
-            ),
+            "mode": _domain_choices(public.pop("policy"), ["kv_router", "round_robin"]),
             "overlap_score_credit": _domain_choices(
                 public.pop("overlap_score_credit", None), [0.0, 0.5, 1.0]
             ),
@@ -119,9 +117,7 @@ class RouterSearchSpace(BaseModel):
                 raise ValueError(f"{name} must list at least one choice")
             if self.public_schema:
                 invalid = [
-                    value
-                    for value in values
-                    if not math.isfinite(value) or value < 0.0
+                    value for value in values if not math.isfinite(value) or value < 0.0
                 ]
             else:
                 invalid = [value for value in values if value not in legacy_allowed]

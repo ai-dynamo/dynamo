@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 # Optional-dependency preflight must run before the simulation imports.
 
 """Parity tests for the Router-owned Sweeper sweep configuration provider."""
@@ -13,10 +14,11 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-import dynamo.router.simulation.provider as router_provider_module
 from aisimulate.config_adapter import PredictionAdapterContext
 from aisimulate.sweeper.provider import CandidateContext, SweepContext
 from aisimulate.sweeper.replay import BackendDeploymentSpec
+
+import dynamo.router.simulation.provider as router_provider_module
 from dynamo.router.simulation import create_provider
 
 pytestmark = [

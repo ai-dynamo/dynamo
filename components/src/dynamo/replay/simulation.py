@@ -26,6 +26,7 @@ from aisimulate.sweeper.replay import (
     ReplaySpec,
     RunnerCapabilities,
 )
+
 from dynamo.llm import AicPerfConfig, KvRouterConfig
 from dynamo.mocker import MockEngineArgs
 from dynamo.replay.api import run_synthetic_trace_replay, run_trace_replay
@@ -99,9 +100,12 @@ class DynamoReplayRunner:
 
         output_requirements = output_requirements or ReplayOutputRequirements()
         self.capabilities.require_compatible(spec)
-        planner_config, router_mode, router_config, aic_perf_config = self._resolve_hooks(
-            spec.runtime_hooks
-        )
+        (
+            planner_config,
+            router_mode,
+            router_config,
+            aic_perf_config,
+        ) = self._resolve_hooks(spec.runtime_hooks)
         common: dict[str, Any] = {
             "router_mode": router_mode,
             "router_config": router_config,
@@ -357,9 +361,7 @@ class DynamoReplayRunner:
             else max(
                 1,
                 round(
-                    _float_value(
-                        workload["num_request_ratio"], "num_request_ratio"
-                    )
+                    _float_value(workload["num_request_ratio"], "num_request_ratio")
                     * load
                 ),
             )
@@ -490,10 +492,7 @@ def _kv_load_concurrency(spec: ReplaySpec) -> int:
         role = "aggregated"
     args = DynamoReplayRunner._engine_args(payload)
     capacity_tokens = (
-        args.num_gpu_blocks
-        * args.block_size
-        * max(args.dp_size, 1)
-        * max(replicas, 1)
+        args.num_gpu_blocks * args.block_size * max(args.dp_size, 1) * max(replicas, 1)
     )
     expected_tokens = _int_value(spec.workload["isl"], "isl") + (
         _int_value(spec.workload["osl"], "osl") // 2

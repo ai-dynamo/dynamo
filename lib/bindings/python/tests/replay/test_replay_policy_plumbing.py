@@ -4,8 +4,9 @@
 import json
 from types import SimpleNamespace
 
-import dynamo.replay.api as replay_api
 import pytest
+
+import dynamo.replay.api as replay_api
 from dynamo.llm import KvRouterConfig
 
 pytestmark = [
