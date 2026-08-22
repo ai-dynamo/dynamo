@@ -22,6 +22,7 @@ import torch  # noqa: E402
 from dynamo.workflow import ValueRef  # noqa: E402
 from examples.custom_backend.user_ensemble.stages import (  # noqa: E402
     DummyClassifier,
+    DummyMetadataClassifier,
     EnsembleResponseStage,
 )
 from examples.custom_backend.user_ensemble.workflow import define_workflow  # noqa: E402
@@ -77,8 +78,17 @@ async def test_classifier_consumes_the_packed_tensor():
         _context(),
     )
 
-    assert set(result["scores"]) == {"positive-mean", "negative-mean"}
+    assert set(result["scores"]) == {"positive-sample", "negative-sample"}
     assert sum(result["scores"].values()) == pytest.approx(1.0)
+
+
+async def test_metadata_classifier_does_not_require_the_packed_tensor():
+    result = await DummyMetadataClassifier().run(
+        {"encoder_metadata": {"row_splits": [0, 1]}},
+        _context(),
+    )
+
+    assert result == {"scores": {"metadata-control": 1.0}}
 
 
 async def test_inline_response_stage_preserves_completion_and_attaches_scores():

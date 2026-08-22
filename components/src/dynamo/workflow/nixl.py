@@ -8,11 +8,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
+import time
 import uuid
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional, Union
 
+from dynamo.workflow.perf import WORKFLOW_PERF_TRACE
 from dynamo.workflow.runtime import WorkflowExecutionError
 
 logger = logging.getLogger(__name__)
@@ -21,6 +24,18 @@ NIXL_TENSOR_SCHEMA = "dynamo.workflow.nixl_tensor"
 NIXL_TENSOR_FANOUT_SCHEMA = "dynamo.workflow.nixl_tensor_fanout"
 NIXL_TENSOR_VERSION = 0
 DEFAULT_NIXL_LEASE_TIMEOUT_S = 60.0
+_NIXL_PROGRESS_THREAD_ENV = "DYN_NIXL_PROGRESS_THREAD"
+
+
+def _progress_thread_from_environment() -> bool:
+    value = os.environ.get(_NIXL_PROGRESS_THREAD_ENV, "0").strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        f"{_NIXL_PROGRESS_THREAD_ENV} must be a boolean value, got {value!r}"
+    )
 
 
 def _check_keys(data: Mapping[str, Any], required: set[str]) -> None:
@@ -130,21 +145,114 @@ class NixlTensorRef:
 
 
 @dataclass(frozen=True)
+class EmbeddingTransferRef:
+    """Existing multimodal ``TransferRequest`` carried on one workflow edge."""
+
+    shape: tuple[int, ...]
+    dtype: str
+    serialized_request: Any
+    transfer_id: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        shape = tuple(self.shape)
+        if any(
+            isinstance(dimension, bool)
+            or not isinstance(dimension, int)
+            or dimension < 0
+            for dimension in shape
+        ):
+            raise WorkflowExecutionError(
+                "embedding transfer shape must contain non-negative integers"
+            )
+        if not isinstance(self.dtype, str) or not self.dtype:
+            raise WorkflowExecutionError(
+                "embedding transfer dtype must be a non-empty string"
+            )
+        if self.transfer_id is not None and (
+            not isinstance(self.transfer_id, str) or not self.transfer_id
+        ):
+            raise WorkflowExecutionError(
+                "embedding transfer id must be a non-empty string when set"
+            )
+        object.__setattr__(self, "shape", shape)
+        object.__setattr__(self, "dtype", self.dtype.removeprefix("torch."))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "embeddings_shape": list(self.shape),
+            "embedding_dtype_str": self.dtype,
+            "serialized_request": self.serialized_request,
+        }
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: Mapping[str, Any],
+        *,
+        transfer_id: Optional[str] = None,
+    ) -> "EmbeddingTransferRef":
+        if not isinstance(data, Mapping):
+            raise WorkflowExecutionError(
+                "embedding transfer reference must be an object"
+            )
+        _check_keys(
+            data,
+            {
+                "embeddings_shape",
+                "embedding_dtype_str",
+                "serialized_request",
+            },
+        )
+        shape = data["embeddings_shape"]
+        if not isinstance(shape, list):
+            raise WorkflowExecutionError("embedding transfer shape must be an array")
+        return cls(
+            shape=tuple(shape),
+            dtype=data["embedding_dtype_str"],
+            serialized_request=data["serialized_request"],
+            transfer_id=transfer_id,
+        )
+
+
+TensorTransferRef = Union[NixlTensorRef, EmbeddingTransferRef]
+
+
+def tensor_transfer_ref_from_dict(
+    data: Mapping[str, Any],
+    *,
+    transfer_id: Optional[str] = None,
+) -> TensorTransferRef:
+    """Parse either the legacy READ reference or a multimodal transfer request."""
+
+    if isinstance(data, Mapping) and data.get("schema") == NIXL_TENSOR_SCHEMA:
+        reference = NixlTensorRef.from_dict(data)
+        if transfer_id is not None and reference.transfer_id != transfer_id:
+            raise WorkflowExecutionError(
+                "NIXL tensor fanout key does not match transfer id"
+            )
+        return reference
+    return EmbeddingTransferRef.from_dict(data, transfer_id=transfer_id)
+
+
+@dataclass(frozen=True)
 class NixlTensorFanout:
     """Per-consumer NIXL references for one logical tensor output."""
 
-    transfers: Mapping[str, NixlTensorRef]
+    transfers: Mapping[str, TensorTransferRef]
 
     def __post_init__(self) -> None:
         if not isinstance(self.transfers, Mapping) or not self.transfers:
             raise WorkflowExecutionError("NIXL tensor fanout requires transfers")
-        transfers: dict[str, NixlTensorRef] = {}
+        transfers: dict[str, TensorTransferRef] = {}
         for transfer_id, reference in sorted(self.transfers.items()):
-            if not isinstance(reference, NixlTensorRef):
+            if not isinstance(reference, (NixlTensorRef, EmbeddingTransferRef)):
                 raise WorkflowExecutionError(
-                    "NIXL tensor fanout values must use NixlTensorRef"
+                    "NIXL tensor fanout values must use a tensor transfer reference"
                 )
-            if transfer_id != reference.transfer_id:
+            if (
+                reference.transfer_id is not None
+                and transfer_id != reference.transfer_id
+            ):
                 raise WorkflowExecutionError(
                     "NIXL tensor fanout key does not match transfer id"
                 )
@@ -174,12 +282,14 @@ class NixlTensorFanout:
             )
         return cls(
             {
-                transfer_id: NixlTensorRef.from_dict(reference)
+                transfer_id: tensor_transfer_ref_from_dict(
+                    reference, transfer_id=transfer_id
+                )
                 for transfer_id, reference in transfers.items()
             }
         )
 
-    def for_transfer(self, transfer_id: str) -> NixlTensorRef:
+    def for_transfer(self, transfer_id: str) -> TensorTransferRef:
         try:
             return self.transfers[transfer_id]
         except KeyError as error:
@@ -236,8 +346,14 @@ class NixlLeaseRegistry:
         if duplicate is not None:
             raise WorkflowExecutionError(f"duplicate NIXL lease {duplicate!r}")
         operation_values = tuple(operations.values())
+        tracked_ns = time.perf_counter_ns()
         task = asyncio.create_task(
-            self._wait_and_release(lease_ids, operation_values, on_release),
+            self._wait_and_release(
+                lease_ids,
+                operation_values,
+                on_release,
+                tracked_ns,
+            ),
             name=f"workflow-nixl-lease:{lease_ids[0]}",
         )
         lease = _Lease(operation_values, value, task, on_release)
@@ -249,10 +365,35 @@ class NixlLeaseRegistry:
         lease_ids: tuple[str, ...],
         operations: tuple[Any, ...],
         on_release: Optional[Callable[[], None]],
+        tracked_ns: int,
     ) -> None:
+        async def wait_for_one(lease_id: str, operation: Any) -> None:
+            started_ns = time.perf_counter_ns()
+            try:
+                await operation.wait_for_completion()
+            except BaseException:
+                WORKFLOW_PERF_TRACE.emit(
+                    logger,
+                    "nixl.producer_wait",
+                    lease_id,
+                    status="error",
+                    wait_ms=(time.perf_counter_ns() - started_ns) / 1_000_000,
+                )
+                raise
+            WORKFLOW_PERF_TRACE.emit(
+                logger,
+                "nixl.producer_wait",
+                lease_id,
+                status="complete",
+                wait_ms=(time.perf_counter_ns() - started_ns) / 1_000_000,
+            )
+
         async def wait_for_all() -> None:
             results = await asyncio.gather(
-                *(operation.wait_for_completion() for operation in operations),
+                *(
+                    wait_for_one(lease_id, operation)
+                    for lease_id, operation in zip(lease_ids, operations)
+                ),
                 return_exceptions=True,
             )
             failures = [
@@ -306,6 +447,16 @@ class NixlLeaseRegistry:
                 )
         if on_release is not None:
             on_release()
+        residence_ms = (time.perf_counter_ns() - tracked_ns) / 1_000_000
+        for lease_id in lease_ids:
+            WORKFLOW_PERF_TRACE.emit(
+                logger,
+                "nixl.lease_release",
+                lease_id,
+                active_leases=self.active_count,
+                fanout=len(lease_ids),
+                residence_ms=residence_ms,
+            )
 
     async def close(self) -> None:
         if self._leases:
@@ -374,7 +525,7 @@ class NixlTensorCarrier:
         torch_module: Any = None,
         send_pool_capacity: int = 0,
         send_pool_bytes: int = 0,
-        enable_progress_thread: bool = False,
+        enable_progress_thread: Optional[bool] = None,
     ) -> None:
         if nixl_module is None:
             try:
@@ -404,6 +555,8 @@ class NixlTensorCarrier:
             raise ValueError(
                 "send_pool_capacity and send_pool_bytes must both be zero or positive"
             )
+        if enable_progress_thread is None:
+            enable_progress_thread = _progress_thread_from_environment()
         if not isinstance(enable_progress_thread, bool):
             raise TypeError("enable_progress_thread must be a bool")
         self._nixl = nixl_module
@@ -419,6 +572,7 @@ class NixlTensorCarrier:
             self._connector = connector
             self._export_connector_factory = None
         self._receive_device = receive_device
+        self._enable_progress_thread = enable_progress_thread
         self._leases = NixlLeaseRegistry(lease_timeout_s)
         self._send_pool_capacity = send_pool_capacity
         self._send_pool_bytes = send_pool_bytes
@@ -465,6 +619,8 @@ class NixlTensorCarrier:
             tensor = tensor.contiguous()
         if self._send_pool_capacity:
             return await self._export_from_send_pool(tensor, transfer_ids)
+        started_ns = time.perf_counter_ns()
+        lease_ids = {transfer_id: uuid.uuid4().hex for transfer_id in transfer_ids}
         readables: dict[str, Any] = {}
         try:
             references: dict[str, NixlTensorRef] = {}
@@ -481,7 +637,7 @@ class NixlTensorCarrier:
                 )
                 descriptor = self._nixl.Descriptor(tensor)
                 readable = await connector.create_readable(descriptor)
-                lease_id = uuid.uuid4().hex
+                lease_id = lease_ids[transfer_id]
                 readables[lease_id] = readable
                 references[transfer_id] = NixlTensorRef(
                     transfer_id=transfer_id,
@@ -496,10 +652,25 @@ class NixlTensorCarrier:
             for readable in readables.values():
                 readable.__exit__(None, None, None)
             raise
-        return {
+        wire_references = {
             transfer_id: reference.to_dict()
             for transfer_id, reference in references.items()
         }
+        elapsed_ms = (time.perf_counter_ns() - started_ns) / 1_000_000
+        tensor_bytes = tensor.numel() * tensor.element_size()
+        for lease_id in lease_ids.values():
+            WORKFLOW_PERF_TRACE.emit(
+                logger,
+                "nixl.export",
+                lease_id,
+                active_leases=self.active_leases,
+                bytes=tensor_bytes,
+                elapsed_ms=elapsed_ms,
+                fanout=len(transfer_ids),
+                pooled=False,
+                progress_thread=self._enable_progress_thread,
+            )
+        return wire_references
 
     async def _ensure_send_pool(self, tensor: Any) -> None:
         if self._send_pool_backing is not None:
@@ -533,10 +704,22 @@ class NixlTensorCarrier:
             self._send_pool_connection = connection
             self._send_pool_backing = backing
             self._send_pool_descriptors = descriptors
+            WORKFLOW_PERF_TRACE.emit(
+                logger,
+                "nixl.pool_init",
+                "send-pool",
+                force=True,
+                bytes_per_slot=self._send_pool_bytes,
+                capacity=self._send_pool_capacity,
+                device=str(tensor.device),
+                progress_thread=self._enable_progress_thread,
+                total_bytes=self._send_pool_capacity * self._send_pool_bytes,
+            )
 
     async def _export_from_send_pool(
         self, tensor: Any, transfer_ids: tuple[str, ...]
     ) -> Mapping[str, Mapping[str, Any]]:
+        started_ns = time.perf_counter_ns()
         tensor_bytes = tensor.numel() * tensor.element_size()
         if tensor_bytes > self._send_pool_bytes:
             raise WorkflowExecutionError(
@@ -544,16 +727,23 @@ class NixlTensorCarrier:
                 f"{tensor_bytes} > {self._send_pool_bytes} bytes"
             )
         await self._ensure_send_pool(tensor)
+        lease_ids = {transfer_id: uuid.uuid4().hex for transfer_id in transfer_ids}
+        pool_wait_started_ns = time.perf_counter_ns()
         slot = await self._send_pool_available.get()
+        pool_wait_ms = (time.perf_counter_ns() - pool_wait_started_ns) / 1_000_000
+        available_slots = self._send_pool_available.qsize()
         readables: dict[str, Any] = {}
         try:
+            copy_started_ns = time.perf_counter_ns()
             storage = self._send_pool_backing[slot]
             storage[:tensor_bytes].view(tensor.dtype).view(tensor.shape).copy_(tensor)
+            copy_ms = (time.perf_counter_ns() - copy_started_ns) / 1_000_000
             descriptor = self._send_pool_descriptors[slot]
             references: dict[str, NixlTensorRef] = {}
+            readable_started_ns = time.perf_counter_ns()
             for transfer_id in transfer_ids:
                 readable = await self._connector.create_readable(descriptor)
-                lease_id = uuid.uuid4().hex
+                lease_id = lease_ids[transfer_id]
                 readables[lease_id] = readable
                 references[transfer_id] = NixlTensorRef(
                     transfer_id=transfer_id,
@@ -565,6 +755,7 @@ class NixlTensorCarrier:
                         readable.metadata(), tensor_bytes
                     ),
                 )
+            readable_ms = (time.perf_counter_ns() - readable_started_ns) / 1_000_000
             self._leases.track_fanout(
                 readables,
                 storage,
@@ -575,22 +766,45 @@ class NixlTensorCarrier:
                 readable.__exit__(None, None, None)
             self._send_pool_available.put_nowait(slot)
             raise
-        return {
+        wire_references = {
             transfer_id: reference.to_dict()
             for transfer_id, reference in references.items()
         }
+        elapsed_ms = (time.perf_counter_ns() - started_ns) / 1_000_000
+        for lease_id in lease_ids.values():
+            WORKFLOW_PERF_TRACE.emit(
+                logger,
+                "nixl.export",
+                lease_id,
+                active_leases=self.active_leases,
+                available_slots=available_slots,
+                bytes=tensor_bytes,
+                copy_ms=copy_ms,
+                elapsed_ms=elapsed_ms,
+                fanout=len(transfer_ids),
+                pool_capacity=self._send_pool_capacity,
+                pool_wait_ms=pool_wait_ms,
+                pooled=True,
+                progress_thread=self._enable_progress_thread,
+                readable_ms=readable_ms,
+            )
+        return wire_references
 
     async def import_tensor(self, reference: Mapping[str, Any]) -> Any:
+        started_ns = time.perf_counter_ns()
         parsed = NixlTensorRef.from_dict(reference)
+        parse_ms = (time.perf_counter_ns() - started_ns) / 1_000_000
         dtype = getattr(self._torch, parsed.dtype, None)
         if dtype is None:
             raise WorkflowExecutionError(
                 f"unsupported NIXL tensor dtype {parsed.dtype!r}"
             )
         device = self._receive_device or parsed.device
+        metadata_started_ns = time.perf_counter_ns()
         rdma_metadata = self._nixl.RdmaMetadata.model_validate(
             dict(parsed.rdma_metadata)
         )
+        metadata_ms = (time.perf_counter_ns() - metadata_started_ns) / 1_000_000
         tensor_bytes = (
             math.prod(parsed.shape) * self._torch.empty((), dtype=dtype).element_size()
         )
@@ -609,16 +823,38 @@ class NixlTensorCarrier:
             raise WorkflowExecutionError(
                 "NIXL tensor shape exceeds the remote transfer buffer"
             )
+        allocation_started_ns = time.perf_counter_ns()
         storage = self._torch.empty(
             transfer_bytes, dtype=self._torch.uint8, device=device
         )
         descriptor = self._nixl.Descriptor(storage)
+        allocation_ms = (time.perf_counter_ns() - allocation_started_ns) / 1_000_000
+        begin_read_started_ns = time.perf_counter_ns()
         operation = await self._connector.begin_read(rdma_metadata, descriptor)
+        begin_read_ms = (time.perf_counter_ns() - begin_read_started_ns) / 1_000_000
+        wait_started_ns = time.perf_counter_ns()
         try:
             await operation.wait_for_completion()
         finally:
             operation.__exit__(None, None, None)
-        return storage[:tensor_bytes].view(dtype).view(parsed.shape)
+        wait_ms = (time.perf_counter_ns() - wait_started_ns) / 1_000_000
+        result = storage[:tensor_bytes].view(dtype).view(parsed.shape)
+        WORKFLOW_PERF_TRACE.emit(
+            logger,
+            "nixl.import",
+            parsed.lease_id,
+            allocation_ms=allocation_ms,
+            begin_read_ms=begin_read_ms,
+            bytes=tensor_bytes,
+            device=str(device),
+            elapsed_ms=(time.perf_counter_ns() - started_ns) / 1_000_000,
+            metadata_ms=metadata_ms,
+            parse_ms=parse_ms,
+            progress_thread=self._enable_progress_thread,
+            transfer_bytes=transfer_bytes,
+            wait_ms=wait_ms,
+        )
+        return result
 
     async def close(self) -> None:
         await self._leases.close()

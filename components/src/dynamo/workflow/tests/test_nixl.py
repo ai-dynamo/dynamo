@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
+import logging
 
 import pytest
 import torch
@@ -21,6 +23,8 @@ from dynamo.workflow import (
     compile_workflow,
 )
 from dynamo.workflow.dispatcher import StageDispatcher
+from dynamo.workflow.nixl import EmbeddingTransferRef
+from dynamo.workflow.perf import WorkflowPerfTracer
 from dynamo.workflow.remote import NixlCarriedValue
 
 pytestmark = [
@@ -246,6 +250,21 @@ async def test_default_carrier_isolates_each_exported_edge() -> None:
     await _wait_for_no_leases(carrier)
 
 
+def test_progress_thread_can_be_enabled_for_every_carrier_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _IsolatedNixlModule.connectors = []
+    _IsolatedNixlModule.connector_options = []
+    monkeypatch.setenv("DYN_NIXL_PROGRESS_THREAD", "1")
+
+    NixlTensorCarrier(
+        nixl_module=_IsolatedNixlModule,
+        torch_module=torch,
+    )
+
+    assert _IsolatedNixlModule.connector_options == [{"enable_progress_thread": True}]
+
+
 async def test_send_pool_reuses_slot_after_all_fanout_reads() -> None:
     connector = _Connector()
     carrier = NixlTensorCarrier(
@@ -278,6 +297,47 @@ async def test_send_pool_reuses_slot_after_all_fanout_reads() -> None:
     next_readable.completed.set()
     await _wait_for_no_leases(carrier)
     await carrier.close()
+
+
+async def test_send_pool_trace_correlates_export_import_and_release(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(
+        "dynamo.workflow.nixl.WORKFLOW_PERF_TRACE",
+        WorkflowPerfTracer(enabled=True, sample_every=1),
+    )
+    connector = _Connector()
+    carrier = NixlTensorCarrier(
+        connector=connector,
+        nixl_module=_NixlModule,
+        torch_module=torch,
+        send_pool_capacity=1,
+        send_pool_bytes=64,
+    )
+
+    with caplog.at_level(logging.INFO):
+        reference = await carrier.export_tensor(
+            torch.ones((2, 8), dtype=torch.float16), "decoder.embedding"
+        )
+        await carrier.import_tensor(reference)
+        await _wait_for_no_leases(carrier)
+
+    payloads = [
+        json.loads(record.getMessage().removeprefix("workflow_perf "))
+        for record in caplog.records
+        if record.getMessage().startswith("workflow_perf ")
+    ]
+    lease_id = reference["lease_id"]
+    lease_events = {
+        payload["event"] for payload in payloads if payload["trace_id"] == lease_id
+    }
+    assert lease_events == {
+        "nixl.export",
+        "nixl.import",
+        "nixl.lease_release",
+        "nixl.producer_wait",
+    }
 
 
 async def test_lease_registry_retains_unread_operation_after_timeout() -> None:
@@ -325,6 +385,27 @@ def test_tensor_reference_rejects_unknown_wire_fields() -> None:
 
     with pytest.raises(WorkflowExecutionError, match="unknown fields"):
         NixlTensorRef.from_dict(reference)
+
+
+def test_embedding_transfer_reference_uses_existing_request_shape() -> None:
+    reference = EmbeddingTransferRef(
+        shape=(3, 8),
+        dtype="torch.bfloat16",
+        serialized_request="opaque-write-handshake",
+        transfer_id="generator.embedding",
+    )
+
+    assert reference.to_dict() == {
+        "embeddings_shape": [3, 8],
+        "embedding_dtype_str": "bfloat16",
+        "serialized_request": "opaque-write-handshake",
+    }
+    assert (
+        EmbeddingTransferRef.from_dict(
+            reference.to_dict(), transfer_id="generator.embedding"
+        )
+        == reference
+    )
 
 
 ENCODER = StageContract(

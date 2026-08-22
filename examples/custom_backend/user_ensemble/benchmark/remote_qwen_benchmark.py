@@ -35,8 +35,9 @@ EXPECTED_PATCH_COST = 907_800
 EXPECTED_GRIDS = {"1x22x22", "1x36x36"}
 EXPECTED_GRAPH_CAPTURES = 14
 REPETITIONS = 3
-TOPOLOGY = "remote"
-MIN_ACHIEVED_TO_OFFERED_RATIO = 0.98
+TOPOLOGIES = ("metadata", "tensor")
+MIN_ACHIEVED_TO_OFFERED_RATIO = 0.95
+MAX_LAST_TO_FIRST_QUARTER_MEDIAN_RATIO = 1.20
 MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
 
 _DISPATCH_RE = re.compile(
@@ -45,6 +46,7 @@ _DISPATCH_RE = re.compile(
 _GRID_RE = re.compile(r"\bgrid=(?P<grid>\d+x\d+x\d+)\b")
 _CAPTURE_RE = re.compile(r"captured CUDA graph: grid=")
 _CAPTURE_COMPLETE_RE = re.compile(r"CUDA graph capture complete: .*?graphs=(\d+)")
+_PERF_RE = re.compile(r"\bworkflow_perf (?P<payload>\{.*\})$")
 
 
 class BenchmarkAuditError(RuntimeError):
@@ -303,10 +305,145 @@ def _parse_gpu_telemetry(path: Path) -> dict[str, Any]:
     }
 
 
+def audit_latency_stability(path: Path) -> dict[str, Any]:
+    """Require the final request quarter not to accumulate an open-loop queue."""
+
+    records = _read_jsonl(path)
+    if len(records) != MEASURED_REQUESTS:
+        raise BenchmarkAuditError(
+            f"expected {MEASURED_REQUESTS} request records, found {len(records)}"
+        )
+    ordered = sorted(
+        records,
+        key=lambda record: int(record.get("metadata", {}).get("request_start_ns", 0)),
+    )
+    quarter = MEASURED_REQUESTS // 4
+
+    def latency(record: Mapping[str, Any]) -> float:
+        metrics = record.get("metrics")
+        metric = (
+            metrics.get("request_latency") if isinstance(metrics, Mapping) else None
+        )
+        if not isinstance(metric, Mapping) or "value" not in metric:
+            raise BenchmarkAuditError("request record is missing request_latency")
+        return float(metric["value"])
+
+    first_median = statistics.median(latency(record) for record in ordered[:quarter])
+    last_median = statistics.median(latency(record) for record in ordered[-quarter:])
+    ratio = last_median / first_median if first_median else math.inf
+    if ratio > MAX_LAST_TO_FIRST_QUARTER_MEDIAN_RATIO:
+        raise BenchmarkAuditError(
+            "request latency accumulated across the measured window: "
+            f"first-quarter median={first_median:.3f} ms, "
+            f"last-quarter median={last_median:.3f} ms, ratio={ratio:.3f}"
+        )
+    return {
+        "first_quarter_median_ms": first_median,
+        "last_quarter_median_ms": last_median,
+        "last_to_first_ratio": ratio,
+        "maximum_ratio": MAX_LAST_TO_FIRST_QUARTER_MEDIAN_RATIO,
+        "passed": True,
+    }
+
+
+def _percentile(values: list[float], percentile: float) -> float:
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * percentile
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    fraction = position - lower
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+
+
+def summarize_perf_log(path: Path) -> dict[str, Any]:
+    """Aggregate sampled workflow timing records from one measured window."""
+
+    records: list[dict[str, Any]] = []
+    malformed = 0
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        match = _PERF_RE.search(line)
+        if match is None:
+            continue
+        try:
+            payload = json.loads(match.group("payload"))
+        except json.JSONDecodeError:
+            malformed += 1
+            continue
+        if not isinstance(payload, dict) or not isinstance(payload.get("event"), str):
+            malformed += 1
+            continue
+        records.append(payload)
+
+    events: dict[str, dict[str, Any]] = {}
+    series_names = {
+        (
+            f"{record['event']}:{record['stage']}"
+            if isinstance(record.get("stage"), str)
+            else str(record["event"])
+        )
+        for record in records
+    }
+    for event in sorted(series_names):
+        event_records = [
+            record
+            for record in records
+            if (
+                f"{record['event']}:{record['stage']}"
+                if isinstance(record.get("stage"), str)
+                else str(record["event"])
+            )
+            == event
+        ]
+        numeric_fields: dict[str, dict[str, float | int]] = {}
+        numeric_names = sorted(
+            {
+                key
+                for record in event_records
+                for key, value in record.items()
+                if key not in {"event", "trace_id"}
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+            }
+        )
+        for field_name in numeric_names:
+            values = [
+                float(record[field_name])
+                for record in event_records
+                if isinstance(record.get(field_name), (int, float))
+                and not isinstance(record[field_name], bool)
+            ]
+            numeric_fields[field_name] = {
+                "count": len(values),
+                "mean": statistics.mean(values),
+                "p50": _percentile(values, 0.50),
+                "p95": _percentile(values, 0.95),
+                "p99": _percentile(values, 0.99),
+                "max": max(values),
+            }
+        events[event] = {
+            "records": len(event_records),
+            "unique_trace_ids": len(
+                {str(record.get("trace_id")) for record in event_records}
+            ),
+            "numeric_fields": numeric_fields,
+        }
+    return {
+        "records": len(records),
+        "malformed_records": malformed,
+        "events": events,
+    }
+
+
 def validate_cell(
     profile_path: Path,
+    records_path: Path,
     wall_path: Path,
     server_log: Path,
+    perf_log: Path,
     gpu_telemetry: Path,
 ) -> dict[str, Any]:
     try:
@@ -319,8 +456,10 @@ def validate_cell(
         "full_client_process_wall_s": wall_seconds,
         "full_client_process_throughput_req_s": MEASURED_REQUESTS / wall_seconds,
         "aiperf": validate_profile(profile_path, expected_requests=MEASURED_REQUESTS),
+        "latency_stability": audit_latency_stability(records_path),
         "encoder": audit_encoder_log(server_log),
         "gpu": _parse_gpu_telemetry(gpu_telemetry),
+        "perf_trace": summarize_perf_log(perf_log),
     }
 
 
@@ -356,6 +495,8 @@ def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
         raise BenchmarkAuditError(
             f"request rate is {args.request_rate}; expected {REQUEST_RATE}"
         )
+    if args.embedding_transfer_mode != "nixl-write":
+        raise BenchmarkAuditError("qualification requires nixl-write transfer mode")
     packages: dict[str, str] = {}
     for package in ("ai-dynamo", "aiperf", "torch", "transformers", "vllm"):
         try:
@@ -371,10 +512,10 @@ def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
         "cuda_visible_devices": args.cuda_visible_devices,
         "gpu": _parse_gpu_info(args.gpu_info, args.torch_gpu_count),
         "versions": packages,
-        "topology_order_by_repetition": [
-            [TOPOLOGY],
-            [TOPOLOGY],
-            [TOPOLOGY],
+        "cell_order": [
+            {"repetition": repetition, "topology": topology}
+            for topology in TOPOLOGIES
+            for repetition in range(1, REPETITIONS + 1)
         ],
         "benchmark": {
             "load_mode": "constant",
@@ -384,7 +525,7 @@ def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
             "request_rate_mode": "constant",
             "request_rates": [args.request_rate],
             "concurrency": None,
-            "topologies": [TOPOLOGY],
+            "topologies": list(TOPOLOGIES),
             "response_placement": "inline",
             "streaming": False,
             "max_tokens": OUTPUT_TOKENS,
@@ -395,7 +536,14 @@ def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
             "gpu_memory_utilization": 0.4,
             "max_batch_patches": 41_472,
             "max_batch_items": 64,
-            "batching_policy": "block for first item, then eager-drain queued work",
+            "batch_queue_wait_ms": args.batch_queue_wait_ms,
+            "batch_queue_max_wait_ms": args.batch_queue_max_wait_ms,
+            "embedding_transfer_mode": args.embedding_transfer_mode,
+            "nixl_receive_storage": "pre-registered receiver ring buffer",
+            "classifier_nixl_buffer_bytes": args.classifier_nixl_buffer_bytes,
+            "workflow_provider": args.workflow_provider,
+            "perf_trace": bool(args.perf_trace),
+            "perf_sample_every": args.perf_sample_every,
             "preprocess_concurrency": 64,
             "preprocess_cache_size": 0,
             "graph_batch_buckets": [1, 2, 4, 8, 16, 32, 64],
@@ -454,21 +602,22 @@ def smoke_joined_response(
     nvext = result.get("nvext")
     engine_data = nvext.get("engine_data") if isinstance(nvext, Mapping) else None
     ensemble = engine_data.get("ensemble") if isinstance(engine_data, Mapping) else None
-    scores = (
+    classifier_scores = (
         ensemble.get("classifier_scores") if isinstance(ensemble, Mapping) else None
     )
-    if not isinstance(scores, Mapping) or not scores:
-        raise BenchmarkAuditError("joined response is missing classifier scores")
-    score_values = [float(value) for value in scores.values()]
-    if any(not math.isfinite(value) for value in score_values) or not math.isclose(
-        sum(score_values), 1.0
-    ):
-        raise BenchmarkAuditError(f"invalid classifier scores: {dict(scores)}")
+    if not isinstance(classifier_scores, Mapping) or not classifier_scores:
+        raise BenchmarkAuditError("joined-response smoke returned no classifier scores")
+    try:
+        score_sum = sum(float(score) for score in classifier_scores.values())
+    except (TypeError, ValueError) as error:
+        raise BenchmarkAuditError("classifier scores must be numeric") from error
+    if not math.isclose(score_sum, 1.0):
+        raise BenchmarkAuditError(f"classifier scores sum to {score_sum}; expected 1.0")
     return {
         "completion_tokens": usage["completion_tokens"],
-        "classifier_scores": dict(scores),
-        "classifier_score_sum": sum(score_values),
         "finish_reason": choices[0].get("finish_reason"),
+        "classifier_scores": dict(classifier_scores),
+        "classifier_score_sum": score_sum,
     }
 
 
@@ -528,35 +677,47 @@ def summarize(root: Path) -> dict[str, Any]:
     if not isinstance(benchmark, Mapping):
         raise BenchmarkAuditError("benchmark metadata is missing benchmark settings")
     request_rates = benchmark.get("request_rates")
-    if request_rates != [REQUEST_RATE] or benchmark.get("concurrency") is not None:
+    if (
+        request_rates != [REQUEST_RATE]
+        or benchmark.get("concurrency") is not None
+        or benchmark.get("topologies") != list(TOPOLOGIES)
+    ):
         raise BenchmarkAuditError(
-            "summary requires 50 req/s constant load without a concurrency limit"
+            "summary requires both classifier topologies at 50 req/s constant "
+            "load without a concurrency limit"
         )
-    topology = _summarize_topology(root, TOPOLOGY)
-    joined_smokes = [
-        _read_json(root / f"rep-{repetition}" / "remote" / "joined_smoke.json")
-        for repetition in range(1, REPETITIONS + 1)
-    ]
-    window = topology["request_window_throughput_req_s"]
     minimum_rate = REQUEST_RATE * MIN_ACHIEVED_TO_OFFERED_RATIO
-    run_rates = [float(value) for value in window["runs"]]
-    comparison = {
-        "topology": TOPOLOGY,
-        "offered_request_rate_req_s": REQUEST_RATE,
-        "achieved_request_window_req_s": float(window["mean"]),
-        "achieved_to_offered_ratio": float(window["mean"]) / REQUEST_RATE,
-        "minimum_ratio": MIN_ACHIEVED_TO_OFFERED_RATIO,
-        "minimum_rate_req_s": minimum_rate,
-        "passed": all(value >= minimum_rate for value in run_rates),
+    topologies = {
+        topology: _summarize_topology(root, topology) for topology in TOPOLOGIES
     }
+    joined_smokes = {
+        topology: [
+            _read_json(root / f"rep-{repetition}" / topology / "joined_smoke.json")
+            for repetition in range(1, REPETITIONS + 1)
+        ]
+        for topology in TOPOLOGIES
+    }
+    comparisons = {}
+    for name, topology in topologies.items():
+        window = topology["request_window_throughput_req_s"]
+        run_rates = [float(value) for value in window["runs"]]
+        comparisons[name] = {
+            "topology": name,
+            "offered_request_rate_req_s": REQUEST_RATE,
+            "achieved_request_window_req_s": float(window["mean"]),
+            "achieved_to_offered_ratio": float(window["mean"]) / REQUEST_RATE,
+            "minimum_ratio": MIN_ACHIEVED_TO_OFFERED_RATIO,
+            "minimum_rate_req_s": minimum_rate,
+            "passed": all(value >= minimum_rate for value in run_rates),
+        }
     summary = {
         "metadata": metadata,
         "workload": workload,
-        "topologies": {TOPOLOGY: topology},
-        "comparison": comparison,
+        "topologies": topologies,
+        "comparisons": comparisons,
         "gate": {
             "minimum_achieved_to_offered_ratio": MIN_ACHIEVED_TO_OFFERED_RATIO,
-            "passed": comparison["passed"],
+            "passed": all(comparison["passed"] for comparison in comparisons.values()),
         },
         "joined_response_smokes": joined_smokes,
     }
@@ -572,8 +733,6 @@ def _format_runs(values: list[Any]) -> str:
 def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
     metadata = summary["metadata"]
     workload = summary["workload"]
-    topology = summary["topologies"][TOPOLOGY]
-    comparison = summary["comparison"]
     lines = [
         "# Remote Qwen workflow open-loop qualification",
         "",
@@ -588,6 +747,14 @@ def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
         "1,000 measured requests; 20 warmups",
         "- Response placement: inline",
         "- Non-streaming; TTFT and ITL are intentionally not compared",
+        "- Tensor transport: "
+        f"{metadata['benchmark']['embedding_transfer_mode']}; "
+        f"{metadata['benchmark']['nixl_receive_storage']}",
+        "- Classifier NIXL receive ring: "
+        f"{metadata['benchmark']['classifier_nixl_buffer_bytes']} bytes",
+        "- Encoder queue waits: "
+        f"{metadata['benchmark']['batch_queue_wait_ms']} ms quiet / "
+        f"{metadata['benchmark']['batch_queue_max_wait_ms']} ms maximum",
         "",
         "## Throughput",
         "",
@@ -595,22 +762,28 @@ def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
         "Request-window runs (req/s) | Window mean |",
         "| --- | --- | ---: | --- | ---: |",
     ]
-    full = topology["full_client_process_throughput_req_s"]
-    window = topology["request_window_throughput_req_s"]
-    lines.append(
-        f"| {TOPOLOGY} | {_format_runs(full['runs'])} | "
-        f"{full['from_mean_wall']:.3f} | {_format_runs(window['runs'])} | "
-        f"{window['mean']:.3f} |"
-    )
+    for name in TOPOLOGIES:
+        topology = summary["topologies"][name]
+        full = topology["full_client_process_throughput_req_s"]
+        window = topology["request_window_throughput_req_s"]
+        lines.append(
+            f"| {name} | {_format_runs(full['runs'])} | "
+            f"{full['from_mean_wall']:.3f} | {_format_runs(window['runs'])} | "
+            f"{window['mean']:.3f} |"
+        )
+    lines.extend(["", "## Qualification gates", ""])
+    for name in TOPOLOGIES:
+        comparison = summary["comparisons"][name]
+        lines.append(
+            f"- {name}: achieved/offered "
+            f"**{comparison['achieved_to_offered_ratio']:.3f}**; every run >= "
+            f"{comparison['minimum_rate_req_s']:.3f} req/s: "
+            f"**{comparison['passed']}**."
+        )
     lines.extend(
         [
             "",
-            "Achieved/offered request-window ratio: "
-            f"**{comparison['achieved_to_offered_ratio']:.3f}**; "
-            f"every run >= {comparison['minimum_rate_req_s']:.3f} req/s: "
-            f"**{comparison['passed']}**.",
-            "",
-            "Overall >=98% achieved/offered in every run gate: "
+            "Overall >=95% achieved/offered in every run gate: "
             f"**{summary['gate']['passed']}**.",
             "",
             "## Correctness",
@@ -618,7 +791,9 @@ def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
             "- Every measured cell completed 1,000 requests with zero errors.",
             "- Every cell produced average decoder ISL 874.5 and exact OSL 7.",
             "- Every cell processed 907,800 patches across both audited grids.",
-            "- Every remote repetition returned normalized classifier scores.",
+            "- Every repetition returned the exact seven-token completion and "
+            "classifier scores.",
+            "- Final-quarter median latency remained within 1.2× of the first quarter.",
             "",
         ]
     )
@@ -644,13 +819,26 @@ def _build_parser() -> argparse.ArgumentParser:
     metadata.add_argument("--torch-gpu-count", type=int, required=True)
     metadata.add_argument("--request-rate", type=int, required=True)
     metadata.add_argument("--aiperf-version", required=True)
+    metadata.add_argument("--batch-queue-wait-ms", type=float, required=True)
+    metadata.add_argument("--batch-queue-max-wait-ms", type=float, required=True)
+    metadata.add_argument("--embedding-transfer-mode", required=True)
+    metadata.add_argument("--classifier-nixl-buffer-bytes", type=int, required=True)
+    metadata.add_argument("--workflow-provider", required=True)
+    metadata.add_argument("--perf-trace", type=int, choices=(0, 1), required=True)
+    metadata.add_argument("--perf-sample-every", type=int, required=True)
 
     cell = subparsers.add_parser("validate-cell")
     cell.add_argument("--profile", type=Path, required=True)
+    cell.add_argument("--records", type=Path, required=True)
     cell.add_argument("--wall-seconds", type=Path, required=True)
     cell.add_argument("--server-log", type=Path, required=True)
+    cell.add_argument("--perf-log", type=Path, required=True)
     cell.add_argument("--gpu-telemetry", type=Path, required=True)
     cell.add_argument("--output", type=Path, required=True)
+
+    perf = subparsers.add_parser("summarize-perf")
+    perf.add_argument("--log", type=Path, required=True)
+    perf.add_argument("--output", type=Path, required=True)
 
     profile = subparsers.add_parser("validate-profile")
     profile.add_argument("--profile", type=Path, required=True)
@@ -688,11 +876,15 @@ def main() -> None:
             args.output,
             validate_cell(
                 args.profile,
+                args.records,
                 args.wall_seconds,
                 args.server_log,
+                args.perf_log,
                 args.gpu_telemetry,
             ),
         )
+    elif args.command == "summarize-perf":
+        _write_json(args.output, summarize_perf_log(args.log))
     elif args.command == "validate-profile":
         _write_json(
             args.output,

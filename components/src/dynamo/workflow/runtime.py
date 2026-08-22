@@ -93,3 +93,11 @@ class TensorCarrier(Protocol):
 
     async def import_tensor(self, reference: Mapping[str, Any]) -> Any:
         ...
+
+
+@runtime_checkable
+class ReleasableTensorCarrier(Protocol):
+    """Optional consumer hook for borrowed tensor storage."""
+
+    def release_imported_tensor(self, tensor: Any) -> None:
+        ...

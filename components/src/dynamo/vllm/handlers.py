@@ -3326,6 +3326,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             prompt = await self._external_encoder_prompt_loader.load(
                 encoder_result,
                 token_ids,
+                trace_id=request_id,
             )
         except Exception as exc:
             msg = f"External encoder result failed: {exc}"
