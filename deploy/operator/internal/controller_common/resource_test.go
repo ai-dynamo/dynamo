@@ -19,13 +19,18 @@ package controller_common
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 
 	"github.com/bsm/gomega"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -959,6 +964,13 @@ type observedResourceTestReconciler struct {
 	recorder events.EventRecorder
 }
 
+// syncTestReconciler is the minimal Reconciler SyncResource needs: a client and
+// an event recorder.
+type syncTestReconciler struct {
+	client.Client
+	recorder *events.FakeRecorder
+}
+
 func (r observedResourceTestReconciler) GetRecorder() events.EventRecorder {
 	return r.recorder
 }
@@ -1010,4 +1022,279 @@ func TestSyncObservedResourceUsesProvidedObservation(t *testing.T) {
 	g.Expect(getCalls).To(gomega.Equal(1), "sync must use the caller's exact observation")
 	g.Expect(observed.Data["value"]).To(gomega.Equal("before"), "sync must not mutate the caller's observation")
 	g.Expect(synced.Data["value"]).To(gomega.Equal("after"))
+}
+
+func (r *syncTestReconciler) GetRecorder() events.EventRecorder { return r.recorder }
+
+// warnedForeign reports whether a foreign-owner warning event was emitted.
+func (r *syncTestReconciler) warnedForeign(t *testing.T) bool {
+	t.Helper()
+	for {
+		select {
+		case event := <-r.recorder.Events:
+			if strings.Contains(event, "Foreign") {
+				return true
+			}
+		default:
+			return false
+		}
+	}
+}
+
+func newSyncTestReconciler(t *testing.T, seeded ...client.Object) *syncTestReconciler {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add corev1 to scheme: %v", err)
+	}
+	if err := v1beta1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add nvidia.com/v1beta1 to scheme: %v", err)
+	}
+	return &syncTestReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(seeded...).Build(),
+		recorder: events.NewFakeRecorder(16),
+	}
+}
+
+// foreignOwnedConfigMap is a ConfigMap already controlled by a different owner.
+func foreignOwnedConfigMap() *corev1.ConfigMap {
+	controller := true
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "shared-name",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "apps/v1",
+				Kind:       "StatefulSet",
+				Name:       "someone-else",
+				UID:        "owner-uid-other",
+				Controller: &controller,
+			}},
+		},
+		Data: map[string]string{"owner": "other-controller"},
+	}
+}
+
+func syncParent() *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "parent", Namespace: "default", UID: "owner-uid-parent"},
+	}
+}
+
+func TestSyncResourceRefusesToUpdateAForeignOwnedResource(t *testing.T) {
+	t.Log("given an existing ConfigMap controlled by another controller")
+	existing := foreignOwnedConfigMap()
+	r := newSyncTestReconciler(t, existing)
+
+	t.Log("when SyncResource reconciles a same-name resource for a different parent")
+	desired := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "shared-name", Namespace: "default"},
+		Data:       map[string]string{"owner": "us"},
+	}
+	modified, _, err := SyncResource(context.Background(), r, syncParent(),
+		func(context.Context) (*corev1.ConfigMap, bool, error) { return desired, false, nil })
+
+	t.Log("then it reports a collision and leaves the resource untouched")
+	if err == nil {
+		t.Fatal("SyncResource() error = nil, want a collision error")
+	}
+	if modified {
+		t.Fatal("SyncResource() modified = true, want false")
+	}
+	var got corev1.ConfigMap
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "shared-name", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("Get() after refused sync error = %v", err)
+	}
+	if got.Data["owner"] != "other-controller" {
+		t.Fatalf("resource data = %v, want the other controller's content preserved", got.Data)
+	}
+	if !r.warnedForeign(t) {
+		t.Fatal("no foreign-owner warning event was recorded")
+	}
+}
+
+func TestSyncResourceRefusesToDeleteAForeignOwnedResource(t *testing.T) {
+	t.Log("given an existing ConfigMap controlled by another controller")
+	r := newSyncTestReconciler(t, foreignOwnedConfigMap())
+
+	t.Log("when SyncResource is asked to delete a same-name resource for a different parent")
+	modified, _, err := SyncResource(context.Background(), r, syncParent(),
+		func(context.Context) (*corev1.ConfigMap, bool, error) {
+			return &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "shared-name", Namespace: "default"},
+			}, true, nil
+		})
+
+	t.Log("then it reports a collision and the resource still exists")
+	if err == nil {
+		t.Fatal("SyncResource() error = nil, want a collision error")
+	}
+	if modified {
+		t.Fatal("SyncResource() modified = true, want false")
+	}
+	var got corev1.ConfigMap
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "shared-name", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("resource was deleted despite belonging to another controller: %v", err)
+	}
+	if !r.warnedForeign(t) {
+		t.Fatal("no foreign-owner warning event was recorded")
+	}
+}
+
+// SyncObservedResource is called directly by the Grove workloads reconciler with
+// an observation it read itself, so it needs the same guard as SyncResource
+// rather than inheriting it from the lookup path.
+func TestSyncObservedResourceRefusesAForeignOwnedResource(t *testing.T) {
+	t.Log("given an observation of a ConfigMap controlled by another controller")
+	observed := foreignOwnedConfigMap()
+	r := newSyncTestReconciler(t, observed.DeepCopy())
+
+	t.Log("when a different parent syncs a desired resource against that observation")
+	desired := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "shared-name", Namespace: "default"},
+		Data:       map[string]string{"owner": "us"},
+	}
+	modified, _, err := SyncObservedResource(context.Background(), r, syncParent(), observed, desired)
+
+	t.Log("then it refuses and leaves the resource untouched")
+	if err == nil {
+		t.Fatal("SyncObservedResource() error = nil, want a collision error")
+	}
+	if modified {
+		t.Fatal("SyncObservedResource() modified = true, want false")
+	}
+	var got corev1.ConfigMap
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "shared-name", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("Get() after refused sync error = %v", err)
+	}
+	if got.Data["owner"] != "other-controller" {
+		t.Fatalf("resource data = %v, want the other controller's content preserved", got.Data)
+	}
+}
+
+// `nvidia.com` is shared with other NVIDIA controllers. The GPU operator's
+// ClusterPolicy lives in that group, so matching on the group alone would treat
+// it as ours and put back the cross-controller mutation this guard prevents.
+func TestSyncResourceRefusesAnotherNvidiaControllersResource(t *testing.T) {
+	t.Log("given an existing resource controlled by a non-Dynamo nvidia.com kind")
+	controller := true
+	existing := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "shared-name",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "nvidia.com/v1",
+				Kind:       "ClusterPolicy",
+				Name:       "gpu-operator",
+				UID:        "owner-uid-gpu-operator",
+				Controller: &controller,
+			}},
+		},
+		Data: map[string]string{"owner": "gpu-operator"},
+	}
+	r := newSyncTestReconciler(t, existing)
+
+	t.Log("when SyncResource reconciles a same-name resource")
+	_, _, err := SyncResource(context.Background(), r, syncParent(),
+		func(context.Context) (*corev1.ConfigMap, bool, error) {
+			return &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "shared-name", Namespace: "default"},
+				Data:       map[string]string{"owner": "us"},
+			}, false, nil
+		})
+
+	t.Log("then a kind this operator does not manage is still treated as foreign")
+	if err == nil {
+		t.Fatal("SyncResource() error = nil, want a collision error for a ClusterPolicy-owned resource")
+	}
+	var got corev1.ConfigMap
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "shared-name", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got.Data["owner"] != "gpu-operator" {
+		t.Fatalf("resource data = %v, want the GPU operator's content preserved", got.Data)
+	}
+}
+
+func TestSyncResourceStillManagesItsOwnResource(t *testing.T) {
+	t.Log("given an existing ConfigMap this parent already controls")
+	controller := true
+	parent := syncParent()
+	existing := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "shared-name",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "v1",
+				Kind:       "ConfigMap",
+				Name:       parent.Name,
+				UID:        parent.UID,
+				Controller: &controller,
+			}},
+		},
+		Data: map[string]string{"owner": "us"},
+	}
+	r := newSyncTestReconciler(t, existing)
+
+	t.Log("when SyncResource deletes it")
+	modified, _, err := SyncResource(context.Background(), r, parent,
+		func(context.Context) (*corev1.ConfigMap, bool, error) {
+			return &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "shared-name", Namespace: "default"},
+			}, true, nil
+		})
+
+	t.Log("then the delete really happens rather than being skipped")
+	if err != nil {
+		t.Fatalf("SyncResource() error = %v, want nil for an owned resource", err)
+	}
+	if !modified {
+		t.Fatal("SyncResource() modified = false, want true for a deleted resource")
+	}
+	var got corev1.ConfigMap
+	getErr := r.Get(context.Background(), types.NamespacedName{Name: "shared-name", Namespace: "default"}, &got)
+	if !apierrors.IsNotFound(getErr) {
+		t.Fatalf("Get() after delete error = %v, want NotFound", getErr)
+	}
+}
+
+// A resource can legitimately be shared between two of this operator's own
+// objects. The headless model discovery service is named from the base model
+// alone, so the prefill and decode DynamoComponentDeployments serving one model
+// sync the same service and only the first becomes its controller owner.
+// Refusing there would leave every other component unable to reconcile.
+func TestSyncResourceStillManagesAResourceOwnedByAnotherDynamoObject(t *testing.T) {
+	t.Log("given a shared resource already controlled by a different Dynamo object")
+	controller := true
+	existing := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "dynamo-model-abcd1234",
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: v1beta1.GroupVersion.String(),
+				Kind:       "DynamoComponentDeployment",
+				Name:       "prefill-worker",
+				UID:        "owner-uid-prefill",
+				Controller: &controller,
+			}},
+		},
+		Data: map[string]string{"model": "shared"},
+	}
+	r := newSyncTestReconciler(t, existing)
+
+	t.Log("when a second Dynamo object syncs the same resource")
+	desired := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "dynamo-model-abcd1234", Namespace: "default"},
+		Data:       map[string]string{"model": "shared"},
+	}
+	_, _, err := SyncResource(context.Background(), r, syncParent(),
+		func(context.Context) (*corev1.ConfigMap, bool, error) { return desired, false, nil })
+
+	t.Log("then it is not treated as foreign")
+	if err != nil {
+		t.Fatalf("SyncResource() error = %v, want nil for a resource shared with another Dynamo object", err)
+	}
+	if r.warnedForeign(t) {
+		t.Fatal("a foreign-owner warning was recorded for an operator-owned resource")
+	}
 }

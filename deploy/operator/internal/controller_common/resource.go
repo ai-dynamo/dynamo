@@ -31,8 +31,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -52,6 +54,57 @@ const (
 type Reconciler interface {
 	client.Client
 	GetRecorder() events.EventRecorder
+}
+
+// isDynamoOwner reports whether ref names a kind this operator manages.
+//
+// The group alone is not enough to decide that. `nvidia.com` is shared with
+// other NVIDIA controllers, the GPU operator's `nvidia.com/v1` ClusterPolicy
+// among them, and treating those as ours would put back the cross-controller
+// mutation this guard exists to stop. Asking the scheme keeps the answer exact
+// across both API versions and stays correct as kinds are added.
+func isDynamoOwner(ref *metav1.OwnerReference, scheme *runtime.Scheme) bool {
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil || gv.Group != v1beta1.GroupVersion.Group {
+		return false
+	}
+	return scheme.Recognizes(gv.WithKind(ref.Kind))
+}
+
+// checkForeignOwner refuses to touch an observed object that some other
+// controller owns.
+//
+// An object is looked up by namespace and name only, so a name collision can
+// hand back a resource that belongs to a different controller. The create path
+// attaches parentResource as controller owner, but the update and delete paths
+// would otherwise write to whatever they found.
+//
+// Scoped to owners outside this operator's API group on purpose. Resources are
+// deliberately shared between our own objects: the headless model discovery
+// service is named from the base model alone, so the prefill and decode
+// DynamoComponentDeployments serving one model sync the same service, and only
+// the first becomes its controller owner. Refusing there would leave every
+// other component permanently unable to reconcile. Whether such sharing should
+// be expressed through ownership at all is a design question, so this leaves
+// our own objects behaving as they do now.
+//
+// A resource with no controller owner is left alone here: adopting it, or
+// treating the collision as fatal, changes behaviour for objects that
+// reconcile today, so that policy belongs with the maintainers.
+func checkForeignOwner(r Reconciler, parentResource, observed, desired client.Object, resourceType string) error {
+	if parentResource == nil {
+		return nil
+	}
+	owner := metav1.GetControllerOf(observed)
+	if owner == nil || owner.UID == parentResource.GetUID() || isDynamoOwner(owner, r.Scheme()) {
+		return nil
+	}
+	err := fmt.Errorf(
+		"%s %s/%s is controlled by %s %s, which this operator does not manage; refusing to modify it",
+		resourceType, observed.GetNamespace(), observed.GetName(), owner.Kind, owner.Name,
+	)
+	recordResourceEvent(r, desired, corev1.EventTypeWarning, fmt.Sprintf("Foreign%s", resourceType), "Sync", "%s", err.Error())
+	return err
 }
 
 // ResourceGenerator is a function that generates a resource.
@@ -113,6 +166,10 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 
 	logs.Info(fmt.Sprintf("%s found.", resourceType))
 	if toDelete {
+		if err = checkForeignOwner(r, parentResource, oldResource, resource, resourceType); err != nil {
+			logs.Error(err, "Refusing to delete a resource owned by a foreign controller.")
+			return
+		}
 		logs.Info(fmt.Sprintf("%s found. Deleting the existing one.", resourceType))
 		err = r.Delete(ctx, oldResource)
 		if err != nil {
@@ -180,6 +237,12 @@ func SyncObservedResource[T client.Object](
 		logs.Info(fmt.Sprintf("%s created.", resourceType))
 		recordResourceEvent(r, desired, corev1.EventTypeNormal, fmt.Sprintf("Create%s", resourceType), "Create", "Created %s %s", resourceType, resourceNamespace)
 		return true, desired, nil
+	}
+
+	if err := checkForeignOwner(r, parentResource, observed, desired, resourceType); err != nil {
+		logs.Error(err, "Refusing to modify a resource owned by a foreign controller.")
+		var zero T
+		return false, zero, err
 	}
 
 	changeResult, err := GetSpecChangeResult(observed, desired)
