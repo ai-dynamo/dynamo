@@ -46,12 +46,14 @@ class DeploymentSpec:
         )
 
     @classmethod
-    def remote(cls, **endpoint_ids: str) -> "DeploymentSpec":
+    def remote(
+        cls, *, tensor_carrier: str | None = None, **endpoint_ids: str
+    ) -> "DeploymentSpec":
         """Build round-robin bindings to discovered Dynamo endpoints."""
 
         return cls(
             bindings={
-                stage_id: RemoteBinding(endpoint_id)
+                stage_id: RemoteBinding(endpoint_id, tensor_carrier=tensor_carrier)
                 for stage_id, endpoint_id in endpoint_ids.items()
             }
         )

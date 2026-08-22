@@ -35,7 +35,9 @@ class WorkflowOrchestrator:
         """Bind initialized resources to an immutable execution plan."""
 
         dispatcher = await StageDispatcher.bind(
-            plan, runtime=runtime, inline_runners=inline_runners
+            plan,
+            runtime=runtime,
+            inline_runners=inline_runners,
         )
         return cls(plan, dispatcher)
 

@@ -28,11 +28,7 @@ class WorkflowAttempt:
 
 @dataclass(frozen=True)
 class StageContext:
-    """Attempt metadata available to a running stage.
-
-    ``workflow_name`` is unavailable for remote stages until the transport
-    carries workflow lineage explicitly.
-    """
+    """Attempt metadata available to a running stage."""
 
     workflow_name: Optional[str]
     stage_id: str
@@ -75,4 +71,25 @@ class StageRunner(Protocol):
     ) -> Mapping[str, Any]:
         """Run one stage attempt and return all declared outputs."""
 
+        ...
+
+
+@runtime_checkable
+class TensorCarrier(Protocol):
+    """Runtime-bound carrier for optional out-of-band tensor transport."""
+
+    def can_export(self, value: Any) -> bool:
+        """Whether this carrier can export the complete port value."""
+
+        ...
+
+    async def export_tensor(self, tensor: Any, transfer_id: str) -> Mapping[str, Any]:
+        ...
+
+    async def export_tensor_fanout(
+        self, tensor: Any, transfer_ids: tuple[str, ...]
+    ) -> Mapping[str, Mapping[str, Any]]:
+        ...
+
+    async def import_tensor(self, reference: Mapping[str, Any]) -> Any:
         ...

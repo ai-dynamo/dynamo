@@ -7,10 +7,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Mapping, Union
+from typing import Mapping, Optional, Union
 
 from dynamo.workflow.ir import WorkflowIR
 from dynamo.workflow.types import StageContract, WorkflowValidationError, validate_name
+
+NIXL_CARRIER = "nixl"
 
 
 @dataclass(frozen=True)
@@ -41,12 +43,17 @@ class RemoteBinding:
 
     endpoint_id: str
     routing_policy: str = "round_robin"
+    tensor_carrier: Optional[str] = None
 
     def __post_init__(self) -> None:
         _validate_endpoint_id(self.endpoint_id)
         if self.routing_policy != "round_robin":
             raise WorkflowValidationError(
                 f"unsupported remote routing policy {self.routing_policy!r}"
+            )
+        if self.tensor_carrier not in {None, NIXL_CARRIER}:
+            raise WorkflowValidationError(
+                f"unsupported remote tensor carrier {self.tensor_carrier!r}"
             )
 
 

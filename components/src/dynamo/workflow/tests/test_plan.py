@@ -125,3 +125,82 @@ def test_remote_endpoint_id_is_a_stable_discovery_identity() -> None:
 
     with pytest.raises(WorkflowValidationError, match="namespace.component.endpoint"):
         RemoteBinding("component.endpoint")
+
+
+def test_nixl_is_an_opt_in_remote_binding_capability() -> None:
+    encoder_contract = StageContract(
+        id="encoder",
+        inputs={"request"},
+        outputs={"embedding"},
+    )
+    classifier_contract = StageContract(
+        id="classifier",
+        inputs={"embedding"},
+        outputs={"scores"},
+    )
+    generator_contract = StageContract(
+        id="generator",
+        inputs={"embedding"},
+        outputs={"text"},
+    )
+    workflow = Workflow("nixl-fanout")
+    request = workflow.input("request")
+    encoder = workflow.stage("encoder", encoder_contract, request=request)
+    classifier = workflow.stage(
+        "classifier", classifier_contract, embedding=encoder.embedding
+    )
+    generator = workflow.stage(
+        "generator", generator_contract, embedding=encoder.embedding
+    )
+    workflow.output("scores", classifier.scores)
+    workflow.output("text", generator.text)
+
+    plan = compile_workflow(
+        workflow,
+        DeploymentSpec.remote(
+            tensor_carrier="nixl",
+            encoder="workflows.encoder.generate",
+            classifier="workflows.classifier.generate",
+            generator="workflows.generator.generate",
+        ),
+    )
+    assert all(binding.tensor_carrier == "nixl" for binding in plan.bindings.values())
+    assert not hasattr(plan, "edges")
+
+
+def test_compilation_keeps_mixed_placement_value_opaque() -> None:
+    producer_contract = StageContract(
+        id="producer",
+        inputs={"request"},
+        outputs={"embedding"},
+    )
+    consumer_contract = StageContract(
+        id="consumer",
+        inputs={"embedding"},
+        outputs={"result"},
+    )
+    workflow = Workflow("unsupported-mixed-tensor")
+    request = workflow.input("request")
+    producer = workflow.stage("producer", producer_contract, request=request)
+    consumer = workflow.stage(
+        "consumer", consumer_contract, embedding=producer.embedding
+    )
+    workflow.output("result", consumer.result)
+
+    placements = (
+        {
+            "producer": InlineBinding("producer"),
+            "consumer": RemoteBinding(
+                "workflows.consumer.generate", tensor_carrier="nixl"
+            ),
+        },
+        {
+            "producer": RemoteBinding(
+                "workflows.producer.generate", tensor_carrier="nixl"
+            ),
+            "consumer": InlineBinding("consumer"),
+        },
+    )
+    for bindings in placements:
+        plan = compile_workflow(workflow, DeploymentSpec(bindings))
+        assert plan.bindings == bindings
