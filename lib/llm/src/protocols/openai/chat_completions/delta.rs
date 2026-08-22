@@ -439,6 +439,18 @@ mod tests {
     }
 
     #[test]
+    fn test_response_identity_matches_chat_completion_protocol() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("request-id".to_string());
+
+        let response = generator.create_choice(0, None, None, None);
+
+        assert_eq!(response.inner.id, "chatcmpl-request-id");
+        assert_eq!(response.inner.object, "chat.completion.chunk");
+        assert_eq!(response.inner.model, "test-model");
+    }
+
+    #[test]
     fn test_completion_token_details_are_propagated_from_backend_usage() {
         let request = create_test_request();
         let mut generator = request.response_generator("req-token-details".to_string());

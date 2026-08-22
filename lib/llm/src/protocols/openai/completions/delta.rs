@@ -348,6 +348,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_response_identity_matches_completion_protocol() {
+        let request = create_test_request();
+        let generator = request.response_generator("request-id".to_string());
+
+        let response = generator.create_choice(0, None, None, None);
+
+        assert_eq!(response.inner.id, "cmpl-request-id");
+        assert_eq!(response.inner.object, "text_completion");
+        assert_eq!(response.inner.model, "test-model");
+    }
+
     fn create_test_request_with_extra_fields(fields: Vec<String>) -> NvCreateCompletionRequest {
         let inner = CreateCompletionRequestArgs::default()
             .model("test-model")
