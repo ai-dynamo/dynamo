@@ -1580,46 +1580,14 @@ class ManagedDeployment:
                         f"Connection test failed for pod {pod.name} (attempt {attempt+1}/{max_connection_attempts}): {e}"
                     )
 
-                # Restart port-forward for next attempt (except on last attempt)
-                if attempt == max_connection_attempts - 1:
-                    continue
-                try:
-                    port_forward.stop()
-                except Exception as e:
-                    self._logger.debug(
-                        f"Error stopping port forward for pod {pod.name}: {e}"
-                    )
-                # kr8s' sync stop() can return before the background thread has
-                # fully torn down (or even finished starting), so we can't assume
-                # the old forward is dead once stop() returns. Track it so
-                # _cleanup() stops it later regardless of whether stop() raised,
-                # rather than losing the reference when we replace the object.
-                if port_forward not in self._active_port_forwards:
-                    self._active_port_forwards.append(port_forward)
-                # Create a fresh portforward object so local_port=0 picks a new
-                # ephemeral port rather than re-binding the previously assigned
-                # port that may still be in TIME_WAIT.
-                try:
-                    port_forward = pod.portforward(
-                        remote_port=remote_port,
-                        local_port=0,
-                        address="127.0.0.1",
-                    )
-                    port_forward.start()
-                except Exception as e:
-                    self._logger.debug(
-                        f"Error restarting port forward for pod {pod.name}: {e}"
-                    )
-                    break
-
             # All attempts failed
             self._logger.warning(
                 f"Port forward failed after {max_connection_attempts} attempts for pod {pod.name}"
             )
             try:
                 port_forward.stop()
-            except Exception:
-                pass  # Ignore errors during cleanup
+            except Exception as e:
+                self._logger.debug("Error stopping port forward: %s", e)
             return None
 
         except Exception as e:
@@ -1638,17 +1606,11 @@ class ManagedDeployment:
             for port_forward in self._active_port_forwards:
                 try:
                     port_forward.stop()
-                except RuntimeError as e:
-                    # Expected error when pod is terminated:
-                    # "anext(): asynchronous generator is already running"
-                    if "anext()" in str(e) or "already running" in str(e):
-                        self._logger.debug(f"Port forward cleanup: {e}")
-                    else:
-                        self._logger.warning(
-                            f"Unexpected error stopping port forward: {e}"
-                        )
                 except Exception as e:
-                    self._logger.debug(f"Error stopping port forward: {e}")
+                    # Port-forward teardown is best-effort. A third-party cleanup
+                    # failure must not mask the deployment test result or prevent
+                    # the remaining forwards from being stopped.
+                    self._logger.debug("Error stopping port forward: %s", e)
             self._active_port_forwards.clear()
         finally:
             await self._delete_deployment()
