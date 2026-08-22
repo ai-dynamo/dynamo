@@ -1,0 +1,19 @@
+# Coverage config for the product processes the tests launch (frontend, backend workers).
+#
+# Kept separate from .coveragerc so it can never affect the main pytest-cov run or the
+# combine/report step. tests/utils/managed_process.py injects COVERAGE_PROCESS_START
+# pointing at this file into the processes it launches; it propagates through the launch
+# shell scripts to the real `python -m dynamo.*` workers, where the site .pth bootstrap
+# (tests/utils/coverage_subprocess_bootstrap.py) calls coverage.process_startup(). The
+# recorded source-tree paths are remapped back by the [paths] section in .coveragerc
+# during `coverage combine`.
+[run]
+# Unique per-process data files so the existing `coverage combine` merges them.
+parallel = True
+# Save promptly on SIGTERM for processes that don't override the handler (e.g. the
+# frontend). Backend workers that force-exit on a launch-script's double-SIGTERM are
+# covered instead by the bootstrap's periodic flush.
+sigterm = true
+# Restrict measurement to the dynamo product package; otherwise every heavy dependency
+# (torch, vllm, ...) the worker executes would be recorded, bloating the data files.
+source_pkgs = dynamo

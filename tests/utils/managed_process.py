@@ -430,6 +430,30 @@ class ManagedProcess:
         if process.poll() is None:
             raise ManagedProcessStopTimeoutError(attr_name, process.pid, wait_timeout)
 
+    def _child_env_with_coverage(self):
+        """Return the child environment, adding subprocess-coverage vars when CI enables it.
+
+        Dynamo runs product code (frontend, workers) in separate OS processes — usually via
+        a launch shell script, so the real ``python -m dynamo.*`` is a *grandchild* of this
+        ManagedProcess, not a direct child. Setting ``COVERAGE_PROCESS_START`` here (it
+        propagates through the shell to every python descendant) makes coverage's site
+        ``.pth`` call ``coverage.process_startup()``, so each product process records its own
+        ``.coverage.*`` file next to ``COVERAGE_FILE`` (combined later by the coverage job).
+
+        Scoped to child environments only: no pytest process (main or xdist worker) ever
+        gets ``COVERAGE_PROCESS_START``, so pytest-cov in those processes is unaffected.
+        """
+        env = self.env or os.environ.copy()
+        rcfile = os.environ.get("DYN_SUBPROCESS_COVERAGE")
+        if rcfile:
+            # Copy so we never mutate a caller-provided dict or os.environ.
+            env = dict(env)
+            env["COVERAGE_PROCESS_START"] = rcfile
+            cov_file = os.environ.get("COVERAGE_FILE")
+            if cov_file:
+                env.setdefault("COVERAGE_FILE", cov_file)
+        return env
+
     def _start_process(self):
         assert self._command_name
         assert self._log_path
@@ -440,6 +464,10 @@ class ManagedProcess:
             self.working_dir or os.getcwd(),
         )
 
+        # Product children (and their shell-script grandchildren) are launched here as
+        # separate OS processes; propagate coverage env when CI requests it (no-op otherwise).
+        child_env = self._child_env_with_coverage()
+
         stdin = subprocess.DEVNULL
         stdout = subprocess.PIPE
         stderr = subprocess.STDOUT
@@ -447,7 +475,7 @@ class ManagedProcess:
         if self.display_output:
             self.proc = subprocess.Popen(
                 self.command,
-                env=self.env or os.environ.copy(),
+                env=child_env,
                 cwd=self.working_dir,
                 stdin=stdin,
                 stdout=stdout,
@@ -474,7 +502,7 @@ class ManagedProcess:
             with open(self._log_path, "w", encoding="utf-8") as f:
                 self.proc = subprocess.Popen(
                     self.command,
-                    env=self.env or os.environ.copy(),
+                    env=child_env,
                     cwd=self.working_dir,
                     stdin=stdin,
                     stdout=stdout,
