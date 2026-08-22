@@ -10,10 +10,11 @@ const DYNAMO_CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
 
 /// Parse a frontend-issued Dynamo MM hash from a vLLM extra key.
 ///
-/// The frontend forwards its 16-character routing hash to vLLM padded with
-/// 48 trailing zeroes. Treat that padding as an enablement marker: native
-/// 64-character vLLM hashes must not enable worker-side key rewriting when
-/// the frontend has disabled exact MM routing for this request.
+/// The worker canonicalizes a frontend-approved routing hash to its first 16
+/// hex characters plus 48 trailing zeroes before submitting it to vLLM. Treat
+/// that padding as an enablement marker: native 64-character vLLM hashes must
+/// not enable worker-side key rewriting when the frontend disabled exact MM
+/// routing for this request.
 pub fn parse_mm_hash_from_extra_key(s: &str) -> Option<u64> {
     // extra_keys mixes MM identifiers with LoRA/cache_salt/prompt-embed metadata.
     // Only MM identifiers should be mapped into BlockExtraInfo.
