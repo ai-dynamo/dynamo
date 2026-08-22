@@ -31,6 +31,8 @@
 #   print_launch_banner    Print startup banner with model info and example curl
 #   print_curl_footer      Print a custom curl example with standard framing (heredoc)
 #   wait_any_exit          Wait for any background process to exit, propagate its code
+#   export_nixl_wheel_libs Put the NIXL wheel's native libs on the loader path
+#                          (required before launching a frontend that decodes media)
 
 if [[ "${BASH_VERSINFO[0]}" -lt 4 || ( "${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VERSINFO[1]}" -lt 3 ) ]]; then
     echo "launch_utils.sh requires bash 4.3+ (for wait -n), found ${BASH_VERSION}" >&2
@@ -233,6 +235,37 @@ wait_for_ready() {
     done
     echo "WARNING: $_url not ready after ${_timeout}s" >&2
     return 1
+}
+
+# export_nixl_wheel_libs
+#
+# Put the NIXL wheel's native libraries on the dynamic-loader path. Call this
+# before launching `dynamo.frontend` in any deployment that passes
+# --frontend-decoding.
+#
+# The SGLang image inherits NIXL from the upstream lmsysorg/sglang runtime
+# stack but does NOT add its native libs to LD_LIBRARY_PATH (cf.
+# container/templates/dev.Dockerfile: "SGLang dev/local-dev inherit the
+# upstream SGLang/NIXL runtime stack"). nixl-sys resolves libnixl_capi.so with
+# a plain dlopen(), which then fails, and the frontend's Rust runtime reports
+# "NIXL is not supported in stub mode" the moment it builds a media-fetching
+# pipeline -- so the model is never added from discovery and /v1/models stays
+# empty forever. Point the loader at the wheel-shipped .so files explicitly.
+# We build cuda13 only, so the wheel is nixl_cu13, which stores its native libs
+# under ".nixl_cu13.mesonpy.libs".
+#
+# No-op (and silent) where the wheel layout does not match, e.g. images that
+# already expose NIXL on the default loader path.
+export_nixl_wheel_libs() {
+    local _libs
+    _libs="$(python3 -c 'import nixl_cu13, os; print(os.path.join(os.path.dirname(os.path.dirname(nixl_cu13.__file__)), ".nixl_cu13.mesonpy.libs"))' 2>/dev/null || true)"
+    if [ -d "$_libs" ]; then
+        # ${VAR:+:${VAR}} rather than a bare :${VAR}: an unset LD_LIBRARY_PATH
+        # would otherwise leave a trailing empty element, which the loader
+        # reads as the current directory.
+        export LD_LIBRARY_PATH="${_libs}:${_libs}/plugins${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+        export NIXL_PLUGIN_DIR="${NIXL_PLUGIN_DIR:-$_libs/plugins}"
+    fi
 }
 
 allocate_free_port() {
