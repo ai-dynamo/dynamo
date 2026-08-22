@@ -36,17 +36,17 @@ use crate::{
     },
 };
 
+mod builtin;
 mod cancellation;
 mod load;
 mod request_guard;
 mod selection;
-mod stateless;
 
+use builtin::BuiltinWorkerSelector;
 use cancellation::cancel_on_stop;
 use load::RoutingLoadState;
 use request_guard::RequestGuard;
 use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
-use stateless::StatelessWorkerSelector;
 
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
 const OUTPUT_REPLAY_CONSUMER_RUNTIME_KEY: &str = "output_replay_consumer";
@@ -135,63 +135,22 @@ where
     ResponseStream::new(wrapped_stream, stream_context)
 }
 
-/// First-party policies selected without a KV-cache index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BuiltinRoutingPolicy {
-    RoundRobin,
-    Random,
-    PowerOfTwoChoices,
-    LeastLoaded,
+pub(crate) fn is_builtin_router_mode(mode: RouterMode) -> bool {
+    matches!(
+        mode,
+        RouterMode::RoundRobin
+            | RouterMode::Random
+            | RouterMode::PowerOfTwoChoices
+            | RouterMode::LeastLoaded
+    )
 }
 
-impl BuiltinRoutingPolicy {
-    pub fn from_router_mode(mode: RouterMode) -> Option<Self> {
-        match mode {
-            RouterMode::RoundRobin => Some(Self::RoundRobin),
-            RouterMode::Random => Some(Self::Random),
-            RouterMode::PowerOfTwoChoices => Some(Self::PowerOfTwoChoices),
-            RouterMode::LeastLoaded => Some(Self::LeastLoaded),
-            _ => None,
-        }
-    }
-
-    const fn telemetry_name(self) -> &'static str {
-        match self {
-            Self::RoundRobin => "round-robin",
-            Self::Random => "random",
-            Self::PowerOfTwoChoices => "power-of-two-choices",
-            Self::LeastLoaded => "least-loaded",
-        }
-    }
-}
-
-struct BuiltinPlane {
-    policy: BuiltinRoutingPolicy,
-    stateless_selector: Option<StatelessWorkerSelector>,
-}
-
-impl BuiltinPlane {
-    fn new(policy: BuiltinRoutingPolicy) -> Self {
-        Self {
-            policy,
-            stateless_selector: StatelessWorkerSelector::new(policy),
-        }
-    }
-
-    fn required_worker_inputs(&self) -> WorkerInputs {
-        self.stateless_selector
-            .as_ref()
-            .map(WorkerSelector::required_worker_inputs)
-            .unwrap_or(WorkerInputs::LOAD)
-    }
-}
-
-enum RoutingPlane<Sel>
+enum RoutingPolicy<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     Kv(Arc<KvRouter<Sel>>),
-    Builtin(BuiltinPlane),
+    Builtin(BuiltinWorkerSelector),
 }
 
 /// Owns request routing from worker selection through response cleanup.
@@ -204,7 +163,7 @@ where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-    plane: RoutingPlane<Sel>,
+    policy: RoutingPolicy<Sel>,
     request_metrics: Arc<RouterRequestMetrics>,
     affinity: Option<AffinityCoordinator>,
     load_state: Option<RoutingLoadState>,
@@ -245,7 +204,7 @@ where
 
         RoutingHost {
             inner,
-            plane: RoutingPlane::Kv(kv_router),
+            policy: RoutingPolicy::Kv(kv_router),
             request_metrics,
             affinity,
             load_state: None,
@@ -255,24 +214,22 @@ where
     pub(crate) fn new_builtin(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<Self, Error> {
-        let policy =
-            BuiltinRoutingPolicy::from_router_mode(inner.router_mode()).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "{:?} routing is not a first-party builtin policy",
-                    inner.router_mode()
-                )
-            })?;
-        let plane = BuiltinPlane::new(policy);
-        let load_state = plane
+        let selector = BuiltinWorkerSelector::new(inner.router_mode()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{:?} routing is not a first-party builtin policy",
+                inner.router_mode()
+            )
+        })?;
+        let load_state = selector
             .required_worker_inputs()
             .contains(WorkerInputs::LOAD)
-            .then(|| RoutingLoadState::new(&inner, policy))
+            .then(|| RoutingLoadState::new(&inner))
             .transpose()?;
         let request_metrics =
             RouterRequestMetrics::from_component(inner.client.endpoint.component());
         Ok(Self {
             inner,
-            plane: RoutingPlane::Builtin(plane),
+            policy: RoutingPolicy::Builtin(selector),
             request_metrics,
             affinity: None,
             load_state,
@@ -280,9 +237,9 @@ where
     }
 
     pub fn required_worker_inputs(&self) -> WorkerInputs {
-        match &self.plane {
-            RoutingPlane::Kv(chooser) => chooser.required_worker_inputs(),
-            RoutingPlane::Builtin(plane) => plane.required_worker_inputs(),
+        match &self.policy {
+            RoutingPolicy::Kv(chooser) => chooser.required_worker_inputs(),
+            RoutingPolicy::Builtin(selector) => selector.required_worker_inputs(),
         }
     }
 
@@ -293,24 +250,27 @@ where
     }
 
     pub(crate) fn kv_router_if_enabled(&self) -> Option<&Arc<KvRouter<Sel>>> {
-        match &self.plane {
-            RoutingPlane::Kv(chooser) => Some(chooser),
-            RoutingPlane::Builtin(_) => None,
+        match &self.policy {
+            RoutingPolicy::Kv(chooser) => Some(chooser),
+            RoutingPolicy::Builtin(_) => None,
         }
     }
 
     pub(crate) fn peek_next_worker(&self) -> Option<u64> {
-        match &self.plane {
-            RoutingPlane::Builtin(plane) => match &self.load_state {
-                Some(load_state) => load_state.peek(&self.inner),
-                None => plane.stateless_selector.as_ref().and_then(|selector| {
-                    self.inner
-                        .with_selectable_worker_ids(|ids| selector.peek_worker_id(ids))
-                        .ok()
-                        .flatten()
-                }),
+        match &self.policy {
+            RoutingPolicy::Builtin(selector) => match &self.load_state {
+                Some(load_state) => load_state.peek(&self.inner, selector),
+                None => self
+                    .inner
+                    .with_selectable_worker_ids(|ids| {
+                        selector.peek_worker(
+                            dynamo_kv_router::selector::WorkerSelectionInput::hosted(ids, None),
+                        )
+                    })
+                    .ok()
+                    .and_then(Result::ok),
             },
-            RoutingPlane::Kv(_) => None,
+            RoutingPolicy::Kv(_) => None,
         }
     }
 
@@ -635,11 +595,10 @@ where
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
-        let RoutingPlane::Builtin(plane) = &self.plane else {
+        let RoutingPolicy::Builtin(selector) = &self.policy else {
             unreachable!("builtin dispatch called for KV routing")
         };
-        let policy = plane.policy;
-        let required_inputs = plane.required_worker_inputs();
+        let required_inputs = selector.required_worker_inputs();
 
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
@@ -651,8 +610,11 @@ where
                     .load_state
                     .as_ref()
                     .expect("LOAD policy must have routing load state");
-                let selection = load_state
-                    .select_and_reserve(&self.inner, explicit.map(|target| target.worker_id))?;
+                let selection = load_state.select_and_reserve(
+                    &self.inner,
+                    selector,
+                    explicit.map(|target| target.worker_id),
+                )?;
                 (
                     selection.worker_id,
                     explicit,
@@ -667,12 +629,16 @@ where
                         target.worker_id
                     }
                     None => {
-                        let selector = plane
-                            .stateless_selector
-                            .as_ref()
-                            .expect("cache-free builtin must have a worker selector");
                         self.inner
-                            .with_selectable_worker_ids(|ids| selector.select_worker_id(ids))??
+                            .with_selectable_worker_ids(|ids| {
+                                selector.select_worker(
+                                    dynamo_kv_router::selector::WorkerSelectionInput::hosted(
+                                        ids, None,
+                                    ),
+                                )
+                            })??
+                            .worker
+                            .worker_id
                     }
                 };
                 (worker_id, None, None, 0, None)
@@ -761,7 +727,7 @@ where
         guard.retarget_worker(target.worker_id);
         if uses_load {
             tracing::info!(
-                router_mode = policy.telemetry_name(),
+                router_mode = selector.telemetry_name(),
                 worker_id = target.worker_id,
                 candidate_count,
                 load = final_load.expect("LOAD dispatch must retain its reservation"),
@@ -840,9 +806,9 @@ where
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
-        match &self.plane {
-            RoutingPlane::Kv(_) => self.select_and_dispatch_kv_prefill(request, prepare).await,
-            RoutingPlane::Builtin(_) => {
+        match &self.policy {
+            RoutingPolicy::Kv(_) => self.select_and_dispatch_kv_prefill(request, prepare).await,
+            RoutingPolicy::Builtin(_) => {
                 self.select_and_dispatch_builtin(request, RequestPhase::Prefill, prepare)
                     .await
             }
@@ -883,7 +849,7 @@ where
         &self,
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        if matches!(&self.plane, RoutingPlane::Builtin(_)) {
+        if matches!(&self.policy, RoutingPolicy::Builtin(_)) {
             let phase = request
                 .tracker
                 .as_ref()
@@ -1112,22 +1078,14 @@ mod tests {
 
     #[test]
     fn builtin_policies_declare_capabilities() {
-        assert_eq!(
-            BuiltinPlane::new(BuiltinRoutingPolicy::RoundRobin).required_worker_inputs(),
-            WorkerInputs::NONE
-        );
-        assert_eq!(
-            BuiltinPlane::new(BuiltinRoutingPolicy::PowerOfTwoChoices).required_worker_inputs(),
-            WorkerInputs::LOAD
-        );
-        assert_eq!(
-            BuiltinPlane::new(BuiltinRoutingPolicy::LeastLoaded).required_worker_inputs(),
-            WorkerInputs::LOAD
-        );
-        assert_eq!(
-            BuiltinPlane::new(BuiltinRoutingPolicy::Random).required_worker_inputs(),
-            WorkerInputs::NONE
-        );
+        for mode in [RouterMode::RoundRobin, RouterMode::Random] {
+            let selector = BuiltinWorkerSelector::new(mode).unwrap();
+            assert_eq!(selector.required_worker_inputs(), WorkerInputs::NONE);
+        }
+        for mode in [RouterMode::PowerOfTwoChoices, RouterMode::LeastLoaded] {
+            let selector = BuiltinWorkerSelector::new(mode).unwrap();
+            assert_eq!(selector.required_worker_inputs(), WorkerInputs::LOAD);
+        }
     }
 
     #[tokio::test]
@@ -1160,13 +1118,16 @@ mod tests {
             .await
             .unwrap();
         let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner).unwrap();
+        let RoutingPolicy::Builtin(selector) = &host.policy else {
+            unreachable!()
+        };
         assert_eq!(host.required_worker_inputs(), WorkerInputs::LOAD);
         assert!(host.load_state.is_some());
         let selection = host
             .load_state
             .as_ref()
             .unwrap()
-            .select_and_reserve(&host.inner, Some(1))
+            .select_and_reserve(&host.inner, selector, Some(1))
             .unwrap();
         assert_eq!(selection.worker_id, 1);
         assert_eq!(selection.load, 1);
@@ -1205,9 +1166,16 @@ mod tests {
         client.override_discovered_instances(vec![1, 2]);
         client.override_instance_avail(vec![1, 2]);
         let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner).unwrap();
+        let RoutingPolicy::Builtin(selector) = &host.policy else {
+            unreachable!()
+        };
         let load_state = host.load_state.as_ref().unwrap();
-        let first = load_state.select_and_reserve(&host.inner, Some(1)).unwrap();
-        let second = load_state.select_and_reserve(&host.inner, None).unwrap();
+        let first = load_state
+            .select_and_reserve(&host.inner, selector, Some(1))
+            .unwrap();
+        let second = load_state
+            .select_and_reserve(&host.inner, selector, None)
+            .unwrap();
 
         assert_eq!(first.worker_id, 1);
         assert_eq!(second.worker_id, 2);

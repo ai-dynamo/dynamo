@@ -14,22 +14,6 @@ use dashmap::{DashMap, mapref::entry::Entry};
 use super::{CandidateView, RouteContext, RouteDecision, RoutePicker, RoutePolicy};
 use crate::{component::Endpoint, traits::DistributedRuntimeProvider};
 
-/// Load-aware policies backed by request occupancy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OccupancyPolicy {
-    PowerOfTwoChoices,
-    LeastLoaded,
-}
-
-impl OccupancyPolicy {
-    fn route_policy(self) -> RoutePolicy {
-        match self {
-            Self::PowerOfTwoChoices => RoutePolicy::PowerOfTwoChoices,
-            Self::LeastLoaded => RoutePolicy::LeastLoaded,
-        }
-    }
-}
-
 /// The result of an atomic load-aware selection and reservation.
 pub struct OccupancySelection {
     worker_id: u64,
@@ -122,22 +106,18 @@ impl RoutingOccupancyState {
         Some((decision, counter))
     }
 
-    /// Atomically select and reserve a worker for a load-aware policy.
-    pub fn select_and_reserve(
+    /// Atomically run host-owned selection against the live load view and reserve its result.
+    pub fn select_and_reserve_with<E>(
         self: &Arc<Self>,
-        policy: OccupancyPolicy,
         candidates: &[u64],
-    ) -> Option<OccupancySelection> {
+        select: impl FnOnce(&dyn Fn(u64) -> u64) -> Result<u64, E>,
+    ) -> Result<OccupancySelection, E> {
         let _admission = self.admission_lock.lock();
-        let decision = RoutePicker::new(policy.route_policy()).select(
-            CandidateView::Workers(candidates),
-            RouteContext::default(),
-            |id| self.load(id),
-        )?;
-        let worker_id = decision.target.worker_id;
+        let worker_id = select(&|worker_id| self.load(worker_id))?;
+        debug_assert!(candidates.contains(&worker_id));
         let counter = self.increment_locked(worker_id);
         let load = counter.load(Ordering::Relaxed);
-        Some(OccupancySelection {
+        Ok(OccupancySelection {
             worker_id,
             candidate_count: candidates.len(),
             load,
@@ -149,17 +129,6 @@ impl RoutingOccupancyState {
     pub fn reserve(self: &Arc<Self>, worker_id: u64) -> OccupancyReservation {
         let counter = self.increment(worker_id);
         OccupancyReservation::from_counter(Arc::clone(self), worker_id, counter)
-    }
-
-    /// Peek a load-aware selection without admitting work.
-    pub fn peek_policy(&self, policy: OccupancyPolicy, candidates: &[u64]) -> Option<u64> {
-        RoutePicker::new(policy.route_policy())
-            .peek(
-                CandidateView::Workers(candidates),
-                RouteContext::default(),
-                |id| self.load(id),
-            )
-            .map(|decision| decision.target.worker_id)
     }
 
     fn decrement_locked(&self, worker_id: u64, counter: &Arc<AtomicU64>) {
@@ -346,7 +315,14 @@ mod tests {
                 let state = Arc::clone(&state);
                 std::thread::spawn(move || {
                     state
-                        .select_and_reserve(OccupancyPolicy::LeastLoaded, &[1, 2, 3])
+                        .select_and_reserve_with(&[1, 2, 3], |load| {
+                            Ok::<_, std::convert::Infallible>(
+                                [1, 2, 3]
+                                    .into_iter()
+                                    .min_by_key(|worker_id| load(*worker_id))
+                                    .unwrap(),
+                            )
+                        })
                         .unwrap()
                         .into_reservation()
                 })

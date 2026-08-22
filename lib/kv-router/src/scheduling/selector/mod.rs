@@ -40,21 +40,79 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
 
     fn select_worker(
         &self,
-        workers: &HashMap<WorkerId, C>,
-        request: &SchedulingRequest,
-        eligibility: RoutingEligibility<'_>,
-        block_size: u32,
+        input: WorkerSelectionInput<'_, C>,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
+}
 
-    /// Select from a cache-free host's ordered worker-ID snapshot.
-    ///
-    /// Selectors that implement this path must require [`WorkerInputs::NONE`].
-    /// The default keeps existing configured-worker selectors source-compatible.
-    fn select_worker_from_ids(
-        &self,
-        _worker_ids: &[WorkerId],
-    ) -> Result<WorkerSelectionResult, KvSchedulerError> {
-        Err(WorkerSelectionPolicyError::failed("selector requires configured worker inputs").into())
+/// Host-owned inputs for one worker-selection decision.
+///
+/// KV schedulers supply configured workers and request state. Cache-free routing
+/// hosts supply their ordered routable IDs and, when requested, a lazy load view.
+#[derive(Clone, Copy)]
+pub enum WorkerSelectionInput<'a, C: WorkerConfigLike> {
+    Configured {
+        workers: &'a HashMap<WorkerId, C>,
+        request: &'a SchedulingRequest,
+        eligibility: RoutingEligibility<'a>,
+        block_size: u32,
+    },
+    Hosted {
+        worker_ids: &'a [WorkerId],
+        load: Option<&'a dyn Fn(WorkerId) -> u64>,
+    },
+}
+
+pub type ConfiguredSelectionInputs<'a, C> = (
+    &'a HashMap<WorkerId, C>,
+    &'a SchedulingRequest,
+    RoutingEligibility<'a>,
+    u32,
+);
+
+pub type HostedSelectionInputs<'a> = (&'a [WorkerId], Option<&'a dyn Fn(WorkerId) -> u64>);
+
+impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
+    pub fn configured(
+        workers: &'a HashMap<WorkerId, C>,
+        request: &'a SchedulingRequest,
+        eligibility: RoutingEligibility<'a>,
+        block_size: u32,
+    ) -> Self {
+        Self::Configured {
+            workers,
+            request,
+            eligibility,
+            block_size,
+        }
+    }
+
+    pub fn hosted(worker_ids: &'a [WorkerId], load: Option<&'a dyn Fn(WorkerId) -> u64>) -> Self {
+        Self::Hosted { worker_ids, load }
+    }
+
+    pub fn into_configured(self) -> Result<ConfiguredSelectionInputs<'a, C>, KvSchedulerError> {
+        match self {
+            Self::Configured {
+                workers,
+                request,
+                eligibility,
+                block_size,
+            } => Ok((workers, request, eligibility, block_size)),
+            Self::Hosted { .. } => Err(WorkerSelectionPolicyError::failed(
+                "selector requires configured worker inputs",
+            )
+            .into()),
+        }
+    }
+
+    pub fn into_hosted(self) -> Result<HostedSelectionInputs<'a>, KvSchedulerError> {
+        match self {
+            Self::Hosted { worker_ids, load } => Ok((worker_ids, load)),
+            Self::Configured { .. } => Err(WorkerSelectionPolicyError::failed(
+                "selector requires hosted worker inputs",
+            )
+            .into()),
+        }
     }
 }
 
@@ -66,14 +124,14 @@ struct LogitWeights {
     shared_cache_multiplier: f64,
 }
 
-struct WorkerSelectionInput<'a> {
+struct MaterializedSelectionInput<'a> {
     request: &'a SchedulingRequest,
     has_tier_overlap_blocks: bool,
     use_default_cache_fallbacks: bool,
     context: WorkerSelectionContext<'a>,
 }
 
-impl<'a> WorkerSelectionInput<'a> {
+impl<'a> MaterializedSelectionInput<'a> {
     fn new<C: WorkerConfigLike>(
         workers: &'a HashMap<WorkerId, C>,
         request: &'a SchedulingRequest,
@@ -361,7 +419,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
     };
     let mut input =
-        WorkerSelectionInput::new(workers, request, eligibility, block_size, weights, inputs);
+        MaterializedSelectionInput::new(workers, request, eligibility, block_size, weights, inputs);
     let selected = match state {
         WorkerSelectionPolicyStateRef::Default(picker) => {
             let scorer = DefaultWorkerScorer {
