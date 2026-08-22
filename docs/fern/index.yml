@@ -190,6 +190,8 @@ navigation:
         contents:
           - page: Overview
             path: pages/kubernetes/kv-cache-offloading/overview.mdx
+          - page: Deploy LMCache MP
+            path: pages/kubernetes/kv-cache-offloading/lmcache.mdx
 
       - section: Fault Tolerance
         icon: shield-halved
