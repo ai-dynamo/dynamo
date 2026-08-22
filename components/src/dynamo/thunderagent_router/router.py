@@ -22,6 +22,7 @@ from dynamo.thunderagent_router.program_state import (
     ProgramLifecycle,
     ProgramStatus,
     ProgramTable,
+    RequestSnapshot,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,7 @@ class ThunderAgentScheduler:
         self._stat_resumes = 0
         self._stat_marked_for_pause = 0
         self._stat_worker_assignments = 0
+        self._stat_admissions_cancelled = 0
 
     def start(self) -> None:
         if self._scheduler_task is not None:
@@ -101,56 +103,113 @@ class ThunderAgentScheduler:
     ) -> PauseDecision:
         wait_started = time.monotonic()
         async with self._lock:
+            snapshot = self._table.snapshot_request(program_id)
             wait_event, was_paused = self._admit_locked(
                 program_id, estimated_prompt_tokens
             )
+            # No await can replace this program before its identity is captured.
+            admitted = self._table.programs.get(program_id)
+            admitted_epoch = admitted.admission_epoch if admitted is not None else None
 
-        if wait_event is not None:
+        try:
+            if wait_event is not None:
+                try:
+                    await asyncio.wait_for(
+                        wait_event.wait(), timeout=self._cfg.resume_timeout_seconds
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Forced resume for %s after %.1fs",
+                        program_id,
+                        self._cfg.resume_timeout_seconds,
+                    )
+                    async with self._lock:
+                        program = self._table.programs.get(program_id)
+                        if (
+                            program is not None
+                            and program.lifecycle == ProgramLifecycle.PAUSED
+                        ):
+                            worker_id = self._least_loaded_worker_locked(
+                                self._capacity.snapshot()
+                            )
+                            self._resume_program(program, worker_id)
+                            self._stat_forced_resumes += 1
+
+            waited = time.monotonic() - wait_started
+
+            async with self._lock:
+                program = self._table.programs.get(program_id)
+                if program is None:
+                    return PauseDecision(program_id=program_id, waited_seconds=waited)
+
+                self._stat_requests_admitted += 1
+                if was_paused:
+                    self._stat_requests_paused += 1
+
+                priority_jump = self._cfg.resume_priority_boost if was_paused else 0.0
+                soft_demoted = program.soft_demoted_until > time.monotonic()
+                if soft_demoted:
+                    priority_jump += self._cfg.soft_demote_priority_jump
+
+                return PauseDecision(
+                    program_id=program_id,
+                    priority_jump=priority_jump,
+                    waited_seconds=waited,
+                    was_paused=was_paused,
+                    was_soft_demoted=soft_demoted,
+                    assigned_worker_hint=program.assigned_worker_id,
+                )
+        except asyncio.CancelledError:
+            # Admission mutates shared state before the first cancellable wait.
+            await self._rollback_admission_shielded(
+                program_id, snapshot, admitted, admitted_epoch
+            )
+            raise
+
+    async def _rollback_admission_shielded(
+        self,
+        program_id: str,
+        snapshot: Optional[RequestSnapshot],
+        admitted: Optional[Program],
+        admitted_epoch: Optional[int],
+    ) -> None:
+        """Finish rollback even if request cancellation is delivered again."""
+        rollback = asyncio.ensure_future(
+            self._rollback_admission(program_id, snapshot, admitted, admitted_epoch)
+        )
+        while not rollback.done():
             try:
-                await asyncio.wait_for(
-                    wait_event.wait(), timeout=self._cfg.resume_timeout_seconds
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Forced resume for %s after %.1fs",
-                    program_id,
-                    self._cfg.resume_timeout_seconds,
-                )
-                async with self._lock:
-                    program = self._table.programs.get(program_id)
-                    if (
-                        program is not None
-                        and program.lifecycle == ProgramLifecycle.PAUSED
-                    ):
-                        worker_id = self._least_loaded_worker_locked(
-                            self._capacity.snapshot()
-                        )
-                        self._resume_program(program, worker_id)
-                        self._stat_forced_resumes += 1
+                await asyncio.shield(rollback)
+            except asyncio.CancelledError:
+                if rollback.cancelled():
+                    break
+        if not rollback.cancelled():
+            rollback.result()
 
-        waited = time.monotonic() - wait_started
-
+    async def _rollback_admission(
+        self,
+        program_id: str,
+        snapshot: Optional[RequestSnapshot],
+        admitted: Optional[Program],
+        admitted_epoch: Optional[int],
+    ) -> None:
+        if admitted is None:
+            return
         async with self._lock:
-            program = self._table.programs.get(program_id)
-            if program is None:
-                return PauseDecision(program_id=program_id, waited_seconds=waited)
-
-            self._stat_requests_admitted += 1
-            if was_paused:
-                self._stat_requests_paused += 1
-
-            priority_jump = self._cfg.resume_priority_boost if was_paused else 0.0
-            soft_demoted = program.soft_demoted_until > time.monotonic()
-            if soft_demoted:
-                priority_jump += self._cfg.soft_demote_priority_jump
-
-            return PauseDecision(
-                program_id=program_id,
-                priority_jump=priority_jump,
-                waited_seconds=waited,
-                was_paused=was_paused,
-                was_soft_demoted=soft_demoted,
-                assigned_worker_hint=program.assigned_worker_id,
+            if self._table.programs.get(program_id) is not admitted:
+                return
+            if admitted.admission_epoch != admitted_epoch:
+                # A later admission owns the shared Program state.
+                return
+            self._table.rollback_request(program_id, snapshot)
+            self._stat_admissions_cancelled += 1
+            logger.info(
+                "thunderagent.program admission_cancelled program=%s "
+                "retained=%s active=%d paused=%d",
+                program_id,
+                snapshot is not None,
+                len(self._table.programs),
+                len(self._table.paused),
             )
 
     def _admit_locked(
@@ -687,6 +746,7 @@ class ThunderAgentScheduler:
                     "program_resumes_total": self._stat_resumes,
                     "programs_marked_for_pause_total": self._stat_marked_for_pause,
                     "forced_resumes_total": self._stat_forced_resumes,
+                    "admissions_cancelled_total": self._stat_admissions_cancelled,
                     "worker_assignments_total": self._stat_worker_assignments,
                 },
                 "gauges": {
