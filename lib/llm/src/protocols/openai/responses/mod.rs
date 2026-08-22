@@ -860,28 +860,31 @@ fn custom_tool_description(tool: &CustomToolParam) -> String {
 }
 
 /// Convert Responses API ToolChoiceParam to ChatCompletionToolChoiceOption.
-fn convert_tool_choice(tc: &ToolChoiceParam) -> ChatCompletionToolChoiceOption {
+fn convert_tool_choice(
+    tc: &ToolChoiceParam,
+    tools: Option<&[ChatCompletionTool]>,
+) -> ChatCompletionToolChoiceOption {
+    fn named(name: String) -> ChatCompletionToolChoiceOption {
+        ChatCompletionToolChoiceOption::Named(ChatCompletionNamedToolChoice {
+            r#type: ChatCompletionToolType::Function,
+            function: FunctionName { name },
+        })
+    }
+
     match tc {
         ToolChoiceParam::Mode(mode) => match mode {
             ToolChoiceOptions::None => ChatCompletionToolChoiceOption::None,
             ToolChoiceOptions::Auto => ChatCompletionToolChoiceOption::Auto,
             ToolChoiceOptions::Required => ChatCompletionToolChoiceOption::Required,
         },
-        ToolChoiceParam::Function(f) => {
-            ChatCompletionToolChoiceOption::Named(ChatCompletionNamedToolChoice {
-                r#type: ChatCompletionToolType::Function,
-                function: FunctionName {
-                    name: f.name.clone(),
-                },
-            })
-        }
-        ToolChoiceParam::Custom(c) => {
-            ChatCompletionToolChoiceOption::Named(ChatCompletionNamedToolChoice {
-                r#type: ChatCompletionToolType::Function,
-                function: FunctionName {
-                    name: c.name.clone(),
-                },
-            })
+        ToolChoiceParam::Function(f) => named(f.name.clone()),
+        ToolChoiceParam::Custom(c) => named(c.name.clone()),
+        ToolChoiceParam::ApplyPatch
+            if tools.is_some_and(|tools| {
+                tools.iter().any(|tool| tool.function.name == "apply_patch")
+            }) =>
+        {
+            named("apply_patch".to_string())
         }
         ToolChoiceParam::Hosted(_) => {
             // Hosted tools are not forwarded to chat completions
@@ -1003,7 +1006,11 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             .filter(|t: &Vec<_>| !t.is_empty());
 
         // Convert tool_choice if present
-        let tool_choice = resp.inner.tool_choice.as_ref().map(convert_tool_choice);
+        let tool_choice = resp
+            .inner
+            .tool_choice
+            .as_ref()
+            .map(|tc| convert_tool_choice(tc, tools.as_deref()));
 
         // Determine stream setting: respect caller's preference, default to true for aggregation
         let stream = resp.inner.stream.or(Some(true));
@@ -3007,6 +3014,26 @@ mod tests {
             chat_req.inner.tool_choice,
             Some(ChatCompletionToolChoiceOption::Auto)
         ));
+    }
+
+    #[test]
+    fn test_native_apply_patch_tool_choice_targets_forwarded_tool() {
+        let mut req = make_response_with_input("patch the file");
+        req.inner.tools = Some(
+            serde_json::from_value(serde_json::json!([{
+                "type": "custom",
+                "name": "apply_patch",
+                "format": {"type": "text"}
+            }]))
+            .unwrap(),
+        );
+        req.inner.tool_choice = Some(ToolChoiceParam::ApplyPatch);
+
+        let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
+        let Some(ChatCompletionToolChoiceOption::Named(choice)) = chat_req.inner.tool_choice else {
+            panic!("expected named apply_patch tool choice");
+        };
+        assert_eq!(choice.function.name, "apply_patch");
     }
 
     #[test]

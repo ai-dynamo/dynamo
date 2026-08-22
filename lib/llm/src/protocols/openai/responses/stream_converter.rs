@@ -1448,6 +1448,17 @@ mod tests {
         events.iter().map(event_type).collect()
     }
 
+    fn event_json(event: &Result<Event, anyhow::Error>) -> serde_json::Value {
+        let debug = format!("{:?}", event.as_ref().unwrap());
+        let start = debug.find("data: ").expect("event should contain data") + 6;
+        let rest = &debug[start..];
+        let end = rest
+            .rfind("\\n")
+            .expect("event data should be line delimited");
+        let data: String = serde_json::from_str(&format!("\"{}\"", &rest[..end])).unwrap();
+        serde_json::from_str(&data).unwrap()
+    }
+
     fn legacy_event_json(
         event: &ResponseStreamEvent,
         params: &ResponseParams,
@@ -2246,21 +2257,35 @@ mod tests {
         let mut conv = ResponseStreamConverter::new("test-model".into(), params);
         let _ = conv.emit_start_events();
 
-        let chunk_types = event_types(&conv.process_chunk(&tool_call_chunk(
+        let split_at = args.len() / 2;
+        let first_chunk_events = conv.process_chunk(&tool_call_chunk(
             0,
             Some("call_patch"),
             Some("apply_patch"),
-            Some(&args),
-        )));
-        assert!(chunk_types.contains(&"response.output_item.added".to_string()));
-        assert!(!chunk_types.contains(&"response.function_call_arguments.delta".to_string()));
-        assert!(chunk_types.contains(&"response.custom_tool_call_input.delta".to_string()));
-        assert!(!chunk_types.contains(&"response.custom_tool_call_input.done".to_string()));
+            Some(&args[..split_at]),
+        ));
+        assert_eq!(
+            event_types(&first_chunk_events),
+            vec!["response.output_item.added".to_string()]
+        );
 
-        let finish_types = event_types(&conv.process_chunk(&finish_chunk(FinishReason::ToolCalls)));
-        assert!(finish_types.contains(&"response.custom_tool_call_input.done".to_string()));
-        assert!(finish_types.contains(&"response.output_item.done".to_string()));
-        assert!(!finish_types.contains(&"response.function_call_arguments.done".to_string()));
+        let second_chunk_events =
+            conv.process_chunk(&tool_call_chunk(0, None, None, Some(&args[split_at..])));
+        assert_eq!(
+            event_types(&second_chunk_events),
+            vec!["response.custom_tool_call_input.delta".to_string()]
+        );
+        assert_eq!(event_json(&second_chunk_events[0])["delta"], patch);
+
+        let finish_events = conv.process_chunk(&finish_chunk(FinishReason::ToolCalls));
+        assert_eq!(
+            event_types(&finish_events),
+            vec![
+                "response.custom_tool_call_input.done".to_string(),
+                "response.output_item.done".to_string()
+            ]
+        );
+        assert_eq!(event_json(&finish_events[0])["input"], patch);
 
         let output = conv.completed_output();
         let OutputItem::CustomToolCall(call) = &output[0] else {
