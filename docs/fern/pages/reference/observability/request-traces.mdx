@@ -133,6 +133,18 @@ A payload row stores the client request under `payload.request`, the completed r
 }
 ```
 
+`payload.endpoint` identifies the API the client called: `openai.chat_completion` for
+`/v1/chat/completions` and `openai.response` for `/v1/responses`. Other routes that reach the
+chat-completions engine, including `/v1/messages`, currently report `openai.chat_completion`. A
+`/v1/responses` record stores the translated chat-completions form of the request under
+`payload.request`, not the original Responses body.
+
+The route label is best-effort. It travels from the HTTP handler to the preprocessor through the
+per-request context, which is not serialized across a worker boundary, so when preprocessing runs
+in a remote worker rather than in the frontend process the label is lost and a `/v1/responses`
+record reports `openai.chat_completion`. This is the same limitation as the HTTP request-header
+capture above, which shares that transport.
+
 `input_sequence_hashes` are Dynamo's sequence-aware rolling hashes. DynoSim maps them to compact
 internal IDs while loading the original trace; it does not create an intermediate Mooncake file.
 

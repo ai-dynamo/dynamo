@@ -14,6 +14,15 @@ use crate::protocols::openai::chat_completions::{
 /// Context key for the allowlisted headers captured at the HTTP layer.
 pub const HTTP_HEADERS_CONTEXT_KEY: &str = "request_trace.http.request.headers";
 
+/// Request-context key for the client-facing API route.
+pub const ENDPOINT_LABEL_CONTEXT_KEY: &str = "request_trace.endpoint";
+
+/// Default endpoint label for requests without a route marker.
+pub const CHAT_COMPLETION_ENDPOINT_LABEL: &str = "openai.chat_completion";
+
+/// Endpoint label for requests received through `/v1/responses`.
+pub const RESPONSES_ENDPOINT_LABEL: &str = "openai.response";
+
 /// True when payload records are being captured and a header allowlist is set.
 pub(crate) fn http_header_capture_active() -> bool {
     if !super::config::capture_enabled() {
@@ -58,6 +67,7 @@ fn capture_http_headers_with_list(
 pub struct RequestPayloadHandle {
     requested_streaming: bool,
     request_id: String,
+    endpoint: String,
     model: String,
     event_time: SystemTime,
     request: Arc<NvCreateChatCompletionRequest>,
@@ -81,7 +91,7 @@ impl RequestPayloadHandle {
         super::record::emit_request_payload(
             super::RequestTracePayload {
                 request_id: self.request_id,
-                endpoint: "openai.chat_completion".to_string(),
+                endpoint: self.endpoint,
                 model: self.model,
                 request: Some(self.request),
                 response,
@@ -94,9 +104,21 @@ impl RequestPayloadHandle {
     }
 }
 
+/// Creates a payload handle using the chat-completions endpoint label.
+/// Its signature is preserved for external callers.
 pub fn create_handle(
     req: &NvCreateChatCompletionRequest,
     request_id: &str,
+    http_request_headers: Option<Arc<BTreeMap<String, String>>>,
+) -> Option<RequestPayloadHandle> {
+    create_handle_with_endpoint(req, request_id, None, http_request_headers)
+}
+
+/// Creates a payload handle with an optional internal route marker.
+pub(crate) fn create_handle_with_endpoint(
+    req: &NvCreateChatCompletionRequest,
+    request_id: &str,
+    endpoint: Option<&str>,
     http_request_headers: Option<Arc<BTreeMap<String, String>>>,
 ) -> Option<RequestPayloadHandle> {
     let policy = super::policy();
@@ -106,6 +128,7 @@ pub fn create_handle(
     create_handle_with_config(
         req,
         request_id,
+        endpoint,
         super::config::capture_enabled(),
         policy.emit_request_payload_records(),
         http_request_headers,
@@ -121,6 +144,7 @@ fn unix_time_ms(time: SystemTime) -> u64 {
 fn create_handle_with_config(
     req: &NvCreateChatCompletionRequest,
     request_id: &str,
+    endpoint: Option<&str>,
     enabled: bool,
     emit_request_payload: bool,
     http_request_headers: Option<Arc<BTreeMap<String, String>>>,
@@ -134,6 +158,9 @@ fn create_handle_with_config(
     Some(RequestPayloadHandle {
         requested_streaming,
         request_id: request_id.to_string(),
+        endpoint: endpoint
+            .unwrap_or(CHAT_COMPLETION_ENDPOINT_LABEL)
+            .to_string(),
         model,
         // Snapshot the pristine inbound request (before the preprocessor
         // overrides stream/usage) and stamp arrival time on the producing
@@ -180,7 +207,7 @@ mod tests {
     #[test]
     fn request_payload_records_emit_even_when_store_is_false() {
         let request = create_test_request("test-model", false);
-        let handle = create_handle_with_config(&request, "test-id", true, true, None);
+        let handle = create_handle_with_config(&request, "test-id", None, true, true, None);
 
         assert!(
             handle.is_some(),
@@ -191,7 +218,7 @@ mod tests {
     #[test]
     fn request_payload_records_disabled_skips_store_true_payloads() {
         let request = create_test_request("test-model", true);
-        let handle = create_handle_with_config(&request, "test-id", true, false, None);
+        let handle = create_handle_with_config(&request, "test-id", None, true, false, None);
 
         assert!(
             handle.is_none(),
@@ -282,6 +309,7 @@ mod tests {
             Self {
                 requested_streaming: streaming,
                 request_id: request_id.to_string(),
+                endpoint: CHAT_COMPLETION_ENDPOINT_LABEL.to_string(),
                 model: model.to_string(),
                 event_time: SystemTime::now(),
                 request: Arc::new(create_test_request(model, true)),
@@ -349,5 +377,91 @@ mod tests {
         assert_eq!(second_payload.request_id, "payload-test-req-cancel");
         assert!(second_payload.request.is_some());
         assert!(second_payload.response.is_none());
+    }
+
+    async fn recv_payload_endpoint(
+        rx: &mut tokio::sync::broadcast::Receiver<crate::request_trace::RequestTraceRecord>,
+        request_id: &str,
+    ) -> String {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let record = rx.recv().await.expect("record receives ok");
+                if record.event_type != crate::request_trace::RequestTraceEventType::RequestPayload
+                {
+                    continue;
+                }
+                let Some(payload) = record.payload.as_ref() else {
+                    continue;
+                };
+                if payload.request_id == request_id {
+                    return payload.endpoint.clone();
+                }
+            }
+        })
+        .await
+        .expect("expected request payload record before timeout")
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn emit_labels_the_record_with_the_route_that_created_the_handle() {
+        crate::request_trace::init_bus_for_test(8);
+        let mut rx = crate::request_trace::subscribe();
+
+        let request = create_test_request("test-model", true);
+        create_handle_with_config(
+            &request,
+            "payload-endpoint-responses",
+            Some(RESPONSES_ENDPOINT_LABEL),
+            true,
+            true,
+            None,
+        )
+        .expect("responses handle")
+        .emit(None);
+
+        assert_eq!(
+            recv_payload_endpoint(&mut rx, "payload-endpoint-responses").await,
+            "openai.response",
+            "a record from the responses route must not claim to be a chat completion"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn emit_labels_an_unmarked_request_as_a_chat_completion() {
+        crate::request_trace::init_bus_for_test(8);
+        let mut rx = crate::request_trace::subscribe();
+
+        let request = create_test_request("test-model", true);
+        create_handle_with_config(&request, "payload-endpoint-default", None, true, true, None)
+            .expect("default handle")
+            .emit(None);
+
+        assert_eq!(
+            recv_payload_endpoint(&mut rx, "payload-endpoint-default").await,
+            "openai.chat_completion",
+            "an unmarked request must keep the chat-completion label"
+        );
+    }
+
+    #[test]
+    fn endpoint_marker_survives_the_responses_to_chat_context_map() {
+        // Context::map must preserve the route marker across request conversion.
+        use dynamo_runtime::pipeline::Context;
+
+        let mut request = Context::new("original-responses-request".to_string());
+        request.insert(
+            ENDPOINT_LABEL_CONTEXT_KEY,
+            RESPONSES_ENDPOINT_LABEL.to_string(),
+        );
+
+        let translated = request.map(|_req| create_test_request("test-model", true));
+
+        let label = translated
+            .get_optional::<String>(ENDPOINT_LABEL_CONTEXT_KEY)
+            .expect("registry lookup succeeds")
+            .expect("label survives the request type change");
+        assert_eq!(label.as_str(), RESPONSES_ENDPOINT_LABEL);
     }
 }

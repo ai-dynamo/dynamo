@@ -3423,6 +3423,10 @@ async fn responses(
     if response_params.max_output_tokens.is_none() {
         request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
     }
+    request.insert(
+        crate::request_trace::payload::ENDPOINT_LABEL_CONTEXT_KEY,
+        crate::request_trace::payload::RESPONSES_ENDPOINT_LABEL.to_string(),
+    );
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 

@@ -5134,9 +5134,14 @@ impl
         } else {
             None
         };
-        let payload_handle = crate::request_trace::payload::create_handle(
+        let payload_endpoint = context
+            .get_optional::<String>(crate::request_trace::payload::ENDPOINT_LABEL_CONTEXT_KEY)
+            .ok()
+            .flatten();
+        let payload_handle = crate::request_trace::payload::create_handle_with_endpoint(
             &request,
             &request_id,
+            payload_endpoint.as_ref().map(|label| label.as_str()),
             payload_http_headers,
         );
 
