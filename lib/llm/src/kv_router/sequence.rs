@@ -25,13 +25,15 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::{
     EventPublisher, EventSubscriber, EventTransportKind, TypedEventSubscriber,
 };
+use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 
 use super::metrics::{RouterWorkerStatusMetrics, WORKER_LOAD_METRICS};
 use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, KV_METRICS_SUBJECT};
@@ -109,10 +111,73 @@ fn active_sequence_event_channel(
     enabled.then(|| ActiveSequenceEventSender::channel(capacity, cancellation_token.child_token()))
 }
 
+struct WorkerLoadEventSender {
+    pending: Arc<Mutex<HashMap<WorkerWithDpRank, ActiveLoad>>>,
+    updated: Arc<Notify>,
+}
+
+struct WorkerLoadEventReceiver {
+    pending: Arc<Mutex<HashMap<WorkerWithDpRank, ActiveLoad>>>,
+    updated: Arc<Notify>,
+}
+
+impl WorkerLoadEventSender {
+    fn channel() -> (Self, WorkerLoadEventReceiver) {
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let updated = Arc::new(Notify::new());
+        (
+            Self {
+                pending: Arc::clone(&pending),
+                updated: Arc::clone(&updated),
+            },
+            WorkerLoadEventReceiver { pending, updated },
+        )
+    }
+
+    fn enqueue(&self, load: ActiveLoad) {
+        self.enqueue_batch(std::iter::once(load));
+    }
+
+    fn enqueue_batch(&self, loads: impl IntoIterator<Item = ActiveLoad>) {
+        let mut pending = self.pending.lock();
+        let was_empty = pending.is_empty();
+        let mut inserted = false;
+        for load in loads {
+            let worker = WorkerWithDpRank::new(load.worker_id, load.dp_rank);
+            pending.insert(worker, load);
+            inserted = true;
+        }
+        let should_notify = was_empty && inserted;
+        drop(pending);
+
+        if should_notify {
+            self.updated.notify_one();
+        }
+    }
+}
+
+impl WorkerLoadEventReceiver {
+    async fn recv(&self) -> Vec<ActiveLoad> {
+        loop {
+            self.updated.notified().await;
+            let loads = self
+                .pending
+                .lock()
+                .drain()
+                .map(|(_, load)| load)
+                .collect::<Vec<_>>();
+            if !loads.is_empty() {
+                return loads;
+            }
+        }
+    }
+}
+
 /// Concrete [`SequencePublisher`] backed by the runtime event plane and Prometheus gauges.
 pub struct RuntimeSequencePublisher {
     event_sender: Option<ActiveSequenceEventSender>,
-    metrics_publisher: Arc<EventPublisher>,
+    load_sender: WorkerLoadEventSender,
+    _load_publisher_task: AbortOnDropHandle<()>,
     worker_status_metrics: Arc<RouterWorkerStatusMetrics>,
 }
 
@@ -125,31 +190,11 @@ impl SequencePublisher for RuntimeSequencePublisher {
     }
 
     fn publish_load(&self, load: ActiveLoad) {
-        let publisher = self.metrics_publisher.clone();
-        tokio::spawn(async move {
-            if let Err(e) = publisher.publish(&load).await {
-                tracing::trace!(
-                    "Failed to publish ActiveLoad to NATS for worker (id={}, dp_rank={}): {e:?}",
-                    load.worker_id,
-                    load.dp_rank
-                );
-            }
-        });
+        self.load_sender.enqueue(load);
     }
 
     fn publish_load_batch(&self, loads: Vec<ActiveLoad>) {
-        let publisher = self.metrics_publisher.clone();
-        tokio::spawn(async move {
-            for load in loads {
-                if let Err(e) = publisher.publish(&load).await {
-                    tracing::trace!(
-                        "Failed to publish ActiveLoad to NATS for worker (id={}, dp_rank={}): {e:?}",
-                        load.worker_id,
-                        load.dp_rank
-                    );
-                }
-            }
-        });
+        self.load_sender.enqueue_batch(loads);
     }
 
     fn observe_load(
@@ -218,6 +263,48 @@ async fn run_replica_singleton_publisher<P: SingletonEventPublisher>(
                 error = %error,
                 "Failed to publish active-sequence replica event"
             );
+        }
+    }
+}
+
+trait LoadEventPublisher: Send + Sync {
+    fn publish_load_event(
+        &self,
+        load: &ActiveLoad,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send;
+}
+
+impl LoadEventPublisher for EventPublisher {
+    async fn publish_load_event(&self, load: &ActiveLoad) -> anyhow::Result<()> {
+        self.publish(load).await
+    }
+}
+
+async fn run_worker_load_publisher<P: LoadEventPublisher>(
+    publisher: P,
+    load_rx: WorkerLoadEventReceiver,
+    cancellation_token: CancellationToken,
+) {
+    'publish: loop {
+        let loads = tokio::select! {
+            biased;
+            _ = cancellation_token.cancelled() => break,
+            loads = load_rx.recv() => loads,
+        };
+        for load in loads {
+            let publish_result = tokio::select! {
+                biased;
+                _ = cancellation_token.cancelled() => break 'publish,
+                result = publisher.publish_load_event(&load) => result,
+            };
+            if let Err(error) = publish_result {
+                tracing::trace!(
+                    worker_id = load.worker_id,
+                    dp_rank = load.dp_rank,
+                    error = %error,
+                    "Failed to publish ActiveLoad"
+                );
+            }
         }
     }
 }
@@ -424,13 +511,19 @@ pub async fn create_multi_worker_sequences(
     } else {
         None
     };
-    let metrics_publisher =
-        Arc::new(EventPublisher::for_endpoint(&endpoint, KV_METRICS_SUBJECT).await?);
+    let (load_sender, load_rx) = WorkerLoadEventSender::channel();
+    let metrics_publisher = EventPublisher::for_endpoint(&endpoint, KV_METRICS_SUBJECT).await?;
+    let load_publisher_task = AbortOnDropHandle::new(tokio::spawn(run_worker_load_publisher(
+        metrics_publisher,
+        load_rx,
+        cancellation_token.child_token(),
+    )));
     let worker_status_metrics = RouterWorkerStatusMetrics::from_component(endpoint.component());
 
     let publisher = RuntimeSequencePublisher {
         event_sender,
-        metrics_publisher,
+        load_sender,
+        _load_publisher_task: load_publisher_task,
         worker_status_metrics,
     };
 
@@ -689,6 +782,130 @@ mod tests {
             .await
             .expect("singleton publisher should stop after cancellation")
             .expect("singleton publisher task should not panic");
+    }
+
+    fn active_load(worker_id: u64, active_decode_blocks: u64, blocking: bool) -> ActiveLoad {
+        ActiveLoad {
+            worker_id,
+            dp_rank: 0,
+            active_decode_blocks: Some(active_decode_blocks),
+            active_prefill_tokens: None,
+            kv_used_blocks: blocking.then_some(1),
+        }
+    }
+
+    struct BlockingLoadPublisher {
+        attempted_tx: mpsc::UnboundedSender<(u64, u64)>,
+        release: Arc<tokio::sync::Notify>,
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        max_active: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl LoadEventPublisher for BlockingLoadPublisher {
+        async fn publish_load_event(&self, load: &ActiveLoad) -> anyhow::Result<()> {
+            let active = self
+                .active
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            self.max_active
+                .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
+            self.attempted_tx
+                .send((
+                    load.worker_id,
+                    load.active_decode_blocks
+                        .expect("test loads should include decode blocks"),
+                ))
+                .unwrap();
+
+            if load.kv_used_blocks == Some(1) {
+                self.release.notified().await;
+            }
+
+            self.active
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_load_sender_retains_latest_snapshot_per_worker() {
+        let (sender, load_rx) = WorkerLoadEventSender::channel();
+
+        sender.enqueue_batch(vec![
+            active_load(1, 10, false),
+            active_load(2, 20, false),
+            active_load(1, 0, false),
+        ]);
+
+        let mut loads = load_rx.recv().await;
+        loads.sort_by_key(|load| load.worker_id);
+        assert_eq!(loads, [active_load(1, 0, false), active_load(2, 20, false)]);
+    }
+
+    #[tokio::test]
+    async fn worker_load_publisher_coalesces_pending_work_and_stops_on_cancellation() {
+        let (attempted_tx, mut attempted_rx) = mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let max_active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let publisher = BlockingLoadPublisher {
+            attempted_tx,
+            release: Arc::clone(&release),
+            active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            max_active: Arc::clone(&max_active),
+        };
+
+        let cancellation_token = CancellationToken::new();
+        let (sender, load_rx) = WorkerLoadEventSender::channel();
+        let task = tokio::spawn(run_worker_load_publisher(
+            publisher,
+            load_rx,
+            cancellation_token.clone(),
+        ));
+
+        sender.enqueue(active_load(0, 0, true));
+        let first = tokio::time::timeout(std::time::Duration::from_secs(1), attempted_rx.recv())
+            .await
+            .expect("first load publish should start")
+            .expect("attempt channel should remain open");
+        assert_eq!(first, (0, 0));
+
+        sender.enqueue(active_load(1, 10, false));
+        sender.enqueue(active_load(1, 0, false));
+        sender.enqueue(active_load(2, 20, false));
+        sender.enqueue(active_load(2, 21, false));
+        assert!(
+            attempted_rx.try_recv().is_err(),
+            "pending loads must not be published while an earlier publish is pending"
+        );
+        assert_eq!(max_active.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        release.notify_one();
+        let mut coalesced = Vec::new();
+        for _ in 0..2 {
+            coalesced.push(
+                tokio::time::timeout(std::time::Duration::from_secs(1), attempted_rx.recv())
+                    .await
+                    .expect("latest worker loads should be attempted once released")
+                    .expect("attempt channel should remain open"),
+            );
+        }
+        coalesced.sort_unstable();
+        assert_eq!(coalesced, [(1, 0), (2, 21)]);
+        assert_eq!(max_active.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(attempted_rx.try_recv().is_err());
+
+        sender.enqueue(active_load(9, 90, true));
+        let blocked = tokio::time::timeout(std::time::Duration::from_secs(1), attempted_rx.recv())
+            .await
+            .expect("blocked load publish should start")
+            .expect("attempt channel should remain open");
+        assert_eq!(blocked, (9, 90));
+
+        cancellation_token.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("load publisher should stop after cancellation")
+            .expect("load publisher task should not panic");
     }
 
     #[tokio::test(start_paused = true)]
