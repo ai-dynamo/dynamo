@@ -586,6 +586,7 @@ pub fn make_inference_request_span<B>(req: &Request<B>) -> Span {
         x_request_id = trace_parent.x_request_id,
         request_id = %request_id,
         model = tracing::field::Empty,
+        "request.outcome" = tracing::field::Empty,
         input_tokens = tracing::field::Empty,
         output_tokens = tracing::field::Empty,
         image_count = tracing::field::Empty,
@@ -703,6 +704,7 @@ pub fn make_handle_payload_span(
         let span = tracing::info_span!(
             target: "request_span",
             "handle_payload",
+            otel.kind = "server",
             trace_id = trace_id.as_str(),
             parent_id = parent_id.as_str(),
             trace_flags = trace_parent.trace_flags,
@@ -723,6 +725,7 @@ pub fn make_handle_payload_span(
         tracing::info_span!(
             target: "request_span",
             "handle_payload",
+            otel.kind = "server",
             trace_flags = trace_parent.trace_flags,
             x_request_id = trace_parent.x_request_id,
             request_id = trace_parent.request_id,
@@ -760,6 +763,7 @@ pub fn make_handle_payload_span_from_tcp_headers(
         let span = tracing::info_span!(
             target: "request_span",
             "handle_payload",
+            otel.kind = "server",
             trace_id = trace_id.as_str(),
             parent_id = parent_id.as_str(),
             trace_flags = trace_flags,
@@ -780,6 +784,7 @@ pub fn make_handle_payload_span_from_tcp_headers(
         tracing::info_span!(
             target: "request_span",
             "handle_payload",
+            otel.kind = "server",
             trace_flags = trace_flags,
             x_request_id = x_request_id,
             request_id = request_id,

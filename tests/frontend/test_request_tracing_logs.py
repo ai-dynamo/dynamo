@@ -136,12 +136,17 @@ def assert_lifecycle_logs(req_logs, expected_status="success"):
 
 
 def assert_cancellation(req_logs):
-    """Assert error completion with cancelled error_type is logged."""
+    """Assert cancelled completion with cancelled error_type is logged.
+
+    Client cancellation is an expected outcome, not a server error, so the
+    completion line reports `status="cancelled"` at INFO. The Prometheus
+    contract still labels it `status="error", error_type="cancelled"`.
+    """
     completed = [
         e
         for e in req_logs
         if e.get("message") == "request completed"
-        and e.get("status") == "error"
+        and e.get("status") == "cancelled"
         and e.get("error_type") == "cancelled"
     ]
     msgs = [(e.get("message"), e.get("status"), e.get("error_type")) for e in req_logs]

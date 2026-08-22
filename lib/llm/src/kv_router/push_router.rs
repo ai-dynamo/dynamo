@@ -13,6 +13,9 @@ use dynamo_runtime::{
     pipeline::{
         AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
         ResponseStream, SingleIn, async_trait,
+        network::egress::route_span::{
+            get_route_trace_context, record_route_error, record_route_span_start, wrap_route_span,
+        },
     },
     protocols::annotated::Annotated,
 };
@@ -369,6 +372,7 @@ where
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let context_id = request.context().id().to_string();
         let request_context = request.context().clone();
+        let route_trace_context = get_route_trace_context(&request);
         let phase = request
             .tracker
             .as_ref()
@@ -411,22 +415,41 @@ where
                     .await
             }
         };
+        let route_span = tracing::info_span!(
+            target: "request_span",
+            "kv_router.route_request",
+            otel.kind = "client",
+            request_id = %context_id,
+            worker_id = tracing::field::Empty,
+            dp_rank = selection.worker.dp_rank,
+            overlap_blocks = selection.overlap_amount,
+            phase = ?phase,
+            "request.attempt" = tracing::field::Empty,
+            "request.outcome" = tracing::field::Empty,
+            "migration.is_retry" = tracing::field::Empty,
+            "migration.reason" = tracing::field::Empty,
+            "migration.from_worker_id" = tracing::field::Empty,
+            "migration.tokens_completed" = tracing::field::Empty,
+            "cancellation.signal" = tracing::field::Empty,
+            "error.type" = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+            otel.status_description = tracing::field::Empty,
+        );
+        record_route_span_start(
+            &route_span,
+            route_trace_context.as_deref(),
+            selection.worker.worker_id,
+        );
         let dispatch_result = cancel_on_stop(
             request_context.as_ref(),
-            dispatch.instrument(tracing::info_span!(
-                "kv_router.route_request",
-                request_id = %context_id,
-                worker_id = selection.worker.worker_id,
-                dp_rank = selection.worker.dp_rank,
-                overlap_blocks = selection.overlap_amount,
-                phase = ?phase,
-            )),
+            dispatch.instrument(route_span.clone()),
         )
         .await
         .and_then(|result| result);
         let response_stream = match dispatch_result {
             Ok(stream) => stream,
             Err(error) => {
+                record_route_error(&route_span, error.as_ref());
                 let typed_error = error
                     .chain()
                     .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned());
@@ -443,7 +466,10 @@ where
             stream_context.clone(),
             guard,
         ));
-        Ok(ResponseStream::new(wrapped_stream, stream_context))
+        Ok(wrap_route_span(
+            ResponseStream::new(wrapped_stream, stream_context),
+            route_span,
+        ))
     }
 
     fn warn_if_output_replay_annotation_ignored(
