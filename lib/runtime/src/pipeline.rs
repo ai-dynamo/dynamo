@@ -16,7 +16,8 @@ pub mod error;
 pub mod network;
 pub use crate::routing_policy::RouteTarget;
 pub use network::egress::addressed_router::{
-    AddressedPushRouter, AddressedRequest, StreamingDispatch,
+    AddressedPushRouter, AddressedRequest, StreamingDispatch, attach_first_response_guard,
+    propagate_first_response_guard,
 };
 pub use network::egress::push_router::{
     MultimodalCacheIndex, MultimodalCacheKeyExtractor, PushRouter, RouterMode, WorkerLoadMonitor,

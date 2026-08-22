@@ -16,6 +16,7 @@ from dynamo.vllm.multimodal_utils import prefill_worker_utils as mod
 from dynamo.vllm.multimodal_utils.protocol import MultiModalGroup, MultiModalInput
 
 pytestmark = [
+    pytest.mark.unit,
     pytest.mark.pre_merge,
     pytest.mark.vllm,
     pytest.mark.gpu_0,
@@ -110,6 +111,62 @@ class TestMultimodalEmbeddingLoader:
 
         mock_fetch.assert_awaited_once()
         assert torch.equal(mm_data["image"], tensor)
+
+    @pytest.mark.asyncio
+    async def test_decoded_item_cached_by_content_hash(self):
+        """A frontend-decoded item reuses the canonical content hash as its
+        cache key, so a second request skips the encode worker."""
+        cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
+        content_hash = "0123456789abcdef"
+        decoded_item = {"Decoded": {"shape": [4, 4, 3], "content_hash": content_hash}}
+        tensor = torch.randn(1, 10, dtype=DTYPE)
+        fake_group = MultiModalGroup(
+            multimodal_input=MultiModalInput(),
+            image_grid_thw=[[1, 2, 3]],
+            loaded_embedding=tensor,
+        )
+
+        with patch.object(
+            mod,
+            "_fetch_from_encode_workers",
+            new_callable=AsyncMock,
+            return_value=([fake_group], None),
+        ) as mock_fetch:
+            embedding_loader = mod.MultiModalEmbeddingLoader(AsyncMock(), None, cache)
+            mm_data = await embedding_loader.load_multimodal_embeddings(
+                [decoded_item],
+                "req-1",
+                model=MODEL,
+            )
+            mm_data_again = await embedding_loader.load_multimodal_embeddings(
+                [decoded_item],
+                "req-2",
+                model=MODEL,
+            )
+
+        mock_fetch.assert_awaited_once()
+        assert mock_fetch.call_args[0][1] == [decoded_item]
+        assert torch.equal(mm_data["image"], tensor)
+        assert torch.equal(mm_data_again["image"], tensor)
+        cached = cache.get(content_hash)
+        assert cached is not None
+        assert torch.equal(cached.tensor, tensor)
+
+    def test_parse_image_item_variants(self):
+        assert mod.parse_image_item("http://a.png") == ("http://a.png", None)
+        assert mod.parse_image_item({"Url": "http://a.png"}) == (
+            "http://a.png",
+            None,
+        )
+        metadata = {"shape": [4, 4, 3], "content_hash": "0123456789abcdef"}
+        assert mod.parse_image_item({"Decoded": metadata}) == (None, metadata)
+
+        with pytest.raises(ValueError, match="Unsupported image item"):
+            mod.parse_image_item({"Url": "http://a.png", "Decoded": metadata})
+        with pytest.raises(ValueError, match="Unsupported image item"):
+            mod.parse_image_item({"ignored": "value"})
+        with pytest.raises(ValueError, match="Unsupported image item"):
+            mod.parse_image_item(123)
 
     @pytest.mark.asyncio
     async def test_mixed_cache(self):
