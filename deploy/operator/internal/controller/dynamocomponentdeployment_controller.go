@@ -88,6 +88,11 @@ type DynamoComponentDeploymentReconciler struct {
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+// Listing nodes answers one question for the elastic-EP follower: does any node
+// advertise an NVLink partition (nvidia.com/gpu.clique)? Without it the renderer
+// cannot tell a cluster that can satisfy the follower placement from one where it
+// would leave the pod Pending forever.
+//+kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create;update;patch;delete
@@ -700,7 +705,67 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx
 	if err != nil {
 		return false, err
 	}
-	return modified, nil
+	// An elastic-EP leader additionally owns a headless "<component>-ray" Service
+	// that its follower joins as a Ray head. The Grove pathway emits the same
+	// Service from its stable-resources reconciler; this is the non-Grove twin.
+	modifiedRay, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
+		return r.generateElasticEPHeadlessService(ctx, opt)
+	})
+	if err != nil {
+		return false, err
+	}
+	return modified || modifiedRay, nil
+}
+
+// generateElasticEPHeadlessService returns the headless "<component>-ray" Service for a
+// single-pod elastic-EP leader, or a delete stub for anything else -- including the
+// follower, which joins the Service but never owns it. Staying total lets SyncResource
+// garbage-collect the Service once a component stops qualifying.
+func (r *DynamoComponentDeploymentReconciler) generateElasticEPHeadlessService(ctx context.Context, opt generateResourceOption) (*corev1.Service, bool, error) {
+	dcd := opt.dynamoComponentDeployment
+	componentName := dynamo.GetDCDComponentName(dcd)
+	// Named from the DCD's own resource name, never the bare component name: that name
+	// is unique per DGD and per worker generation, so this Service cannot collide with
+	// another DGD's "decode-ray" or with the other generation's during a rollout. The
+	// delete stub must use the same name or it would garbage-collect nothing.
+	deleteStub := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      dynamo.ElasticEPLeaderServiceNameForDCD(dcd),
+			Namespace: dcd.Namespace,
+		},
+	}
+	// The follower joins the leader's Ray head but never emits it.
+	if dcd.GetAnnotations()[commonconsts.KubeAnnotationElasticEPFollower] == commonconsts.KubeLabelValueTrue {
+		return deleteStub, true, nil
+	}
+	// Same gate as the Grove pathway: the selector matches every pod with the component
+	// labels, so this addresses one Ray head only while the component is one pod.
+	// replicas > 1 round-robins across independent clusters; numberOfNodes > 1 publishes
+	// workers as if they were the head.
+	if !dynamo.IsSinglePodElasticEPLeader(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
+		return deleteStub, true, nil
+	}
+	dynamoNamespace := dynamo.GetDCDDynamoNamespace(dcd)
+	if dynamoNamespace == "" {
+		return nil, false, fmt.Errorf("expected DynamoComponentDeployment %s to have a dynamoNamespace", dcd.Name)
+	}
+	componentType, err := r.getDCDWorkloadComponentType(ctx, dcd)
+	if err != nil {
+		return nil, false, err
+	}
+	annotations := dynamo.GetDCDKubeAnnotations(dcd)
+	svc := dynamo.GenerateElasticEPHeadlessService(dynamo.ComponentServiceParams{
+		ServiceName:     dcd.Name,
+		Namespace:       dcd.Namespace,
+		ComponentType:   componentType,
+		DynamoNamespace: dynamoNamespace,
+		ComponentName:   componentName,
+		Labels:          dynamo.GetDCDKubeLabels(dcd),
+		Annotations:     annotations,
+		IsK8sDiscovery:  commonController.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, annotations),
+		DCDSelector:     dcd.Name,
+	})
+	return svc, false, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteIngress(ctx context.Context, opt generateResourceOption) (bool, error) {
@@ -816,10 +881,19 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 		},
 	}
 
+	// A synthesized follower carries the leader's serve command but must launch as a
+	// Ray-join; every other single-pod Deployment is a RoleMain serve. The marker sits on
+	// the DCD's own metadata, so read it there -- GetDCDKubeAnnotations would return
+	// pod-template annotations instead.
+	role := dynamo.RoleMain
+	if opt.dynamoComponentDeployment.GetAnnotations()[commonconsts.KubeAnnotationElasticEPFollower] == commonconsts.KubeLabelValueTrue {
+		role = dynamo.RoleFollower
+	}
+
 	renderer := r.workloadRenderer()
 	containerGPUs := renderer.containerGPUCount(ctx, opt.dynamoComponentDeployment)
 	// nolint: gosimple
-	podTemplateSpec, err := renderer.generatePodTemplateSpec(ctx, opt.dynamoComponentDeployment, dynamo.RoleMain, containerGPUs)
+	podTemplateSpec, err := renderer.generatePodTemplateSpec(ctx, opt.dynamoComponentDeployment, role, containerGPUs)
 	if err != nil {
 		return
 	}

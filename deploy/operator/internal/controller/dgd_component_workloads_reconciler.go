@@ -91,6 +91,12 @@ func (r *componentWorkloadsReconciler) Reconcile(
 	}
 
 	for key, dcd := range dcds {
+		// Keyed by declared component name, so a synthesized elastic-EP follower finds
+		// nothing -- which is what it should find. Inheriting the leader's checkpoint
+		// would set Checkpoint.Enabled and a CheckpointRef on the follower, making it a
+		// CRIU restore target for an engine process it never runs (its command is a bare
+		// `ray start --block`), and would gate it on a waitForCheckpoint it has no use
+		// for. Unlike the GMS claim template, this one must NOT resolve to the leader.
 		if err := r.applyCheckpointStartupPolicy(dcd, checkpointInfos[key]); err != nil {
 			return ReconcileResult{}, fmt.Errorf("failed to apply checkpoint startup policy for %s: %w", key, err)
 		}

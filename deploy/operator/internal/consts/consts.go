@@ -58,6 +58,34 @@ const (
 	// when the namespace carries istio-injection=enabled.
 	KubeAnnotationIstioSidecarInject = "sidecar.istio.io/inject"
 
+	// KubeAnnotationElasticEPFollower marks a synthesized elastic-EP follower DCD, so
+	// the renderer launches it with the Ray-join command (RoleFollower) instead of the
+	// leader's serve command. Operator-set when it expands a leader; never user-set.
+	KubeAnnotationElasticEPFollower = "nvidia.com/elastic-ep-follower"
+
+	// KubeAnnotationElasticEPLeaderComponent carries the leader's component name on a
+	// synthesized follower. Infrastructure that is keyed by component name -- GMS DRA
+	// claim templates, checkpoint info -- is only created for components declared in the
+	// DGD, so resolving it under the follower's own invented "<leader>-flw" name finds
+	// nothing: the claim template never exists and the pod cannot schedule, and the
+	// checkpoint lookup silently returns nil. Those lookups read this instead.
+	// Operator-set; never user-set.
+	KubeAnnotationElasticEPLeaderComponent = "nvidia.com/elastic-ep-leader-component"
+
+	// KubeAnnotationElasticEPLeaderService carries the exact headless Service name the
+	// follower must join, stamped on the follower's pod template when it is synthesized.
+	// The follower reads this instead of recomputing the name from its own identity, so
+	// the emitter and the joiner cannot disagree -- and so the leader address can be
+	// scoped to one DGD and one worker generation without the follower having to
+	// reconstruct that scoping. Operator-set; never user-set.
+	KubeAnnotationElasticEPLeaderService = "nvidia.com/elastic-ep-leader-service"
+
+	// NodeLabelGPUClique is the NVLink-partition label the DRA driver stamps on GB200
+	// nodes. Nodes sharing a value share a multi-node NVLink fabric; nodes in different
+	// partitions have no NVLink route between them. Used as the topology key that pins an
+	// elastic-EP follower into the leader's partition.
+	NodeLabelGPUClique = "nvidia.com/gpu.clique"
+
 	KubeAnnotationDisableImagePullSecretDiscovery = "nvidia.com/disable-image-pull-secret-discovery"
 	KubeAnnotationDynamoDiscoveryBackend          = "nvidia.com/dynamo-discovery-backend"
 	KubeAnnotationDynamoKubeDiscoveryMode         = "nvidia.com/dynamo-kube-discovery-mode"
@@ -222,6 +250,9 @@ const (
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"
 	GroveRoleSuffixGMS    = "gms"
+	// GroveRoleSuffixFollower names the on-demand elastic-EP follower clique.
+	// Kept to three characters to preserve the combined Grove name budget.
+	GroveRoleSuffixFollower = "flw"
 
 	// MaxCombinedGroveResourceNameLength is the maximum allowed combined length for Grove
 	// resource names (PCS name + PCSG config name + PCLQ template name).

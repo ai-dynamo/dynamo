@@ -99,6 +99,49 @@ func TestComputeBetaDGDWorkersSpecHash_IgnoresNonWorkers(t *testing.T) {
 	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, withFrontend)), mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, withoutFrontend)))
 }
 
+// The synthesized elastic-EP follower must not reach the worker-spec hash. It is a
+// worker DCD by component type, so the plain IsWorkerComponent filter would have
+// hashed it -- and because it appears the moment an operator carrying this feature
+// rolls out, that would change the desired hash of every existing elastic-EP DGD and
+// roll a serving leader whose requested spec never changed.
+func TestComputeBetaDGDWorkersSpecHash_ExcludesSynthesizedElasticEPFollower(t *testing.T) {
+	dgd := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"decode": {ComponentType: commonconsts.ComponentTypeDecode, Replicas: ptr.To(int32(1))},
+	}))
+	dgd.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:    commonconsts.MainContainerName,
+				Command: []string{"python3"},
+				Args:    []string{"-m", "dynamo.vllm", "--enable-elastic-ep", "--data-parallel-backend", "ray"},
+			}},
+		},
+	}
+
+	t.Log("generate the DCDs the hash is computed from")
+	dcds, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+	if err != nil {
+		t.Fatalf("GenerateDynamoComponentsDeployments: %v", err)
+	}
+
+	t.Log("the follower is generated, and is a worker by component type")
+	follower := dcds["decode-"+commonconsts.GroveRoleSuffixFollower]
+	if follower == nil {
+		t.Fatalf("expected a synthesized follower DCD; got %d generated DCDs", len(dcds))
+	}
+	if !IsWorkerComponent(string(follower.Spec.ComponentType)) {
+		t.Fatal("follower is not a worker component, so this test no longer guards the hash")
+	}
+
+	t.Log("yet it is excluded from the hash, while the leader it derives from is not")
+	if participatesInWorkerSpecHash(follower) {
+		t.Error("the synthesized follower must not contribute to the worker-spec hash")
+	}
+	if leader := dcds["decode"]; leader == nil || !participatesInWorkerSpecHash(leader) {
+		t.Error("the elastic-EP leader must still contribute to the worker-spec hash")
+	}
+}
+
 func TestComputeBetaDGDWorkersSpecHash_IgnoresGeneratedDCDObjectIdentity(t *testing.T) {
 	dgd := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {

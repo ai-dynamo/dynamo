@@ -84,7 +84,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 		// A single-pod elastic-EP component still needs a Ray head, so that
 		// follower pods created later have a cluster to join. Only the leader
 		// arm applies here: a lone pod is expanded as RoleMain, never RoleWorker.
-		if injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer) {
+		if injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer, "") {
 			// Bind both addresses only when a Ray head was actually injected.
 			//
 			// Both resolve from status.podIP, which is the point: the Ray head
@@ -111,6 +111,37 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 				corev1.EnvVar{Name: commonconsts.PodIPEnvVar, ValueFrom: podIPRef()},
 				corev1.EnvVar{Name: commonconsts.VLLMDPMasterIPEnvVar, ValueFrom: podIPRef()},
 			)
+		}
+	} else if role == RoleFollower && IsElasticEPRayLaunch(container) {
+		// The leader's Service name is carried on the follower rather than rebuilt here.
+		// Its absence means synthesis and rendering have gone out of step, and guessing
+		// an address would produce a pod that polls a hostname nothing backs for three
+		// hours, so fail the reconcile instead.
+		leaderService := annotations[commonconsts.KubeAnnotationElasticEPLeaderService]
+		if leaderService == "" {
+			return fmt.Errorf(
+				"elastic-EP follower is missing the %s annotation carrying the leader Service name",
+				commonconsts.KubeAnnotationElasticEPLeaderService,
+			)
+		}
+
+		// The follower joins the leader's Ray cluster (injectElasticEPRayLaunchFlags's
+		// RoleFollower arm). It needs POD_IP for the --node-ip-address it interpolates,
+		// but not VLLM_DP_MASTER_IP: the follower is a plain Ray node, not the DP master.
+		if injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer, leaderService) {
+			container.Env = append(container.Env, corev1.EnvVar{
+				Name: commonconsts.PodIPEnvVar,
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"},
+				},
+			})
+			// Drop the worker probes: this pod runs `ray start --block`, not the Dynamo
+			// system server, so nothing listens on DynamoSystemPort. Liveness has
+			// FailureThreshold 1, so the kubelet would kill it on the first probe and
+			// restart it forever. Ray reports the raylet's health to the leader instead.
+			container.LivenessProbe = nil
+			container.ReadinessProbe = nil
+			container.StartupProbe = nil
 		}
 	}
 
@@ -328,7 +359,7 @@ func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName
 		// worker's health-gate delaying its Ray join until dynamo.vllm is fully ready,
 		// only the leader node is in the Ray cluster when create_dp_placement_groups runs,
 		// so vLLM naturally places all initial DP workers on the leader node.
-		injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer)
+		injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer, "")
 	} else if needsDataParallelMultinodeLaunch(expandedArgs, containerGPUs) {
 		injectDataParallelLaunchFlags(container, role, serviceName, multinodeDeployer, containerGPUs, numberOfNodes)
 	} else {
@@ -460,7 +491,9 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 // container untouched (see the empty-Command case below), so callers can gate
 // side effects such as the VLLM_DP_MASTER_IP injection on whether a Ray head was
 // actually set up.
-func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) bool {
+// leaderService is only read for RoleFollower: it is the already-resolved headless Ray
+// Service name the follower must join, carried from synthesis. Other roles pass "".
+func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, leaderService string) bool {
 	switch role {
 	// RoleMain is a component deployed as a single pod; it heads the Ray
 	// cluster exactly as a multi-node leader does.
@@ -546,6 +579,32 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 		container.Args = []string{fmt.Sprintf(
 			"%s && ray start --address=%s:%s --block",
 			healthGate, leaderHostname, VLLMPort,
+		)}
+	case RoleFollower:
+		// The follower is not in the leader's gang, so it reaches the leader through the
+		// headless elastic-EP Service rather than the framework's leader hostname. It
+		// never serves -- the leader spawns the real DP-rank worker on its GPU as a Ray
+		// actor -- so the serve command is dropped for a bare Ray join, with
+		// --node-ip-address pinned to the pod IP so the leader finds this rank's GPU.
+		// The /live gate matches the worker's: join only after the leader has placed its
+		// data-parallel group.
+		//
+		// leaderService is the address the synthesis stamped on this follower, resolved
+		// once by ElasticEPLeaderServiceNameForDCD. It is deliberately not recomputed
+		// here: the name is DGD- and generation-scoped and may be hash-truncated, so
+		// rebuilding it from the follower's own identity is what let the emitter and the
+		// joiner drift apart.
+		leaderHostname := leaderService
+		healthGate := fmt.Sprintf(
+			`i=0; until python3 -c "import urllib.request; urllib.request.urlopen('http://%s:%d/live', timeout=5)" `+
+				`2>/dev/null; do `+
+				`i=$((i+1)); [ "$i" -ge 720 ] && { echo "ERROR: leader /live did not become ready within 3h" >&2; exit 1; }; `+
+				`echo 'waiting for leader dynamo.vllm /live to return 200...'; sleep 15; done`,
+			leaderHostname, commonconsts.DynamoSystemPort,
+		)
+		container.Args = []string{fmt.Sprintf(
+			`%s && ray start --address=%s:%s --node-ip-address="$%s" --block`,
+			healthGate, leaderHostname, VLLMPort, commonconsts.PodIPEnvVar,
 		)}
 	}
 	container.Command = []string{"/bin/sh", "-c"}

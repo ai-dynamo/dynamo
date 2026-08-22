@@ -132,6 +132,7 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 		validateInferencePoolAvailability = false
 	)
 	allErrs := validateElasticEPRequiresCommand(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)
+	allErrs = append(allErrs, validateElasticEPSingleReplica(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)...)
 	allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 		&spec.DynamoComponentDeploymentSharedSpec,
 		fldPath,
