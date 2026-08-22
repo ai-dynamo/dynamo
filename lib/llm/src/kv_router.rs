@@ -73,7 +73,8 @@ pub use dynamo_kv_router::scheduling::{
 pub use encoder_router::EncoderRouter;
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
-pub use push_router::{BuiltinRoutingPolicy, DirectRoutingRouter, KvPushRouter, RoutingHost};
+pub(crate) use push_router::is_builtin_router_mode;
+pub use push_router::{DirectRoutingRouter, KvPushRouter, RoutingHost};
 
 use crate::{
     discovery::{KvSourceMembershipWatch, RuntimeConfigWatch},
@@ -2012,6 +2013,7 @@ mod tests {
 
     use async_trait::async_trait;
     use dynamo_kv_router::{
+        WorkerSelectionInput,
         indexer::{LowerTierMatchDetails, MatchDetails},
         protocols::{
             ExternalSequenceBlockHash, OverlapScores, StorageTier, compute_seq_hash_for_block,
@@ -2257,11 +2259,9 @@ mod tests {
 
         fn select_worker(
             &self,
-            _workers: &HashMap<WorkerId, ModelRuntimeConfig>,
-            request: &dynamo_kv_router::scheduling::SchedulingRequest,
-            _eligibility: dynamo_kv_router::scheduling::RoutingEligibility<'_>,
-            block_size: u32,
+            input: WorkerSelectionInput<'_, ModelRuntimeConfig>,
         ) -> Result<dynamo_kv_router::protocols::WorkerSelectionResult, KvSchedulerError> {
+            let (_workers, request, _eligibility, block_size) = input.into_configured()?;
             let observed_hits = request
                 .shared_cache_hits
                 .as_ref()
@@ -2290,10 +2290,7 @@ mod tests {
 
         fn select_worker(
             &self,
-            _workers: &HashMap<WorkerId, ModelRuntimeConfig>,
-            _request: &dynamo_kv_router::scheduling::SchedulingRequest,
-            _eligibility: dynamo_kv_router::scheduling::RoutingEligibility<'_>,
-            _block_size: u32,
+            _input: WorkerSelectionInput<'_, ModelRuntimeConfig>,
         ) -> Result<dynamo_kv_router::protocols::WorkerSelectionResult, KvSchedulerError> {
             Err(KvSchedulerError::AllEligibleWorkersOverloaded)
         }
@@ -2308,10 +2305,7 @@ mod tests {
 
         fn select_worker(
             &self,
-            _workers: &HashMap<WorkerId, ModelRuntimeConfig>,
-            _request: &dynamo_kv_router::scheduling::SchedulingRequest,
-            _eligibility: dynamo_kv_router::scheduling::RoutingEligibility<'_>,
-            _block_size: u32,
+            _input: WorkerSelectionInput<'_, ModelRuntimeConfig>,
         ) -> Result<dynamo_kv_router::protocols::WorkerSelectionResult, KvSchedulerError> {
             unreachable!("capability construction test does not select a worker")
         }

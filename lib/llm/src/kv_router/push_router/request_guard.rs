@@ -4,10 +4,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    kv_router::{
-        KvRouter, metrics::RouterRequestMetrics, push_router::load::RoutingLoadReservation,
-        scheduler::DefaultWorkerSelector,
-    },
+    kv_router::{KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector},
     local_model::runtime_config::ModelRuntimeConfig,
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -29,6 +26,7 @@ use dynamo_kv_router::{
 use dynamo_runtime::{
     error::DynamoError,
     metrics::frontend_perf::{STAGE_DISPATCH, StageGuard},
+    pipeline::OccupancyReservation,
     protocols::annotated::Annotated,
 };
 
@@ -217,72 +215,6 @@ impl CanonicalOutputTracker {
             start_position,
             private_blocks,
         })
-    }
-}
-
-/// Policy-specific state released by the host's common request lifecycle.
-enum RequestCleanup<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    Kv(KvRequestCleanup<Sel>),
-    Stateless {
-        worker_id: u64,
-    },
-    Load {
-        worker_id: u64,
-        reservation: Option<RoutingLoadReservation>,
-    },
-}
-
-impl<Sel> RequestCleanup<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    fn worker_id(&self) -> u64 {
-        match self {
-            Self::Kv(cleanup) => cleanup.worker.worker_id,
-            Self::Stateless { worker_id } => *worker_id,
-            Self::Load { worker_id, .. } => *worker_id,
-        }
-    }
-
-    fn context_id(&self) -> Option<&str> {
-        match self {
-            Self::Kv(cleanup) => Some(&cleanup.context_id),
-            Self::Stateless { .. } | Self::Load { .. } => None,
-        }
-    }
-
-    fn retarget_worker(&mut self, worker_id: u64) -> Option<u64> {
-        match self {
-            Self::Kv(_) => {
-                debug_assert!(false, "KV cleanup target cannot be retargeted");
-                None
-            }
-            Self::Stateless { worker_id: current } => {
-                *current = worker_id;
-                None
-            }
-            Self::Load {
-                worker_id: current,
-                reservation,
-            } => {
-                let load = reservation
-                    .as_mut()
-                    .map(|reservation| reservation.retarget(worker_id));
-                *current = worker_id;
-                load
-            }
-        }
-    }
-
-    async fn finish(&mut self) {
-        match self {
-            Self::Kv(cleanup) => cleanup.finish().await,
-            Self::Load { reservation, .. } => drop(reservation.take()),
-            Self::Stateless { .. } => {}
-        }
     }
 }
 
@@ -510,7 +442,13 @@ where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     Kv(KvRequestCleanup<Sel>),
-    Stateless { worker_id: u64 },
+    Stateless {
+        worker_id: u64,
+    },
+    Occupancy {
+        worker_id: u64,
+        reservation: Option<OccupancyReservation>,
+    },
 }
 
 impl<Sel> RequestCleanup<Sel>
@@ -521,19 +459,45 @@ where
         match self {
             Self::Kv(cleanup) => cleanup.worker.worker_id,
             Self::Stateless { worker_id } => *worker_id,
+            Self::Occupancy { worker_id, .. } => *worker_id,
+        }
+    }
+
+    fn retarget_worker(&mut self, worker_id: u64) -> Option<u64> {
+        match self {
+            Self::Kv(_) => {
+                debug_assert!(false, "KV cleanup target cannot be retargeted");
+                None
+            }
+            Self::Stateless { worker_id: current } => {
+                *current = worker_id;
+                None
+            }
+            Self::Occupancy {
+                worker_id: current,
+                reservation,
+            } => {
+                let occupancy = reservation
+                    .as_mut()
+                    .map(|reservation| reservation.retarget(worker_id));
+                *current = worker_id;
+                occupancy
+            }
         }
     }
 
     fn context_id(&self) -> Option<&str> {
         match self {
             Self::Kv(cleanup) => Some(&cleanup.context_id),
-            Self::Stateless { .. } => None,
+            Self::Stateless { .. } | Self::Occupancy { .. } => None,
         }
     }
 
     async fn finish(&mut self) {
-        if let Self::Kv(cleanup) = self {
-            cleanup.finish().await;
+        match self {
+            Self::Kv(cleanup) => cleanup.finish().await,
+            Self::Occupancy { reservation, .. } => drop(reservation.take()),
+            Self::Stateless { .. } => {}
         }
     }
 }
@@ -654,13 +618,13 @@ where
     pub(super) fn new_builtin(
         request_metrics: Arc<RouterRequestMetrics>,
         worker_id: u64,
-        load_reservation: Option<RoutingLoadReservation>,
+        occupancy_reservation: Option<OccupancyReservation>,
         request: &PreprocessedRequest,
     ) -> Self {
         request_metrics.requests_started_total().inc();
         Self {
-            cleanup: match load_reservation {
-                Some(reservation) => RequestCleanup::Load {
+            cleanup: match occupancy_reservation {
+                Some(reservation) => RequestCleanup::Occupancy {
                     worker_id,
                     reservation: Some(reservation),
                 },
@@ -854,7 +818,7 @@ where
         if let Some(lease) = &self.approximate_lru {
             lease.release_now();
         }
-        // RequestCleanup drops immediately afterward and performs scheduler cleanup.
+        // RequestCleanup drops immediately afterward and performs resource cleanup.
     }
 }
 
