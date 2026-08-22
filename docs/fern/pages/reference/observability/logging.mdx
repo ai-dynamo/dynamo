@@ -65,8 +65,8 @@ export DYN_LOG='info,dynamo_runtime::system_status_server=trace'
 
 ## OTLP Export
 
-`OTEL_EXPORT_ENABLED=true` is the master switch for runtime trace and log export. Configure a
-generic endpoint for both signals:
+`OTEL_EXPORT_ENABLED=true` is the master switch for runtime trace and log export. Logs are exported
+by default. Configure a generic endpoint for both signals:
 
 ```bash
 export DYN_LOGGING_CONSOLE_FORMAT=readable
@@ -78,6 +78,13 @@ export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
 Console formatting does not affect OTLP export; use `jsonl` instead if the local stderr stream also
 needs machine-readable records.
 
+To export traces without runtime logs, disable only the log exporter:
+
+```bash
+export OTEL_EXPORT_ENABLED=true
+export OTEL_EXPORT_LOGS_ENABLED=false
+```
+
 Use `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` for signal-specific
 destinations. Signal-specific endpoints are used as-is. For a generic `http/protobuf` endpoint,
 Dynamo appends `/v1/traces` or `/v1/logs`.
@@ -86,6 +93,7 @@ Dynamo appends `/v1/traces` or `/v1/logs`.
 `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` does not fall back to
 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. If only the traces endpoint is set, logs use the generic
 endpoint or the protocol default and can be silently dropped when no collector is listening there.
+Set `OTEL_EXPORT_LOGS_ENABLED=false` when the collector accepts traces only.
 </Warning>
 
 Set these variables on every process whose telemetry you want to export. Use

@@ -51,6 +51,11 @@ pub mod logging {
         /// Enable OTLP export for traces and logs (set to "1" to enable)
         pub const OTEL_EXPORT_ENABLED: &str = "OTEL_EXPORT_ENABLED";
 
+        /// Export OTLP logs when OTLP export is enabled. Logs are exported by
+        /// default; set to a falsy value ("0", "false", "off", "no") to export
+        /// traces only, e.g. when the collector accepts traces but not logs.
+        pub const OTEL_EXPORT_LOGS_ENABLED: &str = "OTEL_EXPORT_LOGS_ENABLED";
+
         /// OTLP exporter transport protocol. Supported values: "grpc", "http/protobuf".
         pub const OTEL_EXPORTER_OTLP_PROTOCOL: &str = "OTEL_EXPORTER_OTLP_PROTOCOL";
 
@@ -846,6 +851,7 @@ mod tests {
             logging::DYN_LOG_USE_LOCAL_TZ,
             logging::DYN_LOGGING_SPAN_EVENTS,
             logging::otlp::OTEL_EXPORT_ENABLED,
+            logging::otlp::OTEL_EXPORT_LOGS_ENABLED,
             logging::otlp::OTEL_EXPORTER_OTLP_PROTOCOL,
             logging::otlp::OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
             logging::otlp::OTEL_EXPORTER_OTLP_LOGS_PROTOCOL,

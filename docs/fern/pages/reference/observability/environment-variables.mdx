@@ -114,6 +114,10 @@ Every Dynamo process reads its own environment at startup, so set these on each 
   Master switch for OTLP export. Gates both traces and runtime logs. Request trace records require the separate `otel` request-trace sink.
 </ParamField>
 
+<ParamField path="OTEL_EXPORT_LOGS_ENABLED" type="boolean" default="true">
+  Export runtime logs when `OTEL_EXPORT_ENABLED` is enabled. Set this to a falsy value (`false`, `0`, `off`, or `no`) to export traces without creating the OTLP log exporter.
+</ParamField>
+
 <ParamField path="OTEL_EXPORTER_OTLP_ENDPOINT" type="string">
   Generic endpoint for traces and logs. For `grpc`, Dynamo uses it as-is. For `http/protobuf`, Dynamo appends `/v1/traces` or `/v1/logs`. When unset, each signal uses its protocol default.
 </ParamField>
