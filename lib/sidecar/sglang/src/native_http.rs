@@ -25,6 +25,7 @@ const MAX_EVENT_BYTES: usize = 64 * 1024 * 1024;
 
 pub(crate) struct NativeRequest {
     body: Value,
+    is_prefill: bool,
     prefill_handoff: Option<Value>,
 }
 
@@ -56,8 +57,7 @@ pub(crate) fn request(
     }
 
     body.insert("input_ids".into(), serde_json::json!(request.token_ids));
-    body.entry("rid")
-        .or_insert_with(|| Value::String(request_id.to_string()));
+    body.insert("rid".into(), Value::String(request_id.to_string()));
     body.insert("stream".into(), Value::Bool(true));
 
     let routing = request.routing.as_ref();
@@ -90,6 +90,10 @@ pub(crate) fn request(
         );
         body.insert("bootstrap_port".into(), Value::from(params.bootstrap_port));
         body.insert("bootstrap_room".into(), Value::from(params.bootstrap_room));
+    } else {
+        body.remove("bootstrap_host");
+        body.remove("bootstrap_port");
+        body.remove("bootstrap_room");
     }
 
     let mut trace_headers = HashMap::new();
@@ -116,6 +120,7 @@ pub(crate) fn request(
     };
     Ok(Some(NativeRequest {
         body: Value::Object(body),
+        is_prefill: mode.is_prefill(),
         prefill_handoff,
     }))
 }
@@ -194,6 +199,7 @@ impl NativeHttp {
         cancel: CancellationToken,
     ) -> BoxStream<'static, Result<LLMEngineOutput, DynamoError>> {
         Box::pin(async_stream::stream! {
+            let is_prefill = request.is_prefill;
             tracing::debug!(request_id = %ctx.id(), endpoint = %self.endpoint, "sending native request to SGLang HTTP");
             let response = tokio::select! {
                 biased;
@@ -259,7 +265,13 @@ impl NativeHttp {
                         return;
                     }
                 };
-                let (output, terminal) = output(response, &mut prefill_handoff);
+                let (mut output, terminal) = output(response, &mut prefill_handoff);
+                if is_prefill {
+                    if !terminal {
+                        continue;
+                    }
+                    output.engine_data = None;
+                }
                 yield Ok(output);
                 if terminal {
                     return;
