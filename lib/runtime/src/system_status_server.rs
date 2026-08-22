@@ -18,13 +18,15 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
     routing::{any, delete, get, post},
+    serve::Listener,
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::io;
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::TraceLayer;
@@ -128,6 +130,8 @@ pub struct LoraResponse {
     pub count: Option<usize>,
 }
 
+const SYSTEM_STATUS_REBIND_BACKOFF: Duration = Duration::from_secs(1);
+
 /// Start system status server with metrics support
 pub async fn spawn_system_status_server(
     host: &str,
@@ -138,6 +142,30 @@ pub async fn spawn_system_status_server(
 ) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
     // Create system status server state with the provided distributed runtime
     let server_state = Arc::new(SystemStatusState::new(drt, discovery_metadata)?);
+    let app = build_system_status_router(server_state);
+
+    let initial_bind_address = format!("{}:{}", host, port);
+    let (listener, actual_address) = bind_system_status_listener(initial_bind_address).await?;
+
+    // Reuse the concrete address so an ephemeral port remains stable across rebinds.
+    let listener =
+        RebindingTcpListener::new(listener, actual_address, SYSTEM_STATUS_REBIND_BACKOFF);
+    let observer = cancel_token.child_token();
+
+    // Spawn the server in the background and return the handle
+    let handle = tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app)
+            .with_graceful_shutdown(observer.cancelled_owned())
+            .await
+        {
+            tracing::error!("System status server error: {e}");
+        }
+    });
+
+    Ok((actual_address, handle))
+}
+
+fn build_system_status_router(server_state: Arc<SystemStatusState>) -> Router {
     let health_path = server_state
         .drt()
         .system_health()
@@ -219,53 +247,146 @@ pub async fn spawn_system_status_server(
     // The endpoint triple disambiguates multi-LocalModel-per-DRT; the
     // suffix segment (LoRA slug or `_base`) scopes per-registration so
     // detaching one doesn't wipe another's entries.
-    app = app.route(
+    app.route(
         "/v1/metadata/{namespace}/{component}/{endpoint}/{model_slug}/{model_suffix}/{*filename}",
         get({
             let state = Arc::clone(&server_state);
             move |path| metadata_file_handler(State(state), path)
         }),
-    );
+    )
+    .fallback(|uri: axum::http::Uri| async move {
+        tracing::debug!(%uri, "system status server has no route for this request");
+        (StatusCode::NOT_FOUND, "Route not found").into_response()
+    })
+    .layer(TraceLayer::new_for_http().make_span_with(make_system_request_span))
+}
 
-    let app = app
-        .fallback(|| async {
-            tracing::info!("[fallback handler] called");
-            (StatusCode::NOT_FOUND, "Route not found").into_response()
-        })
-        .layer(TraceLayer::new_for_http().make_span_with(make_system_request_span));
-
-    let address = format!("{}:{}", host, port);
+async fn bind_system_status_listener(
+    address: String,
+) -> anyhow::Result<(TcpListener, std::net::SocketAddr)> {
     tracing::info!("[spawn_system_status_server] binding to: {address}");
 
-    let listener = match TcpListener::bind(&address).await {
-        Ok(listener) => {
-            // get the actual address and port, print in debug level
-            let actual_address = listener.local_addr()?;
-            tracing::info!(
-                "[spawn_system_status_server] system status server bound to: {}",
-                actual_address
-            );
-            (listener, actual_address)
-        }
-        Err(e) => {
-            tracing::error!("Failed to bind to address {}: {}", address, e);
-            return Err(anyhow::anyhow!("Failed to bind to address: {}", e));
-        }
-    };
-    let (listener, actual_address) = listener;
+    let listener = TcpListener::bind(&address).await.map_err(|e| {
+        tracing::error!("Failed to bind to address {}: {}", address, e);
+        anyhow::anyhow!("Failed to bind to address: {}", e)
+    })?;
 
-    let observer = cancel_token.child_token();
-    // Spawn the server in the background and return the handle
-    let handle = tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, app)
-            .with_graceful_shutdown(observer.cancelled_owned())
-            .await
-        {
-            tracing::error!("System status server error: {e}");
-        }
-    });
+    let actual_address = listener.local_addr()?;
+    tracing::info!(
+        "[spawn_system_status_server] system status server bound to: {}",
+        actual_address
+    );
 
-    Ok((actual_address, handle))
+    Ok((listener, actual_address))
+}
+
+/// Rebinds after fatal accept errors.
+/// Axum's [`Listener::accept`] cannot return an error, so recovery must happen here.
+struct RebindingTcpListener {
+    /// Concrete address returned by the initial bind, including an assigned ephemeral port.
+    address: std::net::SocketAddr,
+    listener: Option<TcpListener>,
+    rebind_backoff: Duration,
+}
+
+impl RebindingTcpListener {
+    fn new(listener: TcpListener, address: std::net::SocketAddr, rebind_backoff: Duration) -> Self {
+        Self {
+            address,
+            listener: Some(listener),
+            rebind_backoff,
+        }
+    }
+}
+
+impl Listener for RebindingTcpListener {
+    type Io = tokio::net::TcpStream;
+    type Addr = std::net::SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            let Some(listener) = self.listener.as_ref() else {
+                match bind_system_status_listener(self.address.to_string()).await {
+                    Ok((listener, _)) => self.listener = Some(listener),
+                    Err(error) => {
+                        tracing::error!(
+                            "System status server failed to rebind {}; retrying after {:?}: {error}",
+                            self.address,
+                            self.rebind_backoff
+                        );
+                        tokio::time::sleep(self.rebind_backoff).await;
+                    }
+                }
+                continue;
+            };
+
+            match listener.accept().await {
+                Ok(accepted) => return accepted,
+                // A dropped connection does not invalidate the listener.
+                Err(error) if is_dead_connection_error(&error) => {
+                    tracing::trace!("system status connection dropped before accept: {error}");
+                }
+                // Resource exhaustion does not invalidate the listener.
+                Err(error) if is_resource_exhaustion_error(&error) => {
+                    tracing::error!(
+                        "System status listener cannot accept on {} for want of a process resource; retrying the same socket after {:?}: {error}",
+                        self.address,
+                        self.rebind_backoff
+                    );
+                    tokio::time::sleep(self.rebind_backoff).await;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        "System status listener stopped accepting on {}; rebinding after {:?}: {error}",
+                        self.address,
+                        self.rebind_backoff
+                    );
+                    // Drop before rebinding or the address remains in use.
+                    self.listener = None;
+                    tokio::time::sleep(self.rebind_backoff).await;
+                }
+            }
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        Ok(self.address)
+    }
+}
+
+/// Matches connection failures that leave the listener usable.
+fn is_dead_connection_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+    )
+}
+
+/// Matches shortages that require retrying the same socket.
+/// EMFILE, ENFILE, and ENOBUFS require raw errno checks because Rust has no distinct kinds.
+fn is_resource_exhaustion_error(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::OutOfMemory {
+        return true;
+    }
+
+    #[cfg(unix)]
+    {
+        // ENOBUFS differs between Linux and BSD-derived systems.
+        const ENFILE: i32 = 23;
+        const EMFILE: i32 = 24;
+        #[cfg(target_os = "linux")]
+        const ENOBUFS: i32 = 105;
+        #[cfg(not(target_os = "linux"))]
+        const ENOBUFS: i32 = 55;
+
+        if let Some(code) = error.raw_os_error() {
+            return matches!(code, ENFILE | EMFILE | ENOBUFS);
+        }
+    }
+
+    false
 }
 
 /// Health handler with optional active health checking
@@ -740,6 +861,153 @@ mod tests {
             result.is_ok(),
             "HTTP server should shut down when cancel token is cancelled"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_rebinding_listener_serves_again_after_listener_shutdown() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let shutdown_result = socket2::SockRef::from(&listener).shutdown(std::net::Shutdown::Both);
+
+        let mut rebinding = RebindingTcpListener::new(listener, address, Duration::from_millis(10));
+
+        if let Err(error) = shutdown_result {
+            eprintln!("skipping: this platform refused shutdown on a listening socket: {error}");
+            return;
+        }
+
+        let accepted = tokio::spawn(async move { rebinding.accept().await });
+
+        let client = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(stream) = tokio::net::TcpStream::connect(address).await {
+                    return stream;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("listener should rebind and accept connections again");
+
+        let (_io, peer) = tokio::time::timeout(Duration::from_secs(5), accepted)
+            .await
+            .expect("accept should return once the listener is rebound")
+            .expect("accept task should not panic");
+
+        assert_eq!(
+            peer,
+            client.local_addr().unwrap(),
+            "accepted connection should be the one we opened"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_rebinding_listener_keeps_trying_after_a_rebind_fails() {
+        let holder = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let contested_address = holder.local_addr().unwrap();
+
+        let broken = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let shutdown_result = socket2::SockRef::from(&broken).shutdown(std::net::Shutdown::Both);
+
+        let mut rebinding =
+            RebindingTcpListener::new(broken, contested_address, Duration::from_millis(10));
+
+        if let Err(error) = shutdown_result {
+            eprintln!("skipping: this platform refused shutdown on a listening socket: {error}");
+            return;
+        }
+
+        let accepted = tokio::spawn(async move { rebinding.accept().await });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(holder);
+
+        let client = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(stream) = tokio::net::TcpStream::connect(contested_address).await {
+                    return stream;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("listener should rebind once the address is free again");
+
+        let (_io, peer) = tokio::time::timeout(Duration::from_secs(5), accepted)
+            .await
+            .expect("accept should return once a later rebind succeeds")
+            .expect("accept task should not panic");
+
+        assert_eq!(
+            peer,
+            client.local_addr().unwrap(),
+            "accepted connection should be the one we opened"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_resource_exhaustion_does_not_look_like_a_dead_listener() {
+        for code in [23 /* ENFILE */, 24 /* EMFILE */] {
+            let error = io::Error::from_raw_os_error(code);
+            assert!(
+                is_resource_exhaustion_error(&error),
+                "errno {code} should be treated as a process resource shortage, got {:?}",
+                error.kind()
+            );
+            assert!(
+                !is_dead_connection_error(&error),
+                "errno {code} is not a dead connection"
+            );
+        }
+
+        let dead_listener = io::Error::from(io::ErrorKind::InvalidInput);
+        assert!(!is_resource_exhaustion_error(&dead_listener));
+        assert!(!is_dead_connection_error(&dead_listener));
+    }
+
+    #[tokio::test]
+    async fn test_rebinding_listener_reports_the_address_it_rebinds() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+
+        let rebinding = RebindingTcpListener::new(listener, address, Duration::from_millis(10));
+
+        assert_ne!(address.port(), 0, "bind should resolve the ephemeral port");
+        assert_eq!(
+            rebinding.local_addr().unwrap(),
+            address,
+            "the resolved address is what gets rebound and advertised"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rebinding_listener_still_shuts_down_gracefully() {
+        let cancel_token = CancellationToken::new();
+        let app = Router::new().route("/test", get(|| async { (StatusCode::OK, "test") }));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let listener = RebindingTcpListener::new(listener, address, Duration::from_millis(10));
+
+        let server = tokio::spawn({
+            let cancel_token = cancel_token.clone();
+            async move {
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(cancel_token.cancelled_owned())
+                    .await
+            }
+        });
+
+        cancel_token.cancel();
+
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("server should shut down when the cancel token is cancelled")
+            .expect("server task should not panic")
+            .expect("graceful shutdown should not error");
     }
 }
 
