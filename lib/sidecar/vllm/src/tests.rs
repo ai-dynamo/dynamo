@@ -489,6 +489,7 @@ fn sequence_response(
                 kv_transfer_params,
                 ec_transfer_params: None,
             }),
+            routed_experts: None,
         }),
     }
 }
@@ -608,6 +609,92 @@ fn oversized_logprob_counts_are_rejected() {
     )
     .expect_err("oversized prompt logprobs must fail");
     assert!(prompt_error.to_string().contains("must fit in i32"));
+}
+
+#[test]
+fn terminal_routed_experts_are_mapped_to_native_numpy_engine_data() {
+    let request = request();
+    let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
+    let mut response = sequence_response(true, true, None);
+    response.outputs.as_mut().unwrap().routed_experts = Some(pb::RoutedExperts {
+        data: vec![1, 2, 3, 4],
+        shape: vec![2, 1, 2],
+        dtype: "uint8".to_string(),
+    });
+
+    let output = state
+        .convert(response)
+        .expect("valid routed experts")
+        .expect("terminal output");
+    assert_eq!(
+        output
+            .engine_data
+            .as_ref()
+            .and_then(|data| data.get("routed_experts")),
+        Some(&json!(
+            "k05VTVBZAQB2AHsnZGVzY3InOiAnfHUxJywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDEsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoBAgME"
+        ))
+    );
+}
+
+#[test]
+fn terminal_uint16_routed_experts_preserve_numpy_dtype() {
+    let request = request();
+    let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
+    let mut response = sequence_response(true, true, None);
+    response.outputs.as_mut().unwrap().routed_experts = Some(pb::RoutedExperts {
+        data: vec![1, 0, 2, 0, 3, 0, 4, 0],
+        shape: vec![2, 1, 2],
+        dtype: "uint16".to_string(),
+    });
+
+    let output = state
+        .convert(response)
+        .expect("valid uint16 routed experts")
+        .expect("terminal output");
+    assert_eq!(
+        output
+            .engine_data
+            .as_ref()
+            .and_then(|data| data.get("routed_experts")),
+        Some(&json!(
+            "k05VTVBZAQB2AHsnZGVzY3InOiAnPHUyJywgJ2ZvcnRyYW5fb3JkZXInOiBGYWxzZSwgJ3NoYXBlJzogKDIsIDEsIDIpLCB9ICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAoBAAIAAwAEAA=="
+        ))
+    );
+}
+
+#[test]
+fn malformed_terminal_routed_experts_are_rejected() {
+    let request = request();
+    let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
+    let mut response = sequence_response(true, true, None);
+    response.outputs.as_mut().unwrap().routed_experts = Some(pb::RoutedExperts {
+        data: vec![1],
+        shape: vec![2, 1, 2],
+        dtype: "uint8".to_string(),
+    });
+
+    let error = state
+        .convert(response)
+        .expect_err("byte-length mismatch must fail");
+    assert!(error.to_string().contains("byte length mismatch"));
+}
+
+#[test]
+fn nonterminal_routed_experts_are_rejected() {
+    let request = request();
+    let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
+    let mut response = sequence_response(false, true, None);
+    response.outputs.as_mut().unwrap().routed_experts = Some(pb::RoutedExperts {
+        data: vec![1],
+        shape: vec![1, 1, 1],
+        dtype: "uint8".to_string(),
+    });
+
+    let error = state
+        .convert(response)
+        .expect_err("nonterminal routed experts must fail");
+    assert!(error.to_string().contains("only valid on a terminal"));
 }
 
 struct FakeServer {
