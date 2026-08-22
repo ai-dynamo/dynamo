@@ -1,0 +1,229 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Best-effort aggregated TensorRT-LLM deployment for Gemma 4 31B on H200
+# (Hopper, SM90), 4x GPU per worker.
+#
+# This is NOT a port of ../agg-gb200-agentic/deploy.yaml. Hopper cannot use the
+# two things that make that recipe cheap, so the shape is different:
+#
+#   * bf16 weights, not NVFP4 -- NVFP4 requires Blackwell. Weights are ~58 GiB
+#     rather than ~17 GiB.
+#   * 16-bit KV cache, not fp8 -- Gemma 4 31B is hybrid-attention, and its
+#     full_attention layers use global_head_dim=512. FlashInfer permits
+#     head_dim > 256 on SM80+ only for 16-bit KV; one-byte (fp8) KV stays
+#     SM100+. Setting `dtype: fp8` here aborts at init with
+#     "No supported CUDA architectures found for major versions [10, 11, 12]".
+#   * attn_backend: FLASHINFER -- the default TRTLLM backend selects TllmGen
+#     FMHA, which is Blackwell-only for this model and fails the same way.
+#   * tensor_parallel_size: 4 -- with 58 GiB of weights and 16-bit KV, a single
+#     H200 cannot hold the KV for one median request of the agentic trace
+#     (~62 GiB of KV pool vs a 67k-token median prompt). Sharding also cuts
+#     weight duplication: 2 replicas x tp=4 spends 117 GiB on weights across
+#     8 GPUs, where 8 replicas x tp=1 would spend 468 GiB.
+#   * no speculative_config -- MTP is not enabled on this variant.
+#
+# Requires a TensorRT-LLM build carrying the Gemma 4 Hopper FlashInfer fixes
+# (NVIDIA/TensorRT-LLM commits 834ea7dc6d..bab689be21 plus e91b9f8717, which
+# selects the fa2 sub-backend on non-Blackwell) and flashinfer-python >= 0.6.16.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gemma4-31b-agg-h200-agentic-config
+data:
+  agg.yaml: |
+    backend: pytorch
+    tensor_parallel_size: 4
+    pipeline_parallel_size: 1
+    # Required on Hopper: see the header note on TllmGen FMHA.
+    attn_backend: FLASHINFER
+    max_batch_size: 16
+    max_num_tokens: 12288
+    max_seq_len: 262144
+    enable_chunked_prefill: true
+    kv_cache_config:
+      # MUST stay 16-bit on Hopper for this model; fp8 aborts at init.
+      dtype: auto
+      enable_block_reuse: true
+      free_gpu_memory_fraction: 0.93
+      # 64 GiB per rank. NOTE: this is per rank, and tp=4 co-locates four ranks
+      # on one node, so the node total is 256 GiB. The GB200 recipe's 128 GiB is
+      # per rank at tp=1, a different multiplier -- copying that value here
+      # oversubscribes host memory and stalls KV pool allocation.
+      host_cache_size: 68719476736
+      avg_seq_len: 24576
+    cuda_graph_config:
+      enable_padding: true
+      max_batch_size: 16
+    multimodal_config:
+      encoder_cache_max_bytes: 0
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: gemma4-31b-agg-h200-agentic
+  labels:
+    app.kubernetes.io/name: gemma4-31b-agg-h200-agentic
+    app.kubernetes.io/part-of: dynamo
+spec:
+  backendFramework: trtllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      # Image tag is not pure X.Y.Z semver; the DGD CRD validator requires
+      # an explicit runtime version.
+      runtimeVersionOverride: "1.4.0"
+      podTemplate:
+        spec:
+          imagePullSecrets:
+            - name: nvcr-docker-config
+          containers:
+            - name: main
+              # x86_64 build: TensorRT-LLM 1.3.0rc25 + the Gemma 4 Hopper
+              # FlashInfer fixes + flashinfer-python 0.6.16, on Dynamo runtime 1.4.0.
+              image: nvcr.io/nvstaging/avisva/trtllm-dynamo-x86:rc25-gemma4-h200-fa2
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/bash
+                - -lc
+                - exec python3 "$@"
+                - --
+              args:
+                - -m
+                - dynamo.frontend
+                - --router-mode
+                - kv
+                - --http-port
+                - "8000"
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+              resources: {}
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                periodSeconds: 10
+                timeoutSeconds: 60
+                failureThreshold: 60
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+
+    - name: agg
+      type: worker
+      # 2 replicas x tp=4 = 8 GPUs, matching the GB200 recipe's GPU budget.
+      replicas: 2
+      sharedMemorySize: 40Gi
+      # See Frontend.runtimeVersionOverride.
+      runtimeVersionOverride: "1.4.0"
+      podTemplate:
+        spec:
+          imagePullSecrets:
+            - name: nvcr-docker-config
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-H200
+                      - key: kubernetes.io/arch
+                        operator: In
+                        values:
+                          - amd64
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          containers:
+            - name: main
+              # x86_64 build: TensorRT-LLM 1.3.0rc25 + the Gemma 4 Hopper
+              # FlashInfer fixes + flashinfer-python 0.6.16, on Dynamo runtime 1.4.0.
+              image: nvcr.io/nvstaging/avisva/trtllm-dynamo-x86:rc25-gemma4-h200-fa2
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace/
+              command:
+                - /bin/bash
+                - -lc
+                - exec python3 "$@"
+                - --
+              args:
+                - -m
+                - dynamo.trtllm
+                - --model-path
+                - google/gemma-4-31B-it
+                - --served-model-name
+                - google/gemma-4-31B-it
+                - --tensor-parallel-size
+                - "4"
+                - --max-batch-size
+                - "16"
+                - --max-num-tokens
+                - "12288"
+                - --max-seq-len
+                - "262144"
+                - --extra-engine-args
+                - /config/agg.yaml
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+                - name: TRTLLM_ENABLE_PDL
+                  value: "1"
+              resources:
+                requests:
+                  memory: 256Gi
+                  nvidia.com/gpu: "4"
+                limits:
+                  nvidia.com/gpu: "4"
+              securityContext:
+                runAsUser: 0
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                    - SYS_RESOURCE
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 30
+                timeoutSeconds: 20
+                failureThreshold: 120
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+                - name: dshm
+                  mountPath: /dev/shm
+                - name: trtllm-config
+                  mountPath: /config
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 40Gi
+            - name: trtllm-config
+              configMap:
+                name: gemma4-31b-agg-h200-agentic-config
