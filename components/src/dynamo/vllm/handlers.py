@@ -509,6 +509,26 @@ def _nvext_extra_field_requested(request: Dict[str, Any], field: str) -> bool:
     )
 
 
+def _wants_engine_data_accumulation(request: Dict[str, Any]) -> bool:
+    """Whether ``_accumulate_engine_data`` should run for this request.
+
+    Runs when the client asked for the umbrella ``engine_data`` blob OR for
+    any of its narrower per-key selectors that share the same accumulator:
+    ``completion_token_ids`` (paired with ``prompt_token_ids`` on the Rust
+    response builder — clients like vLLM's ``speculators`` capture flow
+    request the pair via ``return_token_ids: true``, which the Rust frontend
+    folds to ``nvext.extra_fields=["completion_token_ids"]``).
+
+    Without this fan-in, a request opting into ``completion_token_ids`` would
+    pass validation, wire through the Rust response selector, then find
+    ``engine_data["prompt_token_ids"]`` / ``engine_data["completion_token_ids"]``
+    missing on the final chunk because the accumulator never ran.
+    """
+    return _nvext_extra_field_requested(
+        request, "engine_data"
+    ) or _nvext_extra_field_requested(request, "completion_token_ids")
+
+
 # Must match DYNAMO_CACHE_SALT_PREFIX in lib/kv-router/src/zmq_wire/extra_keys.rs.
 _DYNAMO_CACHE_SALT_PREFIX = "dynamo-cache-salt:"
 
@@ -3100,6 +3120,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         )
                         if routed_experts is not None:
                             _attach_routed_experts_engine_data(out, routed_experts)
+                        # kv_transfer_params (e.g. hidden_states_path from the
+                        # ExampleHiddenStatesConnector KV connector) rides
+                        # engine_data on the final chunk. The prefill worker's
+                        # _generate_token_mode already surfaces this via
+                        # disaggregated_params for the prefill→decode handoff;
+                        # the aggregated / decode-only path needs its own emit
+                        # here so a client that turned on the extract_hidden_states
+                        # spec method actually sees the response payload the
+                        # connector produced.
+                        kv_transfer_params = getattr(res, "kv_transfer_params", None)
+                        if kv_transfer_params is not None:
+                            engine_data = out.setdefault("engine_data", {})
+                            if isinstance(engine_data, dict):
+                                engine_data["kv_transfer_params"] = kv_transfer_params
                         # Log completion with LoRA info (debug level to avoid log spam)
                         self._log_with_lora_context(
                             "Completed token generation for request {request_id}{lora_info}: "
@@ -3422,14 +3456,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             async with self._abort_monitor(
                 context, request_id, abort_guard=abort_guard
             ):
-                # nvext.engine_data opt-in: if the client requested
-                # `nvext.extra_fields=["engine_data"]`, we accumulate
-                # per-chunk token_ids and logprobs and attach them to the
-                # FINAL chunk (the one carrying `finish_reason`). The Rust
-                # frontend's response builder (delta.rs) gates emission via
-                # `NvExtResponseFieldSelection.engine_data` so this payload
-                # only reaches clients that asked for it.
-                want_engine_data = _nvext_extra_field_requested(request, "engine_data")
+                # nvext engine-data opt-in: if the client requested the
+                # umbrella `engine_data` blob OR its narrower per-key
+                # selectors (`completion_token_ids` — paired on the response
+                # side with `prompt_token_ids`), we accumulate per-chunk
+                # token_ids and logprobs and attach them to the FINAL chunk
+                # (the one carrying `finish_reason`). The Rust frontend's
+                # response builder (delta.rs) gates emission via
+                # `NvExtResponseFieldSelection` so each payload only reaches
+                # clients that asked for it.
+                want_engine_data = _wants_engine_data_accumulation(request)
                 # Prompt token IDs the engine actually saw. Either the
                 # pre-tokenized `nvext.token_data` (TITO) or whatever the
                 # preprocessor produced from messages (MITO). We echo them

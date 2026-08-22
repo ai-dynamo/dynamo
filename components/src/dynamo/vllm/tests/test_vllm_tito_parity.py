@@ -431,3 +431,60 @@ class TestSkipSpecialTokens:
         # build_sampling_params forces detokenize=False even when the request
         # asks for True.
         assert sp.detokenize is False
+
+
+class TestWantsEngineDataAccumulation:
+    """`_wants_engine_data_accumulation` is the gate on `_accumulate_engine_data`,
+    which is the ONLY producer of `engine_data["prompt_token_ids"]` and
+    `engine_data["completion_token_ids"]`. The Rust frontend's response builder
+    reads those keys when the request opted in via
+    `nvext.extra_fields=["completion_token_ids"]` (either directly or via the
+    `return_token_ids: true` alias the frontend folds into it). If this gate
+    doesn't fan those requests in, the trio arrives empty on the wire even
+    though every other layer is wired correctly."""
+
+    @staticmethod
+    def _import():
+        from dynamo.vllm.handlers import _wants_engine_data_accumulation
+
+        return _wants_engine_data_accumulation
+
+    def test_opts_in_on_engine_data(self):
+        fn = self._import()
+        req = {"nvext": {"extra_fields": ["engine_data"]}}
+        assert fn(req) is True
+
+    def test_opts_in_on_completion_token_ids(self):
+        """The narrower per-key selector must fan in to the same accumulator —
+        otherwise `return_token_ids: true` (which normalizes to this) sees
+        empty engine_data on the response."""
+        fn = self._import()
+        req = {"nvext": {"extra_fields": ["completion_token_ids"]}}
+        assert fn(req) is True
+
+    def test_opts_in_when_both_present(self):
+        fn = self._import()
+        req = {"nvext": {"extra_fields": ["engine_data", "completion_token_ids"]}}
+        assert fn(req) is True
+
+    def test_off_by_default(self):
+        fn = self._import()
+        assert fn({}) is False
+        assert fn({"nvext": {}}) is False
+        assert fn({"nvext": {"extra_fields": []}}) is False
+
+    def test_off_for_unrelated_extra_fields(self):
+        """Neighboring selectors that use OTHER pipelines (worker_id/timing —
+        surfaced by the tracker, not by the accumulator) must not falsely
+        trigger the accumulator and its per-chunk copy cost."""
+        fn = self._import()
+        req = {"nvext": {"extra_fields": ["worker_id", "timing", "routed_experts"]}}
+        assert fn(req) is False
+
+    def test_reads_nested_extra_args_nvext(self):
+        """The Rust preprocessor stashes nvext under `extra_args.nvext` when
+        building a PreprocessedRequest (which itself has no nvext field). The
+        gate must see both shapes."""
+        fn = self._import()
+        req = {"extra_args": {"nvext": {"extra_fields": ["completion_token_ids"]}}}
+        assert fn(req) is True

@@ -272,12 +272,31 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         // rules stay in one place.
         let prompt_logprobs_payload =
             common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref());
+        let prompt_token_ids_vec = delta
+            .engine_data
+            .as_ref()
+            .and_then(|d| d.get("prompt_token_ids"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_u64().and_then(|u| u32::try_from(u).ok()))
+                    .collect::<Vec<u32>>()
+            });
+        let kv_transfer_params_value = delta.disaggregated_params.clone().or_else(|| {
+            delta
+                .engine_data
+                .as_ref()
+                .and_then(|d| d.get("kv_transfer_params"))
+                .cloned()
+        });
         if let Some(nvext_response) = self.options.response_fields.build_response_nvext(
             Some(&self.tracker),
             finish_reason.is_some(),
             delta.engine_data,
             stop_reason,
             completion_token_ids_for_nvext.as_deref(),
+            prompt_token_ids_vec.as_deref(),
+            kv_transfer_params_value,
             prompt_logprobs_payload,
         ) && let Ok(nvext_json) = serde_json::to_value(&nvext_response)
         {
@@ -351,6 +370,7 @@ mod tests {
             nvext: None,
             metadata: None,
             return_tokens_as_token_ids: None,
+            return_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -404,6 +424,7 @@ mod tests {
             ),
             metadata: None,
             return_tokens_as_token_ids: None,
+            return_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }

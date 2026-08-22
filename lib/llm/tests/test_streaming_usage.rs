@@ -3,6 +3,7 @@
 
 use async_trait::async_trait;
 use dynamo_llm::preprocessor::{ANNOTATION_PAYLOAD_USAGE, OpenAIPreprocessor};
+use dynamo_llm::protocols::common::extensions::NvExt;
 use dynamo_llm::protocols::common::llm_backend::{BackendOutput, FinishReason};
 use dynamo_llm::protocols::openai::ParsingOptions;
 use dynamo_llm::protocols::openai::chat_completions::{
@@ -207,6 +208,7 @@ fn create_chat_request(
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        return_token_ids: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -770,6 +772,7 @@ fn create_cmpl_request(include_usage: Option<bool>, stream: bool) -> NvCreateCom
         nvext: None,
         metadata: None,
         return_tokens_as_token_ids: None,
+        return_token_ids: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -799,6 +802,7 @@ fn create_nonstreaming_chat_request() -> NvCreateChatCompletionRequest {
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        return_token_ids: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -1134,5 +1138,264 @@ async fn test_multimodal_counts_on_every_metrics_frame() {
             (2, 1, 0),
             "frame {i} must carry the request counts (every frame, not just the first)"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// return_token_ids trio: end-to-end through the postprocessor stream
+// ---------------------------------------------------------------------------
+//
+// The unit tests in `protocols/common/extensions.rs` prove the gating helper
+// in isolation. These integration tests wire a BackendOutput stream —
+// carrying `engine_data["prompt_token_ids"]` (as the vLLM Python handler
+// emits) and `disaggregated_params` (the engine's kv-transfer payload) —
+// through the same postprocessor stream a real request uses, and assert on
+// the terminal SSE frame's `nvext`. They cover the layer between the
+// request-side alias and the response-side field emission that a client
+// setting `return_token_ids: true` in `extra_body` actually depends on.
+
+/// Build the same 3-chunk backend output as the shared helper, but put the
+/// prompt-ids and kv-transfer payloads on the FINAL chunk. Mirrors the vLLM
+/// handler, which surfaces both once at completion (per-token streaming of
+/// prompt IDs makes no sense).
+fn build_backend_outputs_with_return_token_ids_trio() -> Vec<BackendOutput> {
+    let mut outputs = build_backend_outputs_with_cached_tokens(None);
+    let final_idx = outputs.len() - 1;
+    outputs[final_idx].engine_data =
+        Some(serde_json::json!({ "prompt_token_ids": [10u32, 20, 30] }));
+    outputs[final_idx].disaggregated_params =
+        Some(serde_json::json!({ "hidden_states_path": "/tmp/hs_0.safetensors" }));
+    outputs
+}
+
+/// Chat request with `nvext.extra_fields=["completion_token_ids"]` — the
+/// canonical form after `normalize_return_token_ids` folds the top-level
+/// `return_token_ids: true` alias.
+fn create_chat_request_asking_for_trio() -> NvCreateChatCompletionRequest {
+    let mut request = create_chat_request(None, None);
+    request.nvext = Some(NvExt {
+        extra_fields: Some(vec!["completion_token_ids".to_string()]),
+        ..NvExt::default()
+    });
+    request
+}
+
+/// Same shape for /v1/completions.
+fn create_cmpl_request_asking_for_trio() -> NvCreateCompletionRequest {
+    let mut request = create_cmpl_request(None, true);
+    request.nvext = Some(NvExt {
+        extra_fields: Some(vec!["completion_token_ids".to_string()]),
+        ..NvExt::default()
+    });
+    request
+}
+
+#[tokio::test]
+async fn test_chat_return_token_ids_trio_emitted_on_final_chunk_only() {
+    let request = create_chat_request_asking_for_trio();
+    let request_id = "chat-trio-1".to_string();
+    let response_generator = Box::new(request.response_generator(request_id));
+
+    let ctx = Arc::new(MockContext::new());
+    let outputs = build_backend_outputs_with_return_token_ids_trio();
+    let stream = stream::iter(outputs.into_iter().map(Annotated::from_data));
+    let backend_stream = dynamo_runtime::engine::ResponseStream::new(Box::pin(stream), ctx.clone());
+
+    let transformed_stream = OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        response_generator,
+        ctx.clone(),
+        false,
+        false,
+        None,
+        Default::default(),
+    );
+    let chunks: Vec<_> = transformed_stream.collect().await;
+
+    // Filter out metrics-annotation events (event=llm_metrics, data=None) so
+    // we look at content chunks only, same as `test_streaming_without_usage`.
+    let content_chunks: Vec<_> = chunks
+        .into_iter()
+        .filter(|chunk| {
+            !(chunk
+                .event
+                .as_ref()
+                .map(|e| e == "llm_metrics")
+                .unwrap_or(false)
+                && chunk.data.is_none())
+        })
+        .collect();
+    assert_eq!(
+        content_chunks.len(),
+        3,
+        "should have exactly 3 content chunks matching the mock backend stream"
+    );
+
+    // First two chunks (no finish_reason): must NOT carry any of the three
+    // trio fields. `completion_token_ids` is a per-chunk accumulator so the
+    // helper skips emitting nvext entirely when there's no other signal —
+    // but even if a future change causes it to appear, prompt_token_ids and
+    // kv_transfer_params must remain absent until the final chunk.
+    for (i, chunk) in content_chunks.iter().take(2).enumerate() {
+        let resp = chunk.data.as_ref().expect("content chunk must have data");
+        if let Some(nvext) = resp.nvext.as_ref() {
+            assert!(
+                nvext.get("prompt_token_ids").is_none(),
+                "chunk {i}: prompt_token_ids must not appear mid-stream (before finish_reason)"
+            );
+            assert!(
+                nvext.get("kv_transfer_params").is_none(),
+                "chunk {i}: kv_transfer_params must not appear mid-stream (before finish_reason)"
+            );
+        }
+    }
+
+    // Final chunk: all three trio fields present under nvext, with the exact
+    // values we handed to the backend.
+    let final_resp = content_chunks[2]
+        .data
+        .as_ref()
+        .expect("final chunk must have data");
+    let nvext = final_resp
+        .nvext
+        .as_ref()
+        .expect("final chunk must carry nvext when trio is requested");
+    assert_eq!(
+        nvext["prompt_token_ids"],
+        serde_json::json!([10, 20, 30]),
+        "prompt_token_ids must round-trip from engine_data on final chunk"
+    );
+    assert_eq!(
+        nvext["kv_transfer_params"],
+        serde_json::json!({"hidden_states_path": "/tmp/hs_0.safetensors"}),
+        "kv_transfer_params must round-trip from disaggregated_params on final chunk"
+    );
+    assert!(
+        nvext.get("completion_token_ids").is_some(),
+        "completion_token_ids must be present on final chunk (existing behavior — sibling of the two new fields)"
+    );
+}
+
+#[tokio::test]
+async fn test_cmpl_return_token_ids_trio_emitted_on_final_chunk_only() {
+    let request = create_cmpl_request_asking_for_trio();
+    let request_id = "cmpl-trio-1".to_string();
+    let response_generator = Box::new(request.response_generator(request_id));
+
+    let ctx = Arc::new(MockContext::new());
+    let outputs = build_backend_outputs_with_return_token_ids_trio();
+    let stream = stream::iter(outputs.into_iter().map(Annotated::from_data));
+    let backend_stream = dynamo_runtime::engine::ResponseStream::new(Box::pin(stream), ctx.clone());
+
+    let transformed_stream = OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        response_generator,
+        ctx.clone(),
+        false,
+        false,
+        None,
+        Default::default(),
+    );
+    let chunks: Vec<_> = transformed_stream.collect().await;
+
+    // No stream_options.include_usage, so no trailing usage-only chunk.
+    let content_chunks: Vec<_> = chunks
+        .into_iter()
+        .filter(|chunk| {
+            !(chunk
+                .event
+                .as_ref()
+                .map(|e| e == "llm_metrics")
+                .unwrap_or(false)
+                && chunk.data.is_none())
+        })
+        .collect();
+    assert_eq!(
+        content_chunks.len(),
+        3,
+        "should have exactly 3 content chunks matching the mock backend stream"
+    );
+
+    for (i, chunk) in content_chunks.iter().take(2).enumerate() {
+        let resp = chunk.data.as_ref().expect("content chunk must have data");
+        if let Some(nvext) = resp.nvext.as_ref() {
+            assert!(
+                nvext.get("prompt_token_ids").is_none(),
+                "cmpl chunk {i}: prompt_token_ids must not appear mid-stream"
+            );
+            assert!(
+                nvext.get("kv_transfer_params").is_none(),
+                "cmpl chunk {i}: kv_transfer_params must not appear mid-stream"
+            );
+        }
+    }
+
+    let final_resp = content_chunks[2]
+        .data
+        .as_ref()
+        .expect("cmpl final chunk must have data");
+    let nvext = final_resp
+        .nvext
+        .as_ref()
+        .expect("cmpl final chunk must carry nvext when trio is requested");
+    assert_eq!(
+        nvext["prompt_token_ids"],
+        serde_json::json!([10, 20, 30]),
+        "cmpl: prompt_token_ids must round-trip from engine_data"
+    );
+    assert_eq!(
+        nvext["kv_transfer_params"],
+        serde_json::json!({"hidden_states_path": "/tmp/hs_0.safetensors"}),
+        "cmpl: kv_transfer_params must round-trip from disaggregated_params"
+    );
+    assert!(
+        nvext.get("completion_token_ids").is_some(),
+        "cmpl: completion_token_ids must be present on final chunk"
+    );
+}
+
+#[tokio::test]
+async fn test_chat_return_token_ids_absent_without_alias_or_extra_fields() {
+    // Baseline: same engine payload, but the request does NOT ask for the
+    // trio (neither `return_token_ids: true` nor an nvext.extra_fields entry).
+    // The response must not leak the fields — this is what protects
+    // clients that never opted in from seeing engine-side capture data.
+    let request = create_chat_request(None, None);
+    let request_id = "chat-no-trio-baseline".to_string();
+    let response_generator = Box::new(request.response_generator(request_id));
+
+    let ctx = Arc::new(MockContext::new());
+    let outputs = build_backend_outputs_with_return_token_ids_trio();
+    let stream = stream::iter(outputs.into_iter().map(Annotated::from_data));
+    let backend_stream = dynamo_runtime::engine::ResponseStream::new(Box::pin(stream), ctx.clone());
+
+    let transformed_stream = OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        response_generator,
+        ctx.clone(),
+        false,
+        false,
+        None,
+        Default::default(),
+    );
+    let chunks: Vec<_> = transformed_stream.collect().await;
+
+    for chunk in chunks {
+        if let Some(resp) = chunk.data.as_ref()
+            && let Some(nvext) = resp.nvext.as_ref()
+        {
+            assert!(
+                nvext.get("prompt_token_ids").is_none(),
+                "baseline (no opt-in) must never emit prompt_token_ids"
+            );
+            assert!(
+                nvext.get("kv_transfer_params").is_none(),
+                "baseline (no opt-in) must never emit kv_transfer_params"
+            );
+            assert!(
+                nvext.get("completion_token_ids").is_none(),
+                "baseline (no opt-in) must never emit completion_token_ids"
+            );
+        }
     }
 }

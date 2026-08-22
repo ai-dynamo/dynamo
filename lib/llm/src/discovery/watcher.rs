@@ -1615,6 +1615,7 @@ mod tests {
                 thinking: None,
                 media_io_kwargs: None,
                 return_tokens_as_token_ids: None,
+                return_token_ids: None,
                 unsupported_fields: Default::default(),
             };
             assert!(engine.generate(SingleIn::new(request)).await.is_err());
