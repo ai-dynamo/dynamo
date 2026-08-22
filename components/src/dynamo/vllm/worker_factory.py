@@ -1743,6 +1743,7 @@ class WorkerFactory:
             "init_weights_update_group": handler.init_weights_update_group,
             "destroy_weights_update_group": handler.destroy_weights_update_group,
             "get_weight_version": handler.get_weight_version,
+            "set_weight_version": handler.set_weight_version,
         }
 
         if lora_enabled:

@@ -132,6 +132,8 @@ _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
         "weight_version",
     }
 )
+# An object sentinel cannot collide with a caller-supplied version.
+_WEIGHT_VERSION_UNDECLARED: Final = object()
 
 
 def build_prompt_tokens_details(
@@ -1160,7 +1162,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # to prevent both bypassing the check before either inserts (atomicity).
         self._lora_capacity_guard = asyncio.Lock()
         self._paused: bool = False
-        self._weight_version: str = "initial"
+        self._weight_version: Any = _WEIGHT_VERSION_UNDECLARED
 
         embedding_loader = self.init_embedding_loader(config, encode_worker_client)
 
@@ -1765,8 +1767,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             logger.error(f"[RL] Failed to abort request {request_id}: {e}")
             return {"status": "error", "message": str(e)}
 
+    def _declare_weight_version(self, version: Any) -> None:
+        self._weight_version = version
+
     async def get_weight_version(self, body: dict) -> dict:
-        """Return the current weight version tag."""
         if body is None:
             body = {}
         elif not isinstance(body, dict):
@@ -1774,7 +1778,28 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": "request body must be a JSON object",
             }
-        return {"status": "ok", "version": getattr(self, "_weight_version", "initial")}
+        version = self._weight_version
+        declared = version is not _WEIGHT_VERSION_UNDECLARED
+        return {
+            "status": "ok",
+            "version": version if declared else None,
+            "version_declared": declared,
+        }
+
+    async def set_weight_version(self, body: dict) -> dict:
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return {
+                "status": "error",
+                "message": "request body must be a JSON object",
+            }
+        if "weight_version" not in body:
+            return {"status": "error", "message": "Missing 'weight_version' in body"}
+        version = body["weight_version"]
+        self._declare_weight_version(version)
+        logger.info("[RL] Weight version declared (version=%s)", version)
+        return {"status": "ok", "version": version}
 
     async def update_weights_from_disk(self, body: dict) -> dict:
         """Load weights from a shared filesystem checkpoint."""
@@ -1813,7 +1838,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 # weights is now stale and must not be reused. Invalidate it
                 # while still holding _pause_lock (generation is paused).
                 await self.engine_client.reset_prefix_cache()
-                self._weight_version = version
+                if "weight_version" in body:
+                    self._declare_weight_version(version)
                 logger.info(
                     f"[RL] Weights loaded from {path} (version={version}, rpc={rpc})"
                 )
@@ -1876,7 +1902,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     # Weights changed: stale prefix/KV cache must be invalidated
                     # before resume so it is not reused under the new weights.
                     await self.engine_client.reset_prefix_cache()
-                self._weight_version = version
+                if "weight_version" in body:
+                    self._declare_weight_version(version)
                 logger.info(
                     f"[RL] Weights received via distributed "
                     f"(version={version}, rpc={rpc})"
