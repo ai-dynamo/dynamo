@@ -3,6 +3,8 @@
 
 """CPU unit tests for the Qwen3.5 custom vision-encoder example."""
 
+import base64
+import io
 from types import SimpleNamespace
 
 import pytest
@@ -66,35 +68,59 @@ def _item(grid: tuple[int, int, int]) -> Qwen35ImageInputs:
     )
 
 
-class _FakeResponse:
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        return False
-
-    def read(self) -> bytes:
-        return b"image-bytes"
+def _png_data_url() -> str:
+    stream = io.BytesIO()
+    Image.new("RGB", (2, 2), color="green").save(stream, format="PNG")
+    encoded = base64.b64encode(stream.getvalue()).decode()
+    return f"data:image/png;base64,{encoded}"
 
 
-def test_preprocess_returns_processor_output(monkeypatch):
+def test_preprocess_returns_processor_output():
     encoder = Qwen35VisionEncoder()
     encoder._processor = SimpleNamespace(image_processor=_FakeImageProcessor())
-    monkeypatch.setattr(
-        "examples.custom_encoder.qwen3_5_vision_encoder.urllib.request.urlopen",
-        lambda raw, timeout: _FakeResponse(),
-    )
-    monkeypatch.setattr(
-        "examples.custom_encoder.qwen3_5_vision_encoder.Image.open",
-        lambda _stream: Image.new("RGB", (2, 2)),
-    )
 
-    result = encoder.preprocess("data:image/png;base64,example")
+    result = encoder.preprocess(_png_data_url())
 
     assert isinstance(result, Preprocessed)
     assert result.cost == 1
     assert result.item.pixel_values.shape == (4, 6)
     assert result.item.image_grid_thw.tolist() == [[1, 2, 2]]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "https://example.com/image.png",
+        "file:///etc/passwd",
+        "data:text/plain;base64,aGVsbG8=",
+        "data:image/png,not-base64",
+    ],
+)
+def test_preprocess_rejects_non_base64_image_data_urls(raw):
+    encoder = Qwen35VisionEncoder()
+    encoder._processor = SimpleNamespace(image_processor=_FakeImageProcessor())
+
+    with pytest.raises(ValueError, match="inline base64 image data URL"):
+        encoder.preprocess(raw)
+
+
+def test_preprocess_rejects_invalid_base64():
+    encoder = Qwen35VisionEncoder()
+    encoder._processor = SimpleNamespace(image_processor=_FakeImageProcessor())
+
+    with pytest.raises(ValueError, match="invalid base64"):
+        encoder.preprocess("data:image/png;base64,not_valid!")
+
+
+def test_preprocess_rejects_oversized_inline_image(monkeypatch):
+    encoder = Qwen35VisionEncoder()
+    encoder._processor = SimpleNamespace(image_processor=_FakeImageProcessor())
+    monkeypatch.setattr(
+        "examples.custom_encoder.qwen3_5_vision_encoder._MAX_BASE64_CHARS", 4
+    )
+
+    with pytest.raises(ValueError, match="exceeds"):
+        encoder.preprocess("data:image/png;base64,AAAAA")
 
 
 def test_forward_batch_splits_qwen_artifacts_in_input_order():
