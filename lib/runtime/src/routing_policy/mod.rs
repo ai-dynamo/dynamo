@@ -6,11 +6,9 @@ mod picker;
 mod types;
 
 pub(crate) use occupancy::get_or_create_routing_occupancy_state;
-pub use occupancy::{
-    OccupancyPolicy, OccupancyReservation, OccupancySelection, RoutingOccupancyState,
-};
+pub use occupancy::{OccupancyReservation, OccupancySelection, RoutingOccupancyState};
+pub use picker::BuiltinRoutePicker;
 pub(crate) use picker::RoutePicker;
-pub use picker::StatelessRoutePicker;
 pub use types::RouteTarget;
 pub(crate) use types::{
     AdmissionKind, CandidateView, RouteCandidate, RouteContext, RouteDecision, RouteDevice,
