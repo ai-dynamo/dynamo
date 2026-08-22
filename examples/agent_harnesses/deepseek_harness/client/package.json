@@ -1,0 +1,10 @@
+{
+  "name": "dsh-dynamo-client-lock",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "packageManager": "pnpm@11.7.0",
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.1.0-rc.8"
+  }
+}

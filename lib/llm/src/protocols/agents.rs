@@ -14,6 +14,8 @@ pub(crate) const HEADER_CLAUDE_CODE_PARENT_AGENT_ID: &str = "x-claude-code-paren
 pub(crate) const HEADER_CODEX_THREAD_ID: &str = "thread-id";
 pub(crate) const HEADER_CODEX_PARENT_THREAD_ID: &str = "x-codex-parent-thread-id";
 pub(crate) const HEADER_CODEX_TURN_METADATA: &str = "x-codex-turn-metadata";
+pub(crate) const HEADER_DEEPSEEK_HARNESS_SESSION_ID: &str = "x-deepseek-harness-session-id";
+pub(crate) const HEADER_DEEPSEEK_HARNESS_COMPACT: &str = "x-deepseek-harness-compact";
 pub(crate) const HEADER_OPENCODE_SESSION_ID: &str = "x-session-id";
 pub(crate) const HEADER_OPENCODE_PARENT_SESSION_ID: &str = "x-parent-session-id";
 pub(crate) const HEADER_DYNAMO_SESSION_ID: &str = "x-dynamo-session-id";
@@ -39,6 +41,12 @@ const AGENT_HEADER_MAPPINGS: &[AgentHeaderMapping] = &[
         root_session_header: HEADER_CODEX_THREAD_ID,
         child_session_header: None,
         parent_session_header: Some(HEADER_CODEX_PARENT_THREAD_ID),
+        infer_parent_from_session_for_child: false,
+    },
+    AgentHeaderMapping {
+        root_session_header: HEADER_DEEPSEEK_HARNESS_SESSION_ID,
+        child_session_header: None,
+        parent_session_header: None,
         infer_parent_from_session_for_child: false,
     },
     AgentHeaderMapping {
@@ -70,8 +78,6 @@ fn borrowed_header_value<'a>(headers: &'a HeaderMap, header_name: &str) -> Optio
 
 pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentContextHeaderValues> {
     let session_final = header_bool(headers, HEADER_DYNAMO_SESSION_FINAL);
-    let compaction = borrowed_header_value(headers, HEADER_CODEX_THREAD_ID)
-        .and_then(|_| codex_compaction_header_value(headers));
 
     if let Some(session_id) = borrowed_header_value(headers, HEADER_DYNAMO_SESSION_ID) {
         return Some(AgentContextHeaderValues {
@@ -80,7 +86,8 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
                 .map(str::to_owned),
             session_id: session_id.to_owned(),
             session_final,
-            compaction,
+            compaction: borrowed_header_value(headers, HEADER_CODEX_THREAD_ID)
+                .and_then(|_| codex_compaction_header_value(headers)),
         });
     }
 
@@ -109,7 +116,11 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
             session_id: session_id.to_owned(),
             parent_session_id,
             session_final,
-            compaction,
+            compaction: match mapping.root_session_header {
+                HEADER_CODEX_THREAD_ID => codex_compaction_header_value(headers),
+                HEADER_DEEPSEEK_HARNESS_SESSION_ID => deepseek_compaction_header_value(headers),
+                _ => None,
+            },
         });
     }
     None
@@ -120,6 +131,12 @@ fn codex_compaction_header_value(headers: &HeaderMap) -> Option<AgentCompaction>
     let metadata: CodexTurnMetadata = serde_json::from_str(raw).ok()?;
     (metadata.request_kind.as_deref() == Some("compaction"))
         .then(|| metadata.compaction.unwrap_or_default())
+}
+
+fn deepseek_compaction_header_value(headers: &HeaderMap) -> Option<AgentCompaction> {
+    borrowed_header_value(headers, HEADER_DEEPSEEK_HARNESS_SESSION_ID)?;
+    (borrowed_header_value(headers, HEADER_DEEPSEEK_HARNESS_COMPACT) == Some("1"))
+        .then(AgentCompaction::default)
 }
 
 pub(crate) fn session_affinity_header_value(headers: &HeaderMap) -> Option<String> {
