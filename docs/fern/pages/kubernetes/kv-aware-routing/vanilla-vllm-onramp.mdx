@@ -460,7 +460,8 @@ show no selection, the route is bypassing the `InferencePool`.
 ## EPP Replication
 
 Each EPP replica has an in-process selector and KV index. When `DYN_EPP_PEER_SERVICE` is set, replicas
-watch their own Service's `EndpointSlice` resources and discover its named TCP `replica-agg` port.
+read the named TCP `replica-agg` contract from their Service and use its EndpointSlices to discover
+sibling pod IPs and resolve a named backend `targetPort`.
 They synchronize admission, prefill-complete, and free events so active-load accounting converges
 across replicas.
 

@@ -87,8 +87,9 @@ pub struct EppStandaloneConfig {
     /// KV indexer thread-pool size for the in-process selector.
     #[validate(range(min = 1))]
     pub selector_threads: usize,
-    /// EPP Service for peer discovery and state synchronization. The eventual
-    /// selector resolves its named `replica-agg` port from EndpointSlices.
+    /// EPP Service for peer discovery and state synchronization. The selector
+    /// validates its named `replica-agg` Service port and resolves named
+    /// `targetPort` values from EndpointSlices.
     pub peer_service: Option<String>,
     /// `InferencePool` this EPP backs; its selector + target port drive discovery.
     #[validate(length(min = 1, message = "DYN_EPP_INFERENCE_POOL_NAME is required"))]

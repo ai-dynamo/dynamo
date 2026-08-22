@@ -151,20 +151,26 @@ spec:
       port: 8000
       targetPort: http
 ---
-# RBAC: the EPP reads the InferencePool (read-only), lists/watches its pods, and
-# watches EndpointSlices to discover both worker pods and its own sibling EPP
-# replicas (embedded replication peer sync).
+# RBAC: the EPP reads the peer Service contract, the InferencePool (read-only),
+# lists/watches its pods, and watches EndpointSlices to discover both worker
+# pods and its own sibling EPP replicas (embedded replication peer sync).
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: dynamo-epp
 ---
-# Standalone discovery reads only namespaced worker, pool, and EndpointSlice state.
+# Standalone discovery reads namespaced Service, worker, pool, and EndpointSlice state.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: dynamo-epp
 rules:
+  - apiGroups:
+      - ""
+    resources:
+      - services
+    verbs:
+      - get
   - apiGroups:
       - ""
     resources:
