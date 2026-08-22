@@ -3,8 +3,8 @@
 
 //! Shared worker-side first-token notification.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use dynamo_kv_router::sequences::SequencePublishQueueError;
 use dynamo_runtime::{
@@ -135,7 +135,7 @@ pub struct FirstTokenNotifier {
 struct FirstTokenNotifierInner {
     notified: AtomicBool,
     abort_sender: Option<watch::Sender<bool>>,
-    completion: Option<FirstTokenCompletion>,
+    completion: OnceLock<FirstTokenCompletion>,
 }
 
 struct FirstTokenCompletion {
@@ -166,13 +166,39 @@ impl FirstTokenNotifier {
             return None;
         }
 
+        let completion_cell = OnceLock::new();
+        if let Some(completion) = completion {
+            let _ = completion_cell.set(completion);
+        }
+
         Some(Self {
             inner: Arc::new(FirstTokenNotifierInner {
                 notified: AtomicBool::new(false),
                 abort_sender,
-                completion,
+                completion: completion_cell,
             }),
         })
+    }
+
+    /// Attach completion publication to this shared gate before output observation.
+    ///
+    /// Returns `false` when an action is already attached. Existing abort release and one-shot
+    /// state remain shared by every notifier clone.
+    #[doc(hidden)]
+    pub fn attach_completion(
+        &self,
+        source: &FirstTokenSource,
+        request_id: &str,
+        dp_rank: u32,
+    ) -> bool {
+        self.inner
+            .completion
+            .set(FirstTokenCompletion {
+                source: source.clone(),
+                request_id: request_id.to_string(),
+                dp_rank,
+            })
+            .is_ok()
     }
 
     /// Run the configured abort-release and completion-publication actions at most once.
@@ -183,7 +209,7 @@ impl FirstTokenNotifier {
         if let Some(sender) = &self.inner.abort_sender {
             let _ = sender.send(true);
         }
-        if let Some(completion) = &self.inner.completion {
+        if let Some(completion) = self.inner.completion.get() {
             let result = completion.source.publisher.mark_prefill_completed(
                 completion.request_id.clone(),
                 completion.source.worker_id,
@@ -252,6 +278,29 @@ mod tests {
         assert_eq!(event.request_id, "request-1");
         assert_eq!(event.worker.worker_id, 7);
         assert_eq!(event.worker.dp_rank, 3);
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn attaching_completion_preserves_abort_and_shared_gate() {
+        let (source, mut receiver) = source(WorkerType::Decode);
+        let source = source.unwrap();
+        let (abort_tx, mut abort_rx) = watch::channel(false);
+        let notifier = FirstTokenNotifier::for_request(Some(abort_tx), None, "", None).unwrap();
+        let notifier_clone = notifier.clone();
+
+        assert!(notifier.attach_completion(&source, "request-1", 3));
+        assert!(!notifier_clone.attach_completion(&source, "request-2", 4));
+
+        notifier.notify();
+        assert!(abort_rx.has_changed().unwrap());
+        assert!(*abort_rx.borrow_and_update());
+        let event = receiver.try_recv().unwrap();
+        assert_eq!(event.request_id, "request-1");
+        assert_eq!(event.worker.dp_rank, 3);
+
+        notifier_clone.notify();
+        assert!(!abort_rx.has_changed().unwrap());
         assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
     }
 

@@ -3164,7 +3164,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             self._first_token_source.bind(context, routing.get("dp_rank"))
         self._multimodal_request_processor.validate_multimodal_request(request)
         first_token = True
-        first_output_seen = False
+        first_token_output_seen = False
         with time_and_log_code_section(
             f"[DECODE] request: {request_id} generate"
         ) as decode_timer:
@@ -3179,14 +3179,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if first_token:
                     decode_timer.stop_interval()
                     first_token = False
-                if not first_output_seen:
+                if not self.use_vllm_tokenizer and not first_token_output_seen:
                     token_ids = chunk.get("token_ids") or []
-                    has_text = any(
-                        choice.get("delta", {}).get("content") or ""
-                        for choice in chunk.get("choices", [])
-                    )
-                    if token_ids or has_text:
-                        first_output_seen = True
+                    if token_ids:
+                        first_token_output_seen = True
                         context.notify_first_token()
                 yield chunk
 
@@ -3515,6 +3511,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         priority = -int(routing.get("priority", 0))
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text_per_choice: dict[int, str] = {}
+        first_token_output_seen = False
 
         trace_headers = context.trace_headers()
 
@@ -3572,6 +3569,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     for output in res.outputs:
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
+                        if not first_token_output_seen and getattr(
+                            output, "token_ids", None
+                        ):
+                            first_token_output_seen = True
+                            context.notify_first_token()
                         output_idx = getattr(output, "index", 0) or 0
                         previous_text = previous_text_per_choice.get(output_idx, "")
                         # Calculate the delta text (new text since last chunk)

@@ -214,8 +214,15 @@ impl Context {
         source: &dynamo_llm::first_token::FirstTokenSource,
         dp_rank: Option<u32>,
     ) {
+        let Some(dp_rank) = dp_rank else {
+            return;
+        };
+        if let Some(notifier) = &self.first_token {
+            let _ = notifier.attach_completion(source, self.inner.id(), dp_rank);
+            return;
+        }
         self.first_token =
-            FirstTokenNotifier::for_request(None, Some(source), self.inner.id(), dp_rank);
+            FirstTokenNotifier::for_request(None, Some(source), self.inner.id(), Some(dp_rank));
     }
 
     /// Build the `traceparent` header value. Prefers the engine.generate
