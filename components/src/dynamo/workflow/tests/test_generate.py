@@ -10,15 +10,20 @@ import pytest
 from dynamo.workflow import (
     DeploymentSpec,
     GenerateEndpointBinding,
+    NixlTensorFanout,
+    NixlTensorRef,
+    RemoteBinding,
     StageContext,
     StageContract,
     Workflow,
     WorkflowExecutionError,
+    WorkflowOrchestrator,
     WorkflowValidationError,
     compile_workflow,
 )
 from dynamo.workflow.dispatcher import StageDispatcher
 from dynamo.workflow.generate import GenerateEndpointInvoker, collect_generation
+from dynamo.workflow.remote import NixlCarriedValue
 
 pytestmark = [
     pytest.mark.unit,
@@ -77,6 +82,39 @@ def test_generate_binding_rejects_a_non_generate_stage_contract() -> None:
                 {"generator": GenerateEndpointBinding("models.decoder.generate")}
             ),
         )
+
+
+def test_generate_binding_accepts_external_encoder_ports_with_nixl() -> None:
+    external = StageContract(
+        id="external-generator",
+        inputs={"request", "encoder_features", "encoder_metadata"},
+        outputs={"completion"},
+    )
+    workflow = Workflow("external-generator")
+    request = workflow.input("request")
+    features = workflow.input("encoder_features")
+    metadata = workflow.input("encoder_metadata")
+    completion = workflow.stage(
+        "generator",
+        external,
+        request=request,
+        encoder_features=features,
+        encoder_metadata=metadata,
+    )
+    workflow.output("completion", completion.completion)
+
+    plan = compile_workflow(
+        workflow,
+        DeploymentSpec(
+            {
+                "generator": GenerateEndpointBinding(
+                    "models.decoder.generate", tensor_carrier="nixl"
+                )
+            }
+        ),
+    )
+
+    assert plan.bindings["generator"].tensor_carrier == "nixl"
 
 
 class _Client:
@@ -188,6 +226,39 @@ async def test_generate_invoker_forwards_multimodal_request_unchanged() -> None:
     assert transport.request == request
 
 
+async def test_generate_invoker_adapts_nixl_features_for_stock_vllm() -> None:
+    transport = _Client([{"token_ids": [7], "index": 0, "finish_reason": "stop"}])
+    request = _request()
+    reference = NixlTensorRef(
+        transfer_id="generator.encoder_features",
+        lease_id="lease-1",
+        shape=(3, 4),
+        dtype="float16",
+        device="cpu",
+        rdma_metadata={"opaque": True},
+    ).to_dict()
+
+    result = await GenerateEndpointInvoker(transport).run(
+        "generator",
+        StageContract(
+            id="external-generator",
+            inputs={"request", "encoder_features", "encoder_metadata"},
+            outputs={"completion"},
+        ),
+        {
+            "request": request,
+            "encoder_features": NixlCarriedValue(reference),
+            "encoder_metadata": {"row_splits": [0, 3], "image_token_id": 99},
+        },
+        _context(),
+    )
+
+    assert result["completion"]["token_ids"] == [7]
+    assert transport.request["encoder_result"]["features"] == reference
+    assert "multi_modal_data" not in transport.request
+    assert "multi_modal_uuids" not in transport.request
+
+
 async def test_generate_invoker_accepts_null_n_as_the_frontend_default() -> None:
     transport = _Client([{"token_ids": [42], "index": 0, "finish_reason": "stop"}])
 
@@ -253,6 +324,86 @@ async def test_dispatcher_binds_generate_protocol_for_stock_endpoint() -> None:
 
     assert result["completion"]["token_ids"] == [42]
     assert generator_client.request == request
+
+
+async def test_dispatcher_passes_remote_tensor_reference_to_stock_vllm() -> None:
+    encoder_contract = StageContract(
+        id="encoder", inputs={"request"}, outputs={"encoder_features"}
+    )
+    generator_contract = StageContract(
+        id="external-generator",
+        inputs={"request", "encoder_features", "encoder_metadata"},
+        outputs={"completion"},
+    )
+    workflow = Workflow("external-encoder-generate")
+    request = workflow.input("request")
+    metadata = workflow.input("encoder_metadata")
+    encoder = workflow.stage("encoder", encoder_contract, request=request)
+    generator = workflow.stage(
+        "generator",
+        generator_contract,
+        request=request,
+        encoder_features=encoder.encoder_features,
+        encoder_metadata=metadata,
+    )
+    workflow.output("completion", generator.completion)
+    encoder_endpoint = "models.encoder.generate"
+    generator_endpoint = "models.decoder.generate"
+    plan = compile_workflow(
+        workflow,
+        DeploymentSpec(
+            {
+                "encoder": RemoteBinding(encoder_endpoint, tensor_carrier="nixl"),
+                "generator": GenerateEndpointBinding(
+                    generator_endpoint, tensor_carrier="nixl"
+                ),
+            }
+        ),
+    )
+
+    class EncoderInvoker:
+        async def run(self, stage_id, contract, inputs, context, output_transfers):
+            transfer_ids = output_transfers["encoder_features"]
+            fanout = NixlTensorFanout(
+                {
+                    transfer_id: NixlTensorRef(
+                        transfer_id=transfer_id,
+                        lease_id="lease-1",
+                        shape=(3, 4),
+                        dtype="float16",
+                        device="cpu",
+                        rdma_metadata={"opaque": True},
+                    )
+                    for transfer_id in transfer_ids
+                }
+            )
+            return {"encoder_features": NixlCarriedValue(fanout.to_dict())}
+
+    generator_client = _Client(
+        [{"token_ids": [42], "index": 0, "finish_reason": "stop"}]
+    )
+    dispatcher = StageDispatcher(
+        plan,
+        {},
+        {
+            encoder_endpoint: EncoderInvoker(),
+            generator_endpoint: GenerateEndpointInvoker(generator_client),
+        },
+    )
+    orchestrator = WorkflowOrchestrator(plan, dispatcher)
+
+    result = await orchestrator.run(
+        {
+            "request": _request(),
+            "encoder_metadata": {"row_splits": [0, 3], "image_token_id": 99},
+        }
+    )
+
+    assert result["completion"]["token_ids"] == [42]
+    assert (
+        generator_client.request["encoder_result"]["features"]["transfer_id"]
+        == "generator.encoder_features"
+    )
 
 
 @pytest.mark.parametrize(
