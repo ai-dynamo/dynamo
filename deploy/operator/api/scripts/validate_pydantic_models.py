@@ -53,8 +53,7 @@ _components_src = _repo_root() / "components" / "src"
 # is not copied in. The generated files are already committed, so skip validation.
 if not _components_src.exists():
     print(
-        f"Note: {_components_src} not found (operator-only build context). "
-        "Skipping Pydantic validation tests."
+        f"Note: {_components_src} not found (operator-only build context). Skipping Pydantic validation tests."
     )
     sys.exit(0)
 
@@ -92,7 +91,7 @@ _planner_mod.__path__ = [_planner_path]  # type: ignore[attr-defined]
 _planner_mod.__package__ = "dynamo.planner"
 sys.modules["dynamo.planner"] = _planner_mod
 
-import pydantic  # noqa: E402
+import pydantic  # noqa: I001, E402
 
 from dynamo.profiler.utils.dgdr_v1beta1_types import (  # noqa: E402
     BackendType,
@@ -103,6 +102,7 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import (  # noqa: E402
     FeaturesSpec,
     MockerSpec,
     ModelCacheSpec,
+    OptimizationType,
     PlannerConfig,
     PlannerPreDeploymentSweepMode,
     ProfilingPhase,
@@ -133,15 +133,8 @@ def test_full_dgdr():
         model="meta-llama/Llama-3.1-405B",
         backend=BackendType.Vllm,
         image="nvcr.io/nvidia/dynamo-runtime:latest",
-        workload=WorkloadSpec(
-            isl=1024,
-            osl=512,
-            concurrency=10.0,
-        ),
-        sla=SLASpec(
-            ttft=100.0,
-            itl=10.0,
-        ),
+        workload=WorkloadSpec(isl=1024, osl=512, concurrency=10.0),
+        sla=SLASpec(ttft=100.0, itl=10.0, optimizationType="latency"),
         modelCache=ModelCacheSpec(
             pvcName="model-cache",
             pvcModelPath="llama-3.1-405b",
@@ -158,8 +151,11 @@ def test_full_dgdr():
     assert spec.model == "meta-llama/Llama-3.1-405B"
     assert spec.backend == BackendType.Vllm
     assert spec.workload.isl == 1024
+    assert spec.workload.osl == 512
+    assert spec.workload.concurrency == 10.0
     assert spec.sla.ttft == 100.0
     assert spec.sla.itl == 10.0
+    assert spec.sla.optimizationType == OptimizationType.Latency
     assert spec.modelCache.pvcName == "model-cache"
     assert spec.modelCache.pvcModelPath == "llama-3.1-405b"
     assert isinstance(spec.features.planner, PlannerConfig)
@@ -207,6 +203,8 @@ def test_workload_defaults():
     w = WorkloadSpec()
     assert w.isl == 4000
     assert w.osl == 1000
+    assert w.concurrency is None
+    assert w.requestRate is None
     print("✓ WorkloadSpec defaults correct")
 
 
@@ -215,11 +213,18 @@ def test_enums():
     # DGDRPhase — TitleCase suffix from Go const names
     assert DGDRPhase.Pending == "Pending"
     assert DGDRPhase.Profiling == "Profiling"
+    assert DGDRPhase.Deploying == "Deploying"
     assert DGDRPhase.Deployed == "Deployed"
+    assert DGDRPhase.Failed == "Failed"
 
     # ProfilingPhase — TitleCase suffix from Go const names
     assert ProfilingPhase.Initializing == "Initializing"
     assert ProfilingPhase.SweepingPrefill == "SweepingPrefill"
+    assert ProfilingPhase.SweepingDecode == "SweepingDecode"
+    assert ProfilingPhase.SelectingConfig == "SelectingConfig"
+    assert ProfilingPhase.BuildingCurves == "BuildingCurves"
+    assert ProfilingPhase.GeneratingDGD == "GeneratingDGD"
+    assert ProfilingPhase.Done == "Done"
 
     # SearchStrategy — TitleCase from Go const names
     assert SearchStrategy.Rapid == "rapid"
@@ -227,11 +232,14 @@ def test_enums():
 
     # BackendType — mixed case from Go const names
     assert BackendType.Auto == "auto"
+    assert BackendType.Sglang == "sglang"
+    assert BackendType.Trtllm == "trtllm"
     assert BackendType.Vllm == "vllm"
 
     # PlannerPreDeploymentSweepMode (None → None_ to avoid Python keyword clash)
     assert PlannerPreDeploymentSweepMode.None_ == "none"
     assert PlannerPreDeploymentSweepMode.Rapid == "rapid"
+    assert PlannerPreDeploymentSweepMode.Thorough == "thorough"
 
     print("✓ All enum values validated")
 
