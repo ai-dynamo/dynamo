@@ -46,6 +46,7 @@ class _FakeBackend(VisionEncoderBackend):
         self.close_calls = 0
         self.model_id = None
         self.forward_threads: list[int] = []
+        self.forward_batches: list[list[str]] = []
 
     def build(self, model_id):
         self.build_thread = threading.get_ident()
@@ -58,6 +59,7 @@ class _FakeBackend(VisionEncoderBackend):
 
     def forward_batch(self, items, target_bucket=None):
         self.forward_threads.append(threading.get_ident())
+        self.forward_batches.append(list(items))
         return [torch.full((2, 4), float(len(str(it)))) for it in items]
 
     def close(self):
@@ -73,6 +75,23 @@ async def test_encode_returns_one_tensor_per_raw():
         out = await enc.encode(["a", "bb", "ccc"])
         assert len(out) == 3
         assert all(t.shape == (2, 4) for t in out)
+    finally:
+        enc.shutdown()
+
+
+async def test_encode_partitions_preprocessed_compatibility_keys(monkeypatch):
+    be = _FakeBackend()
+    monkeypatch.setattr(
+        be,
+        "preprocess",
+        lambda raw: Preprocessed(item=raw, cost=1, bucket_key=raw[0]),
+    )
+    enc = AsyncVisionEncoder(be)
+    enc.load("m")
+    try:
+        out = await enc.encode(["a", "bbbb", "aa"])
+        assert be.forward_batches == [["a", "aa"], ["bbbb"]]
+        assert [float(tensor[0, 0]) for tensor in out] == [1.0, 4.0, 2.0]
     finally:
         enc.shutdown()
 
@@ -263,6 +282,21 @@ def test_driver_override_to_zero_with_overriding_backend_raises():
 def test_preprocess_concurrency_rejects_negative():
     with pytest.raises(ValueError, match="preprocess_concurrency"):
         AsyncVisionEncoder(_FakeBackend(), preprocess_concurrency=-1)
+
+
+def test_batch_queue_wait_is_forwarded_to_micro_batcher():
+    enc = AsyncVisionEncoder(
+        _FakeBackend(),
+        batch_queue_wait_s=0.002,
+        batch_queue_max_wait_s=0.05,
+    )
+    enc.load("m")
+    try:
+        assert enc._batcher is not None
+        assert enc._batcher._queue_wait_s == 0.002
+        assert enc._batcher._max_queue_wait_s == 0.05
+    finally:
+        enc.shutdown()
 
 
 def test_load_bad_batch_cost_fails_without_spawning_pool():

@@ -165,6 +165,66 @@ async def test_eager_drain_pulls_all_queued_when_free():
     assert ["a", "b", "c"] in batches
 
 
+async def test_queue_wait_coalesces_request_arriving_after_first_item():
+    batches: list[list[str]] = []
+
+    def fn(items):
+        batches.append(list(items))
+        return list(items)
+
+    b = ThreadedMicroBatcher(fn, queue_wait_s=0.05)
+    b.start()
+    try:
+        first = asyncio.create_task(b.submit(["first"]))
+        await asyncio.sleep(0.01)
+        second = asyncio.create_task(b.submit(["second"]))
+        assert await asyncio.gather(first, second) == [["first"], ["second"]]
+        assert batches == [["first", "second"]]
+    finally:
+        b.shutdown()
+
+
+async def test_queue_wait_extends_until_quiet_with_a_hard_deadline():
+    batches: list[list[str]] = []
+
+    def fn(items):
+        batches.append(list(items))
+        return list(items)
+
+    b = ThreadedMicroBatcher(
+        fn,
+        queue_wait_s=0.02,
+        max_queue_wait_s=0.1,
+    )
+    b.start()
+    try:
+        first = asyncio.create_task(b.submit(["first"]))
+        await asyncio.sleep(0.01)
+        second = asyncio.create_task(b.submit(["second"]))
+        await asyncio.sleep(0.015)
+        third = asyncio.create_task(b.submit(["third"]))
+        assert await asyncio.gather(first, second, third) == [
+            ["first"],
+            ["second"],
+            ["third"],
+        ]
+        assert batches == [["first", "second", "third"]]
+    finally:
+        b.shutdown()
+
+
+@pytest.mark.parametrize("queue_wait_s", [-1, float("inf"), float("nan"), True])
+def test_queue_wait_rejects_invalid_values(queue_wait_s):
+    with pytest.raises(ValueError, match="queue_wait_s"):
+        ThreadedMicroBatcher(_echo, queue_wait_s=queue_wait_s)
+
+
+@pytest.mark.parametrize("max_queue_wait_s", [-1, float("inf"), float("nan"), True])
+def test_max_queue_wait_rejects_invalid_values(max_queue_wait_s):
+    with pytest.raises(ValueError, match="max_queue_wait_s"):
+        ThreadedMicroBatcher(_echo, max_queue_wait_s=max_queue_wait_s)
+
+
 async def test_cost_budget_caps_each_batch():
     """costs ride on submit; with budget 5, batches never exceed summed cost 5.
 
@@ -184,6 +244,31 @@ async def test_cost_budget_caps_each_batch():
         assert [3] in g.batches and [3, 1] in g.batches  # split actually happened
     finally:
         b.shutdown()
+
+
+async def test_bucket_keys_partition_and_item_cap_round_robin():
+    g = _Gate()
+    b = ThreadedMicroBatcher(g.fn, max_batch_items=2)
+    b.start()
+    try:
+        gate = await g.park(b)
+        real = asyncio.ensure_future(
+            b.submit(
+                ["a1", "a2", "a3", "b1", "b2"],
+                bucket_keys=["a", "a", "a", "b", "b"],
+            )
+        )
+        await asyncio.sleep(0.05)
+        g.release.set()
+        await asyncio.gather(gate, real)
+        assert g.batches == [["a1", "a2"], ["b1", "b2"], ["a3"]]
+    finally:
+        b.shutdown()
+
+
+def test_nonpositive_item_cap_rejected():
+    with pytest.raises(ValueError, match="max_batch_items"):
+        ThreadedMicroBatcher(_echo, max_batch_items=0)
 
 
 async def test_max_batch_cost_none_is_passthrough():
@@ -439,6 +524,18 @@ async def test_costs_length_mismatch_raises():
     try:
         with pytest.raises(ValueError, match="costs has"):
             await b.submit(["a", "b"], costs=[1])
+    finally:
+        b.shutdown()
+
+
+async def test_bucket_keys_length_and_hashability_are_validated():
+    b = ThreadedMicroBatcher(_echo)
+    b.start()
+    try:
+        with pytest.raises(ValueError, match="bucket_keys has"):
+            await b.submit(["a", "b"], bucket_keys=["a"])
+        with pytest.raises(ValueError, match="must be hashable"):
+            await b.submit(["a"], bucket_keys=[["not-hashable"]])
     finally:
         b.shutdown()
 
