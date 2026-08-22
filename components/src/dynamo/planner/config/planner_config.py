@@ -19,7 +19,7 @@ import math
 import os
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Literal, Optional, Protocol
+from typing import Literal, Protocol
 from urllib.parse import parse_qsl
 
 import yaml
@@ -45,8 +45,8 @@ class MinimumEndpointConfig(Protocol):
     """Configuration fields used to resolve component endpoint floors."""
 
     min_endpoint: int
-    prefill_min_endpoint: Optional[int]
-    decode_min_endpoint: Optional[int]
+    prefill_min_endpoint: int | None
+    decode_min_endpoint: int | None
 
 
 def resolve_min_endpoint(
@@ -109,16 +109,16 @@ class AICPerfModelSpec(BaseModel):
     hf_id: str = Field(description="HuggingFace model id, e.g. Qwen/Qwen3-32B")
     system: str = Field(description="AIC system identifier, e.g. h200_sxm")
     backend: Literal["trtllm", "vllm", "sglang"]
-    backend_version: Optional[str] = None
+    backend_version: str | None = None
 
-    prefill_pick: Optional[PickedParallelConfig] = None
-    decode_pick: Optional[PickedParallelConfig] = None
+    prefill_pick: PickedParallelConfig | None = None
+    decode_pick: PickedParallelConfig | None = None
 
-    model_arch: Optional[str] = None
-    weight_dtype: Optional[str] = None
-    moe_dtype: Optional[str] = None
-    activation_dtype: Optional[str] = None
-    kv_cache_dtype: Optional[str] = None
+    model_arch: str | None = None
+    weight_dtype: str | None = None
+    moe_dtype: str | None = None
+    activation_dtype: str | None = None
+    kv_cache_dtype: str | None = None
 
 
 class ExternalPluginEntry(BaseModel):
@@ -141,8 +141,7 @@ class ExternalPluginEntry(BaseModel):
     plugin_id: str = Field(
         ...,
         min_length=1,
-        description="Unique identifier; must not collide with builtin "
-        "plugin_ids (e.g. ``builtin_load_propose``).",
+        description="Unique identifier; must not collide with builtin plugin_ids (e.g. ``builtin_load_propose``).",
     )
     plugin_type: Literal["predict", "propose", "reconcile", "constrain"] = Field(
         ...,
@@ -199,13 +198,11 @@ class ExternalPluginEntry(BaseModel):
     )
     protocol_version: str = Field(
         default="1.0",
-        description="Plugin protocol version. Must match planner's "
-        "supported range (``[1.0, 1.0]`` today).",
+        description="Plugin protocol version. Must match planner's supported range (``[1.0, 1.0]`` today).",
     )
     version: str = Field(
         default="v1",
-        description="Plugin's own version string — surfaced in "
-        "ListPlugins for debugging / canary identification.",
+        description="Plugin's own version string — surfaced in ListPlugins for debugging / canary identification.",
     )
     execution_interval_seconds: float = Field(
         default=0.0,
@@ -263,8 +260,7 @@ class ExternalPluginEntry(BaseModel):
                 return HoldPolicy[v.upper()]
             except KeyError:
                 raise ValueError(
-                    f"hold_policy must be one of {[p.name for p in HoldPolicy]}, "
-                    f"got {v!r}"
+                    f"hold_policy must be one of {[p.name for p in HoldPolicy]}, got {v!r}"
                 )
         return v
 
@@ -374,7 +370,7 @@ class PlannerConfig(BaseModel):
     Defaults are sourced from SLAPlannerDefaults.
     """
 
-    pre_deployment_sweeping_mode: Optional[PlannerPreDeploymentSweepMode] = Field(
+    pre_deployment_sweeping_mode: PlannerPreDeploymentSweepMode | None = Field(
         default=PlannerPreDeploymentSweepMode.Rapid,
         description=(
             "Controls optional pre-deployment perf-model bootstrap data. "
@@ -406,7 +402,7 @@ class PlannerConfig(BaseModel):
         ),
     )
 
-    log_dir: Optional[str] = SLAPlannerDefaults.log_dir
+    log_dir: str | None = SLAPlannerDefaults.log_dir
     throughput_adjustment_interval_seconds: int = Field(
         default=SLAPlannerDefaults.throughput_adjustment_interval_seconds,
         validation_alias=AliasChoices(
@@ -441,7 +437,7 @@ class PlannerConfig(BaseModel):
             "Must be nonnegative; 0 permits scale-to-zero."
         ),
     )
-    prefill_min_endpoint: Optional[int] = Field(
+    prefill_min_endpoint: int | None = Field(
         default=SLAPlannerDefaults.prefill_min_endpoint,
         ge=1,
         description=(
@@ -449,7 +445,7 @@ class PlannerConfig(BaseModel):
             "replaces the prefill value supplied by min_endpoint."
         ),
     )
-    decode_min_endpoint: Optional[int] = Field(
+    decode_min_endpoint: int | None = Field(
         default=SLAPlannerDefaults.decode_min_endpoint,
         ge=1,
         description=(
@@ -462,17 +458,16 @@ class PlannerConfig(BaseModel):
         ge=0,
         le=65535,
         description=(
-            "Port for the localhost-only runtime minimum-endpoint API. "
-            "Set to 0 to disable the API."
+            "Port for the localhost-only runtime minimum-endpoint API. Set to 0 to disable the API."
         ),
     )
 
-    decode_engine_num_gpu: Optional[int] = None
-    prefill_engine_num_gpu: Optional[int] = None
+    decode_engine_num_gpu: int | None = None
+    prefill_engine_num_gpu: int | None = None
 
     profile_results_dir: str = SLAPlannerDefaults.profile_results_dir
 
-    aic_interpolation: Optional[AICInterpolationSpec] = Field(
+    aic_interpolation: AICInterpolationSpec | None = Field(
         default=None,
         description=(
             "AIConfigurator interpolation spec populated by the profiler in "
@@ -482,7 +477,7 @@ class PlannerConfig(BaseModel):
             "the legacy profile_results_dir file loader)."
         ),
     )
-    aic_perf_model: Optional[AICPerfModelSpec] = Field(
+    aic_perf_model: AICPerfModelSpec | None = Field(
         default=None,
         description=(
             "Native AIC forward-pass perf model identity for the Planner "
@@ -506,7 +501,7 @@ class PlannerConfig(BaseModel):
     load_predictor: str = SLAPlannerDefaults.load_predictor
     load_predictor_log1p: bool = SLAPlannerDefaults.load_predictor_log1p
     prophet_window_size: int = SLAPlannerDefaults.prophet_window_size
-    load_predictor_warmup_trace: Optional[str] = None
+    load_predictor_warmup_trace: str | None = None
 
     # Kalman filter settings
     kalman_q_level: float = SLAPlannerDefaults.kalman_q_level
@@ -522,7 +517,7 @@ class PlannerConfig(BaseModel):
         ),
         exclude=True,
     )
-    metric_pulling_prometheus_token: Optional[str] = Field(
+    metric_pulling_prometheus_token: str | None = Field(
         default_factory=lambda: os.environ.get("PROMETHEUS_TOKEN"),
         exclude=True,
         description=(
@@ -532,7 +527,7 @@ class PlannerConfig(BaseModel):
             "read once at startup."
         ),
     )
-    metric_pulling_prometheus_token_file: Optional[str] = Field(
+    metric_pulling_prometheus_token_file: str | None = Field(
         default_factory=lambda: os.environ.get("PROMETHEUS_TOKEN_FILE"),
         exclude=True,
         description=(
@@ -552,7 +547,7 @@ class PlannerConfig(BaseModel):
             "an injected CA bundle if the upstream uses a private CA."
         ),
     )
-    metric_pulling_prometheus_extra_query_params: Optional[Dict[str, str]] = Field(
+    metric_pulling_prometheus_extra_query_params: dict[str, str] | None = Field(
         default_factory=lambda: (
             dict(
                 parse_qsl(
@@ -569,7 +564,7 @@ class PlannerConfig(BaseModel):
             "e.g. `namespace=my-ns&tenant=foo`."
         ),
     )
-    metric_pulling_prometheus_ca_bundle: Optional[str] = Field(
+    metric_pulling_prometheus_ca_bundle: str | None = Field(
         default_factory=lambda: os.environ.get("PROMETHEUS_CA_BUNDLE"),
         exclude=True,
         validate_default=True,
@@ -599,7 +594,7 @@ class PlannerConfig(BaseModel):
 
     @field_validator("metric_pulling_prometheus_ca_bundle", mode="after")
     @classmethod
-    def _validate_ca_bundle_path(cls, v: Optional[str]) -> Optional[str]:
+    def _validate_ca_bundle_path(cls, v: str | None) -> str | None:
         if v is not None and not Path(v).is_file():
             raise ValueError(
                 f"metric_pulling_prometheus_ca_bundle path does not exist or is not a file: {v!r}. "
@@ -608,16 +603,16 @@ class PlannerConfig(BaseModel):
         return v
 
     metric_reporting_prometheus_port: int = Field(
-        default_factory=lambda: int(os.environ.get("PLANNER_PROMETHEUS_PORT", 0))
+        default_factory=lambda: int(os.environ.get("PLANNER_PROMETHEUS_PORT", "0"))
     )
     throughput_metrics_source: Literal[
         "frontend", "router"
     ] = SLAPlannerDefaults.throughput_metrics_source
 
-    model_name: Optional[str] = None
+    model_name: str | None = None
 
     # Global planner environment
-    global_planner_namespace: Optional[str] = None
+    global_planner_namespace: str | None = None
 
     # Scaling mode flags
     enable_throughput_scaling: bool = SLAPlannerDefaults.enable_throughput_scaling
@@ -643,39 +638,35 @@ class PlannerConfig(BaseModel):
     load_scaling_down_sensitivity: int = (
         SLAPlannerDefaults.load_scaling_down_sensitivity
     )
-    prefill_scale_up_queue_tokens: Optional[int] = Field(
+    prefill_scale_up_queue_tokens: int | None = Field(
         default=SLAPlannerDefaults.prefill_scale_up_queue_tokens,
         ge=0,
         description=(
-            "Prefill queue token count that triggers scale-up when "
-            "optimization_target='load'."
+            "Prefill queue token count that triggers scale-up when optimization_target='load'."
         ),
     )
-    prefill_scale_down_queue_tokens: Optional[int] = Field(
+    prefill_scale_down_queue_tokens: int | None = Field(
         default=SLAPlannerDefaults.prefill_scale_down_queue_tokens,
         ge=0,
         description=(
-            "Prefill queue token count that allows scale-down when "
-            "optimization_target='load'."
+            "Prefill queue token count that allows scale-down when optimization_target='load'."
         ),
     )
-    decode_scale_up_kv_rate: Optional[float] = Field(
+    decode_scale_up_kv_rate: float | None = Field(
         default=SLAPlannerDefaults.decode_scale_up_kv_rate,
         ge=0,
         le=100,
         validation_alias=AliasChoices("decode_scale_up_kv_rate"),
         description=(
-            "Decode KV utilization percentage that triggers scale-up when "
-            "optimization_target='load'. Accepts 0-100."
+            "Decode KV utilization percentage that triggers scale-up when optimization_target='load'. Accepts 0-100."
         ),
     )
-    decode_scale_down_kv_rate: Optional[float] = Field(
+    decode_scale_down_kv_rate: float | None = Field(
         default=SLAPlannerDefaults.decode_scale_down_kv_rate,
         ge=0,
         le=100,
         description=(
-            "Decode KV utilization percentage that allows scale-down when "
-            "optimization_target='load'. Accepts 0-100."
+            "Decode KV utilization percentage that allows scale-down when optimization_target='load'. Accepts 0-100."
         ),
     )
     load_min_observations: int = SLAPlannerDefaults.load_min_observations
@@ -713,7 +704,7 @@ class PlannerConfig(BaseModel):
             "mode='agg'."
         ),
     )
-    total_gpu_power_limit: Optional[int] = Field(
+    total_gpu_power_limit: int | None = Field(
         default=None,
         ge=1,
         description=(
@@ -729,7 +720,7 @@ class PlannerConfig(BaseModel):
     )
 
     # Diagnostics report settings
-    report_interval_hours: Optional[float] = Field(
+    report_interval_hours: float | None = Field(
         default=24.0,
         description=(
             "Generate an HTML diagnostics report every N hours (simulated time). "
@@ -740,7 +731,7 @@ class PlannerConfig(BaseModel):
         default="./planner_reports",
         description="Directory for HTML diagnostics reports.",
     )
-    report_filename: Optional[str] = Field(
+    report_filename: str | None = Field(
         default=None,
         description=(
             "Fixed filename for HTML diagnostics reports. "
@@ -860,24 +851,21 @@ class PlannerConfig(BaseModel):
             or self.decode_min_endpoint is not None
         ):
             raise ValueError(
-                "prefill_min_endpoint and decode_min_endpoint are not supported "
-                "when mode='agg'; use min_endpoint"
+                "prefill_min_endpoint and decode_min_endpoint are not supported when mode='agg'; use min_endpoint"
             )
 
-        if self.report_interval_hours is not None:
-            if (
-                not math.isfinite(self.report_interval_hours)
-                or self.report_interval_hours <= 0
-            ):
-                raise ValueError(
-                    "report_interval_hours must be a positive finite number or None"
-                )
+        if self.report_interval_hours is not None and (
+            not math.isfinite(self.report_interval_hours)
+            or self.report_interval_hours <= 0
+        ):
+            raise ValueError(
+                "report_interval_hours must be a positive finite number or None"
+            )
 
         sqrt = math.isqrt(self.fpm_sample_bucket_size)
         if sqrt * sqrt != self.fpm_sample_bucket_size:
             raise ValueError(
-                f"fpm_sample_bucket_size must be a perfect square, "
-                f"got {self.fpm_sample_bucket_size}"
+                f"fpm_sample_bucket_size must be a perfect square, got {self.fpm_sample_bucket_size}"
             )
 
         # Power-awareness validation. Per-GPU caps come from DGD worker
@@ -929,8 +917,7 @@ class PlannerConfig(BaseModel):
                     <= self.prefill_scale_down_queue_tokens
                 ):
                     raise ValueError(
-                        "prefill_scale_up_queue_tokens must be greater than "
-                        "prefill_scale_down_queue_tokens"
+                        "prefill_scale_up_queue_tokens must be greater than prefill_scale_down_queue_tokens"
                     )
             if self.mode in ("disagg", "decode", "agg"):
                 if (
@@ -944,8 +931,7 @@ class PlannerConfig(BaseModel):
                     )
                 if self.decode_scale_up_kv_rate <= self.decode_scale_down_kv_rate:
                     raise ValueError(
-                        "decode_scale_up_kv_rate must be greater than "
-                        "decode_scale_down_kv_rate"
+                        "decode_scale_up_kv_rate must be greater than decode_scale_down_kv_rate"
                     )
 
         # Easy mode: force load scaling on, throughput scaling off
@@ -970,8 +956,7 @@ class PlannerConfig(BaseModel):
         # At least one scaling mode must be enabled
         if not self.enable_throughput_scaling and not self.enable_load_scaling:
             raise ValueError(
-                "At least one scaling mode must be enabled "
-                "(enable_throughput_scaling or enable_load_scaling)"
+                "At least one scaling mode must be enabled (enable_throughput_scaling or enable_load_scaling)"
             )
 
         if self.enable_throughput_scaling:
@@ -1003,24 +988,21 @@ class PlannerConfig(BaseModel):
                 and self.aic_perf_model.prefill_pick is None
             ):
                 raise ValueError(
-                    "aic_perf_model.prefill_pick is required for prefill "
-                    f"perf queries in mode={self.mode!r}"
+                    f"aic_perf_model.prefill_pick is required for prefill perf queries in mode={self.mode!r}"
                 )
             if (
                 self.mode in ("disagg", "decode", "agg")
                 and self.aic_perf_model.decode_pick is None
             ):
                 raise ValueError(
-                    "aic_perf_model.decode_pick is required for decode/agg "
-                    f"perf queries in mode={self.mode!r}"
+                    f"aic_perf_model.decode_pick is required for decode/agg perf queries in mode={self.mode!r}"
                 )
 
         intervals = [float(self.load_adjustment_interval_seconds)]
         if self.enable_throughput_scaling:
             if self.throughput_adjustment_interval_seconds <= 0:
                 raise ValueError(
-                    "throughput_adjustment_interval_seconds must be > 0 "
-                    "when throughput scaling is enabled"
+                    "throughput_adjustment_interval_seconds must be > 0 when throughput scaling is enabled"
                 )
             intervals.append(float(self.throughput_adjustment_interval_seconds))
         for interval in intervals:
@@ -1031,18 +1013,18 @@ class PlannerConfig(BaseModel):
                     "scaling is enabled, throughput_adjustment_interval_seconds"
                 )
 
-        if self.enable_load_scaling:
-            if self.enable_throughput_scaling:
-                if (
-                    self.load_adjustment_interval_seconds
-                    >= self.throughput_adjustment_interval_seconds
-                ):
-                    raise ValueError(
-                        f"load_adjustment_interval_seconds ({self.load_adjustment_interval_seconds}s) "
-                        f"must be shorter than throughput_adjustment_interval_seconds ({self.throughput_adjustment_interval_seconds}s). "
-                        "Load-based scaling is the fast reactive loop; throughput-based is the "
-                        "slow predictive loop."
-                    )
+        if (
+            self.enable_load_scaling
+            and self.enable_throughput_scaling
+            and self.load_adjustment_interval_seconds
+            >= self.throughput_adjustment_interval_seconds
+        ):
+            raise ValueError(
+                f"load_adjustment_interval_seconds ({self.load_adjustment_interval_seconds}s) "
+                f"must be shorter than throughput_adjustment_interval_seconds ({self.throughput_adjustment_interval_seconds}s). "
+                "Load-based scaling is the fast reactive loop; throughput-based is the "
+                "slow predictive loop."
+            )
 
         return self
 
@@ -1090,8 +1072,7 @@ class PlannerConfig(BaseModel):
                     data = yaml.safe_load(text)
                 except ImportError:
                     raise ValueError(
-                        f"Could not parse config file '{path}'. "
-                        "For YAML support, install pyyaml."
+                        f"Could not parse config file '{path}'. For YAML support, install pyyaml."
                     )
 
         return cls.model_validate(data)
@@ -1111,7 +1092,7 @@ class PlannerConfig(BaseModel):
 
         return resolve_min_endpoint(self, "decode")
 
-    def active_min_endpoints(self) -> tuple[Optional[int], Optional[int]]:
+    def active_min_endpoints(self) -> tuple[int | None, int | None]:
         """Return effective ``(prefill, decode)`` floors for the active mode."""
 
         if self.mode == "prefill":
