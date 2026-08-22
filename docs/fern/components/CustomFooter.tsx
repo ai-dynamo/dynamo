@@ -6,17 +6,18 @@
 /**
  * Custom footer for Dynamo docs (Fern native header/footer).
  *
- * Site chrome CSS is delivered below as a page-level <style> block (NOT via
- * the docs.yml `css:` field) so it survives the shared NVIDIA global theme,
- * which replaces project `css` at publish (same fix as #11952; re-applied
- * after the docs restructure moved styles back to main.css and production
- * rendered unstyled). Inlined rather than imported because Fern custom
- * footer components cannot import local modules.
+ * SITE_CSS mirrors docs/fern/main.css, which stays canonical and is served via
+ * docs.yml `css:` for local and unthemed builds. The inline copy keeps those
+ * styles available whenever Fern renders this project footer; it cannot cover
+ * hosted builds where the shared NVIDIA global theme replaces both project CSS
+ * and the footer. Hosted theme-chrome corrections instead live in SiteStyles
+ * and are injected into the disposable composed pages before Fern generates
+ * them. Inlined rather than imported because Fern custom footer components
+ * cannot import local modules.
  *
- * SITE_CSS mirrors docs/fern/main.css, which stays canonical and served via
- * docs.yml `css:` (the server-rendered / no-JS baseline). Do not edit the
- * block by hand: run `python3 docs/fern/scripts/sync_site_css.py` after
- * changing main.css. Pre-commit enforces the mirror with `--check`.
+ * Do not edit the block by hand: run
+ * `python3 docs/fern/scripts/sync_site_css.py` after changing main.css.
+ * Pre-commit enforces the mirror with `--check`.
  */
 // sync-site-css:begin (generated from ../main.css)
 const SITE_CSS = `
@@ -187,7 +188,6 @@ html.dark,
 /* Sidebar styling */
 #fern-sidebar {
     border-right: 1px solid var(--border, var(--grayscale-a5)) !important;
-    height: 100vh !important;
 }
 .fern-sidebar-link:not(:hover) {
     background-color: transparent !important;

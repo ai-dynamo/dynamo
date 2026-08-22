@@ -321,6 +321,15 @@ markdown files:
 React components in `docs/fern/components/` can be used in markdown via MDX. The
 `CustomFooter.tsx` renders the NVIDIA footer with legal links and branding.
 
+Hosted builds apply the NVIDIA global theme, which replaces project-level CSS and
+footer configuration. Immediately before Fern generates a preview or production
+site, `inject_site_styles.py` adds the page-level `SiteStyles` component to the
+disposable composed pages. This keeps site-wide compatibility corrections active
+without modifying authored pages or frozen release snapshots. Fern's hosted
+runtime publishes the visible footer height as
+`--custom-footer-visible-height`; `SiteStyles` can consume that native value while
+overriding older theme CSS that ignores it.
+
 ---
 
 ## Callout Conversion

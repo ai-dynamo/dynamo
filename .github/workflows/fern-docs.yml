@@ -218,13 +218,15 @@ jobs:
             cp source-checkout/docs/fern/.gitignore docs-checkout/fern/.gitignore
           fi
 
-          # Sync the callout converter under fern/scripts/ and remove its old
-          # root-level location from docs-website after the source-tree move.
+          # Sync hosted-build transforms under fern/scripts/ and remove the
+          # callout converter's old root-level location after the source-tree move.
           rm -f docs-checkout/fern/convert_callouts.py
-          if [ -f source-checkout/docs/fern/scripts/convert_callouts.py ]; then
-            mkdir -p docs-checkout/fern/scripts
-            cp source-checkout/docs/fern/scripts/convert_callouts.py docs-checkout/fern/scripts/convert_callouts.py
-          fi
+          mkdir -p docs-checkout/fern/scripts
+          for script in convert_callouts.py inject_site_styles.py; do
+            if [ -f "source-checkout/docs/fern/scripts/$script" ]; then
+              cp "source-checkout/docs/fern/scripts/$script" "docs-checkout/fern/scripts/$script"
+            fi
+          done
 
           # Sync components/ directory (e.g., CustomFooter.tsx)
           if [ -d source-checkout/docs/fern/components ]; then
@@ -582,6 +584,14 @@ jobs:
       # PREVIEW - Generate a preview URL for docs changes
       ##########################################################################
 
+      # The NVIDIA global theme replaces project css/footer fields. Inject the
+      # registered SiteStyles component into the disposable composed pages so
+      # its page-level <style> survives the theme merge. Do this after change
+      # detection so generated tags never enter the docs-website commit.
+      - name: Inject hosted site styles for preview
+        if: steps.ctx.outputs.is_main != 'true' && steps.changes.outputs.has_changes == 'true'
+        run: python3 source-checkout/docs/fern/scripts/inject_site_styles.py docs-checkout/fern
+
       - name: Generate docs preview
         if: steps.ctx.outputs.is_main != 'true' && steps.changes.outputs.has_changes == 'true'
         id: preview
@@ -641,6 +651,10 @@ jobs:
           git push origin docs-website
 
           echo "Successfully synced dev docs to docs-website branch"
+
+      - name: Inject hosted site styles for publish
+        if: steps.ctx.outputs.is_main == 'true' && steps.changes.outputs.has_changes == 'true'
+        run: python3 docs-checkout/fern/scripts/inject_site_styles.py docs-checkout/fern
 
       - name: Publish Docs
         if: steps.ctx.outputs.is_main == 'true' && steps.changes.outputs.has_changes == 'true'
@@ -1097,6 +1111,14 @@ jobs:
           git push origin docs-website
 
           echo "Successfully released documentation for $TAG on docs-website branch"
+
+      - name: Inject hosted site styles for release publish
+        run: |
+          if [ -f docs-checkout/fern/scripts/inject_site_styles.py ]; then
+            python3 docs-checkout/fern/scripts/inject_site_styles.py docs-checkout/fern
+          else
+            echo "::warning::inject_site_styles.py is absent from docs-website; publishing without hosted site corrections"
+          fi
 
       - name: Publish Docs
         env:
