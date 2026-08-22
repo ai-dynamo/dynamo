@@ -1,4 +1,4 @@
-<!--
+﻿<!--
 SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
@@ -15,71 +15,40 @@ and ask it to author or adapt one; the repo's agent skills guide the process.
 
 ## Available Recipes
 
-### Feature Comparison Recipes
-
-These recipes compare Dynamo performance features with benchmark results, each including both baseline and optimized deployment configurations:
-
-| Model | Framework | Configuration | GPUs | Features |
-|-------|-----------|---------------|------|----------|
-| **[Qwen3-32B](qwen3-32b/)** | vLLM | Disagg + KV-Router | 16x H200 | **Disaggregated Serving + KV-Aware Routing** — benchmark comparison with real-world Mooncake traces |
-| **[DeepSeek-V3.2-NVFP4](deepseek-v32-fp4/)** | TensorRT-LLM | Agg + Disagg WideEP | 32x GB200 | **Disaggregated Serving + KV-Aware Routing** — benchmark comparison with Mooncake-based synthetic coding trace |
-| **[Qwen3-VL-30B-A3B-FP8](qwen3-vl-30b/)** | vLLM | Agg + Embedding Cache | 1x GB200 | **Multimodal Embedding Cache** — benchmark comparison showing +16% throughput, -28% TTFT |
-
 ### Aggregated & Disaggregated Recipes
 
 These recipes demonstrate aggregated or disaggregated serving:
 
-**GAIE Column**: Indicates whether the recipe includes integration with the [Gateway API Inference Extension (GAIE)](../deploy/inference-gateway/README.md) — a Kubernetes SIG project that extends the Gateway API for AI inference workloads, providing load balancing, model routing, and request management.
-
-| Model | Framework | Mode | GPUs | Deployment | Benchmark | Notes | GAIE |
-|-------|-----------|------|------|------------|-----------|-------|------|
-| **[Llama-3-70B](llama-3-70b/vllm/agg/)** | vLLM | Aggregated | 4x H100/H200 | ✅ | ✅ | FP8 dynamic quantization | ✅ |
-| **[Llama-3-70B](llama-3-70b/vllm/disagg-single-node/)** | vLLM | Disagg (Single-Node) | 8x H100/H200 | ✅ | ✅ | Prefill + Decode separation | ❌ |
-| **[Llama-3-70B](llama-3-70b/vllm/disagg-multi-node/)** | vLLM | Disagg (Multi-Node) | 16x H100/H200 | ✅ | ✅ | 2 nodes, 8 GPUs each | ❌ |
-| **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/agg/)** | TensorRT-LLM | Aggregated | 2x H100/H200/A100 | ✅ | ✅ | FP8 quantization | ❌ |
-| **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 8x H100/H200/A100 | ✅ | ✅ | Prefill + Decode separation | ❌ |
-| **[Qwen3-32B-FP8](qwen3-32b-fp8/vllm/disagg/)** | vLLM | Disagg (Single-Node) | 8x A100 | ✅ | ✅ | 2× TP2 prefill + 1× TP4 decode, NixlConnector KV transfer | ❌ |
-| **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/agg/hopper/)** | TensorRT-LLM | Aggregated (Hopper) | 16x H100/H200 | ✅ | ✅ | MoE model, TP4×EP4 | ❌ |
-| **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/agg/blackwell/)** | TensorRT-LLM | Aggregated (Blackwell) | 16x B100/B200 | ✅ | ✅ | MoE model, TP4×EP4, DEEPGEMM backend | ❌ |
-| **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/disagg/hopper/)** | TensorRT-LLM | Disaggregated (Hopper) | 16x H100/H200 | ✅ | ✅ | MoE model, Prefill + Decode | ❌ |
-| **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/)** | TensorRT-LLM | Disaggregated (Blackwell) | 16x B100/B200 | ✅ | ✅ | MoE model, Prefill + Decode, DEEPGEMM backend | ❌ |
-| **[Qwen3.8-2.4T-A95B-FP8](qwen3.8-2.4t-a95b-fp8/)** | vLLM, SGLang | Aggregated / Disaggregated | 16x GB300 / GB200 | ✅ | ❌ | Hybrid gated-delta-net + 512-expert MoE (262K ctx), FP8 weights + FP8 KV, TP16 over MNNVL, KV-aware routing + prefix caching, reasoning + tool calling | ❌ |
-| **[Qwen3.5-122B-A10B-NVFP4](qwen3.5-122b/nvfp4/vllm/agg-b200-agentic/)** | vLLM | Aggregated | 2x B200 | ✅ | ✅ | Hybrid GDN+MoE, NVFP4 + FP8 KV, TP1 x `replicas: 2`, KV-aware routing; agentic profile | ❌ |
-| **[Qwen3.5-122B-A10B-NVFP4](qwen3.5-122b/nvfp4/vllm/disagg-b200-agentic/)** | vLLM | Disaggregated | 3x B200 | ✅ | ✅ | Hybrid GDN+MoE, NVFP4 + FP8 KV, 1P2D over NIXL, KV-aware routing; agentic profile | ❌ |
-| **[GPT-OSS-120B](gpt-oss-120b/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x GB200 | ✅ | ✅ | Blackwell only, WideEP | ❌ |
-| **[GPT-OSS-120B](gpt-oss-120b/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 5x Blackwell (GB200/B200) | ✅ | ✅ | Prefill/Decode split | ❌ |
-| **[GPT-OSS-120B](gpt-oss-120b/vllm/)** | vLLM | Agg + Disagg | 8x B200 / 8x H200 | ✅ | ✅ | MXFP4 MoE + FP8 KV, 8x TP1 agg / decode-heavy single-node disagg (2P6D B200, 4P4D H200), EAGLE3 spec decode, KV-aware routing, harmony reasoning + tool calling; agentic profile | ❌ |
-| **[Qwen3.5-122B-A10B-FP8](qwen3.5-122b/fp8/vllm/agg-h200-agentic/)** | vLLM | Aggregated | 4x H200 | ✅ | ✅ | Hybrid GDN+MoE, TP2 x `replicas: 2`, MTP spec decode, KV-aware routing; agentic profile | ❌ |
-| **[Qwen3.5-122B-A10B-FP8](qwen3.5-122b/fp8/vllm/disagg-h200-agentic/)** | vLLM | Disaggregated | 3x H200 | ✅ | ✅ | Hybrid GDN+MoE, 1P2D over NIXL, KV-aware routing, no MTP; agentic profile | ❌ |
-| **[GLM-5-NVFP4](glm-5-nvfp4/sglang/disagg/)** | SGLang | Disagg Prefill/Decode | 20x GB200 | ✅ | ✅ | NVFP4, EAGLE speculative decoding, TP16 decode + TP4 prefill, stable SGLang runtime image | ❌ |
-| **[GLM-5.2](glm-5.2/)** | SGLang | Aggregated + Disaggregated | 16x/20x B200 or 24x/16x H200 | ✅ | ✅ | B200 NVFP4 or H200 FP8 with FP8 KV, KV-aware routing, EAGLE, B200 HiCache CPU offload, agentic trace profile | ❌ |
-| **[DeepSeek-R1](deepseek-r1/sglang/disagg-8gpu/)** | SGLang | Disagg WideEP | 16x H200 | ✅ | ❌ | TP=8, single-node. Use `model-download-sglang.yaml` | ❌ |
-| **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 32x H200 | ✅ | ❌ | TP=16, multi-node. Use `model-download-sglang.yaml` | ❌ |
-| **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 36x GB200 | ✅ | ✅ | Multi-node: 8 decode + 1 prefill nodes | ❌ |
-| **[DeepSeek-R1](deepseek-r1/)** | vLLM | Disagg DEP16 | 32x H200 | ✅ | ❌ | Multi-node, data-expert parallel | ❌ |
-| **[DeepSeek-V4-Flash](deepseek-v4/deepseek-v4-flash/)** | vLLM | Agg + Disagg | 4x B200 / 4x H200 | ✅ | ✅ | Text — MoE 284B / 13B active, NVFP4 (B200) / public FP8 (H200) + FP8 KV, agg TP4 (B200) / DP4+TP1+EP (H200), MTP (H200), KV-aware routing, agentic trace profile, reasoning + tool calling; plus disagg 2P1D (12x B200) / 4P3D (28x H200) | ❌ |
-| **[DeepSeek-V4-Pro](deepseek-v4/deepseek-v4-pro/)** | vLLM | Agg + Disagg | 8x B200 / 8x H200 | ✅ | ✅ | Text — MoE 1.6T / 49B active (1M ctx; 86k on H200), NVFP4 (B200) / public FP8 (H200) + FP8 KV, TP8 + EP, MTP-2 (B200), KV-aware routing, agentic trace profile, reasoning + tool calling; plus disagg 1P1D (16x B200) / 1P3D (32x H200) | ❌ |
-| **[Kimi-K2.5](kimi-k2.5/trtllm/disagg-eagle-kv-router/)** | TensorRT-LLM | Disaggregated | 24x GB200 | ✅ | ✅ | DEP4 prefill + TEP4 decode, TRTLLM-native KV host offload | ❌ |
-| **[Kimi-K3](kimi-k3/vllm/)** | vLLM | Agg + Disagg | 16x GB200 / 16x GB300 | ✅ | ❌ | Multimodal MoE (1M ctx), MXFP4 experts + BF16 dense + FP8 KV, TP16 over MNNVL (GB200) / TP8 (GB300), KV-aware routing, FlashInfer MLA, reasoning + tool calling; plus disagg 1P1D (32x GB200) / 1P2D (24x GB300) | ❌ |
-| **[Kimi-K2.6](kimi-k2.6/vllm/)** | vLLM | Aggregated | 4x B200 / 8x H200 | ✅ | ✅ | MoE, NVFP4+FP8 KV (B200) / INT4 (H200), TP4/TP8, EAGLE3 MLA spec decode, LMCache CPU offload; text+image, chat + agentic profiles | ❌ |
-| **[Nemotron-3-Super](nemotron-3-super/vllm/)** | vLLM | Aggregated | 4x B200 / 4x H200 | ✅ | ✅ | ~120B hybrid Mamba/Attention/MoE (~12B active), NVFP4 (B200) / FP8 (H200) + FP8 KV, TP4+EP, MTP, KV-aware routing; chat + agentic profiles | ❌ |
-| **[Nemotron-3-Ultra](nemotron-3-ultra/vllm/)** | vLLM | Agg + Disagg | 4x B200 / 8x H200 | ✅ | ✅ | ~550B hybrid Mamba/Attention/MoE (~55B active), NVFP4 + FP8, TP4 (B200) / TP8 (H200) + EP, MTP, KV-aware routing; chat + agentic, plus 1P1D disagg on B200 | ❌ |
+| Model | Framework | Mode | GPUs | Deployment | Benchmark | Notes |
+|-------|-----------|------|------|------------|-----------|-------|
+| **[Qwen3.8-2.4T-A95B-FP8](qwen3.8-2.4t-a95b-fp8/)** | vLLM, SGLang | Aggregated / Disaggregated | 16x GB300 / GB200 | âœ… | âŒ | Hybrid gated-delta-net + 512-expert MoE (262K ctx), FP8 weights + FP8 KV, TP16 over MNNVL, KV-aware routing + prefix caching, reasoning + tool calling | âŒ |
+| **[Qwen3.5-122B-A10B-NVFP4](qwen3.5-122b/nvfp4/vllm/agg-b200-agentic/)** | vLLM | Aggregated | 2x B200 | âœ… | âœ… | Hybrid GDN+MoE, NVFP4 + FP8 KV, TP1 x `replicas: 2`, KV-aware routing; agentic profile | âŒ |
+| **[Qwen3.5-122B-A10B-NVFP4](qwen3.5-122b/nvfp4/vllm/disagg-b200-agentic/)** | vLLM | Disaggregated | 3x B200 | âœ… | âœ… | Hybrid GDN+MoE, NVFP4 + FP8 KV, 1P2D over NIXL, KV-aware routing; agentic profile | âŒ |
+| **[GPT-OSS-120B](gpt-oss-120b/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x GB200 | âœ… | âœ… | Blackwell only, WideEP | âŒ |
+| **[GPT-OSS-120B](gpt-oss-120b/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 5x Blackwell (GB200/B200) | âœ… | âœ… | Prefill/Decode split | âŒ |
+| **[GPT-OSS-120B](gpt-oss-120b/vllm/)** | vLLM | Agg + Disagg | 8x B200 / 8x H200 | âœ… | âœ… | MXFP4 MoE + FP8 KV, 8x TP1 agg / decode-heavy single-node disagg (2P6D B200, 4P4D H200), EAGLE3 spec decode, KV-aware routing, harmony reasoning + tool calling; agentic profile | âŒ |
+| **[Qwen3.5-122B-A10B-FP8](qwen3.5-122b/fp8/vllm/agg-h200-agentic/)** | vLLM | Aggregated | 4x H200 | âœ… | âœ… | Hybrid GDN+MoE, TP2 x `replicas: 2`, MTP spec decode, KV-aware routing; agentic profile | âŒ |
+| **[Qwen3.5-122B-A10B-FP8](qwen3.5-122b/fp8/vllm/disagg-h200-agentic/)** | vLLM | Disaggregated | 3x H200 | âœ… | âœ… | Hybrid GDN+MoE, 1P2D over NIXL, KV-aware routing, no MTP; agentic profile | âŒ |
+| **[GLM-5.2](glm-5.2/)** | SGLang | Aggregated + Disaggregated | 16x/20x B200 or 24x/16x H200 | âœ… | âœ… | B200 NVFP4 or H200 FP8 with FP8 KV, KV-aware routing, EAGLE, B200 HiCache CPU offload, agentic trace profile | âŒ |
+| **[DeepSeek-R1](deepseek-r1/sglang/disagg-8gpu/)** | SGLang | Disagg WideEP | 16x H200 | âœ… | âŒ | TP=8, single-node. Use `model-download-sglang.yaml` | âŒ |
+| **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 32x H200 | âœ… | âŒ | TP=16, multi-node. Use `model-download-sglang.yaml` | âŒ |
+| **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 36x GB200 | âœ… | âœ… | Multi-node: 8 decode + 1 prefill nodes | âŒ |
+| **[DeepSeek-R1](deepseek-r1/)** | vLLM | Disagg DEP16 | 32x H200 | âœ… | âŒ | Multi-node, data-expert parallel | âŒ |
+| **[DeepSeek-V4-Flash](deepseek-v4/deepseek-v4-flash/)** | vLLM | Agg + Disagg | 4x B200 / 4x H200 | âœ… | âœ… | Text â€” MoE 284B / 13B active, NVFP4 (B200) / public FP8 (H200) + FP8 KV, agg TP4 (B200) / DP4+TP1+EP (H200), MTP (H200), KV-aware routing, agentic trace profile, reasoning + tool calling; plus disagg 2P1D (12x B200) / 4P3D (28x H200) | âŒ |
+| **[DeepSeek-V4-Pro](deepseek-v4/deepseek-v4-pro/)** | vLLM | Agg + Disagg | 8x B200 / 8x H200 | âœ… | âœ… | Text â€” MoE 1.6T / 49B active (1M ctx; 86k on H200), NVFP4 (B200) / public FP8 (H200) + FP8 KV, TP8 + EP, MTP-2 (B200), KV-aware routing, agentic trace profile, reasoning + tool calling; plus disagg 1P1D (16x B200) / 1P3D (32x H200) | âŒ |
+| **[Kimi-K2.5](kimi-k2.5/trtllm/disagg-eagle-kv-router/)** | TensorRT-LLM | Disaggregated | 24x GB200 | âœ… | âœ… | DEP4 prefill + TEP4 decode, TRTLLM-native KV host offload | âŒ |
+| **[Kimi-K3](kimi-k3/vllm/)** | vLLM | Agg + Disagg | 16x GB200 / 16x GB300 | âœ… | âŒ | Multimodal MoE (1M ctx), MXFP4 experts + BF16 dense + FP8 KV, TP16 over MNNVL (GB200) / TP8 (GB300), KV-aware routing, FlashInfer MLA, reasoning + tool calling; plus disagg 1P1D (32x GB200) / 1P2D (24x GB300) | âŒ |
+| **[Kimi-K2.6](kimi-k2.6/vllm/)** | vLLM | Aggregated | 4x B200 / 8x H200 | âœ… | âœ… | MoE, NVFP4+FP8 KV (B200) / INT4 (H200), TP4/TP8, EAGLE3 MLA spec decode, LMCache CPU offload; text+image, chat + agentic profiles | âŒ |
+| **[Nemotron-3-Super](nemotron-3-super/vllm/)** | vLLM | Aggregated | 4x B200 / 4x H200 | âœ… | âœ… | ~120B hybrid Mamba/Attention/MoE (~12B active), NVFP4 (B200) / FP8 (H200) + FP8 KV, TP4+EP, MTP, KV-aware routing; chat + agentic profiles | âŒ |
+| **[Nemotron-3-Ultra](nemotron-3-ultra/vllm/)** | vLLM | Agg + Disagg | 4x B200 / 8x H200 | âœ… | âœ… | ~550B hybrid Mamba/Attention/MoE (~55B active), NVFP4 + FP8, TP4 (B200) / TP8 (H200) + EP, MTP, KV-aware routing; chat + agentic, plus 1P1D disagg on B200 | âŒ |
 
 **Legend:**
-- **Deployment**: ✅ = Complete `deploy.yaml` manifest available
-- **Benchmark**: ✅ = Includes `perf.yaml` for running AIPerf benchmarks
+- **Deployment**: âœ… = Complete `deploy.yaml` manifest available
+- **Benchmark**: âœ… = Includes `perf.yaml` for running AIPerf benchmarks
 
 ### Functional Recipes (Not Yet Benchmarked)
 
-These recipes demonstrate functional deployments with Dynamo features, but have not yet been performance-tuned or paired with benchmark manifests.
-
-| Model | Framework | Mode | GPUs | Deployment | Notes |
-|-------|-----------|-------|------|------------|-------|
-| **[Qwen3-32B](qwen3-32b/vllm/cloud-providers/)** | vLLM | Disagg 1P1D Provider Overlays | 8x A100/H100/H200/B200/GB200 | ✅ | Kustomize overlays for AWS EFA, GKE RoCE, AKS/Nebius/Nscale IB |
-| **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/vllm/agg/)** | vLLM | Aggregated | 4x H100/H200 | ✅ | TP=4, KV-aware routing |
-| **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/sglang/agg/)** | SGLang | Aggregated | 4x H100/H200 | ✅ | TP=4, KV-aware routing, 1.0+ |
-| **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 4x H100/H200 | ✅ | TP=2 prefill/decode split, UCX KV transfer |
-| **[Nemotron-3-Super-FP8](nemotron-3-super-fp8/sglang/disagg/)** | SGLang | Disaggregated | 4x H100/H200 | ✅ | TP=2 prefill/decode split, nixl KV transfer, 1.0+ |
+These recipes demonstrate functional deployments with Dynamo features, but have not yet been performance-tuned or paired with benchmark manifests. None are listed currently.
 
 ### Experimental Recipes
 
@@ -87,16 +56,14 @@ These recipes are under active development and may require additional setup step
 
 | Model | Framework | Mode | GPUs | Deployment | Notes |
 |-------|-----------|------|------|------------|-------|
-| **[GLM-5-NVFP4 (EFA)](glm-5-nvfp4/sglang/disagg/efa/)** | SGLang | Disagg Prefill/Decode over AWS EFA | 20x GB200 | ✅ | KV transfer over AWS EFA via NIXL LIBFABRIC instead of UCX. Patched libfabric baked into image. Requires [custom container build](glm-5-nvfp4/sglang/disagg/efa/Dockerfile.efa). |
-| **[Nemotron-3-Nano-Omni-NVFP4](nemotron-3-nano-omni/vllm/agg/)** | vLLM | Aggregated | 1x GPU | ✅ | Multimodal text/image/video/audio serving. Requires [custom container build](nemotron-3-nano-omni/). |
-| **[nvidia/Kimi-K2.5-NVFP4](kimi-k2.5/tokenspeed/agg/nvidia/)** | TokenSpeed | Aggregated | 4x B200 | ✅ | Text only — MoE model, TP4×EP4, reasoning + tool calling. Requires [custom container build](kimi-k2.5/tokenspeed/agg/nvidia/Dockerfile) (no public Dynamo+TokenSpeed image yet) and raw `Deployment`s/`Service`s instead of `DynamoGraphDeployment` (operator backend support pending). |
-| **[DeepSeek-V4-Flash](deepseek-v4/deepseek-v4-flash/vllm/agg_b200/)** | vLLM | Aggregated | 4x B200 | ✅ | Text only — MoE model (284B / 13B active), DP=4 + EP, FP8 KV cache, reasoning + tool calling. Requires [custom container build](deepseek-v4/container/). |
-| **[DeepSeek-V4-Flash](deepseek-v4/deepseek-v4-flash/vllm/agg_gb200/)** | vLLM | Aggregated | 4x GB200 | ✅ | Text only — MoE model (284B / 13B active), TP=4 + EP, `deep_gemm_mega_moe`, FP8 KV cache, reasoning + tool calling (single NVL4 tray). Requires [custom container build](deepseek-v4/container/). |
-| **[DeepSeek-V4-Flash](deepseek-v4/deepseek-v4-flash/sglang/agg/)** | SGLang | Aggregated | 4x B200 | ✅ | Text only — MoE model (284B / 13B active), TP=4, MXFP4 MoE via FlashInfer, EAGLE MTP (3 steps / 4 draft tokens), reasoning + tool calling. Prebuilt image available; optional [custom container build](deepseek-v4/container/). |
-| **[DeepSeek-V4-Pro](deepseek-v4/deepseek-v4-pro/vllm/agg/b200/)** | vLLM | Aggregated | 8x B200 | ✅ | Text only — MoE model (1.6T / 49B active, 1M context), TP=8 + EP, FP4+FP8 mixed checkpoint, FP8 KV cache, CSA+HCA attention, tool calling. Thinking modes unstable on Day-0 — run with `thinking: false`. Requires [custom container build](deepseek-v4/container/). |
-| **[DeepSeek-V4-Pro](deepseek-v4/deepseek-v4-pro/vllm/agg/gb200/)** | vLLM | Aggregated | 8x GB200 (2 NVL4 trays) | ✅ | Text only — same model as B200 agg; TP=8 + EP cross-node via NVLink72 (MNNVL) + ComputeDomain. Requires [custom container build](deepseek-v4/container/). |
-| **[DeepSeek-V4-Pro](deepseek-v4/deepseek-v4-pro/vllm/disagg/gb200/)** | vLLM | Disaggregated | 16x GB200 (4 NVL4 trays) | ✅ | Text only — DP=8 + EP per worker, 1P + 1D, NVLink72 (MNNVL) + ComputeDomain. Requires [custom container build](deepseek-v4/container/). |
-| **[DeepSeek-V4-Pro](deepseek-v4/deepseek-v4-pro/sglang/agg/)** | SGLang | Aggregated | 8x B200 | ✅ | Text only — MoE model (1.6T / 49B active, 1M context), TP=8, MXFP4 MoE via FlashInfer, EAGLE MTP (3 steps / 4 draft tokens), reasoning + tool calling. Prebuilt image available (shared with [DeepSeek-V4-Flash](deepseek-v4/deepseek-v4-flash/sglang/agg/)). |
+| **[nvidia/Kimi-K2.5-NVFP4](kimi-k2.5/tokenspeed/agg/nvidia/)** | TokenSpeed | Aggregated | 4x B200 | âœ… | Text only â€” MoE model, TP4Ã—EP4, reasoning + tool calling. Requires [custom container build](kimi-k2.5/tokenspeed/agg/nvidia/Dockerfile) (no public Dynamo+TokenSpeed image yet) and raw `Deployment`s/`Service`s instead of `DynamoGraphDeployment` (operator backend support pending). |
+| **[DeepSeek-V4-Flash](deepseek-v4/deepseek-v4-flash/vllm/agg_b200/)** | vLLM | Aggregated | 4x B200 | âœ… | Text only â€” MoE model (284B / 13B active), DP=4 + EP, FP8 KV cache, reasoning + tool calling. Requires [custom container build](deepseek-v4/container/). |
+| **[DeepSeek-V4-Flash](deepseek-v4/deepseek-v4-flash/vllm/agg_gb200/)** | vLLM | Aggregated | 4x GB200 | âœ… | Text only â€” MoE model (284B / 13B active), TP=4 + EP, `deep_gemm_mega_moe`, FP8 KV cache, reasoning + tool calling (single NVL4 tray). Requires [custom container build](deepseek-v4/container/). |
+| **[DeepSeek-V4-Flash](deepseek-v4/deepseek-v4-flash/sglang/agg/)** | SGLang | Aggregated | 4x B200 | âœ… | Text only â€” MoE model (284B / 13B active), TP=4, MXFP4 MoE via FlashInfer, EAGLE MTP (3 steps / 4 draft tokens), reasoning + tool calling. Prebuilt image available; optional [custom container build](deepseek-v4/container/). |
+| **[DeepSeek-V4-Pro](deepseek-v4/deepseek-v4-pro/vllm/agg/b200/)** | vLLM | Aggregated | 8x B200 | âœ… | Text only â€” MoE model (1.6T / 49B active, 1M context), TP=8 + EP, FP4+FP8 mixed checkpoint, FP8 KV cache, CSA+HCA attention, tool calling. Thinking modes unstable on Day-0 â€” run with `thinking: false`. Requires [custom container build](deepseek-v4/container/). |
+| **[DeepSeek-V4-Pro](deepseek-v4/deepseek-v4-pro/vllm/agg/gb200/)** | vLLM | Aggregated | 8x GB200 (2 NVL4 trays) | âœ… | Text only â€” same model as B200 agg; TP=8 + EP cross-node via NVLink72 (MNNVL) + ComputeDomain. Requires [custom container build](deepseek-v4/container/). |
+| **[DeepSeek-V4-Pro](deepseek-v4/deepseek-v4-pro/vllm/disagg/gb200/)** | vLLM | Disaggregated | 16x GB200 (4 NVL4 trays) | âœ… | Text only â€” DP=8 + EP per worker, 1P + 1D, NVLink72 (MNNVL) + ComputeDomain. Requires [custom container build](deepseek-v4/container/). |
+| **[DeepSeek-V4-Pro](deepseek-v4/deepseek-v4-pro/sglang/agg/)** | SGLang | Aggregated | 8x B200 | âœ… | Text only â€” MoE model (1.6T / 49B active, 1M context), TP=8, MXFP4 MoE via FlashInfer, EAGLE MTP (3 steps / 4 draft tokens), reasoning + tool calling. Prebuilt image available (shared with [DeepSeek-V4-Flash](deepseek-v4/deepseek-v4-flash/sglang/agg/)). |
 
 ## Recipe Structure
 
@@ -104,14 +71,14 @@ Each complete recipe follows this standard structure:
 
 ```
 <model-name>/
-├── README.md (optional)           # Model-specific deployment notes
-├── model-cache/
-│   ├── model-cache.yaml          # PersistentVolumeClaim for model storage
-│   └── model-download.yaml       # Job to download model from HuggingFace
-└── <framework>/                  # vllm, sglang, or trtllm
-    └── <deployment-mode>/        # agg, disagg, disagg-single-node, etc.
-        ├── deploy.yaml           # Complete DynamoGraphDeployment manifest
-        └── perf.yaml (optional)  # AIPerf benchmark job
+â”œâ”€â”€ README.md (optional)           # Model-specific deployment notes
+â”œâ”€â”€ model-cache/
+â”‚   â”œâ”€â”€ model-cache.yaml          # PersistentVolumeClaim for model storage
+â”‚   â””â”€â”€ model-download.yaml       # Job to download model from HuggingFace
+â””â”€â”€ <framework>/                  # vllm, sglang, or trtllm
+    â””â”€â”€ <deployment-mode>/        # agg, disagg, disagg-single-node, etc.
+        â”œâ”€â”€ deploy.yaml           # Complete DynamoGraphDeployment manifest
+        â””â”€â”€ perf.yaml (optional)  # AIPerf benchmark job
 ```
 
 In addition, [`accuracy/`](accuracy/) is a shared, model-agnostic accuracy
@@ -232,7 +199,7 @@ kubectl logs job/<benchmark-job-name> -n ${NAMESPACE} | tail -50
 
 ## Example Deployments
 
-### Llama-3-70B with vLLM (Aggregated)
+### GPT-OSS-120B with TensorRT-LLM (Aggregated)
 
 ```bash
 export NAMESPACE=dynamo-demo
@@ -245,33 +212,12 @@ kubectl create secret generic hf-token-secret \
 
 # Deploy
 cd recipes
-kubectl apply -f llama-3-70b/model-cache/ -n ${NAMESPACE}
+kubectl apply -f gpt-oss-120b/model-cache/ -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=6000s
-kubectl apply -f llama-3-70b/vllm/agg/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f gpt-oss-120b/trtllm/agg/deploy.yaml -n ${NAMESPACE}
 
 # Test
-kubectl port-forward svc/llama3-70b-agg-frontend 8000:8000 -n ${NAMESPACE}
-```
-
-### Inference Gateway (GAIE) Integration (Optional)
-
-For Llama-3-70B with vLLM (Aggregated), an example of integration with the Inference Gateway is provided.
-
-First, deploy the Dynamo Graph per instructions above.
-
-Then follow [Deploy Inference Gateway Section 2](../deploy/inference-gateway/README.md#2-deploy-inference-gateway) to install GAIE.
-
-Update the containers.epp.image in the deployment file, i.e. llama-3-70b/vllm/agg/gaie/k8s-manifests/epp/deployment.yaml. It should match the release tag and be in the format `nvcr.io/nvidia/ai-dynamo/frontend:<version>` e.g. `nvcr.io/nvidia/ai-dynamo/frontend:0.9.0`
-The recipe assumes you are using Kubernetes discovery backend and sets the `DYN_DISCOVERY_BACKEND` env variable in the epp deployment. If you want to use etcd enable the lines below and remove the DYN_DISCOVERY_BACKEND env var.
-```bash
-- name: ETCD_ENDPOINTS
-  value: "dynamo-platform-etcd.$(PLATFORM_NAMESPACE):2379" #  update dynamo-platform to appropriate namespace
-```
-
-```bash
-export DEPLOY_PATH=llama-3-70b/vllm/agg/
-# DEPLOY_PATH=<model>/<framework>/<mode>/
-kubectl apply -R -f "$DEPLOY_PATH/gaie/k8s-manifests" -n "$NAMESPACE"
+kubectl port-forward svc/gpt-oss-120b-agg-frontend 8000:8000 -n ${NAMESPACE}
 ```
 
 ### DeepSeek-R1 on GB200 (Multi-node)
@@ -369,8 +315,8 @@ We welcome contributions of new recipes! See [CONTRIBUTING.md](CONTRIBUTING.md) 
 ### Recipe Quality Standards
 
 A production-ready recipe must include:
-- ✅ Complete `deploy.yaml` with DynamoGraphDeployment
-- ✅ Model cache PVC and download job
-- ✅ Benchmark recipe (`perf.yaml`) for performance testing
-- ✅ Verification on target hardware
-- ✅ Documentation of GPU requirements
+- âœ… Complete `deploy.yaml` with DynamoGraphDeployment
+- âœ… Model cache PVC and download job
+- âœ… Benchmark recipe (`perf.yaml`) for performance testing
+- âœ… Verification on target hardware
+- âœ… Documentation of GPU requirements

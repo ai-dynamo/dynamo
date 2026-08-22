@@ -164,9 +164,9 @@ spec:
 
 | 模型 | 框架 | 模式 | 配方 |
 |------|------|------|------|
-| Llama-3-70B | vLLM | 聚合式 | [查看](recipes/llama-3-70b/vllm/) |
+| GPT-OSS-120B | TensorRT-LLM | 聚合式 | [查看](recipes/gpt-oss-120b/trtllm/) |
 | DeepSeek-R1 | SGLang | 分离式 | [查看](recipes/deepseek-r1/sglang/) |
-| Qwen3-32B-FP8 | TensorRT-LLM | 聚合式 | [查看](recipes/qwen3-32b-fp8/trtllm/) |
+| Kimi-K3 | vLLM | 聚合式 | [查看](recipes/kimi-k3/vllm/) |
 
 完整列表见 [recipes/](recipes/README.md)。云平台专用指南：[AWS EKS](docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/eks-setup.mdx) · [Google GKE](docs/fern/pages/kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx) · [Azure AKS](docs/fern/pages/kubernetes/installation/managed-kubernetes/azure/aks-setup.mdx) · [Amazon ECS](docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/ecs.mdx)
 

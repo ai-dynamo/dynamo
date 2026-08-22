@@ -77,7 +77,7 @@ Start the spec with a Frontend and one worker. The `${NAMESPACE}` and `${RUNTIME
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: qwen3-32b-agg
+  name: gpt-oss-120b-agg
   namespace: ${NAMESPACE}
 spec:
   components:
@@ -116,7 +116,7 @@ spec:
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: qwen3-32b-agg
+  name: gpt-oss-120b-agg
   namespace: ${NAMESPACE}
 spec:
   components:
@@ -163,7 +163,7 @@ spec:
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: qwen3-32b-agg
+  name: gpt-oss-120b-agg
   namespace: ${NAMESPACE}
 spec:
   components:
@@ -467,12 +467,12 @@ To pick actual numbers, start from a **[recipe](https://github.com/ai-dynamo/dyn
 You have exported `NAMESPACE` and `RUNTIME_IMAGE` (and created the token Secret). Expand the placeholders and validate the spec with a server-side dry run, then apply it — pipe the file through `envsubst` both times:
 
 ```bash
-envsubst < qwen3-32b-agg.yaml | kubectl apply -f - -n ${NAMESPACE} --dry-run=server
-envsubst < qwen3-32b-agg.yaml | kubectl apply -f - -n ${NAMESPACE}
+envsubst < gpt-oss-120b-agg.yaml | kubectl apply -f - -n ${NAMESPACE} --dry-run=server
+envsubst < gpt-oss-120b-agg.yaml | kubectl apply -f - -n ${NAMESPACE}
 ```
 
 > [!NOTE]
-> `envsubst` only substitutes `${VAR}` tokens. Confirm the exports are set (`echo ${NAMESPACE} ${RUNTIME_IMAGE}`) before applying, or the placeholders expand to empty strings. To see the fully rendered spec first, run `envsubst < qwen3-32b-agg.yaml | less`.
+> `envsubst` only substitutes `${VAR}` tokens. Confirm the exports are set (`echo ${NAMESPACE} ${RUNTIME_IMAGE}`) before applying, or the placeholders expand to empty strings. To see the fully rendered spec first, run `envsubst < gpt-oss-120b-agg.yaml | less`.
 
 The DGD is the live serving resource. It becomes ready once the Frontend and workers are up — the `Ready` condition reports `True`. Watch it reconcile:
 
@@ -483,7 +483,7 @@ kubectl get dynamographdeployment -n ${NAMESPACE} -w
 Or block until it is ready:
 
 ```bash
-kubectl wait --for=condition=Ready dynamographdeployment/qwen3-32b-agg \
+kubectl wait --for=condition=Ready dynamographdeployment/gpt-oss-120b-agg \
   -n ${NAMESPACE} --timeout=600s
 ```
 
@@ -496,7 +496,7 @@ If it stalls, `kubectl describe dynamographdeployment <name> -n ${NAMESPACE}` an
 The operator creates a `ClusterIP` Service named `<name>-frontend` on port 8000. Port-forward it and send requests to the OpenAI-compatible API:
 
 ```bash
-kubectl port-forward svc/qwen3-32b-agg-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/gpt-oss-120b-agg-frontend 8000:8000 -n ${NAMESPACE}
 ```
 
 List the served models:
@@ -523,9 +523,9 @@ For a stable external address instead of `port-forward`, see [Expose the Fronten
 
 </Steps>
 
-## Put it all together: Qwen3-32B
+## Put it all together: GPT-OSS-120B
 
-The following spec assembles the steps above into one aggregated Qwen3-32B deployment, adapted from the [agg-round-robin recipe](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/agg-round-robin/deploy.yaml). It reflects the backend you selected earlier. Comments mark the values you substitute for your model, hardware, and scale:
+The following spec assembles the steps above into one aggregated GPT-OSS-120B deployment, adapted from the [vLLM B200 agentic recipe](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/vllm/agg-b200-agentic/deploy.yaml). It reflects the backend you selected earlier. Comments mark the values you substitute for your model, hardware, and scale:
 
 <Tabs>
 <Tab title="vLLM" language="vllm">
@@ -534,7 +534,7 @@ The following spec assembles the steps above into one aggregated Qwen3-32B deplo
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: qwen3-32b-agg
+  name: gpt-oss-120b-agg
   namespace: ${NAMESPACE}
 spec:
   components:
@@ -567,7 +567,7 @@ spec:
           - dynamo.vllm
           args:
           - --model
-          - Qwen/Qwen3-32B                     # substitute: your model
+          - openai/gpt-oss-120b                     # substitute: your model
           - --tensor-parallel-size
           - "2"
           - --max-model-len
@@ -593,7 +593,7 @@ spec:
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: qwen3-32b-agg
+  name: gpt-oss-120b-agg
   namespace: ${NAMESPACE}
 spec:
   components:
@@ -626,7 +626,7 @@ spec:
           - dynamo.sglang
           args:
           - --model-path
-          - Qwen/Qwen3-32B                     # substitute: your model
+          - openai/gpt-oss-120b                     # substitute: your model
           - --served-model-name
           - Qwen/Qwen3-32B
           - --page-size
@@ -658,7 +658,7 @@ spec:
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: qwen3-32b-agg
+  name: gpt-oss-120b-agg
   namespace: ${NAMESPACE}
 spec:
   components:
@@ -691,7 +691,7 @@ spec:
           - dynamo.trtllm
           args:
           - --model-path
-          - Qwen/Qwen3-32B                     # substitute: your model
+          - openai/gpt-oss-120b                     # substitute: your model
           - --served-model-name
           - Qwen/Qwen3-32B
           - --extra-engine-args

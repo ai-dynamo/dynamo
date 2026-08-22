@@ -96,7 +96,7 @@ two scheduled GPU pods on the fabric.
 Invoke via the agentskills.io `run_script()` protocol:
 
 ```python
-run_script("scripts/check_interconnect.py", args=["env", "recipes/qwen3-32b-fp8/vllm/disagg"])
+run_script("scripts/check_interconnect.py", args=["env", "recipes/gpt-oss-120b/vllm/disagg-b200-agentic"])
 run_script("scripts/check_interconnect.py", args=["node", "--namespace", "dynamo-demo", "--pod", "qwen-worker-0"])
 ```
 
@@ -105,7 +105,7 @@ run_script("scripts/check_interconnect.py", args=["node", "--namespace", "dynamo
 Verify a disagg recipe's transport env shape before deploy:
 
 ```bash
-python3 scripts/check_interconnect.py env recipes/qwen3-32b-fp8/vllm/disagg
+python3 scripts/check_interconnect.py env recipes/gpt-oss-120b/vllm/disagg-b200-agentic
 ```
 
 After deploy, validate a worker pod's fabric:

@@ -62,7 +62,7 @@ For the router to track which blocks each worker holds, workers must publish KV 
 
 This is the half that the [Router Guide](../../developer-guide/knowledge-base/modular-components/router/router-guide.md) does not show. Without it, the router falls back to load-only decisions even in `kv` mode.
 
-The Frontend and worker snippets above are drawn from the [disagg-kv-router recipe](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/disagg-kv-router/deploy.yaml), where six prefill workers publish KV events and the Frontend routes across them.
+The Frontend and worker snippets above are drawn from the [Kimi-K3 disaggregated recipe](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k3/vllm/disagg-gb200-agentic/deploy.yaml), where prefill and decode workers publish KV events and the Frontend routes across them.
 
 </Step>
 

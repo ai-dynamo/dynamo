@@ -17,22 +17,13 @@ and related routing components.
 The main TRT-LLM recipe entrypoints are:
 
 - [DeepSeek-R1 WideEP on GB200](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-r1/trtllm/disagg/wide_ep/gb200/deploy.yaml)
-- [Qwen3-235B-A22B-FP8 aggregated, Hopper](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/agg/hopper/deploy.yaml)
-- [Qwen3-235B-A22B-FP8 aggregated, Blackwell](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/agg/blackwell/deploy.yaml)
-- [Qwen3-235B-A22B-FP8 disaggregated, Hopper](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/hopper/deploy.yaml)
-- [Qwen3-235B-A22B-FP8 disaggregated, Blackwell](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-generic.yaml)
-- [Qwen3-32B-FP8 aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b-fp8/trtllm/agg/deploy.yaml)
-- [Qwen3-32B-FP8 disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b-fp8/trtllm/disagg/deploy.yaml)
 - [GPT-OSS-120B aggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/agg/deploy.yaml)
 - [GPT-OSS-120B disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/trtllm/disagg/deploy.yaml)
-- [Nemotron-3-Super-FP8 disaggregated](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-super-fp8/trtllm/disagg/deploy.yaml)
 
 For model-level setup, prerequisites, and hardware notes, use the recipe
 README files:
 
 - [DeepSeek-R1 recipes](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-r1/README.md)
-- [Qwen3-235B-A22B-FP8 recipes](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-235b-a22b-fp8/README.md)
-- [Qwen3-32B-FP8 recipes](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b-fp8/README.md)
 - [GPT-OSS-120B recipes](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/README.md)
 - [Kimi-K2.5 recipes](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.5/README.md)
 
