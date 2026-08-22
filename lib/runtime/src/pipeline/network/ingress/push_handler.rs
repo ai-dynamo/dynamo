@@ -9,6 +9,7 @@ use crate::metrics::work_handler_perf::{
     WORK_HANDLER_NETWORK_TRANSIT_SECONDS, WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS,
 };
 use crate::pipeline::{ManyIn, RequestStream};
+use crate::{dynamo_nvtx_mark, dynamo_nvtx_range};
 use futures::StreamExt;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::Deserialize;
@@ -167,7 +168,14 @@ where
         let mut send_complete_final = true;
         let mut saw_error_response = false;
         while let Some(resp) = stream.next().await {
+            // Everything inside this range is Dynamo-side egress work for one
+            // chunk. The gaps *between* consecutive `worker.egress.chunk` ranges
+            // are the engine producing the next token — that split is the whole
+            // point of the worker annotations. (Frontend-side receive/decode is
+            // a separate, currently unannotated cost; do not attribute it here.)
+            let _nvtx_chunk = dynamo_nvtx_range!("worker.egress.chunk");
             tracing::trace!("Sending response: {:?}", resp);
+            let nvtx_encode = dynamo_nvtx_range!("worker.egress.encode");
             let encoded = match self
                 .payload_adapter
                 .encode_response(payload_codec, Some(resp), false)
@@ -186,13 +194,17 @@ where
                     break;
                 }
             };
+            drop(nvtx_encode);
             let is_error = encoded.is_error;
             saw_error_response |= is_error;
             let resp_bytes = encoded.bytes;
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
             }
-            if (publisher.send(resp_bytes).await).is_err() {
+            let nvtx_publish = dynamo_nvtx_range!("worker.egress.publish");
+            let publish_failed = publisher.send(resp_bytes).await.is_err();
+            drop(nvtx_publish);
+            if publish_failed {
                 send_complete_final = false;
                 if context.is_stopped() {
                     // Say there are 2 threads accessing `context`, the sequence can be either:
@@ -584,6 +596,10 @@ where
     where
         Self: IngressDispatch<Request = Req>,
     {
+        // Outer band for one request's entire time inside the worker, from wire
+        // arrival to terminal frame. Held across awaits, hence a start/end range.
+        let _nvtx_request = dynamo_nvtx_range!("worker.ingress.request");
+
         let t2_wallclock_ns = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -606,12 +622,14 @@ where
             }
         });
 
+        let nvtx_parse = dynamo_nvtx_range!("worker.ingress.parse_request");
         let ParsedRequest {
             request,
             response_connection_info,
             frontend_send_ts_ns,
             payload_codec,
         } = self.parse_and_build_request(payload).await?;
+        drop(nvtx_parse);
 
         // Compute network transit time (T2 - T1) using cross-process wall-clock timestamps
         if let Some(t1_ns) = frontend_send_ts_ns {
@@ -622,6 +640,7 @@ where
         // todo - eventually have a handler class which will returned an abstracted object, but for now,
         // we only support tcp here, so we can just unwrap the connection info
         tracing::trace!("creating tcp response stream");
+        let nvtx_open = dynamo_nvtx_range!("worker.ingress.open_response_stream");
         let mut publisher = tcp::client::TcpClient::create_response_stream(
             request.context(),
             response_connection_info,
@@ -636,8 +655,13 @@ where
             }
             PipelineError::Generic(format!("Failed to create response stream: {e}"))
         })?;
+        drop(nvtx_open);
 
         tracing::trace!("calling generate");
+        // Dispatch into the engine. For a Python worker this covers the pyo3
+        // bridge crossing that builds the response generator, not token
+        // generation itself.
+        let nvtx_generate = dynamo_nvtx_range!("worker.ingress.generate");
         let stream = self
             .segment
             .get()
@@ -652,6 +676,7 @@ where
                 }
                 PipelineError::GenerateError(e)
             });
+        drop(nvtx_generate);
 
         // the prolouge is sent to the client to indicate that the stream is ready to receive data
         // or if the generate call failed, the error is sent to the client
@@ -659,6 +684,7 @@ where
             Ok(stream) => {
                 tracing::trace!("Successfully generated response stream; sending prologue");
                 let _result = publisher.send_prologue(None).await;
+                dynamo_nvtx_mark!("worker.ingress.prologue_sent");
                 WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS
                     .observe(start_time.elapsed().as_secs_f64());
                 stream

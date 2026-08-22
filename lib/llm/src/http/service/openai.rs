@@ -25,6 +25,7 @@ use base64::Engine as _;
 use bytes::Bytes;
 use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
 use dynamo_runtime::{
+    dynamo_nvtx_mark, dynamo_nvtx_range,
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
 };
@@ -889,6 +890,9 @@ async fn completions_single(
     mut request: Context<NvCreateCompletionRequest>,
     stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
+    // Handler body only; for a streaming request the SSE stream outlives this range.
+    let _nvtx = dynamo_nvtx_range!("frontend.http.completions.handler");
+
     let request_id = request.id().to_string();
 
     // todo - decide on default
@@ -920,6 +924,7 @@ async fn completions_single(
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
     // todo - error handling should be more robust
+    let nvtx_lookup = dynamo_nvtx_range!("frontend.http.completions.engine_lookup");
     let (engine, parsing_options) = state
         .manager()
         .get_completions_engine_with_parsing(&model)
@@ -928,6 +933,7 @@ async fn completions_single(
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
+    drop(nvtx_lookup);
 
     let mut response_collector = state
         .metrics_clone()
@@ -937,6 +943,8 @@ async fn completions_single(
     let annotations = request.annotations();
 
     // issue the generate call on the engine
+    // Covers preprocessing, routing and the wire handoff to the worker.
+    let nvtx_generate = dynamo_nvtx_range!("frontend.http.completions.generate");
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
@@ -947,6 +955,7 @@ async fn completions_single(
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
+    drop(nvtx_generate);
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -984,6 +993,10 @@ async fn completions_single(
                 )
             })
             .map(move |response| {
+                // Frontend-side SSE conversion for one chunk. The gaps between
+                // consecutive ranges cover both worker time and the frontend's
+                // own unannotated receive/decode path.
+                let _nvtx_chunk = dynamo_nvtx_range!("frontend.http.completions.sse_chunk");
                 // Calls observe_response() on each token
                 process_response_using_event_converter_and_observe_metrics(
                     EventConverter::from(response),
@@ -1028,6 +1041,8 @@ async fn completions_single(
             );
         });
 
+        // Spans the whole fold, so it includes worker time.
+        let _nvtx_aggregate = dynamo_nvtx_range!("frontend.http.completions.aggregate");
         let response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
             .await
             .map_err(|e| {
@@ -2751,6 +2766,11 @@ async fn chat_completions(
     mut request: Context<NvCreateChatCompletionRequest>,
     stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
+    // Covers the handler body only: template resolution, validation, engine
+    // dispatch and response commit. For a streaming request the SSE stream
+    // outlives this range, and each chunk is annotated separately below.
+    let _nvtx = dynamo_nvtx_range!("frontend.http.chat.handler");
+
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
@@ -2787,6 +2807,7 @@ async fn chat_completions(
         &request_id,
     );
 
+    let nvtx_validate = dynamo_nvtx_range!("frontend.http.chat.validate");
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
@@ -2818,6 +2839,7 @@ async fn chat_completions(
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
     }
+    drop(nvtx_validate);
 
     // Create HTTP queue guard after template resolution so labels are correct
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
@@ -2829,6 +2851,7 @@ async fn chat_completions(
 
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
+    let nvtx_lookup = dynamo_nvtx_range!("frontend.http.chat.engine_lookup");
     let (engine, parsing_options) = state
         .manager()
         .get_chat_completions_engine_with_parsing(&model)
@@ -2837,6 +2860,7 @@ async fn chat_completions(
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
+    drop(nvtx_lookup);
 
     // Request policy controls whether parser-produced tool calls may be exposed.
     // Assistant response/guided constraints are handled separately during
@@ -2872,6 +2896,9 @@ async fn chat_completions(
     let annotations = request.annotations();
 
     // issue the generate call on the engine
+    // Covers preprocessing, routing and the wire handoff to the worker — everything
+    // between the validated request and a live response stream.
+    let nvtx_generate = dynamo_nvtx_range!("frontend.http.chat.generate");
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
@@ -2882,6 +2909,7 @@ async fn chat_completions(
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
+    drop(nvtx_generate);
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -2946,8 +2974,14 @@ async fn chat_completions(
         let stream = async_stream::stream! {
             let mut stream = Box::pin(stream);
             let mut events: Vec<Result<Event, axum::Error>> = Vec::with_capacity(4);
+            let mut first_chunk = true;
 
             while let Some(mut response) = stream.next().await {
+                // Frontend-side SSE conversion for one chunk. The gaps *between*
+                // consecutive `sse_chunk` ranges cover both the worker producing
+                // the next token and the frontend's own receive/decode path,
+                // which is not annotated — do not read them as pure worker time.
+                let nvtx_chunk = dynamo_nvtx_range!("frontend.http.chat.sse_chunk");
                 events.clear();
 
                 // When parallel_tool_calls is false, surface only the first tool call
@@ -2986,6 +3020,16 @@ async fn chat_completions(
                     );
                     continue;
                 }
+
+                // Marked here, not at the top of the loop: the stream is prefixed
+                // with annotation events (`data: None`) and can yield empty chunks
+                // that never reach the client. This is the first chunk actually
+                // carrying token data, which is what a TTFT reading wants.
+                if first_chunk && response.data.is_some() {
+                    dynamo_nvtx_mark!("frontend.http.chat.first_chunk");
+                    first_chunk = false;
+                }
+
                 if tool_dispatch_enabled {
                     streaming_tool_dispatch_events(
                         &response,
@@ -3016,6 +3060,10 @@ async fn chat_completions(
                     Ok(None) => {}
                     Err(e) => events.push(Err(e)),
                 }
+
+                // Ends before the yields: everything past this point is the
+                // consumer's time, not the frontend's.
+                drop(nvtx_chunk);
 
                 events.reverse();
                 while let Some(event) = events.pop() {
@@ -3058,6 +3106,9 @@ async fn chat_completions(
             );
         });
 
+        // Spans the whole fold, so it includes worker time; the per-token frontend
+        // cost on this path is not separable from the wait for the next token.
+        let _nvtx_aggregate = dynamo_nvtx_range!("frontend.http.chat.aggregate");
         let response =
             NvCreateChatCompletionResponse::from_annotated_stream(stream, parsing_options.clone())
                 .await

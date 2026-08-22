@@ -23,9 +23,11 @@ testing = []
 tokio-console = ["dep:console-subscriber", "tokio/tracing"]
 compute-validation = [] # Enable validation and timing for compute macros
 tcp-low-latency = [] # Enable Linux-specific TCP optimizations (TCP_QUICKACK, SO_BUSY_POLL)
-# NVTX timeline annotations for Nsight Systems (compile-time off; also gated at runtime by DYN_ENABLE_RUST_NVTX).
-# Overhead: feature off = zero; feature on, env off = ~1ns AtomicBool load; feature on, env on = ~50ns/annotation.
-nvtx = ["dep:cudarc"]
+# NVTX v3 timeline annotations for Nsight Systems (compile-time off; also gated at runtime by DYN_NVTX).
+# Overhead: feature off = zero. Feature on, env off = an inlined relaxed atomic load plus a
+# predictable branch. Feature on, env on = two heap allocations (the crate renders the name with
+# to_string() then copies it into a CString) plus the injection-library call. See lib/runtime/src/nvtx.rs.
+nvtx = ["dep:nvtx"]
 
 [dependencies]
 # repo
@@ -80,7 +82,10 @@ url = { workspace = true }
 validator = { workspace = true }
 xxhash-rust = { workspace = true }
 
-cudarc = { workspace = true, features = ["nvtx"], optional = true }
+# NVTX v3: header-only, statically linked by the crate's build script. Unlike the
+# NVTX v2 C API (nvToolsExt), this needs no shared library at runtime — the stubs
+# bind to the profiler's injection library via NVTX_INJECTION64_PATH on first use.
+nvtx = { version = "1.3", optional = true }
 
 arc-swap = { version = "1" }
 crossbeam-queue = { version = "0.3" }

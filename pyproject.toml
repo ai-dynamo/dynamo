@@ -90,6 +90,15 @@ mocker = [
     "aiconfigurator-core==0.11.0.dev20260728",
 ]
 
+# NVTX profiling. Opt-in only: dynamo.common.utils.nvtx_utils imports `nvtx`
+# solely when DYN_NVTX=1, and is pure-Python no-ops otherwise, so the marker
+# call sites throughout components/ carry no dependency on this extra. Install
+# it alongside DYN_NVTX=1 to record markers. Container images already install
+# the same pin from container/deps/requirements.common.txt.
+profiling = [
+    "nvtx==0.2.14",
+]
+
 [tool.uv]
 # Some backend extras have incompatible transitive dependency requirements.
 # Each conflict below identifies the dependency that prevents co-installation.

@@ -188,6 +188,17 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
     uv pip install {{ pip_target }} --no-deps \
         "transformers==${TRANSFORMERS_VERSION}"
 
+# Install nvtx pinned in container/deps/requirements.common.txt so DYN_NVTX=1
+# profiling works in all targets (runtime, dev, local-dev) — see
+# components/src/dynamo/common/utils/nvtx_utils.py, which imports it
+# unconditionally once DYN_NVTX is set. The upstream vllm/vllm-openai stack does
+# not ship it. --no-deps preserves that stack; nvtx is a self-contained C
+# extension with no dependencies of its own.
+RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
+    --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    uv pip install {{ pip_target }} --no-deps $(grep -E '^nvtx==' /tmp/requirements.common.txt)
+
 {% if device != "cuda" %}
 # NIXL meta package always tries to find a cuda-backend
 # https://github.com/ai-dynamo/nixl/blob/v1.1.0/src/bindings/python/nixl-meta/nixl/__init__.py

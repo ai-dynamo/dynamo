@@ -568,6 +568,7 @@ COPY components/ /opt/dynamo/components/
 
 # Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
 ARG USE_SCCACHE
+ARG ENABLE_NVTX
 {% if framework != "sglang" %}
 ARG ENABLE_MEDIA_FFMPEG
 {% endif %}
@@ -587,11 +588,19 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
-{% if framework == "sglang" %}    maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --out /opt/dynamo/dist && \
+    # NVTX timeline annotations for Nsight Systems. Off by default, matching
+    # TRT-LLM's own NVTX_DISABLE=ON default: with the feature absent the macros
+    # expand to nothing. Compiled in, the markers stay dormant until
+    # DYN_NVTX is set at runtime, costing one relaxed atomic load
+    # and a predictable branch per site. Needs no extra runtime library — NVTX
+    # v3 is header-only and statically linked.
+    NVTX_FEATURE="" && \
+    if [ "$ENABLE_NVTX" = "true" ]; then NVTX_FEATURE=",nvtx"; fi && \
+{% if framework == "sglang" %}    maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3${NVTX_FEATURE}" --out /opt/dynamo/dist && \
 {% else %}    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-        maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --out /opt/dynamo/dist; \
+        maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3${NVTX_FEATURE}" --out /opt/dynamo/dist; \
     else \
-        maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --out /opt/dynamo/dist; \
+        maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3${NVTX_FEATURE}" --out /opt/dynamo/dist; \
     fi && \
 {% endif %}    /tmp/use-sccache.sh show-stats "Dynamo Runtime"
 

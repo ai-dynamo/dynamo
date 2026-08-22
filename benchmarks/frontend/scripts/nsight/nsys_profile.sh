@@ -8,7 +8,7 @@
 #
 # Prerequisites:
 #   - nsys (Nsight Systems CLI) installed
-#   - Binary built with: cargo build --profile profiling --features nvtx
+#   - Binary built with: cargo build --profile profiling --features dynamo-runtime/nvtx
 #
 # Usage:
 #   ./nsys_profile.sh <binary> [args...]
@@ -36,10 +36,10 @@ while [[ $# -gt 0 ]]; do
             echo "  --output PREFIX   Output file prefix (default: dynamo_frontend_<timestamp>)"
             echo ""
             echo "Environment:"
-            echo "  DYN_ENABLE_NVTX=1 is set automatically"
+            echo "  DYN_NVTX=1 is set automatically"
             echo ""
             echo "Build the binary first:"
-            echo "  cargo build --profile profiling --features nvtx"
+            echo "  cargo build --profile profiling --features dynamo-runtime/nvtx"
             exit 0
             ;;
         *)  break ;;
@@ -62,13 +62,15 @@ fi
 
 if ! command -v "$BINARY" &>/dev/null && [[ ! -x "$BINARY" ]]; then
     echo "ERROR: Binary not found or not executable: $BINARY"
-    echo "Build with: cargo build --profile profiling --features nvtx"
+    echo "Build with: cargo build --profile profiling --features dynamo-runtime/nvtx"
     exit 1
 fi
 
 mkdir -p "$OUTPUT_DIR"
 
-export DYN_ENABLE_NVTX=1
+# One switch for both layers: the Rust runtime (lib/runtime/src/nvtx.rs) and
+# the Python components (dynamo.common.utils.nvtx_utils) both read this.
+export DYN_NVTX=1
 
 echo "Profiling: $BINARY $*"
 echo "Duration: ${DURATION}s"

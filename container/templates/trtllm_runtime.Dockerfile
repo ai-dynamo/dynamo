@@ -139,6 +139,18 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/opt/dynamo/venv/bin:${PATH}
 {% endif %}
 
+# Install nvtx pinned in container/deps/requirements.common.txt so DYN_NVTX=1
+# profiling works in all targets (runtime, dev, local-dev) — see
+# components/src/dynamo/common/utils/nvtx_utils.py, which imports it
+# unconditionally once DYN_NVTX is set. TRT-LLM's own markers use the same
+# package, so this is normally already present; pinning it here makes the
+# dependency explicit rather than inherited. --no-deps preserves the upstream
+# tensorrt-llm/release Python stack.
+RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
+    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    pip install --break-system-packages --no-deps $(grep -E '^nvtx==' /tmp/requirements.common.txt)
+
 # Place wheels in /opt/dynamo/wheelhouse unconditionally — dev/local-dev images
 # install from source and skip the pip install RUN below, but they still need
 # the wheels on disk because tests/dependencies/test_kvbm_imports.py greps

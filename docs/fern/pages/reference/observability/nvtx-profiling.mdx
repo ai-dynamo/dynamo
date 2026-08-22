@@ -1,0 +1,195 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: NVTX Profiling
+subtitle: Annotate the Dynamo frontend and workers on an Nsight Systems timeline to separate Dynamo overhead from engine time.
+---
+
+Dynamo emits NVIDIA Tools Extension (NVTX) ranges and markers so an Nsight Systems (`nsys`) capture
+shows where time goes inside Dynamo, not just inside the inference engine. The Rust runtime and the
+Python components are annotated separately but share one runtime switch, `DYN_NVTX`.
+
+Both layers are **off by default**, and the Rust layer is not compiled into released builds at all.
+A Rust build that *does* include the feature still pays a small gate check at each annotation site
+while `DYN_NVTX` is unset — an inlined atomic load and a branch, with the marker name
+never constructed.
+
+## How the two layers are gated
+
+One runtime switch, `DYN_NVTX`, turns on both layers, so a single setting covers a whole capture.
+What differs is the build-time prerequisite. `DYN_NVTX` already gated the Python markers in earlier
+releases and its meaning there is unchanged — on a build that also carries the Rust markers, the
+same setting now lights up both.
+
+| Layer | Compiled in by default | Runtime switch | Extra dependency |
+|---|---|---|---|
+| Rust (frontend HTTP, worker ingress/egress, transport, routing) | No — requires the `nvtx` Cargo feature | `DYN_NVTX` | None |
+| Python (backend request handlers, multimodal paths) | Yes | `DYN_NVTX` | `ai-dynamo[profiling]` |
+
+The Rust layer keeps a second, compile-time gate on purpose. With the Cargo feature off, the
+annotation macros expand to nothing and the binary is byte-for-byte what it would be without them.
+With the feature on but `DYN_NVTX` unset, each site costs one relaxed atomic load and a
+predictable branch. This mirrors how TensorRT-LLM gates its own C++ markers, which default to
+`NVTX_DISABLE=ON`.
+
+<Info>
+  NVTX v3 is header-only. Dynamo compiles it in statically, so no `libnvToolsExt.so` is needed at
+  runtime — the markers work on CUDA 13, which removed that library. With no profiler attached the
+  calls are inert stubs; under `nsys` they bind to the injection library named by
+  `NVTX_INJECTION64_PATH` on first use. TensorRT-LLM's Python markers use the same mechanism, so
+  Dynamo and TensorRT-LLM ranges land on one timeline.
+</Info>
+
+## Enable the Rust markers
+
+Released wheels and container images are built without the `nvtx` Cargo feature, so
+`DYN_NVTX` has no effect on them. Rebuild with the feature to get a runtime that can
+emit the markers.
+
+### From source
+
+Build the Python bindings with the feature:
+
+```bash
+cd lib/bindings/python
+maturin develop --uv --features nvtx
+```
+
+For a standalone Rust binary, build with the profiling profile, which keeps debug symbols:
+
+```bash
+cargo build --profile profiling --features dynamo-runtime/nvtx
+```
+
+<Warning>
+  Scope the feature to `dynamo-runtime/nvtx`. A bare `--features nvtx` at the workspace root also
+  selects the `nvtx` feature of `kvbm-engine`, whose markers have no runtime switch and fire
+  unconditionally.
+</Warning>
+
+### In a container image
+
+Prebuilt images ship without the feature. To build one that can emit the markers, pass
+`ENABLE_NVTX=true`:
+
+```bash
+docker build --build-arg ENABLE_NVTX=true -f container/rendered.Dockerfile .
+```
+
+The argument appends `nvtx` to the bindings wheel's feature list and defaults to `false`, so it
+changes nothing unless you pass it. `dev` and `local-dev` targets build from source rather than from
+the wheel, so use the `maturin develop` command above inside those images instead.
+
+Markers compiled in this way are still dormant until `DYN_NVTX` is set, so an
+NVTX-enabled image behaves identically to a stock one in production.
+
+### Run under nsys
+
+However you built it, set the environment variable on every process you want annotated:
+
+```bash
+DYN_NVTX=1 nsys profile --trace=cuda,nvtx -o dynamo.nsys-rep \
+  python -m dynamo.frontend
+```
+
+The runtime logs `NVTX annotations enabled (DYN_NVTX)` at startup when the switch takes
+effect. No such line means the feature was not compiled in.
+
+## Enable the Python markers
+
+The Python markers ship in every image but need the `nvtx` package, which is an optional dependency:
+
+```bash
+pip install ai-dynamo[profiling]
+```
+
+Container images already include it. Then set the same `DYN_NVTX` switch used for the Rust
+markers — on a worker process it turns on whichever of the two layers that process has available:
+
+```bash
+DYN_NVTX=1 nsys profile --trace=cuda,nvtx -o worker.nsys-rep \
+  python -m dynamo.trtllm --model Qwen/Qwen3-0.6B
+```
+
+<Warning>
+  Setting `DYN_NVTX` without the `nvtx` package installed raises `ImportError` at startup rather
+  than silently recording nothing. This is deliberate: a profiling run that produces an empty
+  timeline is worse than one that fails immediately.
+</Warning>
+
+## Environment variables
+
+<ParamField path="DYN_NVTX" type="boolean" default="false">
+  Enables NVTX annotations in both the Rust runtime and the Python components. Accepts `1`, `true`,
+  `on`, or `yes` to enable and `0`, `false`, `off`, or `no` to disable, trimmed and
+  case-insensitive; any other value raises rather than silently disabling. The Rust half also
+  requires a build with the `nvtx` Cargo feature, which released builds do not have. The Python half
+  requires the `nvtx` package from the `ai-dynamo[profiling]` extra, and raises at import if it is
+  missing.
+</ParamField>
+
+## Ranges emitted by the Rust runtime
+
+Names are hierarchical, so filtering on a prefix in Nsight Systems isolates one stage.
+
+### Frontend
+
+| Range | Covers |
+|---|---|
+| `frontend.http.chat.handler` | The `/v1/chat/completions` handler body, from readiness check to response commit |
+| `frontend.http.chat.validate` | Request template resolution and field validation |
+| `frontend.http.chat.engine_lookup` | Resolving the model to an engine and its parsing options |
+| `frontend.http.chat.generate` | Preprocessing, routing, and the wire handoff to the worker |
+| `frontend.http.chat.sse_chunk` | Per-chunk SSE conversion on the streaming path |
+| `frontend.http.chat.aggregate` | Folding the stream into one response on the non-streaming path |
+| `frontend.http.completions.*` | The same stages for `/v1/completions` |
+| `preprocess.template` | Chat template application |
+| `preprocess.tokenize` | Tokenization |
+| `route.select_worker` | Worker selection |
+| `route.kv_match` | KV-aware match scoring |
+| `transport.tcp.wait_backend` | Waiting for the worker's response stream to open |
+| `transport.tcp.send` | Writing the request to the worker |
+
+`frontend.http.chat.first_chunk` is an instantaneous marker on the first chunk carrying token data,
+which is the point a Time To First Token (TTFT) reading should use. Annotation events and dropped
+empty chunks are excluded.
+
+### Worker
+
+| Range | Covers |
+|---|---|
+| `worker.ingress.request` | One request's whole lifetime inside the worker |
+| `worker.ingress.parse_request` | Decoding the request off the wire |
+| `worker.ingress.open_response_stream` | Establishing the response stream back to the frontend |
+| `worker.ingress.generate` | Dispatch into the engine |
+| `worker.egress.chunk` | Per-chunk egress work |
+| `worker.egress.encode` | Response serialization |
+| `worker.egress.publish` | Writing the chunk back to the frontend |
+| `pybridge.invoke_generator` | GIL acquisition and the Rust-to-Python crossing that builds the response generator |
+| `pybridge.anext_call` | The GIL-bound `__anext__` call, excluding the await |
+| `pybridge.decode_response` | Per-response Python-to-Rust deserialization |
+| `detokenize` | Detokenization |
+
+`worker.ingress.prologue_sent` marks the point the response stream is acknowledged to the frontend.
+
+## Reading the timeline
+
+The value is in the **gaps**, not only the bars. Consecutive `worker.egress.chunk` ranges are
+separated by the engine producing the next token, so the bars are Dynamo's cost and the gaps are the
+engine's. The `pybridge.*` ranges deliberately exclude their awaits for the same reason.
+
+<Warning>
+  Gaps between `frontend.http.*.sse_chunk` ranges are not pure worker time. The frontend's own
+  response receive and decode path is not annotated, so its cost falls into those gaps. Disaggregated
+  prefill dispatch is likewise unannotated and appears inside `frontend.http.chat.generate`.
+</Warning>
+
+Marker names are static, so concurrent requests produce overlapping identically-named ranges.
+Capture at low concurrency when you need to follow a single request end to end.
+
+## Related
+
+- [Environment Variables](environment-variables.mdx) — every other observability variable.
+- [Request Traces](request-traces.mdx) — per-request records, for analysis that outlives a capture.
+- [Forward Pass Metrics Traces](forward-pass-metrics-traces.mdx) — engine-side forward pass timing.
+- [SGLang Multimodal](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#profiling) — the `mm:*` markers on the multimodal encode and prefill paths.

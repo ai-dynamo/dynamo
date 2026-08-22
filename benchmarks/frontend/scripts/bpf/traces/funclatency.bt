@@ -18,7 +18,7 @@
 //   sudo BINARY=/path/to/binary FUNC=function_name bpftrace funclatency.bt
 //
 // Build target with symbols:
-//   cargo build --profile profiling --features nvtx
+//   cargo build --profile profiling --features dynamo-runtime/nvtx
 
 BEGIN
 {
