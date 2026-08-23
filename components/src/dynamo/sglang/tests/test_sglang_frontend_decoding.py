@@ -442,6 +442,7 @@ def _new_decode_handler(*, enable_frontend_decoding: bool):
     )
     handler._routed_experts_kwargs = {}
     handler._enable_frontend_decoding = enable_frontend_decoding
+    handler._first_token_source = None
     handler._image_loader = None
     handler._video_loader = None
     handler._mm_hashes_supported = False

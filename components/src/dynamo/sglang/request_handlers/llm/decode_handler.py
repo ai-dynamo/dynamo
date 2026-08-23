@@ -224,6 +224,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         generate_endpoint=None,
         shutdown_event: Optional[asyncio.Event] = None,
         enable_frontend_decoding: bool = False,
+        first_token_source: Any | None = None,
     ) -> None:
         """Initialize decode worker handler.
 
@@ -237,6 +238,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 ``Decoded`` variants over NIXL RDMA from the Rust frontend
                 and must be read before passing to SGLang.
                 Off by default; the worker keeps the URL-string fast path.
+            first_token_source: Endpoint-scoped prefill-completion source.
         """
         super().__init__(
             engine,
@@ -254,6 +256,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             str, Any
         ] = self._resolve_routed_experts_kwargs(self.engine, self.config.server_args)
         self._enable_frontend_decoding = enable_frontend_decoding
+        self._first_token_source = first_token_source
         self._image_loader: Optional[ImageLoader] = None
         self._video_loader: Optional[VideoLoader] = None
         if self._enable_frontend_decoding:
@@ -458,6 +461,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             RuntimeError: If no bootstrap info received from prefill worker.
         """
         logging.debug(f"New Request ID: {context.id()}")
+        routing = request.get("routing") or {}
+        if self._first_token_source is not None:
+            self._first_token_source.bind(context, routing.get("dp_rank"))
         _raise_if_conditional_disagg_bypass(request)
         trace_id = context.trace_id
         input_param = self._get_input_param(request)
@@ -644,6 +650,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Forward opaque SGLang chunks while retaining engine cancellation."""
         request_id_future: asyncio.Future[str] = asyncio.Future()
+        first_output_seen = False
         async with self._cancellation_monitor(request_id_future, context):
             async for chunk in stream_source:
                 native_response = chunk["engine_data"]["sglang_response"]
@@ -652,6 +659,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     if sglang_request_id:
                         request_id_future.set_result(sglang_request_id)
                         logging.debug(f"New SGLang Request ID: {sglang_request_id}")
+                if not first_output_seen and (
+                    native_response.get("output_ids") or native_response.get("text")
+                ):
+                    first_output_seen = True
+                    context.notify_first_token()
                 if not context.is_stopped():
                     yield chunk
 
@@ -677,6 +689,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         """
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
+        first_output_seen = False
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 meta_info = res.get("meta_info", {})
@@ -715,6 +728,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     if context.is_stopped():
                         break
                     continue
+
+                if output_ids and not first_output_seen:
+                    first_output_seen = True
+                    context.notify_first_token()
 
                 # Pass through disjoint token segments directly
                 out["token_ids"] = output_ids
@@ -799,6 +816,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
+        first_output_seen = False
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 meta_info = res.get("meta_info", {})
@@ -828,6 +846,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 next_count = len(text)
                 count = text_counts_per_choice.get(index, 0)
                 delta = text[count:]
+                if res.get("output_ids") and not first_output_seen:
+                    first_output_seen = True
+                    context.notify_first_token()
 
                 choice_data = {
                     "index": index,

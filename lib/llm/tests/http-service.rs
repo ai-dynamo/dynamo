@@ -6,6 +6,7 @@ use async_stream::stream;
 use dynamo_llm::protocols::{
     Annotated,
     codec::SseLineCodec,
+    common::extensions::NvExt,
     convert_sse_stream,
     openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
@@ -50,16 +51,17 @@ use ports::bind_random_port;
 struct CounterEngine {}
 
 #[derive(Default)]
-struct NvextProbeEngine {
-    called: AtomicBool,
-    received_nvext: AtomicBool,
+struct NvExtCaptureEngine {
+    nvext: std::sync::Mutex<Option<Option<NvExt>>>,
 }
 
-impl NvextProbeEngine {
-    fn observed_nvext(&self) -> Option<bool> {
-        self.called
-            .load(Ordering::Acquire)
-            .then(|| self.received_nvext.load(Ordering::Acquire))
+impl NvExtCaptureEngine {
+    fn take_nvext(&self) -> Option<NvExt> {
+        self.nvext
+            .lock()
+            .unwrap()
+            .take()
+            .expect("engine did not receive a request")
     }
 }
 
@@ -161,34 +163,6 @@ impl
         SingleIn<NvCreateChatCompletionRequest>,
         ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
         Error,
-    > for NvextProbeEngine
-{
-    async fn generate(
-        &self,
-        request: SingleIn<NvCreateChatCompletionRequest>,
-    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
-        let (request, context) = request.transfer(());
-        let ctx = context.context();
-        self.received_nvext
-            .store(request.nvext.is_some(), Ordering::Release);
-        self.called.store(true, Ordering::Release);
-        let mut generator = request.response_generator(ctx.id().to_string());
-
-        let stream = stream! {
-            let output = generator.create_choice(0, Some("choice 0".to_string()), None, None);
-            yield Annotated::from_data(output);
-        };
-
-        Ok(ResponseStream::new(Box::pin(stream), ctx))
-    }
-}
-
-#[async_trait]
-impl
-    AsyncEngine<
-        SingleIn<NvCreateChatCompletionRequest>,
-        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-        Error,
     > for CounterEngine
 {
     async fn generate(
@@ -222,6 +196,23 @@ impl
         };
 
         Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for NvExtCaptureEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        self.nvext.lock().unwrap().replace(request.nvext.clone());
+        CounterEngine {}.generate(request).await
     }
 }
 
@@ -1502,8 +1493,8 @@ async fn test_model_ready_endpoint_non_displayable_shadow() {
     task.await.unwrap().unwrap();
 }
 
-/// With nvext disabled, a request asking for response `extra_fields` must not
-/// produce any `nvext` field in the response.
+/// With nvext disabled, cache salting reaches the engine while all other NvExt
+/// behavior stays disabled, including response `extra_fields`.
 #[tokio::test]
 async fn test_nvext_disabled_strips_request_and_response() {
     dynamo_runtime::logging::init();
@@ -1524,20 +1515,24 @@ async fn test_nvext_disabled_strips_request_and_response() {
     wait_for_service_ready(port).await;
 
     let card = ModelDeploymentCard::with_name_only("test-model");
-    let probe_engine = Arc::new(NvextProbeEngine::default());
+    let engine = Arc::new(NvExtCaptureEngine::default());
     manager
-        .add_chat_completions_model("test-model", card.mdcsum(), probe_engine.clone())
+        .add_chat_completions_model("test-model", card.mdcsum(), engine.clone())
         .unwrap();
 
     let response = reqwest::Client::new()
         .post(format!("http://localhost:{port}/v1/chat/completions"))
         .header("x-dynamo-worker-instance-id", "42")
+        .header("x-dynamo-dp-rank", "3")
+        .header("x-dynamo-request-priority", "7")
+        .header("x-tenant-id", "tenant-header")
         .json(&serde_json::json!({
             "model": "test-model",
             "messages": [{"role": "user", "content": "hi"}],
             "stream": true,
             "max_tokens": 1,
             "nvext": {
+                "cache_salt": "tenant-body",
                 "extra_fields": ["worker_id", "timing", "engine_data"],
                 "backend_instance_id": 99
             }
@@ -1548,11 +1543,11 @@ async fn test_nvext_disabled_strips_request_and_response() {
     assert!(response.status().is_success());
 
     let body = response.text().await.expect("read body");
-    assert_eq!(
-        probe_engine.observed_nvext(),
-        Some(false),
-        "the disabled gate must strip nvext before dispatching to the engine"
-    );
+    let nvext = engine
+        .take_nvext()
+        .expect("cache salt must reach the engine");
+    assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-header"));
+    assert!(!nvext.has_non_cache_salt_fields());
     assert!(
         !body.contains("\"nvext\""),
         "nvext gate off: response must not contain an `nvext` field, got: {body}"
