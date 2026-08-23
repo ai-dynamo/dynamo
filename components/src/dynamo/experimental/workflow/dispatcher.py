@@ -11,7 +11,7 @@ from typing import Any
 
 from dynamo.experimental.workflow.plan import ExecutionPlan, InlineBinding
 from dynamo.experimental.workflow.runtime import StageContext, StageRunner, WorkflowExecutionError
-from dynamo.experimental.workflow.types import StageContract, WorkflowValidationError
+from dynamo.experimental.workflow.types import WorkflowValidationError
 
 
 class StageDispatcher:
@@ -64,12 +64,12 @@ class StageDispatcher:
     async def call(
         self,
         stage_id: str,
-        contract: StageContract,
         inputs: Mapping[str, Any],
         context: StageContext,
     ) -> dict[str, Any]:
         """Invoke one stage and validate its complete input/output contract."""
 
+        contract = self._plan.stage_contracts[stage_id]
         expected_inputs = set(contract.inputs)
         actual_inputs = set(inputs)
         if actual_inputs != expected_inputs:
