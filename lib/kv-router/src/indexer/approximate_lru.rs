@@ -47,6 +47,7 @@ pub enum ApproximateRetentionConfig {
 pub enum ApproximateAcquireMode {
     Lru,
     TtlFallback,
+    Ignored,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,7 +92,6 @@ pub(crate) enum ApproximateLruCommand {
         attempt_id: AttemptId,
         blocks: Vec<ApproximateLruBlock>,
         private_blocks: usize,
-        capacity_hint: Option<usize>,
     },
     Materialize {
         worker: WorkerWithDpRank,
@@ -203,6 +203,25 @@ impl ApproximateLruClient {
         expect_applied(reply)
     }
 
+    /// Enqueue rank registration without waiting for acknowledgement.
+    ///
+    /// Acquires use the same FIFO and never create rank state themselves, so a
+    /// successfully enqueued capacity command is the durable incarnation fence.
+    pub fn set_capacity_now(
+        &self,
+        worker: WorkerWithDpRank,
+        incarnation: ApproximateLruIncarnation,
+        capacity: Option<usize>,
+    ) -> Result<(), KvRouterError> {
+        self.sink.send(ApproximateLruTask::unacknowledged(
+            ApproximateLruCommand::SetCapacity {
+                worker,
+                incarnation,
+                capacity,
+            },
+        ))
+    }
+
     pub async fn reset_rank(&self, worker: WorkerWithDpRank) -> Result<(), KvRouterError> {
         let reply =
             send_acknowledged(&self.sink, ApproximateLruCommand::ResetRank { worker }).await?;
@@ -267,16 +286,6 @@ impl ApproximateLruLease {
         blocks: Vec<ApproximateLruBlock>,
         private_blocks: usize,
     ) -> Result<ApproximateAcquireMode, KvRouterError> {
-        self.acquire_with_capacity_hint(blocks, private_blocks, None)
-            .await
-    }
-
-    pub async fn acquire_with_capacity_hint(
-        &self,
-        blocks: Vec<ApproximateLruBlock>,
-        private_blocks: usize,
-        capacity_hint: Option<usize>,
-    ) -> Result<ApproximateAcquireMode, KvRouterError> {
         if self.inner.released.load(Ordering::Acquire) {
             return Err(KvRouterError::Unsupported(
                 "approximate LRU lease is already complete".to_string(),
@@ -290,7 +299,6 @@ impl ApproximateLruLease {
                 attempt_id: self.inner.attempt_id,
                 blocks,
                 private_blocks,
-                capacity_hint,
             },
         )
         .await?
@@ -796,31 +804,19 @@ impl ApproximateLruLane {
                 attempt_id,
                 blocks,
                 private_blocks,
-                capacity_hint,
             } => {
                 self.requests = self.requests.saturating_add(1);
                 self.request_messages = self.request_messages.saturating_add(1);
-                if !self.ranks.contains_key(&worker) {
-                    let state = capacity_hint.filter(|capacity| *capacity > 0).map_or(
-                        WorkerRetentionState::TtlFallback { incarnation },
-                        |capacity| WorkerRetentionState::Lru {
-                            incarnation,
-                            state: RankLruState::new(capacity),
-                        },
-                    );
-                    if matches!(state, WorkerRetentionState::TtlFallback { .. }) {
-                        self.fallback_activations = self.fallback_activations.saturating_add(1);
-                    }
-                    self.ranks.insert(worker, state);
-                }
-                let state = self
-                    .ranks
-                    .get_mut(&worker)
-                    .expect("rank state was inserted above");
+                let Some(state) = self.ranks.get_mut(&worker) else {
+                    return Ok(ApproximateLruApplyOutput {
+                        events,
+                        reply: ApproximateLruReply::Acquired(ApproximateAcquireMode::Ignored),
+                    });
+                };
                 if state.incarnation() != incarnation {
                     return Ok(ApproximateLruApplyOutput {
                         events,
-                        reply: ApproximateLruReply::Applied,
+                        reply: ApproximateLruReply::Acquired(ApproximateAcquireMode::Ignored),
                     });
                 }
                 let WorkerRetentionState::Lru { state, .. } = state else {
@@ -1055,7 +1051,6 @@ mod tests {
                 attempt_id: attempt(1),
                 blocks: vec![block(1), block(2), block(3)],
                 private_blocks: 0,
-                capacity_hint: None,
             },
         );
         apply(
@@ -1098,7 +1093,6 @@ mod tests {
                 attempt_id: attempt(1),
                 blocks: vec![block(1), block(2)],
                 private_blocks: 0,
-                capacity_hint: None,
             },
         );
         assert_eq!(lane.stats().overcapacity_blocks, 1);
@@ -1119,6 +1113,14 @@ mod tests {
     #[test]
     fn missing_capacity_pins_rank_to_ttl_until_reset() {
         let mut lane = ApproximateLruLane::default();
+        apply(
+            &mut lane,
+            ApproximateLruCommand::SetCapacity {
+                worker: worker(),
+                incarnation: 1,
+                capacity: None,
+            },
+        );
         let output = lane
             .apply(ApproximateLruCommand::Acquire {
                 worker: worker(),
@@ -1126,7 +1128,6 @@ mod tests {
                 attempt_id: attempt(1),
                 blocks: vec![block(1)],
                 private_blocks: 0,
-                capacity_hint: None,
             })
             .unwrap();
         assert!(matches!(
@@ -1158,6 +1159,40 @@ mod tests {
     }
 
     #[test]
+    fn reset_rejects_late_acquire_without_rank_registration() {
+        let mut lane = ApproximateLruLane::default();
+        apply(
+            &mut lane,
+            ApproximateLruCommand::SetCapacity {
+                worker: worker(),
+                incarnation: 1,
+                capacity: Some(4),
+            },
+        );
+        apply(
+            &mut lane,
+            ApproximateLruCommand::ResetRank { worker: worker() },
+        );
+
+        let output = lane
+            .apply(ApproximateLruCommand::Acquire {
+                worker: worker(),
+                incarnation: 1,
+                attempt_id: attempt(1),
+                blocks: vec![block(1)],
+                private_blocks: 0,
+            })
+            .unwrap();
+
+        assert!(output.events.is_empty());
+        assert!(matches!(
+            output.reply,
+            ApproximateLruReply::Acquired(ApproximateAcquireMode::Ignored)
+        ));
+        assert_eq!(lane.stats().ranks, 0);
+    }
+
+    #[test]
     fn cached_prefix_is_referenced_and_only_missing_suffix_allocates() {
         let mut lane = ApproximateLruLane::default();
         apply(
@@ -1176,7 +1211,6 @@ mod tests {
                 attempt_id: attempt(1),
                 blocks: vec![block(1), block(2)],
                 private_blocks: 0,
-                capacity_hint: None,
             },
         );
         apply(
@@ -1195,7 +1229,6 @@ mod tests {
                 attempt_id: attempt(2),
                 blocks: vec![block(1), block(2), block(3)],
                 private_blocks: 0,
-                capacity_hint: None,
             },
         );
 
@@ -1232,7 +1265,6 @@ mod tests {
                 attempt_id: attempt(1),
                 blocks: vec![block(1)],
                 private_blocks: 0,
-                capacity_hint: None,
             },
         );
         apply(
@@ -1251,7 +1283,6 @@ mod tests {
                 attempt_id: attempt(2),
                 blocks: Vec::new(),
                 private_blocks: 0,
-                capacity_hint: None,
             },
         );
         apply(
@@ -1292,7 +1323,6 @@ mod tests {
                 attempt_id: attempt(3),
                 blocks: vec![block(2)],
                 private_blocks: 0,
-                capacity_hint: None,
             })
             .unwrap();
         let removed = final_eviction
@@ -1333,7 +1363,6 @@ mod tests {
                 attempt_id: attempt(1),
                 blocks: vec![block(1)],
                 private_blocks: 1,
-                capacity_hint: None,
             },
         );
         apply(
@@ -1358,7 +1387,6 @@ mod tests {
                 attempt_id: attempt(1),
                 blocks: vec![block(9)],
                 private_blocks: 1,
-                capacity_hint: None,
             },
         );
         let stale_output = lane
@@ -1413,17 +1441,20 @@ mod tests {
 
         let local_hashes = vec![LocalBlockHash(11), LocalBlockHash(22)];
         let sequence_hashes = compute_seq_hash_for_block(&local_hashes);
+        indexer
+            .set_approximate_lru_capacity(worker, 1, Some(4))
+            .await
+            .unwrap();
         let lease = indexer
             .begin_approximate_lru_request(worker, 1, attempt(1))
             .unwrap();
         lease
-            .acquire_with_capacity_hint(
+            .acquire(
                 vec![ApproximateLruBlock {
                     local_hash: local_hashes[0],
                     sequence_hash: sequence_hashes[0],
                 }],
                 0,
-                Some(4),
             )
             .await
             .unwrap();

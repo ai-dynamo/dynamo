@@ -477,7 +477,7 @@ impl Indexer {
         }
     }
 
-    pub(crate) async fn set_approximate_lru_capacity(
+    pub(crate) fn set_approximate_lru_capacity_now(
         &self,
         worker: dynamo_kv_router::protocols::WorkerWithDpRank,
         incarnation: ApproximateLruIncarnation,
@@ -485,14 +485,10 @@ impl Indexer {
     ) -> Result<(), KvRouterError> {
         match self {
             Self::KvIndexer { primary, .. } => {
-                primary
-                    .set_approximate_lru_capacity(worker, incarnation, capacity)
-                    .await
+                primary.set_approximate_lru_capacity_now(worker, incarnation, capacity)
             }
             Self::Concurrent { primary, .. } => {
-                primary
-                    .set_approximate_lru_capacity(worker, incarnation, capacity)
-                    .await
+                primary.set_approximate_lru_capacity_now(worker, incarnation, capacity)
             }
             Self::Remote { .. } | Self::None => Ok(()),
         }

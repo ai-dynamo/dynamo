@@ -32,7 +32,6 @@ impl ApproximateRequestLease {
         &mut self,
         hashes: RoutingDecisionHashes,
         private_blocks: usize,
-        capacity_hint: Option<usize>,
     ) -> Result<ApproximateAcquireMode, KvRouterError> {
         let blocks = hashes
             .local_hashes
@@ -43,18 +42,19 @@ impl ApproximateRequestLease {
                 sequence_hash,
             })
             .collect();
-        let mode = self
-            .lease
-            .acquire_with_capacity_hint(blocks, private_blocks, capacity_hint)
-            .await?;
+        let mode = self.lease.acquire(blocks, private_blocks).await?;
         self.mode.store(
             match mode {
                 ApproximateAcquireMode::Lru => 1,
                 ApproximateAcquireMode::TtlFallback => 2,
+                ApproximateAcquireMode::Ignored => 0,
             },
             Ordering::Release,
         );
         if mode == ApproximateAcquireMode::Lru {
+            return Ok(mode);
+        }
+        if mode == ApproximateAcquireMode::Ignored {
             return Ok(mode);
         }
         self.indexer

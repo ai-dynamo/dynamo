@@ -42,6 +42,7 @@ mod selection;
 
 use cancellation::cancel_on_stop;
 use request_guard::RequestGuard;
+pub(super) use request_guard::prompt_private_blocks;
 use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";

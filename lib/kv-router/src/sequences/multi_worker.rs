@@ -48,11 +48,10 @@ const SEQUENCE_PUBLISH_FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(30);
 /// Environment override for the stale active-request cleanup guard.
 const DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
 
-/// Returns the configured request-lifecycle cleanup interval.
+/// Returns the configured active-request expiry duration.
 ///
-/// Callers that install the shared CLOCK lease manager should construct the slot
-/// tracker without its legacy expiry mechanism and use this duration as the scan
-/// interval instead.
+/// Legacy standalone slot trackers use this as an absolute-age threshold. The
+/// embedded `KvRouter` uses it as the scan interval for its second-chance CLOCK.
 pub fn active_request_expiry_duration() -> Duration {
     active_request_expiry_duration_from_lookup(|key| env::var(key).ok())
 }
@@ -1010,12 +1009,22 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         {
             return Ok(LifecycleMutationOutcome::NoChange);
         }
-        self.mutate_request_worker_load_state_local(
+        let outcome = self.mutate_request_worker_load_state_local(
             worker,
             request_id,
             decay_now,
             |seqs, rid, decay_now| seqs.mark_prefill_completed(rid, decay_now),
-        )
+        )?;
+        if outcome.is_applied() {
+            self.enqueue_publish_event(ActiveSequenceEvent {
+                request_id: request_id.clone(),
+                worker,
+                data: ActiveSequenceEventData::MarkPrefillCompleted,
+                router_id: self.router_id,
+                lora_name: self.request_index.lora_for(request_id),
+            });
+        }
+        Ok(outcome)
     }
 
     /// Publish the router's ordered completion fallback independently of the local mutation.
@@ -1507,7 +1516,7 @@ mod tests {
         );
     }
 
-    /// Verifies that absent and invalid expiry overrides use the default.
+    /// Verifies that absent and invalid expiry overrides use the shared default.
     #[test]
     fn active_request_expiry_duration_override_falls_back_to_default() {
         assert_eq!(
@@ -2144,8 +2153,7 @@ mod tests {
     #[test]
     fn stale_attempt_cleanup_cannot_free_reused_request_id() {
         let worker = WorkerWithDpRank::new(1, 0);
-        let (sequences, _) =
-            make_recording_sequences_without_replica_sync(HashMap::from([(1, (0, 1))]));
+        let (sequences, state) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
         let request_id = "reused-request-id".to_string();
         let now = Instant::now();
 
@@ -2163,6 +2171,7 @@ mod tests {
             .add_request_admitted(local_sequence_request(&request_id, worker), now)
             .unwrap();
         assert_ne!(first_attempt, replacement_attempt);
+        state.clear();
         assert_eq!(
             sequences
                 .mark_prefill_completed_if_booking(&request_id, worker, first_attempt, now)
@@ -2182,6 +2191,18 @@ mod tests {
             LifecycleMutationOutcome::NoChange
         );
         assert_eq!(sequences.request_worker(&request_id), Some(worker));
+        assert!(state.events.lock().unwrap().is_empty());
+
+        assert_eq!(
+            sequences
+                .mark_prefill_completed_if_booking(&request_id, worker, replacement_attempt, now)
+                .unwrap(),
+            LifecycleMutationOutcome::Applied
+        );
+        assert!(matches!(
+            state.events.lock().unwrap().as_slice(),
+            [ActiveSequenceEventData::MarkPrefillCompleted]
+        ));
 
         assert_eq!(
             sequences

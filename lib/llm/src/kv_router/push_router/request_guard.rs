@@ -50,6 +50,17 @@ struct MaterializedOutputBlocks {
     private_blocks: usize,
 }
 
+pub(crate) fn prompt_private_blocks(
+    token_count: usize,
+    complete_blocks: usize,
+    block_size: usize,
+    is_eagle: bool,
+) -> usize {
+    let tail_tokens = token_count.saturating_sub(complete_blocks.saturating_mul(block_size));
+    let retained_eagle_overlap = usize::from(is_eagle && complete_blocks > 0);
+    usize::from(tail_tokens > retained_eagle_overlap)
+}
+
 /// Incrementally extends the same canonical hash chain used for prompt routing.
 struct CanonicalOutputTracker {
     template: OutputHashBranch,
@@ -107,7 +118,8 @@ impl CanonicalOutputTracker {
                 .flatten(),
             has_uncomputed_output: false,
         };
-        let reported_private_blocks = usize::from(Self::has_private_tail(&template, is_eagle));
+        let reported_private_blocks =
+            prompt_private_blocks(tokens.len(), complete_blocks, stride, is_eagle);
         Self {
             template,
             branches: HashMap::new(),
@@ -167,7 +179,7 @@ impl CanonicalOutputTracker {
                 &branch.tail[consumed..consumed + window_size],
                 self.block_size,
                 BlockHashOptions {
-                    block_mm_infos: mm_infos.as_deref(),
+                    block_mm_infos: mm_infos,
                     lora_name: self.lora_name.as_deref(),
                     cache_namespace: self.cache_namespace.as_deref(),
                     is_eagle: Some(self.is_eagle),
@@ -386,7 +398,6 @@ where
     observability: RequestObservability,
     output_blocks: OutputBlockTracker,
     approximate_lru: Option<ApproximateRequestLease>,
-    approximate_lru_capacity: Option<usize>,
     output_hashes: Option<CanonicalOutputTracker>,
     prefill_marked: bool,
     migration_state: Option<MigrationState>,
@@ -458,8 +469,6 @@ where
                 expected_output_tokens,
             ),
             approximate_lru,
-            approximate_lru_capacity: lru_registration
-                .and_then(|registration| registration.capacity),
             output_hashes,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
@@ -504,10 +513,8 @@ where
         let Some(lease) = self.approximate_lru.as_mut() else {
             return Ok(());
         };
-        let mode = lease
-            .acquire(hashes, private_blocks, self.approximate_lru_capacity)
-            .await?;
-        if mode == ApproximateAcquireMode::TtlFallback {
+        let mode = lease.acquire(hashes, private_blocks).await?;
+        if mode != ApproximateAcquireMode::Lru {
             self.output_hashes = None;
             return Ok(());
         }

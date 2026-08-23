@@ -522,6 +522,7 @@ pub async fn create_multi_worker_sequences(
     .await
 }
 
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn create_multi_worker_sequences_with_observer(
     endpoint: Endpoint,
     block_size: usize,
@@ -597,8 +598,10 @@ pub(crate) async fn create_multi_worker_sequences_with_observer(
     );
 
     let arc = Arc::new(multi_worker);
-    if let Some(observer) = replica_request_lease_observer {
-        debug_assert!(arc.set_replica_request_lease_observer(observer));
+    if let Some(observer) = replica_request_lease_observer
+        && !arc.set_replica_request_lease_observer(observer)
+    {
+        anyhow::bail!("replica request lease observer is already installed");
     }
 
     // Worker-origin completion marks are consumed even when router-to-router replica sync is

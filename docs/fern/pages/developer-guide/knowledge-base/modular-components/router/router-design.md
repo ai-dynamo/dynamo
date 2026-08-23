@@ -171,7 +171,7 @@ In distributed deployments with multiple routers, each router initially sees onl
 
 3. **Free**: Indicates request completion and resource release, enabling accurate block reference counting across all routers.
 
-Each event carries a unique router ID to prevent self-event processing. Publication is fire-and-forget and the bounded outbound publisher queue drops the newest event when full. These events improve cross-replica active-load estimates; they do not synchronize prefix-cache state or guarantee identical routing decisions. Output-block growth is tracked locally rather than published as a lifecycle event. One CLOCK reaper per router expires stale request leases after roughly one to two scans; configure its safety window with `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS` (default `120` seconds). Peer leases refresh only on replicated lifecycle events, not output chunks.
+Each event carries a unique router ID to prevent self-event processing. Publication is fire-and-forget and the bounded outbound publisher queue drops the newest event when full. These events improve cross-replica active-load estimates; they do not synchronize prefix-cache state or guarantee identical routing decisions. Output-block growth is tracked locally rather than published as a lifecycle event. The embedded `KvRouter` runs one CLOCK reaper and expires idle request leases after roughly one to two scans; configure its scan interval with `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS` (default `300` seconds). Peer leases refresh only on replicated lifecycle events, not output chunks.
 
 ## Event Transport Modes
 

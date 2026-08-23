@@ -92,6 +92,7 @@ struct ApproximateLruRankRegistration {
     incarnation: ApproximateLruIncarnation,
     capacity: Option<usize>,
     reconciled: bool,
+    retiring: bool,
 }
 
 #[derive(Default)]
@@ -111,6 +112,7 @@ impl ApproximateLruRankRegistry {
             incarnation: self.next_incarnation,
             capacity,
             reconciled: false,
+            retiring: false,
         };
         self.ranks.insert(worker, registration);
         registration
@@ -138,21 +140,24 @@ async fn reconcile_approximate_lru_snapshot(
         }
     }
 
-    let (removed, updates) = {
+    let retirements = {
         let mut registry = registry.lock();
-        let removed = registry
-            .ranks
-            .keys()
-            .filter(|worker| !advertised.contains_key(worker))
-            .copied()
-            .collect::<Vec<_>>();
-        for worker in &removed {
-            registry.ranks.remove(worker);
+        for (worker, registration) in &mut registry.ranks {
+            if !advertised.contains_key(worker) {
+                registration.retiring = true;
+                registration.reconciled = false;
+            }
         }
+        let retirements = registry
+            .ranks
+            .iter()
+            .filter(|(_, registration)| registration.retiring)
+            .map(|(&worker, registration)| (worker, registration.incarnation))
+            .collect::<Vec<_>>();
 
-        let mut updates = Vec::new();
         for (worker, advertised_capacity) in advertised {
-            let registration = match registry.ranks.get(&worker).copied() {
+            let mut registration = match registry.ranks.get(&worker).copied() {
+                Some(registration) if registration.retiring => continue,
                 Some(mut registration) => {
                     // Missing capacity pins this worker incarnation to TTL until removal.
                     let effective_capacity = registration.capacity.and(advertised_capacity);
@@ -160,40 +165,41 @@ async fn reconcile_approximate_lru_snapshot(
                         continue;
                     }
                     registration.capacity = effective_capacity;
-                    registration.reconciled = true;
-                    registry.ranks.insert(worker, registration);
                     registration
                 }
-                None => {
-                    let mut registration = registry.register(worker, advertised_capacity);
-                    registration.reconciled = true;
-                    registry.ranks.insert(worker, registration);
-                    registration
-                }
+                None => registry.register(worker, advertised_capacity),
             };
-            updates.push((worker, registration));
+            if registration.capacity.is_none() {
+                tracing::warn!(
+                    worker_id = worker.worker_id,
+                    dp_rank = worker.dp_rank,
+                    "Approximate LRU requires a positive per-rank total_kv_blocks; clearing this rank and using TTL until it is removed and re-registered"
+                );
+            }
+            registration.reconciled = indexer
+                .set_approximate_lru_capacity_now(
+                    worker,
+                    registration.incarnation,
+                    registration.capacity,
+                )
+                .is_ok();
+            registry.ranks.insert(worker, registration);
         }
-        (removed, updates)
+        retirements
     };
 
-    for worker in removed {
+    for (worker, incarnation) in retirements {
         indexer
             .reset_worker_dp_rank_and_wait(worker.worker_id, worker.dp_rank)
             .await?;
+        let mut registry = registry.lock();
+        if registry.ranks.get(&worker).is_some_and(|registration| {
+            registration.retiring && registration.incarnation == incarnation
+        }) {
+            registry.ranks.remove(&worker);
+        }
     }
 
-    for (worker, registration) in updates {
-        if registration.capacity.is_none() {
-            tracing::warn!(
-                worker_id = worker.worker_id,
-                dp_rank = worker.dp_rank,
-                "Approximate LRU requires a positive per-rank total_kv_blocks; clearing this rank and using TTL until it is removed and re-registered"
-            );
-        }
-        indexer
-            .set_approximate_lru_capacity(worker, registration.incarnation, registration.capacity)
-            .await?;
-    }
     Ok(())
 }
 
@@ -373,9 +379,17 @@ pub(super) enum FindBestMatchAdmission {
     WithoutAdmission,
 }
 
-pub(super) struct AdmittedFindBestMatchOutcome {
+#[doc(hidden)]
+pub struct AdmittedFindBestMatchOutcome {
     pub(super) outcome: FindBestMatchOutcome,
     pub(super) attempt_id: Option<AttemptId>,
+}
+
+impl AdmittedFindBestMatchOutcome {
+    #[doc(hidden)]
+    pub fn into_parts(self) -> (FindBestMatchOutcome, Option<AttemptId>) {
+        (self.outcome, self.attempt_id)
+    }
 }
 
 pub(super) enum FindBestMatchInnerOutcome {
@@ -841,16 +855,17 @@ where
         if !self.indexer.uses_approximate_lru() {
             return None;
         }
-        if let Some(registration) = self
-            .approximate_lru_ranks
-            .lock()
+        // Serialize the authoritative MRC recheck with rank retirement. A request
+        // that observed the prior snapshot cannot re-register a rank after its
+        // reset has begun.
+        let mut registry = self.approximate_lru_ranks.lock();
+        if registry
             .ranks
             .get(&worker)
-            .copied()
+            .is_some_and(|registration| registration.retiring)
         {
-            return Some(registration);
+            return None;
         }
-
         let configs = self.workers_with_configs.borrow();
         let config = configs.get(&worker.worker_id)?;
         let end_rank = config
@@ -864,7 +879,30 @@ where
             .and_then(|blocks| usize::try_from(blocks).ok())
             .filter(|blocks| *blocks > 0);
         drop(configs);
-        Some(self.approximate_lru_ranks.lock().register(worker, capacity))
+
+        let mut registration = match registry.ranks.get(&worker).copied() {
+            Some(registration) => registration,
+            None => registry.register(worker, capacity),
+        };
+        if registration.reconciled {
+            return Some(registration);
+        }
+        if let Err(error) = self.indexer.set_approximate_lru_capacity_now(
+            worker,
+            registration.incarnation,
+            registration.capacity,
+        ) {
+            tracing::warn!(
+                worker_id = worker.worker_id,
+                dp_rank = worker.dp_rank,
+                %error,
+                "Failed to register approximate LRU rank"
+            );
+            return None;
+        }
+        registration.reconciled = true;
+        registry.ranks.insert(worker, registration);
+        Some(registration)
     }
 
     fn tracking_hash_scope(&self) -> TrackingHashScope<'_> {
@@ -959,6 +997,89 @@ where
         self.indexer
             .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
             .await
+    }
+
+    /// Record an update that has no admitted request attempt. Capacity-bounded
+    /// LRU requires acquire/release lifecycle fencing, so query-only callers
+    /// intentionally leave it unchanged. TTL recording retains its existing behavior.
+    #[doc(hidden)]
+    pub async fn record_query_only_routing_decision(
+        &self,
+        tokens_with_hashes: TokensWithHashes,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError> {
+        if self.indexer.uses_approximate_lru() {
+            return Ok(());
+        }
+        self.record_routing_decision(tokens_with_hashes, worker)
+            .await
+    }
+
+    /// Install the detached lifecycle used by public request-ID admissions.
+    /// Registration precedes the fallible LRU acquire so an indexing failure
+    /// cannot strand the scheduler booking.
+    #[doc(hidden)]
+    pub async fn enroll_public_request_attempt(
+        &self,
+        request_id: String,
+        worker: WorkerWithDpRank,
+        attempt_id: AttemptId,
+        mut routing_decision: Option<TokensWithHashes>,
+    ) -> Result<(), KvRouterError> {
+        let lru_registration = self.approximate_lru_rank_registration(worker);
+        let approximate_lru = lru_registration.and_then(|registration| {
+            self.indexer
+                .begin_approximate_lru_request(worker, registration.incarnation, attempt_id)
+        });
+        let booking = scheduler::SchedulerBookingDescriptor {
+            request_id,
+            worker,
+            attempt_id,
+        };
+        self.request_leases
+            .register_detached(booking.clone(), approximate_lru.clone());
+
+        let Some(tokens_with_hashes) = routing_decision.as_mut() else {
+            return Ok(());
+        };
+        if let (Some(mut lease), Some(_)) = (approximate_lru, lru_registration) {
+            let token_count = tokens_with_hashes.len();
+            let local_hashes = tokens_with_hashes.get_or_compute_block_hashes().to_vec();
+            let sequence_hashes = tokens_with_hashes.get_or_compute_seq_hashes().to_vec();
+            let private_blocks = push_router::prompt_private_blocks(
+                token_count,
+                local_hashes.len(),
+                usize::try_from(self.block_size).unwrap_or(usize::MAX),
+                self.is_eagle,
+            );
+            if let Err(error) = lease
+                .acquire(
+                    RoutingDecisionHashes {
+                        local_hashes,
+                        sequence_hashes,
+                    },
+                    private_blocks,
+                )
+                .await
+            {
+                self.request_leases.finish_booking(&booking).await;
+                return Err(error);
+            }
+            return Ok(());
+        }
+        if self.indexer.uses_approximate_lru() {
+            return Ok(());
+        }
+        let result = self
+            .record_routing_decision(
+                routing_decision.expect("routing decision is present"),
+                worker,
+            )
+            .await;
+        if result.is_err() {
+            self.request_leases.finish_booking(&booking).await;
+        }
+        result
     }
 
     pub(crate) async fn record_routing_decision_hashes(
@@ -1084,6 +1205,59 @@ where
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> anyhow::Result<FindBestMatchOutcome> {
+        let admitted = self
+            .find_best_match_details_with_policy_class_admitted(
+                context_id,
+                tokens,
+                block_mm_infos,
+                router_config_override,
+                update_states,
+                return_routing_hashes,
+                lora_name,
+                cache_namespace,
+                priority_jump,
+                strict_priority,
+                policy_class,
+                session_context,
+                expected_output_tokens,
+                pinned_worker,
+                allowed_worker_ids,
+                routing_constraints,
+            )
+            .await?;
+        if let (Some(request_id), FindBestMatchOutcome::Routed { worker, .. }, Some(attempt_id)) =
+            (context_id, &admitted.outcome, admitted.attempt_id)
+        {
+            self.enroll_public_request_attempt(request_id.to_string(), *worker, attempt_id, None)
+                .await?;
+        }
+        Ok(admitted.outcome)
+    }
+
+    /// Return the admitted routing wrapper without enrolling it in a detached
+    /// lifecycle lease. Internal bindings use this to attach optional LRU state
+    /// before installing the one shared request lease.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn find_best_match_details_with_policy_class_admitted(
+        &self,
+        context_id: Option<&str>,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
+        return_routing_hashes: bool,
+        lora_name: Option<String>,
+        cache_namespace: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        policy_class: Option<String>,
+        session_context: Option<dynamo_kv_router::SessionContext>,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+    ) -> anyhow::Result<AdmittedFindBestMatchOutcome> {
         match self
             .find_best_match_details_with_policy_class_inner(
                 context_id,
@@ -1108,7 +1282,7 @@ where
             )
             .await?
         {
-            FindBestMatchInnerOutcome::WithAdmission(admitted) => Ok(admitted.outcome),
+            FindBestMatchInnerOutcome::WithAdmission(admitted) => Ok(admitted),
             FindBestMatchInnerOutcome::WithoutAdmission(_) => {
                 unreachable!("with-admission routing returned advisory outcome")
             }
@@ -1541,10 +1715,15 @@ where
     }
 
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
-        self.scheduler.mark_prefill_completed(request_id).await
+        self.scheduler.mark_prefill_completed(request_id).await?;
+        self.request_leases.touch_request(request_id);
+        Ok(())
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
+        if self.request_leases.finish_request(request_id).await {
+            return Ok(());
+        }
         self.scheduler.free(request_id).await
     }
 

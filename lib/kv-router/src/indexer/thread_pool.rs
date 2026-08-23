@@ -373,6 +373,18 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         client.set_capacity(worker, incarnation, capacity).await
     }
 
+    pub fn set_approximate_lru_capacity_now(
+        &self,
+        worker: WorkerWithDpRank,
+        incarnation: ApproximateLruIncarnation,
+        capacity: Option<usize>,
+    ) -> Result<(), KvRouterError> {
+        let Some(client) = self.approximate_lru_client_for_worker(worker) else {
+            return Ok(());
+        };
+        client.set_capacity_now(worker, incarnation, capacity)
+    }
+
     pub async fn approximate_lru_stats(&self) -> Result<ApproximateLruStats, KvRouterError> {
         if !self.approximate_lru_enabled {
             return Ok(ApproximateLruStats::default());

@@ -436,6 +436,37 @@ impl KvIndexer {
                                 apply_mutation(&mut trie, mutation, &counters, &prune_manager);
                             }
 
+                            Some(req) = match_rx.recv() => {
+                                #[cfg(feature = "bench")]
+                                let queue_wait = req.created_at.elapsed();
+                                #[cfg(feature = "bench")]
+                                let seq_len = req.sequence.len();
+
+                                #[cfg(feature = "bench")]
+                                let process_start = Instant::now();
+                                let matches = trie.find_matches(req.sequence, req.early_exit);
+                                #[cfg(feature = "bench")]
+                                let process_time = process_start.elapsed();
+
+                                #[cfg(feature = "bench")]
+                                tracing::info!(
+                                    seq_len,
+                                    queue_wait_us = queue_wait.as_micros() as u64,
+                                    process_us = process_time.as_micros() as u64,
+                                    "indexer: processed find_matches"
+                                );
+                                let _ = req.resp.send(matches);
+                            }
+
+                            Some(req) = match_details_rx.recv() => {
+                                let matches = trie.find_match_details_with_options(
+                                    req.sequence,
+                                    req.early_exit,
+                                    req.retain_router_hint_chain,
+                                );
+                                let _ = req.resp.send(matches);
+                            }
+
                             task = async {
                                 let Some(receiver) = approximate_lru_rx.as_ref() else {
                                     return std::future::pending::<Option<ApproximateLruTask>>().await;
@@ -525,37 +556,6 @@ impl KvIndexer {
                                         );
                                     }
                                 }
-                            }
-
-                            Some(req) = match_rx.recv() => {
-                                #[cfg(feature = "bench")]
-                                let queue_wait = req.created_at.elapsed();
-                                #[cfg(feature = "bench")]
-                                let seq_len = req.sequence.len();
-
-                                #[cfg(feature = "bench")]
-                                let process_start = Instant::now();
-                                let matches = trie.find_matches(req.sequence, req.early_exit);
-                                #[cfg(feature = "bench")]
-                                let process_time = process_start.elapsed();
-
-                                #[cfg(feature = "bench")]
-                                tracing::info!(
-                                    seq_len,
-                                    queue_wait_us = queue_wait.as_micros() as u64,
-                                    process_us = process_time.as_micros() as u64,
-                                    "indexer: processed find_matches"
-                                );
-                                let _ = req.resp.send(matches);
-                            }
-
-                            Some(req) = match_details_rx.recv() => {
-                                let matches = trie.find_match_details_with_options(
-                                    req.sequence,
-                                    req.early_exit,
-                                    req.retain_router_hint_chain,
-                                );
-                                let _ = req.resp.send(matches);
                             }
 
                         }
@@ -908,6 +908,18 @@ impl KvIndexer {
         approximate_lru
             .set_capacity(worker, incarnation, capacity)
             .await
+    }
+
+    pub fn set_approximate_lru_capacity_now(
+        &self,
+        worker: WorkerWithDpRank,
+        incarnation: ApproximateLruIncarnation,
+        capacity: Option<usize>,
+    ) -> Result<(), KvRouterError> {
+        let Some(approximate_lru) = &self.approximate_lru else {
+            return Ok(());
+        };
+        approximate_lru.set_capacity_now(worker, incarnation, capacity)
     }
 
     pub async fn approximate_lru_stats(&self) -> Result<ApproximateLruStats, KvRouterError> {

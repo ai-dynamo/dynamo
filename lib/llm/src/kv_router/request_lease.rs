@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::HashMap,
     sync::{
         Arc, Weak,
         atomic::{AtomicU8, Ordering},
@@ -96,30 +96,39 @@ impl RequestLeaseRecord {
 }
 
 struct RequestLeaseManagerInner {
-    active: Mutex<HashMap<AttemptId, Arc<RequestLeaseRecord>>>,
+    active: Mutex<ActiveRequestLeases>,
     scheduler: SchedulerBookingCleanup,
 }
 
+#[derive(Default)]
+struct ActiveRequestLeases {
+    by_attempt: HashMap<AttemptId, Arc<RequestLeaseRecord>>,
+    current_by_request: HashMap<String, AttemptId>,
+}
+
 impl RequestLeaseManagerInner {
-    fn insert(&self, record: Arc<RequestLeaseRecord>) {
+    fn insert(&self, record: Arc<RequestLeaseRecord>, track_request_id: bool) {
         let attempt_id = record.booking.attempt_id;
-        match self.active.lock().entry(attempt_id) {
-            Entry::Vacant(entry) => {
-                entry.insert(record);
+        let mut active = self.active.lock();
+        if let Some(existing) = active.by_attempt.get(&attempt_id) {
+            if existing.booking == record.booking {
+                existing.clock.touch();
+                return;
             }
-            Entry::Occupied(entry) => {
-                if entry.get().booking == record.booking {
-                    entry.get().clock.touch();
-                    return;
-                }
-                tracing::error!(
-                    attempt_id = %attempt_id,
-                    existing_request_id = %entry.get().booking.request_id,
-                    replacement_request_id = %record.booking.request_id,
-                    "Duplicate request lease attempt ID; preserving the existing lease"
-                );
-            }
+            tracing::error!(
+                attempt_id = %attempt_id,
+                existing_request_id = %existing.booking.request_id,
+                replacement_request_id = %record.booking.request_id,
+                "Duplicate request lease attempt ID; preserving the existing lease"
+            );
+            return;
         }
+        if track_request_id {
+            active
+                .current_by_request
+                .insert(record.booking.request_id.clone(), attempt_id);
+        }
+        active.by_attempt.insert(attempt_id, record);
     }
 
     fn matching_record(
@@ -128,19 +137,34 @@ impl RequestLeaseManagerInner {
     ) -> Option<Arc<RequestLeaseRecord>> {
         self.active
             .lock()
+            .by_attempt
             .get(&booking.attempt_id)
             .filter(|record| record.booking == *booking)
             .cloned()
+    }
+
+    fn current_record(&self, request_id: &str) -> Option<Arc<RequestLeaseRecord>> {
+        let active = self.active.lock();
+        let attempt_id = active.current_by_request.get(request_id)?;
+        active.by_attempt.get(attempt_id).cloned()
     }
 
     fn remove(&self, record: &Arc<RequestLeaseRecord>) {
         let attempt_id = record.booking.attempt_id;
         let mut active = self.active.lock();
         if active
+            .by_attempt
             .get(&attempt_id)
             .is_some_and(|current| Arc::ptr_eq(current, record))
         {
-            active.remove(&attempt_id);
+            active.by_attempt.remove(&attempt_id);
+            if active
+                .current_by_request
+                .get(&record.booking.request_id)
+                .is_some_and(|current| *current == attempt_id)
+            {
+                active.current_by_request.remove(&record.booking.request_id);
+            }
         }
     }
 
@@ -152,7 +176,13 @@ impl RequestLeaseManagerInner {
     }
 
     fn reap(&self) {
-        let records = self.active.lock().values().cloned().collect::<Vec<_>>();
+        let records = self
+            .active
+            .lock()
+            .by_attempt
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
         for record in records {
             if !record.clock.reap() {
                 continue;
@@ -172,7 +202,7 @@ pub(crate) struct RequestLeaseManager {
 impl RequestLeaseManager {
     pub(crate) fn new(scheduler: SchedulerBookingCleanup, cancellation: CancellationToken) -> Self {
         let inner = Arc::new(RequestLeaseManagerInner {
-            active: Mutex::new(HashMap::new()),
+            active: Mutex::new(ActiveRequestLeases::default()),
             scheduler,
         });
         start_reaper(
@@ -189,16 +219,49 @@ impl RequestLeaseManager {
         approximate_lru: Option<ApproximateRequestLease>,
     ) -> RequestAttemptLease {
         let record = Arc::new(RequestLeaseRecord::new(booking, approximate_lru));
-        self.inner.insert(Arc::clone(&record));
+        self.inner.insert(Arc::clone(&record), false);
         RequestAttemptLease {
             manager: self.clone(),
             record,
         }
     }
 
+    pub(crate) fn register_detached(
+        &self,
+        booking: SchedulerBookingDescriptor,
+        approximate_lru: Option<ApproximateRequestLease>,
+    ) {
+        self.inner.insert(
+            Arc::new(RequestLeaseRecord::new(booking, approximate_lru)),
+            true,
+        );
+    }
+
+    pub(crate) fn touch_request(&self, request_id: &str) {
+        if let Some(record) = self.inner.current_record(request_id) {
+            record.clock.touch();
+        }
+    }
+
+    pub(crate) async fn finish_request(&self, request_id: &str) -> bool {
+        let Some(record) = self.inner.current_record(request_id) else {
+            return false;
+        };
+        self.finish(&record).await;
+        true
+    }
+
+    pub(crate) async fn finish_booking(&self, booking: &SchedulerBookingDescriptor) -> bool {
+        let Some(record) = self.inner.matching_record(booking) else {
+            return false;
+        };
+        self.finish(&record).await;
+        true
+    }
+
     fn register_remote(&self, booking: SchedulerBookingDescriptor) {
         self.inner
-            .insert(Arc::new(RequestLeaseRecord::new(booking, None)));
+            .insert(Arc::new(RequestLeaseRecord::new(booking, None)), false);
     }
 
     fn touch_booking(&self, booking: &SchedulerBookingDescriptor) {
