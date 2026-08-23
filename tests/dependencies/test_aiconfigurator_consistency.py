@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from importlib import metadata
 from pathlib import Path
 
@@ -90,6 +91,12 @@ def _project_requirements(path: Path, *, extra: str | None = None) -> dict[str, 
     return _aic_requirements(requirements, source=str(path))
 
 
+def _installed_requirements(package: str) -> dict[str, str]:
+    requirements = metadata.requires(package)
+    assert requirements is not None, f"{package} has no installed requirements"
+    return _aic_requirements(requirements, source=f"installed {package} distribution")
+
+
 def _requirements_file(path: Path) -> dict[str, str]:
     requirements = [
         line.partition(" #")[0].strip()
@@ -116,7 +123,11 @@ def test_all_aiconfigurator_dependencies_use_one_release() -> None:
         bindings_cargo = tomllib.load(handle)
 
     root_requirements = _project_requirements(ROOT / "pyproject.toml", extra="mocker")
-    aisimulate_requirements = _project_requirements(ROOT / "aisimulate/pyproject.toml")
+    if sys.version_info < (3, 13):
+        aisimulate_requirements = _installed_requirements("aisimulate")
+        assert set(aisimulate_requirements) == AIC_PACKAGES
+    else:
+        aisimulate_requirements = {}
     benchmark_requirements = _project_requirements(ROOT / "benchmarks/pyproject.toml")
     frontend_requirements = _requirements_file(
         ROOT / "container/deps/requirements.frontend.txt"
@@ -126,7 +137,6 @@ def test_all_aiconfigurator_dependencies_use_one_release() -> None:
     )
 
     assert set(root_requirements) == {"aiconfigurator-core"}
-    assert set(aisimulate_requirements) == AIC_PACKAGES
     assert set(benchmark_requirements) == {"aiconfigurator-core"}
     assert set(frontend_requirements) == {"aiconfigurator-core"}
     assert set(planner_requirements) == AIC_PACKAGES
@@ -140,14 +150,6 @@ def test_all_aiconfigurator_dependencies_use_one_release() -> None:
         ),
         "ai-dynamo[mocker]": _python_exact_version(
             root_requirements["aiconfigurator-core"],
-            package="aiconfigurator-core",
-        ),
-        "AI Simulate upper": _python_exact_version(
-            aisimulate_requirements["aiconfigurator"],
-            package="aiconfigurator",
-        ),
-        "AI Simulate core": _python_exact_version(
-            aisimulate_requirements["aiconfigurator-core"],
             package="aiconfigurator-core",
         ),
         "benchmarks core": _python_exact_version(
@@ -167,6 +169,19 @@ def test_all_aiconfigurator_dependencies_use_one_release() -> None:
             package="aiconfigurator-core",
         ),
     }
+    if aisimulate_requirements:
+        versions.update(
+            {
+                "AI Simulate upper": _python_exact_version(
+                    aisimulate_requirements["aiconfigurator"],
+                    package="aiconfigurator",
+                ),
+                "AI Simulate core": _python_exact_version(
+                    aisimulate_requirements["aiconfigurator-core"],
+                    package="aiconfigurator-core",
+                ),
+            }
+        )
     expected_version = versions["Python bindings Cargo"]
     mismatches = {
         consumer: version

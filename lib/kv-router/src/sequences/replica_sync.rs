@@ -166,6 +166,9 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         if router_id == self.router_id {
             return;
         }
+        if !self.replica_sync && !matches!(data, ActiveSequenceEventData::MarkPrefillCompleted) {
+            return;
+        }
 
         // ActiveSequenceEvent does not carry prompt-load decay timestamps yet.
         // Peer routers still approximate decay anchoring with local receive time.
@@ -178,20 +181,26 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 expected_output_tokens,
                 prefill_load_hint,
             } => {
+                if self
+                    .request_index
+                    .try_insert_request(request_id.clone(), event_worker, lora_name)
+                    .is_err()
+                {
+                    return;
+                }
                 if self.replica_worker_policy == ReplicaWorkerPolicy::LazyRegister {
                     self.ensure_worker_registered(event_worker);
                 }
                 let table = self.workers.read();
                 let Some(&idx) = table.index.get(&event_worker) else {
+                    self.request_index
+                        .remove_request_if_worker(&request_id, event_worker);
                     tracing::debug!(
                         worker = ?event_worker,
                         "Dropping replica AddRequest for unregistered worker"
                     );
                     return;
                 };
-
-                self.request_index
-                    .set_request(request_id.clone(), event_worker, lora_name);
                 let (expired_request_ids, load) = {
                     let slot = &table.slots[idx];
                     let mut seq = slot.sequences.write();
@@ -219,9 +228,12 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 effects.cleanup_prompt_trie = true;
             }
             ActiveSequenceEventData::Free => {
-                let Some(worker) = self.request_index.remove_request(&request_id) else {
+                let Some(worker) = self.request_index.worker_for(&request_id) else {
                     return;
                 };
+                if worker != event_worker {
+                    return;
+                }
                 let table = self.workers.read();
                 let Some(&idx) = table.index.get(&worker) else {
                     return;
@@ -229,13 +241,17 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 let load = {
                     let slot = &table.slots[idx];
                     let mut seq = slot.sequences.write();
-                    let delta = seq.free(&request_id, decay_now);
+                    let Some(delta) = seq.free(&request_id, decay_now) else {
+                        return;
+                    };
                     let load = seq.worker_load_snapshot();
                     self.prompt_registry
                         .apply_membership_delta_and_load_without_cleanup(worker, delta, load);
                     load
                 };
                 drop(table);
+                self.request_index
+                    .remove_request_if_worker(&request_id, worker);
                 effects.record_worker_load(worker, load, true);
                 effects.wake_scheduler = true;
                 effects.cleanup_prompt_trie = true;
@@ -244,13 +260,18 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 let Some(worker) = self.request_index.worker_for(&request_id) else {
                     return;
                 };
+                if worker != event_worker {
+                    return;
+                }
                 let table = self.workers.read();
                 let Some(&idx) = table.index.get(&worker) else {
                     return;
                 };
                 let load = {
                     let mut seq = table.slots[idx].sequences.write();
-                    seq.mark_prefill_completed(&request_id, decay_now);
+                    if !seq.mark_prefill_completed(&request_id, decay_now) {
+                        return;
+                    }
                     let load = seq.worker_load_snapshot();
                     self.prompt_registry.replace_worker_load_state(worker, load);
                     load
