@@ -6,6 +6,7 @@
 Functions:
     detect_gpus()                  Enumerate GPUs via pynvml
     auto_worker_count(gpus, limit) Calculate slot count for -n auto
+    gpu_count_from_marker_names(names)  Resolve the gpu_N hardware requirement
     write_test_meta(items)         Serialize profiled/requested vram + timeout
     load_test_meta()               Read the serialized test metadata
     print_gpu_plan(gpus, limit, would_run)  Dry-run GPU plan summary
@@ -24,6 +25,7 @@ import json
 import logging
 import os
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
 
 _logger = logging.getLogger(__name__)
@@ -33,6 +35,47 @@ _logger = logging.getLogger(__name__)
 VRAM_MULTI_PROC_MARGIN = 0.15
 
 _TEST_META_FILENAME = "pytest_gpu_parallel_test_meta.json"
+
+# Hardware markers that declare how many GPUs a test needs. ``gpu_0`` is
+# deliberately absent: it declares "no GPU required", not a device count, and
+# such tests are scheduled as ordinary zero-VRAM fillers on a single device.
+# A test with none of these markers keeps the historical default of one GPU.
+GPU_COUNT_MARKERS: dict[str, int] = {
+    "gpu_1": 1,
+    "gpu_2": 2,
+    "gpu_4": 4,
+    "gpu_8": 8,
+}
+
+DEFAULT_GPU_COUNT = 1
+
+
+def gpu_count_from_marker_names(names: Iterable[str]) -> int | None:
+    """Resolve the GPU-count requirement declared by a test's marker names.
+
+    Returns ``None`` when the test declares no ``gpu_N`` marker, so the caller
+    can fall back to ``DEFAULT_GPU_COUNT`` -- which is also what a metadata file
+    written before this field existed deserializes to.
+
+    Fails closed on a test that declares two different counts (say ``gpu_1`` and
+    ``gpu_2``). Guessing the lower one would under-reserve devices and let a
+    second test be placed on a GPU this one is already using; guessing the
+    higher one would silently paper over a marker bug. Neither is safe, so the
+    declaration is rejected and named.
+    """
+    # Materialize first: callers pass a generator over the item's markers, and
+    # the error path below needs a second look at the same names.
+    declared_names = [n for n in names if n in GPU_COUNT_MARKERS]
+    declared = {GPU_COUNT_MARKERS[n] for n in declared_names}
+    if not declared:
+        return None
+    if len(declared) > 1:
+        conflicting = sorted(set(declared_names))
+        raise ValueError(
+            f"conflicting GPU-count markers {conflicting}; "
+            "a test must declare exactly one of gpu_1/gpu_2/gpu_4/gpu_8"
+        )
+    return declared.pop()
 
 
 def detect_gpus() -> list[dict]:
@@ -154,14 +197,22 @@ def effective_cpu_budget() -> int:
 
 
 def write_test_meta(items, dest_dir: str | None = None) -> None:
-    """Serialize profiled_vram_gib, timeout, and KV cache markers to JSON.
+    """Serialize gpu_count, profiled_vram_gib, timeout, and KV markers to JSON.
 
     Called from pytest_collection_modifyitems so the GPU orchestrator can
     read test metadata without re-collecting.
+
+    ``gpu_count`` is omitted for a test that declares no ``gpu_N`` marker, and
+    consumers default it to ``DEFAULT_GPU_COUNT``. That is also how metadata
+    written before this field existed deserializes, so an older file stays
+    readable.
     """
     test_meta: dict[str, dict] = {}
     for item in items:
         meta: dict = {}
+        gpu_count = gpu_count_from_marker_names(m.name for m in item.iter_markers())
+        if gpu_count is not None:
+            meta["gpu_count"] = gpu_count
         profiled_mark = item.get_closest_marker("profiled_vram_gib")
         if profiled_mark and profiled_mark.args:
             meta["profiled_vram_gib"] = profiled_mark.args[0]

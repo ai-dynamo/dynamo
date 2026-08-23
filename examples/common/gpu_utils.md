@@ -127,4 +127,8 @@ minimum passing value, applies a 2x safety factor, outputs pytest markers
 `@pytest.mark.requested_trtllm_kv_tokens(N)`).
 
 **Scheduler** (`pytest_parallel_gpu.py`): reads the markers at runtime and
-sets the env var per-test. See `tests/README.md` for details.
+sets the env var per-test. It also reads the `gpu_N` hardware marker: a
+multi-GPU test is given that many distinct devices atomically, with
+`profiled_vram_gib` treated as the per-device peak and reserved on each of
+them, and `CUDA_VISIBLE_DEVICES` set to the whole set in ascending order.
+See `tests/README.md` for details.
