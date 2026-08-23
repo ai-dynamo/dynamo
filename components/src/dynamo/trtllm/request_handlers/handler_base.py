@@ -37,6 +37,7 @@ from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.backend.engine import is_generation_stage
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+from dynamo.common.utils.guided_json import reject_nonprogressing_guided_json_ref_cycles
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.llm.exceptions import EngineShutdown
@@ -1531,8 +1532,12 @@ class HandlerBase(BaseGenerativeHandler):
                 if valid_choices:
                     regex = "(" + "|".join(re.escape(c) for c in valid_choices) + ")"
 
+            json_schema = guided_decoding.get("json")
+            if json_schema is not None:
+                reject_nonprogressing_guided_json_ref_cycles(json_schema)
+
             overrides["guided_decoding"] = GuidedDecodingParams(
-                json=guided_decoding.get("json"),
+                json=json_schema,
                 regex=regex,
                 grammar=guided_decoding.get("grammar"),
                 json_object=guided_decoding.get("json_object", False),
