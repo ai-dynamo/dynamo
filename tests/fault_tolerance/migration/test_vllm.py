@@ -34,6 +34,84 @@ logger = logging.getLogger(__name__)
 AGGREGATED_MAX_MODEL_LEN = 1024
 AGGREGATED_MAX_TOKENS = 512
 
+# Cover each distinct migration policy with complementary lifecycle, API,
+# response, and transport values. Together these eight rows cover every pair
+# of those four binary dimensions without paying for their Cartesian product.
+MIGRATION_CASES = [
+    pytest.param(
+        3,
+        None,
+        True,
+        "chat",
+        True,
+        "nats",
+        id="migration_enabled-no_seq_cap-worker_failure-chat-stream-nats",
+    ),
+    pytest.param(
+        3,
+        None,
+        False,
+        "completion",
+        False,
+        "tcp",
+        id="migration_enabled-no_seq_cap-graceful_shutdown-completion-unary-tcp",
+    ),
+    pytest.param(
+        0,
+        None,
+        True,
+        "chat",
+        False,
+        "tcp",
+        id="migration_disabled-worker_failure-chat-unary-tcp",
+    ),
+    pytest.param(
+        0,
+        None,
+        False,
+        "completion",
+        True,
+        "nats",
+        id="migration_disabled-graceful_shutdown-completion-stream-nats",
+    ),
+    pytest.param(
+        3,
+        1,
+        True,
+        "completion",
+        True,
+        "tcp",
+        id="max_seq_len_exceeded-worker_failure-completion-stream-tcp",
+    ),
+    pytest.param(
+        3,
+        1,
+        False,
+        "chat",
+        False,
+        "nats",
+        id="max_seq_len_exceeded-graceful_shutdown-chat-unary-nats",
+    ),
+    pytest.param(
+        3,
+        1_000_000,
+        True,
+        "completion",
+        False,
+        "nats",
+        id="max_seq_len_not_exceeded-worker_failure-completion-unary-nats",
+    ),
+    pytest.param(
+        3,
+        1_000_000,
+        False,
+        "chat",
+        True,
+        "tcp",
+        id="max_seq_len_not_exceeded-graceful_shutdown-chat-stream-tcp",
+    ),
+]
+
 pytestmark = [
     pytest.mark.fault_tolerance,
     pytest.mark.vllm,
@@ -41,29 +119,17 @@ pytestmark = [
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
     pytest.mark.parametrize(
-        "migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"]
+        (
+            "migration_limit",
+            "migration_max_seq_len",
+            "immediate_kill",
+            "request_api",
+            "stream",
+            "request_plane",
+        ),
+        MIGRATION_CASES,
+        indirect=["request_plane"],
     ),
-    pytest.mark.parametrize(
-        "migration_max_seq_len",
-        [
-            pytest.param(None, id="max_seq_len_disabled"),
-            pytest.param(1_000_000, id="max_seq_len_not_exceeded"),
-            pytest.param(1, id="max_seq_len_exceeded"),
-        ],
-    ),
-    pytest.mark.parametrize(
-        "immediate_kill", [True, False], ids=["worker_failure", "graceful_shutdown"]
-    ),
-    pytest.mark.parametrize(
-        "request_api",
-        ["chat", "completion"],
-    ),
-    pytest.mark.parametrize(
-        "stream",
-        [True, False],
-        ids=["stream", "unary"],
-    ),
-    pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
 ]
 
 
