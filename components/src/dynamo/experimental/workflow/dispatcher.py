@@ -70,7 +70,6 @@ class StageDispatcher:
     ) -> dict[str, Any]:
         """Invoke one stage and validate its complete input/output contract."""
 
-        context.raise_if_cancelled()
         expected_inputs = set(contract.inputs)
         actual_inputs = set(inputs)
         if actual_inputs != expected_inputs:
