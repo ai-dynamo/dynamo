@@ -20,6 +20,9 @@ from dynamo.experimental.workflow.scheduler import GraphScheduler
 class WorkflowOrchestrator:
     """Own one compiled workflow's request and result lifecycle."""
 
+    # Declarative workflows execute through GraphScheduler.
+    # TODO: Support imperative authoring through WorkflowHandler.
+
     def __init__(self, plan: ExecutionPlan, dispatcher: StageDispatcher) -> None:
         self._plan = plan
         self._dispatcher = dispatcher
