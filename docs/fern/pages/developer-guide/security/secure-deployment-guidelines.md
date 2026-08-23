@@ -130,25 +130,27 @@ reference.
 Requests and KV-cache data move between components over the request plane (TCP,
 and the NIXL/RDMA fabric for data transfer).
 
-- **Encrypt the request plane with TLS (available today).** Enable TLS on the TCP
-  request plane with `DYN_TCP_TLS_CERT_PATH` + `DYN_TCP_TLS_KEY_PATH` (server side);
-  clients verify the server with `DYN_TCP_TLS_CA_CERT_PATH` (and
-  `DYN_TCP_TLS_SERVER_NAME` to pin the expected name). This protects the
-  confidentiality and integrity of request-plane traffic in transit.
+- **Encrypt the request plane with TLS.** Enable TLS on the TCP request plane with
+  `DYN_TCP_TLS_CERT_PATH` + `DYN_TCP_TLS_KEY_PATH` (server side); clients verify the
+  server with `DYN_TCP_TLS_CA_CERT_PATH` (and `DYN_TCP_TLS_SERVER_NAME` to pin the
+  expected name). This protects the confidentiality and integrity of request-plane
+  traffic in transit.
+- **Authenticate both ends with mutual TLS (mTLS).** Set
+  `DYN_TCP_TLS_CLIENT_CA_CERT_PATH` on the server so it requires clients to present
+  a certificate — an unauthenticated client is then rejected at the handshake;
+  clients present an identity with `DYN_TCP_TLS_CLIENT_CERT_PATH` /
+  `DYN_TCP_TLS_CLIENT_KEY_PATH`. For the NATS transport, use
+  `NATS_TLS_CLIENT_CERT_PATH` / `NATS_TLS_CLIENT_KEY_PATH`.
 - Keep the **NIXL/RDMA** data-transfer fabric on the trusted network.
 
 > [!NOTE]
-> Server TLS above encrypts the request plane but does not *authenticate* the
-> client. Mutual TLS (both ends present certificates, so an unauthenticated client
-> is rejected at the handshake), along with Helm-based setup of the TCP and NATS
-> certificates, is in progress
-> ([#13528](https://github.com/ai-dynamo/dynamo/pull/13528),
-> [#10809](https://github.com/ai-dynamo/dynamo/issues/10809)). Until it lands,
-> authenticate the request plane by keeping it on the trusted network.
+> Helm-based setup of the TCP and NATS certificates is tracked in
+> [#10809](https://github.com/ai-dynamo/dynamo/issues/10809).
 
-**Why it matters:** without mutual authentication, any peer that can reach a
-worker on the request plane can deliver requests or data-transfer payloads to it,
-so network isolation is required in addition to TLS encryption. See the
+**Why it matters:** TLS encrypts request-plane traffic, and mTLS additionally
+authenticates the client so an unauthenticated peer cannot deliver requests or
+data-transfer payloads to a worker. Keep the plane on the trusted network as
+defense in depth. See the
 [Request Plane](../knowledge-base/concepts/communication-planes/request-plane.md)
 reference.
 
