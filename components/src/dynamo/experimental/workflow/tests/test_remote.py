@@ -40,7 +40,6 @@ def _context(request_context: Any = None) -> StageContext:
         workflow_name="remote-wire",
         stage_id="normalize",
         attempt_id="request-1",
-        invocation_id="request-1:normalize",
         request_context=request_context,
     )
 
@@ -106,7 +105,7 @@ async def test_remote_client_sends_inputs_and_accepts_one_response_mapping() -> 
     assert transport.request == {"text": "HELLO"}
 
 
-async def test_remote_client_creates_an_invocation_scoped_transport_context() -> None:
+async def test_remote_client_creates_a_stage_scoped_transport_context() -> None:
     transport = _Client([{"normalized": "hello"}])
     parent = _ParentContext()
 
@@ -169,7 +168,6 @@ class _Runner:
         assert context.workflow_name is None
         assert context.stage_id == "normalize"
         assert context.attempt_id == "request-1:normalize"
-        assert context.invocation_id == "request-1:normalize"
         assert context.request_context.id() == "request-1:normalize"
         return {"normalized": inputs["text"].strip().lower()}
 
