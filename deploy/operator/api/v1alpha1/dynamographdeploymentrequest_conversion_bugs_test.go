@@ -20,6 +20,7 @@ package v1alpha1
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -372,7 +373,7 @@ func TestBugDGDRHubRoundTripPreservesContainerOrder(t *testing.T) {
 					Overrides: &v1beta1.OverridesSpec{
 						ProfilingJob: &batchv1.JobSpec{
 							Template: corev1.PodTemplateSpec{
-								Spec: corev1.PodSpec{Containers: test.containers},
+								Spec: corev1.PodSpec{Containers: slices.Clone(test.containers)},
 							},
 						},
 					},
@@ -458,7 +459,7 @@ func TestBugDGDRNameOnlyProfilerPreserved(t *testing.T) {
 			Overrides: &v1beta1.OverridesSpec{
 				ProfilingJob: &batchv1.JobSpec{
 					Template: corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{Containers: wantContainers},
+						Spec: corev1.PodSpec{Containers: slices.Clone(wantContainers)},
 					},
 				},
 			},

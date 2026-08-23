@@ -1146,6 +1146,61 @@ func TestApplyProfilingJobOverrides_NamedProfilerAndOutputCopierOverrides(t *tes
 	}
 }
 
+func TestApplyProfilingJobOverrides_UnnamedOverrideTargetsProfiler(t *testing.T) {
+	t.Log("Apply a legacy unnamed container override")
+	job := baseJob()
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "", Image: "custom-profiler:v2"},
+				},
+			},
+		},
+	})
+
+	t.Log("Verify the unnamed override still targets the profiler")
+	profiler := findContainer(job.Spec.Template.Spec.Containers, ContainerNameProfiler)
+	if profiler == nil {
+		t.Fatal("profiler container not found")
+	}
+	if profiler.Image != "custom-profiler:v2" {
+		t.Errorf("profiler image: want custom-profiler:v2, got %s", profiler.Image)
+	}
+}
+
+func TestApplyProfilingJobOverrides_UnknownNameDoesNotOverrideProfiler(t *testing.T) {
+	t.Log("Apply an override whose only container has an unknown name")
+	job := baseJob()
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "extra-tools",
+						Image: "custom-profiler:v2",
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	t.Log("Verify the profiler image and resources are unchanged")
+	profiler := findContainer(job.Spec.Template.Spec.Containers, ContainerNameProfiler)
+	if profiler == nil {
+		t.Fatal("profiler container not found")
+	}
+	if profiler.Image != "profiler:latest" {
+		t.Errorf("profiler image should be unchanged, got %s", profiler.Image)
+	}
+	if len(profiler.Resources.Limits) != 0 || len(profiler.Resources.Requests) != 0 {
+		t.Errorf("profiler resources should be unchanged, got %+v", profiler.Resources)
+	}
+}
+
 func TestApplyProfilingJobOverrides_Combined(t *testing.T) {
 	job := baseJob()
 	applyProfilingJobOverrides(job, &batchv1.JobSpec{
