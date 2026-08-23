@@ -35,6 +35,8 @@ const MAX_CONCURRENT_CONNECTIONS: usize = 1024;
 /// `DYN_EPP_GRACEFUL_SHUTDOWN_PROPAGATION_SECS`.
 const DEFAULT_GRACEFUL_SHUTDOWN_PROPAGATION_SECS: u64 = 5;
 const GRACEFUL_SHUTDOWN_PROPAGATION_ENV: &str = "DYN_EPP_GRACEFUL_SHUTDOWN_PROPAGATION_SECS";
+const ALLOW_MISSING_SEND_BODY_WITHOUT_WAITING_ENV: &str =
+    "DYN_EPP_ALLOW_MISSING_SEND_BODY_WITHOUT_WAITING";
 /// Max time to wait for the TLS handshake to complete before dropping the
 /// connection. Without this, a client that finishes the TCP connect but
 /// stalls the TLS handshake holds a connection-limit permit indefinitely;
@@ -462,7 +464,16 @@ async fn serve<P: crate::EndpointPicker>(
         })
     };
 
-    let server = ExtProcServer::new(picker);
+    let allow_missing_send_body_without_waiting =
+        parse_env(ALLOW_MISSING_SEND_BODY_WITHOUT_WAITING_ENV, false);
+    if allow_missing_send_body_without_waiting {
+        tracing::warn!(
+            env = ALLOW_MISSING_SEND_BODY_WITHOUT_WAITING_ENV,
+            "Protocol compatibility override enabled; only use this with a gateway verified to stream request bodies without waiting for the EPP header response"
+        );
+    }
+    let server = ExtProcServer::new(picker)
+        .with_missing_send_body_without_waiting_allowed(allow_missing_send_body_without_waiting);
     // Default to TLS to match the Go EPP behavior. Verified working with
     // kGateway (`appProtocol: http2` upstreams negotiate h2 over TLS via ALPN
     // when the cert is presented). Set DYN_SECURE_SERVING=false to fall back

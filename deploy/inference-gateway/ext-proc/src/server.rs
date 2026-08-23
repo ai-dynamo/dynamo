@@ -203,11 +203,25 @@ impl RequestContext {
 /// LW-EPP trait contract while removing the unused `Datastore` plumbing.
 pub struct ExtProcServer<P: EndpointPicker> {
     picker: Arc<P>,
+    allow_missing_send_body_without_waiting: bool,
 }
 
 impl<P: EndpointPicker> ExtProcServer<P> {
     pub fn new(picker: Arc<P>) -> Self {
-        Self { picker }
+        Self {
+            picker,
+            allow_missing_send_body_without_waiting: false,
+        }
+    }
+
+    /// Allow a gateway that streams request bodies without waiting for the
+    /// EPP's header response but omits the corresponding protocol flag.
+    ///
+    /// This compatibility override is unsafe for gateways that actually wait
+    /// for a header response, so strict validation remains the default.
+    pub fn with_missing_send_body_without_waiting_allowed(mut self, allowed: bool) -> Self {
+        self.allow_missing_send_body_without_waiting = allowed;
+        self
     }
 
     /// Create a `tonic` service ready for registration on a gRPC server.
@@ -534,6 +548,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
     ) -> Result<Response<Self::ProcessStream>, Status> {
         let mut inbound = request.into_inner();
         let picker = self.picker.clone();
+        let allow_missing_send_body_without_waiting = self.allow_missing_send_body_without_waiting;
 
         let (tx, rx) = mpsc::channel::<Result<ProcessingResponse, Status>>(32);
         let output_stream = ReceiverStream::new(rx);
@@ -560,7 +575,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
                             "[PROTOCOL] ProtocolConfiguration from Envoy"
                         );
                         if !ctx.protocol_validated {
-                            validate_protocol_config(pc)?;
+                            validate_protocol_config(pc, allow_missing_send_body_without_waiting)?;
                             ctx.protocol_validated = true;
                         }
                     }
@@ -765,7 +780,9 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 
 /// Validate the gateway's `ProtocolConfiguration` against the protocol
 /// contract this EPP requires: `FULL_DUPLEX_STREAMED` on both body
-/// directions plus `send_body_without_waiting_for_header_response`.
+/// directions plus `send_body_without_waiting_for_header_response`. A caller
+/// may explicitly allow the flag to be omitted for a gateway that is known to
+/// provide the same request-body streaming behavior.
 ///
 /// **Request direction.** We build the `RequestHeaders` response only after
 /// receiving the request body, because:
@@ -807,9 +824,22 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 // `Status` is the tonic-mandated error type for this stream, so we can't box
 // it without rewriting the return path. The function is called once per
 // stream, so the size of the `Err` variant is not a hot-path concern.
+fn protocol_config_is_compatible(
+    request_is_full_duplex: bool,
+    response_is_full_duplex: bool,
+    send_body_without_waiting_for_header_response: bool,
+    allow_missing_send_body_without_waiting: bool,
+) -> bool {
+    request_is_full_duplex
+        && response_is_full_duplex
+        && (send_body_without_waiting_for_header_response
+            || allow_missing_send_body_without_waiting)
+}
+
 #[allow(clippy::result_large_err)]
 fn validate_protocol_config(
     pc: &crate::proto::envoy::service::ext_proc::v3::ProtocolConfiguration,
+    allow_missing_send_body_without_waiting: bool,
 ) -> Result<(), Status> {
     use crate::proto::envoy::extensions::filters::http::ext_proc::v3::processing_mode::BodySendMode;
 
@@ -818,7 +848,12 @@ fn validate_protocol_config(
     let full_duplex = Some(BodySendMode::FullDuplexStreamed);
     let flag_ok = pc.send_body_without_waiting_for_header_response;
 
-    if request_mode == full_duplex && response_mode == full_duplex && flag_ok {
+    if protocol_config_is_compatible(
+        request_mode == full_duplex,
+        response_mode == full_duplex,
+        flag_ok,
+        allow_missing_send_body_without_waiting,
+    ) {
         return Ok(());
     }
 
@@ -1012,7 +1047,35 @@ mod tests {
         use crate::proto::envoy::extensions::filters::http::ext_proc::v3::processing_mode::BodySendMode;
 
         let full_duplex = BodySendMode::FullDuplexStreamed as i32;
-        assert!(validate_protocol_config(&protocol_config(full_duplex, full_duplex, true)).is_ok());
+        assert!(
+            validate_protocol_config(&protocol_config(full_duplex, full_duplex, true), false)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn protocol_config_compatibility_only_waives_the_missing_flag() {
+        use crate::proto::envoy::extensions::filters::http::ext_proc::v3::processing_mode::BodySendMode;
+
+        let full_duplex = BodySendMode::FullDuplexStreamed as i32;
+        assert!(
+            validate_protocol_config(&protocol_config(full_duplex, full_duplex, false), true)
+                .is_ok()
+        );
+        assert!(
+            validate_protocol_config(
+                &protocol_config(BodySendMode::Streamed as i32, full_duplex, false),
+                true,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_protocol_config(
+                &protocol_config(full_duplex, BodySendMode::None as i32, false),
+                true,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1021,11 +1084,14 @@ mod tests {
 
         // Envoy's default. Without response bodies the EPP never signals
         // prefill completion, parses usage, or rewrites the model name.
-        let err = validate_protocol_config(&protocol_config(
-            BodySendMode::FullDuplexStreamed as i32,
-            BodySendMode::None as i32,
-            true,
-        ))
+        let err = validate_protocol_config(
+            &protocol_config(
+                BodySendMode::FullDuplexStreamed as i32,
+                BodySendMode::None as i32,
+                true,
+            ),
+            false,
+        )
         .expect_err("response_body_mode=NONE must be rejected");
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
         assert!(err.message().contains("response_body_mode"));
@@ -1036,11 +1102,14 @@ mod tests {
         use crate::proto::envoy::extensions::filters::http::ext_proc::v3::processing_mode::BodySendMode;
 
         // Buffering holds the whole body, which would break SSE streaming.
-        let err = validate_protocol_config(&protocol_config(
-            BodySendMode::FullDuplexStreamed as i32,
-            BodySendMode::Buffered as i32,
-            true,
-        ))
+        let err = validate_protocol_config(
+            &protocol_config(
+                BodySendMode::FullDuplexStreamed as i32,
+                BodySendMode::Buffered as i32,
+                true,
+            ),
+            false,
+        )
         .expect_err("response_body_mode=BUFFERED must be rejected");
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     }
@@ -1051,15 +1120,15 @@ mod tests {
 
         let full_duplex = BodySendMode::FullDuplexStreamed as i32;
         assert!(
-            validate_protocol_config(&protocol_config(
-                BodySendMode::Streamed as i32,
-                full_duplex,
-                true
-            ))
+            validate_protocol_config(
+                &protocol_config(BodySendMode::Streamed as i32, full_duplex, true),
+                false
+            )
             .is_err()
         );
         assert!(
-            validate_protocol_config(&protocol_config(full_duplex, full_duplex, false)).is_err()
+            validate_protocol_config(&protocol_config(full_duplex, full_duplex, false), false)
+                .is_err()
         );
     }
 
@@ -1298,10 +1367,15 @@ mod tests {
     }
 
     // Spin up a GRPC server and create a gRPC bi-directional stream
-    async fn connect(t: Arc<Tracker>) -> ExternalProcessorClient<tonic::transport::Channel> {
+    async fn connect_with_protocol_compatibility(
+        t: Arc<Tracker>,
+        allow_missing_send_body_without_waiting: bool,
+    ) -> ExternalProcessorClient<tonic::transport::Channel> {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
-        let svc = ExtProcServer::new(t).into_service();
+        let svc = ExtProcServer::new(t)
+            .with_missing_send_body_without_waiting_allowed(allow_missing_send_body_without_waiting)
+            .into_service();
         tokio::spawn(
             tonic::transport::Server::builder()
                 .add_service(svc)
@@ -1317,8 +1391,24 @@ mod tests {
         )
     }
 
+    async fn connect(t: Arc<Tracker>) -> ExternalProcessorClient<tonic::transport::Channel> {
+        connect_with_protocol_compatibility(t, false).await
+    }
+
     fn stream() -> Vec<ProcessingRequest> {
         stream_with_request_id("r1")
+    }
+
+    fn stream_with_missing_send_body_without_waiting() -> Vec<ProcessingRequest> {
+        use crate::proto::envoy::extensions::filters::http::ext_proc::v3::processing_mode::BodySendMode;
+
+        let mut requests = stream();
+        requests[0].protocol_config = Some(protocol_config(
+            BodySendMode::FullDuplexStreamed as i32,
+            BodySendMode::FullDuplexStreamed as i32,
+            false,
+        ));
+        requests
     }
 
     /// A full request/response stream carrying an explicit `x-request-id`, so
@@ -1451,6 +1541,16 @@ mod tests {
     async fn test_add_request_called() {
         let t = Arc::new(Tracker::agg());
         run(&mut connect(t.clone()).await).await;
+        assert_eq!(t.add.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_protocol_compatibility_allows_missing_streaming_flag() {
+        let t = Arc::new(Tracker::agg());
+        let mut client = connect_with_protocol_compatibility(t.clone(), true).await;
+
+        run_stream(&mut client, stream_with_missing_send_body_without_waiting()).await;
+
         assert_eq!(t.add.load(Ordering::SeqCst), 1);
     }
 
