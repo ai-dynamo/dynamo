@@ -10,6 +10,7 @@ import asyncio
 
 import uvloop
 
+from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 from tests.frontend.test_http_status_propagation import (
@@ -32,6 +33,12 @@ class _StatusLikeError(Exception):
 
 
 async def generate(request, context):
+    image_items = (request.get("multi_modal_data") or {}).get("image_url")
+    if image_items:
+        # Exercise the real Python backend-decoding batch boundary. A blocked
+        # URL must raise before this generator can produce or delegate work.
+        await ImageLoader().load_image_batch(image_items)
+        raise AssertionError("blocked media URL unexpectedly passed validation")
     raise _StatusLikeError(status=EXPECTED_STATUS, message=EXPECTED_MESSAGE)
     yield  # unreachable; needed to make this an async generator
 

@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 import torch
 
+from dynamo.common.http import HttpStatusError
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -744,29 +745,51 @@ async def test_policy_rejection_is_not_swallowed_into_url_passthrough(
     existed -- a loopback URL the policy rejected was fetched anyway, and a
     refused file:// path resolved to a readable local file.
     """
-    from dynamo.common.http.url_validator import UrlValidationError
-
     monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
     nvdec_handler.encoder.model_type = "qwen2_5_vl"
+    error = UrlValidationError("blocked IP")
     monkeypatch.setattr(
         f"{_HANDLER_MOD}.validate_media_url",
-        AsyncMock(side_effect=UrlValidationError("blocked IP")),
+        AsyncMock(side_effect=error),
     )
     fetch = AsyncMock()
     monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", fetch)
 
-    with pytest.raises(UrlValidationError):
-        await nvdec_handler._maybe_nvdec_decoder(
-            "http://169.254.169.254/latest/meta-data"
-        )
-    fetch.assert_not_called()
-
-    # ...and it propagates through the batch builder rather than being mapped
-    # back to the URL there.
-    with pytest.raises(UrlValidationError):
+    # The error also propagates through the batch builder rather than being
+    # mapped back to the URL there. Returning None from the inner adapter
+    # would restore the rejected URL here.
+    with pytest.raises(UrlValidationError) as exc_info:
         await nvdec_handler._build_encode_inputs(
             ["http://169.254.169.254/latest/meta-data"], "VIDEO"
         )
+
+    assert exc_info.value is error
+    fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_http_client_error_is_not_swallowed_into_url_passthrough(
+    nvdec_handler, monkeypatch
+) -> None:
+    """A typed fetch failure is terminal. SGLang must not retry the URL."""
+    monkeypatch.setattr(f"{_HANDLER_MOD}.nvdec_available", lambda: True)
+    nvdec_handler.encoder.model_type = "qwen2_5_vl"
+    url = "https://example.com/rejected.mp4"
+    error = HttpStatusError(403, "Forbidden", url)
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.validate_media_url", AsyncMock(return_value=url)
+    )
+    fetch = AsyncMock(side_effect=error)
+    decode = Mock()
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", fetch)
+    monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", decode)
+
+    with pytest.raises(HttpStatusError) as exc_info:
+        await nvdec_handler._build_encode_inputs([url], "VIDEO")
+
+    assert exc_info.value is error
+    fetch.assert_awaited_once()
+    decode.assert_not_called()
 
 
 @pytest.mark.asyncio
