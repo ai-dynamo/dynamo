@@ -127,14 +127,17 @@ reference.
 
 ### Request plane
 
-Requests and KV-cache data move between components over the request plane (TCP,
-and the NIXL/RDMA fabric for data transfer).
+Requests and KV-cache data move between components over the request plane. The
+transport is selected by `DYN_REQUEST_PLANE` — `tcp` (with the NIXL/RDMA fabric
+for data transfer) or `nats` — and the TLS/mTLS settings below apply to whichever
+you use.
 
-- **Encrypt the request plane with TLS.** Enable TLS on the TCP request plane with
+- **Encrypt the request plane with TLS.** For the TCP transport, enable TLS with
   `DYN_TCP_TLS_CERT_PATH` + `DYN_TCP_TLS_KEY_PATH` (server side); clients verify the
   server with `DYN_TCP_TLS_CA_CERT_PATH` (and `DYN_TCP_TLS_SERVER_NAME` to pin the
-  expected name). This protects the confidentiality and integrity of request-plane
-  traffic in transit.
+  expected name). For the NATS transport, enable TLS with `NATS_TLS_CA_CERT_PATH`.
+  This protects the confidentiality and integrity of request-plane traffic in
+  transit.
 - **Authenticate both ends with mutual TLS (mTLS).** Set
   `DYN_TCP_TLS_CLIENT_CA_CERT_PATH` on the server so it requires clients to present
   a certificate — an unauthenticated client is then rejected at the handshake;
