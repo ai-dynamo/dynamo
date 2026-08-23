@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
+    body::Body,
     extract::State,
     http::{HeaderMap, StatusCode},
     middleware,
@@ -31,7 +32,7 @@ use super::metrics::{
 };
 use super::openai::{
     check_model_serving_ready, check_ready, context_from_headers, get_body_limit,
-    get_or_create_request_id, smart_json_error_middleware,
+    get_or_create_request_id, is_json_content_type, smart_json_error_middleware,
 };
 use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
@@ -106,6 +107,62 @@ pub fn generate_router(
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
     (vec![doc], router)
+}
+
+/// Read the request body, reporting a bad `Content-Type`, an oversized body or
+/// malformed JSON in this route's own nested-`error` envelope.
+///
+/// Axum's `Json` extractor rejects all three as `text/plain`, so a client that
+/// parsed the `{"error": {...}}` shape this route returns everywhere else got
+/// an unparseable body for the most common client mistakes.
+async fn read_generate_request(
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<GenerateRequest, Response> {
+    let is_json = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(is_json_content_type);
+    if !is_json {
+        return Err(generate_error_response(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "invalid_request_error",
+            "Expected request with Content-Type application/json".to_string(),
+        ));
+    }
+
+    let bytes = axum::body::to_bytes(body, get_body_limit())
+        .await
+        .map_err(|error| {
+            // `to_bytes` wraps an oversized-body failure in its error source
+            // rather than returning `LengthLimitError` directly.
+            if std::error::Error::source(&error)
+                .is_some_and(|source| source.is::<http_body_util::LengthLimitError>())
+            {
+                generate_error_response(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "invalid_request_error",
+                    format!(
+                        "Request body exceeds the limit of {} bytes",
+                        get_body_limit()
+                    ),
+                )
+            } else {
+                generate_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    "Failed to read the request body".to_string(),
+                )
+            }
+        })?;
+
+    serde_json::from_slice(&bytes).map_err(|error| {
+        generate_error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            format!("Failed to parse the request body as JSON: {error}"),
+        )
+    })
 }
 
 /// Build a vLLM-style nested-`error` response.
@@ -788,8 +845,12 @@ impl Drop for GenerateMetricCollector {
 async fn handler_generate(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<GenerateRequest>,
+    body: Body,
 ) -> Response {
+    let mut request = match read_generate_request(&headers, body).await {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     let request_context = resolve_generate_request_context(&headers, request.request_id.as_deref());
     let implicit_models = if request.model.is_none() {
         canonical_generate_models(
@@ -2976,5 +3037,57 @@ mod tests {
     #[test]
     fn priority_inversion_saturates_at_i32_min() {
         assert_eq!(dynamo_routing_priority(i32::MIN), i32::MAX);
+    }
+
+    /// Every other failure on this route answers with the nested-`error`
+    /// envelope, and the route's own tests assert that shape. Axum's `Json`
+    /// extractor rejected a bad `Content-Type` as `text/plain`, so a client
+    /// parsing that envelope got an unparseable body for one of the most
+    /// common mistakes.
+    #[tokio::test]
+    async fn generate_route_bad_content_type_returns_structured_415() {
+        let (port, handle) = serve(Some(true)).await;
+        let resp = reqwest::Client::new()
+            .post(format!("http://localhost:{}/inference/v1/generate", port))
+            .header("content-type", "text/plain")
+            .body("not json")
+            .send()
+            .await
+            .expect("generate request failed");
+
+        assert_eq!(
+            resp.status().as_u16(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE.as_u16()
+        );
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.starts_with("application/json")),
+            Some(true),
+            "the 415 must use this route's JSON envelope, not Axum's text/plain rejection"
+        );
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert_eq!(body["error"]["code"], 415);
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn generate_route_malformed_json_returns_structured_400() {
+        let (port, handle) = serve(Some(true)).await;
+        let resp = reqwest::Client::new()
+            .post(format!("http://localhost:{}/inference/v1/generate", port))
+            .header("content-type", "application/json")
+            .body("{not json")
+            .send()
+            .await
+            .expect("generate request failed");
+
+        assert_eq!(resp.status().as_u16(), StatusCode::BAD_REQUEST.as_u16());
+        let body: serde_json::Value = resp.json().await.expect("json body");
+        assert_eq!(body["error"]["code"], 400);
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        handle.abort();
     }
 }
