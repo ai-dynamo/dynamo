@@ -479,20 +479,40 @@ def _select_launches(
         free budget, so a large test that anchored an empty GPU gets backfilled
         with smaller tests up to the budget instead of running alone.
       * Anti-starvation -- when a VRAM test does not fit, the GPUs where it is
-        closest to fitting are *reserved* for it. Lower-priority tests may still
-        backfill those GPUs, but only up to ``cap - required`` so that once the
-        current occupants free, the reserved test fits (the backfill we add now
-        can never sum past the space it needs). A gang reserves all
-        ``gpu_count`` devices or none -- headroom held on fewer devices than it
-        needs could never assemble into a launch. Zero-VRAM fillers bypass the
-        budget gates entirely (they allocate no memory) so transient memory
-        pressure can't strand an otherwise-free slot; a zero-VRAM gang still
-        takes its full count of distinct devices, because the count is a
-        visibility requirement, not a memory one.
+        closest to fitting are *reserved* for it, and lower-priority tests are
+        limited in how far they may backfill those GPUs. The limit differs by
+        kind, because the two kinds need different guarantees:
 
-    Note the reservation is rebuilt on every call, so it bounds backfill within
-    a pass rather than across passes; see ``run_parallel`` for the progress
-    argument this supports.
+          - ``gpu_1`` (unchanged from upstream): backfill added *this pass* is
+            capped at ``cap - required``. Rebuilt on every call, so it bounds
+            backfill within a pass rather than across passes. The honest
+            property is finite-workload conditional progress, not starvation
+            freedom -- a single-GPU test only ever needs one card to come free
+            and any card will do, so the creep is survivable in practice.
+          - gangs: the *absolute* committed budget is capped at
+            ``budget_multi - required``. A gang needs headroom on ``gpu_count``
+            cards at the same instant, and a per-pass cap measured against
+            ``_cap`` cannot deliver that -- see the gate itself for why each
+            half matters. This makes per-card headroom monotone, which is what
+            buys the gang a finite wait.
+
+        A gang reserves all ``gpu_count`` devices or none -- headroom held on
+        fewer devices than it needs could never assemble into a launch.
+        Zero-VRAM fillers bypass the budget gates entirely (they allocate no
+        memory) so transient memory pressure can't strand an otherwise-free
+        slot; a zero-VRAM gang still takes its full count of distinct devices,
+        because the count is a visibility requirement, not a memory one. Note
+        that a filler still raises ``running_count``, which drops a card's cap
+        to ``budget_multi``; a test profiled above ``budget_multi`` can
+        therefore still be held off by fillers. That is pre-existing upstream
+        behaviour for ``gpu_1`` and is not addressed here.
+
+    Gang progress guarantee: if a gang passes ``_unschedulable_reason`` and
+    every running test terminates, the gang launches in finite time. Each
+    reserved member's committed budget can only fall to ``budget_multi -
+    required`` and never rise back above it, the pre-reservation occupants all
+    finish, and the gang is scanned before every lower-priority test -- so the
+    ``gpu_count`` members eventually satisfy the gate simultaneously.
     """
     tentative = {
         gi: _TentativeGpu(
@@ -509,10 +529,14 @@ def _select_launches(
     # single-GPU best-fit scan did when it kept the first strict maximum.
     rank = {gi: pos for pos, gi in enumerate(gpu_states)}
     # GPU -> required GiB of a blocked higher-priority VRAM test, and the budget
-    # we have since added to that GPU via lower-priority backfill. Backfill is
-    # capped at cap - required so the reserved test still fits once occupants free.
+    # we have since added to that GPU via lower-priority backfill this pass.
+    # `backfill_added` is only consulted for gpu_1 reservations; gang holds are
+    # gated on absolute committed budget instead (see the gate below).
     reserved_req: dict[int, float] = {}
     backfill_added: dict[int, float] = {}
+    # Subset of `reserved_req` held for a blocked *gang*. Gangs need a stronger
+    # gate than gpu_1 tests do -- see the reservation block below.
+    reserved_gang: set[int] = set()
     to_launch: list[tuple[int, tuple[int, ...]]] = []
 
     def _cap(gi: int) -> float:
@@ -556,10 +580,41 @@ def _select_launches(
             actual_used = gs.total_gib - ts.free
             if actual_used + test.profiled_gib > cap:
                 continue  # actual-usage gate (catches init-time spikes)
-            if gi in reserved_req and (
-                backfill_added[gi] + test.profiled_gib > cap - reserved_req[gi]
-            ):
-                continue  # would crowd out the reserved higher-priority test
+            if gi in reserved_req:
+                if gi in reserved_gang:
+                    # Gang reservations are gated on the ABSOLUTE committed
+                    # budget, in budget_multi units. Both halves are load
+                    # bearing, and the gpu_1 rule below is wrong for a gang in
+                    # both of them:
+                    #   * absolute, not per-pass: `backfill_added` is rebuilt on
+                    #     every call, so a per-pass cap lets committed budget
+                    #     creep upward one pass at a time. A gpu_1 test rides
+                    #     that out -- it needs one card to come free, and any
+                    #     card will do -- but a gang needs headroom on `k` cards
+                    #     at the same instant, and creep means the k never
+                    #     coincide. Gating on `ts.budget` (which starts from
+                    #     gpu_states, i.e. already-committed budget) makes the
+                    #     headroom monotone: once a member drops below the line
+                    #     it cannot be pushed back over it.
+                    #   * budget_multi, not `_cap(gi)`: an IDLE reserved card
+                    #     reports the whole-card cap, which is the cap for
+                    #     whoever lands first -- but the instant a filler lands,
+                    #     the gang's own cap on that card drops to budget_multi.
+                    #     Gating on `_cap` therefore over-grants by exactly
+                    #     VRAM_MULTI_PROC_MARGIN * total_gib and admits a filler
+                    #     that immediately re-blocks the gang; on a card that
+                    #     keeps draining and refilling, forever.
+                    # Together these give the gang a finite wait: every member
+                    # reaches `budget_multi - required` and stays there, so the
+                    # k members eventually hold simultaneously and the gang --
+                    # scanned before every lower-priority test -- launches.
+                    committed = ts.budget + test.profiled_gib
+                    if committed > gs.budget_multi - reserved_req[gi]:
+                        continue  # would crowd out the reserved gang
+                elif backfill_added[gi] + test.profiled_gib > cap - reserved_req[gi]:
+                    # Single-GPU reservation: unchanged per-pass semantics, so
+                    # gpu_1-only scheduling stays bit-identical to upstream.
+                    continue  # would crowd out the reserved higher-priority test
             eligible.append((gi, avail))
 
         if len(eligible) >= need:
@@ -588,6 +643,8 @@ def _select_launches(
             for gi in unreserved[:need]:
                 reserved_req[gi] = test.profiled_gib
                 backfill_added[gi] = 0.0
+                if need > 1:
+                    reserved_gang.add(gi)
 
     return to_launch
 

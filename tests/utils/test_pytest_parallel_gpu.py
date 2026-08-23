@@ -13,7 +13,13 @@ from __future__ import annotations
 
 import io
 import itertools
+import json
+import os
 import random
+import re
+import shutil
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -29,9 +35,11 @@ from tests.utils.pytest_parallel_gpu import (
     _unschedulable_reason,
 )
 from tests.utils.vram_utils import (
+    _TEST_META_FILENAME,
     DEFAULT_GPU_COUNT,
     VRAM_MULTI_PROC_MARGIN,
     gpu_count_from_marker_names,
+    write_test_meta,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
@@ -682,9 +690,17 @@ def test_mixed_gpu1_and_gpu2_share_a_node_without_overlapping():
 
 
 def test_gang_reservation_is_all_or_none():
-    # Two GPUs, both busy; a blocked 12 GiB gang needs headroom on BOTH. The
-    # backfill cap (cap - required = 19 - 12 = 7) therefore applies to each
-    # card, so only one 3.8 filler fits per card, not two.
+    # Two GPUs, both busy; a blocked 12 GiB gang needs headroom on BOTH, so the
+    # reservation applies to each card rather than just the better one.
+    #
+    # A gang's backfill limit is the ABSOLUTE committed budget against
+    # budget_multi: a card may hold at most `budget_multi - required`
+    # = 18.7 - 12.0 = 6.7 GiB while the gang waits on it. Both cards already
+    # hold 8.0, which is past that line, so no filler may be added to either --
+    # the gang's headroom has to be reached by attrition, not rented out again.
+    # Admitting "just one" 3.8 here is what lets committed budget creep upward
+    # one pass at a time until the gang can never assemble; see
+    # test_blocked_gang_is_not_starved_by_endless_lower_priority_backfill.
     gpus = {
         0: _gpu(0, 22.0, budget_used=8.0, running_count=1),
         1: _gpu(1, 22.0, budget_used=8.0, running_count=1),
@@ -698,10 +714,254 @@ def test_gang_reservation_is_all_or_none():
 
     launches = _select_checked(pending, gpus, num_slots=8, running_count=2)
 
-    # The gang itself cannot run yet (19 - 8 = 11 < 12).
+    # The gang itself cannot run yet (18.7 - 8.0 = 10.7 < 12).
     assert all(idx != 0 for idx, _ in launches)
-    # One filler per reserved card, and no third: 7 GiB of backfill room each.
-    assert launches == [(1, (0,)), (2, (1,))]
+    assert launches == []
+
+
+def test_gang_reservation_admits_backfill_that_still_leaves_its_headroom():
+    # The reservation throttles backfill; it does not ban it. A gang-held card
+    # may still take work while it stays inside `budget_multi - required`
+    # = 18.7 - 12.0 = 6.7 GiB.
+    #
+    # Note the two states are mutually exclusive on a single card: a card that
+    # is *blocking* the gang is by definition already past that line, so it can
+    # never also accept a filler. Backfill under a gang reservation is only
+    # reachable on a member that is NOT the blocker -- here GPU0 has room and
+    # GPU1 is the blocker, so the gang waits while GPU0 keeps working.
+    gpus = {
+        0: _gpu(0, 22.0, budget_used=1.0, running_count=1),
+        1: _gpu(1, 22.0, budget_used=8.0, running_count=1),
+    }
+    pending = [
+        _t("gang12", 12.0, timeout=1800, gpus=2),
+        _t("fill_a", 3.8),
+        _t("fill_b", 3.8),
+    ]
+
+    launches = _select_checked(pending, gpus, num_slots=8, running_count=2)
+
+    # Gang blocked by GPU1 (18.7 - 8.0 = 10.7 < 12). One filler fits on GPU0
+    # (1.0 + 3.8 = 4.8 <= 6.7); the second does not (8.6 > 6.7), and neither
+    # may touch GPU1.
+    assert launches == [(1, (0,))]
+
+
+# --------------------------------------------------------------------------- #
+# cross-pass progress -- the property a single-pass assertion cannot see
+# --------------------------------------------------------------------------- #
+def _drive_passes(gpus, seeded, *, backfill, passes, num_slots=8, queue_depth=4):
+    """Drive repeated `_select_launches` passes against live `gpu_states`.
+
+    Mirrors ``run_parallel``'s loop -- retire what finished, select, commit --
+    on an integer clock, with ``backfill(i)`` keeping the queue topped up so the
+    supply of lower-priority work never runs dry.
+
+    Every other selection test in this file asserts a property of ONE pass on a
+    hand-authored state. Starvation is not visible there by construction: it is
+    what happens on the pass after next, once ``backfill_added`` has been rebuilt
+    and the committed budget it was meant to bound has moved. This driver is the
+    only place the suite can see that.
+
+    ``run_time`` is in passes. Returns ``{name: pass index it launched on}``.
+    """
+    pending = sorted(seeded, key=_priority_key, reverse=True)
+    running: dict[str, tuple[_TestEntry, int]] = {}
+    started: dict[str, int] = {}
+    made = 0
+
+    for now in range(passes):
+        for name in [n for n, (_, end) in running.items() if end <= now]:
+            _release_gpus(running.pop(name)[0], gpus)
+
+        while len(pending) < queue_depth:
+            pending.append(backfill(made))
+            made += 1
+        pending.sort(key=_priority_key, reverse=True)
+
+        resident = {
+            gi: sum(
+                t.profiled_gib for t, _ in running.values() if gi in t.assigned_gpus
+            )
+            for gi in gpus
+        }
+        actual_free = {gi: gs.total_gib - resident[gi] for gi, gs in gpus.items()}
+        if len(running) >= num_slots:
+            continue
+        launches = _select_launches(
+            pending=pending,
+            gpu_states=gpus,
+            actual_free=actual_free,
+            num_slots=num_slots,
+            running_count=len(running),
+        )
+        batch = [(pending.pop(idx), got) for idx, got in reversed(launches)]
+        for test, got in reversed(batch):
+            _reserve_gpus(test, got, gpus)
+            running[test.name] = (test, now + max(1, int(test.est_duration)))
+            started.setdefault(test.name, now)
+
+    return started
+
+
+def test_blocked_gang_is_not_starved_by_endless_lower_priority_backfill():
+    """A feasible gpu_2 test must not be postponed forever by gpu_1 backfill.
+
+    Two 10 GiB cards (budget_multi 8.5). `hog` occupies one of them for 40
+    passes; `gang` needs 6.0 GiB on BOTH, so it is blocked from pass 0 -- the
+    idle card fits it but the hog's card does not (8.5 - 3.0 = 5.5 < 6.0).
+    Behind them is an endless queue of strictly lower-priority 2.0 GiB gpu_1
+    tests (shorter est_duration, smaller VRAM, so `_priority_key` ranks them
+    last and `gang` is always scanned first).
+
+    `gang` is feasible: `_unschedulable_reason` clears it, and with no backfill
+    at all it launches the moment the hog retires. The requirement is that the
+    backfill cannot take that away from it.
+    """
+    gpus = {0: _gpu(0, 10.0), 1: _gpu(1, 10.0)}
+    hog = _t("hog", 3.0, timeout=120)  # est 40 passes
+    gang = _t("gang", 6.0, timeout=90, gpus=2)  # est 30 passes, lower priority
+    assert _unschedulable_reason(gang, gpus) is None
+    assert _priority_key(hog) > _priority_key(gang) > _priority_key(_t("f", 2.0, 15.0))
+
+    started = _drive_passes(
+        gpus,
+        [hog, gang],
+        backfill=lambda i: _t(f"fill{i}", 2.0, timeout=15.0),
+        passes=400,
+    )
+
+    assert "gang" in started, (
+        "gpu_2 test never launched in 400 passes while lower-priority gpu_1 "
+        "tests kept launching -- starved"
+    )
+    # It must not merely launch eventually: it must launch as soon as the hog
+    # that was blocking it retires, not after some further backfill has been
+    # let in ahead of it.
+    assert started["gang"] <= 41, started["gang"]
+
+
+def test_gpu1_reservation_still_makes_progress_under_the_same_backfill():
+    """Control for the test above: the identical workload with gpu_count=1.
+
+    Confirms the gpu_2 assertion is about gang scheduling and not about the
+    driver, and pins that the unchanged single-GPU reservation path still lets
+    a blocked gpu_1 test through.
+    """
+    gpus = {0: _gpu(0, 10.0)}
+    hog = _t("hog", 3.0, timeout=120)
+    blocked = _t("blocked", 6.0, timeout=90)
+
+    started = _drive_passes(
+        gpus,
+        [hog, blocked],
+        backfill=lambda i: _t(f"fill{i}", 2.0, timeout=15.0),
+        passes=400,
+    )
+
+    assert "blocked" in started
+    assert started["blocked"] <= 41, started["blocked"]
+
+
+def test_nothing_is_admitted_past_a_gang_hold_across_passes():
+    """The invariant the progress guarantee rests on.
+
+    While a gang is blocked and holding card `g`, any test admitted to `g` must
+    leave `budget_used[g] <= budget_multi[g] - required`. That is what makes the
+    headroom monotone, and monotone headroom per card is what makes `gpu_count`
+    cards eventually satisfy the gate at the same instant -- without it each
+    card oscillates and the k of them need never coincide.
+
+    Checked as a statement about admissions under an existing hold: an increase
+    on a pass whose predecessor already had the gang blocked. The pass that
+    first creates the hold is excluded -- the blocker that causes the block is
+    legitimately placed before any hold exists.
+    """
+    gpus = {0: _gpu(0, 10.0), 1: _gpu(1, 10.0)}
+    hog = _t("hog", 3.0, timeout=120)
+    gang = _t("gang", 6.0, timeout=90, gpus=2)
+    line = {gi: gs.budget_multi - gang.profiled_gib for gi, gs in gpus.items()}
+    prev = {gi: 0.0 for gi in gpus}
+    st = {"held_last_pass": False, "ever_launched": False}
+    violations: list[tuple[int, float, float]] = []
+
+    def _watch(i):
+        # Flag only increases observed while the hold was ALREADY in place on
+        # the previous pass: the pass that creates the hold legitimately places
+        # the blocker itself. `ever_launched` latches permanently, so the free
+        # backfill that follows the gang's own run is not mistaken for a breach.
+        if gang.assigned_gpus:
+            st["ever_launched"] = True
+        holding = st["held_last_pass"] and not st["ever_launched"]
+        for gi, gs in gpus.items():
+            grew = gs.budget_used > prev[gi] + 1e-9
+            if holding and grew and gs.budget_used > line[gi] + 1e-9:
+                violations.append((gi, prev[gi], gs.budget_used))
+            prev[gi] = gs.budget_used
+        st["held_last_pass"] = bool(hog.assigned_gpus) and not st["ever_launched"]
+        return _t(f"fill{i}", 2.0, timeout=15.0)
+
+    started = _drive_passes(gpus, [hog, gang], backfill=_watch, passes=120)
+
+    assert "gang" in started
+    assert (
+        not violations
+    ), f"admitted past the gang hold (gi, before, after): {violations}"
+
+
+def test_gang_hold_admits_backfill_exactly_at_the_line():
+    """The boundary of the gang gate: at the line is admitted, over it is not.
+
+    Sized off `budget_multi` itself rather than a literal, so the equality is
+    exact whatever `total_gib * (1 - MARGIN)` rounds to. Without this the
+    comparison could be `>=` instead of `>` and every other test would still
+    pass -- the two differ only on this one state.
+    """
+    gpus = {0: _gpu(0, 10.0), 1: _gpu(1, 10.0, budget_used=3.0, running_count=1)}
+    gang = _t("gang", 6.0, timeout=1800, gpus=2)
+    exact = gpus[0].budget_multi - gang.profiled_gib  # lands exactly on the line
+    over = exact * 1.02
+
+    at_line = _select_checked(
+        [gang, _t("fill_exact", exact)],
+        gpus,
+        num_slots=8,
+        running_count=1,
+        actual_free={0: 10.0, 1: 7.0},
+    )
+    assert at_line == [(1, (0,))], "backfill landing exactly on the line must fit"
+
+    past_line = _select_checked(
+        [gang, _t("fill_over", over)],
+        gpus,
+        num_slots=8,
+        running_count=1,
+        actual_free={0: 10.0, 1: 7.0},
+    )
+    assert past_line == [], "backfill past the line must be refused"
+
+
+def test_idle_reserved_card_is_capped_at_budget_multi_not_the_whole_card():
+    # An IDLE card reserved for a blocked gang reports the whole-card cap,
+    # because that is the cap for whoever lands there first. But the instant a
+    # filler lands, the gang's own cap on that card becomes budget_multi. Gating
+    # the reservation on the whole-card cap therefore over-grants by exactly
+    # VRAM_MULTI_PROC_MARGIN * total_gib (0.15 * 22 = 3.3) and admits a filler
+    # that immediately re-blocks the gang the reservation exists to protect.
+    #
+    # GPU0 idle, GPU1 holds the gang's blocker. An 8.0 filler is inside
+    # 22.0 - 12.0 = 10.0 but outside 18.7 - 12.0 = 6.7, so it must be refused.
+    gpus = {
+        0: _gpu(0, 22.0),
+        1: _gpu(1, 22.0, budget_used=8.0, running_count=1),
+    }
+    pending = [_t("gang12", 12.0, timeout=1800, gpus=2), _t("fill8", 8.0)]
+
+    launches = _select_checked(
+        pending, gpus, num_slots=8, running_count=1, actual_free={0: 22.0, 1: 14.0}
+    )
+
+    assert launches == []
 
 
 def test_gang_does_not_reserve_when_it_cannot_hold_every_device():
@@ -888,6 +1148,234 @@ def test_gpu_count_is_absent_without_a_hardware_marker():
     assert gpu_count_from_marker_names(["unit", "pre_merge"]) is None
     assert gpu_count_from_marker_names(["gpu_0"]) is None
     assert DEFAULT_GPU_COUNT == 1
+
+
+# --------------------------------------------------------------------------- #
+# write_test_meta -- the PRODUCER half of the gpu_count path
+#
+# gpu_count_from_marker_names is well covered below, but the line that actually
+# puts its answer into the metadata file is the single point where every gpu_2
+# test can be silently downgraded to gpu_1. Deleting it, renaming its key, or
+# hardcoding it to 1 leaves the whole scheduler suite green: nothing downstream
+# can tell "no gpu_N marker" (legitimately defaults to 1) from "the marker was
+# dropped on the floor". These tests pin the producer against REAL marker
+# objects taken off real `@pytest.mark.*` decorators.
+# --------------------------------------------------------------------------- #
+@pytest.mark.gpu_2
+@pytest.mark.profiled_vram_gib(5.0)
+@pytest.mark.requested_vllm_kv_cache_bytes(559_693_824)
+@pytest.mark.timeout(420)
+def _marker_sample_gpu2():
+    """Stand-in carrying the exact marker set of the two real gpu_2 tests."""
+
+
+@pytest.mark.gpu_1
+@pytest.mark.profiled_vram_gib(4.0)
+def _marker_sample_gpu1():
+    """A single-GPU test."""
+
+
+@pytest.mark.gpu_4
+@pytest.mark.profiled_vram_gib(9.0)
+def _marker_sample_gpu4():
+    """A four-GPU test."""
+
+
+@pytest.mark.gpu_0
+@pytest.mark.profiled_vram_gib(0)
+def _marker_sample_gpu0():
+    """gpu_0 declares 'no GPU required', not a device count."""
+
+
+@pytest.mark.profiled_vram_gib(3.0)
+def _marker_sample_unmarked():
+    """No gpu_N marker at all -- the historical default."""
+
+
+class _MarkedItem:
+    """Minimal pytest item over the REAL marks of a decorated function.
+
+    `pytestmark` holds genuine `pytest.Mark` instances, so this drives
+    `write_test_meta` with the same objects a collected item would carry rather
+    than hand-written name strings. `iter_markers` yields closest-first, which
+    is pytest's own ordering and the order `get_closest_marker` depends on.
+    """
+
+    def __init__(self, nodeid: str, func):
+        self.nodeid = nodeid
+        self._marks = list(reversed(getattr(func, "pytestmark", [])))
+
+    def iter_markers(self, name: str | None = None):
+        for mark in self._marks:
+            if name is None or mark.name == name:
+                yield mark
+
+    def get_closest_marker(self, name: str):
+        return next(self.iter_markers(name), None)
+
+
+def _write_and_read(items, tmp_path) -> dict:
+    write_test_meta(items, dest_dir=str(tmp_path))
+    written = tmp_path / _TEST_META_FILENAME
+    assert written.exists(), "write_test_meta produced no metadata file"
+    return json.loads(written.read_text())
+
+
+def test_write_test_meta_serializes_gpu_count_from_a_real_gpu_2_marker(tmp_path):
+    nodeid = "tests/serve/test_vllm.py::test_embedding_multi_worker_same_model"
+    meta = _write_and_read([_MarkedItem(nodeid, _marker_sample_gpu2)], tmp_path)[nodeid]
+
+    # The producer line itself.
+    assert meta["gpu_count"] == 2
+    # And the consumer, read exactly the way run_parallel reads it.
+    assert meta.get("gpu_count", DEFAULT_GPU_COUNT) == 2
+    # The rest of the marker set must survive alongside it.
+    assert meta["profiled_vram_gib"] == 5.0
+    assert meta["requested_vllm_kv_cache_bytes"] == 559_693_824
+    assert meta["timeout"] == 420
+
+
+def test_write_test_meta_gpu_count_round_trips_into_a_scheduled_gang(tmp_path):
+    """Producer -> metadata -> _TestEntry -> a two-device selection.
+
+    Closes the loop end to end: if the serialization is dropped the entry
+    defaults to one GPU and the selection is a single device, not a gang.
+    """
+    nodeid = "tests/serve/test_vllm.py::test_gang"
+    meta = _write_and_read([_MarkedItem(nodeid, _marker_sample_gpu2)], tmp_path)[nodeid]
+
+    entry = _TestEntry(
+        id=nodeid,
+        name=nodeid,
+        profiled_gib=meta["profiled_vram_gib"],
+        timeout=meta["timeout"],
+        requested_vllm_kv_cache_bytes=meta["requested_vllm_kv_cache_bytes"],
+        gpu_count=meta.get("gpu_count", DEFAULT_GPU_COUNT),
+    )
+    assert entry.gpu_count == 2
+
+    gpus = {0: _gpu(0, 80.0), 1: _gpu(1, 80.0)}
+    launches = _select_checked([entry], gpus, num_slots=8)
+    assert launches == [(0, (0, 1))]
+
+
+def test_write_test_meta_gpu_count_covers_every_marker_case(tmp_path):
+    cases = {
+        "one": (_marker_sample_gpu1, 1),
+        "four": (_marker_sample_gpu4, 4),
+        # gpu_0 means "no GPU required", not a device count, so no key is
+        # written and the consumer default of 1 applies -- same as a test that
+        # declares no gpu_N marker at all, and same as a metadata file written
+        # before the field existed.
+        "zero": (_marker_sample_gpu0, None),
+        "unmarked": (_marker_sample_unmarked, None),
+    }
+    written = _write_and_read(
+        [_MarkedItem(nid, func) for nid, (func, _) in cases.items()], tmp_path
+    )
+
+    for nodeid, (_, expected) in cases.items():
+        meta = written[nodeid]
+        if expected is None:
+            assert "gpu_count" not in meta, nodeid
+            assert meta.get("gpu_count", DEFAULT_GPU_COUNT) == DEFAULT_GPU_COUNT
+        else:
+            assert meta["gpu_count"] == expected, nodeid
+
+
+def test_write_test_meta_propagates_a_marker_conflict_rather_than_guessing(tmp_path):
+    """A conflict must abort collection, not silently pick one of the two."""
+
+    @pytest.mark.gpu_1
+    @pytest.mark.gpu_2
+    @pytest.mark.profiled_vram_gib(5.0)
+    def _conflicted():
+        pass
+
+    with pytest.raises(ValueError) as excinfo:
+        write_test_meta(
+            [_MarkedItem("conflicted", _conflicted)], dest_dir=str(tmp_path)
+        )
+    assert "['gpu_1', 'gpu_2']" in str(excinfo.value)
+    assert not (tmp_path / _TEST_META_FILENAME).exists()
+
+
+# --------------------------------------------------------------------------- #
+# the gang assignment has to survive into the workers
+#
+# CUDA_VISIBLE_DEVICES is absolute, not relative: a child that sets it to "0"
+# gets physical GPU 0 whatever the parent's value was -- the parent's
+# restriction is replaced, not compounded. A launch script that hardcodes 0/1
+# therefore ignores the gang the scheduler gave it, and on a node with more
+# than two GPUs runs its workers on devices reserved for *other* tests, whose
+# VRAM the scheduler still believes is disjoint. These tests execute the real
+# lines out of the shipped script rather than asserting on its text.
+# --------------------------------------------------------------------------- #
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_GANG_LAUNCH_SCRIPT = (
+    _REPO_ROOT / "examples/backends/vllm/launch/agg_embed_multiworker.sh"
+)
+
+
+def _derive_worker_gpus(cvd: str | None) -> tuple[int, str]:
+    """Run the script's own device-derivation block under a given inherited set."""
+    text = _GANG_LAUNCH_SCRIPT.read_text()
+    start = text.index("IFS=',' read -r -a _VISIBLE_GPUS")
+    end = text.index("\n", text.index('WORKER2_GPU="'))
+    snippet = text[start:end] + '\necho "${WORKER1_GPU},${WORKER2_GPU}"\n'
+
+    env = dict(os.environ)
+    env.pop("CUDA_VISIBLE_DEVICES", None)
+    if cvd is not None:
+        env["CUDA_VISIBLE_DEVICES"] = cvd
+    proc = subprocess.run(
+        ["bash", "-c", snippet], capture_output=True, text=True, env=env
+    )
+    return proc.returncode, proc.stdout.strip()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_gang_launch_script_uses_the_devices_the_scheduler_assigned():
+    if not _GANG_LAUNCH_SCRIPT.exists():
+        pytest.skip("launch script not present in this checkout")
+
+    # The case that matters: a gang other than (0,1). The scheduler hands the
+    # whole gang down in CUDA_VISIBLE_DEVICES and the workers must land on it.
+    assert _derive_worker_gpus("2,3") == (0, "2,3")
+    assert _derive_worker_gpus("5,7") == (0, "5,7")
+    # Order is the scheduler's, not re-sorted by the script.
+    assert _derive_worker_gpus("1,0") == (0, "1,0")
+    # The historical shape still works, and an unrestricted manual run still
+    # defaults to the first two devices.
+    assert _derive_worker_gpus("0,1") == (0, "0,1")
+    assert _derive_worker_gpus(None) == (0, "0,1")
+    # More devices than it needs: take the first two of the set.
+    assert _derive_worker_gpus("0,1,2,3") == (0, "0,1")
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_gang_launch_script_refuses_a_device_set_it_cannot_satisfy():
+    if not _GANG_LAUNCH_SCRIPT.exists():
+        pytest.skip("launch script not present in this checkout")
+
+    # One device cannot host a two-worker gang.
+    rc, _ = _derive_worker_gpus("3")
+    assert rc != 0
+    # Empty means "no devices at all" in CUDA -- it must NOT fall back to 0,1.
+    rc, _ = _derive_worker_gpus("")
+    assert rc != 0
+
+
+def test_gang_launch_script_hardcodes_no_absolute_device():
+    if not _GANG_LAUNCH_SCRIPT.exists():
+        pytest.skip("launch script not present in this checkout")
+
+    offenders = re.findall(
+        r"^\s*CUDA_VISIBLE_DEVICES=\d.*$",
+        _GANG_LAUNCH_SCRIPT.read_text(),
+        re.MULTILINE,
+    )
+    assert not offenders, f"absolute device pinned in a gang launcher: {offenders}"
 
 
 def test_conflicting_gpu_count_markers_fail_closed():
