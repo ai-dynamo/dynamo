@@ -99,6 +99,8 @@ navigation:
           path: pages/kubernetes/installation/multinode-orchestration.md
         - page: Gateway API Inference Extension
           path: pages/kubernetes/installation/gateway-api-routing.mdx
+        - page: Operator TLS
+          path: pages/kubernetes/installation/tls.md
         - section: RDMA Setup
           contents:
             - page: Overview
