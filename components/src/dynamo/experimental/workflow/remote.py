@@ -43,11 +43,13 @@ class RemoteStageClient:
         contract: StageContract,
         inputs: Mapping[str, Any],
         context: StageContext,
+        *,
+        request_context: Any = None,
     ) -> Mapping[str, Any]:
         stage_label = f"remote stage {stage_id!r} with contract {contract.id!r}"
         transport_context = None
-        if context.request_context is not None:
-            detach = getattr(context.request_context, "detached", None)
+        if request_context is not None:
+            detach = getattr(request_context, "detached", None)
             if not callable(detach):
                 raise WorkflowExecutionError(
                     "request context cannot create a detached child context"
@@ -142,7 +144,6 @@ class RemoteStageServer:
             workflow_name=None,
             stage_id=self._stage_id,
             attempt_id=request_id,
-            request_context=transport_context,
         )
 
         async def invoke() -> Mapping[str, Any]:
