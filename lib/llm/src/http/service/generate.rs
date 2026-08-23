@@ -3085,6 +3085,14 @@ mod tests {
             .expect("generate request failed");
 
         assert_eq!(resp.status().as_u16(), StatusCode::BAD_REQUEST.as_u16());
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.starts_with("application/json")),
+            Some(true),
+            "the 400 must use this route's JSON envelope, not Axum's text/plain rejection"
+        );
         let body: serde_json::Value = resp.json().await.expect("json body");
         assert_eq!(body["error"]["code"], 400);
         assert_eq!(body["error"]["type"], "invalid_request_error");
