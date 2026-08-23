@@ -17,7 +17,6 @@ class TextEncoder:
     async def run(
         self, inputs: Mapping[str, Any], context: StageContext
     ) -> Mapping[str, Any]:
-        context.raise_if_cancelled()
         return {"tokens": inputs["text"].lower().split()}
 
 
@@ -31,7 +30,6 @@ class KeywordClassifier:
     async def run(
         self, inputs: Mapping[str, Any], context: StageContext
     ) -> Mapping[str, Any]:
-        context.raise_if_cancelled()
         tokens = inputs["tokens"]
         workflow_hits = sum(token == "workflow" for token in tokens)
         score = workflow_hits / max(1, len(tokens))
@@ -48,7 +46,6 @@ class TextGenerator:
     async def run(
         self, inputs: Mapping[str, Any], context: StageContext
     ) -> Mapping[str, Any]:
-        context.raise_if_cancelled()
         return {"text": " ".join(reversed(inputs["tokens"]))}
 
 
