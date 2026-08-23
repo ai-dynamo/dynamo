@@ -35,15 +35,12 @@ CONTRACT = StageContract(
 )
 
 
-def _context(timeout=None, request_context=None):
-    loop = asyncio.get_running_loop()
+def _context(request_context: Any = None) -> StageContext:
     return StageContext(
         workflow_name="remote-wire",
         stage_id="normalize",
         attempt_id="request-1",
         invocation_id="request-1:normalize",
-        deadline=None if timeout is None else loop.time() + timeout,
-        _cancelled=asyncio.Event(),
         request_context=request_context,
     )
 
@@ -102,7 +99,7 @@ async def test_remote_client_sends_inputs_and_accepts_one_response_mapping() -> 
     transport = _Client([{"normalized": "hello"}])
 
     result = await RemoteStageClient(transport).run(
-        "normalize", CONTRACT, {"text": "HELLO"}, _context(timeout=1.0)
+        "normalize", CONTRACT, {"text": "HELLO"}, _context()
     )
 
     assert result == {"normalized": "hello"}
@@ -173,7 +170,7 @@ class _Runner:
         assert context.stage_id == "normalize"
         assert context.attempt_id == "request-1:normalize"
         assert context.invocation_id == "request-1:normalize"
-        assert context.deadline is None
+        assert context.request_context.id() == "request-1:normalize"
         return {"normalized": inputs["text"].strip().lower()}
 
 
@@ -203,7 +200,6 @@ async def test_remote_server_cancels_runner_when_transport_stops() -> None:
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
-                assert context.cancelled
                 self.cancelled.set()
                 raise
 
@@ -276,7 +272,6 @@ class _TextEncoder:
     async def run(
         self, inputs: Mapping[str, Any], context: StageContext
     ) -> Mapping[str, Any]:
-        context.raise_if_cancelled()
         self.calls += 1
         return {"tokens": inputs["text"].lower().split()}
 
@@ -287,7 +282,6 @@ class _KeywordClassifier:
     async def run(
         self, inputs: Mapping[str, Any], context: StageContext
     ) -> Mapping[str, Any]:
-        context.raise_if_cancelled()
         tokens = inputs["tokens"]
         workflow_hits = sum(token == "workflow" for token in tokens)
         score = workflow_hits / max(1, len(tokens))
@@ -300,7 +294,6 @@ class _TextGenerator:
     async def run(
         self, inputs: Mapping[str, Any], context: StageContext
     ) -> Mapping[str, Any]:
-        context.raise_if_cancelled()
         return {"text": " ".join(reversed(inputs["tokens"]))}
 
 
@@ -310,7 +303,6 @@ class _Response:
     async def run(
         self, inputs: Mapping[str, Any], context: StageContext
     ) -> Mapping[str, Any]:
-        context.raise_if_cancelled()
         return {"chunk": {"text": inputs["text"], "scores": inputs["scores"]}}
 
 
@@ -378,9 +370,11 @@ async def test_three_remote_stages_fan_out_and_join_through_direct_mappings() ->
     runtime = _Runtime(clients)
     executor = await WorkflowOrchestrator.bind(plan, runtime=runtime)
 
+    request_context = _ParentContext()
     result = await executor.run(
         {"text": "Dynamo workflow runs across processes"},
         attempt_id="remote-example-1",
+        request_context=request_context,
     )
 
     assert result == {
@@ -389,6 +383,11 @@ async def test_three_remote_stages_fan_out_and_join_through_direct_mappings() ->
     }
     assert encoder_runner.calls == 1
     assert runtime.endpoint_ids == sorted(endpoint_ids.values())
+    assert sorted(child.context_id for child in request_context.children) == [
+        "remote-example-1:classifier",
+        "remote-example-1:encoder",
+        "remote-example-1:generator",
+    ]
 
 
 async def test_remote_branches_join_in_an_inline_response_stage() -> None:

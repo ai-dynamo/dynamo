@@ -44,7 +44,6 @@ class RemoteStageClient:
         inputs: Mapping[str, Any],
         context: StageContext,
     ) -> Mapping[str, Any]:
-        context.raise_if_cancelled()
         stage_label = f"remote stage {stage_id!r} with contract {contract.id!r}"
         transport_context = None
         if context.request_context is not None:
@@ -139,14 +138,11 @@ class RemoteStageServer:
                 candidate = get_request_id()
                 if isinstance(candidate, str) and candidate:
                     request_id = candidate
-        cancelled = asyncio.Event()
         stage_context = StageContext(
             workflow_name=None,
             stage_id=self._stage_id,
             attempt_id=request_id,
             invocation_id=request_id,
-            deadline=None,
-            _cancelled=cancelled,
             request_context=transport_context,
         )
 
@@ -175,7 +171,6 @@ class RemoteStageServer:
                 else:
                     raise asyncio.CancelledError()
         except BaseException:
-            cancelled.set()
             if not invoke_task.done():
                 invoke_task.cancel()
             await asyncio.gather(invoke_task, return_exceptions=True)
@@ -192,7 +187,6 @@ class RemoteStageServer:
             getattr(transport_context, "is_killed", lambda: False)()
         )
         if transport_stopped or transport_killed:
-            cancelled.set()
             raise asyncio.CancelledError()
         if not isinstance(result, Mapping):
             raise WorkflowExecutionError(
