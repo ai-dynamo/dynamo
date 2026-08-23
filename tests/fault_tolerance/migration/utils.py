@@ -557,7 +557,11 @@ def run_migration_test(
         logger.info(
             f"Gracefully shutting down {worker_name} with PID {worker.get_pid()}"
         )
-        terminate_process_tree(worker.get_pid(), immediate_kill=False, timeout=10)
+        # Give the runtime time to withdraw the endpoint from discovery, then
+        # stop its engine child before this short request can finish. A long
+        # parent-first grace period lets vLLM exhaust the output budget and
+        # turns the intended disconnect into a zero-token migration retry.
+        terminate_process_tree(worker.get_pid(), immediate_kill=False, timeout=2)
 
     # Step 5: Validate the request outcome via its response (the user-facing
     # contract). Migration is expected to succeed only when it is enabled and the
