@@ -4,7 +4,6 @@
 """
 Test Execution Times (Last Run: 2026-01-09):
 - test_request_migration_vllm_aggregated: ~95s
-- test_request_migration_vllm_prefill: N/A
 - test_request_migration_vllm_kv_transfer: N/A
 - test_request_migration_vllm_decode: ~115s
 """
@@ -409,87 +408,6 @@ def test_request_migration_vllm_aggregated(
                 max_tokens=AGGREGATED_MAX_TOKENS,
                 expected_ongoing_request_count=1,
             )
-
-
-@pytest.mark.skip(reason="Prefill migration not yet supported")
-@pytest.mark.timeout(350)  # 3x average
-@pytest.mark.nightly
-@MIGRATION_PARAMETERS
-def test_request_migration_vllm_prefill(
-    request,
-    runtime_services_dynamic_ports,
-    set_ucx_tls_no_mm,
-    predownload_models,
-    migration_limit,
-    migration_max_seq_len,
-    immediate_kill,
-    request_api,
-    stream,
-    tmp_path,
-):
-    """
-    End-to-end test for prefill worker request migration in disaggregated mode.
-
-    Setup: 1 decode worker + 2 prefill workers
-
-    Parameters:
-        immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
-        migration_limit: > 0 to verify migration succeeds, 0 to verify request fails
-        request_api: "chat" for chat completion API, "completion" for completion API
-        stream: True for streaming, False for non-streaming
-    """
-
-    # Step 1: Start the frontend
-    with DynamoFrontendProcess(
-        request,
-        migration_limit=migration_limit,
-        migration_max_seq_len=migration_max_seq_len,
-    ) as frontend:
-        logger.info("Frontend started successfully")
-
-        # Step 2: Start decode worker first (required for prefill workers to connect)
-        with DynamoWorkerProcess(
-            request,
-            "worker0",
-            frontend.frontend_port,
-            tmp_path,
-            is_prefill=False,
-        ) as decode_worker:
-            logger.info("Decode Worker PID: %s", decode_worker.get_pid())
-
-            # Step 3: Start 2 prefill workers
-            with DynamoWorkerProcess(
-                request,
-                "worker1",
-                frontend.frontend_port,
-                tmp_path,
-                is_prefill=True,
-            ) as prefill1:
-                logger.info("Prefill Worker 1 PID: %s", prefill1.get_pid())
-
-                with DynamoWorkerProcess(
-                    request,
-                    "worker2",
-                    frontend.frontend_port,
-                    tmp_path,
-                    is_prefill=True,
-                ) as prefill2:
-                    logger.info("Prefill Worker 2 PID: %s", prefill2.get_pid())
-
-                    # Step 4: Run migration test
-                    run_migration_test(
-                        frontend,
-                        prefill1,
-                        prefill2,
-                        receiving_pattern="Prefill Request ID: ",
-                        migration_limit=migration_limit,
-                        migration_max_seq_len=migration_max_seq_len,
-                        immediate_kill=immediate_kill,
-                        use_chat_completion=(request_api == "chat"),
-                        stream=stream,
-                        use_long_prompt=True,
-                        expected_ongoing_request_count=1,
-                    )
 
 
 @pytest.mark.skip(
