@@ -17,17 +17,15 @@ class WorkflowExecutionError(RuntimeError):
 
 @dataclass(frozen=True)
 class StageContext:
-    """Request identity and optional transport context for one stage call.
+    """Logical request identity available to one stage call.
 
     ``workflow_name`` is unavailable for remote stages until the transport
-    carries workflow lineage explicitly. ``request_context`` is present only
-    when a transport boundary needs linked cancellation.
+    carries workflow lineage explicitly.
     """
 
     workflow_name: str | None
     stage_id: str
     attempt_id: str
-    request_context: Any = None
 
 
 @runtime_checkable

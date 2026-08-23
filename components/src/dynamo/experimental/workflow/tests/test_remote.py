@@ -35,12 +35,11 @@ CONTRACT = StageContract(
 )
 
 
-def _context(request_context: Any = None) -> StageContext:
+def _context() -> StageContext:
     return StageContext(
         workflow_name="remote-wire",
         stage_id="normalize",
         attempt_id="request-1",
-        request_context=request_context,
     )
 
 
@@ -113,7 +112,8 @@ async def test_remote_client_creates_a_stage_scoped_transport_context() -> None:
         "normalize",
         CONTRACT,
         {"text": "HELLO"},
-        _context(request_context=parent),
+        _context(),
+        request_context=parent,
     )
 
     assert [child.context_id for child in parent.children] == ["request-1:normalize"]
@@ -133,7 +133,8 @@ async def test_remote_client_rejects_missing_or_duplicate_response_mapping() -> 
             "normalize",
             CONTRACT,
             {"text": "HELLO"},
-            _context(request_context=parent),
+            _context(),
+            request_context=parent,
         )
     assert parent.children[0].is_stopped()
 
@@ -168,7 +169,7 @@ class _Runner:
         assert context.workflow_name is None
         assert context.stage_id == "normalize"
         assert context.attempt_id == "request-1:normalize"
-        assert context.request_context.id() == "request-1:normalize"
+        assert not hasattr(context, "request_context")
         return {"normalized": inputs["text"].strip().lower()}
 
 

@@ -42,8 +42,8 @@ class GraphScheduler:
                     workflow_name=self._workflow.name,
                     stage_id=stage.id,
                     attempt_id=attempt_id,
-                    request_context=request_context,
                 ),
+                request_context=request_context,
             )
 
         async def resolve(reference: ValueRef) -> Any:
