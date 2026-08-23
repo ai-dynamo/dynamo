@@ -832,7 +832,7 @@ impl RequestPlaneMode {
     /// Get the request plane mode from environment variable (uncached)
     /// Reads from `DYN_REQUEST_PLANE` environment variable.
     fn from_env() -> Self {
-        std::env::var("DYN_REQUEST_PLANE")
+        std::env::var(crate::config::environment_names::request_plane::DYN_REQUEST_PLANE)
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or_default()
