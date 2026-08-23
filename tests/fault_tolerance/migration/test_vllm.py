@@ -12,19 +12,23 @@ Test Execution Times (Last Run: 2026-01-09):
 import json
 import logging
 import os
-import shutil
+from pathlib import Path
 
 import pytest
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
+from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
-from tests.utils.port_utils import allocate_port, deallocate_port
+from tests.utils.port_utils import allocate_port, deallocate_ports
 
 # Customized utils for migration tests
 from .utils import DynamoFrontendProcess, run_migration_test
 
 logger = logging.getLogger(__name__)
+
+AGGREGATED_MAX_MODEL_LEN = 1024
+AGGREGATED_MAX_TOKENS = 512
 
 pytestmark = [
     pytest.mark.fault_tolerance,
@@ -48,24 +52,12 @@ pytestmark = [
     ),
     pytest.mark.parametrize(
         "request_api",
-        [
-            pytest.param("chat"),
-            pytest.param(
-                "completion",
-                marks=pytest.mark.skip(reason="Behavior unverified yet"),
-            ),
-        ],
+        ["chat", "completion"],
     ),
     pytest.mark.parametrize(
         "stream",
-        [
-            pytest.param(True, id="stream"),
-            pytest.param(
-                False,
-                id="unary",
-                marks=pytest.mark.skip(reason="Behavior unverified yet"),
-            ),
-        ],
+        [True, False],
+        ids=["stream", "unary"],
     ),
     pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
 ]
@@ -82,6 +74,7 @@ class DynamoWorkerProcess(ManagedProcess):
         worker_id: Unique identifier for the worker (e.g., "worker1", "prefill1")
         frontend_port: Port where the frontend is running
         is_prefill: None for aggregated mode, True for prefill worker, False for decode worker
+        max_model_len: Maximum input-plus-output context exposed by the worker
     """
 
     def __init__(
@@ -89,11 +82,40 @@ class DynamoWorkerProcess(ManagedProcess):
         request,
         worker_id: str,
         frontend_port: int,
+        log_root: Path,
         is_prefill: bool | None = None,
+        max_model_len: int = 8192,
     ):
         self.worker_id = worker_id
+        allocated_ports: list[int] = []
+        request.addfinalizer(lambda ports=allocated_ports: deallocate_ports(ports))
+
         self.system_port = allocate_port(DynamoPortRange.SERVE.value)
-        request.addfinalizer(lambda port=self.system_port: deallocate_port(port))
+        allocated_ports.append(self.system_port)
+
+        self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
+        allocated_ports.append(self.nixl_side_channel_port)
+
+        # vLLM defaults every engine to the same torch.distributed rendezvous
+        # port (29501). TP=1 does not always bind it, but assigning it explicitly
+        # avoids startup races when several engine processes initialize together.
+        self.master_port = allocate_port(DynamoPortRange.BOOTSTRAP.value)
+        allocated_ports.append(self.master_port)
+
+        env = os.environ.copy()
+        if "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES" not in env:
+            kv_mark = request.node.get_closest_marker("requested_vllm_kv_cache_bytes")
+            if kv_mark:
+                env["_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES"] = str(int(kv_mark.args[0]))
+
+        gpu_mem_args = build_gpu_mem_args("build_vllm_gpu_mem_args", env=env)
+        if not gpu_mem_args:
+            gpu_mem_args = [
+                "--num-gpu-blocks-override",
+                "512",  # 8192 tokens / 16 tokens per block
+                "--gpu-memory-utilization",
+                "0.15",
+            ]
 
         command = [
             "python3",
@@ -103,13 +125,12 @@ class DynamoWorkerProcess(ManagedProcess):
             FAULT_TOLERANCE_MODEL_NAME,
             "--enforce-eager",
             "--max-model-len",
-            "8192",  # input + output tokens
+            str(max_model_len),
             "--max-num-seqs",
             "1",  # number of requests at a time
-            "--num-gpu-blocks-override",  # limit total KV cache allocation
-            "512",  # 8192 tokens x 1 context / 16 tokens per block = 512 blocks
-            "--gpu-memory-utilization",
-            "0.15",  # avoid assertion error on vLLM available memory checks
+            "--master-port",
+            str(self.master_port),
+            *gpu_mem_args,
         ]
         if is_prefill is True:
             command.extend(["--disaggregation-mode", "prefill"])
@@ -118,7 +139,8 @@ class DynamoWorkerProcess(ManagedProcess):
 
         # Aggregated mode and prefill workers publish KV events
         if is_prefill is not False:
-            kv_event_port = f"2008{worker_id[-1]}"  # TODO: use dynamic port allocation
+            kv_event_port = allocate_port(DynamoPortRange.SERVE.value)
+            allocated_ports.append(kv_event_port)
             command.extend(
                 [
                     "--kv-events-config",
@@ -134,13 +156,10 @@ class DynamoWorkerProcess(ManagedProcess):
             )
 
         # Set environment variables
-        env = os.environ.copy()
         env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
 
         # All workers need unique NIXL side channel ports for KV transfer
-        env[
-            "VLLM_NIXL_SIDE_CHANNEL_PORT"
-        ] = f"560{worker_id[-1]}"  # TODO: use dynamic port allocation
+        env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)
 
         env["DYN_LOG"] = "debug"
         # Disable canary health check - these tests expect full control over requests
@@ -165,28 +184,20 @@ class DynamoWorkerProcess(ManagedProcess):
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api)
             )
 
-        # TODO: Have the managed process take a command name explicitly to distinguish
-        #       between processes started with the same command.
-        log_dir = f"{request.node.name}_{worker_id}"
-
-        # Clean up any existing log directory from previous runs
-        try:
-            shutil.rmtree(log_dir)
-            logger.info(f"Cleaned up existing log directory: {log_dir}")
-        except FileNotFoundError:
-            # Directory doesn't exist, which is fine
-            pass
+        log_dir = log_root / worker_id
 
         super().__init__(
             command=command,
             env=env,
             health_check_urls=health_check_urls,
             timeout=300,
-            display_output=True,
+            # Every worker retains a complete per-test log. Avoid interleaving
+            # verbose engine output when several GPU tests run concurrently.
+            display_output=False,
             terminate_all_matching_process_names=False,
             stragglers=["VLLM::EngineCore"],
             straggler_commands=["-m dynamo.vllm"],
-            log_dir=log_dir,
+            log_dir=str(log_dir),
             display_name=worker_id,
         )
 
@@ -207,10 +218,8 @@ class DynamoWorkerProcess(ManagedProcess):
 
 @pytest.mark.timeout(290)  # 3x average
 @pytest.mark.post_merge
-@pytest.mark.skip(
-    reason="Flaky: 0% post-merge pass rate across multiple parametrizations; "
-    "skipped wholesale until the underlying migration fault is owned and fixed."
-)
+@pytest.mark.profiled_vram_gib(4.8)
+@pytest.mark.requested_vllm_kv_cache_bytes(331_711_000)
 def test_request_migration_vllm_aggregated(
     request,
     runtime_services_dynamic_ports,
@@ -221,6 +230,7 @@ def test_request_migration_vllm_aggregated(
     immediate_kill,
     request_api,
     stream,
+    tmp_path,
 ):
     """
     End-to-end test for aggregated worker request migration.
@@ -242,13 +252,21 @@ def test_request_migration_vllm_aggregated(
         logger.info("Frontend started successfully")
 
         # Step 2: Start 2 workers
-        with DynamoWorkerProcess(request, "worker1", frontend.frontend_port) as worker1:
+        with DynamoWorkerProcess(
+            request,
+            "worker1",
+            frontend.frontend_port,
+            tmp_path,
+            max_model_len=AGGREGATED_MAX_MODEL_LEN,
+        ) as worker1:
             logger.info(f"Worker 1 PID: {worker1.get_pid()}")
 
             with DynamoWorkerProcess(
                 request,
                 "worker2",
                 frontend.frontend_port,
+                tmp_path,
+                max_model_len=AGGREGATED_MAX_MODEL_LEN,
             ) as worker2:
                 logger.info(f"Worker 2 PID: {worker2.get_pid()}")
 
@@ -263,6 +281,7 @@ def test_request_migration_vllm_aggregated(
                     immediate_kill=immediate_kill,
                     use_chat_completion=(request_api == "chat"),
                     stream=stream,
+                    max_tokens=AGGREGATED_MAX_TOKENS,
                 )
 
 
@@ -279,6 +298,7 @@ def test_request_migration_vllm_prefill(
     immediate_kill,
     request_api,
     stream,
+    tmp_path,
 ):
     """
     End-to-end test for prefill worker request migration in disaggregated mode.
@@ -305,6 +325,7 @@ def test_request_migration_vllm_prefill(
             request,
             "worker0",
             frontend.frontend_port,
+            tmp_path,
             is_prefill=False,
         ) as decode_worker:
             logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
@@ -314,6 +335,7 @@ def test_request_migration_vllm_prefill(
                 request,
                 "worker1",
                 frontend.frontend_port,
+                tmp_path,
                 is_prefill=True,
             ) as prefill1:
                 logger.info(f"Prefill Worker 1 PID: {prefill1.get_pid()}")
@@ -322,6 +344,7 @@ def test_request_migration_vllm_prefill(
                     request,
                     "worker2",
                     frontend.frontend_port,
+                    tmp_path,
                     is_prefill=True,
                 ) as prefill2:
                     logger.info(f"Prefill Worker 2 PID: {prefill2.get_pid()}")
@@ -362,6 +385,7 @@ def test_request_migration_vllm_kv_transfer(
     immediate_kill,
     request_api,
     stream,
+    tmp_path,
 ):
     """
     End-to-end test for request migration during KV transfer in disaggregated mode.
@@ -388,6 +412,7 @@ def test_request_migration_vllm_kv_transfer(
             request,
             "worker0",
             frontend.frontend_port,
+            tmp_path,
             is_prefill=True,
         ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
@@ -397,6 +422,7 @@ def test_request_migration_vllm_kv_transfer(
                 request,
                 "worker1",
                 frontend.frontend_port,
+                tmp_path,
                 is_prefill=False,
             ) as decode1:
                 logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
@@ -405,6 +431,7 @@ def test_request_migration_vllm_kv_transfer(
                     request,
                     "worker2",
                     frontend.frontend_port,
+                    tmp_path,
                     is_prefill=False,
                 ) as decode2:
                     logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
@@ -445,6 +472,7 @@ def test_request_migration_vllm_decode(
     immediate_kill,
     request_api,
     stream,
+    tmp_path,
 ):
     """
     End-to-end test for decode worker request migration in disaggregated mode.
@@ -475,6 +503,7 @@ def test_request_migration_vllm_decode(
             request,
             "worker0",
             frontend.frontend_port,
+            tmp_path,
             is_prefill=True,
         ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
@@ -484,6 +513,7 @@ def test_request_migration_vllm_decode(
                 request,
                 "worker1",
                 frontend.frontend_port,
+                tmp_path,
                 is_prefill=False,
             ) as decode1:
                 logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
@@ -492,6 +522,7 @@ def test_request_migration_vllm_decode(
                     request,
                     "worker2",
                     frontend.frontend_port,
+                    tmp_path,
                     is_prefill=False,
                 ) as decode2:
                     logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
