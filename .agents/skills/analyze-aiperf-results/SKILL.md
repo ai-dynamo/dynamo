@@ -41,6 +41,9 @@ candidate audits and summaries, and the profile-export documentation matching th
 
 ## Audit And Normalize
 
+- Require the run's `benchmark_execution.json` to exist before auditing: it is the execution record the audit
+  chain and budget accounting bind to. A benchmark whose raw exports exist but whose execution record was never
+  written is an audit blocker — return it to `run-aiperf-benchmark` to write the record; do not audit around it.
 - Parse per-request `profile_export.jsonl` with AIPerf's native Pydantic models when available. Record the parser and
   runtime version used.
 - Parse `profile_export_aiperf.json` and multi-run aggregate/search artifacts when configured.

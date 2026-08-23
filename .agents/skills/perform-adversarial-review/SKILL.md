@@ -63,8 +63,10 @@ returning.
    family lacks that arithmetic, or when its estimate fits the remaining budget; return that family as the
    required follow-up); for a throughput-class objective the recommendation
    carries saturation evidence or a recorded budget/operator reason in `known_limitations.md` ("still rising at
-   the top of the measured grid" is not terminal); and the stop-request's draft recommendation at `EXP_ROOT/final/recommended_config.md` carries its required
-   `Correctness status:` line (require that path as an input for stop-request validation).
+   the top of the measured grid" is not terminal); and all three Finalize files EXIST ON DISK at `EXP_ROOT/final/` — `recommended_config.md` (carrying its
+   required `Correctness status:` line), `reproduced_commands.sh`, and `known_limitations.md` — verified by
+   path, not by the submitter's claim (require those paths as inputs for stop-request validation; a
+   recommendation that exists only in conversation is a blocking objection).
 3. Verify the stop-request delta cites derived budget consumption (wall clock from `manifest.yaml` session start;
    failed-deploy count from the deployment ledgers; GPU-hours from GPU allocation time, per deployment ledger
    `allocated_at`-to-`torn_down_at` span — or to now, for a live deployment — times its `gpus_requested`,
