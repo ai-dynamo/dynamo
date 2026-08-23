@@ -49,7 +49,11 @@ class WorkflowOrchestrator:
         timeout: float | None = None,
         attempt_id: str | None = None,
     ) -> dict[str, Any]:
-        """Execute one graph request and return its named results."""
+        """Execute one graph request and return its named results.
+
+        A timeout starts cancellation but still waits for stage cleanup. A
+        stage that suppresses cancellation can therefore delay this method.
+        """
 
         if timeout is not None and timeout <= 0:
             raise ValueError("timeout must be positive")

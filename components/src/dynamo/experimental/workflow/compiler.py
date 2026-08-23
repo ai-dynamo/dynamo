@@ -34,11 +34,11 @@ class DeploymentSpec:
             bindings[stage_id] = binding
         object.__setattr__(self, "bindings", MappingProxyType(bindings))
 
-    @classmethod
-    def inline(cls, **runner_keys: str) -> "DeploymentSpec":
+    @staticmethod
+    def inline(**runner_keys: str) -> "DeploymentSpec":
         """Build bindings to runners in the orchestrator process."""
 
-        return cls(
+        return DeploymentSpec(
             bindings={
                 stage_id: InlineBinding(runner_key)
                 for stage_id, runner_key in runner_keys.items()
