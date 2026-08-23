@@ -143,7 +143,8 @@ and record the exact change and reason in `deployment_ledger.json`. Do not chang
 
 For iteration > 0, read the previous deployment ledger and delete only its DGD by exact name, namespace, and context.
 Wait for the DGD and its operator-owned workloads to terminate before applying the new candidate. Record the deletion
-in the new deployment ledger.
+in the new deployment ledger, and write `torn_down_at` into the RETIRED iteration's `deployment_ledger.json` (the
+sole permitted modification of a previous iteration directory).
 
 ```bash
 set -euo pipefail
@@ -154,7 +155,7 @@ kubectl --context "${PREVIOUS_KUBE_CONTEXT}" wait --for=delete pod \
   -n "${PREVIOUS_NAMESPACE}" --timeout=10m
 ```
 
-Do not delete or modify the previous deployment directory or its successful YAML. Create new run-scoped copies in the
+Do not delete or modify the previous deployment directory or its successful YAML, except for writing `torn_down_at` into its `deployment_ledger.json` at teardown time. Create new run-scoped copies in the
 new iteration directory. Preserve shared PVCs, model-cache jobs, namespaces, and secrets.
 
 ### 4. Apply Support Manifests
@@ -233,8 +234,8 @@ by category — each category has a different correct action:
 - **Untolerated taint / node-affinity or selector mismatch**: the manifest can NEVER schedule as written. This
   is a FAILED DEPLOY, not a wait state: append it to the ledger's `failed_attempts` BEFORE redeploying (that is
   how it counts against the failed-deploy budget), fix the manifest (restore
-  recipe tolerations/selectors; a baseline expresses requirements like GPU type and count, never observed
-  cluster state such as a specific node name), and redeploy.
+  the recipe's scheduling MECHANISMS with values retargeted to the contract's hardware; a baseline expresses
+  requirements like GPU type and count, never observed cluster state such as a specific node name), and redeploy.
 - **Insufficient GPU/CPU/memory on otherwise-eligible nodes**: genuine capacity contention. Waiting is
   legitimate; record the evidence line and an explicit next-check interval in the ledger. Note: `allocated_at`
   starts only when a GPU pod schedules, so contention waits cost wall clock but not GPU-hours.

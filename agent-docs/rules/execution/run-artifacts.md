@@ -136,7 +136,8 @@ runs/<EXP_ID>/
 - Keep retries and compatibility patches for the same candidate in the same `DEPLOY_ROOT`.
 - Create the next deployment directory only when the optimization loop assigns a new candidate.
 - Before iteration > 0, remove only the previous iteration's DGD. Keep its deployment directory and successful YAML
-  unchanged, and preserve shared PVCs, model-cache jobs, namespaces, and secrets.
+  unchanged (sole exception: the retiring role writes `torn_down_at` into that iteration's
+  `deployment_ledger.json`), and preserve shared PVCs, model-cache jobs, namespaces, and secrets.
 
 ## Final Manifest Set
 

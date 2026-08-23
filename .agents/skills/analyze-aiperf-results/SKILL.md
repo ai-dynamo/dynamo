@@ -110,7 +110,8 @@ Cross-series results may provide context but never a gain, loss, or Pareto calcu
    history table.
 6. Calculate signed percent change as `(current - prior) / prior * 100`. Also state whether the value is higher or
    lower and whether that direction is an improvement or regression.
-6a. When the series has no measured noise floor and the decision at hand rests on a small delta, return
+6a. When the series has no measured noise floor and the decision at hand rests on a small delta - or a
+stop-request or final recommendation requires the series MDE per `optimize-loop.md` section 6 - return
    `repeat_decision: necessary` with the rationale "series noise-floor pilot (n=3 total)"; after the pilot,
    derive the run-to-run spread and minimum detectable effect and record both in `performance_analysis.json`
    (fields `series_noise_floor`, `minimum_detectable_effect`); copy both forward into every later same-series

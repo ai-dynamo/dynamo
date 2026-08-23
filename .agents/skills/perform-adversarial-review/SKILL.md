@@ -58,10 +58,10 @@ returning.
    `EXP_ROOT/analysis/search-calibration.md`. On mismatch, reject: the ledger moved after submission.
 2. Validate completeness and evidence class against the ledger, not the consult file (which carries only the
    delta): every lever family carries a terminal disposition (`tested`, `ruled-out`, `not-applicable`, or `deferred` — an answered ask resolves its family into one of these; `untested-promising` and `reopened-by-new-evidence` are non-terminal); every `ruled-out` row cites a measurement, a sourced hard constraint, a confirmed incompatibility,
-   or an explicit operator decision; every `deferred` row cites the cost estimate showing why its next cheapest
-   informative experiment does not fit the remaining budget (reject when a deferred family with upside above the
-   series' measured minimum detectable effect lacks that arithmetic, or when its estimate fits the remaining
-   budget; return that family as the required follow-up); for a throughput-class objective the recommendation
+   or an explicit operator decision; every `deferred` row is terminal on a recorded ground - upside below the primary series' measured minimum
+   detectable effect, or a cited cost-estimate-vs-remaining-budget arithmetic (reject when an above-MDE deferred
+   family lacks that arithmetic, or when its estimate fits the remaining budget; return that family as the
+   required follow-up); for a throughput-class objective the recommendation
    carries saturation evidence or a recorded budget/operator reason in `known_limitations.md` ("still rising at
    the top of the measured grid" is not terminal); and the stop-request's draft recommendation at `EXP_ROOT/final/recommended_config.md` carries its required
    `Correctness status:` line (require that path as an input for stop-request validation).
