@@ -4,13 +4,95 @@
 use dynamo_kv_router::{
     ConcurrentRadixTreeCompressed,
     indexer::{
-        KvIndexer, KvIndexerInterface, KvRouterError, RoutingDecisionHashes, ThreadPoolIndexer,
+        ApproximateAcquireMode, ApproximateLruBlock, ApproximateLruIncarnation,
+        ApproximateLruLease, ApproximateLruReleaseAck, KvIndexer, KvIndexerInterface,
+        KvRouterError, RoutingDecisionHashes, ThreadPoolIndexer,
     },
     protocols::{LocalBlockHash, TokensWithHashes, WorkerWithDpRank},
+    scheduling::AttemptId,
 };
 use dynamo_tokens::SequenceHash;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU8, Ordering},
+};
 
 use super::{Indexer, SideIndexer, remote::RemoteIndexer};
+
+#[derive(Clone)]
+pub(crate) struct ApproximateRequestLease {
+    lease: ApproximateLruLease,
+    indexer: Indexer,
+    worker: WorkerWithDpRank,
+    mode: Arc<AtomicU8>,
+}
+
+impl ApproximateRequestLease {
+    pub(crate) async fn acquire(
+        &mut self,
+        hashes: RoutingDecisionHashes,
+        private_blocks: usize,
+        capacity_hint: Option<usize>,
+    ) -> Result<ApproximateAcquireMode, KvRouterError> {
+        let blocks = hashes
+            .local_hashes
+            .iter()
+            .zip(&hashes.sequence_hashes)
+            .map(|(&local_hash, &sequence_hash)| ApproximateLruBlock {
+                local_hash,
+                sequence_hash,
+            })
+            .collect();
+        let mode = self
+            .lease
+            .acquire_with_capacity_hint(blocks, private_blocks, capacity_hint)
+            .await?;
+        self.mode.store(
+            match mode {
+                ApproximateAcquireMode::Lru => 1,
+                ApproximateAcquireMode::TtlFallback => 2,
+            },
+            Ordering::Release,
+        );
+        if mode == ApproximateAcquireMode::Lru {
+            return Ok(mode);
+        }
+        self.indexer
+            .record_ttl_fallback_hashes(self.worker, hashes)
+            .await?;
+        Ok(mode)
+    }
+
+    pub(crate) fn materialize(
+        &self,
+        parent_hash: Option<SequenceHash>,
+        blocks: Vec<ApproximateLruBlock>,
+        start_position: usize,
+        private_blocks: usize,
+    ) -> Result<(), KvRouterError> {
+        if !self.is_active_lru() {
+            return Ok(());
+        }
+        self.lease
+            .materialize(parent_hash, blocks, start_position, private_blocks)
+    }
+
+    pub(crate) async fn finish(&self) -> Result<(), KvRouterError> {
+        self.lease.finish().await
+    }
+
+    pub(crate) fn begin_finish(&self) -> Result<Option<ApproximateLruReleaseAck>, KvRouterError> {
+        self.lease.begin_finish()
+    }
+
+    pub(crate) fn release_now(&self) {
+        self.lease.release_now();
+    }
+
+    pub(crate) fn is_active_lru(&self) -> bool {
+        self.mode.load(Ordering::Acquire) == 1
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum RouteRecordingTarget<'a> {
@@ -22,6 +104,53 @@ pub(super) enum RouteRecordingTarget<'a> {
 }
 
 impl Indexer {
+    pub(crate) fn begin_approximate_lru_request(
+        &self,
+        worker: WorkerWithDpRank,
+        incarnation: ApproximateLruIncarnation,
+        attempt_id: AttemptId,
+    ) -> Option<ApproximateRequestLease> {
+        let lease = match self {
+            Self::KvIndexer { primary, .. } => {
+                primary.begin_approximate_lru_request(worker, incarnation, attempt_id)?
+            }
+            Self::Concurrent { primary, .. } => {
+                primary.begin_approximate_lru_request(worker, incarnation, attempt_id)?
+            }
+            Self::Remote { .. } | Self::None => return None,
+        };
+        Some(ApproximateRequestLease {
+            lease,
+            indexer: self.clone(),
+            worker,
+            mode: Arc::new(AtomicU8::new(0)),
+        })
+    }
+
+    async fn record_ttl_fallback_hashes(
+        &self,
+        worker: WorkerWithDpRank,
+        hashes: RoutingDecisionHashes,
+    ) -> Result<(), KvRouterError> {
+        match self {
+            Self::KvIndexer { primary, .. } => {
+                primary
+                    .record_ttl_fallback_hashes(worker, hashes.local_hashes, hashes.sequence_hashes)
+                    .await
+            }
+            Self::Concurrent { primary, .. } => {
+                primary
+                    .record_ttl_fallback_hashes(
+                        worker,
+                        &hashes.local_hashes,
+                        &hashes.sequence_hashes,
+                    )
+                    .await
+            }
+            Self::Remote { .. } | Self::None => Ok(()),
+        }
+    }
+
     pub(crate) fn records_routing_decisions(&self) -> bool {
         !matches!(self.recording_target(), RouteRecordingTarget::Disabled)
     }

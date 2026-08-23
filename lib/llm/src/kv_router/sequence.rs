@@ -497,7 +497,9 @@ pub async fn create_multi_worker_sequences(
         })
         .collect();
 
-    let multi_worker = ActiveSequencesMultiWorker::new(
+    // RequestGuard's attempt lease owns the single idle-expiration deadline for
+    // scheduler and approximate-LRU cleanup. Cache-retention TTL is unrelated.
+    let multi_worker = ActiveSequencesMultiWorker::new_without_expiry(
         publisher,
         block_size,
         dp_range,
@@ -535,8 +537,6 @@ pub async fn create_multi_worker_sequences(
             "active-sequence event ingress unavailable; continuing with response-side cleanup"
         );
     }
-
-    arc.start_periodic_force_expiry_across_all_workers(cancellation_token.child_token());
 
     Ok(arc)
 }

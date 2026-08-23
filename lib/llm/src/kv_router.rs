@@ -1,14 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashSet, fmt, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    sync::Arc,
+    time::Instant,
+};
 
 use anyhow::Result;
 use dynamo_kv_router::{
     DEFAULT_ROUTING_GROUP, KvSchedulerError, PrefillLoadEstimator, RoutingPartitionRef,
     SharedKvCache, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
-    indexer::{KvRouterError, RoutingDecisionHashes},
+    indexer::{
+        ApproximateLruIncarnation, ApproximateLruStats, KvRouterError, RoutingDecisionHashes,
+    },
     protocols::KV_EVENT_SUBJECT,
     protocols::{
         BlockExtraInfo, BlockHashOptions, LocalBlockHash, PrefillLoadHint, RouterEvent,
@@ -17,7 +24,7 @@ use dynamo_kv_router::{
     },
     router_hint::{RouterHint, RouterHintRootCandidates},
     scheduling::{
-        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, ScheduleMode,
+        AttemptId, CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, ScheduleMode,
         ScheduleRequest, TieredOverlapRefresher, WorkerAvailabilityProvider,
         effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
     },
@@ -78,6 +85,164 @@ use route_lookup::{
 
 pub(crate) type WorkerSelectorFactory<Sel> =
     Arc<dyn for<'a> Fn(&KvRouterConfig, WorkerType, RoutingPartitionRef<'a>) -> Sel + Send + Sync>;
+
+#[derive(Clone, Copy)]
+struct ApproximateLruRankRegistration {
+    incarnation: ApproximateLruIncarnation,
+    capacity: Option<usize>,
+    reconciled: bool,
+}
+
+#[derive(Default)]
+struct ApproximateLruRankRegistry {
+    ranks: HashMap<WorkerWithDpRank, ApproximateLruRankRegistration>,
+    next_incarnation: ApproximateLruIncarnation,
+}
+
+impl ApproximateLruRankRegistry {
+    fn register(
+        &mut self,
+        worker: WorkerWithDpRank,
+        capacity: Option<usize>,
+    ) -> ApproximateLruRankRegistration {
+        self.next_incarnation = self.next_incarnation.wrapping_add(1).max(1);
+        let registration = ApproximateLruRankRegistration {
+            incarnation: self.next_incarnation,
+            capacity,
+            reconciled: false,
+        };
+        self.ranks.insert(worker, registration);
+        registration
+    }
+}
+
+type ApproximateLruRanks = Arc<parking_lot::Mutex<ApproximateLruRankRegistry>>;
+
+async fn reconcile_approximate_lru_snapshot(
+    indexer: &Indexer,
+    snapshot: &HashMap<WorkerId, ModelRuntimeConfig>,
+    registry: &ApproximateLruRanks,
+) -> Result<(), KvRouterError> {
+    let mut advertised = HashMap::new();
+    for (&worker_id, config) in snapshot {
+        let capacity = config
+            .total_kv_blocks
+            .and_then(|blocks| usize::try_from(blocks).ok())
+            .filter(|blocks| *blocks > 0);
+        let end_rank = config
+            .data_parallel_start_rank
+            .saturating_add(config.data_parallel_size);
+        for dp_rank in config.data_parallel_start_rank..end_rank {
+            advertised.insert(WorkerWithDpRank::new(worker_id, dp_rank), capacity);
+        }
+    }
+
+    let (removed, updates) = {
+        let mut registry = registry.lock();
+        let removed = registry
+            .ranks
+            .keys()
+            .filter(|worker| !advertised.contains_key(worker))
+            .copied()
+            .collect::<Vec<_>>();
+        for worker in &removed {
+            registry.ranks.remove(worker);
+        }
+
+        let mut updates = Vec::new();
+        for (worker, advertised_capacity) in advertised {
+            let registration = match registry.ranks.get(&worker).copied() {
+                Some(mut registration) => {
+                    // Missing capacity pins this worker incarnation to TTL until removal.
+                    let effective_capacity = registration.capacity.and(advertised_capacity);
+                    if registration.capacity == effective_capacity && registration.reconciled {
+                        continue;
+                    }
+                    registration.capacity = effective_capacity;
+                    registration.reconciled = true;
+                    registry.ranks.insert(worker, registration);
+                    registration
+                }
+                None => {
+                    let mut registration = registry.register(worker, advertised_capacity);
+                    registration.reconciled = true;
+                    registry.ranks.insert(worker, registration);
+                    registration
+                }
+            };
+            updates.push((worker, registration));
+        }
+        (removed, updates)
+    };
+
+    for worker in removed {
+        indexer
+            .reset_worker_dp_rank_and_wait(worker.worker_id, worker.dp_rank)
+            .await?;
+    }
+
+    for (worker, registration) in updates {
+        if registration.capacity.is_none() {
+            tracing::warn!(
+                worker_id = worker.worker_id,
+                dp_rank = worker.dp_rank,
+                "Approximate LRU requires a positive per-rank total_kv_blocks; clearing this rank and using TTL until it is removed and re-registered"
+            );
+        }
+        indexer
+            .set_approximate_lru_capacity(worker, registration.incarnation, registration.capacity)
+            .await?;
+    }
+    Ok(())
+}
+
+fn start_approximate_lru_reconciler(
+    indexer: Indexer,
+    mut workers: RuntimeConfigWatch,
+    registry: ApproximateLruRanks,
+    cancellation: CancellationToken,
+) {
+    tokio::spawn(async move {
+        loop {
+            let changed = tokio::select! {
+                _ = cancellation.cancelled() => break,
+                changed = workers.changed() => changed,
+            };
+            if changed.is_err() {
+                break;
+            }
+            let snapshot = workers.borrow_and_update().clone();
+            if let Err(error) =
+                reconcile_approximate_lru_snapshot(&indexer, &snapshot, &registry).await
+            {
+                tracing::error!(%error, "Failed to reconcile approximate LRU capacities");
+            }
+        }
+    });
+}
+
+fn start_approximate_lru_metrics(
+    indexer: Indexer,
+    metrics: Arc<metrics::ApproximateLruMetrics>,
+    cancellation: CancellationToken,
+) {
+    tokio::spawn(async move {
+        let mut previous = ApproximateLruStats::default();
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = cancellation.cancelled() => break,
+                _ = interval.tick() => {
+                    match indexer.approximate_lru_stats().await {
+                        Ok(stats) => metrics.observe(stats, &mut previous),
+                        Err(error) => tracing::warn!(%error, "Failed to collect approximate LRU metrics"),
+                    }
+                }
+            }
+        }
+    });
+}
 
 pub(crate) fn to_worker_selection_session_context(
     context: &crate::protocols::common::extensions::AgentContext,
@@ -207,8 +372,13 @@ pub(super) enum FindBestMatchAdmission {
     WithoutAdmission,
 }
 
+pub(super) struct AdmittedFindBestMatchOutcome {
+    pub(super) outcome: FindBestMatchOutcome,
+    pub(super) attempt_id: Option<AttemptId>,
+}
+
 pub(super) enum FindBestMatchInnerOutcome {
-    WithAdmission(FindBestMatchOutcome),
+    WithAdmission(AdmittedFindBestMatchOutcome),
     WithoutAdmission(FindBestMatchAdvisoryOutcome),
 }
 
@@ -356,6 +526,7 @@ where
     kv_event_subscription: Option<indexer::KvEventSubscriptionHandle>,
     tracking_hash: TrackingHashContext,
     tracking_model_name: String,
+    approximate_lru_ranks: ApproximateLruRanks,
     _served_indexer_handle: Option<ServedIndexerHandle>,
     /// Optional external shared KV cache pool. When present, `find_best_match`
     /// queries it in parallel with the indexer and factors shared hits into scoring.
@@ -460,6 +631,16 @@ where
             cancellation_token.child_token(),
         )
         .await?;
+        let approximate_lru_metrics = metrics::ApproximateLruMetrics::from_component(component);
+        let configured_policy = kv_router_config.router_approximate_cache_policy.to_string();
+        let effective_policy = if kv_router_config.overlap_score_credit <= 0.0 {
+            "disabled"
+        } else if indexer.uses_approximate_lru() {
+            "lru"
+        } else {
+            "ttl"
+        };
+        approximate_lru_metrics.set_policies(&configured_policy, effective_policy);
 
         if min_initial_workers > 0 && !kv_router_config.skip_initial_worker_wait {
             let mut startup_watch = workers_with_configs.clone();
@@ -472,6 +653,25 @@ where
                         min_initial_workers
                     )
                 })?;
+        }
+
+        let approximate_lru_ranks = Arc::new(parking_lot::Mutex::new(
+            ApproximateLruRankRegistry::default(),
+        ));
+        if indexer.uses_approximate_lru() {
+            let snapshot = workers_with_configs.borrow().clone();
+            reconcile_approximate_lru_snapshot(&indexer, &snapshot, &approximate_lru_ranks).await?;
+            start_approximate_lru_reconciler(
+                indexer.clone(),
+                workers_with_configs.clone(),
+                Arc::clone(&approximate_lru_ranks),
+                cancellation_token.child_token(),
+            );
+            start_approximate_lru_metrics(
+                indexer.clone(),
+                approximate_lru_metrics,
+                cancellation_token.child_token(),
+            );
         }
 
         let overlap_scores_refresh = indexer.supports_overlap_refresh().then(|| {
@@ -571,6 +771,7 @@ where
             kv_event_subscription,
             tracking_hash,
             tracking_model_name,
+            approximate_lru_ranks,
             _served_indexer_handle: served_indexer_handle,
             shared_cache,
             lora_filter,
@@ -619,6 +820,39 @@ where
 
     pub fn is_eagle(&self) -> bool {
         self.is_eagle
+    }
+
+    pub(crate) fn approximate_lru_rank_registration(
+        &self,
+        worker: WorkerWithDpRank,
+    ) -> Option<ApproximateLruRankRegistration> {
+        if !self.indexer.uses_approximate_lru() {
+            return None;
+        }
+        if let Some(registration) = self
+            .approximate_lru_ranks
+            .lock()
+            .ranks
+            .get(&worker)
+            .copied()
+        {
+            return Some(registration);
+        }
+
+        let configs = self.workers_with_configs.borrow();
+        let config = configs.get(&worker.worker_id)?;
+        let end_rank = config
+            .data_parallel_start_rank
+            .saturating_add(config.data_parallel_size);
+        if !(config.data_parallel_start_rank..end_rank).contains(&worker.dp_rank) {
+            return None;
+        }
+        let capacity = config
+            .total_kv_blocks
+            .and_then(|blocks| usize::try_from(blocks).ok())
+            .filter(|blocks| *blocks > 0);
+        drop(configs);
+        Some(self.approximate_lru_ranks.lock().register(worker, capacity))
     }
 
     fn tracking_hash_scope(&self) -> TrackingHashScope<'_> {
@@ -862,7 +1096,7 @@ where
             )
             .await?
         {
-            FindBestMatchInnerOutcome::WithAdmission(outcome) => Ok(outcome),
+            FindBestMatchInnerOutcome::WithAdmission(admitted) => Ok(admitted.outcome),
             FindBestMatchInnerOutcome::WithoutAdmission(_) => {
                 unreachable!("with-admission routing returned advisory outcome")
             }
@@ -1077,17 +1311,20 @@ where
             routing_constraints,
             shared_cache_hits,
         };
-        let (response, selected_worker_load) = match admission {
+        let (response, attempt_id, selected_worker_load) = match admission {
             FindBestMatchAdmission::WithAdmission { .. } => match self
                 .scheduler
-                .schedule_request(schedule_request)
+                .schedule_request_admitted(schedule_request)
                 .instrument(tracing::info_span!("kv_router.schedule"))
                 .await
             {
-                Ok(response) => (response, None),
+                Ok(admitted) => (admitted.response, admitted.attempt_id, None),
                 Err(KvSchedulerError::QueueRejected(rejection)) => {
                     return Ok(FindBestMatchInnerOutcome::WithAdmission(
-                        FindBestMatchOutcome::QueueRejected { rejection },
+                        AdmittedFindBestMatchOutcome {
+                            outcome: FindBestMatchOutcome::QueueRejected { rejection },
+                            attempt_id: None,
+                        },
                     ));
                 }
                 Err(error) => return Err(map_scheduler_error(error)),
@@ -1098,7 +1335,7 @@ where
                 .instrument(tracing::info_span!("kv_router.select_without_admission"))
                 .await
             {
-                Ok(advisory) => (advisory.response, Some(advisory.selected_worker_load)),
+                Ok(advisory) => (advisory.response, None, Some(advisory.selected_worker_load)),
                 Err(KvSchedulerError::QueueRejected(rejection)) => {
                     return Ok(FindBestMatchInnerOutcome::WithoutAdmission(
                         FindBestMatchAdvisoryOutcome::QueueRejected { rejection },
@@ -1158,14 +1395,17 @@ where
 
         match admission {
             FindBestMatchAdmission::WithAdmission { .. } => Ok(
-                FindBestMatchInnerOutcome::WithAdmission(FindBestMatchOutcome::Routed {
-                    worker: response.best_worker,
-                    overlap_blocks: response.effective_overlap_blocks.round() as u32,
-                    effective_overlap_blocks: response.effective_overlap_blocks,
-                    cached_tokens: response.cached_tokens,
-                    potential_decode_blocks: response.potential_decode_blocks as u64,
-                    routing_hashes,
-                    router_hint,
+                FindBestMatchInnerOutcome::WithAdmission(AdmittedFindBestMatchOutcome {
+                    outcome: FindBestMatchOutcome::Routed {
+                        worker: response.best_worker,
+                        overlap_blocks: response.effective_overlap_blocks.round() as u32,
+                        effective_overlap_blocks: response.effective_overlap_blocks,
+                        cached_tokens: response.cached_tokens,
+                        potential_decode_blocks: response.potential_decode_blocks as u64,
+                        routing_hashes,
+                        router_hint,
+                    },
+                    attempt_id,
                 }),
             ),
             FindBestMatchAdmission::WithoutAdmission => Ok(
@@ -1308,6 +1548,19 @@ where
         self.scheduler.free_if_worker(request_id, worker).await
     }
 
+    pub(crate) fn scheduler_booking_cleanup(&self) -> scheduler::SchedulerBookingCleanup {
+        self.scheduler.booking_cleanup()
+    }
+
+    pub(crate) async fn mark_prefill_completed_if_booking(
+        &self,
+        booking: &scheduler::SchedulerBookingDescriptor,
+    ) -> Result<(), KvSchedulerError> {
+        self.scheduler
+            .mark_prefill_completed_if_booking(booking)
+            .await
+    }
+
     /// Number of requests currently parked in the scheduler queue.
     pub fn pending_count(&self) -> usize {
         self.scheduler.pending_count()
@@ -1374,6 +1627,16 @@ where
         decay_fraction: Option<f64>,
     ) -> Result<(), SequenceError> {
         self.scheduler.add_output_block(request_id, decay_fraction)
+    }
+
+    pub(crate) async fn add_output_block_if_booking(
+        &self,
+        booking: &scheduler::SchedulerBookingDescriptor,
+        decay_fraction: Option<f64>,
+    ) -> Result<(), KvSchedulerError> {
+        self.scheduler
+            .add_output_block_if_booking(booking, decay_fraction)
+            .await
     }
 
     pub fn block_size(&self) -> u32 {

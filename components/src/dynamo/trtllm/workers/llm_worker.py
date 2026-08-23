@@ -204,7 +204,7 @@ def _populate_kv_cache_capacity(
     engine: TensorRTLLMEngine,
     fallback_block_size: int,
 ) -> int:
-    """Publish engine KV capacity and return its effective block size."""
+    """Publish the engine's per-attention-DP-rank KV capacity and block size."""
     capacity = engine.get_kv_cache_capacity()
     if not capacity:
         logging.warning(

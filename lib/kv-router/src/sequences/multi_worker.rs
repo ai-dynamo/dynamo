@@ -35,6 +35,7 @@ use crate::protocols::{
     ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId,
     WorkerWithDpRank,
 };
+use crate::scheduling::AttemptId;
 
 // How often we force expire stale requests across all workers. See the comment
 // in ActiveSequencesMultiWorker::force_expire_requests_across_all_workers for
@@ -47,8 +48,12 @@ const SEQUENCE_PUBLISH_FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(30);
 /// Environment override for the stale active-request cleanup guard.
 const DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
 
-/// Returns the configured stale active-request cleanup guard.
-fn active_request_expiry_duration() -> Duration {
+/// Returns the configured request-lifecycle idle timeout.
+///
+/// Callers that install an explicit lifecycle lease should construct the slot
+/// tracker without its legacy expiry mechanism and use this duration for that
+/// lease instead.
+pub fn active_request_expiry_duration() -> Duration {
     active_request_expiry_duration_from_lookup(|key| env::var(key).ok())
 }
 
@@ -758,6 +763,14 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         req: SequenceRequest,
         decay_now: Instant,
     ) -> Result<(), SequenceError> {
+        self.add_request_admitted(req, decay_now).map(|_| ())
+    }
+
+    pub(crate) fn add_request_admitted(
+        &self,
+        req: SequenceRequest,
+        decay_now: Instant,
+    ) -> Result<AttemptId, SequenceError> {
         self.add_request_impl(req, decay_now, true)
     }
 
@@ -770,7 +783,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         req: SequenceRequest,
         decay_now: Instant,
     ) -> Result<(), SequenceError> {
-        self.add_request_impl(req, decay_now, false)
+        self.add_request_impl(req, decay_now, false).map(|_| ())
     }
 
     fn add_request_impl(
@@ -778,7 +791,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         req: SequenceRequest,
         decay_now: Instant,
         lazily_register_worker: bool,
-    ) -> Result<(), SequenceError> {
+    ) -> Result<AttemptId, SequenceError> {
         let event = self.replica_sync.then(|| ActiveSequenceEvent {
             request_id: req.request_id.clone(),
             worker: req.worker,
@@ -791,11 +804,11 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             router_id: self.router_id,
             lora_name: req.lora_name.clone(),
         });
-        self.add_request_local(req, decay_now, lazily_register_worker)?;
+        let attempt_id = self.add_request_local(req, decay_now, lazily_register_worker)?;
         if let Some(event) = event {
             self.enqueue_publish_event(event);
         }
-        Ok(())
+        Ok(attempt_id)
     }
 
     pub(crate) fn request_worker(&self, request_id: &RequestId) -> Option<WorkerWithDpRank> {
@@ -896,6 +909,51 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         })
     }
 
+    /// Release only the scheduler booking owned by one request attempt.
+    pub(crate) fn free_if_booking(
+        &self,
+        request_id: &RequestId,
+        worker: WorkerWithDpRank,
+        attempt_id: AttemptId,
+        decay_now: Instant,
+    ) -> Result<LifecycleMutationOutcome, SequenceError> {
+        if self.request_index.booking_for(request_id)
+            != Some(super::request_maps::RequestBooking { worker, attempt_id })
+        {
+            return Ok(LifecycleMutationOutcome::NoChange);
+        }
+        let lora_name = self.request_index.lora_for(request_id);
+        let state_changed = match self.mutate_request_worker_prompt_state_local(
+            worker,
+            request_id,
+            decay_now,
+            |seqs, rid, decay_now| seqs.free(rid, decay_now),
+        ) {
+            Ok(outcome) => outcome,
+            Err(SequenceError::RequestNotFound { .. }) => {
+                return Ok(LifecycleMutationOutcome::Applied);
+            }
+            Err(error) => return Err(error),
+        };
+        let booking_removed = self
+            .request_index
+            .remove_request_if_booking(request_id, worker, attempt_id);
+        if booking_removed {
+            self.enqueue_publish_event(ActiveSequenceEvent {
+                request_id: request_id.clone(),
+                worker,
+                data: ActiveSequenceEventData::Free,
+                router_id: self.router_id,
+                lora_name,
+            });
+        }
+        Ok(if state_changed.is_applied() || booking_removed {
+            LifecycleMutationOutcome::Applied
+        } else {
+            LifecycleMutationOutcome::NoChange
+        })
+    }
+
     /// Mark prefill as completed for a request.
     ///
     /// Note: Calling this multiple times for the same request is allowed and will be a no-op
@@ -908,6 +966,26 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         let Some(worker) = self.request_index.worker_for(request_id) else {
             return Ok(LifecycleMutationOutcome::NoChange);
         };
+        self.mutate_request_worker_load_state_local(
+            worker,
+            request_id,
+            decay_now,
+            |seqs, rid, decay_now| seqs.mark_prefill_completed(rid, decay_now),
+        )
+    }
+
+    pub(crate) fn mark_prefill_completed_if_booking(
+        &self,
+        request_id: &RequestId,
+        worker: WorkerWithDpRank,
+        attempt_id: AttemptId,
+        decay_now: Instant,
+    ) -> Result<LifecycleMutationOutcome, SequenceError> {
+        if self.request_index.booking_for(request_id)
+            != Some(super::request_maps::RequestBooking { worker, attempt_id })
+        {
+            return Ok(LifecycleMutationOutcome::NoChange);
+        }
         self.mutate_request_worker_load_state_local(
             worker,
             request_id,
@@ -970,6 +1048,23 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         let _ = self.observe_worker_load_snapshot(worker, load, Instant::now());
 
         Ok(())
+    }
+
+    pub(crate) fn add_output_block_if_booking(
+        &self,
+        request_id: &RequestId,
+        worker: WorkerWithDpRank,
+        attempt_id: AttemptId,
+        decay_fraction: Option<f64>,
+    ) -> Result<LifecycleMutationOutcome, SequenceError> {
+        if self.request_index.booking_for(request_id)
+            != Some(super::request_maps::RequestBooking { worker, attempt_id })
+        {
+            return Ok(LifecycleMutationOutcome::NoChange);
+        }
+
+        self.add_output_block(request_id, decay_fraction)?;
+        Ok(LifecycleMutationOutcome::Applied)
     }
 
     /// Get the number of workers.
@@ -1211,7 +1306,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         req: SequenceRequest,
         decay_now: Instant,
         lazily_register_worker: bool,
-    ) -> Result<(), SequenceError> {
+    ) -> Result<AttemptId, SequenceError> {
         let SequenceRequest {
             request_id,
             token_sequence,
@@ -1224,7 +1319,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
         let mut attempted_lazy_registration = false;
 
-        let (expired_request_ids, load) = loop {
+        let (expired_request_ids, load, attempt_id) = loop {
             let table = self.workers.read();
             let Some(&idx) = table.index.get(&worker) else {
                 drop(table);
@@ -1235,15 +1330,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 self.ensure_worker_registered_after_miss(worker);
                 continue;
             };
-            if let Err(existing_worker) =
-                self.request_index
-                    .try_insert_request(request_id.clone(), worker, lora_name)
-            {
-                return Err(SequenceError::DuplicateRequest {
-                    request_id,
+            let attempt_id = self
+                .request_index
+                .try_insert_request(request_id.clone(), worker, lora_name)
+                .map_err(|existing_worker| SequenceError::DuplicateRequest {
+                    request_id: request_id.clone(),
                     worker: existing_worker,
-                });
-            }
+                })?;
             let slot = &table.slots[idx];
             let mut seq = slot.sequences.write();
             let outcome = seq.add_request_with_prefill_tracking(
@@ -1260,7 +1353,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 outcome.membership_delta,
                 load,
             );
-            break (outcome.expired_request_ids, load);
+            break (outcome.expired_request_ids, load, attempt_id);
         };
 
         self.request_index
@@ -1268,7 +1361,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
 
         self.publish_worker_load_snapshot(worker, load, decay_now);
 
-        Ok(())
+        Ok(attempt_id)
     }
 
     fn stale_request_not_found(
@@ -1959,6 +2052,57 @@ mod tests {
             state.events.lock().unwrap().as_slice(),
             [ActiveSequenceEventData::Free]
         ));
+    }
+
+    #[test]
+    fn stale_attempt_cleanup_cannot_free_reused_request_id() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let (sequences, _) =
+            make_recording_sequences_without_replica_sync(HashMap::from([(1, (0, 1))]));
+        let request_id = "reused-request-id".to_string();
+        let now = Instant::now();
+
+        let first_attempt = sequences
+            .add_request_admitted(local_sequence_request(&request_id, worker), now)
+            .unwrap();
+        assert_eq!(
+            sequences
+                .free_if_booking(&request_id, worker, first_attempt, now)
+                .unwrap(),
+            LifecycleMutationOutcome::Applied
+        );
+
+        let replacement_attempt = sequences
+            .add_request_admitted(local_sequence_request(&request_id, worker), now)
+            .unwrap();
+        assert_ne!(first_attempt, replacement_attempt);
+        assert_eq!(
+            sequences
+                .mark_prefill_completed_if_booking(&request_id, worker, first_attempt, now)
+                .unwrap(),
+            LifecycleMutationOutcome::NoChange
+        );
+        assert_eq!(
+            sequences
+                .add_output_block_if_booking(&request_id, worker, first_attempt, None)
+                .unwrap(),
+            LifecycleMutationOutcome::NoChange
+        );
+        assert_eq!(
+            sequences
+                .free_if_booking(&request_id, worker, first_attempt, now)
+                .unwrap(),
+            LifecycleMutationOutcome::NoChange
+        );
+        assert_eq!(sequences.request_worker(&request_id), Some(worker));
+
+        assert_eq!(
+            sequences
+                .free_if_booking(&request_id, worker, replacement_attempt, now)
+                .unwrap(),
+            LifecycleMutationOutcome::Applied
+        );
+        assert_eq!(sequences.request_worker(&request_id), None);
     }
 
     #[test]

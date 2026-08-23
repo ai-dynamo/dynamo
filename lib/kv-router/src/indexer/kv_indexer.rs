@@ -11,12 +11,15 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use super::{
+    ApproximateLruClient, ApproximateLruCommandSink, ApproximateLruIncarnation, ApproximateLruLane,
+    ApproximateLruLease, ApproximateLruStats, ApproximateLruTask, ApproximateRetentionConfig,
     DumpRequest, EventKind, FlushRequest, GetWorkersRequest, KvIndexerInterface, KvIndexerMetrics,
     KvRouterError, MatchDetails, MatchDetailsRequest, MatchRequest, PreBoundEventCounters,
     RadixTree, RoutingDecisionRequest, panic_payload_message,
 };
 use crate::indexer::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
 use crate::protocols::*;
+use crate::scheduling::AttemptId;
 use dynamo_tokens::SequenceHash;
 
 fn apply_event_with_counters(
@@ -139,6 +142,48 @@ enum MutationRequest {
     },
 }
 
+struct DirectLruSink {
+    sender: flume::Sender<ApproximateLruTask>,
+}
+
+impl ApproximateLruCommandSink for DirectLruSink {
+    fn send(&self, mut task: ApproximateLruTask) -> Result<(), KvRouterError> {
+        task.observe_enqueue_depth(self.sender.len());
+        self.sender
+            .send(task)
+            .map_err(|_| KvRouterError::IndexerOffline)
+    }
+}
+
+fn apply_approximate_lru_task(
+    trie: &mut RadixTree,
+    lane: &mut ApproximateLruLane,
+    task: ApproximateLruTask,
+    counters: &PreBoundEventCounters,
+    prune_manager: &Option<WorkerPruneManager>,
+) {
+    lane.observe_task(&task);
+    let ApproximateLruTask {
+        command, response, ..
+    } = task;
+    if let super::ApproximateLruCommand::ResetRank { worker } = &command
+        && let Some(prune_manager) = prune_manager
+    {
+        prune_manager.remove_worker_dp_rank(*worker);
+    }
+    let result = lane.apply(command).and_then(|output| {
+        for event in output.events {
+            if !apply_event_with_counters(trie, event, counters) {
+                return Err(KvRouterError::IndexerDroppedRequest);
+            }
+        }
+        Ok(output.reply)
+    });
+    if let Some(response) = response {
+        let _ = response.send(result);
+    }
+}
+
 /// Cloneable sender for the indexer's FIFO mutation queue.
 #[derive(Clone)]
 pub struct KvEventSender {
@@ -257,6 +302,8 @@ pub struct KvIndexer {
     flush_tx: mpsc::Sender<FlushRequest>,
     /// A sender for routing decision requests.
     routing_tx: mpsc::Sender<RoutingDecisionRequest>,
+    /// Request-scoped LRU command client for local approximate mode.
+    approximate_lru: Option<ApproximateLruClient>,
     /// The size of the KV block this indexer can handle.
     kv_block_size: u32,
     /// Reference counter for Clone-aware Drop.
@@ -265,6 +312,10 @@ pub struct KvIndexer {
 }
 
 impl KvIndexer {
+    pub fn approximate_lru_enabled(&self) -> bool {
+        self.approximate_lru.is_some()
+    }
+
     /// Create a new `KvIndexer`.
     ///
     /// ### Arguments
@@ -281,6 +332,25 @@ impl KvIndexer {
         metrics: Arc<KvIndexerMetrics>,
         prune_config: Option<PruneConfig>,
     ) -> Self {
+        Self::new_with_approximate_retention(
+            token,
+            kv_block_size,
+            metrics,
+            prune_config.map(ApproximateRetentionConfig::Ttl),
+        )
+    }
+
+    pub fn new_with_approximate_retention(
+        token: CancellationToken,
+        kv_block_size: u32,
+        metrics: Arc<KvIndexerMetrics>,
+        retention: Option<ApproximateRetentionConfig>,
+    ) -> Self {
+        let (prune_config, approximate_lru_enabled) = match retention {
+            Some(ApproximateRetentionConfig::Ttl(config)) => (Some(config), false),
+            Some(ApproximateRetentionConfig::Lru { fallback_ttl }) => (Some(fallback_ttl), true),
+            None => (None, false),
+        };
         super::warn_on_unit_block_size("single", kv_block_size);
 
         let (mutation_tx, mutation_rx) = mpsc::channel::<MutationRequest>(16384);
@@ -293,6 +363,14 @@ impl KvIndexer {
         let (dump_tx, dump_rx) = mpsc::channel::<DumpRequest>(16);
         let (flush_tx, flush_rx) = mpsc::channel::<FlushRequest>(16);
         let (routing_tx, mut routing_rx) = mpsc::channel::<RoutingDecisionRequest>(2048);
+        let (approximate_lru_tx, approximate_lru_rx) = approximate_lru_enabled
+            .then(flume::unbounded::<ApproximateLruTask>)
+            .map_or((None, None), |(tx, rx)| (Some(tx), Some(rx)));
+        let approximate_lru = approximate_lru_tx.as_ref().map(|sender| {
+            ApproximateLruClient::new(Arc::new(DirectLruSink {
+                sender: sender.clone(),
+            }))
+        });
 
         let cancel_clone = token.clone();
 
@@ -314,6 +392,8 @@ impl KvIndexer {
                     let mut dump_rx = dump_rx;
                     let mut flush_rx = flush_rx;
                     let mut trie = RadixTree::new();
+                    let mut approximate_lru_lane = ApproximateLruLane::default();
+                    let approximate_lru_rx = approximate_lru_rx;
 
                     let prune_manager = prune_config.map(WorkerPruneManager::new);
                     let mut prune_ready_rx = prune_manager.as_ref().map(|pm| pm.subscribe_ready());
@@ -330,6 +410,7 @@ impl KvIndexer {
                             }
 
                             Some(worker) = remove_worker_rx.recv() => {
+                                approximate_lru_lane.forget_worker(worker);
                                 trie.remove_worker(worker);
                                 if let Some(pm) = &prune_manager {
                                     pm.remove_worker(worker);
@@ -337,6 +418,9 @@ impl KvIndexer {
                             }
 
                             Some((worker_id, dp_rank)) = remove_worker_dp_rank_rx.recv() => {
+                                approximate_lru_lane.forget_rank(
+                                    WorkerWithDpRank::new(worker_id, dp_rank)
+                                );
                                 trie.remove_worker_dp_rank(worker_id, dp_rank);
                                 if let Some(pm) = &prune_manager {
                                     pm.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
@@ -345,6 +429,22 @@ impl KvIndexer {
 
                             Some(mutation) = mutation_rx.recv() => {
                                 apply_mutation(&mut trie, mutation, &counters, &prune_manager);
+                            }
+
+                            task = async {
+                                let Some(receiver) = approximate_lru_rx.as_ref() else {
+                                    return std::future::pending::<Option<ApproximateLruTask>>().await;
+                                };
+                                receiver.recv_async().await.ok()
+                            } => {
+                                let Some(task) = task else { continue; };
+                                apply_approximate_lru_task(
+                                    &mut trie,
+                                    &mut approximate_lru_lane,
+                                    task,
+                                    &counters,
+                                    &prune_manager,
+                                );
                             }
 
                             Some(get_workers_req) = get_workers_rx.recv() => {
@@ -482,6 +582,7 @@ impl KvIndexer {
             dump_tx,
             flush_tx,
             routing_tx,
+            approximate_lru,
             kv_block_size,
             _ref_count: Arc::new(()),
         }
@@ -512,6 +613,9 @@ impl KvIndexer {
 
     /// Wait until all mutations accepted before this call have been applied.
     pub async fn flush_and_wait(&self) -> Result<usize, KvRouterError> {
+        if let Some(approximate_lru) = &self.approximate_lru {
+            let _ = approximate_lru.stats().await?;
+        }
         let curr_size = self.mutation_tx.max_capacity() - self.mutation_tx.capacity();
         let (resp_tx, resp_rx) = oneshot::channel();
         self.flush_tx
@@ -661,6 +765,11 @@ impl KvIndexerInterface for KvIndexer {
         worker_id: WorkerId,
         dp_rank: DpRank,
     ) -> Result<(), KvRouterError> {
+        if let Some(approximate_lru) = &self.approximate_lru {
+            return approximate_lru
+                .reset_rank(WorkerWithDpRank::new(worker_id, dp_rank))
+                .await;
+        }
         let (resp_tx, resp_rx) = oneshot::channel();
         self.mutation_tx
             .send(MutationRequest::ResetWorkerDpRank {
@@ -680,6 +789,9 @@ impl KvIndexerInterface for KvIndexer {
     }
 
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+        if let Some(approximate_lru) = &self.approximate_lru {
+            let _ = approximate_lru.stats().await?;
+        }
         let (resp_tx, resp_rx) = oneshot::channel();
         let dump_req = DumpRequest { resp: resp_tx };
 
@@ -742,6 +854,21 @@ impl KvIndexer {
         local_hashes: Vec<LocalBlockHash>,
         sequence_hashes: Vec<SequenceHash>,
     ) -> Result<(), KvRouterError> {
+        if self.approximate_lru.is_some() {
+            return Err(KvRouterError::Unsupported(
+                "approximate LRU routing decisions require an admitted request attempt".to_string(),
+            ));
+        }
+        self.record_ttl_fallback_hashes(worker, local_hashes, sequence_hashes)
+            .await
+    }
+
+    pub async fn record_ttl_fallback_hashes(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: Vec<LocalBlockHash>,
+        sequence_hashes: Vec<SequenceHash>,
+    ) -> Result<(), KvRouterError> {
         self.routing_tx
             .send(RoutingDecisionRequest {
                 worker,
@@ -751,6 +878,38 @@ impl KvIndexer {
             .await
             .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
         Ok(())
+    }
+
+    pub fn begin_approximate_lru_request(
+        &self,
+        worker: WorkerWithDpRank,
+        incarnation: ApproximateLruIncarnation,
+        attempt_id: AttemptId,
+    ) -> Option<ApproximateLruLease> {
+        self.approximate_lru
+            .as_ref()
+            .map(|client| client.begin_request(worker, incarnation, attempt_id))
+    }
+
+    pub async fn set_approximate_lru_capacity(
+        &self,
+        worker: WorkerWithDpRank,
+        incarnation: ApproximateLruIncarnation,
+        capacity: Option<usize>,
+    ) -> Result<(), KvRouterError> {
+        let Some(approximate_lru) = &self.approximate_lru else {
+            return Ok(());
+        };
+        approximate_lru
+            .set_capacity(worker, incarnation, capacity)
+            .await
+    }
+
+    pub async fn approximate_lru_stats(&self) -> Result<ApproximateLruStats, KvRouterError> {
+        let Some(approximate_lru) = &self.approximate_lru else {
+            return Ok(ApproximateLruStats::default());
+        };
+        approximate_lru.stats().await
     }
 }
 

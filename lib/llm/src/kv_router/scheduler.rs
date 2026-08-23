@@ -5,10 +5,13 @@ use dynamo_kv_router::protocols::{LocalBlockHash, SharedCacheHits};
 pub use dynamo_kv_router::scheduling::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
 };
+pub(crate) use dynamo_kv_router::scheduling::queue::{
+    SchedulerBookingCleanup, SchedulerBookingDescriptor,
+};
 pub use dynamo_kv_router::scheduling::{
-    AdvisorySchedulingResponse, KvSchedulerError, LocalScheduler, NonMaxOverlapSelectionObserver,
-    OverloadedWorkerProvider, PotentialLoad, ScheduleRequest, SchedulingRequest,
-    SchedulingResponse, TierOverlapBlocks, WorkerAvailabilityProvider,
+    AdmittedSchedulingResponse, AdvisorySchedulingResponse, KvSchedulerError, LocalScheduler,
+    NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad, ScheduleRequest,
+    SchedulingRequest, SchedulingResponse, TierOverlapBlocks, WorkerAvailabilityProvider,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
@@ -192,6 +195,15 @@ where
         response
     }
 
+    pub(crate) async fn schedule_request_admitted(
+        &self,
+        request: ScheduleRequest,
+    ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
+        let response = self.inner.schedule_request_admitted(request).await;
+        self.observe_schedule_result(&response);
+        response
+    }
+
     #[expect(clippy::too_many_arguments)]
     pub async fn schedule(
         &self,
@@ -330,7 +342,7 @@ where
         response
     }
 
-    fn observe_schedule_result(&self, response: &Result<SchedulingResponse, KvSchedulerError>) {
+    fn observe_schedule_result<T>(&self, response: &Result<T, KvSchedulerError>) {
         if let Err(KvSchedulerError::QueueRejected(rejection)) = response
             && let Some(metrics) = self
                 .queue_metric_indices
@@ -391,6 +403,21 @@ where
         Ok(())
     }
 
+    pub(crate) fn booking_cleanup(&self) -> SchedulerBookingCleanup {
+        self.inner.booking_cleanup()
+    }
+
+    pub(crate) async fn mark_prefill_completed_if_booking(
+        &self,
+        booking: &SchedulerBookingDescriptor,
+    ) -> Result<(), KvSchedulerError> {
+        self.inner
+            .mark_prefill_completed_if_booking(booking)
+            .await?;
+        self.update_queue_metrics();
+        Ok(())
+    }
+
     pub fn pending_count(&self) -> usize {
         self.inner.pending_count()
     }
@@ -409,6 +436,16 @@ where
         decay_fraction: Option<f64>,
     ) -> Result<(), SequenceError> {
         self.inner.add_output_block(request_id, decay_fraction)
+    }
+
+    pub(crate) async fn add_output_block_if_booking(
+        &self,
+        booking: &SchedulerBookingDescriptor,
+        decay_fraction: Option<f64>,
+    ) -> Result<(), KvSchedulerError> {
+        self.inner
+            .add_output_block_if_booking(booking, decay_fraction)
+            .await
     }
 
     pub fn get_potential_loads(
