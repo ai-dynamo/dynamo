@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 
 AGGREGATED_MAX_MODEL_LEN = 1024
 AGGREGATED_MAX_TOKENS = 512
+DECODE_MAX_MODEL_LEN = 1024
+DECODE_MAX_TOKENS = 512
 
 # Cover each distinct migration policy with complementary lifecycle, API,
 # response, and transport values. Together these eight rows cover every pair
@@ -257,6 +259,14 @@ class DynamoWorkerProcess(ManagedProcess):
             command.extend(["--disaggregation-mode", "prefill"])
         elif is_prefill is False:
             command.extend(["--disaggregation-mode", "decode"])
+
+        if is_prefill is not None:
+            command.extend(
+                [
+                    "--kv-transfer-config",
+                    '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+                ]
+            )
 
         # Aggregated mode and prefill workers publish KV events
         if is_prefill is not False:
@@ -499,17 +509,10 @@ def test_request_migration_vllm_kv_transfer(
                     )
 
 
-@pytest.mark.skip(
-    reason=(
-        "Migration reuses the same request_id for vLLM, but the prefill worker's "
-        "KV cache still holds the request due to delay_free_blocks in disaggregated mode. "
-        "With chat completions API, prefix cache hits on chat template tokens cause "
-        "an assertion error in vLLM's KV cache manager (save_new_computed_blocks expects "
-        "no new computed blocks for existing requests)."
-    ),
-)
 @pytest.mark.timeout(350)  # 3x average
 @pytest.mark.nightly
+@pytest.mark.profiled_vram_gib(6.8)
+@pytest.mark.requested_vllm_kv_cache_bytes(331_711_000)
 @DECODE_MIGRATION_PARAMETERS
 def test_request_migration_vllm_decode(
     request,
@@ -526,13 +529,15 @@ def test_request_migration_vllm_decode(
     End-to-end test for decode worker request migration in disaggregated mode.
 
     Setup: 1 prefill worker + 2 decode workers
+    The request is streamed so the test can inject a fault after decode starts.
 
     Parameters:
         immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
         migration_limit: > 0 to verify migration succeeds, 0 to verify request fails
         request_api: "chat" for chat completion API, "completion" for completion API
-        This target is always streaming so the fault can be injected while the
-        decode request is in flight.
+
+    This target is always streaming so the fault can be injected while the
+    decode request is in flight.
     """
     # Step 1: Start the frontend
     with DynamoFrontendProcess(
@@ -542,46 +547,48 @@ def test_request_migration_vllm_decode(
     ) as frontend:
         logger.info("Frontend started successfully")
 
-        # Step 2: Start prefill worker first
-        with DynamoWorkerProcess(
+        # Step 2: Start the independent prefill and decode workers concurrently
+        prefill_worker = DynamoWorkerProcess(
             request,
             "worker0",
             frontend.frontend_port,
             tmp_path,
             is_prefill=True,
-        ) as prefill_worker:
+            max_model_len=DECODE_MAX_MODEL_LEN,
+        )
+        decode1 = DynamoWorkerProcess(
+            request,
+            "worker1",
+            frontend.frontend_port,
+            tmp_path,
+            is_prefill=False,
+            max_model_len=DECODE_MAX_MODEL_LEN,
+        )
+        decode2 = DynamoWorkerProcess(
+            request,
+            "worker2",
+            frontend.frontend_port,
+            tmp_path,
+            is_prefill=False,
+            max_model_len=DECODE_MAX_MODEL_LEN,
+        )
+        with managed_processes_concurrently(prefill_worker, decode1, decode2):
             logger.info("Prefill Worker PID: %s", prefill_worker.get_pid())
+            logger.info("Decode Worker 1 PID: %s", decode1.get_pid())
+            logger.info("Decode Worker 2 PID: %s", decode2.get_pid())
 
-            # Step 3: Start 2 decode workers
-            with DynamoWorkerProcess(
-                request,
-                "worker1",
-                frontend.frontend_port,
-                tmp_path,
-                is_prefill=False,
-            ) as decode1:
-                logger.info("Decode Worker 1 PID: %s", decode1.get_pid())
-
-                with DynamoWorkerProcess(
-                    request,
-                    "worker2",
-                    frontend.frontend_port,
-                    tmp_path,
-                    is_prefill=False,
-                ) as decode2:
-                    logger.info("Decode Worker 2 PID: %s", decode2.get_pid())
-
-                    # Step 4: Run migration test
-                    run_migration_test(
-                        frontend,
-                        decode1,
-                        decode2,
-                        receiving_pattern="Decode Request ID: ",
-                        migration_limit=migration_limit,
-                        migration_max_seq_len=migration_max_seq_len,
-                        immediate_kill=immediate_kill,
-                        use_chat_completion=(request_api == "chat"),
-                        stream=True,
-                        wait_for_new_response_before_stop=True,
-                        expected_ongoing_request_count=1,
-                    )
+            # Step 3: Run migration test
+            run_migration_test(
+                frontend,
+                decode1,
+                decode2,
+                receiving_pattern="Decode Request ID: ",
+                migration_limit=migration_limit,
+                migration_max_seq_len=migration_max_seq_len,
+                immediate_kill=immediate_kill,
+                use_chat_completion=(request_api == "chat"),
+                stream=True,
+                max_tokens=DECODE_MAX_TOKENS,
+                wait_for_new_response_before_stop=True,
+                expected_ongoing_request_count=1,
+            )

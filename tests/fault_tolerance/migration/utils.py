@@ -340,19 +340,16 @@ def wait_for_response(
     initial_len = len(response_list)
     target_len = initial_len + num_responses
     poll_interval = 0.001  # 1ms
-    elapsed = 0.0
+    deadline = time.monotonic() + max_wait_time
 
-    while elapsed < max_wait_time:
+    while time.monotonic() < deadline:
         if len(response_list) >= target_len:
             return
         time.sleep(poll_interval)
-        elapsed += poll_interval
 
-    logger.warning(
-        "Only received %s/%s new responses within %ss",
-        len(response_list) - initial_len,
-        num_responses,
-        max_wait_time,
+    pytest.fail(
+        f"Only received {len(response_list) - initial_len}/{num_responses} new "
+        f"responses within {max_wait_time}s"
     )
 
 
@@ -581,6 +578,9 @@ def run_migration_test(
     # Step 3: Optionally wait for new response before stop (for decode tests)
     if wait_for_new_response_before_stop:
         wait_for_response(response_list)
+        assert (
+            request_thread.is_alive()
+        ), "Request completed before the worker fault was injected"
 
     # Step 4: Stop the worker (kill or graceful shutdown)
     if immediate_kill:
