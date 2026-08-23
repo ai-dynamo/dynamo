@@ -23,7 +23,11 @@ from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_ports
 
 # Customized utils for migration tests
-from .utils import DynamoFrontendProcess, run_migration_test
+from .utils import (
+    DynamoFrontendProcess,
+    managed_processes_concurrently,
+    run_migration_test,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -251,38 +255,38 @@ def test_request_migration_vllm_aggregated(
     ) as frontend:
         logger.info("Frontend started successfully")
 
-        # Step 2: Start 2 workers
-        with DynamoWorkerProcess(
+        # Step 2: Start 2 independent workers concurrently
+        worker1 = DynamoWorkerProcess(
             request,
             "worker1",
             frontend.frontend_port,
             tmp_path,
             max_model_len=AGGREGATED_MAX_MODEL_LEN,
-        ) as worker1:
+        )
+        worker2 = DynamoWorkerProcess(
+            request,
+            "worker2",
+            frontend.frontend_port,
+            tmp_path,
+            max_model_len=AGGREGATED_MAX_MODEL_LEN,
+        )
+        with managed_processes_concurrently(worker1, worker2):
             logger.info(f"Worker 1 PID: {worker1.get_pid()}")
+            logger.info(f"Worker 2 PID: {worker2.get_pid()}")
 
-            with DynamoWorkerProcess(
-                request,
-                "worker2",
-                frontend.frontend_port,
-                tmp_path,
-                max_model_len=AGGREGATED_MAX_MODEL_LEN,
-            ) as worker2:
-                logger.info(f"Worker 2 PID: {worker2.get_pid()}")
-
-                # Step 3: Run migration test
-                run_migration_test(
-                    frontend,
-                    worker1,
-                    worker2,
-                    receiving_pattern="Decode Request ID: ",
-                    migration_limit=migration_limit,
-                    migration_max_seq_len=migration_max_seq_len,
-                    immediate_kill=immediate_kill,
-                    use_chat_completion=(request_api == "chat"),
-                    stream=stream,
-                    max_tokens=AGGREGATED_MAX_TOKENS,
-                )
+            # Step 3: Run migration test
+            run_migration_test(
+                frontend,
+                worker1,
+                worker2,
+                receiving_pattern="Decode Request ID: ",
+                migration_limit=migration_limit,
+                migration_max_seq_len=migration_max_seq_len,
+                immediate_kill=immediate_kill,
+                use_chat_completion=(request_api == "chat"),
+                stream=stream,
+                max_tokens=AGGREGATED_MAX_TOKENS,
+            )
 
 
 @pytest.mark.skip(reason="Prefill migration not yet supported")

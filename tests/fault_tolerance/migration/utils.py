@@ -5,6 +5,9 @@ import logging
 import re
 import threading
 import time
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, contextmanager
 
 import pytest
 import requests
@@ -17,6 +20,37 @@ from tests.utils.managed_process import (
 from tests.utils.managed_process import ManagedProcess, terminate_process_tree
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def managed_processes_concurrently(
+    *processes: ManagedProcess,
+) -> Iterator[tuple[ManagedProcess, ...]]:
+    """Enter independent managed processes concurrently and clean them up safely."""
+    if not processes:
+        yield ()
+        return
+
+    entered: list[ManagedProcess | None] = [None] * len(processes)
+    startup_error: BaseException | None = None
+    with ThreadPoolExecutor(max_workers=len(processes)) as executor:
+        futures = [executor.submit(process.__enter__) for process in processes]
+        for index, future in enumerate(futures):
+            try:
+                entered[index] = future.result()
+            except BaseException as error:
+                if startup_error is None:
+                    startup_error = error
+
+    with ExitStack() as stack:
+        for process in entered:
+            if process is not None:
+                stack.callback(process.__exit__, None, None, None)
+
+        if startup_error is not None:
+            raise startup_error
+
+        yield tuple(process for process in entered if process is not None)
 
 
 class DynamoFrontendProcess(BaseDynamoFrontendProcess):
