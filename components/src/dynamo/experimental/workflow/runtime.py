@@ -27,7 +27,6 @@ class StageContext:
     workflow_name: str | None
     stage_id: str
     attempt_id: str
-    invocation_id: str
     request_context: Any = None
 
 

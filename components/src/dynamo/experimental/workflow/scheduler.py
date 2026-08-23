@@ -42,7 +42,6 @@ class GraphScheduler:
                     workflow_name=self._workflow.name,
                     stage_id=stage.id,
                     attempt_id=attempt_id,
-                    invocation_id=f"{attempt_id}:{stage.id}",
                     request_context=request_context,
                 ),
             )

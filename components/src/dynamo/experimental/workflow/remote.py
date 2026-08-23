@@ -52,7 +52,7 @@ class RemoteStageClient:
                 raise WorkflowExecutionError(
                     "request context cannot create a detached child context"
                 )
-            transport_context = detach(context.invocation_id)
+            transport_context = detach(f"{context.attempt_id}:{context.stage_id}")
 
         try:
             stream = await self._client.round_robin(
@@ -142,7 +142,6 @@ class RemoteStageServer:
             workflow_name=None,
             stage_id=self._stage_id,
             attempt_id=request_id,
-            invocation_id=request_id,
             request_context=transport_context,
         )
 
