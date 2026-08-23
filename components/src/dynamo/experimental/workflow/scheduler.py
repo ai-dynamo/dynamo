@@ -32,7 +32,6 @@ class GraphScheduler:
             }
             return await self._dispatcher.call(
                 stage.id,
-                stage.contract,
                 stage_inputs,
                 StageContext(
                     workflow_name=self._workflow.name,
