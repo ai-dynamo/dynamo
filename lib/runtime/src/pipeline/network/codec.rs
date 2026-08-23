@@ -11,7 +11,7 @@
 use bytes::Bytes;
 use tokio_util::{
     bytes::{Buf, BufMut, BytesMut},
-    codec::{Decoder, Encoder},
+    codec::{Decoder, Encoder, LengthDelimitedCodec},
 };
 
 mod two_part;
@@ -397,16 +397,9 @@ impl TcpResponseMessage {
             ));
         }
 
-        // Use BytesMut for efficient buffer building
         let mut buf = BytesMut::with_capacity(4 + self.data.len());
-
-        // Write length (4 bytes)
         buf.put_u32(self.data.len() as u32);
-
-        // Write data
         buf.put_slice(&self.data);
-
-        // Zero-copy conversion to Bytes
         Ok(buf.freeze())
     }
 
@@ -440,16 +433,39 @@ impl TcpResponseMessage {
     }
 }
 
+const RESPONSE_LENGTH_WIDTH: usize = std::mem::size_of::<u32>();
+
+fn response_payload_limit(max_message_size: Option<usize>) -> usize {
+    max_message_size
+        .map(|max| max.saturating_sub(RESPONSE_LENGTH_WIDTH))
+        .unwrap_or(u32::MAX as usize)
+        .min(u32::MAX as usize)
+}
+
 /// Codec for encoding/decoding TcpResponseMessage
 /// Supports max_message_size enforcement
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct TcpResponseCodec {
-    max_message_size: Option<usize>,
+    decoder: LengthDelimitedCodec,
 }
 
 impl TcpResponseCodec {
     pub fn new(max_message_size: Option<usize>) -> Self {
-        Self { max_message_size }
+        let decoder = LengthDelimitedCodec::builder()
+            .length_field_type::<u32>()
+            .big_endian()
+            .length_adjustment(RESPONSE_LENGTH_WIDTH as isize)
+            .num_skip(0)
+            .max_frame_length(response_payload_limit(max_message_size))
+            .new_codec();
+
+        Self { decoder }
+    }
+}
+
+impl Default for TcpResponseCodec {
+    fn default() -> Self {
+        Self::new(None)
     }
 }
 
@@ -458,40 +474,14 @@ impl Decoder for TcpResponseCodec {
     type Error = std::io::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        // Need at least 4 bytes for length
-        if src.len() < 4 {
-            return Ok(None);
-        }
-
-        // Peek at message length without consuming
-        let data_len = u32::from_be_bytes([src[0], src[1], src[2], src[3]]) as usize;
-        let total_len = 4 + data_len;
-
-        // Check max message size
-        if let Some(max_size) = self.max_message_size
-            && total_len > max_size
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "Response too large: {} bytes (max: {} bytes)",
-                    total_len, max_size
-                ),
-            ));
-        }
-
-        // Check if we have the full message
-        if src.len() < total_len {
-            return Ok(None);
-        }
-
-        // Advance past the length prefix
-        src.advance(4);
-
-        // Read data
-        let data = src.split_to(data_len).freeze();
-
-        Ok(Some(TcpResponseMessage { data }))
+        self.decoder.decode(src).map(|frame| {
+            frame.map(|mut frame| {
+                frame.advance(RESPONSE_LENGTH_WIDTH);
+                TcpResponseMessage {
+                    data: frame.freeze(),
+                }
+            })
+        })
     }
 }
 
@@ -499,38 +489,12 @@ impl Encoder<TcpResponseMessage> for TcpResponseCodec {
     type Error = std::io::Error;
 
     fn encode(&mut self, item: TcpResponseMessage, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        if item.data.len() > u32::MAX as usize {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Response too large: {} bytes", item.data.len()),
-            ));
-        }
-
-        let total_len = 4 + item.data.len();
-
-        // Check max message size
-        if let Some(max_size) = self.max_message_size
-            && total_len > max_size
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "Response too large: {} bytes (max: {} bytes)",
-                    total_len, max_size
-                ),
-            ));
-        }
-
-        // Reserve space
-        dst.reserve(total_len);
-
-        // Write length
-        dst.put_u32(item.data.len() as u32);
-
-        // Write data
-        dst.put_slice(&item.data);
-
-        Ok(())
+        LengthDelimitedCodec::builder()
+            .length_field_type::<u32>()
+            .big_endian()
+            .max_frame_length(self.decoder.max_frame_length())
+            .new_codec()
+            .encode(item.data, dst)
     }
 }
 
