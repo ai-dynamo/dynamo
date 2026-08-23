@@ -15,9 +15,9 @@ use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::env;
 use std::future::Future;
-use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
@@ -35,7 +35,7 @@ use crate::protocols::{
     ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, PrefillLoadHint, WorkerId,
     WorkerWithDpRank,
 };
-use crate::scheduling::AttemptId;
+use crate::scheduling::{AttemptId, queue::SchedulerBookingDescriptor};
 
 // How often we force expire stale requests across all workers. See the comment
 // in ActiveSequencesMultiWorker::force_expire_requests_across_all_workers for
@@ -48,11 +48,11 @@ const SEQUENCE_PUBLISH_FAILURE_LOG_INTERVAL: Duration = Duration::from_secs(30);
 /// Environment override for the stale active-request cleanup guard.
 const DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS: &str = "DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS";
 
-/// Returns the configured request-lifecycle idle timeout.
+/// Returns the configured request-lifecycle cleanup interval.
 ///
-/// Callers that install an explicit lifecycle lease should construct the slot
-/// tracker without its legacy expiry mechanism and use this duration for that
-/// lease instead.
+/// Callers that install the shared CLOCK lease manager should construct the slot
+/// tracker without its legacy expiry mechanism and use this duration as the scan
+/// interval instead.
 pub fn active_request_expiry_duration() -> Duration {
     active_request_expiry_duration_from_lookup(|key| env::var(key).ok())
 }
@@ -313,6 +313,14 @@ pub enum LifecycleMutationOutcome {
     NoChange,
 }
 
+/// Observes request attempts mirrored from another router so their local
+/// scheduler state can share the router's request-liveness reaper.
+pub trait ReplicaRequestLeaseObserver: Send + Sync {
+    fn admitted(&self, booking: SchedulerBookingDescriptor);
+    fn progressed(&self, booking: &SchedulerBookingDescriptor);
+    fn completed(&self, booking: &SchedulerBookingDescriptor);
+}
+
 impl LifecycleMutationOutcome {
     pub fn is_applied(self) -> bool {
         matches!(self, Self::Applied)
@@ -341,6 +349,7 @@ pub struct ActiveSequencesMultiWorker<P: SequencePublisher> {
     remote_state_update_count: AtomicUsize,
     pub(super) replica_sync: bool,
     pub(super) replica_worker_policy: ReplicaWorkerPolicy,
+    replica_request_lease_observer: OnceLock<Arc<dyn ReplicaRequestLeaseObserver>>,
     worker_type: &'static str,
 }
 
@@ -484,6 +493,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             remote_state_update_count: AtomicUsize::new(0),
             replica_sync,
             replica_worker_policy: options.replica_worker_policy,
+            replica_request_lease_observer: OnceLock::new(),
             worker_type,
         }
     }
@@ -635,6 +645,20 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// capacity locally.
     pub fn subscribe_remote_state_changes(&self) -> watch::Receiver<()> {
         self.remote_state_updates.subscribe()
+    }
+
+    /// Install the one router-owned observer for mirrored request attempts.
+    pub fn set_replica_request_lease_observer(
+        &self,
+        observer: Arc<dyn ReplicaRequestLeaseObserver>,
+    ) -> bool {
+        self.replica_request_lease_observer.set(observer).is_ok()
+    }
+
+    pub(super) fn replica_request_lease_observer(
+        &self,
+    ) -> Option<&Arc<dyn ReplicaRequestLeaseObserver>> {
+        self.replica_request_lease_observer.get()
     }
 
     pub(super) fn notify_remote_state_update(&self) {
@@ -1837,6 +1861,69 @@ mod tests {
             "test",
         );
         (sequences, state)
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum ObservedReplicaLeaseEvent {
+        Admitted(SchedulerBookingDescriptor),
+        Progressed(SchedulerBookingDescriptor),
+        Completed(SchedulerBookingDescriptor),
+    }
+
+    #[derive(Default)]
+    struct RecordingReplicaLeaseObserver {
+        events: Mutex<Vec<ObservedReplicaLeaseEvent>>,
+    }
+
+    impl ReplicaRequestLeaseObserver for RecordingReplicaLeaseObserver {
+        fn admitted(&self, booking: SchedulerBookingDescriptor) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(ObservedReplicaLeaseEvent::Admitted(booking));
+        }
+
+        fn progressed(&self, booking: &SchedulerBookingDescriptor) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(ObservedReplicaLeaseEvent::Progressed(booking.clone()));
+        }
+
+        fn completed(&self, booking: &SchedulerBookingDescriptor) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(ObservedReplicaLeaseEvent::Completed(booking.clone()));
+        }
+    }
+
+    #[test]
+    fn replica_lifecycle_uses_one_local_attempt_generation() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let (sequences, _) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
+        let observer = Arc::new(RecordingReplicaLeaseObserver::default());
+        assert!(sequences.set_replica_request_lease_observer(observer.clone()));
+
+        sequences.apply_replica_batch(vec![
+            replica_add("req-1", worker, vec![1, 2, 3]),
+            replica_mark("req-1", worker),
+            replica_free("req-1", worker),
+        ]);
+
+        let events = observer.events.lock().unwrap();
+        assert_eq!(events.len(), 3);
+        let ObservedReplicaLeaseEvent::Admitted(admitted) = &events[0] else {
+            panic!("first replica lease event must be admission");
+        };
+        assert_eq!(
+            events[1],
+            ObservedReplicaLeaseEvent::Progressed(admitted.clone())
+        );
+        assert_eq!(
+            events[2],
+            ObservedReplicaLeaseEvent::Completed(admitted.clone())
+        );
     }
 
     #[test]

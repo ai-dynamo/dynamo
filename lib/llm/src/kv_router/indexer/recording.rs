@@ -77,10 +77,6 @@ impl ApproximateRequestLease {
             .materialize(parent_hash, blocks, start_position, private_blocks)
     }
 
-    pub(crate) async fn finish(&self) -> Result<(), KvRouterError> {
-        self.lease.finish().await
-    }
-
     pub(crate) fn begin_finish(&self) -> Result<Option<ApproximateLruReleaseAck>, KvRouterError> {
         self.lease.begin_finish()
     }

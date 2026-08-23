@@ -57,6 +57,7 @@ pub mod metrics;
 pub mod prefill_router;
 pub mod publisher;
 pub mod push_router;
+mod request_lease;
 mod route_lookup;
 pub mod scheduler;
 pub mod sequence;
@@ -527,6 +528,7 @@ where
     tracking_hash: TrackingHashContext,
     tracking_model_name: String,
     approximate_lru_ranks: ApproximateLruRanks,
+    request_leases: request_lease::RequestLeaseManager,
     _served_indexer_handle: Option<ServedIndexerHandle>,
     /// Optional external shared KV cache pool. When present, `find_best_match`
     /// queries it in parallel with the indexer and factors shared hits into scoring.
@@ -704,6 +706,15 @@ where
             cancellation_token.child_token(),
         )
         .await?;
+        let request_leases = request_lease::RequestLeaseManager::new(
+            scheduler.booking_cleanup(),
+            cancellation_token.child_token(),
+        );
+        if !scheduler.set_replica_request_lease_observer(Arc::new(request_leases.clone())) {
+            return Err(anyhow::anyhow!(
+                "request lease observer is already installed for this router"
+            ));
+        }
 
         // Start KV event subscription if needed — skip when using a remote indexer.
         let kv_event_subscription = if kv_event_source_requirement
@@ -772,6 +783,7 @@ where
             tracking_hash,
             tracking_model_name,
             approximate_lru_ranks,
+            request_leases,
             _served_indexer_handle: served_indexer_handle,
             shared_cache,
             lora_filter,
@@ -822,7 +834,7 @@ where
         self.is_eagle
     }
 
-    pub(crate) fn approximate_lru_rank_registration(
+    fn approximate_lru_rank_registration(
         &self,
         worker: WorkerWithDpRank,
     ) -> Option<ApproximateLruRankRegistration> {
@@ -1548,8 +1560,8 @@ where
         self.scheduler.free_if_worker(request_id, worker).await
     }
 
-    pub(crate) fn scheduler_booking_cleanup(&self) -> scheduler::SchedulerBookingCleanup {
-        self.scheduler.booking_cleanup()
+    pub(crate) fn request_lease_manager(&self) -> &request_lease::RequestLeaseManager {
+        &self.request_leases
     }
 
     pub(crate) async fn mark_prefill_completed_if_booking(

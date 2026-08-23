@@ -18,7 +18,8 @@ use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
 
 use super::metrics::{ROUTER_QUEUE_METRICS, RouterQueueMetricHandles, RouterRequestMetrics};
 use super::sequence::{
-    RuntimeSequencePublisher, SequenceError, SequenceRequest, create_multi_worker_sequences,
+    DeferredReplicaRequestLeaseObserver, RuntimeSequencePublisher, SequenceError, SequenceRequest,
+    create_multi_worker_sequences_with_observer,
 };
 use crate::discovery::RuntimeConfigWatch;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
@@ -27,6 +28,7 @@ use anyhow::Result;
 use dynamo_kv_router::{
     PrefillLoadEstimator,
     config::{KvRouterConfig, RouterConfigOverride},
+    multi_worker_sequence::ReplicaRequestLeaseObserver,
     protocols::{RoutingConstraints, WorkerId, WorkerWithDpRank},
 };
 use dynamo_runtime::component::Endpoint;
@@ -43,6 +45,7 @@ where
     RF: OverlapScoresRefresh,
 {
     inner: Arc<LocalScheduler<RuntimeSequencePublisher, ModelRuntimeConfig, Sel, RF>>,
+    replica_request_lease_observer: Arc<DeferredReplicaRequestLeaseObserver>,
     queue_metrics: Vec<RouterQueueMetricHandles>,
     queue_metric_indices: HashMap<String, usize>,
 }
@@ -73,13 +76,17 @@ where
             workers_with_configs.borrow().clone();
 
         let router_id = endpoint.drt().discovery().instance_id();
-        let slots = create_multi_worker_sequences(
+        let replica_request_lease_observer =
+            Arc::new(DeferredReplicaRequestLeaseObserver::default());
+        let observer: Arc<dyn ReplicaRequestLeaseObserver> = replica_request_lease_observer.clone();
+        let slots = create_multi_worker_sequences_with_observer(
             endpoint,
             block_size as usize,
             initial_workers,
             kv_router_config.router_replica_sync,
             router_id,
             worker_type,
+            Some(observer),
             cancellation_token.child_token(),
         )
         .await
@@ -181,6 +188,7 @@ where
 
         Ok(Self {
             inner,
+            replica_request_lease_observer,
             queue_metrics,
             queue_metric_indices,
         })
@@ -405,6 +413,13 @@ where
 
     pub(crate) fn booking_cleanup(&self) -> SchedulerBookingCleanup {
         self.inner.booking_cleanup()
+    }
+
+    pub(crate) fn set_replica_request_lease_observer(
+        &self,
+        observer: Arc<dyn ReplicaRequestLeaseObserver>,
+    ) -> bool {
+        self.replica_request_lease_observer.install(observer)
     }
 
     pub(crate) async fn mark_prefill_completed_if_booking(

@@ -1,18 +1,26 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc, Weak,
-        atomic::{AtomicU8, Ordering},
-    },
-    time::Duration,
-};
+use std::{collections::HashMap, sync::Arc};
 
+use crate::{
+    kv_router::{
+        KvRouter,
+        indexer::ApproximateRequestLease,
+        metrics::RouterRequestMetrics,
+        request_lease::RequestAttemptLease,
+        scheduler::{DefaultWorkerSelector, SchedulerBookingDescriptor},
+    },
+    local_model::runtime_config::ModelRuntimeConfig,
+    preprocessor::PreprocessedRequest,
+    protocols::common::{
+        llm_backend::LLMEngineOutput,
+        preprocessor::MigrationState,
+        timing::{RequestPhase, RequestTracker},
+    },
+};
 use dynamo_kv_router::{
     indexer::{ApproximateAcquireMode, ApproximateLruBlock, RoutingDecisionHashes},
-    multi_worker_sequence::active_request_expiry_duration,
     protocols::{
         BlockExtraInfo, BlockHashOptions, WorkerWithDpRank, compute_block_hash_for_seq,
         compute_next_seq_hash,
@@ -25,24 +33,6 @@ use dynamo_runtime::{
     metrics::frontend_perf::{STAGE_DISPATCH, StageGuard},
     protocols::annotated::Annotated,
 };
-use tokio::sync::{Notify, watch};
-use tokio::time::Instant;
-
-use crate::{
-    kv_router::{
-        KvRouter,
-        indexer::ApproximateRequestLease,
-        metrics::RouterRequestMetrics,
-        scheduler::{DefaultWorkerSelector, SchedulerBookingCleanup, SchedulerBookingDescriptor},
-    },
-    local_model::runtime_config::ModelRuntimeConfig,
-    preprocessor::PreprocessedRequest,
-    protocols::common::{
-        llm_backend::LLMEngineOutput,
-        preprocessor::MigrationState,
-        timing::{RequestPhase, RequestTracker},
-    },
-};
 
 #[derive(Clone)]
 struct OutputHashBranch {
@@ -50,6 +40,7 @@ struct OutputHashBranch {
     parent_hash: Option<u64>,
     next_position: usize,
     first_mm_info: Option<BlockExtraInfo>,
+    has_uncomputed_output: bool,
 }
 
 struct MaterializedOutputBlocks {
@@ -114,8 +105,9 @@ impl CanonicalOutputTracker {
                 .and_then(|infos| infos.get(complete_blocks))
                 .cloned()
                 .flatten(),
+            has_uncomputed_output: false,
         };
-        let reported_private_blocks = usize::from(!template.tail.is_empty());
+        let reported_private_blocks = usize::from(Self::has_private_tail(&template, is_eagle));
         Self {
             template,
             branches: HashMap::new(),
@@ -128,7 +120,16 @@ impl CanonicalOutputTracker {
     }
 
     fn initial_private_blocks(&self) -> usize {
-        usize::from(!self.template.tail.is_empty())
+        usize::from(Self::has_private_tail(&self.template, self.is_eagle))
+    }
+
+    fn has_private_tail(branch: &OutputHashBranch, is_eagle: bool) -> bool {
+        let computed_tokens = branch
+            .tail
+            .len()
+            .saturating_sub(usize::from(branch.has_uncomputed_output));
+        let retained_eagle_overlap = usize::from(is_eagle && branch.next_position > 0);
+        computed_tokens > retained_eagle_overlap
     }
 
     fn set_prompt_parent(&mut self, parent_hash: Option<u64>) {
@@ -142,17 +143,24 @@ impl CanonicalOutputTracker {
 
         let stride = self.block_size as usize;
         let window_size = if self.is_eagle { stride + 1 } else { stride };
+        let materialization_size = window_size + usize::from(!self.is_eagle);
         let branch = self
             .branches
             .entry(index)
             .or_insert_with(|| self.template.clone());
         branch.tail.extend_from_slice(token_ids);
+        // The newest sampled token is visible to the client before the engine
+        // feeds it back, so it does not have a KV entry yet.
+        branch.has_uncomputed_output = true;
 
         let parent_hash = branch.parent_hash;
         let start_position = branch.next_position;
         let mut blocks = Vec::new();
         let mut consumed = 0;
-        while branch.tail.len().saturating_sub(consumed) >= window_size {
+        // Normal blocks need one token beyond the hash window because the newest
+        // sampled token has not entered KV yet. Eagle includes that token as the
+        // lookahead at the end of its overlapping hash window.
+        while branch.tail.len().saturating_sub(consumed) >= materialization_size {
             let mm_info = branch.first_mm_info.clone().map(Some);
             let mm_infos = mm_info.as_ref().map(std::slice::from_ref);
             let local_hash = compute_block_hash_for_seq(
@@ -187,7 +195,7 @@ impl CanonicalOutputTracker {
         let private_blocks = self
             .branches
             .values()
-            .filter(|branch| !branch.tail.is_empty())
+            .filter(|branch| Self::has_private_tail(branch, self.is_eagle))
             .count();
         if blocks.is_empty() && private_blocks == self.reported_private_blocks {
             return None;
@@ -199,196 +207,6 @@ impl CanonicalOutputTracker {
             start_position,
             private_blocks,
         })
-    }
-}
-
-const ATTEMPT_ACTIVE: u8 = 0;
-const ATTEMPT_COMPLETING: u8 = 1;
-const ATTEMPT_COMPLETE: u8 = 2;
-
-struct RequestAttemptLeaseInner {
-    state: AtomicU8,
-    scheduler: SchedulerBookingCleanup,
-    booking: SchedulerBookingDescriptor,
-    approximate_lru: Option<ApproximateRequestLease>,
-    completion: Notify,
-}
-
-struct RequestAttemptCompletion<'a> {
-    attempt: &'a RequestAttemptLeaseInner,
-}
-
-impl Drop for RequestAttemptCompletion<'_> {
-    fn drop(&mut self) {
-        self.attempt
-            .state
-            .store(ATTEMPT_COMPLETE, Ordering::Release);
-        self.attempt.completion.notify_waiters();
-    }
-}
-
-impl RequestAttemptLeaseInner {
-    fn enqueue_cleanup(&self) {
-        if self
-            .state
-            .compare_exchange(
-                ATTEMPT_ACTIVE,
-                ATTEMPT_COMPLETING,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_err()
-        {
-            return;
-        }
-
-        self.scheduler.enqueue(self.booking.clone());
-        if let Some(lease) = &self.approximate_lru {
-            lease.release_now();
-        }
-        self.state.store(ATTEMPT_COMPLETE, Ordering::Release);
-        self.completion.notify_waiters();
-    }
-
-    async fn complete(&self) {
-        if self
-            .state
-            .compare_exchange(
-                ATTEMPT_ACTIVE,
-                ATTEMPT_COMPLETING,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_err()
-        {
-            loop {
-                let notified = self.completion.notified();
-                if self.state.load(Ordering::Acquire) != ATTEMPT_COMPLETING {
-                    break;
-                }
-                notified.await;
-            }
-            return;
-        }
-        let _completion = RequestAttemptCompletion { attempt: self };
-
-        // Both commands are synchronously enqueued before the first await. If the
-        // finishing future is cancelled, cleanup still converges in each lane.
-        let scheduler_ack = self.scheduler.enqueue_acknowledged(self.booking.clone());
-        let lru_ack = self
-            .approximate_lru
-            .as_ref()
-            .map(ApproximateRequestLease::begin_finish)
-            .transpose();
-
-        let scheduler_result = scheduler_ack.wait().await;
-        if let Err(error) = scheduler_result {
-            tracing::warn!(
-                request_id = %self.booking.request_id,
-                worker = ?self.booking.worker,
-                attempt_id = %self.booking.attempt_id,
-                %error,
-                "Failed to release scheduler booking"
-            );
-        }
-        match lru_ack {
-            Ok(Some(Some(ack))) => {
-                if let Err(error) = ack.wait().await {
-                    tracing::warn!(
-                        request_id = %self.booking.request_id,
-                        worker = ?self.booking.worker,
-                        %error,
-                        "Failed to release approximate LRU request lease"
-                    );
-                }
-            }
-            Ok(Some(None)) | Ok(None) => {}
-            Err(error) => tracing::warn!(
-                request_id = %self.booking.request_id,
-                worker = ?self.booking.worker,
-                %error,
-                "Failed to enqueue approximate LRU request release"
-            ),
-        }
-    }
-
-    fn is_active(&self) -> bool {
-        self.state.load(Ordering::Acquire) == ATTEMPT_ACTIVE
-    }
-}
-
-struct RequestAttemptLease {
-    inner: Arc<RequestAttemptLeaseInner>,
-    progress: watch::Sender<Instant>,
-    idle_timeout: Duration,
-}
-
-impl RequestAttemptLease {
-    fn new(
-        scheduler: SchedulerBookingCleanup,
-        booking: SchedulerBookingDescriptor,
-        approximate_lru: Option<ApproximateRequestLease>,
-    ) -> Self {
-        let idle_timeout = active_request_expiry_duration();
-        let deadline = Instant::now() + idle_timeout;
-        let (progress, receiver) = watch::channel(deadline);
-        let inner = Arc::new(RequestAttemptLeaseInner {
-            state: AtomicU8::new(ATTEMPT_ACTIVE),
-            scheduler,
-            booking,
-            approximate_lru,
-            completion: Notify::new(),
-        });
-        tokio::spawn(expire_request_attempt(Arc::downgrade(&inner), receiver));
-        Self {
-            inner,
-            progress,
-            idle_timeout,
-        }
-    }
-
-    fn refresh(&self) {
-        if self.inner.is_active() {
-            self.progress
-                .send_replace(Instant::now() + self.idle_timeout);
-        }
-    }
-
-    fn is_active(&self) -> bool {
-        self.inner.is_active()
-    }
-
-    async fn finish(&self) {
-        self.inner.complete().await;
-    }
-}
-
-impl Drop for RequestAttemptLease {
-    fn drop(&mut self) {
-        self.inner.enqueue_cleanup();
-    }
-}
-
-async fn expire_request_attempt(
-    attempt: Weak<RequestAttemptLeaseInner>,
-    mut progress: watch::Receiver<Instant>,
-) {
-    loop {
-        let deadline = *progress.borrow_and_update();
-        tokio::select! {
-            _ = tokio::time::sleep_until(deadline) => {
-                let Some(attempt) = attempt.upgrade() else {
-                    return;
-                };
-                attempt.complete().await;
-                return;
-            }
-            changed = progress.changed() => {
-                if changed.is_err() {
-                    return;
-                }
-            }
-        }
     }
 }
 
@@ -617,8 +435,7 @@ where
             .map(|_| CanonicalOutputTracker::new(request, block_size as u32, chooser.is_eagle()));
         let lifecycle = scheduler_tracked.then(|| {
             let attempt_id = attempt_id.expect("tracked request requires an admitted attempt");
-            RequestAttemptLease::new(
-                chooser.scheduler_booking_cleanup(),
+            chooser.request_lease_manager().register_local(
                 SchedulerBookingDescriptor {
                     request_id: context_id.clone(),
                     worker,
@@ -707,7 +524,7 @@ where
         if new_tokens > 0
             && let Some(lifecycle) = &self.lifecycle
         {
-            lifecycle.refresh();
+            lifecycle.touch();
         }
 
         if !self.prefill_marked {
@@ -720,7 +537,7 @@ where
                     && lifecycle.is_active()
                     && let Err(error) = self
                         .chooser
-                        .mark_prefill_completed_if_booking(&lifecycle.inner.booking)
+                        .mark_prefill_completed_if_booking(lifecycle.booking())
                         .await
                 {
                     tracing::warn!(
@@ -771,7 +588,7 @@ where
         }
         if let Err(error) = self
             .chooser
-            .add_output_block_if_booking(&lifecycle.inner.booking, update.decay_fraction)
+            .add_output_block_if_booking(lifecycle.booking(), update.decay_fraction)
             .await
         {
             tracing::warn!(
@@ -853,8 +670,8 @@ mod output_hash_tests {
 
         let first = tracker.observe(0, &[4, 5]).unwrap();
         assert_eq!(first.start_position, 0);
-        assert_eq!(first.private_blocks, 1);
-        let second = tracker.observe(0, &[6, 7, 8]).unwrap();
+        assert_eq!(first.private_blocks, 0);
+        let second = tracker.observe(0, &[6, 7, 8, 9]).unwrap();
         assert_eq!(second.start_position, 1);
         assert_eq!(second.private_blocks, 0);
 
@@ -883,11 +700,12 @@ mod output_hash_tests {
         let mut tracker = CanonicalOutputTracker::from_parts(&prompt, None, 4, false, None, None);
         tracker.set_prompt_parent(Some(prompt_block[0].sequence_hash));
 
-        let partial = tracker.observe(0, &[5]).unwrap();
+        assert!(tracker.observe(0, &[5]).is_none());
+        let partial = tracker.observe(0, &[6]).unwrap();
         assert!(partial.blocks.is_empty());
         assert_eq!(partial.private_blocks, 1);
 
-        let completed = tracker.observe(0, &[6, 7, 8]).unwrap();
+        let completed = tracker.observe(0, &[7, 8, 9]).unwrap();
         assert_eq!(completed.blocks.len(), 1);
         assert_eq!(completed.private_blocks, 0);
     }
@@ -899,8 +717,8 @@ mod output_hash_tests {
         let mut tracker = CanonicalOutputTracker::from_parts(&prompt, None, 4, false, None, None);
         tracker.set_prompt_parent(Some(prompt_block[0].sequence_hash));
 
-        let choice_zero = tracker.observe(0, &[5, 6, 7, 8]).unwrap();
-        let choice_one = tracker.observe(1, &[9, 10, 11, 12]).unwrap();
+        let choice_zero = tracker.observe(0, &[5, 6, 7, 8, 13]).unwrap();
+        let choice_one = tracker.observe(1, &[9, 10, 11, 12, 14]).unwrap();
         assert_eq!(choice_zero.start_position, 1);
         assert_eq!(choice_one.start_position, 1);
         assert_eq!(

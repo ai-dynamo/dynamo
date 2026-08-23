@@ -233,7 +233,7 @@ For Kubernetes deployment examples, see [Kubernetes Topology-Aware KV Transfer](
 - `--no-router-assume-kv-reuse`: When tracking active blocks, disables the assumption of KV cache reuse. This is useful in disaggregated setups where transferred blocks are not actually deduplicated on the decode side.
 - `--no-router-track-prefill-tokens`: Disables prompt-side prefill token accounting in the router's active load model. Use this for decode-only routing paths where prompt processing already happened elsewhere.
 - `--router-replica-sync`: Disabled by default. Enables best-effort Runtime event-plane synchronization of KV active-sequence state. Session-affinity synchronization is independent and starts when `--router-session-affinity-ttl-secs` is set.
-- `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS`: Environment-only safety timeout for stale active requests in the router's slot tracker, including entries learned through replica sync. Each router periodically force-expires entries older than this value; the default is `300` seconds. It does not turn best-effort synchronization into authoritative state.
+- `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS`: Environment-only scan interval for stale active requests, including entries learned through replica sync. The default is `120` seconds. A router-owned CLOCK reaper gives output progress one second chance, so cleanup occurs approximately one to two scan intervals after progress stops. Replica mirrors refresh only from synchronized lifecycle events. This request-liveness policy is separate from approximate-cache retention TTL and does not turn best-effort synchronization into authoritative state.
 
 ### Tracking Hash Identities
 

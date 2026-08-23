@@ -32,8 +32,8 @@ use super::prefill_tracker::{PrefillLoadState, PrefillLoadTracker};
 use super::prompt_registry::WorkerLoadSnapshot;
 use crate::protocols::PrefillLoadHint;
 
-/// Duration after which stale requests may be expired (5 minutes).
-pub const DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION: Duration = Duration::from_secs(300);
+/// Duration after which stale requests may be expired (2 minutes).
+pub const DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION: Duration = Duration::from_secs(120);
 
 /// How often we *check* for stale requests (30 seconds). This is not
 /// the expiration time, that is DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION.
@@ -840,7 +840,7 @@ mod tests {
             Some(prefill_hint(40, 100)),
             first_decay_now,
         );
-        tokio::time::advance(Duration::from_secs(250)).await;
+        tokio::time::advance(Duration::from_secs(90)).await;
         seq_manager.add_request_with_prefill_tracking(
             "r2".to_string(),
             Some(vec![2]),
@@ -850,7 +850,7 @@ mod tests {
             Instant::now(),
         );
 
-        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::time::advance(Duration::from_secs(40)).await;
         let expired = seq_manager.force_expiry();
         assert_eq!(
             expired.expired_request_ids,

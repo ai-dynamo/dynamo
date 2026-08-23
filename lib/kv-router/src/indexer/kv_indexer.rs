@@ -83,6 +83,10 @@ fn apply_routing_decision_with_prune_tracking(
         return;
     }
 
+    // NOTE: Approximate TTL is refreshed only by another predicted insertion of the same
+    // block. It is therefore TTL since the latest routing decision, not since first sighting.
+    // Output progress, request-liveness leases, and active request references do not refresh
+    // it; those lifecycles also remain independent from approximate-LRU ref/deref tracking.
     let block_entries = routing_req
         .sequence_hashes
         .iter()
