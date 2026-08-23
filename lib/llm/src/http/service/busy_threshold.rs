@@ -41,12 +41,14 @@
 //! {"thresholds": [{"model": "llama-3-70b", "active_decode_blocks_threshold": 0.85, "active_prefill_tokens_threshold": 1000, "active_prefill_tokens_threshold_frac": 0.8}]}
 //! ```
 
+use super::openai::{get_body_limit, is_json_content_type};
 use super::{RouteDoc, service_v2};
 use crate::discovery::LoadThresholdConfig;
 use axum::{
     Json, Router,
+    body::Body,
     extract::Request,
-    http::{Method, StatusCode},
+    http::{HeaderMap, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -139,10 +141,75 @@ pub fn busy_threshold_router(
     (docs, router)
 }
 
+/// Read the request body, reporting a bad `Content-Type`, an oversized body or
+/// malformed JSON in this route's `{"error": "..."}` envelope.
+///
+/// Axum's `Json` extractor rejects all three as `text/plain`, and
+/// `json_error_middleware` only rewrites 422, so a caller parsing the envelope
+/// this endpoint documents got an unparseable body for the most common
+/// mistakes.
+async fn read_busy_threshold_request(
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<BusyThresholdRequest, (StatusCode, Json<serde_json::Value>)> {
+    let error = |code: StatusCode, message: String| {
+        (
+            code,
+            Json(serde_json::json!(ErrorResponse { error: message })),
+        )
+    };
+
+    let is_json = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(is_json_content_type);
+    if !is_json {
+        return Err(error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Expected request with Content-Type application/json".to_string(),
+        ));
+    }
+
+    let bytes = axum::body::to_bytes(body, get_body_limit())
+        .await
+        .map_err(|err| {
+            // `to_bytes` wraps an oversized-body failure in its error source
+            // rather than returning `LengthLimitError` directly.
+            if std::error::Error::source(&err)
+                .is_some_and(|source| source.is::<http_body_util::LengthLimitError>())
+            {
+                error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    format!(
+                        "Request body exceeds the limit of {} bytes",
+                        get_body_limit()
+                    ),
+                )
+            } else {
+                error(
+                    StatusCode::BAD_REQUEST,
+                    "Failed to read the request body".to_string(),
+                )
+            }
+        })?;
+
+    serde_json::from_slice(&bytes).map_err(|err| {
+        error(
+            StatusCode::BAD_REQUEST,
+            format!("Failed to parse the request body as JSON: {err}"),
+        )
+    })
+}
+
 async fn busy_threshold_handler(
     axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
-    Json(request): Json<BusyThresholdRequest>,
+    headers: HeaderMap,
+    body: Body,
 ) -> impl IntoResponse {
+    let request = match read_busy_threshold_request(&headers, body).await {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
     let requested_config = LoadThresholdConfig {
         active_decode_blocks_threshold: request.active_decode_blocks_threshold,
         active_prefill_tokens_threshold: request.active_prefill_tokens_threshold,

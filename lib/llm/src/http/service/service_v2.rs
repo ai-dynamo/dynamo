@@ -2452,4 +2452,61 @@ mod tests {
             assert!(validate_generate_route_path(path).is_err());
         }
     }
+
+    /// `/busy_threshold` documents an `{"error": "..."}` envelope and its
+    /// `json_error_middleware` produces one for a 422, but Axum's `Json`
+    /// extractor rejects a bad `Content-Type` and malformed JSON as
+    /// `text/plain`, so a caller parsing the documented shape got an
+    /// unparseable body for the most common mistakes.
+    #[tokio::test]
+    async fn test_busy_threshold_bad_content_type_returns_json_error() {
+        let (port, handle) = spawn_default_service().await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://localhost:{port}/busy_threshold"))
+            .header("content-type", "text/plain")
+            .body("not json")
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.starts_with("application/json")),
+            Some(true),
+            "the 415 must use this route's JSON envelope, not Axum's text/plain rejection"
+        );
+        let body: serde_json::Value = resp.json().await.expect("body must be JSON");
+        assert!(body["error"].is_string(), "expected {{\"error\": \"...\"}}");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_busy_threshold_malformed_json_returns_json_error() {
+        let (port, handle) = spawn_default_service().await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://localhost:{port}/busy_threshold"))
+            .header("content-type", "application/json")
+            .body("{not json")
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.starts_with("application/json")),
+            Some(true),
+            "the 400 must use this route's JSON envelope, not Axum's text/plain rejection"
+        );
+        let body: serde_json::Value = resp.json().await.expect("body must be JSON");
+        assert!(body["error"].is_string(), "expected {{\"error\": \"...\"}}");
+        handle.abort();
+    }
 }
