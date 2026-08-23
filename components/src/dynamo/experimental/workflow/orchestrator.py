@@ -52,6 +52,7 @@ class WorkflowOrchestrator:
         *,
         timeout: float | None = None,
         attempt_id: str | None = None,
+        request_context: Any = None,
     ) -> dict[str, Any]:
         """Execute one graph request and return its named results.
 
@@ -75,7 +76,7 @@ class WorkflowOrchestrator:
 
         async def execute() -> dict[str, Any]:
             result = await GraphScheduler(workflow, self._dispatcher).run(
-                MappingProxyType(input_values), resolved_attempt_id
+                MappingProxyType(input_values), resolved_attempt_id, request_context
             )
             return _validate_result(set(workflow.outputs), result)
 

@@ -22,7 +22,12 @@ class GraphScheduler:
         self._workflow = workflow
         self._dispatcher = dispatcher
 
-    async def run(self, inputs: Mapping[str, Any], attempt_id: str) -> dict[str, Any]:
+    async def run(
+        self,
+        inputs: Mapping[str, Any],
+        attempt_id: str,
+        request_context: Any = None,
+    ) -> dict[str, Any]:
         tasks: dict[str, asyncio.Task[dict[str, Any]]] = {}
 
         async def run_stage(stage: StageIR) -> dict[str, Any]:
@@ -37,6 +42,8 @@ class GraphScheduler:
                     workflow_name=self._workflow.name,
                     stage_id=stage.id,
                     attempt_id=attempt_id,
+                    invocation_id=f"{attempt_id}:{stage.id}",
+                    request_context=request_context,
                 ),
             )
 
