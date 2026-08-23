@@ -63,7 +63,9 @@ use crate::types::Annotated;
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::{SanitizedError, invalid_argument};
 use super::metadata::{attach_x_request_id, extract_metadata_from_http};
-use super::openai::{get_body_limit, get_or_create_request_id, warn_nvext_disabled};
+use super::openai::{
+    get_body_limit, get_or_create_request_id, is_json_content_type, warn_nvext_disabled,
+};
 
 // ---------------------------------------------------------------------------
 // Router
@@ -134,6 +136,63 @@ async fn anthropic_error_middleware(request: Request<Body>, next: Next) -> Respo
     }
 
     response
+}
+
+/// Read a request body, reporting a bad `Content-Type`, an oversized body or
+/// malformed JSON in the nested Anthropic error envelope.
+///
+/// Axum's `Json` extractor rejects all three as `text/plain`, and
+/// `anthropic_error_middleware` only rewrites 422, so an Anthropic client
+/// parsing `{"type": "error", "error": {...}}` got an unparseable body for the
+/// most common request mistakes.
+async fn read_anthropic_request<T: serde::de::DeserializeOwned>(
+    headers: &HeaderMap,
+    body: Body,
+) -> Result<T, Response> {
+    let is_json = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(is_json_content_type);
+    if !is_json {
+        return Err(anthropic_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "invalid_request_error",
+            "Expected request with Content-Type application/json",
+        ));
+    }
+
+    let bytes = axum::body::to_bytes(body, get_body_limit())
+        .await
+        .map_err(|error| {
+            // `to_bytes` wraps an oversized-body failure in its error source
+            // rather than returning `LengthLimitError` directly.
+            if std::error::Error::source(&error)
+                .is_some_and(|source| source.is::<http_body_util::LengthLimitError>())
+            {
+                anthropic_error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "invalid_request_error",
+                    &format!(
+                        "Request body exceeds the limit of {} bytes",
+                        get_body_limit()
+                    ),
+                )
+            } else {
+                anthropic_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    "Failed to read the request body",
+                )
+            }
+        })?;
+
+    serde_json::from_slice(&bytes).map_err(|error| {
+        anthropic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            &format!("Failed to parse the request body as JSON: {error}"),
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -249,8 +308,9 @@ fn validate_anthropic_tools(
 async fn handler_anthropic_messages(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
-    Json(mut request): Json<AnthropicCreateMessageRequest>,
+    body: Body,
 ) -> Result<Response, Response> {
+    let mut request: AnthropicCreateMessageRequest = read_anthropic_request(&headers, body).await?;
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.stream;
     let resolved_model = resolve_request_model(&request.model, template.as_ref());
@@ -778,8 +838,10 @@ async fn anthropic_messages(
 /// Returns an estimated input token count using a len/3 heuristic.
 async fn handler_count_tokens(
     State((state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
-    Json(mut request): Json<AnthropicCountTokensRequest>,
+    headers: HeaderMap,
+    body: Body,
 ) -> Result<Response, Response> {
+    let mut request: AnthropicCountTokensRequest = read_anthropic_request(&headers, body).await?;
     if let Err(error) = validate_anthropic_messages(&request.messages) {
         return Err(anthropic_error(
             error.status(),

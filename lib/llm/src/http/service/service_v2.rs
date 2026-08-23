@@ -2452,4 +2452,68 @@ mod tests {
             assert!(validate_generate_route_path(path).is_err());
         }
     }
+
+    /// Anthropic clients parse the nested `{"type": "error", "error": {...}}`
+    /// envelope, which #13102 established for unmatched routes. The Messages
+    /// handler still used Axum's `Json` extractor, whose rejections are
+    /// `text/plain`, so the two most common request mistakes came back
+    /// unparseable. `anthropic_error_middleware` does not cover them; it only
+    /// rewrites 422.
+    #[tokio::test]
+    async fn test_anthropic_bad_content_type_returns_anthropic_envelope() {
+        let (port, _state, handle) =
+            spawn_service(|builder| builder.enable_anthropic_endpoints(true)).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://localhost:{port}/v1/messages"))
+            .header("content-type", "text/plain")
+            .header("anthropic-version", "2023-06-01")
+            .body("not json")
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.starts_with("application/json")),
+            Some(true),
+            "the 415 must use the Anthropic envelope, not Axum's text/plain rejection"
+        );
+        let body: serde_json::Value = resp.json().await.expect("body must be JSON");
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_malformed_json_returns_anthropic_envelope() {
+        let (port, _state, handle) =
+            spawn_service(|builder| builder.enable_anthropic_endpoints(true)).await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://localhost:{port}/v1/messages"))
+            .header("content-type", "application/json")
+            .header("anthropic-version", "2023-06-01")
+            .body("{not json")
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .map(|value| value.starts_with("application/json")),
+            Some(true),
+            "the 400 must use the Anthropic envelope, not Axum's text/plain rejection"
+        );
+        let body: serde_json::Value = resp.json().await.expect("body must be JSON");
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        handle.abort();
+    }
 }
