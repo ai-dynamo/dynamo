@@ -447,10 +447,12 @@ fn response_payload_limit(max_message_size: Option<usize>) -> usize {
 #[derive(Clone)]
 pub struct TcpResponseCodec {
     decoder: LengthDelimitedCodec,
+    reject_all_frames: bool,
 }
 
 impl TcpResponseCodec {
     pub fn new(max_message_size: Option<usize>) -> Self {
+        let reject_all_frames = max_message_size.is_some_and(|max| max < RESPONSE_LENGTH_WIDTH);
         let decoder = LengthDelimitedCodec::builder()
             .length_field_type::<u32>()
             .big_endian()
@@ -459,7 +461,10 @@ impl TcpResponseCodec {
             .max_frame_length(response_payload_limit(max_message_size))
             .new_codec();
 
-        Self { decoder }
+        Self {
+            decoder,
+            reject_all_frames,
+        }
     }
 }
 
@@ -474,6 +479,10 @@ impl Decoder for TcpResponseCodec {
     type Error = std::io::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        if self.reject_all_frames && src.len() >= RESPONSE_LENGTH_WIDTH {
+            return Err(std::io::ErrorKind::InvalidData.into());
+        }
+
         self.decoder.decode(src).map(|frame| {
             frame.map(|mut frame| {
                 frame.advance(RESPONSE_LENGTH_WIDTH);
@@ -489,6 +498,10 @@ impl Encoder<TcpResponseMessage> for TcpResponseCodec {
     type Error = std::io::Error;
 
     fn encode(&mut self, item: TcpResponseMessage, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        if self.reject_all_frames {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+
         LengthDelimitedCodec::builder()
             .length_field_type::<u32>()
             .big_endian()
