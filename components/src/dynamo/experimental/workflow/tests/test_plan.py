@@ -21,11 +21,11 @@ pytestmark = [
 ]
 
 
-def _workflow() -> Workflow:
+def _workflow(stage_id: str = "normalize") -> Workflow:
     workflow = Workflow("physical-plan")
     text = workflow.input("text")
     stage = workflow.stage(
-        "normalize",
+        stage_id,
         StageContract(
             id="normalize",
             inputs={"text"},
@@ -48,6 +48,12 @@ def test_compilation_defaults_to_stage_id_inline_bindings() -> None:
     plan = compile_workflow(_workflow())
 
     assert plan.bindings == {"normalize": InlineBinding(runner_key="normalize")}
+
+
+def test_default_compilation_supports_stage_named_cls() -> None:
+    plan = compile_workflow(_workflow("cls"))
+
+    assert plan.bindings == {"cls": InlineBinding(runner_key="cls")}
 
 
 def test_execution_plan_rejects_missing_stage_bindings() -> None:
