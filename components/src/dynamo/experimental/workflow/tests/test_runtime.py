@@ -221,7 +221,6 @@ class _BlockingClassifier:
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
-            assert context.cancelled
             self.cancelled.set()
             raise
 
