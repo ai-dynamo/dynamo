@@ -99,6 +99,7 @@ def start_completion_request(
     stream: bool,
     use_long_prompt: bool = False,
     max_tokens: int | None = None,
+    long_prompt_repetitions: int = 8_000,
 ) -> tuple:
     """
     Start a long-running completion request in a separate thread.
@@ -111,6 +112,7 @@ def start_completion_request(
         stream: Whether to use streaming responses
         use_long_prompt: Whether to use a long prompt (~8000 tokens)
         max_tokens: Explicit output-token cap, or the backend default when unset
+        long_prompt_repetitions: Number of repeated words in the long prompt
 
     Returns:
         tuple: (request_thread, response_list) where response_list contains
@@ -123,7 +125,7 @@ def start_completion_request(
     def send_request():
         prompt = "Tell me a long long long story about yourself?"
         if use_long_prompt:
-            prompt += " Make sure it is" + " long" * 8000 + "!"
+            prompt += " Make sure it is" + " long" * long_prompt_repetitions + "!"
 
         logger.info(
             "Sending completion request (stream=%s) with prompt: '%s...'",
@@ -173,6 +175,7 @@ def start_chat_completion_request(
     stream: bool,
     use_long_prompt: bool = False,
     max_tokens: int | None = None,
+    long_prompt_repetitions: int = 8_000,
 ) -> tuple:
     """
     Start a long-running chat completion request in a separate thread.
@@ -185,6 +188,7 @@ def start_chat_completion_request(
         stream: Whether to use streaming responses
         use_long_prompt: Whether to use a long prompt (~8000 tokens)
         max_tokens: Explicit output-token cap, or the backend default when unset
+        long_prompt_repetitions: Number of repeated words in the long prompt
 
     Returns:
         tuple: (request_thread, response_list) where response_list contains
@@ -197,7 +201,7 @@ def start_chat_completion_request(
     def send_request():
         prompt = "Tell me a long long long story about yourself?"
         if use_long_prompt:
-            prompt += " Make sure it is" + " long" * 8000 + "!"
+            prompt += " Make sure it is" + " long" * long_prompt_repetitions + "!"
 
         logger.info(
             "Sending chat completion request (stream=%s) with prompt: '%s...'",
@@ -322,6 +326,48 @@ def determine_request_receiving_worker(
         pytest.fail("Both workers received the request")
     else:
         pytest.fail("Neither worker received the request")
+
+
+def wait_for_endpoint_instances(
+    frontend_port: int,
+    expected_counts: dict[tuple[str, str], int],
+    max_wait_time: float = 10.0,
+) -> None:
+    """Wait until the frontend's discovery view contains every required endpoint."""
+    deadline = time.monotonic() + max_wait_time
+    last_counts: dict[tuple[str, str], int] = {}
+    last_error: Exception | None = None
+    poll_event = threading.Event()
+
+    while time.monotonic() < deadline:
+        try:
+            response = requests.get(
+                f"http://localhost:{frontend_port}/health",
+                timeout=1,
+            )
+            response.raise_for_status()
+            instances = response.json().get("instances", [])
+            last_counts = {}
+            for instance in instances:
+                key = (instance.get("component"), instance.get("endpoint"))
+                last_counts[key] = last_counts.get(key, 0) + 1
+
+            if all(
+                last_counts.get(endpoint, 0) >= expected
+                for endpoint, expected in expected_counts.items()
+            ):
+                logger.info("Frontend discovery is ready: %s", last_counts)
+                return
+        except (requests.RequestException, ValueError) as error:
+            last_error = error
+
+        poll_event.wait(timeout=0.1)
+
+    pytest.fail(
+        "Frontend discovery did not reach the required endpoint counts "
+        f"{expected_counts} within {max_wait_time}s; last counts={last_counts}, "
+        f"last error={last_error}"
+    )
 
 
 def wait_for_response(
@@ -531,6 +577,7 @@ def run_migration_test(
     stream: bool,
     max_tokens: int | None = None,
     use_long_prompt: bool = False,
+    long_prompt_repetitions: int = 8_000,
     wait_for_new_response_before_stop: bool = False,
     expected_ongoing_request_count: int | None = None,
 ) -> None:
@@ -549,6 +596,7 @@ def run_migration_test(
         stream: Whether to use streaming responses
         max_tokens: Explicit output-token cap, or the backend default when unset
         use_long_prompt: Whether to use long prompt (for prefill tests)
+        long_prompt_repetitions: Number of repeated words in the long prompt
         wait_for_new_response_before_stop: Whether to wait for response before stopping (for decode tests)
         expected_ongoing_request_count: Exact expected count for callers that
             opt into strict metric validation. When omitted, preserve the
@@ -561,6 +609,7 @@ def run_migration_test(
             stream=stream,
             use_long_prompt=use_long_prompt,
             max_tokens=max_tokens,
+            long_prompt_repetitions=long_prompt_repetitions,
         )
     else:
         request_thread, response_list = start_completion_request(
@@ -568,12 +617,16 @@ def run_migration_test(
             stream=stream,
             use_long_prompt=use_long_prompt,
             max_tokens=max_tokens,
+            long_prompt_repetitions=long_prompt_repetitions,
         )
 
     # Step 2: Determine which worker received the request
     worker, worker_name = determine_request_receiving_worker(
         worker1, worker2, receiving_pattern=receiving_pattern
     )
+    assert (
+        request_thread.is_alive()
+    ), "Request completed before the migration fault could be injected"
 
     # Step 3: Optionally wait for new response before stop (for decode tests)
     if wait_for_new_response_before_stop:

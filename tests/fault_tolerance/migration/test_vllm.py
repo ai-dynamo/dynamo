@@ -26,6 +26,7 @@ from .utils import (
     DynamoFrontendProcess,
     managed_processes_concurrently,
     run_migration_test,
+    wait_for_endpoint_instances,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,9 @@ AGGREGATED_MAX_MODEL_LEN = 1024
 AGGREGATED_MAX_TOKENS = 512
 DECODE_MAX_MODEL_LEN = 1024
 DECODE_MAX_TOKENS = 512
+KV_TRANSFER_MAX_MODEL_LEN = 1024
+KV_TRANSFER_MAX_TOKENS = 192
+KV_TRANSFER_PROMPT_REPETITIONS = 800
 
 # Cover each distinct migration policy with complementary lifecycle, API,
 # response, and transport values. Together these eight rows cover every pair
@@ -152,6 +156,32 @@ DECODE_MIGRATION_CASES = [
     ),
 ]
 
+# This target enters KV transfer only when migration is enabled and under the
+# sequence cap. The aggregate test owns the shared disabled/max-seq policies.
+# Chat retains the historical prefix-cache regression shape; these two cases
+# cover both shutdown lifecycles and both request-plane implementations while
+# pairing the response mode, which is independent before KV transfer completes.
+KV_TRANSFER_CASES = [
+    pytest.param(
+        3,
+        None,
+        True,
+        "chat",
+        True,
+        "nats",
+        id="worker-failure-chat-stream-nats",
+    ),
+    pytest.param(
+        3,
+        None,
+        False,
+        "chat",
+        False,
+        "tcp",
+        id="graceful-shutdown-chat-unary-tcp",
+    ),
+]
+
 MIGRATION_PARAMETERS = pytest.mark.parametrize(
     (
         "migration_limit",
@@ -174,6 +204,19 @@ DECODE_MIGRATION_PARAMETERS = pytest.mark.parametrize(
         "request_plane",
     ),
     DECODE_MIGRATION_CASES,
+    indirect=["request_plane"],
+)
+
+KV_TRANSFER_MIGRATION_PARAMETERS = pytest.mark.parametrize(
+    (
+        "migration_limit",
+        "migration_max_seq_len",
+        "immediate_kill",
+        "request_api",
+        "stream",
+        "request_plane",
+    ),
+    KV_TRANSFER_CASES,
     indirect=["request_plane"],
 )
 
@@ -420,18 +463,11 @@ def test_request_migration_vllm_aggregated(
             )
 
 
-@pytest.mark.skip(
-    reason=(
-        "Migration reuses the same request_id for vLLM, but the prefill worker's "
-        "KV cache still holds the request due to delay_free_blocks in disaggregated mode. "
-        "With chat completions API, prefix cache hits on chat template tokens cause "
-        "an assertion error in vLLM's KV cache manager (save_new_computed_blocks expects "
-        "no new computed blocks for existing requests)."
-    ),
-)
 @pytest.mark.timeout(350)  # 3x average
 @pytest.mark.nightly
-@MIGRATION_PARAMETERS
+@pytest.mark.profiled_vram_gib(6.9)
+@pytest.mark.requested_vllm_kv_cache_bytes(331_711_000)
+@KV_TRANSFER_MIGRATION_PARAMETERS
 def test_request_migration_vllm_kv_transfer(
     request,
     runtime_services_dynamic_ports,
@@ -464,49 +500,56 @@ def test_request_migration_vllm_kv_transfer(
     ) as frontend:
         logger.info("Frontend started successfully")
 
-        # Step 2: Start prefill worker first
-        with DynamoWorkerProcess(
+        # Step 2: Start the independent prefill and decode workers concurrently.
+        prefill_worker = DynamoWorkerProcess(
             request,
             "worker0",
             frontend.frontend_port,
             tmp_path,
             is_prefill=True,
-        ) as prefill_worker:
+            max_model_len=KV_TRANSFER_MAX_MODEL_LEN,
+        )
+        decode1 = DynamoWorkerProcess(
+            request,
+            "worker1",
+            frontend.frontend_port,
+            tmp_path,
+            is_prefill=False,
+            max_model_len=KV_TRANSFER_MAX_MODEL_LEN,
+        )
+        decode2 = DynamoWorkerProcess(
+            request,
+            "worker2",
+            frontend.frontend_port,
+            tmp_path,
+            is_prefill=False,
+            max_model_len=KV_TRANSFER_MAX_MODEL_LEN,
+        )
+        with managed_processes_concurrently(prefill_worker, decode1, decode2):
             logger.info("Prefill Worker PID: %s", prefill_worker.get_pid())
-
-            # Step 3: Start 2 decode workers
-            with DynamoWorkerProcess(
-                request,
-                "worker1",
+            logger.info("Decode Worker 1 PID: %s", decode1.get_pid())
+            logger.info("Decode Worker 2 PID: %s", decode2.get_pid())
+            wait_for_endpoint_instances(
                 frontend.frontend_port,
-                tmp_path,
-                is_prefill=False,
-            ) as decode1:
-                logger.info("Decode Worker 1 PID: %s", decode1.get_pid())
+                {("prefill", "generate"): 1, ("backend", "generate"): 2},
+            )
 
-                with DynamoWorkerProcess(
-                    request,
-                    "worker2",
-                    frontend.frontend_port,
-                    tmp_path,
-                    is_prefill=False,
-                ) as decode2:
-                    logger.info("Decode Worker 2 PID: %s", decode2.get_pid())
-
-                    # Step 4: Run migration test
-                    run_migration_test(
-                        frontend,
-                        decode1,
-                        decode2,
-                        receiving_pattern="Decode Request ID: ",
-                        migration_limit=migration_limit,
-                        migration_max_seq_len=migration_max_seq_len,
-                        immediate_kill=immediate_kill,
-                        use_chat_completion=(request_api == "chat"),
-                        stream=stream,
-                        use_long_prompt=True,
-                        expected_ongoing_request_count=1,
-                    )
+            # Step 3: Run migration test
+            run_migration_test(
+                frontend,
+                decode1,
+                decode2,
+                receiving_pattern="Decode Request ID: ",
+                migration_limit=migration_limit,
+                migration_max_seq_len=migration_max_seq_len,
+                immediate_kill=immediate_kill,
+                use_chat_completion=(request_api == "chat"),
+                stream=stream,
+                max_tokens=KV_TRANSFER_MAX_TOKENS,
+                use_long_prompt=True,
+                long_prompt_repetitions=KV_TRANSFER_PROMPT_REPETITIONS,
+                expected_ongoing_request_count=1,
+            )
 
 
 @pytest.mark.timeout(350)  # 3x average
