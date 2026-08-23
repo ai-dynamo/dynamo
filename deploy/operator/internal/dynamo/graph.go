@@ -1590,6 +1590,67 @@ func AddStandardEnvVars(container *corev1.Container, operatorConfig *configv1alp
 			Value: operatorConfig.Infrastructure.PrometheusEndpoint,
 		})
 	}
+	// Inject TLS certificate paths for inter-component encryption (DYN_TCP_TLS_* / NATS_TLS_*).
+	if operatorConfig.Infrastructure.NATSTLSCAPath != "" {
+		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
+			Name:  "NATS_TLS_CA_CERT_PATH",
+			Value: operatorConfig.Infrastructure.NATSTLSCAPath,
+		})
+	}
+	if operatorConfig.Infrastructure.NATSTLSClientCertPath != "" {
+		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
+			Name:  "NATS_TLS_CLIENT_CERT_PATH",
+			Value: operatorConfig.Infrastructure.NATSTLSClientCertPath,
+		})
+	}
+	if operatorConfig.Infrastructure.NATSTLSClientKeyPath != "" {
+		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
+			Name:  "NATS_TLS_CLIENT_KEY_PATH",
+			Value: operatorConfig.Infrastructure.NATSTLSClientKeyPath,
+		})
+	}
+	if operatorConfig.Infrastructure.TCPTLSCertPath != "" {
+		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
+			Name:  "DYN_TCP_TLS_CERT_PATH",
+			Value: operatorConfig.Infrastructure.TCPTLSCertPath,
+		})
+	}
+	if operatorConfig.Infrastructure.TCPTLSKeyPath != "" {
+		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
+			Name:  "DYN_TCP_TLS_KEY_PATH",
+			Value: operatorConfig.Infrastructure.TCPTLSKeyPath,
+		})
+	}
+	if operatorConfig.Infrastructure.TCPTLSCAPath != "" {
+		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
+			Name:  "DYN_TCP_TLS_CA_CERT_PATH",
+			Value: operatorConfig.Infrastructure.TCPTLSCAPath,
+		})
+	}
+	if operatorConfig.Infrastructure.TCPTLSClientCertPath != "" {
+		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
+			Name:  "DYN_TCP_TLS_CLIENT_CERT_PATH",
+			Value: operatorConfig.Infrastructure.TCPTLSClientCertPath,
+		})
+	}
+	if operatorConfig.Infrastructure.TCPTLSClientKeyPath != "" {
+		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
+			Name:  "DYN_TCP_TLS_CLIENT_KEY_PATH",
+			Value: operatorConfig.Infrastructure.TCPTLSClientKeyPath,
+		})
+	}
+	if operatorConfig.Infrastructure.TCPTLSClientCAPath != "" {
+		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
+			Name:  "DYN_TCP_TLS_CLIENT_CA_CERT_PATH",
+			Value: operatorConfig.Infrastructure.TCPTLSClientCAPath,
+		})
+	}
+	if operatorConfig.Infrastructure.TCPTLSServerName != "" {
+		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
+			Name:  "DYN_TCP_TLS_SERVER_NAME",
+			Value: operatorConfig.Infrastructure.TCPTLSServerName,
+		})
+	}
 	// merge the env vars to allow users to override the standard env vars
 	container.Env = MergeEnvs(standardEnvVars, container.Env)
 }
