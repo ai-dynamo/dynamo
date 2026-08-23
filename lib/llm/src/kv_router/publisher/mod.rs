@@ -41,7 +41,7 @@ pub use attachment_owner::{KvStateAttachmentDescriptor, KvStateAttachmentOwner};
 
 pub use crate::discovery::kv_state_agent::KvStateIngressProtocol;
 #[cfg(test)]
-use dedup::EventDedupFilter;
+use dedup::{EventDedupFilter, EventDedupPolicy};
 #[cfg(test)]
 use event_processor::run_event_processor_loop;
 use event_processor::start_event_processor;

@@ -494,9 +494,6 @@ def _prepare_request(
             isinstance(request, dict) and request.get("thinking") is not None
         ),
     )
-    # Don't let an absent top-level field clobber a nested reasoning_effort.
-    if request_for_sampling.reasoning_effort is None:
-        chat_template_kwargs.setdefault("reasoning_effort", None)
 
     # Mistral warns that tokenize=False is unsafe for chat templates.
     is_mistral_tokenizer = (
@@ -664,7 +661,7 @@ class StreamingPostProcessor:
         tool_parser: ToolParser | None,
         reasoning_parser_class: type[ReasoningParser] | None,
         chat_template_kwargs: dict[str, Any],
-        reasoning_ended: bool | None = None,
+        response_reasoning_ended: bool | None = None,
         stream_response: bool = True,
         uses_dynamo_json_tool_call_fallback: bool = False,
     ) -> None:
@@ -673,7 +670,7 @@ class StreamingPostProcessor:
         self.sampling_params = sampling_params
         self.tool_parser = tool_parser
         self.stream_response = stream_response
-        self.reasoning_is_done = bool(reasoning_ended)
+        self.reasoning_is_done = bool(response_reasoning_ended)
         self._uses_dynamo_json_tool_call_fallback = uses_dynamo_json_tool_call_fallback
         # See https://github.com/ai-dynamo/dynamo/issues/8636 —
         # when the chat template runs with enable_thinking=False,
@@ -692,16 +689,23 @@ class StreamingPostProcessor:
             )
             if reasoning_parser_class
             and not thinking_disabled
-            and reasoning_ended is not True
+            and response_reasoning_ended is not True
             else None
         )
         if self.reasoning_parser is not None:
-            if reasoning_ended is None:
+            if response_reasoning_ended is None:
                 self.reasoning_is_done = self.reasoning_parser.is_reasoning_end(
                     prompt_token_ids
                 )
             if not self.reasoning_is_done:
                 self.reasoning_parser.adjust_initial_state_from_prompt(prompt_token_ids)
+        # The parser must still consume hidden reasoning so it cannot leak into
+        # content, but neither the parsed reasoning nor its token metadata should
+        # be projected into the response when the caller opted out.
+        self._suppress_reasoning_output = (
+            self.reasoning_parser is not None
+            and not request_for_sampling.include_reasoning
+        )
         self._fast_plain_text = (
             self.tool_parser is None
             and self.reasoning_parser is None
@@ -1033,7 +1037,7 @@ class StreamingPostProcessor:
             "finish_reason": self._remap_finish_reason(
                 output.index, output.finish_reason
             ),
-            "logprobs": output.logprobs,
+            "logprobs": (None if self._suppress_reasoning_output else output.logprobs),
         }
         self.in_progress_tool_calls.clear()
         return choice
@@ -1047,7 +1051,7 @@ class StreamingPostProcessor:
             "finish_reason": self._remap_finish_reason(
                 output.index, output.finish_reason
             ),
-            "logprobs": output.logprobs,
+            "logprobs": (None if self._suppress_reasoning_output else output.logprobs),
         }
 
     def _process_non_streaming_tool_output(self, output: Any) -> dict[str, Any] | None:
@@ -1270,7 +1274,10 @@ class StreamingPostProcessor:
             if delta_message.tool_calls:
                 self._merge_streaming_tool_calls(delta_message.tool_calls)
 
-            if delta_message.content or delta_message.reasoning:
+            reasoning = (
+                None if self._suppress_reasoning_output else delta_message.reasoning
+            )
+            if delta_message.content or reasoning:
                 delta = {"role": "assistant"}
                 content = delta_message.content
                 if self.in_progress_tool_calls and self._is_control_only_content(
@@ -1279,8 +1286,8 @@ class StreamingPostProcessor:
                     content = None
                 if content:
                     delta["content"] = content
-                if delta_message.reasoning:
-                    delta["reasoning_content"] = delta_message.reasoning
+                if reasoning:
+                    delta["reasoning_content"] = reasoning
                 if self.in_progress_tool_calls:
                     delta["tool_calls"] = self._dump_in_progress_tool_calls()
                     self.in_progress_tool_calls.clear()

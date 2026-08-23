@@ -50,7 +50,7 @@ fn bs_event_with_cache_namespace(
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
         locality: None,
-        source_kind: None,
+        ownership: None,
     }
 }
 
@@ -291,7 +291,7 @@ async fn zmq_multipart_parsing() {
         // 4-frame (bad).
         let good_payload = TestBatch(
             0.0,
-            vec![RawKvEvent::AllBlocksCleared { source_kind: None }],
+            vec![RawKvEvent::AllBlocksCleared { ownership: None }],
             None,
         )
         .encode();

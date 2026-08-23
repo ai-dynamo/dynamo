@@ -28,7 +28,7 @@ fn bs(hash: u64, tokens: Vec<u32>, block_size: usize) -> RawKvEvent {
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
         locality: None,
-        source_kind: None,
+        ownership: None,
     }
 }
 

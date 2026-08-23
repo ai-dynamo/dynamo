@@ -1600,7 +1600,7 @@ def test_benchmark_grid_tracks_each_requested_empty_phase(
     mode, prefill_points, decode_points, expected_missing_phases
 ):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._bench_config = SimpleNamespace(mode=mode)
+    stub._bench_config = BenchmarkConfig(mode=mode)
     stub._bench_explicit_points = None
     stub._bench_grid = deque()
     stub._bench_grid_built = False
@@ -1628,7 +1628,7 @@ def test_benchmark_grid_tracks_each_requested_empty_phase(
 
 def test_benchmark_grid_has_no_point_cap():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._bench_config = SimpleNamespace(mode="prefill")
+    stub._bench_config = BenchmarkConfig(mode="prefill")
     stub._bench_explicit_points = None
     stub._bench_grid = deque()
     stub._bench_grid_built = False
@@ -1654,7 +1654,7 @@ def test_benchmark_grid_has_no_point_cap():
 
 def test_benchmark_grid_assigns_stable_contiguous_ids_and_digest():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._bench_config = SimpleNamespace(mode="prefill")
+    stub._bench_config = BenchmarkConfig(mode="prefill")
     stub._bench_explicit_points = None
     stub._bench_grid = deque()
     stub._bench_grid_built = False
