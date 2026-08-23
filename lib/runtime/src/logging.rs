@@ -525,14 +525,15 @@ fn extract_trace_parent<H: GenericHeaders>(
 ) -> (TraceParent, Option<opentelemetry::Context>) {
     let valid_widths = headers.get("traceparent").is_some_and(|header| {
         let mut fields = header.trim().split('-');
+        let version_field = fields.next();
         matches!(
-            (fields.next(), fields.next(), fields.next(), fields.next()),
+            (version_field, fields.next(), fields.next(), fields.next()),
             (Some(version), Some(trace_id), Some(span_id), Some(flags))
                 if version.len() == 2
                     && trace_id.len() == 32
                     && span_id.len() == 16
                     && flags.len() == 2
-        )
+        ) && (version_field != Some("00") || fields.next().is_none())
     });
     let context = if valid_widths {
         TRACE_PROPAGATOR.extract_with_context(
