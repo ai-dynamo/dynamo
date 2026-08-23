@@ -127,7 +127,7 @@ class Workflow:
 
         return WorkflowIR(
             name=self._name,
-            inputs=self._inputs,
+            inputs=frozenset(self._inputs),
             stages=tuple(self._stages.values()),
             outputs=self._outputs,
         )
