@@ -1369,8 +1369,10 @@ async fn completions_batch(
 async fn embeddings(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateEmbeddingRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreateEmbeddingRequest = parse_json_request("embeddings", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.inner.model)?;
@@ -1547,8 +1549,10 @@ fn decode_base64_embedding_to_floats(s: &str) -> Result<Vec<f32>, anyhow::Error>
 async fn classify(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateClassifyRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreateClassifyRequest = parse_json_request("classify", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
@@ -1824,8 +1828,10 @@ fn build_pooling_binary_response(
 async fn pooling(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreatePoolingRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreatePoolingRequest = parse_json_request("pooling", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
@@ -4264,7 +4270,19 @@ pub fn responses_router(
 async fn images(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateImageRequest>,
+    body: Body,
+) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let request: NvCreateImageRequest = parse_json_request("images", &body)?;
+    images_with_request(state, headers, request).await
+}
+
+/// Shared by `/v1/images/generations` and `/v1/images/edits`, which differ only
+/// in the validation `images_edits` applies before handing the request over.
+async fn images_with_request(
+    state: Arc<service_v2::State>,
+    headers: HeaderMap,
+    request: NvCreateImageRequest,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     // (per-model readiness check is deferred until after we resolve the
@@ -4364,8 +4382,10 @@ async fn images(
 async fn images_edits(
     state: State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateImageRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let request: NvCreateImageRequest = parse_json_request("image edits", &body)?;
     if request.input_reference.is_none() {
         let code = StatusCode::BAD_REQUEST;
         return Err((
@@ -4379,7 +4399,7 @@ async fn images_edits(
             }),
         ));
     }
-    images(state, headers, Json(request)).await
+    images_with_request(state.0, headers, request).await
 }
 
 /// Create an Axum [`Router`] for the OpenAI API Images endpoints.
@@ -4405,8 +4425,10 @@ pub fn images_router(
 async fn videos(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateVideoRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let request: NvCreateVideoRequest = parse_json_request("videos", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
@@ -4527,8 +4549,10 @@ async fn videos(
 async fn video_stream(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateVideoRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let request: NvCreateVideoRequest = parse_json_request("video stream", &body)?;
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
 
@@ -4722,8 +4746,10 @@ fn decode_audio_chunks(response: &NvAudioSpeechResponse) -> Result<Vec<Bytes>, S
 async fn handler_audio_speech(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateAudioSpeechRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreateAudioSpeechRequest = parse_json_request("audio speech", &body)?;
     // return a 503 if the service is not ready
     // (per-model readiness check is deferred until after we resolve the
     // Option<String> model field; see below)

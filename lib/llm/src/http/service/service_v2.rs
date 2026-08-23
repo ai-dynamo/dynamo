@@ -1808,6 +1808,41 @@ mod tests {
         handle.abort();
     }
 
+    /// The JSON error envelope has to be the same on every OpenAI-compatible
+    /// route, not just the ones converted first. `/v1/embeddings` returned
+    /// Axum's plain-text rejection while `/v1/responses` returned JSON, so a
+    /// client parsing the error worked on one endpoint and failed on the other.
+    #[tokio::test]
+    async fn test_embeddings_non_json_content_type_returns_json_error() {
+        let (port, handle) = spawn_default_service().await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://localhost:{port}/v1/embeddings"))
+            .header("content-type", "text/plain")
+            .body(r#"{"model":"model","input":"hi"}"#)
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.starts_with("application/json")),
+            Some(true),
+            "the 415 must be JSON, not Axum's text/plain rejection"
+        );
+        let body: serde_json::Value = resp.json().await.expect("body must be JSON");
+        assert_eq!(body["code"], 415);
+        assert_eq!(
+            body["message"],
+            "Expected request with Content-Type application/json"
+        );
+
+        handle.abort();
+    }
+
     /// Verifies that malformed JSON returns the standard JSON error envelope
     /// instead of Axum's default plain-text rejection.
     #[tokio::test]
