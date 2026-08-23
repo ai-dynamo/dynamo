@@ -65,7 +65,6 @@ class GenerateEndpointInvoker:
     ) -> GenerateEndpointStream:
         """Prepare the Generate request and return its owned token stream."""
 
-        context.raise_if_cancelled()
         request_value = inputs[GENERATE_REQUEST_PORT]
         if not isinstance(request_value, Mapping):
             raise WorkflowExecutionError("Generate endpoint request must be an object")

@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import asyncio
 from collections.abc import Mapping
 from typing import Any
 
@@ -128,8 +127,6 @@ def _context(request_context: Any = None) -> StageContext:
         stage_id="generator",
         attempt_id="request-1",
         invocation_id="request-1:generator",
-        deadline=None,
-        _cancelled=asyncio.Event(),
         request_context=request_context,
     )
 
