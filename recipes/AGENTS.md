@@ -18,14 +18,37 @@ SPDX-License-Identifier: Apache-2.0
   A recipe matrix at `.kustomize-matrix.yaml` has an explicit `source`, a
   `nameTemplate`, and a `matrix` mapping whose values contain a `name` and a
   `components` list. The matrix, recipe-local base and Components, and shared
-  Components are source. Kustomize is both the authoring model and recipe
-  documentation: the base and Components explain settings, public overlay
-  `kustomization.yaml` files document a concrete variant, and `deploy-*.yaml`
-  files are the fully materialized result. Users may apply a checked-in manifest
+  Components are source. A dimension value may also select `templates` and set
+  `values`. Each template selection has a source relative to the matrix and a
+  generated `path` under the overlay's `components/` directory. Generated paths
+  selected by one variant must be unique and non-overlapping. Shared
+  template sources live in `recipes/kustomize/templates/`. A selected template
+  directory extends the direct `*.yaml` and `*.yaml.j2` files in its parent
+  directory by convention. Only direct files participate; never scan or copy
+  subdirectories.
+  Parent files are loaded first, then same-output-name files in the selected
+  directory replace them (`patch.yaml` and `patch.yaml.j2` both produce
+  `patch.yaml`, so either form replaces the other). Optional `values.yaml`
+  mappings use shallow parent-to-selected replacement before matrix values. The
+  effective files must provide a `kustomization.yaml` or
+  `kustomization.yaml.j2` that renders a Component.
+  `unfold` evaluates the template with strict sandboxed Jinja, the variant values,
+  and the fully rendered base indexed as `base.<lowercase-kind>[metadata.name]`.
+  Use `base.<lowercase-kind> | only` only when exactly one such resource is
+  required. Templates render one Component. `unfold` materializes the complete
+  effective files at its selected path under the generated overlay. Files ending
+  in `*.j2` are rendered without that suffix. A template may reference shared
+  Components or resources; `unfold` rebases those external paths for the
+  generated location.
+  Kustomize is both the authoring model and recipe documentation: the base and
+  Components explain settings, public overlay `kustomization.yaml` files
+  document a concrete variant, and `deploy-*.yaml` files are the fully
+  materialized result. Users may apply a checked-in manifest
   with `kubectl apply -f`, a checked-in public overlay with `kubectl apply -k`,
   or an overlay they compose themselves. Contributors run all matrix commands
   from the repository root. `scripts/kustomize-matrix.py unfold <matrix.yaml>`
-  writes every generated public overlay for that matrix; follow it with
+  writes every generated public overlay and selected generated Component for that
+  matrix; follow it with
   `scripts/kustomize-matrix.py render <matrix.yaml>` to regenerate every
   checked-in manifest for that matrix and the central schema. To inspect only
   one concrete overlay, run `kustomize build <deployment>/kustomize/overlays/<name>`.
