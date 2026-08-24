@@ -138,6 +138,7 @@ jobs:
       - vllm-dev-build
       - vllm-test
       - vllm-multi-gpu-test
+      - vllm-4-gpu-test
       - vllm-copy-to-acr
       - sglang-build
       - sglang-dev-build
@@ -782,27 +783,38 @@ jobs:
       (needs.changed-files.outputs.core == 'true' ||
        needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true')
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - gpu_count: 2
-            runner: prod-tester-amd-gpu-2-v2
-            markers: pre_merge and vllm and gpu_2
-          - gpu_count: 4
-            runner: prod-tester-amd-gpu-4-v2
-            # Exercise the only vLLM gpu_4 topology before merge.
-            markers: (pre_merge or post_merge) and vllm and gpu_4
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
-      test_type: ${{ format('{0}-GPU Test', matrix.gpu_count) }}
-      amd_runner: ${{ matrix.runner }}
+      test_type: 2-GPU Test
+      amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: ${{ matrix.markers }}
+      gpu_test_markers: pre_merge and vllm and gpu_2
+      gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  vllm-4-gpu-test:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [changed-files, vllm-build]
+    if: |
+      needs.changed-files.outputs.run_multigpu_tests == 'true' &&
+      (needs.changed-files.outputs.core == 'true' ||
+       needs.changed-files.outputs.vllm == 'true' ||
+       needs.changed-files.outputs.deploy == 'true')
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: 4-GPU Test
+      amd_runner: prod-tester-amd-gpu-4-v2
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]' # No ARM GPUs available
+      run_sanity_check: false
+      # Exercise the only vLLM gpu_4 topology before merge.
+      gpu_test_markers: (pre_merge or post_merge) and vllm and gpu_4
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -1948,6 +1960,7 @@ jobs:
       - planner-copy-to-acr
       - vllm-copy-to-acr
       - vllm-multi-gpu-test
+      - vllm-4-gpu-test
       - vllm-efa-build
       - sglang-copy-to-acr
       - sglang-multi-gpu-test
@@ -1986,6 +1999,7 @@ jobs:
       - vllm-build
       - vllm-test
       - vllm-multi-gpu-test
+      - vllm-4-gpu-test
       - vllm-copy-to-acr
       - sglang-build
       - sglang-test
