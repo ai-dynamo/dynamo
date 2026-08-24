@@ -291,6 +291,7 @@
 /container/Dockerfile.test                                                   @ai-dynamo/dynamo-ops-codeowners
 /container/launch_message/                                                   @ai-dynamo/dynamo-ops-codeowners
 /container/Dockerfile.template                                               @ai-dynamo/dynamo-ops-codeowners
+/dev/docker-compose.etcd-auth.yml                                            @ai-dynamo/dynamo-ops-codeowners
 
 # === docs  (@ai-dynamo/dynamo-docs-codeowners) ===
 /docs/                                                                       @ai-dynamo/dynamo-docs-codeowners
@@ -608,6 +609,7 @@
 /lib/runtime/src/health_check.rs                                             @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/vllm/omni/                                            @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /deploy/operator/**/*podsnapshot*                                            @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-gms-codeowners
+/dev/docker-compose.etcd-auth.yml                                            @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /dev/docker-observability-xpu.yml                                            @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-xpu-codeowners
 /lib/kvbm-config/src/messenger.rs                                            @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/system_health.rs                                            @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
