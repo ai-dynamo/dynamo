@@ -1045,6 +1045,8 @@ pub struct ActiveSequenceEvent {
     pub request_id: String,
     pub worker: WorkerWithDpRank,
     pub data: ActiveSequenceEventData,
+    /// Source DRT identity, used to suppress a publisher's own echo. Router events use the router
+    /// ID; worker-origin completion marks use the worker ID.
     pub router_id: u64,
     #[serde(default)]
     pub lora_name: Option<String>,
