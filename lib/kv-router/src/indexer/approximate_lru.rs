@@ -401,7 +401,7 @@ fn expect_applied(reply: ApproximateLruReply) -> Result<(), KvRouterError> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct InactiveKey {
-    last_access_epoch: u64,
+    release_epoch: u64,
     reverse_position: Reverse<usize>,
     copy_id: BlockCopyId,
 }
@@ -409,7 +409,7 @@ struct InactiveKey {
 struct BlockCopy {
     sequence_hash: SequenceHash,
     refs: usize,
-    last_access_epoch: u64,
+    release_epoch: u64,
     sequence_position: usize,
 }
 
@@ -421,7 +421,7 @@ struct LeaseState {
 
 struct RankLruState {
     capacity: usize,
-    epoch: u64,
+    release_epoch: u64,
     next_copy_id: BlockCopyId,
     copies: FxHashMap<BlockCopyId, BlockCopy>,
     by_hash: FxHashMap<SequenceHash, Vec<BlockCopyId>>,
@@ -435,7 +435,7 @@ impl RankLruState {
     fn new(capacity: usize) -> Self {
         Self {
             capacity,
-            epoch: 0,
+            release_epoch: 0,
             next_copy_id: 1,
             copies: FxHashMap::default(),
             by_hash: FxHashMap::default(),
@@ -446,14 +446,14 @@ impl RankLruState {
         }
     }
 
-    fn next_epoch(&mut self) -> u64 {
-        self.epoch = self.epoch.wrapping_add(1).max(1);
-        self.epoch
+    fn next_release_epoch(&mut self) -> u64 {
+        self.release_epoch = self.release_epoch.wrapping_add(1).max(1);
+        self.release_epoch
     }
 
     fn inactive_key(copy_id: BlockCopyId, copy: &BlockCopy) -> InactiveKey {
         InactiveKey {
-            last_access_epoch: copy.last_access_epoch,
+            release_epoch: copy.release_epoch,
             reverse_position: Reverse(copy.sequence_position),
             copy_id,
         }
@@ -471,7 +471,6 @@ impl RankLruState {
             )));
         }
 
-        let epoch = self.next_epoch();
         let mut lease = LeaseState {
             copies: Vec::with_capacity(blocks.len()),
             private_blocks,
@@ -498,7 +497,6 @@ impl RankLruState {
                     self.inactive.remove(&key);
                 }
                 copy.refs += 1;
-                copy.last_access_epoch = copy.last_access_epoch.max(epoch);
                 copy.sequence_position = position;
                 copy_id
             } else {
@@ -510,7 +508,7 @@ impl RankLruState {
                     BlockCopy {
                         sequence_hash: block.sequence_hash,
                         refs: 1,
-                        last_access_epoch: epoch,
+                        release_epoch: 0,
                         sequence_position: position,
                     },
                 );
@@ -536,7 +534,6 @@ impl RankLruState {
         private_blocks: usize,
     ) -> Option<Vec<SequenceHash>> {
         let mut lease = self.leases.remove(&attempt_id)?;
-        let epoch = self.next_epoch();
         for (offset, block) in blocks.iter().enumerate() {
             let copy_id = self.next_copy_id;
             self.next_copy_id = self.next_copy_id.wrapping_add(1).max(1);
@@ -545,7 +542,7 @@ impl RankLruState {
                 BlockCopy {
                     sequence_hash: block.sequence_hash,
                     refs: 1,
-                    last_access_epoch: epoch,
+                    release_epoch: 0,
                     sequence_position: start_position + offset,
                 },
             );
@@ -569,6 +566,7 @@ impl RankLruState {
         let Some(lease) = self.leases.remove(&attempt_id) else {
             return Vec::new();
         };
+        let release_epoch = self.next_release_epoch();
         self.private_blocks = self.private_blocks.saturating_sub(lease.private_blocks);
         for copy_id in lease.copies {
             let Some(copy) = self.copies.get_mut(&copy_id) else {
@@ -579,6 +577,7 @@ impl RankLruState {
             }
             copy.refs -= 1;
             if copy.refs == 0 {
+                copy.release_epoch = release_epoch;
                 self.inactive.insert(Self::inactive_key(copy_id, copy));
             }
         }
@@ -1033,7 +1032,7 @@ mod tests {
     }
 
     #[test]
-    fn equal_epoch_evicts_suffix_before_prefix() {
+    fn equal_release_epoch_evicts_suffix_before_prefix() {
         let mut lane = ApproximateLruLane::default();
         apply(
             &mut lane,
@@ -1072,6 +1071,137 @@ mod tests {
             panic!("expected remove event");
         };
         assert_eq!(removed.block_hashes, vec![ExternalSequenceBlockHash(3)]);
+    }
+
+    #[test]
+    fn streamed_output_joins_prompt_in_release_order() {
+        let mut lane = ApproximateLruLane::default();
+        apply(
+            &mut lane,
+            ApproximateLruCommand::SetCapacity {
+                worker: worker(),
+                incarnation: 1,
+                capacity: Some(4),
+            },
+        );
+        apply(
+            &mut lane,
+            ApproximateLruCommand::Acquire {
+                worker: worker(),
+                incarnation: 1,
+                attempt_id: attempt(1),
+                blocks: vec![block(1), block(2)],
+                private_blocks: 0,
+            },
+        );
+        for (position, value) in [(2, 3), (3, 4)] {
+            apply(
+                &mut lane,
+                ApproximateLruCommand::Materialize {
+                    worker: worker(),
+                    incarnation: 1,
+                    attempt_id: attempt(1),
+                    parent_hash: Some((value - 1) as SequenceHash),
+                    blocks: vec![block(value)],
+                    start_position: position,
+                    private_blocks: 0,
+                },
+            );
+        }
+        apply(
+            &mut lane,
+            ApproximateLruCommand::Release {
+                worker: worker(),
+                incarnation: 1,
+                attempt_id: attempt(1),
+            },
+        );
+
+        let output = lane
+            .apply(ApproximateLruCommand::SetCapacity {
+                worker: worker(),
+                incarnation: 1,
+                capacity: Some(1),
+            })
+            .unwrap();
+        let KvCacheEventData::Removed(removed) = &output.events[0].event.data else {
+            panic!("expected remove event");
+        };
+        assert_eq!(
+            removed.block_hashes,
+            vec![
+                ExternalSequenceBlockHash(4),
+                ExternalSequenceBlockHash(3),
+                ExternalSequenceBlockHash(2),
+            ]
+        );
+        assert_eq!(lane.stats().resident_blocks, 1);
+        assert_eq!(lane.stats().inactive_blocks, 1);
+    }
+
+    #[test]
+    fn shared_copy_uses_final_release_epoch() {
+        let mut lane = ApproximateLruLane::default();
+        apply(
+            &mut lane,
+            ApproximateLruCommand::SetCapacity {
+                worker: worker(),
+                incarnation: 1,
+                capacity: Some(2),
+            },
+        );
+        for attempt_id in [attempt(1), attempt(2)] {
+            apply(
+                &mut lane,
+                ApproximateLruCommand::Acquire {
+                    worker: worker(),
+                    incarnation: 1,
+                    attempt_id,
+                    blocks: vec![block(1)],
+                    private_blocks: 0,
+                },
+            );
+        }
+        apply(
+            &mut lane,
+            ApproximateLruCommand::Release {
+                worker: worker(),
+                incarnation: 1,
+                attempt_id: attempt(1),
+            },
+        );
+        apply(
+            &mut lane,
+            ApproximateLruCommand::Acquire {
+                worker: worker(),
+                incarnation: 1,
+                attempt_id: attempt(3),
+                blocks: vec![block(2)],
+                private_blocks: 0,
+            },
+        );
+        for attempt_id in [attempt(3), attempt(2)] {
+            apply(
+                &mut lane,
+                ApproximateLruCommand::Release {
+                    worker: worker(),
+                    incarnation: 1,
+                    attempt_id,
+                },
+            );
+        }
+
+        let output = lane
+            .apply(ApproximateLruCommand::SetCapacity {
+                worker: worker(),
+                incarnation: 1,
+                capacity: Some(1),
+            })
+            .unwrap();
+        let KvCacheEventData::Removed(removed) = &output.events[0].event.data else {
+            panic!("expected remove event");
+        };
+        assert_eq!(removed.block_hashes, vec![ExternalSequenceBlockHash(2)]);
     }
 
     #[test]
