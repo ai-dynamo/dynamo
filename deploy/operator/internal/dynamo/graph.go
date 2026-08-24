@@ -1594,6 +1594,77 @@ func AddStandardEnvVars(container *corev1.Container, operatorConfig *configv1alp
 	container.Env = MergeEnvs(standardEnvVars, container.Env)
 }
 
+// AddTransportTLSEnvVars injects DYN_TCP_TLS_* and NATS_TLS_* certificate path
+// environment variables from InfrastructureConfiguration. Unlike
+// AddStandardEnvVars, this is scoped to DGD workload pods only — not the
+// DGDR profiler Job — because the profiler does not run the TCP/NATS
+// transport and does not inherit DGD podTemplate certificate mounts.
+func AddTransportTLSEnvVars(container *corev1.Container, operatorConfig *configv1alpha1.OperatorConfiguration) {
+	tlsEnvVars := []corev1.EnvVar{}
+	// Inject TLS certificate paths for inter-component encryption (DYN_TCP_TLS_* / NATS_TLS_*).
+	if operatorConfig.Infrastructure.NATSTLSCAPath != "" {
+		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
+			Name:  "NATS_TLS_CA_CERT_PATH",
+			Value: operatorConfig.Infrastructure.NATSTLSCAPath,
+		})
+	}
+	if operatorConfig.Infrastructure.NATSTLSClientCertPath != "" {
+		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
+			Name:  "NATS_TLS_CLIENT_CERT_PATH",
+			Value: operatorConfig.Infrastructure.NATSTLSClientCertPath,
+		})
+	}
+	if operatorConfig.Infrastructure.NATSTLSClientKeyPath != "" {
+		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
+			Name:  "NATS_TLS_CLIENT_KEY_PATH",
+			Value: operatorConfig.Infrastructure.NATSTLSClientKeyPath,
+		})
+	}
+	if operatorConfig.Infrastructure.TCPTLSCertPath != "" {
+		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
+			Name:  "DYN_TCP_TLS_CERT_PATH",
+			Value: operatorConfig.Infrastructure.TCPTLSCertPath,
+		})
+	}
+	if operatorConfig.Infrastructure.TCPTLSKeyPath != "" {
+		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
+			Name:  "DYN_TCP_TLS_KEY_PATH",
+			Value: operatorConfig.Infrastructure.TCPTLSKeyPath,
+		})
+	}
+	if operatorConfig.Infrastructure.TCPTLSCAPath != "" {
+		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
+			Name:  "DYN_TCP_TLS_CA_CERT_PATH",
+			Value: operatorConfig.Infrastructure.TCPTLSCAPath,
+		})
+	}
+	if operatorConfig.Infrastructure.TCPTLSClientCertPath != "" {
+		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
+			Name:  "DYN_TCP_TLS_CLIENT_CERT_PATH",
+			Value: operatorConfig.Infrastructure.TCPTLSClientCertPath,
+		})
+	}
+	if operatorConfig.Infrastructure.TCPTLSClientKeyPath != "" {
+		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
+			Name:  "DYN_TCP_TLS_CLIENT_KEY_PATH",
+			Value: operatorConfig.Infrastructure.TCPTLSClientKeyPath,
+		})
+	}
+	if operatorConfig.Infrastructure.TCPTLSClientCAPath != "" {
+		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
+			Name:  "DYN_TCP_TLS_CLIENT_CA_CERT_PATH",
+			Value: operatorConfig.Infrastructure.TCPTLSClientCAPath,
+		})
+	}
+	if operatorConfig.Infrastructure.TCPTLSServerName != "" {
+		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
+			Name:  "DYN_TCP_TLS_SERVER_NAME",
+			Value: operatorConfig.Infrastructure.TCPTLSServerName,
+		})
+	}
+	container.Env = MergeEnvs(tlsEnvVars, container.Env)
+}
+
 func applyCheckpointProbeCadence(
 	container *corev1.Container,
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
@@ -1680,6 +1751,7 @@ func GenerateBasePodSpec(
 	}
 
 	AddStandardEnvVars(&container, operatorConfig)
+	AddTransportTLSEnvVars(&container, operatorConfig)
 	frontendSidecarMounts := append([]corev1.VolumeMount(nil), container.VolumeMounts...)
 
 	// Apply backend-specific container modifications
@@ -1999,6 +2071,7 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 		}
 		base.Env = MergeEnvs(baseEnv, user.Env)
 		AddStandardEnvVars(&base, operatorConfig)
+		AddTransportTLSEnvVars(&base, operatorConfig)
 		base.VolumeMounts = appendMissingVolumeMounts(base.VolumeMounts, parentMounts)
 		podSpec.Containers[i] = base
 		return nil

@@ -269,6 +269,46 @@ impl NvExt {
                 .any(|annotation| annotation.starts_with("query_instance_id:"))
         })
     }
+
+    /// Return true when this envelope contains any field other than `cache_salt`.
+    pub fn has_non_cache_salt_fields(&self) -> bool {
+        let Self {
+            greed_sampling,
+            use_raw_prompt,
+            annotations,
+            backend_instance_id,
+            token_data,
+            max_thinking_tokens,
+            cache_salt: _,
+            extra_fields,
+            metadata_upload,
+            prefill_worker_id,
+            decode_worker_id,
+            dp_rank,
+            prefill_dp_rank,
+            agent_hints,
+            request_timestamp_ms,
+            routing_constraints,
+            router,
+        } = self;
+
+        greed_sampling.is_some()
+            || use_raw_prompt.is_some()
+            || annotations.is_some()
+            || backend_instance_id.is_some()
+            || token_data.is_some()
+            || max_thinking_tokens.is_some()
+            || extra_fields.is_some()
+            || metadata_upload.is_some()
+            || prefill_worker_id.is_some()
+            || decode_worker_id.is_some()
+            || dp_rank.is_some()
+            || prefill_dp_rank.is_some()
+            || agent_hints.is_some()
+            || request_timestamp_ms.is_some()
+            || routing_constraints.is_some()
+            || router.is_some()
+    }
 }
 
 impl NvExtBuilder {
@@ -303,6 +343,35 @@ pub const HEADER_DP_RANK_ALIAS: &str = "x-dp-rank";
 pub const HEADER_DATA_PARALLEL_RANK_ALIAS: &str = "x-data-parallel-rank";
 pub const HEADER_PREFILL_DP_RANK_ALIAS: &str = "x-prefill-dp-rank";
 const UNSET_DP_RANK_SENTINEL: u32 = u32::MAX;
+
+/// Return the last non-empty value after trimming surrounding whitespace.
+pub fn last_non_empty_trimmed_value<'a>(values: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    values
+        .filter_map(|value| {
+            let value = value.trim();
+            (!value.is_empty()).then_some(value)
+        })
+        .last()
+}
+
+/// Return true when the request contains a routing header disabled by the NvExt switch.
+pub fn has_non_cache_salt_routing_headers(headers: &HeaderMap) -> bool {
+    [
+        HEADER_WORKER_INSTANCE_ID,
+        HEADER_WORKER_INSTANCE_ID_ALIAS,
+        HEADER_PREFILL_INSTANCE_ID,
+        HEADER_PREFILL_INSTANCE_ID_ALIAS,
+        HEADER_DP_RANK,
+        HEADER_DP_RANK_ALIAS,
+        HEADER_DATA_PARALLEL_RANK_ALIAS,
+        HEADER_PREFILL_DP_RANK,
+        HEADER_PREFILL_DP_RANK_ALIAS,
+        HEADER_REQUEST_PRIORITY,
+        HEADER_REQUEST_STRICT_PRIORITY,
+    ]
+    .iter()
+    .any(|header| headers.contains_key(*header))
+}
 
 impl From<AgentContextHeaderValues> for AgentContext {
     fn from(values: AgentContextHeaderValues) -> Self {
@@ -354,7 +423,6 @@ pub fn session_affinity_from_headers(headers: &HeaderMap) -> Option<SessionAffin
 /// - `x-dynamo-prefill-dp-rank` -> `prefill_dp_rank`
 /// - `x-dynamo-request-priority` -> `agent_hints.priority`
 /// - `x-dynamo-request-strict-priority` -> `agent_hints.strict_priority`
-/// - `x-tenant-id` -> `cache_salt`
 ///
 /// Routing headers take priority over existing nvext values when present.
 /// If no headers are present, returns the original nvext unchanged.
@@ -395,19 +463,12 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
     // `resolve_request_priority`.
     let priority = priority_header.and_then(|s| s.trim().parse::<i32>().ok());
     let strict_priority = strict_priority_header.and_then(|s| s.trim().parse::<u32>().ok());
-    let tenant_id = headers
-        .get(HEADER_TENANT_ID)
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-
     if worker_id.is_none()
         && prefill_id.is_none()
         && dp_rank.is_none()
         && prefill_dp_rank.is_none()
         && priority.is_none()
         && strict_priority.is_none()
-        && tenant_id.is_none()
     {
         return nvext;
     }
@@ -437,10 +498,60 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         hints.priority = resolved.priority;
         hints.strict_priority = resolved.strict_priority;
     }
-    if let Some(salt) = tenant_id {
-        ext.cache_salt = Some(salt);
-    }
     Some(ext)
+}
+
+/// Apply the `x-tenant-id` cache-salt override independently of other NvExt features.
+///
+/// The last non-empty, trimmed header takes priority over a body salt. Empty or
+/// invalid values are treated as absent and leave the body unchanged.
+pub fn apply_cache_salt_header_override(
+    nvext: Option<NvExt>,
+    headers: &HeaderMap,
+) -> Option<NvExt> {
+    let Some(cache_salt) = last_non_empty_trimmed_value(
+        headers
+            .get_all(HEADER_TENANT_ID)
+            .iter()
+            .filter_map(|value| value.to_str().ok()),
+    )
+    .map(str::to_owned) else {
+        return nvext;
+    };
+
+    let mut nvext = nvext.unwrap_or_default();
+    nvext.cache_salt = Some(cache_salt);
+    Some(nvext)
+}
+
+/// Remove all NvExt fields except a non-empty cache salt.
+pub fn retain_cache_salt(nvext: Option<NvExt>) -> Option<NvExt> {
+    nvext.and_then(|nvext| {
+        nvext
+            .cache_salt
+            .filter(|cache_salt| !cache_salt.is_empty())
+            .map(|cache_salt| NvExt {
+                cache_salt: Some(cache_salt),
+                ..Default::default()
+            })
+    })
+}
+
+/// Apply the frontend NvExt policy for endpoints that support routing headers.
+///
+/// Cache-salt resolution always runs. Other body fields and routing headers run only
+/// when NvExt is enabled.
+pub fn apply_frontend_nvext_policy(
+    nvext: Option<NvExt>,
+    headers: &HeaderMap,
+    nvext_enabled: bool,
+) -> Option<NvExt> {
+    let nvext = apply_cache_salt_header_override(nvext, headers);
+    if nvext_enabled {
+        apply_header_routing_overrides(nvext, headers)
+    } else {
+        retain_cache_salt(nvext)
+    }
 }
 
 /// Priority resolved with header-over-body precedence, per field: a well-formed
@@ -999,11 +1110,11 @@ mod tests {
     }
 
     #[test]
-    fn apply_header_routing_overrides_sets_cache_salt_from_tenant_header() {
+    fn cache_salt_header_override_has_precedence() {
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_TENANT_ID, "tenant-a".parse().unwrap());
 
-        let nvext = apply_header_routing_overrides(None, &headers).unwrap();
+        let nvext = apply_cache_salt_header_override(None, &headers).unwrap();
         assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-a"));
 
         let mut headers = HeaderMap::new();
@@ -1013,8 +1124,93 @@ mod tests {
             ..Default::default()
         };
 
-        let nvext = apply_header_routing_overrides(Some(nvext), &headers).unwrap();
+        let nvext = apply_cache_salt_header_override(Some(nvext), &headers).unwrap();
         assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-header"));
+
+        headers.append(HEADER_TENANT_ID, "   ".parse().unwrap());
+        headers.append(HEADER_TENANT_ID, " tenant-gateway ".parse().unwrap());
+        let nvext = apply_cache_salt_header_override(Some(nvext), &headers).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-gateway"));
+    }
+
+    #[test]
+    fn cache_salt_header_override_ignores_only_empty_values() {
+        let mut headers = HeaderMap::new();
+        headers.append(HEADER_TENANT_ID, "".parse().unwrap());
+        headers.append(HEADER_TENANT_ID, "   ".parse().unwrap());
+        let nvext = NvExt {
+            cache_salt: Some("tenant-body".to_string()),
+            ..Default::default()
+        };
+
+        let nvext = apply_cache_salt_header_override(Some(nvext), &headers).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-body"));
+    }
+
+    #[test]
+    fn frontend_nvext_policy_preserves_cache_salt_when_disabled() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_WORKER_INSTANCE_ID, "42".parse().unwrap());
+        headers.insert(HEADER_REQUEST_PRIORITY, "7".parse().unwrap());
+        let body = NvExt {
+            cache_salt: Some("tenant-body".to_string()),
+            backend_instance_id: Some(99),
+            extra_fields: Some(vec!["worker_id".to_string()]),
+            ..Default::default()
+        };
+
+        let nvext = apply_frontend_nvext_policy(Some(body), &headers, false).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-body"));
+        assert!(!nvext.has_non_cache_salt_fields());
+    }
+
+    #[test]
+    fn frontend_nvext_policy_resolves_header_body_and_empty_values() {
+        let body = || NvExt {
+            cache_salt: Some("tenant-body".to_string()),
+            ..Default::default()
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_TENANT_ID, "tenant-header".parse().unwrap());
+        let nvext = apply_frontend_nvext_policy(Some(body()), &headers, false).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-header"));
+
+        headers.insert(HEADER_TENANT_ID, "".parse().unwrap());
+        let nvext = apply_frontend_nvext_policy(Some(body()), &headers, false).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-body"));
+
+        let empty_body = NvExt {
+            cache_salt: Some(String::new()),
+            ..Default::default()
+        };
+        let mut request = CacheSaltRequest {
+            nvext: apply_frontend_nvext_policy(Some(empty_body), &headers, false),
+            ..Default::default()
+        };
+        request
+            .unsupported_fields
+            .insert("cache_salt".to_string(), serde_json::json!("tenant-legacy"));
+        assert_eq!(request_cache_salt(&request), Some("tenant-legacy"));
+        assert!(apply_frontend_nvext_policy(None, &HeaderMap::new(), false).is_none());
+    }
+
+    #[test]
+    fn frontend_nvext_policy_keeps_full_enabled_behavior() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_TENANT_ID, "tenant-header".parse().unwrap());
+        headers.insert(HEADER_WORKER_INSTANCE_ID, "42".parse().unwrap());
+        let body = NvExt {
+            cache_salt: Some("tenant-body".to_string()),
+            extra_fields: Some(vec!["worker_id".to_string()]),
+            ..Default::default()
+        };
+
+        let nvext = apply_frontend_nvext_policy(Some(body), &headers, true).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-header"));
+        assert_eq!(nvext.backend_instance_id, Some(42));
+        assert_eq!(nvext.decode_worker_id, Some(42));
+        assert_eq!(nvext.extra_fields, Some(vec!["worker_id".to_string()]));
     }
 
     #[test]
@@ -1041,6 +1237,19 @@ mod tests {
                 .dp_rank,
             Some(4)
         );
+    }
+
+    #[test]
+    fn routing_overrides_do_not_apply_tenant_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_TENANT_ID, "tenant-header".parse().unwrap());
+        let nvext = NvExt {
+            cache_salt: Some("tenant-body".to_string()),
+            ..Default::default()
+        };
+
+        let nvext = apply_header_routing_overrides(Some(nvext), &headers).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-body"));
     }
 
     #[test]
