@@ -197,9 +197,10 @@ def dynamo_client(start_services: ServicePorts):
     )
 
 
-def create_embeddings_base64(shape: tuple[int, ...]) -> str:
-    """Create random embeddings tensor and return as base64-encoded PyTorch format."""
-    embeddings = torch.randn(*shape, dtype=torch.float32)
+def create_embeddings_base64(shape: tuple[int, ...], *, seed: int | None = None) -> str:
+    """Create embeddings tensor and return as base64-encoded PyTorch format."""
+    generator = torch.Generator().manual_seed(seed) if seed is not None else None
+    embeddings = torch.randn(*shape, dtype=torch.float32, generator=generator)
     buffer = io.BytesIO()
     torch.save(embeddings, buffer)
     buffer.seek(0)
@@ -338,7 +339,10 @@ class TestPromptEmbedsE2E:
         This validates the worker can handle multiple embedding requests
         simultaneously without race conditions or resource conflicts.
         """
-        embeddings_base64 = create_embeddings_base64((10, 1024))
+        # Keep the transport input reproducible. Random hidden-state-shaped tensors
+        # can legitimately make the model emit only filtered special tokens or
+        # incomplete byte sequences, neither of which produces visible text.
+        embeddings_base64 = create_embeddings_base64((10, 1024), seed=1234)
 
         def send_request():
             return dynamo_client.completions.create(
@@ -361,4 +365,10 @@ class TestPromptEmbedsE2E:
         assert len(results) == NUM_CONCURRENT, "All concurrent requests should complete"
         for response in results:
             assert response.choices, "Each response should have choices"
-            assert len(response.choices[0].text) > 0, "Each response should have text"
+            assert (
+                response.choices[0].finish_reason is not None
+            ), "Each response should finish"
+            assert response.usage is not None, "Each response should report usage"
+            assert (
+                response.usage.completion_tokens > 0
+            ), "Each response should generate completion tokens"
