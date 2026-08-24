@@ -40,7 +40,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "aiconfigurator-core==0.11.0.dev20260728",
+    "aisimulate==0.13.0; python_version >= '3.11' and python_version < '3.14'",
     "aiperf==0.10.0",
     "matplotlib",
     "networkx",

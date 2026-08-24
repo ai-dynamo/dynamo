@@ -783,7 +783,7 @@ def build_aic_perf_model_spec(
 
     if get_latest_database_version is None:
         logger.warning(
-            "aiconfigurator-core is unavailable; Planner will use FPM regression "
+            "AISimulate's AIC perf model is unavailable; Planner will use FPM regression "
             "instead of native AIC estimates."
         )
         return None

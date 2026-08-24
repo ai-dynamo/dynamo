@@ -86,9 +86,7 @@ sglang = [
     "cupy-cuda13x>=13.6.0",
 ]
 
-mocker = [
-    "aiconfigurator-core==0.11.0.dev20260728",
-]
+mocker = []
 
 [tool.uv]
 # Some backend extras have incompatible transitive dependency requirements.
