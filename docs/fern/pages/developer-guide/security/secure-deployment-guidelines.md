@@ -13,9 +13,17 @@ describes Dynamo's trust model and how to secure each part of a deployment.
 
 Dynamo assumes it runs inside a trusted network boundary: external clients reach
 only the frontend, through an authenticating gateway, while the internal
-communication planes and infrastructure run on a network the operator isolates.
+communication planes and infrastructure run on a network the deployer isolates.
 The sections below explain that boundary and how to harden each component and
 plane.
+
+Throughout this guide, **deployer** refers to the team responsible for deploying
+and operating Dynamo in a cluster — distinct from the **Dynamo Operator**, the
+Kubernetes operator component.
+
+> [!WARNING]
+> Do not expose the Dynamo frontend, planner dashboard, standalone router
+> services, NATS, etcd, or ZMQ endpoints directly to an untrusted network.
 
 > [!IMPORTANT]
 > The `docker compose` files and example manifests in this repository are
@@ -36,7 +44,7 @@ Dynamo separates client-facing traffic from internal coordination:
 The security posture rests on two assumptions:
 
 1. The **internal communication planes and infrastructure services** are deployed by the
-   operator in a secure fashion and reside within a **trusted network** that
+   deployer in a secure fashion and reside within a **trusted network** that
    external clients cannot reach.
 2. **External clients reach only the frontend**, and only through a gateway or
    proxy that terminates authentication and TLS.
@@ -68,6 +76,14 @@ adopt Dynamo's optional [Gateway API routing topology](../../kubernetes/installa
 note that its Endpoint Picker selects a backend for load and KV-cache reasons and
 does not authenticate clients, so it still sits behind your authenticating
 gateway.
+
+TLS termination at the gateway secures only the client-to-gateway hop. If traffic
+from the gateway to the frontend crosses an untrusted segment, re-encrypt that hop
+by enabling the frontend's own server-side TLS (`DYN_TLS_CERT_PATH` /
+`DYN_TLS_KEY_PATH`); see the
+[frontend TLS configuration](../../reference/components/frontend-configuration.mdx).
+This is server-side TLS only — it does not authenticate end users, which remains
+the gateway's responsibility.
 
 ## Securing the Internal Communication Planes
 
@@ -171,12 +187,12 @@ reachable.
 - **Client-controlled routing (`nvext`).** By default the frontend honors an
   `nvext` request extension and routing-override headers that let a client pin a
   request to a specific worker instance. In a multi-tenant or untrusted-client
-  setting, operators may want to set `DYN_DISABLE_FRONTEND_NVEXT=1` so clients cannot
+  setting, the deployer may want to set `DYN_DISABLE_FRONTEND_NVEXT=1` so clients cannot
   target individual
   workers. This drops `request.nvext` at handler entry and ignores the
   routing-override headers.
 - **Admin API.** The frontend's HTTP admin API (for example,
-  `GET`/`POST /busy_threshold`) is enabled by default. If operators do not need to
+  `GET`/`POST /busy_threshold`) is enabled by default. If the deployer does not need to
   change runtime tunables through it, set `DYN_DISABLE_FRONTEND_ADMIN_API=1`.
   Inference, metrics, models, health, and liveness routes are unaffected.
 - **Metrics endpoint.** The `/metrics` endpoint is intended for scraping by
@@ -214,7 +230,7 @@ privileges.
   execute model-supplied Python (for example, `trust_remote_code`) should be
   enabled only for models you trust. A pre-existing `trust_remote_code` /
   `--trust-remote-code` flag in a deployment template or worker config does **not**
-  by itself indicate that an operator reviewed and approved it — some stock
+  by itself indicate that a deployer reviewed and approved it — some stock
   templates ship it — so audit templates and pin the provenance of any such flag.
 - **Validate request-derived values.** When integrating or extending Dynamo,
   validate values taken from a request before using them in security-sensitive
@@ -225,7 +241,7 @@ privileges.
 ### Kubernetes deployments
 
 - Use **RBAC** and grant each component's ServiceAccount only the permissions it
-  needs. The Dynamo operator ships with scoped roles; do not broaden them.
+  needs. The Dynamo Operator ships with scoped roles; do not broaden them.
 - Apply **NetworkPolicies** so the internal communication planes, the workers, and the
   NIXL/RDMA fabric are reachable only by the components that need them, and never
   from outside the cluster boundary.
