@@ -124,6 +124,13 @@ func ReconcileModelServicesForComponents(
 	return nil
 }
 
+// GenerateModelServiceForModel returns the stable headless Service for a model.
+// Controllers that need to compose the complete desired Service before writing
+// it can use this without going through the legacy sync-and-then-patch path.
+func GenerateModelServiceForModel(namespace, baseModelName string, annotations map[string]string) *corev1.Service {
+	return generateHeadlessServiceForModel(namespace, baseModelName, annotations)
+}
+
 // GenerateHeadlessServiceForModel creates a headless service for model endpoint discovery
 // Service name is generated deterministically from the base model name using a hash
 // The base model name hash is stored as a label for efficient discovery

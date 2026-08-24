@@ -38,7 +38,6 @@ type disaggregatedSetWorkloadsReconciler struct {
 	DockerSecretRetriever    DockerSecretRetriever
 	rollout                  *dgdWorkerRolloutReconciler
 	renderer                 *dcdWorkloadRenderer
-	componentWorkloads       *componentWorkloadsReconciler
 	componentRestartProgress *componentRestartProgressResolver
 }
 
@@ -63,7 +62,6 @@ func newDisaggregatedSetWorkloadsReconciler(
 	dockerSecretRetriever DockerSecretRetriever,
 	rollout *dgdWorkerRolloutReconciler,
 ) *disaggregatedSetWorkloadsReconciler {
-	componentWorkloads := newComponentWorkloadsReconciler(k8sClient, recorder, rollout)
 	return &disaggregatedSetWorkloadsReconciler{
 		Client:                   k8sClient,
 		Config:                   config,
@@ -72,7 +70,6 @@ func newDisaggregatedSetWorkloadsReconciler(
 		DockerSecretRetriever:    dockerSecretRetriever,
 		rollout:                  rollout,
 		renderer:                 newDCDWorkloadRenderer(k8sClient, config, runtimeConfig, dockerSecretRetriever),
-		componentWorkloads:       componentWorkloads,
 		componentRestartProgress: newComponentRestartProgressResolver(k8sClient),
 	}
 }

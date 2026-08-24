@@ -106,6 +106,126 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecs(
 	return leaderPodTemplateSpec, workerPodTemplateSpec, nil
 }
 
+// renderMultinodePodTemplateSpecsForDGDComponent renders a selected DS role
+// directly from the normalized DGD component instead of materializing a DCD.
+func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecsForDGDComponent(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	componentName string,
+	workloadName string,
+	dynamoNamespace string,
+	backendFramework dynamo.BackendFramework,
+) (*corev1.PodTemplateSpec, *corev1.PodTemplateSpec, error) {
+	podLabels := dynamo.GetDGDComponentResourceLabels(dgd, componentName, component)
+	podAnnotations := dynamo.GetDGDComponentResourceAnnotations(dgd, componentName, component)
+	podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dgd.Name
+	podLabels[commonconsts.KubeLabelDynamoComponent] = componentName
+	podLabels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
+	dynamo.AddBaseModelLabel(podLabels, component.ModelRef)
+	dynamo.AddBaseModelAnnotation(podAnnotations, component.ModelRef)
+	componentType, err := r.getWorkloadComponentType(
+		ctx,
+		dgd.Namespace,
+		workloadName,
+		string(component.ComponentType),
+		podLabels,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+	containerGPUs := dynamo.ContainerGPUCount(func() (int64, error) {
+		return dynamo.ResolveContainerGPUs(ctx, r.reader, dgd.Namespace, component)
+	})
+
+	leaderLabels := maps.Clone(podLabels)
+	leaderPodTemplateSpec, err := r.generateComponentRolePodTemplateSpec(
+		ctx,
+		component,
+		maps.Clone(podLabels),
+		maps.Clone(podAnnotations),
+		componentType,
+		workloadName,
+		dgd.Name,
+		dgd.Namespace,
+		componentName,
+		dynamoNamespace,
+		backendFramework,
+		dynamo.RoleLeader,
+		leaderLabels,
+		containerGPUs,
+	)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "failed to generate leader pod template")
+	}
+
+	workerLabels := maps.Clone(podLabels)
+	workerPodTemplateSpec, err := r.generateComponentRolePodTemplateSpec(
+		ctx,
+		component,
+		maps.Clone(podLabels),
+		maps.Clone(podAnnotations),
+		componentType,
+		workloadName,
+		dgd.Name,
+		dgd.Namespace,
+		componentName,
+		dynamoNamespace,
+		backendFramework,
+		dynamo.RoleWorker,
+		workerLabels,
+		containerGPUs,
+	)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "failed to generate worker pod template")
+	}
+
+	return leaderPodTemplateSpec, workerPodTemplateSpec, nil
+}
+
+func (r *dcdWorkloadRenderer) generateComponentRolePodTemplateSpec(
+	ctx context.Context,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	podLabels map[string]string,
+	podAnnotations map[string]string,
+	componentType string,
+	workloadName string,
+	parentGraphDeploymentName string,
+	namespace string,
+	componentName string,
+	dynamoNamespace string,
+	backendFramework dynamo.BackendFramework,
+	role dynamo.Role,
+	labels map[string]string,
+	containerGPUs dynamo.ContainerGPUCount,
+) (*corev1.PodTemplateSpec, error) {
+	podTemplate, err := r.generateComponentPodTemplateSpec(
+		ctx,
+		component,
+		podLabels,
+		podAnnotations,
+		componentType,
+		workloadName,
+		parentGraphDeploymentName,
+		namespace,
+		componentName,
+		dynamoNamespace,
+		backendFramework,
+		role,
+		containerGPUs,
+	)
+	if err != nil {
+		return nil, err
+	}
+	maps.Copy(podTemplate.ObjectMeta.Labels, labels)
+	podTemplate.ObjectMeta.Labels[dcdWorkloadRoleLabel] = string(role)
+	delete(podTemplate.ObjectMeta.Labels, commonconsts.KubeLabelDynamoSelector)
+	if err := checkMainContainer(&podTemplate.Spec); err != nil {
+		return nil, err
+	}
+	return podTemplate, nil
+}
+
 func (r *dcdWorkloadRenderer) containerGPUCount(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
@@ -179,7 +299,6 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 	if podAnnotations[commonconsts.KubeAnnotationEnableMetrics] != commonconsts.KubeLabelValueFalse {
 		podLabels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
 	}
-
 	if parentName := dcd.GetLabels()[commonconsts.KubeLabelDynamoGraphDeploymentName]; parentName != "" {
 		podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentName
 	} else if parentName := dcd.GetParentGraphDeploymentName(); parentName != "" {
@@ -200,24 +319,14 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 
 	var checkpointInfo *checkpoint.CheckpointInfo
 	if checkpointConfig := dynamo.GetCheckpoint(component); r.runtimeConfig.Gate.Enabled(features.Checkpoint) && checkpointConfig != nil {
-		info, err := checkpoint.ResolveCheckpointForService(
-			ctx,
-			r.reader,
-			dcd.Namespace,
-			dynamo.ToAlphaCheckpointConfig(checkpointConfig),
-		)
+		info, err := checkpoint.ResolveCheckpointForService(ctx, r.reader, dcd.Namespace, dynamo.ToAlphaCheckpointConfig(checkpointConfig))
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to resolve checkpoint")
 		}
 		if dynamo.IsIntraPodFailoverEnabled(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
 			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
 		}
-		if err := gms.OverlayClients(
-			&info.GPUMemoryService,
-			info.CheckpointName,
-			info.Exists,
-			dynamo.GetGPUMemoryService(component),
-		); err != nil {
+		if err := gms.OverlayClients(&info.GPUMemoryService, info.CheckpointName, info.Exists, dynamo.GetGPUMemoryService(component)); err != nil {
 			return nil, errors.Wrap(err, "failed to apply checkpoint gpuMemoryService config")
 		}
 		checkpointInfo = info
@@ -231,62 +340,34 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		commonconsts.MultinodeDeploymentTypeLWS,
 		checkpointInfo,
 		containerGPUs,
-		dynamo.GenerateBasePodSpecForControllerOptions{
-			WorkloadComponentType: nvidiacomv1beta1.ComponentType(componentType),
-		},
+		dynamo.GenerateBasePodSpecForControllerOptions{WorkloadComponentType: nvidiacomv1beta1.ComponentType(componentType)},
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate base pod spec")
 	}
-	if r.runtimeConfig.Gate.Enabled(features.Checkpoint) {
-		if checkpointInfo == nil ||
-			string(checkpointInfo.StartupPolicy) == string(nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint) {
-			if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
-				ctx,
-				r.reader,
-				dcd.Namespace,
-				podSpec,
-				checkpointInfo,
-				r.config.Checkpoint.Storage,
-				r.config.Checkpoint.EffectiveSeccompProfile(),
-			); err != nil {
-				return nil, errors.Wrap(err, "failed to inject checkpoint config")
-			}
+	if r.runtimeConfig.Gate.Enabled(features.Checkpoint) && (checkpointInfo == nil || string(checkpointInfo.StartupPolicy) == string(nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint)) {
+		if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(ctx, r.reader, dcd.Namespace, podSpec, checkpointInfo, r.config.Checkpoint.Storage, r.config.Checkpoint.EffectiveSeccompProfile()); err != nil {
+			return nil, errors.Wrap(err, "failed to inject checkpoint config")
 		}
 	}
-
 	if len(podSpec.Containers) == 0 {
 		return nil, errors.New("no containers found in base pod spec")
 	}
-
 	podLabels[commonconsts.KubeLabelDynamoSelector] = kubeName
-
 	if commonController.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, podAnnotations) {
 		podLabels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
 		podLabels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 	}
-
-	if checkpointInfo != nil &&
-		(checkpointInfo.StartupPolicy == "" ||
-			string(checkpointInfo.StartupPolicy) == string(nvidiacomv1beta1.CheckpointStartupPolicyImmediate)) {
+	if checkpointInfo != nil && (checkpointInfo.StartupPolicy == "" || string(checkpointInfo.StartupPolicy) == string(nvidiacomv1beta1.CheckpointStartupPolicyImmediate)) {
 		if err := checkpoint.ApplyRestoreCandidateMetadata(podLabels, podAnnotations, checkpointInfo); err != nil {
 			return nil, errors.Wrap(err, "failed to apply checkpoint candidate metadata")
 		}
-	} else if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(
-		podLabels,
-		podAnnotations,
-		checkpointInfo,
-		r.config.Checkpoint.Storage,
-	); err != nil {
+	} else if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(podLabels, podAnnotations, checkpointInfo, r.config.Checkpoint.Storage); err != nil {
 		return nil, errors.Wrap(err, "failed to apply checkpoint metadata")
 	}
-
 	if podSpec.ServiceAccountName == "" {
 		serviceAccounts := &corev1.ServiceAccountList{}
-		err = r.reader.List(ctx, serviceAccounts, client.InNamespace(dcd.Namespace), client.MatchingLabels{
-			commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue,
-		})
-		if err != nil {
+		if err := r.reader.List(ctx, serviceAccounts, client.InNamespace(dcd.Namespace), client.MatchingLabels{commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue}); err != nil {
 			return nil, errors.Wrapf(err, "failed to list service accounts in namespace %s", dcd.Namespace)
 		}
 		if len(serviceAccounts.Items) > 0 {
@@ -295,14 +376,116 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 			podSpec.ServiceAccountName = DefaultServiceAccountName
 		}
 	}
+	return &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: podLabels, Annotations: podAnnotations}, Spec: *podSpec}, nil
+}
 
-	return &corev1.PodTemplateSpec{
-		ObjectMeta: metav1.ObjectMeta{
-			Labels:      podLabels,
-			Annotations: podAnnotations,
-		},
-		Spec: *podSpec,
-	}, nil
+func (r *dcdWorkloadRenderer) generateComponentPodTemplateSpec(
+	ctx context.Context,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	podLabels map[string]string,
+	podAnnotations map[string]string,
+	componentType string,
+	workloadName string,
+	parentGraphDeploymentName string,
+	namespace string,
+	componentName string,
+	dynamoNamespace string,
+	backendFramework dynamo.BackendFramework,
+	role dynamo.Role,
+	containerGPUs dynamo.ContainerGPUCount,
+) (*corev1.PodTemplateSpec, error) {
+	component = component.DeepCopy()
+	if componentType != "" {
+		component.ComponentType = nvidiacomv1beta1.ComponentType(componentType)
+	}
+	if dynamoNamespace == "" {
+		return nil, fmt.Errorf("expected workload %s to have a dynamoNamespace", workloadName)
+	}
+
+	if podAnnotations[commonconsts.KubeAnnotationEnableMetrics] != commonconsts.KubeLabelValueFalse {
+		podLabels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
+	}
+	if parentGraphDeploymentName != "" {
+		podLabels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentGraphDeploymentName
+	}
+	if componentType != "" {
+		podLabels[commonconsts.KubeLabelDynamoComponentType] = componentType
+	}
+	if componentName != "" {
+		podLabels[commonconsts.KubeLabelDynamoComponent] = componentName
+	}
+	if dynamoNamespace != "" {
+		podLabels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
+	}
+
+	var checkpointInfo *checkpoint.CheckpointInfo
+	if checkpointConfig := dynamo.GetCheckpoint(component); r.runtimeConfig.Gate.Enabled(features.Checkpoint) && checkpointConfig != nil {
+		info, err := checkpoint.ResolveCheckpointForService(ctx, r.reader, namespace, dynamo.ToAlphaCheckpointConfig(checkpointConfig))
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to resolve checkpoint")
+		}
+		if dynamo.IsIntraPodFailoverEnabled(component) {
+			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
+		}
+		if err := gms.OverlayClients(&info.GPUMemoryService, info.CheckpointName, info.Exists, dynamo.GetGPUMemoryService(component)); err != nil {
+			return nil, errors.Wrap(err, "failed to apply checkpoint gpuMemoryService config")
+		}
+		checkpointInfo = info
+	}
+
+	podSpec, err := dynamo.GenerateBasePodSpec(
+		component,
+		backendFramework,
+		r.dockerSecretRetriever,
+		parentGraphDeploymentName,
+		namespace,
+		role,
+		component.GetNumberOfNodes(),
+		r.config,
+		commonconsts.MultinodeDeploymentTypeLWS,
+		componentName,
+		checkpointInfo,
+		nil,
+		containerGPUs,
+	)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to generate base pod spec")
+	}
+	if r.runtimeConfig.Gate.Enabled(features.Checkpoint) && (checkpointInfo == nil || string(checkpointInfo.StartupPolicy) == string(nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint)) {
+		if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(ctx, r.reader, namespace, podSpec, checkpointInfo, r.config.Checkpoint.Storage, r.config.Checkpoint.EffectiveSeccompProfile()); err != nil {
+			return nil, errors.Wrap(err, "failed to inject checkpoint config")
+		}
+	}
+	if len(podSpec.Containers) == 0 {
+		return nil, errors.New("no containers found in base pod spec")
+	}
+
+	podLabels[commonconsts.KubeLabelDynamoSelector] = workloadName
+	if commonController.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, podAnnotations) {
+		podLabels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+		podLabels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
+	}
+	if checkpointInfo != nil && (checkpointInfo.StartupPolicy == "" || string(checkpointInfo.StartupPolicy) == string(nvidiacomv1beta1.CheckpointStartupPolicyImmediate)) {
+		if err := checkpoint.ApplyRestoreCandidateMetadata(podLabels, podAnnotations, checkpointInfo); err != nil {
+			return nil, errors.Wrap(err, "failed to apply checkpoint candidate metadata")
+		}
+	} else if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(podLabels, podAnnotations, checkpointInfo, r.config.Checkpoint.Storage); err != nil {
+		return nil, errors.Wrap(err, "failed to apply checkpoint metadata")
+	}
+
+	if podSpec.ServiceAccountName == "" {
+		serviceAccounts := &corev1.ServiceAccountList{}
+		if err := r.reader.List(ctx, serviceAccounts, client.InNamespace(namespace), client.MatchingLabels{commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue}); err != nil {
+			return nil, errors.Wrapf(err, "failed to list service accounts in namespace %s", namespace)
+		}
+		if len(serviceAccounts.Items) > 0 {
+			podSpec.ServiceAccountName = serviceAccounts.Items[0].Name
+		} else {
+			podSpec.ServiceAccountName = DefaultServiceAccountName
+		}
+	}
+
+	return &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: podLabels, Annotations: podAnnotations}, Spec: *podSpec}, nil
 }
 
 func (r *dcdWorkloadRenderer) generateService(
@@ -352,6 +535,52 @@ func (r *dcdWorkloadRenderer) generateService(
 	return svc, false, nil
 }
 
+func (r *dcdWorkloadRenderer) generateServiceForDGDComponent(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	componentName string,
+	serviceName string,
+) (*corev1.Service, bool, error) {
+	annotations := dynamo.GetDGDComponentResourceAnnotations(dgd, componentName, component)
+	labels := dynamo.GetDGDComponentResourceLabels(dgd, componentName, component)
+	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = dgd.Name
+	labels[commonconsts.KubeLabelDynamoComponent] = componentName
+	labels[commonconsts.KubeLabelDynamoNamespace] = dynamo.GetDynamoNamespace(dgd, component)
+	dynamo.AddBaseModelLabel(labels, component.ModelRef)
+	dynamo.AddBaseModelAnnotation(annotations, component.ModelRef)
+	isK8sDiscovery := commonController.IsK8sDiscoveryEnabled(r.config.Discovery.Backend, annotations)
+	componentType := string(component.ComponentType)
+	if !isK8sDiscovery && componentType != commonconsts.ComponentTypeFrontend {
+		return &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: dynamo.NormalizeKubeResourceName(serviceName), Namespace: dgd.Namespace}}, true, nil
+	}
+	dynamoNamespace := dynamo.GetDynamoNamespace(dgd, component)
+	if dynamoNamespace == "" {
+		return nil, false, fmt.Errorf("expected component %s to have a dynamoNamespace", componentName)
+	}
+	workloadComponentType, err := r.getWorkloadComponentType(ctx, dgd.Namespace, serviceName, componentType, labels)
+	if err != nil {
+		return nil, false, err
+	}
+	service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
+		ServiceName:     serviceName,
+		Namespace:       dgd.Namespace,
+		ComponentType:   workloadComponentType,
+		DynamoNamespace: dynamoNamespace,
+		ComponentName:   componentName,
+		Labels:          labels,
+		Annotations:     annotations,
+		IsK8sDiscovery:  isK8sDiscovery,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if component.IsMultinode() {
+		service.Spec.Selector[dcdWorkloadRoleLabel] = string(dynamo.RoleLeader)
+	}
+	return service, false, nil
+}
+
 func (r *dcdWorkloadRenderer) getDCDWorkloadPodLabels(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
@@ -386,16 +615,31 @@ func (r *dcdWorkloadRenderer) getDCDWorkloadComponentType(
 		return "", nil
 	}
 
-	componentType := dynamo.GetDCDWorkloadComponentType(dcd)
+	return r.getWorkloadComponentType(
+		ctx,
+		dcd.Namespace,
+		dcd.Name,
+		dynamo.GetDCDWorkloadComponentType(dcd),
+		dcd.GetLabels(),
+	)
+}
+
+func (r *dcdWorkloadRenderer) getWorkloadComponentType(
+	ctx context.Context,
+	namespace string,
+	workloadName string,
+	componentType string,
+	labels map[string]string,
+) (string, error) {
 	if componentType == commonconsts.ComponentTypeWorker || !dynamo.IsWorkerComponent(componentType) {
 		return componentType, nil
 	}
 
-	if hasLegacyWorkerSelector(dcd.GetLabels(), componentType) {
+	if hasLegacyWorkerSelector(labels, componentType) {
 		return commonconsts.ComponentTypeWorker, nil
 	}
 
-	legacy, err := r.hasExistingLegacyWorkerSelector(ctx, dcd, componentType)
+	legacy, err := r.hasExistingLegacyWorkerSelector(ctx, namespace, workloadName, componentType)
 	if err != nil {
 		return "", err
 	}
@@ -408,26 +652,27 @@ func (r *dcdWorkloadRenderer) getDCDWorkloadComponentType(
 
 func (r *dcdWorkloadRenderer) hasExistingLegacyWorkerSelector(
 	ctx context.Context,
-	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	namespace string,
+	workloadName string,
 	componentType string,
 ) (bool, error) {
-	if dcd == nil || r == nil || r.reader == nil {
+	if r == nil || r.reader == nil {
 		return false, nil
 	}
 
 	deployment := &appsv1.Deployment{}
-	if err := r.reader.Get(ctx, types.NamespacedName{Name: dcd.Name, Namespace: dcd.Namespace}, deployment); err == nil {
+	if err := r.reader.Get(ctx, types.NamespacedName{Name: workloadName, Namespace: namespace}, deployment); err == nil {
 		if hasLegacyWorkerSelector(deployment.Spec.Template.Labels, componentType) {
 			return true, nil
 		}
 	} else if !k8serrors.IsNotFound(err) {
-		return false, fmt.Errorf("failed to get deployment %s/%s: %w", dcd.Namespace, dcd.Name, err)
+		return false, fmt.Errorf("failed to get deployment %s/%s: %w", namespace, workloadName, err)
 	}
 
 	if r.runtimeConfig.Gate.Enabled(features.LWS) {
-		lwsName := leaderWorkerSetName(dcd)
+		lwsName := fmt.Sprintf("%s-0", workloadName)
 		leaderWorkerSet := &leaderworkersetv1.LeaderWorkerSet{}
-		if err := r.reader.Get(ctx, types.NamespacedName{Name: lwsName, Namespace: dcd.Namespace}, leaderWorkerSet); err == nil {
+		if err := r.reader.Get(ctx, types.NamespacedName{Name: lwsName, Namespace: namespace}, leaderWorkerSet); err == nil {
 			template := leaderWorkerSet.Spec.LeaderWorkerTemplate
 			if template.LeaderTemplate != nil && hasLegacyWorkerSelector(template.LeaderTemplate.Labels, componentType) {
 				return true, nil
@@ -436,16 +681,16 @@ func (r *dcdWorkloadRenderer) hasExistingLegacyWorkerSelector(
 				return true, nil
 			}
 		} else if !k8serrors.IsNotFound(err) {
-			return false, fmt.Errorf("failed to get leaderworkerset %s/%s: %w", dcd.Namespace, lwsName, err)
+			return false, fmt.Errorf("failed to get leaderworkerset %s/%s: %w", namespace, lwsName, err)
 		}
 	}
 
-	serviceName := dynamo.NormalizeKubeResourceName(dcd.Name)
+	serviceName := dynamo.NormalizeKubeResourceName(workloadName)
 	service := &corev1.Service{}
-	if err := r.reader.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: dcd.Namespace}, service); err == nil {
+	if err := r.reader.Get(ctx, types.NamespacedName{Name: serviceName, Namespace: namespace}, service); err == nil {
 		return hasLegacyWorkerSelector(service.Spec.Selector, componentType), nil
 	} else if !k8serrors.IsNotFound(err) {
-		return false, fmt.Errorf("failed to get service %s/%s: %w", dcd.Namespace, serviceName, err)
+		return false, fmt.Errorf("failed to get service %s/%s: %w", namespace, serviceName, err)
 	}
 
 	return false, nil

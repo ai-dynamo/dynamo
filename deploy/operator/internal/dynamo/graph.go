@@ -294,9 +294,28 @@ func GenerateDynamoComponentsDeployments(
 	existingRestartAnnotations map[string]string,
 	rollingUpdateCtx RollingUpdateContext,
 ) (map[string]*v1beta1.DynamoComponentDeployment, error) {
-	deployments := make(map[string]*v1beta1.DynamoComponentDeployment)
-	backendFramework, err := backendFrameworkForGeneratedDCDs(parentDGD)
+	components, err := NormalizeDynamoGraphDeploymentComponents(
+		parentDGD,
+		restartState,
+		existingRestartAnnotations,
+		rollingUpdateCtx,
+	)
 	if err != nil {
+		return nil, err
+	}
+	return GenerateDynamoComponentsDeploymentsFromNormalized(parentDGD, components, rollingUpdateCtx)
+}
+
+// NormalizeDynamoGraphDeploymentComponents applies the component-level
+// defaults and rollout mutations shared by all workload lowerings.
+func NormalizeDynamoGraphDeploymentComponents(
+	parentDGD *v1beta1.DynamoGraphDeployment,
+	restartState *RestartState,
+	existingRestartAnnotations map[string]string,
+	rollingUpdateCtx RollingUpdateContext,
+) (map[string]*v1beta1.DynamoComponentDeploymentSharedSpec, error) {
+	components := make(map[string]*v1beta1.DynamoComponentDeploymentSharedSpec)
+	if _, err := backendFrameworkForGeneratedDCDs(parentDGD); err != nil {
 		return nil, err
 	}
 
@@ -317,14 +336,55 @@ func GenerateDynamoComponentsDeployments(
 			}
 		}
 
+		normalized, err := normalizeDGDComponent(
+			parentDGD,
+			componentName,
+			component,
+			restartState,
+			existingRestartAnnotations,
+			rollingUpdateCtx,
+		)
+		if err != nil {
+			return nil, err
+		}
+		components[componentName] = normalized
+	}
+
+	return components, nil
+}
+
+// GenerateDynamoComponentsDeploymentsFromNormalized lowers the supplied
+// normalized component specs into real DCD API objects. Callers that own a
+// different provider can lower only the components that remain on the DCD
+// path without first materializing DCDs for their own components.
+func GenerateDynamoComponentsDeploymentsFromNormalized(
+	parentDGD *v1beta1.DynamoGraphDeployment,
+	components map[string]*v1beta1.DynamoComponentDeploymentSharedSpec,
+	rollingUpdateCtx RollingUpdateContext,
+) (map[string]*v1beta1.DynamoComponentDeployment, error) {
+	deployments := make(map[string]*v1beta1.DynamoComponentDeployment, len(components))
+	backendFramework, err := backendFrameworkForGeneratedDCDs(parentDGD)
+	if err != nil {
+		return nil, err
+	}
+	for componentName, component := range components {
+		if component == nil {
+			return nil, fmt.Errorf("normalized component %q is nil", componentName)
+		}
 		dynamoNamespace := parentDGD.GetDynamoNamespaceForComponent(component)
-		dcd, err := generateSingleDCD(parentDGD, componentName, component, dynamoNamespace, backendFramework, restartState, existingRestartAnnotations, rollingUpdateCtx)
+		dcd, err := generateSingleDCDFromNormalized(
+			parentDGD,
+			componentName,
+			component,
+			dynamoNamespace,
+			backendFramework,
+			rollingUpdateCtx,
+		)
 		if err != nil {
 			return nil, err
 		}
 		deployments[componentName] = dcd
 	}
-
 	return deployments, nil
 }
 
@@ -413,6 +473,61 @@ func GetDynamoNamespace(object metav1.Object, service *v1beta1.DynamoComponentDe
 	return v1beta1.ComputeDynamoNamespace(service.GlobalDynamoNamespace, object.GetNamespace(), object.GetName())
 }
 
+func normalizeDGDComponent(
+	parentDGD *v1beta1.DynamoGraphDeployment,
+	componentName string,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	restartState *RestartState,
+	existingRestartAnnotations map[string]string,
+	rollingUpdateCtx RollingUpdateContext,
+) (*v1beta1.DynamoComponentDeploymentSharedSpec, error) {
+	normalized := component.DeepCopy()
+
+	// Keep the EPP mTLS safety default in the component input before graph-wide
+	// metadata is merged so a graph annotation cannot override it.
+	if normalized.ComponentType == commonconsts.ComponentTypeEPP {
+		podTemplate := ensurePodTemplate(normalized)
+		if _, exists := podTemplate.Annotations[commonconsts.KubeAnnotationIstioSidecarInject]; !exists {
+			podTemplate.Annotations[commonconsts.KubeAnnotationIstioSidecarInject] = "false"
+		}
+	}
+
+	applyDGDTemplateDefaults(normalized, parentDGD, nil)
+
+	if IsWorkerComponent(string(normalized.ComponentType)) {
+		podTemplate := ensurePodTemplate(normalized)
+		podTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] = rollingUpdateCtx.NewWorkerHash
+		if parentDGD.HasEPPComponent() {
+			podTemplate.Labels[commonconsts.KubeLabelDynamoComponentClass] = commonconsts.ComponentClassWorker
+		}
+	}
+
+	if restartState.ShouldAnnotateComponent(componentName) {
+		ensurePodTemplate(normalized).Annotations[commonconsts.RestartAnnotation] = restartState.Timestamp
+	} else if existingRestartAt := existingRestartAnnotations[componentName]; existingRestartAt != "" {
+		ensurePodTemplate(normalized).Annotations[commonconsts.RestartAnnotation] = existingRestartAt
+	}
+
+	if normalized.ComponentType == commonconsts.ComponentTypePlanner {
+		ensurePodTemplate(normalized).Spec.ServiceAccountName = commonconsts.PlannerServiceAccountName
+	}
+
+	if err := applyDynDeploymentConfigToComponent(
+		normalized,
+		componentName,
+		normalized.ComponentType == commonconsts.ComponentTypeFrontend,
+		commonconsts.DynamoServicePort,
+	); err != nil {
+		return nil, err
+	}
+
+	if newReplicas, ok := rollingUpdateCtx.NewWorkerReplicaTargetsByComponent[componentName]; rollingUpdateCtx.InProgress() && IsWorkerComponent(string(normalized.ComponentType)) && ok {
+		normalized.Replicas = ptr.To(newReplicas)
+	}
+
+	return normalized, nil
+}
+
 // generateSingleDCD creates a DynamoComponentDeployment for a single service.
 func generateSingleDCD(
 	parentDGD *v1beta1.DynamoGraphDeployment,
@@ -422,6 +537,35 @@ func generateSingleDCD(
 	backendFramework string,
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
+	rollingUpdateCtx RollingUpdateContext,
+) (*v1beta1.DynamoComponentDeployment, error) {
+	normalized, err := normalizeDGDComponent(
+		parentDGD,
+		componentName,
+		component,
+		restartState,
+		existingRestartAnnotations,
+		rollingUpdateCtx,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return generateSingleDCDFromNormalized(
+		parentDGD,
+		componentName,
+		normalized,
+		dynamoNamespace,
+		backendFramework,
+		rollingUpdateCtx,
+	)
+}
+
+func generateSingleDCDFromNormalized(
+	parentDGD *v1beta1.DynamoGraphDeployment,
+	componentName string,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	dynamoNamespace string,
+	backendFramework string,
 	rollingUpdateCtx RollingUpdateContext,
 ) (*v1beta1.DynamoComponentDeployment, error) {
 	deployment := &v1beta1.DynamoComponentDeployment{}
@@ -456,31 +600,6 @@ func generateSingleDCD(
 		}
 	}
 
-	// Stamp sidecar.istio.io/inject: "false" on EPP pod templates before
-	// DGD-level annotations are merged in. EPP serves its own TLS on port 9002
-	// (--secure-serving true); an Istio sidecar intercepting that port causes a
-	// double-TLS handshake failure when the namespace has STRICT mTLS, which
-	// surfaces as cx_connect_fail / HTTP 500 on the gateway.
-	//
-	// Placement before applyDGDTemplateDefaults is intentional: the merge
-	// function (mergeLowPriorityMetadata) does not overwrite keys already
-	// present in the destination map, so a graph-wide DGD Spec.Annotations
-	// entry of sidecar.istio.io/inject: "true" cannot silently bypass the
-	// EPP opt-out. An explicit per-EPP podTemplate annotation set by the user
-	// is preserved by the !exists guard.
-	if component.ComponentType == commonconsts.ComponentTypeEPP {
-		podTemplate := ensurePodTemplate(&deployment.Spec.DynamoComponentDeploymentSharedSpec)
-		if _, exists := podTemplate.Annotations[commonconsts.KubeAnnotationIstioSidecarInject]; !exists {
-			podTemplate.Annotations[commonconsts.KubeAnnotationIstioSidecarInject] = "false"
-		}
-	}
-
-	applyDGDTemplateDefaults(
-		&deployment.Spec.DynamoComponentDeploymentSharedSpec,
-		parentDGD,
-		nil, // no topology domains for DCDs (only applies for Grove pathway)
-	)
-
 	// Topology label controller marker: set on the DCD so it propagates to pods.
 	if shouldApplyKvTransferPolicyToWorkerComponent(component, parentDGD) {
 		if deployment.Annotations == nil {
@@ -489,29 +608,7 @@ func generateSingleDCD(
 		applyKvTransferPolicyTopologyAnnotations(deployment.Annotations, parentDGD.Spec.Experimental.KvTransferPolicy)
 	}
 
-	// Apply restart annotation if this component should be restarted.
-	if restartState.ShouldAnnotateComponent(componentName) {
-		podTemplate := ensurePodTemplate(&deployment.Spec.DynamoComponentDeploymentSharedSpec)
-		podTemplate.Annotations[commonconsts.RestartAnnotation] = restartState.Timestamp
-	} else if existingRestartAnnotations != nil {
-		if existingRestartAt, ok := existingRestartAnnotations[componentName]; ok && existingRestartAt != "" {
-			podTemplate := ensurePodTemplate(&deployment.Spec.DynamoComponentDeploymentSharedSpec)
-			podTemplate.Annotations[commonconsts.RestartAnnotation] = existingRestartAt
-		}
-	}
-
-	if component.ComponentType == commonconsts.ComponentTypePlanner {
-		ensurePodTemplate(&deployment.Spec.DynamoComponentDeploymentSharedSpec).Spec.ServiceAccountName = commonconsts.PlannerServiceAccountName
-	}
-
-	if err := applyDynDeploymentConfig(deployment, commonconsts.DynamoServicePort); err != nil {
-		return nil, err
-	}
-
-	// during a rolling update, the replica count is determined by the rollingUpdateCtx instead of the component spec
-	if newReplicas, ok := rollingUpdateCtx.NewWorkerReplicaTargetsByComponent[componentName]; rollingUpdateCtx.InProgress() && IsWorkerComponent(string(component.ComponentType)) && ok {
-		deployment.Spec.Replicas = ptr.To(newReplicas)
-	} else if component.Replicas != nil {
+	if component.Replicas != nil {
 		deployment.Spec.Replicas = component.Replicas
 	}
 
@@ -590,7 +687,21 @@ func GetDGDComponentPreservedIngressSpec(dgd *v1beta1.DynamoGraphDeployment, com
 }
 
 func applyDynDeploymentConfig(dcd *v1beta1.DynamoComponentDeployment, frontendPort int) error {
-	main := GetMainContainer(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
+	return applyDynDeploymentConfigToComponent(
+		&dcd.Spec.DynamoComponentDeploymentSharedSpec,
+		GetDCDComponentName(dcd),
+		dcd.IsFrontendComponent(),
+		frontendPort,
+	)
+}
+
+func applyDynDeploymentConfigToComponent(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	componentName string,
+	isFrontend bool,
+	frontendPort int,
+) error {
+	main := GetMainContainer(component)
 	if main == nil {
 		return nil
 	}
@@ -598,8 +709,7 @@ func applyDynDeploymentConfig(dcd *v1beta1.DynamoComponentDeployment, frontendPo
 	if rawConfig == nil {
 		return nil
 	}
-	componentName := GetDCDComponentName(dcd)
-	if dcd.IsFrontendComponent() {
+	if isFrontend {
 		updatedConfig, err := updateDynDeploymentConfigBytes(rawConfig, componentName, frontendPort)
 		if err != nil {
 			return err
@@ -611,12 +721,12 @@ func applyDynDeploymentConfig(dcd *v1beta1.DynamoComponentDeployment, frontendPo
 	if err != nil {
 		return err
 	}
-	serviceConfig := getDynDeploymentServiceConfig(config, componentName, dcd.IsFrontendComponent())
+	serviceConfig := getDynDeploymentServiceConfig(config, componentName, isFrontend)
 	if serviceConfig == nil || serviceConfig.ServiceArgs == nil {
 		return nil
 	}
-	if dcd.Spec.Replicas == nil && serviceConfig.ServiceArgs.Workers != nil {
-		dcd.Spec.Replicas = serviceConfig.ServiceArgs.Workers
+	if component.Replicas == nil && serviceConfig.ServiceArgs.Workers != nil {
+		component.Replicas = serviceConfig.ServiceArgs.Workers
 	}
 	return applyDynDeploymentResources(main, serviceConfig.ServiceArgs.Resources)
 }
