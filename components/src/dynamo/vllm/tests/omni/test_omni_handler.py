@@ -111,12 +111,29 @@ def test_streaming_sampling_params_preserves_request_overrides():
 
     result = streaming_sampling_params(engine_client, [requested])
 
-    assert result is not None
     assert result[0].temperature == 0.7
     assert result[0].max_tokens == 42
     assert result[0].top_p == 0.8
     assert result[0].output_kind == RequestOutputKind.DELTA
     assert requested.output_kind == RequestOutputKind.CUMULATIVE
+
+
+def test_streaming_sampling_params_preserves_explicit_empty_list():
+    engine_client = SimpleNamespace(
+        default_sampling_params_list=[SamplingParams(temperature=0.1)]
+    )
+
+    result = streaming_sampling_params(engine_client, [])
+
+    assert result == []
+
+
+def test_streaming_sampling_params_preserves_empty_engine_defaults():
+    engine_client = SimpleNamespace(default_sampling_params_list=[])
+
+    result = streaming_sampling_params(engine_client)
+
+    assert result == []
 
 
 class TestBuildEngineInputs:

@@ -23,16 +23,14 @@ DEFAULT_VIDEO_SIZE = "832x480"
 
 def streaming_sampling_params(
     engine_client: Any, sampling_params_list: list[Any] | None = None
-) -> list[Any] | None:
+) -> list[Any]:
     """Return request parameters or engine defaults configured for streaming."""
     source = (
         sampling_params_list
         if sampling_params_list is not None
         else engine_client.default_sampling_params_list
     )
-    if not source:
-        return None
-    return coerce_param_message_types(list(source), is_streaming=True)
+    return coerce_param_message_types(list(source or []), is_streaming=True)
 
 
 def shm_deserialize(shm_meta: dict) -> Any:
