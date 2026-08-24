@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use dynamo_llm::first_token::FirstTokenSource;
 use dynamo_llm::kv_router::publisher::{
     KvEventPublisher, KvEventSourceConfig, WorkerMetricsPublisher,
 };
@@ -29,8 +30,7 @@ use crate::metrics::{ComponentGauges, EngineMetrics};
 use crate::snapshot_publisher::SnapshotPublisher;
 
 /// Live publisher handles owned by `Worker` for the lifetime of serving.
-/// All variants are kept alive solely so their `Drop` impls run on
-/// shutdown — there is no background task to join.
+/// They keep the underlying publishers alive; there is no task to join during cleanup.
 pub(crate) struct PublisherHandles {
     #[allow(dead_code)]
     kv_publishers: Vec<Arc<KvEventPublisher>>,
@@ -40,6 +40,21 @@ pub(crate) struct PublisherHandles {
     /// inside don't drop their NATS endpoints prematurely.
     #[allow(dead_code)]
     snapshot_publisher: Option<Arc<SnapshotPublisher>>,
+    first_token_source: Option<FirstTokenSource>,
+}
+
+impl PublisherHandles {
+    pub(crate) fn first_token_source(&self) -> Option<FirstTokenSource> {
+        self.first_token_source.clone()
+    }
+
+    pub(crate) fn lifecycle_only(first_token_source: Option<FirstTokenSource>) -> Self {
+        Self {
+            kv_publishers: Vec::new(),
+            snapshot_publisher: None,
+            first_token_source,
+        }
+    }
 }
 
 // Sync — `KvEventPublisher::new_with_local_indexer` doesn't await. The
@@ -137,6 +152,7 @@ pub(crate) async fn setup_publishers(
     on_publisher_ready: Option<crate::engine::OnSnapshotPublisherReady>,
     kv_cache_block_size: Option<u32>,
     enable_local_indexer: bool,
+    first_token_source: Option<FirstTokenSource>,
 ) -> Result<PublisherHandles, DynamoError> {
     // KV event publishers require the engine's block size; without it, the
     // router can't translate token IDs into cache blocks. Snapshot publisher
@@ -175,5 +191,6 @@ pub(crate) async fn setup_publishers(
     Ok(PublisherHandles {
         kv_publishers,
         snapshot_publisher,
+        first_token_source,
     })
 }

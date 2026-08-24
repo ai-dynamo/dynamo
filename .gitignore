@@ -141,7 +141,10 @@ core.*
 !/.claude/skills
 /.agents/*
 !/.agents/skills
-/.codex
+/.codex/*
+!/.codex/config.toml
+!/.codex/agents/
+!/.codex/agents/*.toml
 /CLAUDE.md
 /CLAUDE.md.bak
 
@@ -177,3 +180,7 @@ docs/fern/components/nightly-selector-data.generated.ts
 
 # Local git worktrees
 .worktrees/
+
+
+# Optimization-run artifacts (EXP_ROOT lives at runs/<EXP_ID>/ in the repo root)
+/runs/

@@ -394,6 +394,88 @@ fn scrub_synthetic_chunk_metadata(
     Some(())
 }
 
+/// Estimates reasoning-token usage from the parser-classified Chat Completion stream.
+///
+/// This is intentionally chunk-granular: if one decoded chunk contains both reasoning
+/// and visible content, every token in that chunk is counted as reasoning. The estimate
+/// therefore overcounts visible-content tokens in mixed chunks. A positive count supplied
+/// by the backend remains authoritative.
+#[derive(Debug, Default)]
+struct ReasoningUsageEstimator {
+    total: u32,
+    active_choices: HashSet<u32>,
+}
+
+impl ReasoningUsageEstimator {
+    fn observe(&mut self, chunk: &NvCreateChatCompletionStreamResponse) {
+        let token_count = chunk
+            .llm_metrics
+            .as_ref()
+            .map_or(0, |metrics| metrics.chunk_tokens)
+            .try_into()
+            .unwrap_or(u32::MAX);
+
+        let has_reasoning = chunk
+            .inner
+            .choices
+            .iter()
+            .any(|choice| choice.delta.reasoning_content.is_some());
+        let active_without_visible_output = chunk.inner.choices.iter().any(|choice| {
+            self.active_choices.contains(&choice.index) && !choice_has_visible_output(choice)
+        });
+        let usage_chunk_while_reasoning =
+            chunk.inner.choices.is_empty() && !self.active_choices.is_empty();
+
+        if token_count > 0
+            && (has_reasoning || active_without_visible_output || usage_chunk_while_reasoning)
+        {
+            self.total = self.total.saturating_add(token_count);
+        }
+
+        for choice in &chunk.inner.choices {
+            if choice.delta.reasoning_content.is_some() {
+                self.active_choices.insert(choice.index);
+            } else if choice_has_visible_output(choice) {
+                self.active_choices.remove(&choice.index);
+            }
+        }
+    }
+
+    fn annotate(&self, usage: &mut dynamo_protocols::types::CompletionUsage) {
+        let details = usage.completion_tokens_details.get_or_insert_default();
+        if details.reasoning_tokens.unwrap_or(0) == 0 {
+            details.reasoning_tokens = Some(self.total);
+        }
+    }
+}
+
+fn choice_has_visible_output(choice: &dynamo_protocols::types::ChatChoiceStream) -> bool {
+    choice.delta.content.is_some()
+        || choice
+            .delta
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+}
+
+fn annotate_reasoning_usage<S>(
+    stream: S,
+) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+where
+    S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+{
+    let mut estimator = ReasoningUsageEstimator::default();
+    stream.map(move |mut response| {
+        if let Some(chunk) = response.data.as_mut() {
+            estimator.observe(chunk);
+            if let Some(usage) = chunk.inner.usage.as_mut() {
+                estimator.annotate(usage);
+            }
+        }
+        response
+    })
+}
+
 /// Drain what a choice still holds on the `defer_reasoning_for_nonempty_content`
 /// path, returning `(content, reasoning_content)` to add to its delta. Shared by
 /// the terminal-chunk drain and the end-of-stream fallback so the two cannot
@@ -3117,6 +3199,62 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
+        // Muse serves through ONE unified parser (ordered reasoning + content +
+        // tool calls), default-on. Bypass the v1 reasoning stage — its muse parser
+        // is gone, so it falls back to `Basic`, which cannot read the
+        // `to=self<|message|>` grammar — and the tool jail. auto/none only; a forced
+        // tool_choice keeps the guided-decode + jail path (that emits guided JSON,
+        // not the native markup the unified parser reads), and a structural-tag
+        // request is excluded for the SAME reason by a different flag. `none` routes
+        // here so the markers are still stripped, but its calls are suppressed below.
+        // Runs regardless of has_tools: muse owns reasoning and strips its markers
+        // even with zero tools.
+        //
+        // KNOWN GAP: this returns before `defer_reasoning_for_nonempty_content` is
+        // computed, so a `force_nonempty_content=true` request whose turn produced only
+        // reasoning streams empty `content` while the aggregator surfaces the reasoning
+        // AS content for the identical request. Closing it needs the per-choice
+        // buffering + EOF flush that `parse_reasoning_content_from_stream_inner` has;
+        // it is a follow-up, not a guard tweak. `stream_can_defer_all_output` already
+        // reports false for muse so nothing claims a deferral that does not happen.
+        // (`tool_parser_v2` is imported below; a `use` is in scope for the whole body.)
+        if let Some(family) = tool_parser_v2::unified_family(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ) && !uses_tool_call_structural_tag
+            && matches!(
+                request.inner.tool_choice.as_ref(),
+                None | Some(ChatCompletionToolChoiceOption::Auto)
+                    | Some(ChatCompletionToolChoiceOption::None)
+            )
+        {
+            let tool_definitions = request.inner.tools.as_ref().map(|tools| {
+                tools
+                    .iter()
+                    .map(|tool| dynamo_parsers::tool_calling::ToolDefinition {
+                        name: tool.function.name.clone(),
+                        parameters: tool.function.parameters.clone(),
+                        strict: tool.function.strict,
+                    })
+                    .collect()
+            });
+            // `none` routes here for the split and the stripping, but a caller that
+            // disabled tools must not get `tool_calls` back — every other family
+            // reaches that via `should_apply_tool_jail` returning false.
+            let emit_tool_calls = !matches!(
+                request.inner.tool_choice.as_ref(),
+                Some(ChatCompletionToolChoiceOption::None)
+            );
+            let unified: Pin<Box<dyn Stream<Item = _> + Send>> =
+                Box::pin(tool_parser_v2::apply_unified_stream(
+                    stream,
+                    tool_definitions,
+                    family,
+                    emit_tool_calls,
+                ));
+            return Ok(unified);
+        }
+
         // Guided output may be bare JSON or `reasoning</think>JSON`. Supported
         // parsers inspect the stream shape before deciding whether to parse it.
         let is_guided_tool_choice = matches!(
@@ -3217,6 +3355,11 @@ impl OpenAIPreprocessor {
             } else {
                 stream
             };
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
+            Box::pin(annotate_reasoning_usage(stream))
+        } else {
+            stream
+        };
 
         // Check if tools are present and if we should apply jail
         let has_tools = request
@@ -3237,12 +3380,22 @@ impl OpenAIPreprocessor {
                 .map(str::to_string)
         });
 
-        // Determine if we should apply jail (do this before moving request)
-        let should_jail = Self::should_apply_tool_jail(
-            effective_tool_call_parser.as_ref(),
-            request.inner.tool_choice.as_ref(),
-            has_tools,
-        )?;
+        // A parser describes model syntax, but request semantics decide whether
+        // tool calls are allowed. Keep K3's wrapper decoder active because that
+        // model wraps ordinary assistant content in XTML even without tools.
+        let parser_unwraps_all_kimi_k3_responses = effective_tool_call_parser
+            .as_deref()
+            .is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3"));
+        let tool_call_parsing_enabled = Self::tool_call_parsing_enabled(request);
+        let should_jail = if tool_call_parsing_enabled || parser_unwraps_all_kimi_k3_responses {
+            Self::should_apply_tool_jail(
+                effective_tool_call_parser.as_ref(),
+                request.inner.tool_choice.as_ref(),
+                has_tools,
+            )?
+        } else {
+            false
+        };
 
         // Convert OpenAI tools to parser ToolDefinition format before applying jail
         let tool_definitions = request.inner.tools.as_ref().map(|tools| {
@@ -3294,7 +3447,48 @@ impl OpenAIPreprocessor {
                 Box::pin(stream)
             };
 
-        Ok(transformed_stream)
+        Ok(Self::apply_tool_call_response_policy(
+            transformed_stream,
+            tool_call_parsing_enabled,
+        ))
+    }
+
+    /// Enforce the request's tool-call policy after model-specific parsing.
+    ///
+    /// Kimi K3 must keep its jail active even when the request does not permit
+    /// tools because the same parser unwraps ordinary XTML response channels.
+    /// The jail can still emit structured tool-call deltas while doing that
+    /// decoding, so parser activation alone is not an output-policy boundary.
+    /// Apply the policy to the shared stream before the HTTP streaming and
+    /// non-streaming paths diverge. This policy deliberately fails closed: when
+    /// a decoder consumes a tool-only turn, suppressing the unauthorized call
+    /// may leave an empty assistant turn with `finish_reason: stop`. Reconstructing
+    /// parser-specific wire markup as assistant content would leak internal
+    /// protocol tokens and could still be mistaken for an actionable call.
+    fn apply_tool_call_response_policy<S>(
+        stream: S,
+        tool_call_parsing_enabled: bool,
+    ) -> Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static>>
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        if tool_call_parsing_enabled {
+            return Box::pin(stream);
+        }
+
+        Box::pin(stream.map(|mut response| {
+            if let Some(data) = response.data.as_mut() {
+                for choice in &mut data.inner.choices {
+                    choice.delta.tool_calls = None;
+                    if choice.finish_reason
+                        == Some(dynamo_protocols::types::FinishReason::ToolCalls)
+                    {
+                        choice.finish_reason = Some(dynamo_protocols::types::FinishReason::Stop);
+                    }
+                }
+            }
+            response
+        }))
     }
 
     /// Ensure the first emitted delta for each choice carries the assistant role.
@@ -3709,9 +3903,10 @@ impl OpenAIPreprocessor {
         tool_choice: Option<&ChatCompletionToolChoiceOption>,
         has_tools: bool,
     ) -> std::result::Result<bool, Error> {
-        // K3 wraps every assistant response in XTML, even when the request has
-        // no tools. Keep its parser active so response/message wrappers never
-        // leak into OpenAI `content`.
+        // Necessary for now because K3 needs a special parser for XTML channel
+        // parsing on all responses, regardless of tool or reasoning usage.
+        // Keep its parser active so response/message wrappers never leak into
+        // OpenAI `content`, even when the request has no tools.
         if tool_call_parser.is_some_and(|parser| matches!(parser.as_str(), "kimi_k3" | "kimi-k3")) {
             return Ok(true);
         }
@@ -4066,6 +4261,10 @@ impl OpenAIPreprocessor {
         // - inkling: `<|message_model|>` / `<|content_thinking|>` /
         //   `<|content_text|>` / `<|content_invoke_tool_json|>` / `<|end_message|>`
         //   channel markers, consumed by both the tool-call and reasoning parsers.
+        // - muse_glimmer: `<|start|>` / `<|message|>` / `<|eom|>` / `<|eot|>`
+        //   channel markers, consumed by the unified parser (reasoning + content +
+        //   tool calls); matched on either parser name since the card may set only
+        //   the reasoning name.
         matches!(
             tool_call_parser,
             Some("gemma4")
@@ -4079,6 +4278,8 @@ impl OpenAIPreprocessor {
                 | Some("minimax_m3_nom")
                 | Some("minimax-m3-nom")
                 | Some("inkling")
+                | Some("muse_glimmer")
+                | Some("muse")
         ) || matches!(
             reasoning_parser,
             Some("gemma4")
@@ -4091,6 +4292,8 @@ impl OpenAIPreprocessor {
                 | Some("minimax_m3")
                 | Some("minimax-m3")
                 | Some("inkling")
+                | Some("muse_glimmer")
+                | Some("muse")
         )
     }
 
@@ -4176,6 +4379,17 @@ impl OpenAIPreprocessor {
         reasoning_parser: Option<&str>,
         chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
     ) -> bool {
+        // Muse streams through the unified parser, which withholds nothing, so a
+        // muse request never defers all output. Claiming otherwise switched SSE
+        // keep-alive frames on for a stream that has no buffering to cover.
+        if crate::protocols::openai::chat_completions::tool_parser_v2::unified_family(
+            None,
+            reasoning_parser,
+        )
+        .is_some()
+        {
+            return false;
+        }
         reasoning_parser.is_some()
             && Self::wants_reasoning_as_content_when_empty(chat_template_args)
             && !Self::is_reasoning_disabled_by_request(reasoning_parser, chat_template_args)
@@ -5353,7 +5567,7 @@ mod tests {
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
-        Role,
+        FinishReason, Role,
     };
 
     fn chat_stream_chunk(
@@ -5390,6 +5604,125 @@ mod tests {
         })
     }
 
+    fn reasoning_usage_chunk(
+        reasoning: Option<&str>,
+        content: Option<&str>,
+        chunk_tokens: usize,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = chat_stream_chunk(0, None);
+        let data = chunk.data.as_mut().unwrap();
+        data.inner.choices[0].delta.reasoning_content = reasoning.map(str::to_string);
+        data.inner.choices[0].delta.content = content
+            .map(str::to_string)
+            .map(ChatCompletionMessageContent::Text);
+        data.llm_metrics = Some(LLMMetricAnnotation {
+            chunk_tokens,
+            ..Default::default()
+        });
+        chunk
+    }
+
+    fn reasoning_usage_trailer(
+        completion_tokens: u32,
+        backend_reasoning_tokens: Option<u32>,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = chat_stream_chunk(0, None);
+        let data = chunk.data.as_mut().unwrap();
+        data.inner.choices.clear();
+        let mut usage = dynamo_protocols::types::CompletionUsage {
+            prompt_tokens: 5,
+            completion_tokens,
+            total_tokens: 5 + completion_tokens,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        };
+        if let Some(reasoning_tokens) = backend_reasoning_tokens {
+            usage
+                .completion_tokens_details
+                .get_or_insert_default()
+                .reasoning_tokens = Some(reasoning_tokens);
+        }
+        data.inner.usage = Some(usage);
+        data.llm_metrics = Some(LLMMetricAnnotation {
+            output_tokens: completion_tokens as usize,
+            ..Default::default()
+        });
+        chunk
+    }
+
+    #[tokio::test]
+    async fn reasoning_usage_estimator_stamps_shared_chat_usage() {
+        let output = annotate_reasoning_usage(stream::iter(vec![
+            reasoning_usage_chunk(Some("think"), None, 1),
+            reasoning_usage_chunk(Some(" more"), None, 1),
+            reasoning_usage_chunk(None, None, 1),
+            reasoning_usage_chunk(None, Some("answer"), 1),
+            reasoning_usage_trailer(4, None),
+        ]))
+        .collect::<Vec<_>>()
+        .await;
+
+        let usage = output
+            .last()
+            .and_then(|response| response.data.as_ref())
+            .and_then(|chunk| chunk.inner.usage.as_ref())
+            .unwrap();
+        assert_eq!(
+            usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens),
+            Some(3)
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_usage_estimator_documents_mixed_chunk_overcount() {
+        let output = annotate_reasoning_usage(stream::iter(vec![
+            reasoning_usage_chunk(Some("think"), Some("answer"), 4),
+            reasoning_usage_trailer(4, None),
+        ]))
+        .collect::<Vec<_>>()
+        .await;
+
+        let usage = output
+            .last()
+            .and_then(|response| response.data.as_ref())
+            .and_then(|chunk| chunk.inner.usage.as_ref())
+            .unwrap();
+        assert_eq!(
+            usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens),
+            Some(4),
+            "the chunk-granular estimate intentionally attributes the mixed chunk to reasoning"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_usage_estimator_preserves_positive_backend_count() {
+        let output = annotate_reasoning_usage(stream::iter(vec![
+            reasoning_usage_chunk(Some("two estimated tokens"), None, 2),
+            reasoning_usage_trailer(2, Some(1)),
+        ]))
+        .collect::<Vec<_>>()
+        .await;
+
+        let usage = output
+            .last()
+            .and_then(|response| response.data.as_ref())
+            .and_then(|chunk| chunk.inner.usage.as_ref())
+            .unwrap();
+        assert_eq!(
+            usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens),
+            Some(1)
+        );
+    }
+
     #[tokio::test]
     async fn test_normalize_chat_stream_roles_recovers_missing_first_role_per_choice() {
         let input = stream::iter(vec![
@@ -5412,6 +5745,161 @@ mod tests {
         assert_eq!(
             roles,
             vec![Some(Role::Assistant), Some(Role::Assistant), None, None,]
+        );
+    }
+
+    fn kimi_k3_reasoning_chunk(reasoning: &str) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = chat_stream_chunk(0, Some(Role::Assistant));
+        let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.delta.reasoning_content = Some(reasoning.to_string());
+        chunk
+    }
+
+    fn terminal_chat_stream_chunk() -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = chat_stream_chunk(0, None);
+        let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.finish_reason = Some(FinishReason::Stop);
+        chunk
+    }
+
+    async fn apply_kimi_k3_no_tools(
+        leaked_reasoning: &str,
+    ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "test"}]
+        }))
+        .unwrap();
+        let tool_call_parsing_enabled = OpenAIPreprocessor::tool_call_parsing_enabled(&request);
+        assert!(!tool_call_parsing_enabled, "request has no tools");
+
+        let jailed = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("kimi_k3".to_string()),
+            request.inner.tool_choice.clone(),
+            None,
+            false,
+            stream::iter(vec![
+                kimi_k3_reasoning_chunk(leaked_reasoning),
+                terminal_chat_stream_chunk(),
+            ]),
+        );
+
+        OpenAIPreprocessor::apply_tool_call_response_policy(jailed, tool_call_parsing_enabled)
+            .collect()
+            .await
+    }
+
+    #[tokio::test]
+    async fn test_kimi_k3_no_tools_preserves_decoded_content_and_reasoning() {
+        let responses = apply_kimi_k3_no_tools(concat!(
+            "The user requested an exact integer.",
+            "<|open|>response<|sep|>",
+            "323",
+            "<|close|>response<|sep|>",
+            "<|close|>message<|sep|>",
+            "<|end_of_msg|>"
+        ))
+        .await;
+
+        let choices: Vec<_> = responses
+            .iter()
+            .flat_map(|response| response.data.iter())
+            .flat_map(|data| data.inner.choices.iter())
+            .collect();
+        let content: String = choices
+            .iter()
+            .filter_map(|choice| match &choice.delta.content {
+                Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let reasoning: String = choices
+            .iter()
+            .filter_map(|choice| choice.delta.reasoning_content.as_deref())
+            .collect();
+
+        assert_eq!(content, "323");
+        assert_eq!(reasoning, "The user requested an exact integer.");
+        assert!(!content.contains("<|"));
+        assert!(!reasoning.contains("<|"));
+    }
+
+    #[tokio::test]
+    async fn test_kimi_k3_no_tools_suppresses_structured_calls_for_stream_and_batch() {
+        let responses = apply_kimi_k3_no_tools(concat!(
+            "Use the calculator.",
+            "<|open|>tools<|sep|>",
+            "<|open|>call tool=\"calc\" index=\"1\"<|sep|>",
+            "<|open|>argument key=\"x\" type=\"number\"<|sep|>323",
+            "<|close|>argument<|sep|>",
+            "<|close|>call<|sep|>",
+            "<|close|>tools<|sep|>",
+            "<|close|>message<|sep|>",
+            "<|end_of_msg|>"
+        ))
+        .await;
+
+        let choices: Vec<_> = responses
+            .iter()
+            .flat_map(|response| response.data.iter())
+            .flat_map(|data| data.inner.choices.iter())
+            .collect();
+        assert!(
+            choices
+                .iter()
+                .all(|choice| choice.delta.tool_calls.is_none()),
+            "streaming output must not expose parser-produced tool calls"
+        );
+        assert!(
+            choices
+                .iter()
+                .all(|choice| choice.finish_reason != Some(FinishReason::ToolCalls))
+        );
+        assert!(
+            choices
+                .iter()
+                .any(|choice| choice.finish_reason == Some(FinishReason::Stop))
+        );
+        let content = choices
+            .iter()
+            .filter_map(|choice| match &choice.delta.content {
+                Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert!(
+            content.is_empty(),
+            "a suppressed tool-only turn deliberately fails closed instead of exposing raw XTML"
+        );
+        assert_eq!(
+            choices
+                .iter()
+                .filter_map(|choice| choice.delta.reasoning_content.as_deref())
+                .collect::<String>(),
+            "Use the calculator."
+        );
+
+        let response =
+            crate::protocols::openai::chat_completions::aggregator::DeltaAggregator::apply(
+                stream::iter(responses),
+                crate::protocols::openai::ParsingOptions::new(None, None),
+            )
+            .await
+            .unwrap();
+        let choice = &response.inner.choices[0];
+        assert!(
+            choice.message.content.as_ref().is_none_or(|content| {
+                matches!(content, ChatCompletionMessageContent::Text(text) if text.is_empty())
+            }),
+            "batch output must not reconstruct the suppressed call as assistant content"
+        );
+        assert!(choice.message.tool_calls.is_none());
+        assert_eq!(choice.finish_reason, Some(FinishReason::Stop));
+        assert_eq!(
+            choice.message.reasoning_content.as_deref(),
+            Some("Use the calculator.")
         );
     }
 
@@ -5796,6 +6284,25 @@ mod tests {
                 Some("minimax-m3"),
                 true,
                 "MiniMax M3 SGLang aliases → required",
+            ),
+            (
+                Some("muse_glimmer"),
+                None,
+                true,
+                "muse_glimmer tool-call only → required \
+                 (`<|start|>` / `<|message|>` / `<|eom|>` / `<|eot|>` are special)",
+            ),
+            (
+                None,
+                Some("muse_glimmer"),
+                true,
+                "muse_glimmer reasoning-name only → required",
+            ),
+            (
+                Some("muse"),
+                None,
+                true,
+                "muse (SGLang's registered name, tool) → required",
             ),
             (None, None, false, "no parsers → not required"),
         ];
