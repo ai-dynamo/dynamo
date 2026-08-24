@@ -1,0 +1,129 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: axk2-vllm-agg-b200
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: your-registry.example.com/dynamo/vllm-runtime:axk2-v0.23.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - python3
+                - -m
+                - dynamo.frontend
+              env:
+                - name: HF_HOME
+                  value: /models
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /models
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+
+    - name: agg
+      type: worker
+      replicas: 1
+      sharedMemorySize: 200Gi
+      podTemplate:
+        spec:
+          runtimeClassName: nvidia
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-B200
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Exists
+              effect: NoSchedule
+          containers:
+            - name: main
+              image: your-registry.example.com/dynamo/vllm-runtime:axk2-v0.23.0
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace
+              command:
+                - /bin/bash
+                - -lc
+              args:
+                - |
+                  set -Eeuo pipefail
+                  mkdir -p "${VLLM_CACHE_ROOT}" "${TRITON_CACHE_DIR}" "${FLASHINFER_WORKSPACE_BASE}"
+                  exec python3 -m dynamo.vllm \
+                    --model skt/A.X-K2-NVFP4 \
+                    --served-model-name A.X-K2-NVFP4 \
+                    --tensor-parallel-size 4 \
+                    --enable-expert-parallel \
+                    --attention-backend FLASHINFER_MLA_SPARSE \
+                    --max-model-len 262144 \
+                    --max-num-seqs 32 \
+                    --max-num-batched-tokens 16384 \
+                    --gpu-memory-utilization 0.92 \
+                    --kv-cache-dtype fp8 \
+                    --block-size 64 \
+                    --enable-prefix-caching \
+                    --dyn-tool-call-parser hermes \
+                    --dyn-reasoning-parser deepseek_v3
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              env:
+                - name: HF_HOME
+                  value: /models
+                - name: HF_HUB_CACHE
+                  value: /models/hub
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: VLLM_CACHE_ROOT
+                  value: /models/runtime-cache/axk2-nvfp4/vllm
+                - name: TRITON_CACHE_DIR
+                  value: /models/runtime-cache/axk2-nvfp4/triton
+                - name: FLASHINFER_WORKSPACE_BASE
+                  value: /models/runtime-cache/axk2-nvfp4/flashinfer
+                - name: VLLM_USE_FLASHINFER_MOE_FP4
+                  value: "1"
+                - name: FLASHINFER_DISABLE_VERSION_CHECK
+                  value: "1"
+                - name: VLLM_SKIP_P2P_CHECK
+                  value: "1"
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+                failureThreshold: 90
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add:
+                    - IPC_LOCK
+                    - SYS_RESOURCE
+              resources:
+                requests:
+                  nvidia.com/gpu: "4"
+                  memory: 400Gi
+                limits:
+                  nvidia.com/gpu: "4"
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /models
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache

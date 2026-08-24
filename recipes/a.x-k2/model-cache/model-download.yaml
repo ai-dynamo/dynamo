@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-download
+spec:
+  backoffLimit: 3
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: model-download
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: model-download
+          image: python:3.10-slim
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          command: ["sh", "-c"]
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          env:
+            - name: MODEL_NAME
+              value: skt/A.X-K2-NVFP4
+            - name: HF_HOME
+              value: /models
+            # Disable the 64 GiB high-performance XET buffer on small CPU nodes.
+            - name: HF_XET_HIGH_PERFORMANCE
+              value: "0"
+          args:
+            - |
+              set -eu
+              # huggingface_hub 1.11.0 hf CLI imports click; recent typer no longer pulls it in
+              pip install --no-cache-dir huggingface_hub==1.11.0 click
+              hf download "${MODEL_NAME}"
+          resources:
+            requests:
+              cpu: "2"
+              # memory: "64Gi"
+              memory: "8Gi"
+            limits:
+              cpu: "8"
+              memory: "16Gi"
+          volumeMounts:
+            - name: shared-model-cache
+              mountPath: /models
+      volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
