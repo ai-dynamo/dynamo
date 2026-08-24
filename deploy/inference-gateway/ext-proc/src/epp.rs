@@ -1028,7 +1028,7 @@ impl EndpointPicker for Router {
                     decode_worker.worker_id,
                     decode_worker.dp_rank,
                     is_disaggregated,
-                    cache_namespace,
+                    cache_namespace.clone(),
                 )
                 .await
         {
@@ -1093,6 +1093,7 @@ impl EndpointPicker for Router {
             fallbacks: vec![],
             headers,
             token_ids: Some(tokens),
+            cache_namespace,
             reservation_id: None,
         })
     }

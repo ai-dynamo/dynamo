@@ -68,6 +68,9 @@ pub struct PickResult {
     /// Injected into the request body as `nvext.token_data` so the backend
     /// skips redundant tokenization. Mirrors Go EPP's `setTokenizedPrompt`.
     pub token_ids: Option<Vec<u32>>,
+    /// Cache namespace/salt to inject into the forwarded request body as `cache_salt`.
+    /// The backend uses this to hash KV blocks in the same namespace used for selection.
+    pub cache_namespace: Option<String>,
     /// Booking id the picker recorded for this request's load reservation, if
     /// any. The server carries it on the per-stream context and hands it back to
     /// [`EndpointPicker::on_prefill_complete`] / [`EndpointPicker::on_request_complete`]

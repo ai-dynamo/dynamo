@@ -28,7 +28,8 @@ use tokio::sync::Semaphore;
 
 use dynamo_kv_router::services::selection::SelectionService;
 use dynamo_llm::protocols::common::extensions::{
-    AgentHints, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, resolve_request_priority,
+    AgentHints, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, HEADER_TENANT_ID,
+    resolve_request_priority,
 };
 use serde::Deserialize;
 
@@ -149,19 +150,19 @@ impl EppRouter {
         )
     }
 
-    /// Tokenize a chat body for routing → `(token_ids, priority_jump,
-    /// strict_priority)`. Priority uses header-over-body precedence via
-    /// [`resolve_request_priority`].
+    /// Tokenize a chat body for routing. Returns token ids, priority, strict
+    /// priority, and the cache namespace found in the body (if any). The header
+    /// override is applied by the caller, not here.
     async fn tokenize(
         &self,
         request_body: bytes::Bytes,
         priority_header: Option<String>,
         strict_priority_header: Option<String>,
-    ) -> Result<(Vec<u32>, Option<f64>, Option<u32>), TokenizeError> {
-        // Parse only `nvext.agent_hints` for priority — the worker re-parses the
-        // full body anyway, so we skip allocating the large `messages`/tools
-        // fields. Malformed JSON still fails here (→ 400); a well-formed body that
-        // is not a valid chat request is caught by the renderer below.
+    ) -> Result<(Vec<u32>, Option<f64>, Option<u32>, Option<String>), TokenizeError> {
+        // Parse only the routing hot-path fields — the worker re-parses the full
+        // body anyway, so we skip allocating the large `messages`/tools fields.
+        // Malformed JSON still fails here (→ 400); a well-formed body that is not
+        // a valid chat request is caught by the renderer below.
         let hints: RoutingHints =
             serde_json::from_slice(&request_body).map_err(TokenizeError::InvalidBody)?;
         let resolved = resolve_request_priority(
@@ -169,13 +170,23 @@ impl EppRouter {
             priority_header.as_deref(),
             strict_priority_header.as_deref(),
         );
+        // Body-level cache namespace: prefer native top-level `cache_salt`,
+        // fallback to Dynamo's `nvext.cache_salt`.
+        let body_cache_namespace = hints
+            .cache_namespace
+            .or_else(|| hints.nvext.as_ref().and_then(|n| n.cache_namespace.clone()));
         // Moves the `Bytes` into reqwest (zero-copy) rather than copying.
         let token_ids = self
             .renderer
             .render_chat(request_body)
             .await
             .map_err(TokenizeError::Render)?;
-        Ok((token_ids, resolved.priority_jump, resolved.strict_priority))
+        Ok((
+            token_ids,
+            resolved.priority_jump,
+            resolved.strict_priority,
+            body_cache_namespace,
+        ))
     }
 
     /// Ready workers inside an Envoy `candidate_subset`, resolved in a single index
@@ -215,18 +226,24 @@ fn endpoint_in_subset(
 }
 
 /// Minimal deserialize target for the routing hot path: only `nvext.agent_hints`
-/// is needed for priority resolution, so the large `messages`/tools fields are
+/// and `cache_namespace` are needed, so the large `messages`/tools fields are
 /// never allocated. Unknown fields are ignored (no `deny_unknown_fields`).
 #[derive(Deserialize)]
 struct RoutingHints {
     #[serde(default)]
     nvext: Option<RoutingNvExt>,
+    /// Native vLLM top-level `cache_salt`.
+    #[serde(default, rename = "cache_salt")]
+    cache_namespace: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct RoutingNvExt {
     #[serde(default)]
     agent_hints: Option<AgentHints>,
+    /// Dynamo-style `nvext.cache_salt`.
+    #[serde(default, rename = "cache_salt")]
+    cache_namespace: Option<String>,
 }
 
 /// Case-insensitive lookup of the first non-empty, trimmed value for `name`.
@@ -322,10 +339,24 @@ impl EndpointPicker for EppRouter {
             first_header(&req.headers, HEADER_REQUEST_PRIORITY).map(str::to_owned);
         let strict_priority_header =
             first_header(&req.headers, HEADER_REQUEST_STRICT_PRIORITY).map(str::to_owned);
-        let (tokens, priority_jump, strict_priority) = self
+        let (tokens, priority_jump, strict_priority, body_cache_namespace) = self
             .tokenize(req.body.clone(), priority_header, strict_priority_header)
             .await
             .map_err(|e| e.into_pick_error(&req.request_id))?;
+
+        // Effective cache namespace priority:
+        //   1. header X-Tenant-Id
+        //   2. body top-level cache_salt
+        //   3. body nvext.cache_salt
+        // Selection hashes and the forwarded body must both use this value so the
+        // backend's KV-event hashes land in the same cache domain.
+        let header_tenant_id =
+            first_header(&req.headers, HEADER_TENANT_ID).filter(|s| !s.is_empty());
+        let effective_cache_namespace = if let Some(tenant) = header_tenant_id {
+            Some(tenant.to_string())
+        } else {
+            body_cache_namespace
+        };
 
         // EPP-minted booking key (not the reused `x-request-id`): stays
         // EPP-known/releasable and rides back on `PickResult::reservation_id`,
@@ -350,6 +381,7 @@ impl EndpointPicker for EppRouter {
             // Effective header-over-body values; `None` only when unset everywhere.
             priority_jump,
             strict_priority,
+            cache_namespace: effective_cache_namespace.clone(),
         };
 
         // On either error return below the guard (still armed) frees the booking.
@@ -380,6 +412,9 @@ impl EndpointPicker for EppRouter {
             endpoint,
             // Worker re-tokenizes the forwarded request (llm-d parity); no inject.
             token_ids: None,
+            // Cache namespace echoed back so the server can inject it into the
+            // forwarded body for the backend.
+            cache_namespace: effective_cache_namespace,
             // Booking id for the server's lifecycle callbacks (no shared map).
             reservation_id: Some(reservation_id),
             ..Default::default()

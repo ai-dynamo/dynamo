@@ -51,6 +51,8 @@ pub struct SelectRequest {
     pub allowed_worker_ids: Option<HashSet<u64>>,
     pub priority_jump: Option<f64>,
     pub strict_priority: Option<u32>,
+    /// Cache namespace/salt from the request. Must match what the backend uses for KV hashing.
+    pub cache_namespace: Option<String>,
 }
 
 /// Observability overlap summary (matched token counts).
@@ -336,6 +338,12 @@ impl Selector {
     /// rather than cloned on the hot path.
     pub async fn select_and_reserve(&self, req: SelectRequest) -> Result<SelectResponse> {
         let reservation_id = req.reservation_id;
+        tracing::trace!(
+            reservation_id = %reservation_id,
+            cache_namespace = ?req.cache_namespace,
+            token_count = req.token_ids.len(),
+            "select_and_reserve using cache namespace"
+        );
         let core_req = CoreSelectAndReserveRequest {
             model_name: req.model_name,
             routing_group: DEFAULT_ROUTING_GROUP.to_string(),
@@ -345,6 +353,8 @@ impl Selector {
             selection_id: Some(reservation_id.clone()),
             prompt: PromptRequest {
                 token_ids: Some(req.token_ids),
+                // Mix the cache namespace into selection hashes.
+                cache_namespace: req.cache_namespace,
                 ..Default::default()
             },
             router_config_override: None,
@@ -547,6 +557,7 @@ models:
             allowed_worker_ids: None,
             priority_jump: None,
             strict_priority: None,
+            cache_namespace: None,
         }
     }
 
@@ -917,5 +928,73 @@ models:
             .expect_err("duplicate IDs must be rejected");
         assert!(error.to_string().contains("duplicate worker_id 1"));
         assert!(selector.service.list_workers(None, None).is_empty());
+    }
+
+    /// Verify the cache namespace is mixed into block hashes:
+    /// same salt -> same hashes; different salts -> different hashes.
+    #[test]
+    fn cache_namespace_isolates_block_hashes() {
+        use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
+
+        let tokens: Vec<u32> = (1..=32).collect();
+        let block_size = 16u32;
+
+        let no_salt = compute_block_hash_for_seq(
+            &tokens,
+            block_size,
+            BlockHashOptions {
+                block_mm_infos: None,
+                lora_name: None,
+                cache_namespace: None,
+                is_eagle: Some(false),
+            },
+        );
+        let salt_a = compute_block_hash_for_seq(
+            &tokens,
+            block_size,
+            BlockHashOptions {
+                block_mm_infos: None,
+                lora_name: None,
+                cache_namespace: Some("salt-a"),
+                is_eagle: Some(false),
+            },
+        );
+        let salt_a_again = compute_block_hash_for_seq(
+            &tokens,
+            block_size,
+            BlockHashOptions {
+                block_mm_infos: None,
+                lora_name: None,
+                cache_namespace: Some("salt-a"),
+                is_eagle: Some(false),
+            },
+        );
+        let salt_b = compute_block_hash_for_seq(
+            &tokens,
+            block_size,
+            BlockHashOptions {
+                block_mm_infos: None,
+                lora_name: None,
+                cache_namespace: Some("salt-b"),
+                is_eagle: Some(false),
+            },
+        );
+
+        assert_eq!(
+            salt_a, salt_a_again,
+            "same salt must produce the same hashes (same-salt reuse)"
+        );
+        assert_ne!(
+            no_salt, salt_a,
+            "salted hashes must differ from the default namespace"
+        );
+        assert_ne!(
+            no_salt, salt_b,
+            "salted hashes must differ from the default namespace"
+        );
+        assert_ne!(
+            salt_a, salt_b,
+            "different salts must produce different hashes (cross-salt isolation)"
+        );
     }
 }
