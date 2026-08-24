@@ -1466,6 +1466,22 @@ class TestEmbeddingWorkerHandlerCancellation:
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)
+    async def test_abort_monitor_cleans_up_all_waiters(self):
+        handler = self._make_embedding_handler()
+        handler.shutdown_event = asyncio.Event()
+        context = self._make_context()
+        killed_or_stopped = context.async_killed_or_stopped.return_value
+
+        async with handler._abort_monitor(context, "test-req"):
+            while not handler.shutdown_event._waiters:
+                await asyncio.sleep(0)
+            assert len(handler.shutdown_event._waiters) == 1
+
+        assert killed_or_stopped.cancelled()
+        assert not handler.shutdown_event._waiters
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
     async def test_partial_failure_cancels_in_flight_encodes(self):
         """When one prompt's encode raises, the siblings must be cancelled.
 

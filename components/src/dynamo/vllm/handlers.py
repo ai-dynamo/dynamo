@@ -3851,11 +3851,12 @@ class EmbeddingWorkerHandler:
         embedding path (no ``is_prefill``, no ``abort_guard``).
         """
         shutdown_task: Optional[asyncio.Task] = None
+        wait_for: list[Any] = []
         try:
             # `list[Any]` mirrors BaseWorkerHandler._monitor_abort: the
             # iterable mixes the Future from async_killed_or_stopped() with
             # the Task from shutdown_event.wait().
-            wait_for: list[Any] = [context.async_killed_or_stopped()]
+            wait_for.append(context.async_killed_or_stopped())
             if self.shutdown_event is not None:
                 shutdown_task = asyncio.create_task(self.shutdown_event.wait())
                 wait_for.append(shutdown_task)
@@ -3895,18 +3896,13 @@ class EmbeddingWorkerHandler:
             )
             raise
         finally:
-            # On the success path the wrapping ``_abort_monitor`` cancels
-            # this coroutine while it's blocked in ``asyncio.wait``, which
-            # short-circuits past the pending-task cleanup loop above and
-            # leaves ``shutdown_task`` (the ``shutdown_event.wait()`` task)
-            # pending forever — one leaked task per embedding request.
-            # Cancel it here on every exit path.
-            if shutdown_task is not None and not shutdown_task.done():
-                shutdown_task.cancel()
-                try:
-                    await shutdown_task
-                except asyncio.CancelledError:
-                    pass
+            to_drain = []
+            for task in wait_for:
+                if not task.done():
+                    task.cancel()
+                    to_drain.append(task)
+            if to_drain:
+                await asyncio.gather(*to_drain, return_exceptions=True)
 
     @asynccontextmanager
     async def _abort_monitor(self, context: Context, request_id: str):
