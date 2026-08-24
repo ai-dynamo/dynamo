@@ -201,6 +201,15 @@ impl<'a> LookupPipeline<'a> {
         sequence: HashInput<'_>,
         lower_tier_options: LowerTierQueryOptions,
     ) -> Result<TieredMatchDetails, KvRouterError> {
+        // An empty hash sequence can match nothing, so answer it here instead
+        // of paying the primary, lower-tier, and side queries (a full network
+        // round trip for remote primaries). Empty sequences are routine: any
+        // prompt shorter than one KV block hashes to zero blocks, as do
+        // empty-token PotentialLoads probes (#10566). Mirrors the
+        // `PrimaryLookup::None` arm below.
+        if sequence.as_slice().is_empty() {
+            return Ok(TieredMatchDetails::default());
+        }
         match self.primary {
             PrimaryLookup::KvIndexer(_) | PrimaryLookup::Concurrent(_) => {
                 let Some(lower_tier) = self.lower_tier else {
@@ -264,6 +273,10 @@ impl<'a> LookupPipeline<'a> {
         &self,
         sequence: HashInput<'_>,
     ) -> Result<TieredMatchDetails, KvRouterError> {
+        // Same empty-sequence short-circuit as `find_matches_by_tier` above.
+        if sequence.as_slice().is_empty() {
+            return Ok(TieredMatchDetails::default());
+        }
         match self.primary {
             PrimaryLookup::KvIndexer(_) | PrimaryLookup::Concurrent(_) => {
                 let Some(lower_tier) = self.lower_tier else {
@@ -426,5 +439,64 @@ async fn merge_side_or_warn(
             );
             primary
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynamo_kv_router::indexer::KvIndexerMetrics;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+
+    /// The empty-sequence short-circuit must answer without consulting any
+    /// indexer. A cancelled `KvIndexer` cannot answer real queries, so the
+    /// only way the empty query can still succeed is by never reaching it.
+    #[tokio::test]
+    async fn empty_sequence_short_circuits_before_the_indexer() {
+        let token = CancellationToken::new();
+        let kv = KvIndexer::new_with_pruning(
+            token.clone(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            None,
+        );
+        let lower_tier = LowerTierIndexers::new(1, 4);
+        token.cancel();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let pipeline = LookupPipeline {
+            primary: PrimaryLookup::KvIndexer(&kv),
+            lower_tier: Some(&lower_tier),
+            side: None,
+        };
+
+        let empty = pipeline
+            .find_matches_by_tier(
+                HashInput::Owned(Vec::new()),
+                LowerTierQueryOptions::default(),
+            )
+            .await
+            .expect("empty sequence must not touch the (dead) indexer");
+        assert_eq!(
+            format!("{empty:?}"),
+            format!("{:?}", TieredMatchDetails::default())
+        );
+
+        // Control: the same query with one hash has to reach the cancelled
+        // indexer, which can no longer answer it.
+        let non_empty = tokio::time::timeout(
+            Duration::from_secs(2),
+            pipeline.find_matches_by_tier(
+                HashInput::Owned(vec![LocalBlockHash(1)]),
+                LowerTierQueryOptions::default(),
+            ),
+        )
+        .await;
+        assert!(
+            !matches!(non_empty, Ok(Ok(_))),
+            "control query unexpectedly succeeded against a cancelled indexer"
+        );
     }
 }
