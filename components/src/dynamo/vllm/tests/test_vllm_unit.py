@@ -861,6 +861,7 @@ class TestBenchmarkConfig:
             "decode_max_kv_read_token_samples": 128,
             "decode_max_batch_size_samples": 128,
             "prefix_max_batch_size_samples": 3,
+            "collect_imbalanced": False,
         }
 
     def test_benchmark_points_file_is_embedded_in_benchmark_config(
@@ -1537,6 +1538,7 @@ def _make_dynamo_config(**overrides):
         "decode_max_kv_read_token_samples": 128,
         "decode_max_batch_size_samples": 128,
         "prefix_max_batch_size_samples": 3,
+        "benchmark_collect_imbalanced": False,
         "_benchmark_points": None,
     }
     defaults.update(overrides)
@@ -1974,3 +1976,78 @@ async def test_generate_text_mode_applies_nvext_cache_salt():
 
     assert chunks
     assert captured["prompt"]["cache_salt"] == "dynamo-cache-salt:tenant-a"
+
+
+@pytest.mark.asyncio
+async def test_generate_text_mode_notifies_for_empty_decoded_token():
+    from dynamo.vllm.handlers import DecodeWorkerHandler
+
+    class InputParams:
+        def get_input_param(self, request, use_tokenizer):
+            assert use_tokenizer is True
+            return [1, 2, 3]
+
+    class Context:
+        def __init__(self):
+            self.notifications = 0
+
+        def trace_headers(self):
+            return {}
+
+        def notify_first_token(self):
+            self.notifications += 1
+
+    context = Context()
+
+    class EngineClient:
+        def generate(self, prompt, *args, **kwargs):
+            async def gen():
+                yield SimpleNamespace(
+                    outputs=[
+                        SimpleNamespace(
+                            index=0,
+                            text="",
+                            token_ids=[101],
+                            finish_reason=None,
+                        )
+                    ]
+                )
+                assert context.notifications == 1
+                yield SimpleNamespace(
+                    outputs=[
+                        SimpleNamespace(
+                            index=0,
+                            text="a",
+                            token_ids=[101, 102],
+                            finish_reason=None,
+                        )
+                    ]
+                )
+
+            return gen()
+
+    @asynccontextmanager
+    async def abort_monitor(*args, **kwargs):
+        yield
+
+    handler = SimpleNamespace(
+        input_param_manager=InputParams(),
+        default_sampling_params={},
+        config=SimpleNamespace(disaggregation_mode=DisaggregationMode.AGGREGATED),
+        engine_client=EngineClient(),
+        _deferred_aborts={},
+        _shutdown_on_engine_dead=lambda exc: None,
+        _abort_monitor=abort_monitor,
+        _to_local_dp_rank=lambda rank: None,
+    )
+    request = {"model": "test-model", "prompt": "ignored after tokenization"}
+
+    chunks = [
+        chunk
+        async for chunk in DecodeWorkerHandler._generate_text_mode(
+            handler, request, context, "req-1"
+        )
+    ]
+
+    assert chunks[0]["choices"][0]["delta"]["content"] == ""
+    assert context.notifications == 1

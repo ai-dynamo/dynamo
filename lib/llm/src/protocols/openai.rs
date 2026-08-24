@@ -176,7 +176,6 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
                 return Err(e);
             }
         };
-
         Ok(common::SamplingOptions {
             n,
             best_of,
@@ -342,6 +341,14 @@ pub struct ParsingOptions {
 
     pub reasoning_parser: Option<String>,
 
+    /// Final request policy for tool output. Some model parsers (currently
+    /// Harmony) must still run during non-streaming aggregation to remove
+    /// model-internal channel markup even when the request forbids tool calls.
+    /// In that case the parser is retained for content decoding and this flag
+    /// suppresses any structured calls it discovers.
+    #[serde(default)]
+    pub suppress_tool_calls: bool,
+
     /// Request-side gate for routing the batch tool-call finalize through
     /// `dynamo-parsers-v2` (see
     /// `chat_completions::tool_parser_v2::batch_tool_choice_eligible`). Defaults `false`
@@ -374,6 +381,7 @@ impl ParsingOptions {
         Self {
             tool_call_parser,
             reasoning_parser,
+            suppress_tool_calls: false,
             experimental_v2_batch_eligible: false,
             parallel_tool_calls: None,
             move_reasoning_to_content_when_empty: false,
@@ -385,6 +393,27 @@ impl ParsingOptions {
     /// `chat_completions::tool_parser_v2::batch_tool_choice_eligible`.
     pub fn with_experimental_v2_batch_eligible(mut self, eligible: bool) -> Self {
         self.experimental_v2_batch_eligible = eligible;
+        self
+    }
+
+    /// Enforce request-level tool-call permission while preserving independent
+    /// reasoning parsing and any parser needed for whole-response decoding.
+    /// `tool_call_parser` originates in model configuration, so HTTP handlers
+    /// must narrow it to requests that actually permit tool calls. Harmony and
+    /// Kimi K3 are retained because their aggregate parsers also remove internal
+    /// channel markup from ordinary content; `suppress_tool_calls` remains the
+    /// output policy boundary for those cases.
+    pub fn with_tool_call_parsing_enabled(mut self, enabled: bool) -> Self {
+        if !enabled {
+            self.suppress_tool_calls = true;
+            if !matches!(
+                self.tool_call_parser.as_deref(),
+                Some("harmony" | "kimi_k3" | "kimi-k3")
+            ) {
+                self.tool_call_parser = None;
+            }
+            self.experimental_v2_batch_eligible = false;
+        }
         self
     }
 
@@ -402,5 +431,49 @@ impl ParsingOptions {
     pub fn with_move_reasoning_to_content_when_empty(mut self, enabled: bool) -> Self {
         self.move_reasoning_to_content_when_empty = enabled;
         self
+    }
+}
+
+#[cfg(test)]
+mod parsing_options_tests {
+    use super::ParsingOptions;
+
+    #[test]
+    fn disabling_tool_parsing_preserves_reasoning_parser() {
+        let options = ParsingOptions::new(Some("hermes".to_string()), Some("qwen3".to_string()))
+            .with_experimental_v2_batch_eligible(true)
+            .with_tool_call_parsing_enabled(false);
+
+        assert_eq!(options.tool_call_parser, None);
+        assert_eq!(options.reasoning_parser.as_deref(), Some("qwen3"));
+        assert!(options.suppress_tool_calls);
+        assert!(!options.experimental_v2_batch_eligible);
+    }
+
+    #[test]
+    fn disabling_tool_calls_retains_harmony_for_content_decoding() {
+        let options = ParsingOptions::new(Some("harmony".to_string()), Some("gpt_oss".to_string()))
+            .with_experimental_v2_batch_eligible(true)
+            .with_tool_call_parsing_enabled(false);
+
+        assert_eq!(options.tool_call_parser.as_deref(), Some("harmony"));
+        assert_eq!(options.reasoning_parser.as_deref(), Some("gpt_oss"));
+        assert!(options.suppress_tool_calls);
+        assert!(!options.experimental_v2_batch_eligible);
+    }
+
+    #[test]
+    fn disabling_tool_calls_retains_kimi_k3_for_content_decoding() {
+        for parser in ["kimi_k3", "kimi-k3"] {
+            let options =
+                ParsingOptions::new(Some(parser.to_string()), Some("kimi_k3".to_string()))
+                    .with_experimental_v2_batch_eligible(true)
+                    .with_tool_call_parsing_enabled(false);
+
+            assert_eq!(options.tool_call_parser.as_deref(), Some(parser));
+            assert_eq!(options.reasoning_parser.as_deref(), Some("kimi_k3"));
+            assert!(options.suppress_tool_calls);
+            assert!(!options.experimental_v2_batch_eligible);
+        }
     }
 }

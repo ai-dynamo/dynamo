@@ -255,6 +255,7 @@ class RequestHandlerConfig:
     conversation_affinity: bool = False
     # Select whether the engine or Dynamo owns initial DP-rank placement in affinity mode.
     conversation_affinity_dp_rank_source: str = "engine"
+    first_token_source: Optional[Any] = None
 
 
 class HandlerBase(BaseGenerativeHandler):
@@ -297,6 +298,7 @@ class HandlerBase(BaseGenerativeHandler):
         self.additional_metrics = config.additional_metrics
         self.max_seq_len = config.max_seq_len
         self.disagg_machine_id = config.disagg_machine_id
+        self.first_token_source = config.first_token_source
         # Sleep/wake state
         self._pause_lock = asyncio.Lock()
         self._inflight_lock = asyncio.Lock()
@@ -950,6 +952,9 @@ class HandlerBase(BaseGenerativeHandler):
         ep_disaggregated_params: Optional[DisaggregatedParams] = None,
     ) -> AsyncGenerator[dict, None]:
         """Track in-flight count, reject during sleep, then delegate to implementation."""
+        routing = request.get("routing") or {}
+        if self.first_token_source is not None:
+            self.first_token_source.bind(context, routing.get("dp_rank"))
         started = await self._mark_request_started()
         if not started:
             yield {
@@ -1078,6 +1083,7 @@ class HandlerBase(BaseGenerativeHandler):
         # choice and emit only the new slice for each Dynamo chunk.
         output_tokens_per_choice: dict[int, int] = {}
         prompt_logprobs_payload = None
+        first_output_seen = False
 
         sampling_params = self._override_sampling_params(
             self.default_sampling_params, request
@@ -1288,6 +1294,13 @@ class HandlerBase(BaseGenerativeHandler):
                             "token_ids": output.token_ids[tokens_so_far:],
                             "index": output_idx,
                         }
+                        if (
+                            self.first_token_source is not None
+                            and out["token_ids"]
+                            and not first_output_seen
+                        ):
+                            first_output_seen = True
+                            context.notify_first_token()
 
                         # Extract logprobs from the output. Logprobs are
                         # aligned with the cumulative token list, so use the
@@ -1340,23 +1353,17 @@ class HandlerBase(BaseGenerativeHandler):
                                 len(o.token_ids) for o in res.outputs
                             )
 
-                            prompt_tokens_details = None
                             if prefill_prompt_tokens_details:
                                 prompt_tokens_details = prefill_prompt_tokens_details
                             else:
-                                if output.request_perf_metrics is not None:
-                                    kv_cache_metrics = (
-                                        output.request_perf_metrics.kv_cache_metrics
-                                    )
-                                    cached_tokens = min(
-                                        num_input_tokens,
-                                        kv_cache_metrics.num_reused_blocks
-                                        * self.kv_block_size,
-                                    )
-                                    if cached_tokens > 0:
-                                        prompt_tokens_details = {
-                                            "cached_tokens": int(cached_tokens),
-                                        }
+                                # Clamp to prompt size: image token_ids are unexpanded
+                                # placeholders, so the engine count (measured over the
+                                # expanded prompt) can exceed it.
+                                prompt_tokens_details = {
+                                    "cached_tokens": min(
+                                        num_input_tokens, int(res.cached_tokens or 0)
+                                    ),
+                                }
 
                             out["completion_usage"] = {
                                 "prompt_tokens": int(num_input_tokens),
