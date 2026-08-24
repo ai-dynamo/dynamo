@@ -283,9 +283,11 @@ def validate_success(client: BatchClient, input_path: Path, model: str) -> None:
     output_lines = jsonl_lines(client.file_content(output_file))
     custom_identifiers = {line.get("custom_id") for line in output_lines}
     expected = {"dynamo-batch-1", "dynamo-batch-2"}
-    if custom_identifiers != expected:
+    if len(output_lines) != len(expected) or custom_identifiers != expected:
         raise RuntimeError(
-            f"unexpected successful output ids: {custom_identifiers}, expected {expected}"
+            "unexpected successful output records: "
+            f"count={len(output_lines)}, ids={custom_identifiers}, "
+            f"expected count={len(expected)}, ids={expected}"
         )
     print(f"retrieved {len(output_lines)} successful output lines", flush=True)
     for output_line in sorted(output_lines, key=lambda line: str(line["custom_id"])):

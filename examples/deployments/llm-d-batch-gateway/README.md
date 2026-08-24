@@ -88,7 +88,7 @@ kubectl rollout status -n "${NAMESPACE}" \
   --timeout=180s
 ```
 
-### 4. Deploy the synchronous control
+### 4. Deploy the Synchronous Control
 
 Install the pinned upstream chart in its default synchronous dispatch mode. The
 values file routes exactly one model to the dedicated Dynamo frontend:
@@ -112,7 +112,7 @@ kubectl rollout status -n "${NAMESPACE}" \
   --timeout=180s
 ```
 
-### 5. Run the synchronous batch lifecycle
+### 5. Run the Synchronous Batch Lifecycle
 
 Forward the Batch API in one terminal:
 
@@ -137,7 +137,7 @@ The example client performs three jobs:
 The command exits with an error if a job reaches an unexpected terminal state
 or returns unexpected request counts or output identifiers.
 
-### 6. Switch to llm-d Async dispatch
+### 6. Switch to llm-d Async Dispatch
 
 Install the pinned llm-d Async chart. The Async Processor reads requests from a
 Redis sorted set, sends each request to the same Dynamo frontend, and writes
