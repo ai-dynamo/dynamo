@@ -1200,6 +1200,7 @@ fn advance_state_to_breakpoint(
             local_hash: local_hashes[cur_pos],
         }) else {
             finalize_workers(final_states, active_workers.drain(), cur_pos, cur_hash);
+            active_hint_sources.clear();
             break;
         };
 
@@ -1372,9 +1373,10 @@ mod tests {
     use crate::indexer::{KvIndexerInterface, ThreadPoolIndexer};
     use crate::protocols::{
         ExternalSequenceBlockHash, KvCacheEventData, KvCacheStoreData, LocalBlockHash,
-        ResidencyDomain, ResidencyProjection, RouterEvent, StorageTier, WireResidencyDomain,
-        WorkerWithDpRank,
+        ResidencyDomain, ResidencyOwner, ResidencyProjection, ResidencyRoutingSnapshot,
+        RouterEvent, RouterHintSourceMetadata, StorageTier, WireResidencyDomain, WorkerWithDpRank,
     };
+    use crate::router_hint::RouterHintCandidateSource;
     use crate::test_utils::{remove_event, router_event, stored_blocks_with_sequence_hashes};
 
     fn local_hashes(values: &[u64]) -> Vec<LocalBlockHash> {
@@ -1915,6 +1917,69 @@ mod tests {
                 4,
                 ExternalSequenceBlockHash(104)
             ))
+        );
+    }
+
+    #[test]
+    fn router_hint_source_stops_at_missing_edge_before_later_breakpoint() {
+        let mut index = TestLowerTierIndex::new();
+        index
+            .apply_event(store_event_in_domain(
+                7,
+                0,
+                None,
+                &[11],
+                &[101],
+                ResidencyDomain::CacheOwner,
+            ))
+            .unwrap();
+        index
+            .apply_event(store_event_in_domain(
+                7,
+                1,
+                Some(101),
+                &[13],
+                &[103],
+                ResidencyDomain::CacheOwner,
+            ))
+            .unwrap();
+
+        let mut continuations = FxHashMap::default();
+        continuations.insert(
+            WorkerWithDpRank::new(8, 0),
+            LowerTierContinuation::new(2, ExternalSequenceBlockHash(101)),
+        );
+        let owner = cache_owner_id();
+        let owner_key = ResidencyOwner::cache_owner(owner).compact_key();
+        let snapshot = ResidencyRoutingSnapshot::new(
+            ResidencyProjection::default(),
+            [(
+                owner,
+                RouterHintSourceMetadata {
+                    source_control_endpoint: "tcp://persistent-owner:23280".to_string(),
+                    worker_type: "prefill".to_string(),
+                },
+                None,
+            )],
+        );
+
+        let details = index.index.query_match_details_with_options_and_snapshot(
+            &local_hashes(&[11, 99, 13]),
+            &continuations,
+            true,
+            &snapshot,
+        );
+        let extensions = details.router_hint_extensions.unwrap();
+
+        assert_eq!(
+            extensions
+                .owner_prefix_blocks
+                .get(&RouterHintCandidateSource::CacheOwner(owner_key)),
+            Some(&1)
+        );
+        assert_eq!(
+            extensions.block_hashes,
+            vec![(0, ExternalSequenceBlockHash(101))]
         );
     }
 
