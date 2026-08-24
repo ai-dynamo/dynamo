@@ -6,7 +6,7 @@ Benchmarks and trace-export entrypoints for Dynamo. Hosts:
   OpenAI-compatible endpoint, with optional speculative prefill.
 - `offline_replay_bench` — Rust-native replay loop using the mocker's perf
   model, for profiling replay overhead.
-- `kv_router/{mooncake,active_sequences}_bench` — kv-router microbenchmarks.
+- `kv_router/{mooncake,active_sequences,approximate_lru}_bench` — kv-router microbenchmarks.
 - `claude_trace_export` — converts local Claude sessions into canonical Dynamo
   request traces for direct replay.
 - `request_trace_to_mooncake` — opt-in export of Dynamo request traces to

@@ -30,6 +30,12 @@ impl AttemptId {
     pub(crate) fn new(value: u64) -> Self {
         Self(value)
     }
+
+    #[cfg(feature = "bench")]
+    #[doc(hidden)]
+    pub fn for_benchmark(value: u64) -> Self {
+        Self::new(value)
+    }
 }
 
 impl std::fmt::Display for AttemptId {
