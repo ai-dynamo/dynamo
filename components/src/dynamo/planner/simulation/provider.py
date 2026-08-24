@@ -665,6 +665,8 @@ class DynamoPlannerSweepConfigProvider:
                         "Planner throughput scaling requires target='sla' and "
                         "evaluation.sla.ttft_ms/itl_ms"
                     )
+        else:
+            return {"policy": "disabled"}
         return public.model_dump(mode="json", exclude_none=True)
 
     def validate_recommendation_config(

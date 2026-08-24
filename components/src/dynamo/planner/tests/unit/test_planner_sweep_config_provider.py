@@ -552,9 +552,9 @@ def test_public_planner_validation_is_owned_by_dynamo_adapter() -> None:
         engine={}, traffic={}, evaluation={}, optimization={}
     )
 
-    prediction = adapter.validate_prediction_config({}, prediction_context)
-    assert prediction["policy"] == "disabled"
-    assert prediction["max_num_gpus"] == 8
+    assert adapter.validate_prediction_config({}, prediction_context) == {
+        "policy": "disabled"
+    }
     assert adapter.validate_recommendation_config({}, recommendation_context)[
         "policy"
     ] == {"choices": ["disabled", "enabled"]}
