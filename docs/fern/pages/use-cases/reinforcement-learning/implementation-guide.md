@@ -193,13 +193,17 @@ The OpenAI-compatible completion routes provide a cross-backend token-in/token-o
 | Feature | Request | Response | Notes |
 |---|---|---|---|
 | Token input | Set `prompt` to an integer array on `/v1/completions`, or set `nvext.token_data` on a chat or completion request. | Standard completion response | `nvext.token_data` bypasses frontend tokenization. |
-| Completion token IDs | Add `"completion_token_ids"` to `nvext.extra_fields`. | `nvext.completion_token_ids` | Requires one prompt and one generated choice. Streaming responses contain token deltas; non-streaming responses contain the concatenated IDs. |
+| Completion token IDs | Add `"completion_token_ids"` to `nvext.extra_fields`. | `nvext.completion_token_ids` | Requires one prompt and one generated choice. Streaming responses contain ordered token deltas; non-streaming responses contain the concatenated IDs. A tool parser can buffer and rewrite output, so token IDs on parsed streams are not aligned with each rewritten `delta.content`. |
 | Completion log probabilities | Set `logprobs` on `/v1/completions`, or set `logprobs: true` and `top_logprobs` on `/v1/chat/completions`. | Standard `choices[].logprobs` | The selected engine must support the requested log probability mode. |
 | Prompt log probabilities | Set top-level `prompt_logprobs` and add `"prompt_logprobs"` to `nvext.extra_fields`. | `nvext.prompt_logprobs` on the final response | The first prompt position is `null` because it has no preceding-token probability. |
 | Prefix-cache salt | Set `nvext.cache_salt`. | No response field | vLLM includes the opaque salt in prompt cache keys, separating reuse between requests with different salts. |
 | Routed expert data | Add `"routed_experts"` to `nvext.extra_fields`. | `nvext.routed_experts` on the final response | Requires routed-expert capture in the engine build and configuration. |
 | Raw engine metadata | Add `"engine_data"` to `nvext.extra_fields`. | `nvext.engine_data` | Backend-specific and not a stable cross-backend schema. Prefer named fields when available. |
 | SGLang `meta_info` upload | Set `nvext.metadata_upload.url`. | Out-of-band object per choice | Requires an RL-enabled SGLang worker and fsspec support. |
+
+On the legacy chat tool-parser path, a successful streaming response can include a choice-less `nvext` frame after the last generated choice and before the client usage frame and `[DONE]`. Dynamo-aware streaming clients must inspect top-level `nvext` on every frame. Non-streaming requests still return one JSON response because Dynamo aggregates this internal frame into the final top-level `nvext`.
+
+When Dynamo combines buffered metadata, it appends `completion_token_ids` in stream order. For each other top-level field, the latest supplied value for that field wins; a field that is not supplied again keeps its earlier value. Dynamo replaces `engine_data` as one complete value and does not merge its nested fields. The legacy tool parser requires `n: 1` when `extra_fields` requests `engine_data`, `routed_experts`, or `stop_reason`. This limit does not apply to parser v2 or to request-level metadata such as timing and worker IDs.
 
 See [NVIDIA Request Extensions](../../developer-guide/additional-resources/nvidia-request-extensions-nvext.md) for the complete `nvext` reference.
 

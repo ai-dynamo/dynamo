@@ -27,8 +27,12 @@ across backends.
 */
 
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
+use dynamo_llm::protocols::common::metrics::LLMMetricAnnotation;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
-use dynamo_protocols::types::{ChatChoiceStream, ChatCompletionMessageContent, FinishReason};
+use dynamo_protocols::types::{
+    ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionToolChoiceOption,
+    CompletionUsage, FinishReason,
+};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt, stream};
 use std::pin::Pin;
@@ -1916,87 +1920,125 @@ mod tests {
         );
     }
 
-    // The jail moved to dynamo-parsers and operates on the shared
-    // `Create` payload, so the boundary adapter (apply_tool_calling_jail) must
-    // buffer the dynamo-only typed `llm_metrics` and re-attach it. This asserts
-    // the buffered chunk_tokens sum and latest output_tokens survive the jail on
-    // a tool-call stream (they'd all be None without the buffer/re-attach).
+    fn metadata_chunk(
+        text: &str,
+        finish_reason: Option<FinishReason>,
+        chunk_tokens: usize,
+        output_tokens: usize,
+        nvext: serde_json::Value,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = make_chunk(text, finish_reason);
+        let data = chunk.data.as_mut().expect("chunk data");
+        data.nvext = Some(nvext);
+        data.llm_metrics = Some(LLMMetricAnnotation {
+            input_tokens: 7,
+            output_tokens,
+            chunk_tokens,
+            cached_tokens: None,
+            image_count: 0,
+            video_count: 0,
+            audio_count: 0,
+            image_tokens: None,
+            prefill_worker_id: None,
+            prefill_dp_rank: None,
+            prefill_worker_type: None,
+            decode_worker_id: None,
+            decode_dp_rank: None,
+            decode_worker_type: None,
+            tokenize_latency: None,
+            detokenize_total_latency: None,
+            detokenize_count: None,
+        });
+        chunk
+    }
+
+    fn metadata_usage_chunk() -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = make_chunk("", None);
+        let data = chunk.data.as_mut().expect("usage data");
+        data.inner.choices.clear();
+        data.inner.usage = Some(CompletionUsage {
+            prompt_tokens: 7,
+            completion_tokens: 7,
+            total_tokens: 14,
+            ..Default::default()
+        });
+        chunk.event = Some(dynamo_llm::preprocessor::ANNOTATION_PAYLOAD_USAGE.to_string());
+        chunk
+    }
+
+    fn metadata_only_chunk(
+        finish_reason: Option<FinishReason>,
+        chunk_tokens: usize,
+        output_tokens: usize,
+        nvext: serde_json::Value,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = metadata_chunk("", finish_reason, chunk_tokens, output_tokens, nvext);
+        let choice = &mut chunk.data.as_mut().expect("metadata data").inner.choices[0];
+        choice.delta.content = None;
+        choice.delta.role = None;
+        chunk
+    }
+
+    fn assert_buffered_metrics(
+        out: &[Annotated<NvCreateChatCompletionStreamResponse>],
+        expected_chunk_tokens: usize,
+        expected_output_tokens: usize,
+    ) {
+        let total_chunk_tokens: usize = out
+            .iter()
+            .filter_map(|a| a.data.as_ref().and_then(|d| d.llm_metrics.as_ref()))
+            .map(|m| m.chunk_tokens)
+            .sum();
+        assert_eq!(total_chunk_tokens, expected_chunk_tokens);
+        let max_osl = out
+            .iter()
+            .filter_map(|a| a.data.as_ref().and_then(|d| d.llm_metrics.as_ref()))
+            .map(|m| m.output_tokens)
+            .max();
+        assert_eq!(max_osl, Some(expected_output_tokens));
+    }
+
+    fn metadata_outputs(
+        out: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> Vec<&NvCreateChatCompletionStreamResponse> {
+        out.iter()
+            .filter_map(|response| response.data.as_ref().filter(|data| data.nvext.is_some()))
+            .collect()
+    }
+
+    // Immediate mode holds all generated choices until EOF. A usage chunk can
+    // therefore leave the jail before the parsed tool call, but it must not take
+    // the client-visible nvext that belongs to the generated choice.
     #[tokio::test]
-    async fn jail_preserves_llm_metrics_across_buffered_tool_call() {
-        use dynamo_llm::protocols::common::metrics::LLMMetricAnnotation;
-        use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
-        use dynamo_protocols::types::{
-            ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionStreamResponseDelta,
-            CreateChatCompletionStreamResponse, Role,
-        };
-        use dynamo_runtime::protocols::annotated::Annotated;
-        use futures::StreamExt;
-
-        fn chunk(
-            text: &str,
-            chunk_tokens: usize,
-            output_tokens: usize,
-        ) -> Annotated<NvCreateChatCompletionStreamResponse> {
-            #[allow(deprecated)]
-            let choice = ChatChoiceStream {
-                index: 0,
-                delta: ChatCompletionStreamResponseDelta {
-                    role: Some(Role::Assistant),
-                    content: Some(ChatCompletionMessageContent::Text(text.to_string())),
-                    tool_calls: None,
-                    function_call: None,
-                    refusal: None,
-                    reasoning_content: None,
-                },
-                finish_reason: None,
-                logprobs: None,
-            };
-            Annotated {
-                data: Some(NvCreateChatCompletionStreamResponse {
-                    inner: CreateChatCompletionStreamResponse {
-                        id: "id".to_string(),
-                        object: "chat.completion.chunk".to_string(),
-                        created: 0,
-                        model: "m".to_string(),
-                        choices: vec![choice],
-                        usage: None,
-                        service_tier: None,
-                        system_fingerprint: None,
-                    },
-                    nvext: None,
-                    llm_metrics: Some(LLMMetricAnnotation {
-                        input_tokens: 7,
-                        output_tokens,
-                        chunk_tokens,
-                        cached_tokens: None,
-                        prefill_worker_id: None,
-                        prefill_dp_rank: None,
-                        prefill_worker_type: None,
-                        decode_worker_id: None,
-                        decode_dp_rank: None,
-                        decode_worker_type: None,
-                        tokenize_latency: None,
-                        detokenize_total_latency: None,
-                        detokenize_count: None,
-                        ..Default::default()
-                    }),
-                }),
-                id: None,
-                event: None,
-                comment: None,
-                error: None,
-            }
-        }
-
-        // Hermes tool call split across two metric-bearing chunks -> the jail
-        // buffers both, then emits one tool-call chunk.
+    async fn jail_keeps_nvext_pending_across_usage_chunk() {
+        let engine_data = serde_json::json!({
+            "prompt_token_ids": [1, 2],
+            "completion_token_ids": [10, 11, 12, 13, 14, 15, 16],
+            "completion_logprobs": [-0.1, -0.2, -0.3, -0.4, -0.5, -0.6, -0.7],
+        });
         let chunks = vec![
-            chunk("<tool_call>\n{\"name\": \"get_weather\", \"arg", 3, 3),
-            chunk("uments\": {\"location\": \"SF\"}}\n</tool_call>", 4, 7),
+            metadata_chunk(
+                "[{\"name\": \"get_weather\", \"parameters\": {\"loc",
+                None,
+                3,
+                3,
+                serde_json::json!({ "completion_token_ids": [10, 11, 12] }),
+            ),
+            metadata_chunk(
+                "ation\": \"SF\"}}",
+                None,
+                4,
+                7,
+                serde_json::json!({
+                    "completion_token_ids": [13, 14, 15, 16],
+                    "engine_data": engine_data,
+                }),
+            ),
+            metadata_usage_chunk(),
         ];
         let out: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
             Some("hermes".to_string()),
-            None,
+            Some(ChatCompletionToolChoiceOption::Required),
             None,
             false,
             false,
@@ -2005,25 +2047,118 @@ mod tests {
         .collect()
         .await;
 
-        let total_chunk_tokens: usize = out
+        assert_buffered_metrics(&out, 7, 7);
+        let usage = out
             .iter()
-            .filter_map(|a| a.data.as_ref().and_then(|d| d.llm_metrics.as_ref()))
-            .map(|m| m.chunk_tokens)
-            .sum();
+            .find_map(|a| {
+                a.data
+                    .as_ref()
+                    .filter(|d| d.inner.choices.is_empty() && d.inner.usage.is_some())
+            })
+            .expect("usage output");
+        assert!(usage.nvext.is_none(), "usage output must not consume nvext");
+
+        let metadata = metadata_outputs(&out);
+        assert_eq!(metadata.len(), 1, "nvext must be emitted exactly once");
+        assert!(!metadata[0].inner.choices.is_empty());
+        let nvext = metadata[0].nvext.as_ref().expect("nvext");
         assert_eq!(
-            total_chunk_tokens, 7,
-            "buffered chunk_tokens (3+4) must survive the jail; got {total_chunk_tokens}"
+            nvext["completion_token_ids"],
+            serde_json::json!([10, 11, 12, 13, 14, 15, 16])
         );
-        let max_osl = out
-            .iter()
-            .filter_map(|a| a.data.as_ref().and_then(|d| d.llm_metrics.as_ref()))
-            .map(|m| m.output_tokens)
-            .max();
+        assert_eq!(nvext["engine_data"], engine_data);
+    }
+
+    #[tokio::test]
+    async fn jail_flushes_terminal_nvext_before_client_usage() {
+        let final_engine_data = serde_json::json!({
+            "prompt_token_ids": [1, 2],
+            "completion_token_ids": [30, 31],
+            "completion_logprobs": [-0.1, -0.2],
+        });
+        let mut usage = metadata_usage_chunk();
+        usage.event = None;
+        let early = metadata_only_chunk(
+            None,
+            1,
+            1,
+            serde_json::json!({
+                "completion_token_ids": [30],
+                "engine_data": {"phase": "partial"},
+                "worker_id": {"decode_worker_id": 9},
+            }),
+        );
+        let terminal = metadata_only_chunk(
+            Some(FinishReason::Stop),
+            1,
+            2,
+            serde_json::json!({
+                "completion_token_ids": [31],
+                "engine_data": final_engine_data,
+                "timing": {"total_ms": 12.5},
+                "prompt_logprobs": [null, {"token": 1}],
+            }),
+        );
+        let chunks = vec![early, terminal, usage];
+        let out: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("hermes".to_string()),
+            Some(ChatCompletionToolChoiceOption::Required),
+            None,
+            false,
+            true,
+            Box::pin(futures::stream::iter(chunks)),
+        )
+        .collect()
+        .await;
+
+        assert_buffered_metrics(&out, 2, 2);
+        let metadata = metadata_outputs(&out);
+        assert_eq!(metadata.len(), 1, "nvext must be emitted exactly once");
+        assert!(metadata[0].inner.choices.is_empty());
+        let nvext = metadata[0].nvext.as_ref().expect("nvext");
+        assert_eq!(nvext["completion_token_ids"], serde_json::json!([30, 31]));
+        assert_eq!(nvext["engine_data"], final_engine_data);
         assert_eq!(
-            max_osl,
-            Some(7),
-            "final cumulative output_tokens must survive the jail"
+            nvext["worker_id"],
+            serde_json::json!({"decode_worker_id": 9})
         );
+        assert_eq!(nvext["timing"], serde_json::json!({"total_ms": 12.5}));
+        assert_eq!(
+            nvext["prompt_logprobs"],
+            serde_json::json!([null, {"token": 1}])
+        );
+
+        assert!(out.last().is_some_and(|response| {
+            response
+                .data
+                .as_ref()
+                .is_some_and(|data| data.inner.usage.is_some())
+        }));
+    }
+
+    #[tokio::test]
+    async fn jail_discards_pending_metadata_after_transport_error() {
+        let terminal = metadata_only_chunk(
+            Some(FinishReason::Stop),
+            1,
+            1,
+            serde_json::json!({"engine_data": {"request_id": "failed"}}),
+        );
+        let chunks = vec![terminal, Annotated::from_error("transport failed")];
+
+        let out: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("hermes".to_string()),
+            Some(ChatCompletionToolChoiceOption::Required),
+            None,
+            false,
+            false,
+            Box::pin(futures::stream::iter(chunks)),
+        )
+        .collect()
+        .await;
+
+        assert!(out.iter().any(|response| response.error.is_some()));
+        assert!(metadata_outputs(&out).is_empty());
     }
 }
 
@@ -2106,13 +2241,15 @@ fn content_texts(chunks: &[Annotated<NvCreateChatCompletionStreamResponse>]) -> 
 // The latch must fire on the first finish chunk and not re-fire on the terminal one.
 #[tokio::test]
 async fn test_glm47_streaming_truncated_data_less_terminal_chunk() {
-    let chunks = vec![
+    let mut chunks = vec![
         make_glm47_chunk(
             Some("<tool_call>get_weather<arg_key>city</arg_key><arg_value>Bos"),
             None,
         ),
         make_glm47_chunk(None, Some(FinishReason::Length)),
     ];
+    chunks[1].data.as_mut().unwrap().nvext =
+        Some(serde_json::json!({"completion_token_ids": [42]}));
     let out = run_glm47_jail(chunks).await;
 
     let texts = content_texts(&out);
@@ -2135,6 +2272,19 @@ async fn test_glm47_streaming_truncated_data_less_terminal_chunk() {
             .count(),
         1,
         "finish_reason=length must appear exactly once in output"
+    );
+    let nvext_chunks: Vec<_> = out
+        .iter()
+        .filter_map(|a| a.data.as_ref().and_then(|d| d.nvext.as_ref()))
+        .collect();
+    assert_eq!(
+        nvext_chunks.len(),
+        1,
+        "the synthetic recovery chunk must not repeat nvext"
+    );
+    assert_eq!(
+        nvext_chunks[0]["completion_token_ids"],
+        serde_json::json!([42])
     );
 }
 

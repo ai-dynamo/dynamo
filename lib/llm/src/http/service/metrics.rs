@@ -3181,6 +3181,41 @@ mod tests {
             "internal metrics leaked to client SSE: {wire}"
         );
 
+        // A choice-less Dynamo metadata frame is client-visible.
+        let metadata: crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": "chatcmpl-x", "object": "chat.completion.chunk", "created": 1,
+                "model": "test-model", "choices": [],
+                "nvext": {"engine_data": {"prompt_token_ids": [1, 2]}}
+            }))
+            .unwrap();
+        let metadata = Annotated {
+            id: None,
+            data: Some(metadata),
+            event: None,
+            comment: None,
+            error: None,
+        };
+        let mut http_queue_guard = None;
+        let event = process_chat_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(metadata),
+            &mut collector,
+            &mut http_queue_guard,
+            ReasoningField::default(),
+        )
+        .expect("conversion ok")
+        .expect("nvext chunk should yield a client event");
+        let sse = Sse::new(futures::stream::once(async move {
+            Ok::<_, std::convert::Infallible>(event)
+        }));
+        let body = sse.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        let wire = String::from_utf8_lossy(&bytes);
+        assert!(
+            wire.contains("engine_data") && wire.contains("prompt_token_ids"),
+            "nvext metadata did not reach client SSE: {wire}"
+        );
+
         // (2) Payload-only usage chunk (event = payload_usage, carries usage data).
         let usage: crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse =
             serde_json::from_value(serde_json::json!({
@@ -3198,10 +3233,11 @@ mod tests {
         };
 
         let mut http_queue_guard = None;
-        let result = process_response_using_event_converter_and_observe_metrics(
+        let result = process_chat_response_using_event_converter_and_observe_metrics(
             EventConverter::from(payload_usage),
             &mut collector,
             &mut http_queue_guard,
+            ReasoningField::default(),
         )
         .expect("conversion ok");
         assert!(
