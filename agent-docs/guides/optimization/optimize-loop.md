@@ -33,9 +33,16 @@ rules:
 
 # Optimize Loop
 
-Use this workflow for an end-to-end Dynamo configuration optimization job. The user supplies the baseline DGD;
-`user-interviewer` captures it and hands it directly to `recipe-deployer`. There is no recipe-discovery or
-recipe-selection step in this workflow.
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
+Use this workflow for an end-to-end Dynamo configuration optimization job. The baseline DGD comes from the
+interview's baseline-source ladder (`agents/user-interviewer/AGENTS.md`): supplied by the user, or a recipe or
+authored draft the user explicitly confirmed. `user-interviewer` captures the confirmed baseline and hands it
+directly to `recipe-deployer`. Selection and authoring happen only at interview time with user confirmation; the
+LOOP itself has no recipe-discovery or recipe-selection step.
 
 When using Codex multi-agent mode, dispatch registered roles through `.codex/config.toml`. Each launcher must read and
 follow its corresponding `agents/<role>/AGENTS.md` contract.
@@ -58,7 +65,8 @@ answers; do not advance the workflow meanwhile.
 
 ## 2. Validate The Baseline Handoff
 
-Require the exact `EXP_ROOT`, `user_workload.yaml` path and SHA256, `user_provided_dgd.yaml` path and SHA256, and
+Require the exact `EXP_ROOT`, `user_workload.yaml` path and SHA256, `user_provided_dgd.yaml` path and SHA256,
+`deployment.origin` (with `origin_source` for non-user origins), and
 zero-based iteration `0`. Confirm that the user-provided DGD's model, framework, hardware, precision, and topology do
 not contradict the user workload. Do not edit, replace, or select an alternative DGD.
 
@@ -69,11 +77,11 @@ Give the exact assigned DGD path and SHA256, `user_workload.yaml` path and SHA25
 `user_provided_dgd.yaml`. No role selects or substitutes a baseline. When the user's DGD cannot run on the target as
 provided — it targets different hardware, checkpoints, or fabric — the deployer records the blocking
 incompatibilities in the deployment ledger and returns them; end the engagement with a report that states each
-incompatibility and its evidence, and invite the user to start a new engagement with a target-compatible DGD (a
-changed user DGD starts a new experiment, per `synthesize-user-workload`). Do not select a substitute, do not
-rewrite the captured baseline, and do not park the run waiting for a new manifest. Greenfield engagements — no user
-deployment at all — are likewise not supported by this workflow yet: say so at the interview, point the user at
-`recipes/README.md` to pick a starting recipe, and invite them to return with it as their baseline.
+incompatibility and its evidence, and invite the user to start a new engagement - with a target-compatible DGD of
+their own, or through the baseline-source ladder (rungs 2-3), which may use the incompatibility report as input
+evidence (a changed baseline starts a new experiment, per `synthesize-user-workload`). Do not select a substitute, do not
+rewrite the captured baseline, and do not park the run waiting for a new manifest. (A greenfield user without any
+DGD is handled at the interview by the baseline-source ladder, never here.)
 Later iterations use the exact challenger-approved draft. The deployer creates:
 
 ```text
@@ -87,7 +95,9 @@ semantics to hide a deployment failure.
 ## 4. Configure, Run, And Analyze The Benchmark
 
 Give the successful `DEPLOY_ROOT`, exact `user_workload.yaml` path and SHA256, and current performance question and
-target operating region to `perf-analyzer`. For iteration 0, use a baseline-characterization question. For later
+target operating region to `perf-analyzer`. For iteration 0, use a baseline-characterization question. When `deployment.origin` is not `user`, iteration 0
+is pure characterization: the baseline has no production history, so no result may be framed as an improvement or
+regression against it beyond the same-series comparisons the benchmark rules already govern. For later
 iterations, use the question approved with the candidate.
 
 - Select or create the benchmark series that best answers the question. Reuse a plan only when it remains fit; write
