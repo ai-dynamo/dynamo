@@ -27,13 +27,11 @@ It is a standalone Rust executable.
 - Opaque `kv_transfer_params` handoff
 - Data-parallel rank routing and KV-event source discovery
 - Capability-gated RL pause/resume, sleep/wake, weight-transfer, and weight-version controls through native gRPC
-- Image URL and data-URI inputs, including media UUIDs
+- Image, video, and audio URL and data-URI inputs; cache UUIDs remain image-only
 
-The protocol does not support LoRA, encode workers, beam search, `n > 1`,
-preprocessed multimodal features, audio/video media, or Dynamo tool-call and
-reasoning parsers. Parser defaults returned by Control are intentionally not
-advertised to the Dynamo frontend because the current inference protocol does
-not preserve all parser-related request semantics.
+Audio and video inputs require `connorcarpenter15/vllm:main` at commit [`9e97605e4eb0add37c7a7002ffd3d52baf381385`](https://github.com/connorcarpenter15/vllm/commit/9e97605e4eb0add37c7a7002ffd3d52baf381385). Stock vLLM releases continue to return gRPC `UNIMPLEMENTED` for these modalities.
+
+The protocol does not support LoRA, encode workers, beam search, `n > 1`, or Dynamo tool-call and reasoning parsers. The sidecar does not support `input_audio`, `file://` media, `use_audio_in_video` or other `mm_processor_kwargs`, preprocessed multimodal features, decoded RDMA media, UUID-only media, audio/video cache UUIDs, or EPD. Direct vLLM gRPC callers can send raw media bytes, but Dynamo's current `MultimodalData` representation cannot. Parser defaults returned by Control are intentionally not advertised to the Dynamo frontend because the current inference protocol does not preserve all parser-related request semantics.
 
 ## Run
 
