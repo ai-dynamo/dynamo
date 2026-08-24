@@ -240,7 +240,7 @@ jobs:
       - name: Run GPU tests (parallel)
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
         if: ${{ inputs.run_gpu_tests && inputs.run_gpu_parallel_tests && contains(fromJSON(inputs.gpu_test_platforms), matrix.platform) }}
-        uses: ./.github/actions/pytest-local
+        uses: $/.github/actions/pytest-local
         with:
           container_workspace: ${{ inputs.container_workspace }}
           pytest_marks: ${{ inputs.gpu_test_markers }}
@@ -262,7 +262,7 @@ jobs:
         # container/pod never coming online) skips this step cleanly instead of trying
         # to run the local pytest-local action against an un-checked-out workspace.
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && inputs.run_gpu_tests && contains(fromJSON(inputs.gpu_test_platforms), matrix.platform) }}
-        uses: ./.github/actions/pytest-local
+        uses: $/.github/actions/pytest-local
         with:
           container_workspace: ${{ inputs.container_workspace }}
           # When the parallel stage runs, exclude profiled tests here so they don't run twice.
