@@ -32,7 +32,10 @@ use axum::response::sse::Event;
 use dynamo_runtime::engine::AsyncEngineContext;
 use futures::{Stream, StreamExt};
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, OnceLock};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -70,12 +73,14 @@ pub struct ConnectionHandle {
 
 /// One-shot application error reported by an SSE producer.
 ///
-/// The producer writes only when it emits a terminal protocol failure. The
-/// disconnect monitor reads only when the source stream ends or its guard is
-/// dropped, avoiding synchronization on successful per-token events.
+/// The producer records the error when it is detected, then marks the terminal
+/// protocol event immediately before yielding it. The disconnect monitor reads
+/// only when the source stream ends or its guards are dropped, avoiding
+/// synchronization on successful per-token events.
 #[derive(Clone, Default)]
 pub(super) struct StreamErrorSignal {
     error_type: Arc<OnceLock<ErrorType>>,
+    terminal_event_emitted: Arc<AtomicBool>,
 }
 
 impl StreamErrorSignal {
@@ -85,6 +90,14 @@ impl StreamErrorSignal {
 
     fn get(&self) -> Option<&ErrorType> {
         self.error_type.get()
+    }
+
+    pub(super) fn mark_terminal_event_emitted(&self) {
+        self.terminal_event_emitted.store(true, Ordering::Release);
+    }
+
+    fn terminal_event_emitted(&self) -> bool {
+        self.terminal_event_emitted.load(Ordering::Acquire)
     }
 }
 
@@ -129,6 +142,38 @@ impl Drop for SignaledInflightGuard {
             && let Some(error_type) = self.signaled_error_type()
         {
             self.guard.mark_error(error_type);
+        }
+    }
+}
+
+/// Disarms a stream handle on drop only after its terminal error event was
+/// handed to the disconnect monitor.
+struct SignaledConnectionHandle {
+    handle: ConnectionHandle,
+    error_signal: Option<StreamErrorSignal>,
+}
+
+impl SignaledConnectionHandle {
+    fn new(handle: ConnectionHandle, error_signal: Option<StreamErrorSignal>) -> Self {
+        Self {
+            handle,
+            error_signal,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.handle.disarm();
+    }
+}
+
+impl Drop for SignaledConnectionHandle {
+    fn drop(&mut self) {
+        if self
+            .error_signal
+            .as_ref()
+            .is_some_and(StreamErrorSignal::terminal_event_emitted)
+        {
+            self.handle.disarm();
         }
     }
 }
@@ -397,6 +442,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
     // disconnect causing a broken-pipe on the SSE write), the guard will report
     // "cancelled" instead of "internal". The happy path overrides this via mark_ok().
     inflight_guard.mark_error(ErrorType::Cancelled);
+    let mut stream_handle = SignaledConnectionHandle::new(stream_handle, error_signal.clone());
     let mut inflight_guard = SignaledInflightGuard::new(inflight_guard, error_signal);
 
     async_stream::try_stream! {
@@ -643,7 +689,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn signaled_error_survives_drop_after_terminal_event() {
+    async fn signaled_error_drop_after_terminal_event_is_not_a_cancellation() {
         let model = "drop-after-response-failed";
         let metrics = Arc::new(Metrics::new());
         let guard = metrics.clone().create_inflight_guard(
@@ -652,13 +698,31 @@ mod tests {
             true,
             "req-drop-after-response-failed",
         );
-        let context: Arc<dyn AsyncEngineContext> = Arc::new(MockContext::new());
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        let handle = ConnectionHandle::create_disabled(tx);
+        let context = Arc::new(MockContext::with_kill_tracking());
+        let engine_context: Arc<dyn AsyncEngineContext> = context.clone();
+        let (connection_tx, connection_rx) = tokio::sync::oneshot::channel();
+        let (stream_tx, stream_rx) = tokio::sync::oneshot::channel();
+        let cancellation_labels = CancellationLabels {
+            model: model.to_string(),
+            endpoint: Endpoint::Responses.to_string(),
+            request_type: RequestType::Stream.to_string(),
+        };
+        let connection_monitor = tokio::spawn(connection_monitor(
+            engine_context.clone(),
+            connection_rx,
+            stream_rx,
+            Some(metrics.clone()),
+            cancellation_labels,
+        ));
+        let mut connection_handle = ConnectionHandle::create_armed(connection_tx);
+        let stream_handle = ConnectionHandle::create_disabled(stream_tx);
+        connection_handle.disarm();
+        drop(connection_handle);
         let error_signal = StreamErrorSignal::default();
         let producer_error_signal = error_signal.clone();
         let stream = futures::stream::once(async move {
             producer_error_signal.set(ErrorType::Internal);
+            producer_error_signal.mark_terminal_event_emitted();
             Ok::<_, axum::Error>(
                 Event::default()
                     .event("response.failed")
@@ -669,9 +733,9 @@ mod tests {
 
         let mut monitored = Box::pin(monitor_for_disconnects_with_timeout_error_and_keep_alive(
             stream,
-            context,
+            engine_context,
             guard,
-            handle,
+            stream_handle,
             None,
             openai_stream_error,
             StreamMonitorOptions {
@@ -681,6 +745,10 @@ mod tests {
         ));
         assert!(monitored.next().await.is_some());
         drop(monitored);
+        tokio::time::timeout(Duration::from_secs(5), connection_monitor)
+            .await
+            .expect("connection monitor did not finish")
+            .expect("connection monitor task failed");
 
         assert_eq!(
             metrics.get_request_counter(
@@ -702,6 +770,30 @@ mod tests {
             ),
             0
         );
+        let cancellation_labels = CancellationLabels {
+            model: model.to_string(),
+            endpoint: Endpoint::Responses.to_string(),
+            request_type: RequestType::Stream.to_string(),
+        };
+        assert_eq!(metrics.get_cancellation_count(&cancellation_labels), 0);
+        assert_eq!(metrics.get_client_disconnect_count(), 0);
+        assert!(!context.is_killed());
+    }
+
+    #[tokio::test]
+    async fn signaled_error_before_terminal_event_keeps_disconnect_handle_armed() {
+        let error_signal = StreamErrorSignal::default();
+        error_signal.set(ErrorType::Internal);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let handle =
+            SignaledConnectionHandle::new(ConnectionHandle::create_armed(tx), Some(error_signal));
+
+        drop(handle);
+
+        assert!(matches!(
+            rx.await.expect("stream handle did not report its status"),
+            ConnectionStatus::ClosedUnexpectedly
+        ));
     }
 
     fn generate_cancellation_labels() -> CancellationLabels {

@@ -3612,11 +3612,23 @@ async fn responses(
 
             if let Some(error) = backend_error {
                 converter.append_error_events(error, &mut events);
+                let terminal_event = events
+                    .pop()
+                    .expect("append_error_events must append response.failed");
+                for event in events.drain(..) {
+                    yield event.map_err(axum::Error::new);
+                }
+                if terminal_event.is_ok() {
+                    // From this yield onward, response.failed is sufficient for
+                    // a client to stop consuming without being a disconnect.
+                    producer_error_signal.mark_terminal_event_emitted();
+                }
+                yield terminal_event.map_err(axum::Error::new);
             } else {
                 converter.append_end_events(&mut events);
-            }
-            for event in events.drain(..) {
-                yield event.map_err(axum::Error::new);
+                for event in events.drain(..) {
+                    yield event.map_err(axum::Error::new);
+                }
             }
         };
 
