@@ -520,8 +520,16 @@ def _select_launches(
          only while it leaves fewer than ``k`` usable, and never merely because
          it sits on a card ``J`` had no need of;
       3. the competing work is VRAM-bearing -- a zero-VRAM filler bypasses the
-         budget gates yet still raises ``running_count``, and can hold off a
-         gang profiled above ``budget_multi`` for its lifetime;
+         budget gates yet still raises ``running_count``, which drops ``_cap``
+         from ``total_gib`` to ``budget_multi`` and can hold off a gang whose
+         ``r`` exceeds ``budget_multi - foreign``. That threshold, not
+         ``budget_multi`` alone, is the real one: a gang profiled strictly
+         *below* ``budget_multi`` is blocked too once foreign memory takes up
+         the difference. Nor is the block bounded by one filler's lifetime --
+         fillers are placed by least load and a drained held card is
+         systematically the least loaded, so the occupancy renews. This
+         limitation is pre-existing and shared with the single-GPU path, which
+         the paragraph below declines to address for the same reason;
       4. ``J`` outranks that competing work under ``_priority_key``; a test that
          is simply lowest-priority against an unbounded stream of higher-priority
          arrivals is not being starved by backfill, and no reservation applies;
@@ -532,7 +540,38 @@ def _select_launches(
     memory held outside the run, because that is the quantity ``J``'s own gate
     is denominated in, and a hold bounding anything else bounds nothing. So any
     device admitting backfill under a hold is left able to take a member
-    immediately. Holds are placed only on devices ``J`` could actually occupy,
+    immediately.
+
+    That statement is exact only once every launched test has allocated what it
+    was profiled at. ``profiled_vram_gib`` is a *peak*, so during a launch's
+    allocation window the live free reading is higher than the settled one,
+    ``_foreign_held`` reads correspondingly lower, and the line sits above its
+    settled value -- admitting a filler the settled line would have refused. The
+    ramp is self-limiting rather than unsound: it loosens ``J``'s own
+    actual-usage gate by the same amount at the same instant, and searches
+    across ramp models found no starvation attributable to it. Every observer in
+    this repo models allocation as instantaneous, so none of them can see the
+    window; ``_VLLM_LAUNCH_STAGGER_S`` exists because it is real.
+
+    The term is subtracted only on devices ``J`` could occupy *today*. On a
+    device it could not, ``foreign > total_gib - required`` holds by definition,
+    so the line would be ``budget_multi - foreign - required <
+    budget_multi - total_gib < 0`` for every test of every size -- the device
+    would refuse all backfill while buying ``J`` nothing, since what gates ``J``
+    there is the neighbour retiring, which this run neither owns nor hastens.
+
+    That widening is scoped to condition 1, ``r <= budget_multi``. For a gang
+    profiled above ``budget_multi`` the line is ``budget_multi - r < 0`` even on
+    a device it could take today, and every backfill test is still refused --
+    correctly, and necessarily: admitting one drives ``running_count`` to 1,
+    which drops ``_cap`` from ``total_gib`` to ``budget_multi``, and a member
+    needing more than ``budget_multi`` can then never fit on that device at all.
+    Such a gang runs only by having a device to itself. The pre-flight admits
+    it (it checks physical size, not the multi-process budget), so the state is
+    reachable; it is outside the progress theorem by condition 1, and outside
+    the work-conservation claim for the same reason.
+
+    Holds are placed only on devices ``J`` could actually occupy,
     the pre-hold occupants all finish, and ``J`` is scanned before every
     lower-priority test -- so the ``k`` members eventually satisfy the gate
     simultaneously.
@@ -708,8 +747,26 @@ def _select_launches(
                     #     admission decision, not a permanent candidacy one, so
                     #     a card whose neighbour leaves is admitted again on the
                     #     very next pass.
+                    #   * the foreign term only where it can buy the gang
+                    #     something. On a card the gang could take today the
+                    #     bound above is exactly tight. On one it could not
+                    #     (`_usable_now` false) we have `foreign > total_gib -
+                    #     required`, so the line is `budget_multi - foreign -
+                    #     required < budget_multi - total_gib < 0` for every
+                    #     test of every size -- the card refuses ALL backfill
+                    #     for as long as the gang is queued. Nothing is bought
+                    #     by that: what gates the gang on such a card is the
+                    #     foreign hold retiring, which this run neither owns nor
+                    #     influences, and holding the card idle does not hasten
+                    #     it. At `n == gpu_count` -- the only topology gangs
+                    #     ship to -- every card is held and the node makes zero
+                    #     progress until the CI wall-clock kills it. Keeping
+                    #     `required` in the line unconditionally is what still
+                    #     lets the gang fit the moment the neighbour leaves.
                     committed = ts.budget + test.profiled_gib
-                    line = gs.budget_multi - _foreign_held(gi) - reserved_req[gi]
+                    line = gs.budget_multi - reserved_req[gi]
+                    if _usable_now(gi, reserved_req[gi]):
+                        line -= _foreign_held(gi)
                     if committed > line:
                         continue  # would crowd out the reserved gang
                 elif backfill_added[gi] + test.profiled_gib > cap - reserved_req[gi]:

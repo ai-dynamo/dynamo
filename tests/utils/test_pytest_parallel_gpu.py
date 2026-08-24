@@ -2268,9 +2268,7 @@ def test_gang_waits_only_while_foreign_memory_leaves_too_few_usable_cards(frees_
         backfill=lambda i: _t(f"fill{i}", 2.0, timeout=21.0),
         passes=400,
         external_hold=(
-            lambda now: {1: 4.5, 2: 4.5}
-            if (frees_at is None or now < frees_at)
-            else {}
+            lambda now: {1: 4.5, 2: 4.5} if (frees_at is None or now < frees_at) else {}
         ),
     )
 
@@ -2499,6 +2497,188 @@ def test_gang_still_holds_its_cards_while_every_card_is_transiently_blocked():
     assert started["gang"] <= 60, (
         f"gang launched on pass {started['gang']}, long after the neighbours "
         "left on pass 40 -- its cards were given away while it was unprotected"
+    )
+
+
+def test_non_gang_work_still_launches_while_a_gang_holds_cards_it_cannot_use():
+    """A hold must not suppress work that cannot affect the gang's admission.
+
+    The suite has never asserted this. Every existing observer asks "did the
+    watched gang launch", so a hold that takes the rest of the node to zero
+    scores a clean pass -- which is how this reached a third audit.
+
+    Two 80 GiB cards (``budget_multi`` 68.0) and a gpu_2 gang wanting 40.0 on
+    each. Until pass 60 a process outside the run holds 45.0 GiB on both, so
+    neither card can host the gang: ``_usable_now`` reads 80.0 - 45.0 = 35.0,
+    short of 40.0. On such a card the hold line is
+    ``budget_multi - foreign - required`` = 68.0 - 45.0 - 40.0 = **-17.0**,
+    negative unconditionally, so every backfill test is refused for as long as
+    the gang is queued. At ``n == gpu_count`` -- the only topology this ships to
+    -- that is the whole node, and ``run_parallel``'s ``while pending or
+    running:`` has no bail-out from it.
+
+    The 10.0 GiB backfill here is *causally irrelevant* to the gang: once the
+    neighbours leave, a running filler leaves 10.0 + 40.0 = 50.0 against a cap of
+    68.0, so the gang still fits beside it. Refusing it buys the gang nothing --
+    and the second assertion proves that directly, by pinning that the gang
+    launches on the same pass either way.
+
+    This is deliberately NOT the topology of
+    ``test_gang_still_holds_its_cards_while_every_card_is_transiently_blocked``
+    above, where the backfill outlives the neighbours and genuinely does cost the
+    gang its launch. Both must hold at once: protect what the gang needs, refuse
+    nothing else.
+    """
+    gpus = {0: _gpu(0, 80.0), 1: _gpu(1, 80.0)}
+    gang = _t("gang", 40.0, timeout=1800, gpus=2)
+    assert _unschedulable_reason(gang, gpus) is None
+
+    started = _drive_passes(
+        gpus,
+        [gang],
+        backfill=lambda i: _t(f"fill{i}", 10.0, timeout=15.0),
+        passes=300,
+        external_hold=lambda now: {0: 45.0, 1: 45.0} if now < 60 else {},
+    )
+
+    held_window = [n for n, at in started.items() if n != "gang" and at < 60]
+    assert held_window, (
+        "no non-gang test launched in the 60 passes the gang held both cards it "
+        "could not use -- the node made zero progress while waiting"
+    )
+
+    assert "gang" in started, "gang never launched after its blocker retired"
+    assert started["gang"] <= 61, (
+        f"gang launched on pass {started['gang']}; admitting backfill the gang "
+        "cannot be harmed by must not delay it"
+    )
+
+
+def test_a_gang_hold_prefers_usable_cards_whatever_order_the_gpus_are_declared_in():
+    """The hold must rank by usability, not by however ``gpu_states`` was built.
+
+    Deleting ``unreserved.sort(key=_hold_key)`` -- the whole of the repair that
+    exists because a hold landed on a card nobody in this run could use -- leaves
+    all 100 other tests green. Every one of them happens to declare its GPUs in
+    an order where the correct hold set is already the first ``need`` entries, so
+    the sort is a no-op and its absence is invisible.
+
+    Three 10 GiB cards (``budget_multi`` 8.5) **declared 2, 1, 0**. A process
+    outside the run holds 4.5 GiB on GPU2 forever, so ``_usable_now`` reads
+    10.0 - 4.5 = 5.5 against the gang's 6.0: GPU2 cannot host a member today and
+    will not until that neighbour leaves. GPU0 carries a 5.0 GiB test of *ours*,
+    which retires -- ``_foreign_held`` is 0 there, so GPU0 is usable. The gang is
+    blocked meanwhile, needing two cards and having one.
+
+    The hold must therefore protect {GPU0, GPU1}. Taking ``unreserved[:need]`` in
+    declaration order protects {GPU2, GPU1} instead: GPU2 buys the gang nothing,
+    and GPU0 -- unprotected -- fills with backfill that renews before the hog
+    retires, so the gang never gets a second card. The assertion is on the
+    launch, not on the ordering: this is what the missing sort *does*, not that
+    it is called.
+    """
+    gpus = {gi: _gpu(gi, 10.0) for gi in (2, 1, 0)}
+    gang = _t("gang", 6.0, timeout=1800, gpus=2)
+    hog = _t("hog", 5.0, timeout=60)
+    assert _unschedulable_reason(gang, gpus) is None
+
+    # The hog is already running when the first pass is scheduled, so the gang
+    # starts blocked and the hold's choice of cards is what decides its fate.
+    _reserve_gpus(hog, (0,), gpus)
+    running: dict[str, tuple[_TestEntry, int]] = {"hog": (hog, 60)}
+    pending = [gang]
+    started: dict[str, int] = {}
+    made = 0
+
+    for now in range(600):
+        for name in [n for n, (_, end) in running.items() if end <= now]:
+            _release_gpus(running.pop(name)[0], gpus)
+        while len(pending) < 4:
+            pending.append(_t(f"fill{made}", 3.0, timeout=21.0))
+            made += 1
+        pending.sort(key=_priority_key, reverse=True)
+        resident = {
+            gi: sum(
+                t.profiled_gib for t, _ in running.values() if gi in t.assigned_gpus
+            )
+            for gi in gpus
+        }
+        actual_free = {
+            gi: gs.total_gib - resident[gi] - (4.5 if gi == 2 else 0.0)
+            for gi, gs in gpus.items()
+        }
+        for idx, got in reversed(
+            _select_launches(
+                pending=pending,
+                gpu_states=gpus,
+                actual_free=actual_free,
+                num_slots=8,
+                running_count=len(running),
+            )
+        ):
+            test = pending.pop(idx)
+            _reserve_gpus(test, got, gpus)
+            running[test.name] = (test, now + max(1, int(test.est_duration)))
+            started.setdefault(test.name, now)
+
+    assert "gang" in started, (
+        "gang never launched in 600 passes: its hold went to GPU2, which no "
+        "member can use, leaving usable GPU0 to be taken by backfill"
+    )
+    assert started["gang"] <= 61, (
+        f"gang launched on pass {started['gang']}, not on the pass its own hog "
+        "retired -- a usable card was given away while the gang waited"
+    )
+
+
+def test_a_gang_hold_admits_the_same_backfill_however_far_into_the_pass_it_is():
+    """``_foreign_held`` must not drift as a pass fills. Nothing tested this.
+
+    The helper's whole reason for existing is that the hold's *ranking* and the
+    hold's *admission gate* must read one number; they were denominated
+    differently once and that was defect 3. Its docstring states the mechanism --
+    ``total - free - budget``, where the two terms cancel exactly against this
+    pass's tentative launches -- and asserts in prose that the answer therefore
+    does not drift. Substituting the pass-invariant ``gs.budget_used`` for the
+    tentative ``ts.budget`` leaves all 101 other tests green while making the
+    estimate climb by exactly one profile per test already admitted.
+
+    Three 80 GiB cards (``budget_multi`` 68.0). GPU1 and GPU2 each carry 50.0 GiB
+    held outside the run, so neither can host a member of a 40.0 GiB/device gang
+    (80.0 - 50.0 = 30.0). GPU0 is clean and usable, so with one usable card and a
+    gang needing two, the gang is blocked and holds cards.
+
+    On GPU0 -- held, and usable, so the foreign term applies -- the line is
+    ``budget_multi - foreign - required`` = 68.0 - 0.0 - 40.0 = **28.0 GiB**, and
+    5.0 GiB backfill fits five times (25.0 <= 28.0 < 30.0). A drifting estimate
+    reads foreign as 5.0 after the first admission, 10.0 after the second, and
+    stops at three. The assertion is on how much work the card takes, not on how
+    the number is computed.
+    """
+    gpus = {gi: _gpu(gi, 80.0) for gi in range(3)}
+    gang = _t("gang", 40.0, timeout=1800, gpus=2)
+    pending = [gang] + [_t(f"fill{i}", 5.0, timeout=20.0) for i in range(24)]
+    pending.sort(key=_priority_key, reverse=True)
+
+    launched = _select_launches(
+        pending=pending,
+        gpu_states=gpus,
+        actual_free={0: 80.0, 1: 30.0, 2: 30.0},
+        num_slots=64,
+        running_count=0,
+    )
+
+    names = [pending[idx].name for idx, _ in launched]
+    assert "gang" not in names, "gang must be blocked for its hold to be under test"
+
+    on_gpu0 = sum(
+        1 for idx, got in launched if pending[idx].name != "gang" and 0 in got
+    )
+    assert on_gpu0 == 5, (
+        f"GPU0 took {on_gpu0} backfill tests, not the 5 its hold line admits "
+        "(68.0 - 0.0 - 40.0 = 28.0 GiB, five 5.0 GiB tests = 25.0): the foreign "
+        "estimate drifted upward as the pass filled, so later tests in the same "
+        "pass were gated against a larger number than earlier ones"
     )
 
 
