@@ -29,7 +29,7 @@ use futures::StreamExt;
 use tracing::Instrument;
 
 use super::{
-    RouteDoc,
+    RouteDoc, apply_request_tool_call_parsing_options,
     disconnect::{
         ConnectionHandle, create_connection_monitor, monitor_for_disconnects_with_activity,
     },
@@ -48,7 +48,8 @@ use crate::protocols::anthropic::types::{
 };
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
-    apply_header_routing_overrides, session_affinity_from_headers,
+    apply_cache_salt_header_override, apply_header_routing_overrides,
+    has_non_cache_salt_routing_headers, session_affinity_from_headers,
 };
 use crate::protocols::common::input_trigger::classify_anthropic_request;
 use crate::protocols::openai::chat_completions::{
@@ -62,7 +63,7 @@ use crate::types::Annotated;
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::{SanitizedError, invalid_argument};
 use super::metadata::{attach_x_request_id, extract_metadata_from_http};
-use super::openai::{get_body_limit, get_or_create_request_id};
+use super::openai::{get_body_limit, get_or_create_request_id, warn_nvext_disabled};
 
 // ---------------------------------------------------------------------------
 // Router
@@ -289,7 +290,14 @@ async fn handler_anthropic_messages(
             "max_tokens: must be greater than 0",
         ));
     }
-    gate_anthropic_nvext(&mut request, state.nvext_enabled());
+    if let Err(error) = gate_anthropic_nvext(&mut request, &headers, state.nvext_enabled()) {
+        inflight_guard.mark_error(ErrorType::Validation);
+        return Err(anthropic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            &error.to_string(),
+        ));
+    }
 
     // Create request context
     let cancellation_labels = CancellationLabels {
@@ -460,7 +468,7 @@ async fn anthropic_messages(
     // etc.) that the stream converter needs for faithful response reconstruction.
     let anthropic_ctx = unified_request.anthropic_context().cloned();
     let mut chat_request = unified_request.into_inner();
-    apply_anthropic_header_routing_overrides(&mut chat_request, &headers, state.nvext_enabled());
+    apply_anthropic_nvext_policy(&mut chat_request, &headers, state.nvext_enabled());
     if let Err(error) = chat_request.validate() {
         inflight_guard.mark_error(ErrorType::Validation);
         let error = invalid_argument(error.to_string());
@@ -507,13 +515,10 @@ async fn anthropic_messages(
 
     let request = context.map(|_req| chat_request);
 
-    // Gate the experimental v2 batch finalize on the request's tool_choice, mirroring the
-    // streaming gate (required/named + structural-tag stay on the v1 finalize path).
-    let parsing_options = parsing_options.with_experimental_v2_batch_eligible(
-        crate::protocols::openai::chat_completions::tool_parser_v2::batch_tool_choice_eligible(
-            request.inner.tool_choice.as_ref(),
-        ),
-    );
+    // Anthropic requests are converted to the same chat request contract. Keep
+    // parser activation identical to the OpenAI Chat Completions and Responses
+    // entry points so content-only turns cannot be reclassified as tool calls.
+    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request);
 
     // Same backstop as the chat handler, so the two aggregation entry points
     // cannot drift. See `wants_reasoning_as_content_when_empty`.
@@ -1032,28 +1037,50 @@ fn estimate_input_tokens(req: &AnthropicCreateMessageRequest) -> u32 {
     .estimate_tokens()
 }
 
-fn gate_anthropic_nvext(request: &mut AnthropicCreateMessageRequest, nvext_enabled: bool) {
+fn gate_anthropic_nvext(
+    request: &mut AnthropicCreateMessageRequest,
+    headers: &HeaderMap,
+    nvext_enabled: bool,
+) -> anyhow::Result<()> {
     if nvext_enabled {
-        return;
+        return Ok(());
     }
 
-    if request.nvext.is_some() {
-        tracing::warn!(
-            endpoint = "anthropic_messages",
-            "request carried nvext data but the nvext extension is disabled on this frontend; dropping it"
-        );
+    let mut discarded = has_non_cache_salt_routing_headers(headers);
+    if let Some(raw_nvext) = request.nvext.take() {
+        if let serde_json::Value::Object(mut fields) = raw_nvext {
+            if fields.keys().any(|field| field != "cache_salt") {
+                discarded = true;
+            }
+
+            request.nvext = match fields.remove("cache_salt") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(cache_salt)) if cache_salt.is_empty() => None,
+                Some(serde_json::Value::String(cache_salt)) => {
+                    Some(serde_json::json!({ "cache_salt": cache_salt }))
+                }
+                Some(_) => anyhow::bail!("invalid nvext.cache_salt: expected a string or null"),
+            };
+        } else {
+            discarded = true;
+        }
     }
-    request.nvext = None;
+
+    warn_nvext_disabled("anthropic_messages", discarded);
+    Ok(())
 }
 
-fn apply_anthropic_header_routing_overrides(
+fn apply_anthropic_nvext_policy(
     request: &mut NvCreateChatCompletionRequest,
     headers: &HeaderMap,
     nvext_enabled: bool,
 ) {
-    if nvext_enabled {
-        request.nvext = apply_header_routing_overrides(request.nvext.take(), headers);
-    }
+    let nvext = apply_cache_salt_header_override(request.nvext.take(), headers);
+    request.nvext = if nvext_enabled {
+        apply_header_routing_overrides(nvext, headers)
+    } else {
+        nvext
+    };
 }
 
 /// Build an Anthropic-formatted error response from a canonical
@@ -1156,6 +1183,7 @@ mod tests {
             "max_tokens": 16,
             "messages": [{"role": "user", "content": "hi"}],
             "nvext": {
+                "cache_salt": "tenant-body",
                 "agent_hints": {
                     "priority": 5
                 }
@@ -1167,7 +1195,7 @@ mod tests {
     #[test]
     fn anthropic_nvext_gate_preserves_when_enabled() {
         let mut request = request_with_nvext();
-        gate_anthropic_nvext(&mut request, true);
+        gate_anthropic_nvext(&mut request, &HeaderMap::new(), true).unwrap();
         let nvext = parse_nvext(request.nvext).unwrap();
 
         assert_eq!(
@@ -1177,11 +1205,43 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_nvext_gate_strips_when_disabled() {
+    fn anthropic_nvext_gate_retains_only_cache_salt_when_disabled() {
         let mut request = request_with_nvext();
-        gate_anthropic_nvext(&mut request, false);
+        gate_anthropic_nvext(&mut request, &HeaderMap::new(), false).unwrap();
+        let nvext = parse_nvext(request.nvext).unwrap().unwrap();
 
-        assert!(request.nvext.is_none());
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-body"));
+        assert!(!nvext.has_non_cache_salt_fields());
+    }
+
+    #[test]
+    fn anthropic_nvext_gate_rejects_invalid_cache_salt_when_disabled() {
+        let mut request = request_with_nvext();
+        request.nvext = Some(serde_json::json!({
+            "cache_salt": 42,
+            "ignored_field": true
+        }));
+
+        let error = gate_anthropic_nvext(&mut request, &HeaderMap::new(), false).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid nvext.cache_salt: expected a string or null"
+        );
+    }
+
+    #[test]
+    fn anthropic_nvext_gate_ignores_malformed_non_salt_data_when_disabled() {
+        for raw_nvext in [
+            serde_json::json!(42),
+            serde_json::json!({"agent_hints": 42}),
+            serde_json::json!({"unsupported_future_field": true}),
+        ] {
+            let mut request = request_with_nvext();
+            request.nvext = Some(raw_nvext);
+
+            gate_anthropic_nvext(&mut request, &HeaderMap::new(), false).unwrap();
+            assert!(request.nvext.is_none());
+        }
     }
 
     #[test]
@@ -1197,7 +1257,7 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_header_routing_overrides_apply_when_enabled() {
+    fn anthropic_nvext_policy_applies_routing_when_enabled() {
         let request = request_with_nvext();
         let mut chat_request: NvCreateChatCompletionRequest = request.try_into().unwrap();
         let mut headers = HeaderMap::new();
@@ -1205,7 +1265,7 @@ mod tests {
         headers.insert("x-dynamo-prefill-instance-id", "7".parse().unwrap());
         headers.insert("x-dynamo-dp-rank", "3".parse().unwrap());
 
-        apply_anthropic_header_routing_overrides(&mut chat_request, &headers, true);
+        apply_anthropic_nvext_policy(&mut chat_request, &headers, true);
         let nvext = chat_request.nvext.unwrap();
 
         assert_eq!(nvext.backend_instance_id, Some(42));
@@ -1215,17 +1275,45 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_header_routing_overrides_skip_when_disabled() {
-        let request = request_with_nvext();
-        let mut chat_request: NvCreateChatCompletionRequest = request.try_into().unwrap();
+    fn anthropic_nvext_policy_applies_only_tenant_when_disabled() {
+        let mut request = request_with_nvext();
         let mut headers = HeaderMap::new();
         headers.insert("x-dynamo-worker-instance-id", "42".parse().unwrap());
+        headers.insert("x-dynamo-dp-rank", "3".parse().unwrap());
+        headers.insert("x-dynamo-request-priority", "7".parse().unwrap());
+        headers.insert("x-tenant-id", "tenant-client".parse().unwrap());
+        headers.append("x-tenant-id", "   ".parse().unwrap());
+        headers.append("x-tenant-id", " tenant-gateway ".parse().unwrap());
+        gate_anthropic_nvext(&mut request, &headers, false).unwrap();
+        let mut chat_request: NvCreateChatCompletionRequest = request.try_into().unwrap();
 
-        apply_anthropic_header_routing_overrides(&mut chat_request, &headers, false);
+        apply_anthropic_nvext_policy(&mut chat_request, &headers, false);
         let nvext = chat_request.nvext.unwrap();
 
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-gateway"));
         assert_eq!(nvext.backend_instance_id, None);
         assert_eq!(nvext.decode_worker_id, None);
+        assert_eq!(nvext.dp_rank, None);
+        assert_eq!(nvext.agent_hints, None);
+    }
+
+    #[test]
+    fn anthropic_empty_tenant_header_falls_back_to_body_salt_when_disabled() {
+        let mut request = request_with_nvext();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-tenant-id", "   ".parse().unwrap());
+        gate_anthropic_nvext(&mut request, &headers, false).unwrap();
+        let mut chat_request: NvCreateChatCompletionRequest = request.try_into().unwrap();
+
+        apply_anthropic_nvext_policy(&mut chat_request, &headers, false);
+
+        assert_eq!(
+            chat_request
+                .nvext
+                .and_then(|nvext| nvext.cache_salt)
+                .as_deref(),
+            Some("tenant-body")
+        );
     }
 
     #[test]

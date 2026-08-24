@@ -11,6 +11,26 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
 _VALID_ARCHS = {"amd64", "arm64"}
 
+_PYTHON_PACKAGE_DOWNLOAD_RE = re.compile(
+    r"\buv\s+(?:build|lock|sync|pip\s+(?:compile|install|sync))\b"
+    r"|(?:^|[\s;&|])(?:\S*/)?pip3?\s+(?:install|wheel)\b"
+    r"|(?:^|[\s;&|])(?:\S*/)?python3?(?:\.\d+)?\s+-m\s+pip\s+(?:install|wheel)\b"
+    # vLLM Omni installs packages inside this mounted script.
+    r"|(?:^|[\s;&|])bash\s+/tmp/install_vllm_omni\.sh\b"
+    # NIXL's Meson build resolves Python build dependencies through uv.
+    r"|github\.com/ai-dynamo/nixl\.git",
+    re.MULTILINE,
+)
+
+_PYPI_RUN_PREFIX = (
+    "RUN --mount=type=secret,id=pip-index-url,env=PIP_INDEX_URL \\\n"
+    "    --mount=type=secret,id=uv-default-index,env=UV_DEFAULT_INDEX \\\n"
+    "    --mount=type=secret,id=pypi-netrc,target=/run/secrets/pypi-netrc,mode=0444 \\\n"
+    "    "
+)
+
+_PYPI_ENV = "export NETRC=/run/secrets/pypi-netrc && \\\n    "
+
 
 def parse_platform(platform_str: str) -> str:
     """Normalize a --platform value to the template variable used by Jinja2.
@@ -183,6 +203,27 @@ def _make_jinja_env(script_dir):
     )
 
 
+def _inject_python_index_mounts(dockerfile: str) -> str:
+    """Mount optional PyPI configuration in every Python package install layer."""
+    instructions = re.split(r"(?=^[A-Z]+\b)", dockerfile, flags=re.MULTILINE)
+    for index, instruction in enumerate(instructions):
+        # BuildKit strips full-line comments before parsing RUN flags; ignore them here too.
+        code = re.sub(r"(?m)^[ \t]*#[^\n]*$", "", instruction)
+        if not instruction.startswith("RUN ") or not _PYTHON_PACKAGE_DOWNLOAD_RE.search(
+            code
+        ):
+            continue
+
+        instructions[index] = re.sub(
+            r"^RUN (?P<mounts>(?:(?:--mount=[^\n]*\\|#[^\n]*)\n[ \t]+)*)",
+            lambda match: _PYPI_RUN_PREFIX + match.group("mounts") + _PYPI_ENV,
+            instruction,
+            count=1,
+        )
+
+    return "".join(instructions)
+
+
 def _render_context(args, context=None):
     # device_key is the lookup key into context.yaml's per-device dict
     # (e.g. "cuda12.9", "xpu"). Computed here so it's available to every
@@ -269,6 +310,7 @@ def render(args, context, script_dir):
     rendered = template.render(context=context, **_render_context(args, context))
     # Replace all instances of 3+ newlines with 2 newlines
     cleaned = re.sub(r"\n{3,}", "\n\n", rendered)
+    cleaned = _inject_python_index_mounts(cleaned)
 
     if args.output_short_filename:
         filename = "rendered.Dockerfile"

@@ -3083,6 +3083,31 @@ func TestDGDGroveTopologyConditionReconciler_Reconcile(t *testing.T) {
 			wantEventCount: 1,
 		},
 		{
+			name: "provider override topology projects unavailable condition",
+			dgd: &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{
+					ProviderOverride: rootTopologyOverride(`{"topologyName":"test-topology","pack":{"required":"rack"}}`),
+				},
+			},
+			pcs: &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Status: grovev1alpha1.PodCliqueSetStatus{
+					Conditions: []metav1.Condition{{
+						Type:    groveconstants.ConditionTopologyLevelsUnavailable,
+						Status:  metav1.ConditionTrue,
+						Reason:  groveconstants.ConditionReasonTopologyLevelsUnavailable,
+						Message: "Topology level 'rack' is no longer available",
+					}},
+				},
+			},
+			groveEnabled:   true,
+			wantCondition:  true,
+			wantStatus:     metav1.ConditionFalse,
+			wantReason:     v1alpha1.ConditionReasonTopologyLevelsUnavailable,
+			wantEventCount: 1,
+		},
+		{
 			name: "PCS reports TopologyLevelsUnavailable=True with ClusterTopologyNotFound",
 			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},

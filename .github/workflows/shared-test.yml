@@ -225,7 +225,7 @@ jobs:
       - name: Run CPU-only tests (parallelized)
         if: ${{ inputs.run_cpu_only_tests }}
         timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
-        uses: ./.github/actions/pytest-local
+        uses: $/.github/actions/pytest-local
         with:
           container_workspace: ${{ inputs.container_workspace }}
           pytest_marks: ${{ inputs.cpu_only_test_markers }}

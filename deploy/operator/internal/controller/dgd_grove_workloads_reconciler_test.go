@@ -28,13 +28,17 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -178,7 +182,7 @@ func TestGroveWorkloadsReconciler_DoesNotCommitWorkerHashWhenPodCliqueSetSyncFai
 						object client.Object,
 						_ ...client.CreateOption,
 					) error {
-						if _, ok := object.(*grovev1alpha1.PodCliqueSet); ok {
+						if isGrovePodCliqueSetObject(object) {
 							return apierrors.NewAlreadyExists(
 								schema.GroupResource{Group: "grove.io", Resource: "podcliquesets"},
 								object.GetName(),
@@ -192,8 +196,7 @@ func TestGroveWorkloadsReconciler_DoesNotCommitWorkerHashWhenPodCliqueSetSyncFai
 						object client.Object,
 						_ ...client.UpdateOption,
 					) error {
-						switch object.(type) {
-						case *grovev1alpha1.PodCliqueSet:
+						if isGrovePodCliqueSetObject(object) {
 							if tt.existingPCS {
 								return apierrors.NewConflict(
 									schema.GroupResource{Group: "grove.io", Resource: "podcliquesets"},
@@ -201,7 +204,7 @@ func TestGroveWorkloadsReconciler_DoesNotCommitWorkerHashWhenPodCliqueSetSyncFai
 									errors.New("stale PodCliqueSet"),
 								)
 							}
-						case *nvidiacomv1beta1.DynamoGraphDeployment:
+						} else if _, ok := object.(*nvidiacomv1beta1.DynamoGraphDeployment); ok {
 							dgdUpdateCalls++
 						}
 						return nil
@@ -218,7 +221,6 @@ func TestGroveWorkloadsReconciler_DoesNotCommitWorkerHashWhenPodCliqueSetSyncFai
 				&configv1alpha1.OperatorConfiguration{},
 				&commoncontroller.RuntimeConfig{},
 				&mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }},
-				&recordingGroveScaleClient{},
 			)
 
 			t.Log("Reconcile the full workload transition")
@@ -277,10 +279,9 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 				object client.Object,
 				options ...client.UpdateOption,
 			) error {
-				switch object.(type) {
-				case *grovev1alpha1.PodCliqueSet:
+				if isGrovePodCliqueSetObject(object) {
 					pcsUpdateCalls++
-				case *nvidiacomv1beta1.DynamoGraphDeployment:
+				} else if _, ok := object.(*nvidiacomv1beta1.DynamoGraphDeployment); ok {
 					dgdUpdateCalls++
 					if failDGDUpdate {
 						return apierrors.NewConflict(
@@ -301,7 +302,6 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 		&configv1alpha1.OperatorConfiguration{},
 		&commoncontroller.RuntimeConfig{},
 		&mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }},
-		&recordingGroveScaleClient{},
 	)
 
 	t.Log("Persist the PCS suffix, then fail the DGD hash commit")
@@ -333,7 +333,6 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 		&configv1alpha1.OperatorConfiguration{},
 		&commoncontroller.RuntimeConfig{},
 		&mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }},
-		&recordingGroveScaleClient{},
 	)
 	_, err = workloads.Reconcile(context.Background(), freshDGD, nil, nil)
 	require.NoError(t, err)
@@ -437,4 +436,118 @@ func TestGroveWorkloadsReconciler_ReconcilePodCliqueSetReturnsCreateConflict(t *
 	t.Log("Verify the creation collision is returned to the caller")
 	require.Error(t, err)
 	assert.True(t, apierrors.IsAlreadyExists(err))
+}
+
+func TestGroveProviderOverridesUseObservedPCSReconciliation(t *testing.T) {
+	t.Log("Build one Grove reconciler with an injectable ordinary update failure")
+	ctx := context.Background()
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", UID: types.UID("graph-uid")},
+	}
+	desired := &grovev1alpha1.PodCliqueSet{
+		TypeMeta:   metav1.TypeMeta{APIVersion: provideroverride.GroveAPIVersion, Kind: provideroverride.TargetPodCliqueSet},
+		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+		Spec: grovev1alpha1.PodCliqueSetSpec{
+			Template: grovev1alpha1.PodCliqueSetTemplateSpec{},
+		},
+	}
+	rejectUpdate := false
+	updateCalls := 0
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, writer client.WithWatch, object client.Object, opts ...client.UpdateOption) error {
+				require.IsType(t, &unstructured.Unstructured{}, object, "opaque PCS updates must serialize only at the write boundary")
+				updateCalls++
+				if rejectUpdate {
+					return errors.New("provider rejected update")
+				}
+				return writer.Update(ctx, object, opts...)
+			},
+		}).
+		Build()
+	reconciler := &groveWorkloadsReconciler{
+		syncer: newDGDResourceSyncer(kubeClient, events.NewFakeRecorder(10)),
+	}
+
+	t.Log("Create the PCS after composing an opaque root topology override")
+	dgd.Spec.ProviderOverride = rootTopologyOverride(`{"topologyName":"gpu-topology","futureProviderField":{"enabled":true}}`)
+	_, err := reconciler.reconcilePodCliqueSet(ctx, dgd, &grovePodCliqueSetRender{desired: desired})
+	require.NoError(t, err)
+	assertLiveRootTopologyValue(t, kubeClient, "topologyName", "gpu-topology")
+
+	t.Log("Reuse the typed render observation when the desired PCS is unchanged")
+	observed := &grovev1alpha1.PodCliqueSet{}
+	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(desired), observed))
+	_, err = reconciler.reconcilePodCliqueSet(ctx, dgd, &grovePodCliqueSetRender{existing: observed, desired: desired})
+	require.NoError(t, err)
+	assert.Zero(t, updateCalls)
+
+	t.Log("Reject an ordinary PCS update and verify the live resource remains unchanged")
+	dgd.Spec.ProviderOverride = rootTopologyOverride(`{"topologyName":"changed"}`)
+	rejectUpdate = true
+	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(desired), observed))
+	_, err = reconciler.reconcilePodCliqueSet(ctx, dgd, &grovePodCliqueSetRender{existing: observed, desired: desired})
+	require.ErrorContains(t, err, "provider rejected update")
+	assert.Equal(t, 1, updateCalls)
+	assertLiveRootTopologyValue(t, kubeClient, "topologyName", "gpu-topology")
+
+	t.Log("Remove the override and let the same PCS update path prune its subtree")
+	rejectUpdate = false
+	dgd.Spec.ProviderOverride = nil
+	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(desired), observed))
+	_, err = reconciler.reconcilePodCliqueSet(ctx, dgd, &grovePodCliqueSetRender{existing: observed, desired: desired})
+	require.NoError(t, err)
+	assert.Equal(t, 2, updateCalls)
+	live := newUnstructuredGrovePodCliqueSet()
+	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(desired), live))
+	_, found, nestedErr := unstructured.NestedFieldNoCopy(live.Object, "spec", "template", "topologyConstraint")
+	require.NoError(t, nestedErr)
+	assert.False(t, found)
+}
+
+func isGrovePodCliqueSetObject(object client.Object) bool {
+	if _, ok := object.(*grovev1alpha1.PodCliqueSet); ok {
+		return true
+	}
+	unstructuredObject, ok := object.(*unstructured.Unstructured)
+	return ok && unstructuredObject.GetKind() == provideroverride.TargetPodCliqueSet
+}
+
+func rootTopologyOverride(topology string) *nvidiacomv1beta1.ProviderOverride {
+	return &nvidiacomv1beta1.ProviderOverride{
+		APIVersion: provideroverride.GroveAPIVersion,
+		Target:     provideroverride.TargetPodCliqueSet,
+		Value: apiextensionsv1.JSON{Raw: []byte(
+			`{"spec":{"template":{"topologyConstraint":` + topology + `}}}`,
+		)},
+	}
+}
+
+func assertLiveRootTopologyValue(
+	t *testing.T,
+	kubeClient client.Client,
+	field string,
+	want interface{},
+) {
+	t.Helper()
+	live := newUnstructuredGrovePodCliqueSet()
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: "graph", Namespace: "default"}, live))
+	got, found, err := unstructured.NestedFieldNoCopy(
+		live.Object,
+		"spec",
+		"template",
+		"topologyConstraint",
+		field,
+	)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, want, got)
+}
+
+func newUnstructuredGrovePodCliqueSet() *unstructured.Unstructured {
+	object := &unstructured.Unstructured{}
+	object.SetAPIVersion(provideroverride.GroveAPIVersion)
+	object.SetKind(provideroverride.TargetPodCliqueSet)
+	return object
 }

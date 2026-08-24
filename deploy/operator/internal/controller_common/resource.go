@@ -315,6 +315,10 @@ func CopySpec(source, destination client.Object) error {
 	destUnstructured := &unstructured.Unstructured{Object: destMap}
 
 	if spec, found, err := unstructured.NestedFieldCopy(sourceUnstructured.Object, "spec"); err == nil && found {
+		// Keep unstructured destinations opaque so unknown provider fields survive.
+		if destinationUnstructured, ok := destination.(*unstructured.Unstructured); ok {
+			return unstructured.SetNestedField(destinationUnstructured.Object, spec, "spec")
+		}
 		if err := unstructured.SetNestedField(destUnstructured.Object, spec, "spec"); err != nil {
 			return err
 		}
