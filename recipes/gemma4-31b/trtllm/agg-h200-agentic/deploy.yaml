@@ -183,6 +183,7 @@ spec:
                 - gemma4
                 - --custom-jinja-template
                 - examples/chat_templates/gemma4_tool.jinja
+                - --enable-multimodal
               envFrom:
                 - secretRef:
                     name: hf-token-secret
