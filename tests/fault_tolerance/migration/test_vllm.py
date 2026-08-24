@@ -112,24 +112,76 @@ MIGRATION_CASES = [
     ),
 ]
 
+# Decode migration injects the fault only after a response stream is
+# established, so unary responses are not an executable policy value here.
+# Retain one streaming case for each migration-policy outcome while balancing
+# both shutdown paths, APIs, and request-plane transports.
+DECODE_MIGRATION_CASES = [
+    pytest.param(
+        3,
+        None,
+        True,
+        "chat",
+        "nats",
+        id="migration_enabled-worker_failure-chat-stream-nats",
+    ),
+    pytest.param(
+        0,
+        None,
+        False,
+        "completion",
+        "nats",
+        id="migration_disabled-graceful_shutdown-completion-stream-nats",
+    ),
+    pytest.param(
+        3,
+        1,
+        True,
+        "completion",
+        "tcp",
+        id="max_seq_len_exceeded-worker-failure-completion-stream-tcp",
+    ),
+    pytest.param(
+        3,
+        1_000_000,
+        False,
+        "chat",
+        "tcp",
+        id="max_seq_len_not_exceeded-graceful-shutdown-chat-stream-tcp",
+    ),
+]
+
+MIGRATION_PARAMETERS = pytest.mark.parametrize(
+    (
+        "migration_limit",
+        "migration_max_seq_len",
+        "immediate_kill",
+        "request_api",
+        "stream",
+        "request_plane",
+    ),
+    MIGRATION_CASES,
+    indirect=["request_plane"],
+)
+
+DECODE_MIGRATION_PARAMETERS = pytest.mark.parametrize(
+    (
+        "migration_limit",
+        "migration_max_seq_len",
+        "immediate_kill",
+        "request_api",
+        "request_plane",
+    ),
+    DECODE_MIGRATION_CASES,
+    indirect=["request_plane"],
+)
+
 pytestmark = [
     pytest.mark.fault_tolerance,
     pytest.mark.vllm,
     pytest.mark.gpu_1,
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
-    pytest.mark.parametrize(
-        (
-            "migration_limit",
-            "migration_max_seq_len",
-            "immediate_kill",
-            "request_api",
-            "stream",
-            "request_plane",
-        ),
-        MIGRATION_CASES,
-        indirect=["request_plane"],
-    ),
 ]
 
 
@@ -276,20 +328,23 @@ class DynamoWorkerProcess(ManagedProcess):
         try:
             data = response.json()
             if data.get("status") == "ready":
-                logger.info(f"{self.worker_id} status is ready")
+                logger.info("%s status is ready", self.worker_id)
                 return True
             logger.warning(
-                f"{self.worker_id} status is not ready: {data.get('status')}"
+                "%s status is not ready: %s",
+                self.worker_id,
+                data.get("status"),
             )
         except ValueError:
-            logger.warning(f"{self.worker_id} health response is not valid JSON")
+            logger.warning("%s health response is not valid JSON", self.worker_id)
         return False
 
 
 @pytest.mark.timeout(290)  # 3x average
-@pytest.mark.post_merge
+@pytest.mark.nightly
 @pytest.mark.profiled_vram_gib(4.8)
 @pytest.mark.requested_vllm_kv_cache_bytes(331_711_000)
+@MIGRATION_PARAMETERS
 def test_request_migration_vllm_aggregated(
     request,
     runtime_services_dynamic_ports,
@@ -337,8 +392,8 @@ def test_request_migration_vllm_aggregated(
             max_model_len=AGGREGATED_MAX_MODEL_LEN,
         )
         with managed_processes_concurrently(worker1, worker2):
-            logger.info(f"Worker 1 PID: {worker1.get_pid()}")
-            logger.info(f"Worker 2 PID: {worker2.get_pid()}")
+            logger.info("Worker 1 PID: %s", worker1.get_pid())
+            logger.info("Worker 2 PID: %s", worker2.get_pid())
 
             # Step 3: Run migration test
             run_migration_test(
@@ -352,12 +407,14 @@ def test_request_migration_vllm_aggregated(
                 use_chat_completion=(request_api == "chat"),
                 stream=stream,
                 max_tokens=AGGREGATED_MAX_TOKENS,
+                expected_ongoing_request_count=1,
             )
 
 
 @pytest.mark.skip(reason="Prefill migration not yet supported")
 @pytest.mark.timeout(350)  # 3x average
 @pytest.mark.nightly
+@MIGRATION_PARAMETERS
 def test_request_migration_vllm_prefill(
     request,
     runtime_services_dynamic_ports,
@@ -398,7 +455,7 @@ def test_request_migration_vllm_prefill(
             tmp_path,
             is_prefill=False,
         ) as decode_worker:
-            logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
+            logger.info("Decode Worker PID: %s", decode_worker.get_pid())
 
             # Step 3: Start 2 prefill workers
             with DynamoWorkerProcess(
@@ -408,7 +465,7 @@ def test_request_migration_vllm_prefill(
                 tmp_path,
                 is_prefill=True,
             ) as prefill1:
-                logger.info(f"Prefill Worker 1 PID: {prefill1.get_pid()}")
+                logger.info("Prefill Worker 1 PID: %s", prefill1.get_pid())
 
                 with DynamoWorkerProcess(
                     request,
@@ -417,7 +474,7 @@ def test_request_migration_vllm_prefill(
                     tmp_path,
                     is_prefill=True,
                 ) as prefill2:
-                    logger.info(f"Prefill Worker 2 PID: {prefill2.get_pid()}")
+                    logger.info("Prefill Worker 2 PID: %s", prefill2.get_pid())
 
                     # Step 4: Run migration test
                     run_migration_test(
@@ -431,6 +488,7 @@ def test_request_migration_vllm_prefill(
                         use_chat_completion=(request_api == "chat"),
                         stream=stream,
                         use_long_prompt=True,
+                        expected_ongoing_request_count=1,
                     )
 
 
@@ -445,6 +503,7 @@ def test_request_migration_vllm_prefill(
 )
 @pytest.mark.timeout(350)  # 3x average
 @pytest.mark.nightly
+@MIGRATION_PARAMETERS
 def test_request_migration_vllm_kv_transfer(
     request,
     runtime_services_dynamic_ports,
@@ -485,7 +544,7 @@ def test_request_migration_vllm_kv_transfer(
             tmp_path,
             is_prefill=True,
         ) as prefill_worker:
-            logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
+            logger.info("Prefill Worker PID: %s", prefill_worker.get_pid())
 
             # Step 3: Start 2 decode workers
             with DynamoWorkerProcess(
@@ -495,7 +554,7 @@ def test_request_migration_vllm_kv_transfer(
                 tmp_path,
                 is_prefill=False,
             ) as decode1:
-                logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
+                logger.info("Decode Worker 1 PID: %s", decode1.get_pid())
 
                 with DynamoWorkerProcess(
                     request,
@@ -504,7 +563,7 @@ def test_request_migration_vllm_kv_transfer(
                     tmp_path,
                     is_prefill=False,
                 ) as decode2:
-                    logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
+                    logger.info("Decode Worker 2 PID: %s", decode2.get_pid())
 
                     # Step 4: Run migration test
                     run_migration_test(
@@ -518,6 +577,7 @@ def test_request_migration_vllm_kv_transfer(
                         use_chat_completion=(request_api == "chat"),
                         stream=stream,
                         use_long_prompt=True,
+                        expected_ongoing_request_count=1,
                     )
 
 
@@ -532,6 +592,7 @@ def test_request_migration_vllm_kv_transfer(
 )
 @pytest.mark.timeout(350)  # 3x average
 @pytest.mark.nightly
+@DECODE_MIGRATION_PARAMETERS
 def test_request_migration_vllm_decode(
     request,
     runtime_services_dynamic_ports,
@@ -541,7 +602,6 @@ def test_request_migration_vllm_decode(
     migration_max_seq_len,
     immediate_kill,
     request_api,
-    stream,
     tmp_path,
 ):
     """
@@ -553,13 +613,9 @@ def test_request_migration_vllm_decode(
         immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
         migration_limit: > 0 to verify migration succeeds, 0 to verify request fails
         request_api: "chat" for chat completion API, "completion" for completion API
-        stream: True for streaming, False for non-streaming
+        This target is always streaming so the fault can be injected while the
+        decode request is in flight.
     """
-    if not stream:
-        pytest.skip(
-            "Decode test requires streaming to wait for response before stopping worker"
-        )
-
     # Step 1: Start the frontend
     with DynamoFrontendProcess(
         request,
@@ -576,7 +632,7 @@ def test_request_migration_vllm_decode(
             tmp_path,
             is_prefill=True,
         ) as prefill_worker:
-            logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
+            logger.info("Prefill Worker PID: %s", prefill_worker.get_pid())
 
             # Step 3: Start 2 decode workers
             with DynamoWorkerProcess(
@@ -586,7 +642,7 @@ def test_request_migration_vllm_decode(
                 tmp_path,
                 is_prefill=False,
             ) as decode1:
-                logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
+                logger.info("Decode Worker 1 PID: %s", decode1.get_pid())
 
                 with DynamoWorkerProcess(
                     request,
@@ -595,7 +651,7 @@ def test_request_migration_vllm_decode(
                     tmp_path,
                     is_prefill=False,
                 ) as decode2:
-                    logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
+                    logger.info("Decode Worker 2 PID: %s", decode2.get_pid())
 
                     # Step 4: Run migration test
                     run_migration_test(
@@ -607,6 +663,7 @@ def test_request_migration_vllm_decode(
                         migration_max_seq_len=migration_max_seq_len,
                         immediate_kill=immediate_kill,
                         use_chat_completion=(request_api == "chat"),
-                        stream=stream,
+                        stream=True,
                         wait_for_new_response_before_stop=True,
+                        expected_ongoing_request_count=1,
                     )

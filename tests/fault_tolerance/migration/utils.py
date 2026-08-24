@@ -126,7 +126,9 @@ def start_completion_request(
             prompt += " Make sure it is" + " long" * 8000 + "!"
 
         logger.info(
-            f"Sending completion request (stream={stream}) with prompt: '{prompt[:50]}...'"
+            "Sending completion request (stream=%s) with prompt: '%s...'",
+            stream,
+            prompt[:50],
         )
 
         response_list.append((None, time.monotonic()))  # start observation
@@ -153,12 +155,12 @@ def start_completion_request(
             else:
                 resp = client.completions.create(**request_args)
                 response_list.append((resp.choices[0].text, time.monotonic()))
-        except Exception as e:
+        except Exception as error:
             # openai.APIError subclasses cover HTTP non-200, mid-stream
             # structured `data: {"error": {...}}` frames, connection failures,
             # and timeouts. Non-openai exceptions (network, etc.) also bubble.
-            logger.error(f"Request failed with error: {e}")
-            response_list.append((e, time.monotonic()))
+            logger.error("Request failed with error: %s", error)
+            response_list.append((error, time.monotonic()))
 
     request_thread = threading.Thread(target=send_request, daemon=True)
     request_thread.start()
@@ -198,7 +200,9 @@ def start_chat_completion_request(
             prompt += " Make sure it is" + " long" * 8000 + "!"
 
         logger.info(
-            f"Sending chat completion request (stream={stream}) with prompt: '{prompt[:50]}...'"
+            "Sending chat completion request (stream=%s) with prompt: '%s...'",
+            stream,
+            prompt[:50],
         )
 
         response_list.append((None, time.monotonic()))  # start observation
@@ -228,12 +232,12 @@ def start_chat_completion_request(
                 response_list.append(
                     (resp.choices[0].message.content, time.monotonic())
                 )
-        except Exception as e:
+        except Exception as error:
             # openai.APIError subclasses cover HTTP non-200, mid-stream
             # structured `data: {"error": {...}}` frames, connection failures,
             # and timeouts. Non-openai exceptions also bubble for visibility.
-            logger.error(f"Request failed with error: {e}")
-            response_list.append((e, time.monotonic()))
+            logger.error("Request failed with error: %s", error)
+            response_list.append((error, time.monotonic()))
 
     request_thread = threading.Thread(target=send_request, daemon=True)
     request_thread.start()
@@ -279,8 +283,12 @@ def determine_request_receiving_worker(
                         result_list.append(True)
                         found_event.set()  # Signal other thread to exit
                         return
-            except Exception as e:
-                logger.error(f"Could not read log file {worker.log_path}: {e}")
+            except Exception as error:
+                logger.error(
+                    "Could not read log file %s: %s",
+                    worker.log_path,
+                    error,
+                )
                 return
 
             # This is condition-driven polling: wake immediately when the other
@@ -341,7 +349,10 @@ def wait_for_response(
         elapsed += poll_interval
 
     logger.warning(
-        f"Only received {len(response_list) - initial_len}/{num_responses} new responses within {max_wait_time}s"
+        "Only received %s/%s new responses within %ss",
+        len(response_list) - initial_len,
+        num_responses,
+        max_wait_time,
     )
 
 
@@ -383,7 +394,9 @@ def validate_response(
 
     assert response_words, "Request completed without any response content"
     logger.info(
-        f"Received {len(response_words)} response(s): {''.join(response_words)[:100]}..."
+        "Received %s response(s): %s...",
+        len(response_words),
+        "".join(response_words)[:100],
     )
 
 
@@ -439,6 +452,7 @@ def verify_migration_metrics(
     expected_ongoing_request_count: int = 0,
     expected_new_request_count: int = 0,
     expected_max_seq_len_exceeded_count: int = 0,
+    exact_counts: bool = False,
 ) -> None:
     """
     Verify migration metrics by querying the frontend's /metrics endpoint.
@@ -448,6 +462,8 @@ def verify_migration_metrics(
         expected_ongoing_request_count: Expected count of ongoing_request migrations
         expected_new_request_count: Expected count of new_request migrations
         expected_max_seq_len_exceeded_count: Expected count of max_seq_len exceeded events
+        exact_counts: Require exact ongoing/new-request counts instead of the
+            shared helper's historical lower-bound assertions
     """
     metrics_url = f"http://localhost:{frontend_port}/metrics"
 
@@ -458,7 +474,7 @@ def verify_migration_metrics(
         pytest.fail(f"Failed to fetch metrics from {metrics_url}: {e}")
 
     metrics_text = response.text
-    logger.info(f"Fetched metrics from {metrics_url}")
+    logger.info("Fetched metrics from %s", metrics_url)
 
     # Parse metrics to find migration counts
     ongoing_count = _parse_migration_metric(
@@ -472,20 +488,33 @@ def verify_migration_metrics(
     )
 
     logger.info(
-        f"Migration metrics - ongoing_request: {ongoing_count}, "
-        f"new_request: {new_request_count}, "
-        f"max_seq_len_exceeded: {max_seq_len_exceeded_count}"
+        "Migration metrics - ongoing_request: %s, new_request: %s, "
+        "max_seq_len_exceeded: %s",
+        ongoing_count,
+        new_request_count,
+        max_seq_len_exceeded_count,
     )
 
-    assert ongoing_count == expected_ongoing_request_count, (
-        f"Expected {expected_ongoing_request_count} ongoing_request migrations, "
-        f"but got {ongoing_count}"
-    )
-
-    assert new_request_count == expected_new_request_count, (
-        f"Expected {expected_new_request_count} new_request migrations, "
-        f"but got {new_request_count}"
-    )
+    if exact_counts:
+        assert ongoing_count == expected_ongoing_request_count, (
+            f"Expected {expected_ongoing_request_count} ongoing_request migrations, "
+            f"but got {ongoing_count}"
+        )
+        assert new_request_count == expected_new_request_count, (
+            f"Expected {expected_new_request_count} new_request migrations, "
+            f"but got {new_request_count}"
+        )
+    else:
+        if expected_ongoing_request_count > 0:
+            assert ongoing_count >= expected_ongoing_request_count, (
+                f"Expected at least {expected_ongoing_request_count} "
+                f"ongoing_request migrations, but got {ongoing_count}"
+            )
+        if expected_new_request_count > 0:
+            assert new_request_count >= expected_new_request_count, (
+                f"Expected at least {expected_new_request_count} "
+                f"new_request migrations, but got {new_request_count}"
+            )
 
     assert max_seq_len_exceeded_count == expected_max_seq_len_exceeded_count, (
         f"Expected {expected_max_seq_len_exceeded_count} "
@@ -506,6 +535,7 @@ def run_migration_test(
     max_tokens: int | None = None,
     use_long_prompt: bool = False,
     wait_for_new_response_before_stop: bool = False,
+    expected_ongoing_request_count: int | None = None,
 ) -> None:
     """
     Run the common migration test flow after frontend and workers are started.
@@ -523,6 +553,9 @@ def run_migration_test(
         max_tokens: Explicit output-token cap, or the backend default when unset
         use_long_prompt: Whether to use long prompt (for prefill tests)
         wait_for_new_response_before_stop: Whether to wait for response before stopping (for decode tests)
+        expected_ongoing_request_count: Exact expected count for callers that
+            opt into strict metric validation. When omitted, preserve the
+            shared helper's historical backend-agnostic lower-bound behavior.
     """
     # Step 1: Send the request
     if use_chat_completion:
@@ -551,11 +584,13 @@ def run_migration_test(
 
     # Step 4: Stop the worker (kill or graceful shutdown)
     if immediate_kill:
-        logger.info(f"Killing {worker_name} with PID {worker.get_pid()}")
+        logger.info("Killing %s with PID %s", worker_name, worker.get_pid())
         terminate_process_tree(worker.get_pid(), immediate_kill=True, timeout=0)
     else:
         logger.info(
-            f"Gracefully shutting down {worker_name} with PID {worker.get_pid()}"
+            "Gracefully shutting down %s with PID %s",
+            worker_name,
+            worker.get_pid(),
         )
         # Give the runtime time to withdraw the endpoint from discovery, then
         # stop its engine child before this short request can finish. A long
@@ -582,8 +617,13 @@ def run_migration_test(
     # zero. It is the structured equivalent of the old "Stream disconnected,
     # recreating stream" log assertion. `max_seq_len_exceeded` records hitting
     # the migration seq-len cap.
+    exact_metric_counts = expected_ongoing_request_count is not None
+    if expected_ongoing_request_count is None:
+        expected_ongoing_request_count = 1 if migration_limit > 0 else 0
+
     verify_migration_metrics(
         frontend.frontend_port,
-        expected_ongoing_request_count=1,
+        expected_ongoing_request_count=expected_ongoing_request_count,
         expected_max_seq_len_exceeded_count=1 if migration_max_seq_len == 1 else 0,
+        exact_counts=exact_metric_counts,
     )
