@@ -175,6 +175,8 @@ spec:
                 - "12288"
                 - --max-seq-len
                 - "262144"
+                - --guided-decoding-backend
+                - xgrammar
                 - --extra-engine-args
                 - /config/agg.yaml
                 - --dyn-tool-call-parser

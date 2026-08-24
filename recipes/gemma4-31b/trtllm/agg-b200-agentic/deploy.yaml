@@ -54,7 +54,9 @@ spec:
           containers:
             - name: main
               # image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
-              image: nvcr.io/nvstaging/williamz/gemma4-trtllm:1.3.0-80ed499b0b
+              # williamz/gemma4-trtllm:1.3.0-80ed499b0b + PR NVIDIA/TensorRT-LLM#18162
+              # (guided decoding with one-model MTP).
+              image: nvcr.io/nvstaging/avisva/gemma4-trtllm-x86:1.3.0-80ed499b0b-guided
               imagePullPolicy: IfNotPresent
               command:
                 - /bin/bash
@@ -117,7 +119,9 @@ spec:
           containers:
             - name: main
               # image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
-              image: nvcr.io/nvstaging/williamz/gemma4-trtllm:1.3.0-80ed499b0b
+              # williamz/gemma4-trtllm:1.3.0-80ed499b0b + PR NVIDIA/TensorRT-LLM#18162
+              # (guided decoding with one-model MTP).
+              image: nvcr.io/nvstaging/avisva/gemma4-trtllm-x86:1.3.0-80ed499b0b-guided
               imagePullPolicy: IfNotPresent
               workingDir: /workspace/
               command:
@@ -140,6 +144,8 @@ spec:
                 - "12288"
                 - --max-seq-len
                 - "262144"
+                - --guided-decoding-backend
+                - xgrammar
                 - --extra-engine-args
                 - /config/agg.yaml
                 - --dyn-tool-call-parser
