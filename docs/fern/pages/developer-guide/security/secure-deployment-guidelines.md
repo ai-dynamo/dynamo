@@ -110,18 +110,21 @@ selected by `DYN_EVENT_PLANE`:
   by the NATS server configuration (for example `tls { ca_file: …; verify: true }`),
   not by Dynamo, so harden the server config as well.
 - **ZMQ** is the default event transport in configurations without NATS, and some
-  backends (for example, vLLM) publish KV-cache events over ZMQ natively. ZMQ
-  carries KV-cache **event metadata**, not request or response content, and has no
-  built-in authentication or encryption, so keep every ZMQ endpoint on the trusted
-  network: bind the broker (`ZMQ_BROKER_XSUB_BIND` / `ZMQ_BROKER_XPUB_BIND`) and
-  the advertised KV-event host to cluster-internal addresses, keep intra-node
-  sockets on loopback, and restrict the ports with NetworkPolicy. Authenticated
-  encryption for ZMQ is possible future hardening but requires additional
-  key-management infrastructure.
+  backends (for example, vLLM) publish KV-cache events over ZMQ natively. ZMQ has
+  no built-in authentication or encryption. **Treat KV-cache events as sensitive
+  request-derived data:** they carry token IDs, cumulative block hashes, and the
+  cache/LoRA namespace — given the model tokenizer, the token IDs can reconstruct
+  prompt text and the hashes reveal shared prefixes. Keep every ZMQ endpoint on the
+  trusted network: bind the broker (`ZMQ_BROKER_XSUB_BIND` / `ZMQ_BROKER_XPUB_BIND`)
+  and the advertised KV-event host to cluster-internal addresses, keep intra-node
+  sockets on loopback, and restrict who can publish or subscribe with NetworkPolicy.
+  Authenticated encryption for ZMQ is possible future hardening but requires
+  additional key-management infrastructure.
 
-**Why it matters:** keep the event plane on the trusted network so peers cannot
-subscribe to KV-cache event metadata or inject events. Prefer NATS with
-authentication and TLS wherever the event plane crosses a trust boundary. See the
+**Why it matters:** the event plane carries **sensitive request-derived data** —
+KV events can reconstruct prompt content — so keep it on the trusted network and
+restrict publishers and subscribers. Prefer NATS with authentication and TLS
+wherever the event plane crosses a trust boundary. See the
 [Event Plane](../knowledge-base/concepts/communication-planes/event-plane.md)
 reference.
 
@@ -187,6 +190,17 @@ that exposes advanced control operations — profiling, memory management, and
 weight updates. Keep this port on the trusted network only, and expose only the
 routes a deployment actually uses.
 
+### Other in-cluster listeners
+
+Several components run additional HTTP or diagnostic listeners that bind broadly
+and are unauthenticated. Keep them on the trusted network (bind to loopback or a
+private interface and restrict with NetworkPolicy), and disable them where not
+needed:
+
+- The **planner live dashboard** binds `0.0.0.0` with no authentication.
+- The standalone **KV router services** — indexer, selection, and slot-tracker —
+  bind on all interfaces.
+
 ## Securing Model and Backend Code
 
 Dynamo loads models, tokenizers, chat templates, and (depending on the backend)
@@ -198,7 +212,10 @@ privileges.
   cache or storage so that only trusted principals can publish artifacts.
 - **Be deliberate about remote code execution options.** Framework options that
   execute model-supplied Python (for example, `trust_remote_code`) should be
-  enabled only for models you trust.
+  enabled only for models you trust. A pre-existing `trust_remote_code` /
+  `--trust-remote-code` flag in a deployment template or worker config does **not**
+  by itself indicate that an operator reviewed and approved it — some stock
+  templates ship it — so audit templates and pin the provenance of any such flag.
 - **Validate request-derived values.** When integrating or extending Dynamo,
   validate values taken from a request before using them in security-sensitive
   operations such as outbound network requests, file paths, or deserialization.
