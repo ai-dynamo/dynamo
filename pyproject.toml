@@ -87,7 +87,7 @@ sglang = [
 ]
 
 mocker = [
-    "aiconfigurator-core==0.11.0.dev20260728",
+    "aiconfigurator-core==0.11.0",
 ]
 
 [tool.uv]

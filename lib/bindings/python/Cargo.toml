@@ -54,12 +54,12 @@ request-trace-s3 = ["dynamo-llm/request-trace-s3"]
 
 [dependencies]
 # AIC perf model: pure-Rust hot-path latency engine. Pinned to the matching
-# aiconfigurator-core 0.11 dev release. `extension-module` is
+# aiconfigurator-core 0.11.0 release. `extension-module` is
 # NOT enabled on aiconfigurator-core (its `default = []`), so this extension's
 # own interpreter is used; AicEngineBuilder::build() crosses into Python once at
 # startup while AicEngine::{prefill,decode}_latency_ms() are pure Rust (no GIL)
 # on the predict hot path.
-aiconfigurator-core = { version = "=0.11.0-dev20260728", optional = true }
+aiconfigurator-core = { version = "=0.11.0", optional = true }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { version = "8.0.0" }

@@ -3,10 +3,10 @@
 
 # Dependencies required by the planner, profiler, and global_planner services.
 
-# Keep both layers on the same published AIC dev release.
-aiconfigurator==0.11.0.dev20260728
+# Keep both layers on the same published AIC release.
+aiconfigurator==0.11.0
 
-aiconfigurator-core==0.11.0.dev20260728
+aiconfigurator-core==0.11.0
 aiofiles<=25.1.0
 aiohttp>=3.14.3,<4.0  # see overrides.planner.txt: aiperf pins aiohttp~=3.13.3
 filterpy==1.4.5
