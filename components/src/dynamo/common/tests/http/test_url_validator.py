@@ -66,7 +66,7 @@ def _rust_static_strings(source: str, name: str) -> set[str]:
     array_end = source.find("]", array_start)
     assert (
         array_start >= 0 and array_end >= 0
-      ), f"Rust {name} initializer is no longer a string array"
+    ), f"Rust {name} initializer is no longer a string array"
 
     values = set(_RUST_STRING_LITERAL.findall(source[array_start:array_end]))
     assert values, f"Rust {name} contains no string literals"
