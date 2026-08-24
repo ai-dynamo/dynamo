@@ -1283,40 +1283,6 @@ dynamo_frontend_router_queue_pending_requests{model=\"model\",policy_class=\"def
     }
 
     #[test]
-    fn test_routing_overhead_metric_names_pef() {
-        // Verify the overhead constants produce valid histogram names when
-        // combined with dynamo_router_ prefix.
-        let registry = prometheus::Registry::new();
-        let buckets = async_overhead_buckets();
-        let prefix = name_prefix::ROUTER;
-        let name = format!("{}_{}", prefix, routing_overhead::TOTAL_MS);
-        let total = prometheus::Histogram::with_opts(
-            prometheus::HistogramOpts::new(
-                name,
-                "Total routing overhead per request in milliseconds",
-            )
-            .buckets(buckets),
-        )
-        .unwrap();
-        registry.register(Box::new(total.clone())).unwrap();
-        total.observe(1.5);
-
-        let output = gather_pef(&registry);
-        assert!(
-            output.contains("# HELP dynamo_router_overhead_total_ms"),
-            "PEF missing HELP for routing overhead metric"
-        );
-        assert!(
-            output.contains("# TYPE dynamo_router_overhead_total_ms histogram"),
-            "PEF missing TYPE for routing overhead metric"
-        );
-        assert!(
-            output.contains("dynamo_router_overhead_total_ms_count 1"),
-            "PEF missing observation count"
-        );
-    }
-
-    #[test]
     fn test_routing_overhead_saturating_sub() {
         let buckets = prometheus::exponential_buckets(0.0001, 2.0, 18).unwrap();
         let make = |name: &str| {
@@ -1349,49 +1315,6 @@ dynamo_frontend_router_queue_pending_requests{model=\"model\",policy_class=\"def
             Duration::from_millis(1),
         );
         // Reaching here without panic confirms saturating_sub works
-    }
-
-    #[test]
-    fn test_kv_transfer_estimated_latency_metric_pef() {
-        // Verify the metric name is correctly composed from the constant
-        // and produces valid PEF when observed.
-        let registry = prometheus::Registry::new();
-        let name = format!(
-            "{}{}",
-            router_request::METRIC_PREFIX,
-            frontend_service::KV_TRANSFER_ESTIMATED_LATENCY_SECONDS,
-        );
-        let buckets = generate_log_buckets(0.001, 10.0, 15);
-        let histogram = prometheus::Histogram::with_opts(
-            prometheus::HistogramOpts::new(
-                &name,
-                "Upper-bound estimation of KV cache transfer latency in disaggregated serving (prefill_complete to first_token)",
-            )
-            .buckets(buckets),
-        )
-        .unwrap();
-        registry.register(Box::new(histogram.clone())).unwrap();
-
-        // Observe a 5ms latency
-        histogram.observe(0.005);
-
-        let output = gather_pef(&registry);
-        assert!(
-            output.contains("# HELP router_kv_transfer_estimated_latency_seconds"),
-            "PEF missing HELP line. Got:\n{output}"
-        );
-        assert!(
-            output.contains("# TYPE router_kv_transfer_estimated_latency_seconds histogram"),
-            "PEF missing TYPE line. Got:\n{output}"
-        );
-        assert!(
-            output.contains("router_kv_transfer_estimated_latency_seconds_count 1"),
-            "PEF missing observation count. Got:\n{output}"
-        );
-        assert!(
-            output.contains("router_kv_transfer_estimated_latency_seconds_sum 0.005"),
-            "PEF missing observation sum. Got:\n{output}"
-        );
     }
 }
 

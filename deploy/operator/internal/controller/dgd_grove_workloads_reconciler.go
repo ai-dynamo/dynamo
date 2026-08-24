@@ -26,8 +26,10 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	"k8s.io/client-go/scale"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -51,7 +53,6 @@ func newGroveWorkloadsReconciler(
 	config *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commoncontroller.RuntimeConfig,
 	dockerSecretRetriever DockerSecretRetriever,
-	scaleClient scale.ScalesGetter,
 ) *groveWorkloadsReconciler {
 	return &groveWorkloadsReconciler{
 		syncer:  newDGDResourceSyncer(kubeClient, recorder),
@@ -63,7 +64,7 @@ func newGroveWorkloadsReconciler(
 			runtimeConfig,
 			dockerSecretRetriever,
 		),
-		scaler:          newGroveScaler(scaleClient),
+		scaler:          newGroveScaler(kubeClient),
 		stableResources: newGroveStableResourcesReconciler(kubeClient, recorder, config),
 	}
 }
@@ -133,17 +134,41 @@ func (r *groveWorkloadsReconciler) reconcilePodCliqueSet(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	rendered *grovePodCliqueSetRender,
 ) (*grovev1alpha1.PodCliqueSet, error) {
+	// Compose opaque provider fields only at the serialization boundary.
+	desiredProviderObject, err := provideroverride.ComposeGroveOverrides(dgd, rendered.desired)
+	if err != nil {
+		return nil, fmt.Errorf("compose Grove provider overrides: %w", err)
+	}
+
+	// Serialize the exact typed observation selected during rendering.
+	var observedProviderObject *unstructured.Unstructured
+	if rendered.existing != nil {
+		object, conversionErr := runtime.DefaultUnstructuredConverter.ToUnstructured(rendered.existing)
+		if conversionErr != nil {
+			return nil, fmt.Errorf("convert observed Grove PodCliqueSet to unstructured: %w", conversionErr)
+		}
+		observedProviderObject = &unstructured.Unstructured{Object: object}
+		observedProviderObject.SetGroupVersionKind(desiredProviderObject.GroupVersionKind())
+	}
+
+	// Synchronize without rereading or mutating the render observation.
 	_, synced, err := commoncontroller.SyncObservedResource(
 		ctx,
 		&r.syncer,
 		dgd,
-		rendered.existing,
-		rendered.desired,
+		observedProviderObject,
+		desiredProviderObject,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("sync Grove PodCliqueSet: %w", err)
 	}
-	return synced, nil
+
+	// Adapt the synchronized wire object to the typed Grove readiness view.
+	podCliqueSet := &grovev1alpha1.PodCliqueSet{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(synced.Object, podCliqueSet); err != nil {
+		return nil, fmt.Errorf("convert synchronized Grove PodCliqueSet: %w", err)
+	}
+	return podCliqueSet, nil
 }
 
 // observePodCliqueSetReadiness takes the authoritative Grove snapshot after

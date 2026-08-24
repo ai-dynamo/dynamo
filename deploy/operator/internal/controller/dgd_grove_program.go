@@ -62,7 +62,6 @@ func (r *DynamoGraphDeploymentReconciler) newGroveProgram() *groveProgram {
 			r.Config,
 			r.RuntimeConfig,
 			r.DockerSecretRetriever,
-			r.ScaleClient,
 		),
 		scalingAdapters: newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
 		topology:        newDGDGroveTopologyConditionReconciler(r.Client),

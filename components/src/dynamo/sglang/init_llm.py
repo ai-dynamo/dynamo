@@ -14,6 +14,7 @@ from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
+from dynamo.sglang._compat import override_server_args
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
@@ -71,7 +72,11 @@ async def init_decode(
                 "created before the endpoint existed, so its FPM publisher bound "
                 "a different IPC path than the relay would subscribe to."
             )
-            server_args.enable_forward_pass_metrics = False
+            override_server_args(
+                server_args,
+                "dynamo.snapshot",
+                enable_forward_pass_metrics=False,
+            )
     else:
         set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()
@@ -109,6 +114,16 @@ async def init_decode(
 
     ready_event = asyncio.Event()
 
+    # Worker type and needs, derived from serving_mode.
+    if config.serving_mode == DisaggregationMode.DECODE:
+        decode_worker_type = WorkerType.Decode
+        decode_needs: list[list[WorkerType]] = [[WorkerType.Prefill]]
+    else:
+        decode_worker_type = WorkerType.Aggregated
+        decode_needs = []
+
+    first_token_source = await generate_endpoint.first_token_source(decode_worker_type)
+
     handler = DecodeWorkerHandler(
         engine,
         config,
@@ -116,6 +131,7 @@ async def init_decode(
         generate_endpoint,
         shutdown_event,
         enable_frontend_decoding=dynamo_args.frontend_decoding,
+        first_token_source=first_token_source,
     )
     handler.register_engine_routes(runtime)
 
@@ -134,14 +150,6 @@ async def init_decode(
             "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
-
-    # Worker type and needs, derived from serving_mode.
-    if config.serving_mode == DisaggregationMode.DECODE:
-        decode_worker_type = WorkerType.Decode
-        decode_needs: list[list[WorkerType]] = [[WorkerType.Prefill]]
-    else:
-        decode_worker_type = WorkerType.Aggregated
-        decode_needs = []
 
     try:
         gather_tasks = [
@@ -227,7 +235,11 @@ async def init_prefill(
                 "created before the endpoint existed, so its FPM publisher bound "
                 "a different IPC path than the relay would subscribe to."
             )
-            server_args.enable_forward_pass_metrics = False
+            override_server_args(
+                server_args,
+                "dynamo.snapshot",
+                enable_forward_pass_metrics=False,
+            )
     else:
         set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()
