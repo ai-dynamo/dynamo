@@ -511,11 +511,18 @@ where
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);
-        self.slots
+        let outcome = self
+            .slots
             .mark_prefill_completed(&request_id, Instant::now())?;
-        match worker {
-            Some(worker) => self.queue.update_worker(worker).await,
-            None => self.queue.update().await,
+        if worker.is_none() && !outcome.is_applied() {
+            return Err(SequenceError::RequestNotFound { request_id });
+        }
+        self.slots.publish_prefill_completed(&request_id);
+        if outcome.is_applied() {
+            match worker {
+                Some(worker) => self.queue.update_worker(worker).await,
+                None => self.queue.update().await,
+            }
         }
         Ok(())
     }
@@ -523,10 +530,15 @@ where
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);
-        self.slots.free(&request_id, Instant::now())?;
-        match worker {
-            Some(worker) => self.queue.update_worker(worker).await,
-            None => self.queue.update().await,
+        let outcome = self.slots.free(&request_id, Instant::now())?;
+        if worker.is_none() && !outcome.is_applied() {
+            return Err(SequenceError::RequestNotFound { request_id });
+        }
+        if outcome.is_applied() {
+            match worker {
+                Some(worker) => self.queue.update_worker(worker).await,
+                None => self.queue.update().await,
+            }
         }
         Ok(())
     }
@@ -541,9 +553,12 @@ where
         worker: WorkerWithDpRank,
     ) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
-        self.slots
+        let outcome = self
+            .slots
             .free_if_worker(&request_id, worker, Instant::now())?;
-        self.queue.update_worker(worker).await;
+        if outcome.is_applied() {
+            self.queue.update_worker(worker).await;
+        }
         Ok(())
     }
 
@@ -826,6 +841,28 @@ mod tests {
         watch::Sender<HashMap<WorkerId, SimpleWorkerConfig>>,
         CancellationToken,
     ) {
+        make_scheduler_with_replica_sync(
+            workers,
+            threshold_frac,
+            monitor_worker_configs,
+            prefill_load_estimator,
+            false,
+        )
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn make_scheduler_with_replica_sync(
+        workers: HashMap<WorkerId, SimpleWorkerConfig>,
+        threshold_frac: Option<f64>,
+        monitor_worker_configs: bool,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        replica_sync: bool,
+    ) -> (
+        Arc<LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
+        watch::Sender<HashMap<WorkerId, SimpleWorkerConfig>>,
+        CancellationToken,
+    ) {
         let dp_range = workers
             .iter()
             .map(|(&id, cfg)| (id, (cfg.data_parallel_start_rank, cfg.data_parallel_size)))
@@ -834,7 +871,7 @@ mod tests {
             NoopSequencePublisher,
             64,
             dp_range,
-            false,
+            replica_sync,
             0,
             "test",
         ));
@@ -1162,7 +1199,7 @@ mod tests {
             },
         );
         let (scheduler, slots, _cfg_tx, cancel_token) =
-            make_scheduler(workers, Some(0.5), true, None);
+            make_scheduler_with_replica_sync(workers, Some(0.5), true, None, true);
         let event_tx = start_replica_sync(&slots, &cancel_token);
 
         scheduler
@@ -1246,7 +1283,7 @@ mod tests {
             },
         );
         let (scheduler, slots, _cfg_tx, cancel_token) =
-            make_scheduler(workers, Some(0.5), true, None);
+            make_scheduler_with_replica_sync(workers, Some(0.5), true, None, true);
         let event_tx = start_replica_sync(&slots, &cancel_token);
         let mut queue_updates = scheduler.subscribe_queue_updates();
 
@@ -1331,7 +1368,7 @@ mod tests {
             },
         );
         let (scheduler, slots, _cfg_tx, cancel_token) =
-            make_scheduler(workers, Some(0.5), true, None);
+            make_scheduler_with_replica_sync(workers, Some(0.5), true, None, true);
         let event_tx = start_replica_sync(&slots, &cancel_token);
 
         scheduler

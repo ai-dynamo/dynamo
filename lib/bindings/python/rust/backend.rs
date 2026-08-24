@@ -734,7 +734,7 @@ impl PyEngineCore {
             request_metadata: self.request_metadata.clone(),
         };
 
-        let first_token = ctx.first_token_sender().cloned();
+        let first_token = ctx.first_token_notifier().cloned();
         let inner_ctx = ctx.inner_arc();
         // **Invariant**: `tracing::Span::current()` here MUST be the
         // `engine.generate` span opened by the adapter. The capture must

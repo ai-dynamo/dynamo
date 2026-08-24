@@ -309,6 +309,7 @@ mod tests {
                     name: endpoint_name.to_string(),
                 },
                 router: InnerPrefillRouter::SimpleRouter(shared.clone()),
+                prefill_router_mode: mode,
             },
         )));
         prefill.lifecycle.store(
