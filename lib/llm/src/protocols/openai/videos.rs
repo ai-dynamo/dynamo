@@ -3,15 +3,33 @@
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
-use validator::Validate;
+use validator::{Validate, ValidationError};
 
 mod aggregator;
 mod nvext;
 
 pub use nvext::{NvExt, NvExtProvider};
 
+/// Media type for a video-generation conditioning reference.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoInputReferenceType {
+    Image,
+    Video,
+    Audio,
+}
+
+/// Typed conditioning input for video generation.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct VideoInputReference {
+    #[serde(rename = "type")]
+    pub reference_type: VideoInputReferenceType,
+    pub source: String,
+}
+
 /// Request for video generation (/v1/videos endpoint)
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[validate(schema(function = "validate_video_request"))]
 pub struct NvCreateVideoRequest {
     /// The text prompt for video generation
     pub prompt: String,
@@ -22,6 +40,10 @@ pub struct NvCreateVideoRequest {
     /// Optional image reference that guides generation (for I2V)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_reference: Option<String>,
+
+    /// Typed references; order is preserved within each media type
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_references: Option<Vec<VideoInputReference>>,
 
     /// Clip duration in seconds
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -68,6 +90,20 @@ pub struct VideoData {
     /// Base64-encoded video (if response_format is "b64_json")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub b64_json: Option<String>,
+}
+
+fn validate_video_request(request: &NvCreateVideoRequest) -> Result<(), ValidationError> {
+    if request.input_reference.is_some() && request.input_references.is_some() {
+        return Err(ValidationError::new("input_references_conflict"));
+    }
+    if request
+        .input_references
+        .as_ref()
+        .is_some_and(|references| references.is_empty())
+    {
+        return Err(ValidationError::new("input_references_empty"));
+    }
+    Ok(())
 }
 
 /// Response structure for video generation
@@ -206,6 +242,7 @@ mod tests {
             prompt: "cat".into(),
             model: "wan".into(),
             input_reference: None,
+            input_references: None,
             seconds: None,
             size: None,
             user: None,
@@ -230,6 +267,41 @@ mod tests {
         let json = r#"{"prompt":"cat","model":"wan","output_format":"mp4"}"#;
         let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.output_format.as_deref(), Some("mp4"));
+    }
+
+    #[test]
+    fn video_request_typed_references_round_trip() {
+        let json = r#"{
+            "prompt":"cat",
+            "model":"video-model",
+            "input_references":[
+                {"type":"image","source":"https://example.com/cat.png"},
+                {"type":"audio","source":"data:audio/wav;base64,AA=="}
+            ]
+        }"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        let references = req.input_references.as_ref().unwrap();
+        assert_eq!(references.len(), 2);
+        assert_eq!(references[0].reference_type, VideoInputReferenceType::Image);
+        assert_eq!(references[1].reference_type, VideoInputReferenceType::Audio);
+        assert!(req.validate().is_ok());
+
+        let out = serde_json::to_string(&req).unwrap();
+        assert!(out.contains("\"input_references\""));
+    }
+
+    #[test]
+    fn video_request_rejects_legacy_and_typed_references() {
+        let json = r#"{
+            "prompt":"cat",
+            "model":"video-model",
+            "input_reference":"https://example.com/legacy.png",
+            "input_references":[
+                {"type":"image","source":"https://example.com/new.png"}
+            ]
+        }"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        assert!(req.validate().is_err());
     }
 
     // --- VideoData ---

@@ -365,6 +365,17 @@ class TestNvCreateVideoRequest:
         assert req.output_format is None
         assert req.nvext is None
 
+    def test_protocol_accepts_typed_references_for_capability_routing(self):
+        req = NvCreateVideoRequest(
+            prompt="A cat",
+            model="wan_t2v",
+            input_references=[
+                {"type": "image", "source": "https://example.com/cat.png"}
+            ],
+        )
+
+        assert req.input_references is not None
+
     def test_full_request_valid(self):
         """Test a fully populated request with nvext."""
         req = NvCreateVideoRequest(
@@ -394,6 +405,34 @@ class TestNvCreateVideoRequest:
         assert req.nvext.guidance_scale == 7.5
         assert req.nvext.negative_prompt == "blurry, low quality"
         assert req.nvext.seed == 42
+
+
+@pytest.mark.asyncio
+async def test_handler_rejects_typed_input_references() -> None:
+    from dynamo.trtllm.request_handlers.diffusion.video_handler import (
+        VideoGenerationHandler,
+    )
+
+    handler = object.__new__(VideoGenerationHandler)
+    context = MagicMock()
+    context.id.return_value = "request-id"
+
+    results = [
+        result
+        async for result in handler.generate(
+            {
+                "prompt": "A cat",
+                "model": "wan_t2v",
+                "input_references": [
+                    {"type": "image", "source": "https://example.com/cat.png"}
+                ],
+            },
+            context,
+        )
+    ]
+
+    assert results[0]["status"] == "failed"
+    assert "not supported by the TensorRT-LLM" in results[0]["error"]
 
 
 class TestVideoData:

@@ -54,6 +54,7 @@ from dynamo.vllm.omni.utils import (
     image_generation_sampling_overrides,
     image_generation_size_from_request,
 )
+from dynamo.vllm.omni.video_references import VideoReferenceMaterializer
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +204,7 @@ class OmniHandler(BaseOmniHandler):
         self.media_output_fs = media_output_fs
         self.media_output_http_url = media_output_http_url
         self._image_loader = ImageLoader()
+        self._video_reference_materializer = VideoReferenceMaterializer()
         self.generate_endpoint = generate_endpoint
 
         # Keep parity with BaseWorkerHandler LoRA resolver contract.
@@ -308,9 +310,24 @@ class OmniHandler(BaseOmniHandler):
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Single generation path for all request protocols and output modalities."""
 
-        parsed_request_raw, request_type = parse_request_type(
-            request, self.config.output_modalities
-        )
+        try:
+            parsed_request_raw, request_type = parse_request_type(
+                request, self.config.output_modalities
+            )
+        except (TypeError, ValueError) as e:
+            logger.error("Invalid request %s: %s", request_id, e)
+            output_modality = (
+                self.config.output_modalities[0].lower()
+                if self.config.output_modalities
+                else "text"
+            )
+            error_request_type = {
+                "audio": RequestType.AUDIO_GENERATION,
+                "image": RequestType.IMAGE_GENERATION,
+                "video": RequestType.VIDEO_GENERATION,
+            }.get(output_modality, RequestType.CHAT_COMPLETION)
+            yield self._error_chunk(request_id, str(e), error_request_type)
+            return
         parsed_request = cast(
             Union[NvCreateImageRequest, NvCreateVideoRequest, Dict[str, Any]],
             parsed_request_raw,
@@ -318,6 +335,7 @@ class OmniHandler(BaseOmniHandler):
 
         # Pre-load input image for I2V requests (async I/O before sync build)
         image = None
+        materialized_references = None
         if (
             request_type == RequestType.VIDEO_GENERATION
             and isinstance(parsed_request, NvCreateVideoRequest)
@@ -338,14 +356,45 @@ class OmniHandler(BaseOmniHandler):
                 }
                 return
 
+        if (
+            request_type == RequestType.VIDEO_GENERATION
+            and isinstance(parsed_request, NvCreateVideoRequest)
+            and parsed_request.input_references is not None
+        ):
+            try:
+                materialized_references = (
+                    await self._video_reference_materializer.materialize(parsed_request)
+                )
+            except Exception as e:
+                logger.warning("Failed to materialize input_references: %s", e)
+                yield self._error_chunk(
+                    request_id,
+                    f"Failed to materialize input_references: {e}",
+                    request_type,
+                )
+                return
+
         try:
             inputs = await self.build_engine_inputs(
-                parsed_request, request_type, image=image
+                parsed_request,
+                request_type,
+                image=image,
+                multi_modal_data=(
+                    materialized_references.as_omni_data()
+                    if materialized_references is not None
+                    else None
+                ),
             )
         except (ValueError, NotImplementedError, RuntimeError) as e:
+            if materialized_references is not None:
+                materialized_references.cleanup()
             logger.error(f"Invalid request {request_id}: {e}")
             yield self._error_chunk(request_id, str(e), request_type)
             return
+        except Exception:
+            if materialized_references is not None:
+                materialized_references.cleanup()
+            raise
 
         generate_kwargs: Dict[str, Any] = {
             "prompt": inputs.prompt,
@@ -424,6 +473,9 @@ class OmniHandler(BaseOmniHandler):
             except Exception as e:
                 logger.error(f"Error during generation for request {request_id}: {e}")
                 yield self._error_chunk(request_id, str(e), inputs.request_type)
+            finally:
+                if materialized_references is not None:
+                    materialized_references.cleanup()
 
     async def _generate_with_lora_admission_lock(
         self,
@@ -534,6 +586,7 @@ class OmniHandler(BaseOmniHandler):
         ],
         request_type: RequestType,
         image: PIL.Image.Image | None = None,
+        multi_modal_data: dict[str, Any] | None = None,
     ) -> EngineInputs:
         """Convert a parsed request into AsyncOmni engine inputs.
 
@@ -542,6 +595,7 @@ class OmniHandler(BaseOmniHandler):
                 for image/video/audio requests, or a raw dict for chat completions.
             request_type: The RequestType determined by parse_request_type.
             image: Pre-loaded PIL Image for I2V requests (from input_reference).
+            multi_modal_data: Materialized typed references adapted for the pipeline.
 
         Returns:
             EngineInputs ready for engine_client.generate().
@@ -554,7 +608,11 @@ class OmniHandler(BaseOmniHandler):
             return self._engine_inputs_from_image(parsed_request)
         elif request_type == RequestType.VIDEO_GENERATION:
             assert isinstance(parsed_request, NvCreateVideoRequest)
-            return self._engine_inputs_from_video(parsed_request, image=image)
+            return self._engine_inputs_from_video(
+                parsed_request,
+                image=image,
+                multi_modal_data=multi_modal_data,
+            )
         elif request_type == RequestType.AUDIO_GENERATION:
             assert isinstance(parsed_request, NvCreateAudioSpeechRequest)
             return await self.audio.build_engine_inputs(parsed_request)
@@ -669,6 +727,7 @@ class OmniHandler(BaseOmniHandler):
         self,
         req: NvCreateVideoRequest,
         image: PIL.Image.Image | None = None,
+        multi_modal_data: dict[str, Any] | None = None,
     ) -> EngineInputs:
         """Build engine inputs from an NvCreateVideoRequest.
 
@@ -677,10 +736,10 @@ class OmniHandler(BaseOmniHandler):
             image: Pre-loaded PIL Image for I2V. When provided, the image is
                 attached to the prompt via ``multi_modal_data`` so vllm-omni's
                 I2V pipeline pre-process can use it.
+            multi_modal_data: Typed reference paths adapted for the pipeline.
         """
         width, height = parse_size(req.size)
         nvext = req.nvext or VideoNvExt()
-
         num_frames = compute_num_frames(
             num_frames=nvext.num_frames,
             seconds=req.seconds,
@@ -700,6 +759,15 @@ class OmniHandler(BaseOmniHandler):
                 image.size[0],
                 image.size[1],
             )
+        elif multi_modal_data is not None:
+            prompt["multi_modal_data"] = multi_modal_data
+            logger.info(
+                "Video references attached: %s",
+                {
+                    key: len(value) if isinstance(value, (list, tuple)) else 1
+                    for key, value in multi_modal_data.items()
+                },
+            )
 
         sp = OmniDiffusionSamplingParams(
             height=height,
@@ -714,7 +782,6 @@ class OmniHandler(BaseOmniHandler):
         self._update_if_not_none(sp, "boundary_ratio", nvext.boundary_ratio)
         self._update_if_not_none(sp, "guidance_scale_2", nvext.guidance_scale_2)
         self._update_if_not_none(sp, "fps", fps)
-
         sampling_params_list = self._build_sampling_params_list(sp)
         lora_request = self._resolve_and_apply_lora(req.model, sampling_params_list)
 

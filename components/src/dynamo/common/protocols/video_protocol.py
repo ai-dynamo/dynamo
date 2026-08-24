@@ -10,7 +10,17 @@ to ensure compatibility with the Dynamo HTTP frontend.
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
+
+
+class VideoInputReference(BaseModel):
+    """Typed conditioning input for video generation."""
+
+    type: Literal["image", "video", "audio"]
+    """Reference media type."""
+
+    source: str
+    """HTTP(S), data, file URL, or an allowed local path."""
 
 
 class VideoNvExt(BaseModel):
@@ -64,6 +74,9 @@ class NvCreateVideoRequest(BaseModel):
     input_reference: Optional[str] = None
     """Optional image reference that guides generation (for I2V)."""
 
+    input_references: Optional[list[VideoInputReference]] = None
+    """Typed references; order is preserved within each media type."""
+
     seconds: Optional[int] = None
     """Clip duration in seconds."""
 
@@ -86,6 +99,16 @@ class NvCreateVideoRequest(BaseModel):
 
     nvext: Optional[VideoNvExt] = None
     """NVIDIA extensions."""
+
+    @model_validator(mode="after")
+    def validate_input_references(self) -> "NvCreateVideoRequest":
+        if self.input_reference is not None and self.input_references is not None:
+            raise ValueError(
+                "input_reference and input_references are mutually exclusive"
+            )
+        if self.input_references is not None and not self.input_references:
+            raise ValueError("input_references must not be empty")
+        return self
 
 
 class VideoData(BaseModel):

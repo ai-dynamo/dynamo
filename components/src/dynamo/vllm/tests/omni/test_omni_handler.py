@@ -244,6 +244,30 @@ class TestI2VEngineInputs:
         assert empty.guidance_scale_2 is None
 
 
+class TestTypedVideoReferencesEngineInputs:
+    @pytest.mark.asyncio
+    async def test_request_maps_typed_references(self):
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="a talking cat",
+            model="video-model",
+        )
+        references = {
+            "image": ["/tmp/cat.png"],
+            "video": ["/tmp/motion.mp4"],
+            "audio": ["/tmp/voice.wav"],
+        }
+
+        result = await handler.build_engine_inputs(
+            req,
+            RequestType.VIDEO_GENERATION,
+            multi_modal_data=references,
+        )
+
+        assert result.prompt["multi_modal_data"] == references
+        assert result.fps == 16
+
+
 class TestBuildSamplingParamsList:
     def test_single_diffusion_stage(self):
         handler = _make_handler(stage_types=("diffusion",))

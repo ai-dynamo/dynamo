@@ -190,6 +190,10 @@ class VideoGenerationHandler(BaseGenerativeHandler):
         try:
             # Parse request
             req = NvCreateVideoRequest(**request)
+            if req.input_references is not None:
+                raise ValueError(
+                    "input_references is not supported by the TensorRT-LLM video backend"
+                )
             nvext = req.nvext or VideoNvExt()
 
             # Parse parameters

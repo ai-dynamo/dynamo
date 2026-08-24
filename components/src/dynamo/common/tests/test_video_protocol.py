@@ -39,6 +39,35 @@ def test_video_request_wire_shape():
     }
 
 
+def test_video_request_typed_references_preserve_wire_order():
+    request = NvCreateVideoRequest(
+        prompt="cat",
+        model="video-model",
+        input_references=[
+            {"type": "image", "source": "https://example.com/cat.png"},
+            {"type": "audio", "source": "data:audio/wav;base64,AA=="},
+        ],
+    )
+
+    assert [reference.type for reference in request.input_references] == [
+        "image",
+        "audio",
+    ]
+
+
+@pytest.mark.parametrize(
+    "input_references",
+    [[], [{"type": "image", "source": "https://example.com/cat.png"}]],
+)
+def test_video_request_rejects_invalid_reference_combinations(input_references):
+    kwargs: dict[str, object] = {"input_references": input_references}
+    if input_references:
+        kwargs["input_reference"] = "https://example.com/legacy.png"
+
+    with pytest.raises(ValueError):
+        NvCreateVideoRequest(prompt="cat", model="video-model", **kwargs)
+
+
 def test_video_response_wire_shape():
     response = NvVideosResponse(
         id="r1",
