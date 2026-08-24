@@ -391,7 +391,17 @@ impl ResponseStreamConverter {
 
             // Handle tool call deltas
             if let Some(tool_calls) = &delta.tool_calls {
-                if !tool_calls.is_empty() {
+                // Match the chat-completions post-parse fallback: when the
+                // caller disables parallel tool calls, retain only tool-call
+                // index 0. Filter before starting the reasoning boundary or
+                // allocating converter state so suppressed calls cannot emit
+                // any Responses API events at finish or EOF.
+                let enforce_single_tool_call = self.params.parallel_tool_calls == Some(false);
+                let mut tool_calls = tool_calls
+                    .iter()
+                    .filter(|tc| !enforce_single_tool_call || tc.index == 0)
+                    .peekable();
+                if tool_calls.peek().is_some() {
                     // Starting a tool call is also an explicit reasoning phase
                     // boundary, independent of this chunk's finish reason.
                     self.append_reasoning_done_events(events, OutputStatus::Completed);
@@ -2019,6 +2029,55 @@ mod tests {
             0,
             "finish-reason item completion must not repeat at EOF: {end_types:?}"
         );
+    }
+
+    #[test]
+    fn test_parallel_tool_calls_false_emits_only_first_call() {
+        let params = ResponseParams {
+            parallel_tool_calls: Some(false),
+            ..default_params()
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+        let _ = conv.emit_start_events();
+
+        let first_types = event_types(&conv.process_chunk(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("get_weather"),
+            Some("{\"city\":\"SF\"}"),
+        )));
+        assert_eq!(
+            first_types,
+            vec![
+                "response.output_item.added".to_string(),
+                "response.function_call_arguments.delta".to_string(),
+            ]
+        );
+
+        let second_types = event_types(&conv.process_chunk(&tool_call_chunk(
+            1,
+            Some("call-2"),
+            Some("get_time"),
+            Some("{\"tz\":\"PST\"}"),
+        )));
+        assert!(second_types.is_empty());
+
+        let finish_types = event_types(&conv.process_chunk(&finish_chunk(FinishReason::ToolCalls)));
+        assert_eq!(
+            finish_types,
+            vec![
+                "response.function_call_arguments.done".to_string(),
+                "response.output_item.done".to_string(),
+            ]
+        );
+
+        let output = conv.completed_output();
+        assert_eq!(output.len(), 1);
+        let OutputItem::FunctionCall(call) = &output[0] else {
+            panic!("expected function call, got {:?}", output[0]);
+        };
+        assert_eq!(call.call_id, "call-1");
+        assert_eq!(call.name, "get_weather");
     }
 
     #[test]
