@@ -517,6 +517,7 @@ func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment
 			&follower.Spec.PodTemplate.Spec,
 			leaderComponentName,
 			leaderDCD.Labels[commonconsts.KubeLabelDynamoNamespace],
+			leaderDCD.Name,
 		)
 	}
 	return follower
@@ -2601,17 +2602,24 @@ type cliqueParams struct {
 // Both select the leader component, the follower's reference point. The clique affinity
 // cannot be dropped; the hostname anti-affinity is redundant under node-sized pods and may
 // be relaxed if it ever fights the scheduler.
-func injectElasticEPFollowerAffinity(podSpec *corev1.PodSpec, leaderComponentName, dynamoNamespace string) {
+func injectElasticEPFollowerAffinity(podSpec *corev1.PodSpec, leaderComponentName, dynamoNamespace, leaderDCDName string) {
 	if podSpec.Affinity == nil {
 		podSpec.Affinity = &corev1.Affinity{}
 	}
-	// Both terms position the follower relative to the leader, so both select the leader
-	// component. Separate selector objects avoid aliasing one mutable struct across terms.
+	// Both terms position the follower relative to the leader, so both select the leader.
+	// Separate selector objects avoid aliasing one mutable struct across terms.
+	//
+	// Narrowed to one DCD generation by KubeLabelDynamoSelector, exactly as the leader's
+	// Ray Service is. The component and dynamo-namespace labels alone match every
+	// generation, so mid-rollout these terms would also select the *old* leader: the
+	// follower could be pinned into the old leader's NVLink partition while joining the
+	// new leader's Service, leaving no NVLink path between them.
 	leaderSelector := func() *metav1.LabelSelector {
 		return &metav1.LabelSelector{
 			MatchLabels: map[string]string{
 				commonconsts.KubeLabelDynamoComponent: leaderComponentName,
 				commonconsts.KubeLabelDynamoNamespace: dynamoNamespace,
+				commonconsts.KubeLabelDynamoSelector:  leaderDCDName,
 			},
 		}
 	}

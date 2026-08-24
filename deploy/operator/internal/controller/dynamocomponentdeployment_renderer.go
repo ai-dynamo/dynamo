@@ -358,7 +358,12 @@ func (r *dcdWorkloadRenderer) applyNVLinkTopologyCapability(
 	kept := make([]corev1.PodAffinityTerm, 0, len(terms))
 	var dropped bool
 	for _, term := range terms {
-		if term.TopologyKey != commonconsts.NodeLabelGPUClique {
+		// Only the term synthesis added is ours to remove. The follower deep-copies the
+		// leader's spec, so a user may have their own gpu.clique term here -- and one written
+		// with MatchExpressions rather than MatchLabels would look unsatisfiable to the
+		// lookup below and be deleted silently. Match on the generation label synthesis
+		// stamps, which a user term does not carry.
+		if !isSynthesizedLeaderCliqueTerm(term) {
 			kept = append(kept, term)
 			continue
 		}
@@ -387,6 +392,22 @@ func (r *dcdWorkloadRenderer) applyNVLinkTopologyCapability(
 		podSpec.Affinity.PodAffinity = nil
 	}
 	return nil
+}
+
+// isSynthesizedLeaderCliqueTerm reports whether a required pod-affinity term is the one
+// synthesizeElasticEPFollowerDCD added, rather than one the follower inherited from the
+// leader's user-supplied affinity.
+//
+// The distinguishing mark is KubeLabelDynamoSelector: synthesis pins its term to a single
+// leader DCD generation, and a user-authored term has no reason to carry that internal
+// label. Topology key alone is not enough -- a user may legitimately write their own
+// gpu.clique term, and removing it would silently discard their scheduling intent.
+func isSynthesizedLeaderCliqueTerm(term corev1.PodAffinityTerm) bool {
+	if term.TopologyKey != commonconsts.NodeLabelGPUClique || term.LabelSelector == nil {
+		return false
+	}
+	_, ours := term.LabelSelector.MatchLabels[commonconsts.KubeLabelDynamoSelector]
+	return ours
 }
 
 // leaderHasNVLinkDomain reports whether the node already running this follower's leader

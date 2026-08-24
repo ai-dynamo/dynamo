@@ -36,6 +36,7 @@ import (
 const (
 	leaderComponent       = "decode"
 	leaderDynamoNamespace = "ns-mydgd"
+	leaderDCDName         = "mydgd-decode"
 )
 
 func vllmComponent(extraArgs ...string) *v1beta1.DynamoComponentDeploymentSharedSpec {
@@ -490,7 +491,7 @@ func TestInjectElasticEPFollowerAffinity(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("injecting the follower placement terms (leader component = decode)")
-			injectElasticEPFollowerAffinity(tt.podSpec, leaderComponent, leaderDynamoNamespace)
+			injectElasticEPFollowerAffinity(tt.podSpec, leaderComponent, leaderDynamoNamespace, leaderDCDName)
 			if tt.podSpec.Affinity == nil {
 				t.Fatal("expected affinity to be set")
 			}
@@ -509,6 +510,16 @@ func TestInjectElasticEPFollowerAffinity(t *testing.T) {
 			if s := aff[0].LabelSelector.MatchLabels; s[commonconsts.KubeLabelDynamoComponent] != leaderComponent ||
 				s[commonconsts.KubeLabelDynamoNamespace] != leaderDynamoNamespace {
 				t.Errorf("clique selector = %v, want leader component=decode namespace=ns-mydgd", s)
+			}
+
+			// Without this the term also matches the OLD leader mid-rollout, so the
+			// follower could be pinned into the old leader's partition while joining the
+			// new leader's Service -- the Ray Service is narrowed the same way.
+			t.Log("both terms are narrowed to one leader generation, as the Ray Service is")
+			for _, term := range []corev1.PodAffinityTerm{aff[0], tt.podSpec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution[0]} {
+				if got := term.LabelSelector.MatchLabels[commonconsts.KubeLabelDynamoSelector]; got != leaderDCDName {
+					t.Errorf("term on %q has selector %q, want the leader DCD name %q", term.TopologyKey, got, leaderDCDName)
+				}
 			}
 
 			t.Log("one-pod-per-node: a required pod anti-affinity on hostname selecting the leader")

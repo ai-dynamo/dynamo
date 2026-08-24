@@ -948,11 +948,12 @@ func TestDynamoComponentDeploymentReconciler_ElasticEPHeadlessServiceGate(t *tes
 // follower Pending forever; dropping it lets the pod schedule normally.
 func TestDynamoComponentDeploymentReconciler_NVLinkTopologyCapability(t *testing.T) {
 	tests := []struct {
-		name            string
-		leaderNodeLabel bool // leader pod runs on a node carrying gpu.clique
-		otherNodeLabel  bool // an unrelated node carries it (mixed cluster)
-		leaderScheduled bool
-		wantCliqueTerm  bool
+		name                string
+		leaderNodeLabel     bool // leader pod runs on a node carrying gpu.clique
+		otherNodeLabel      bool // an unrelated node carries it (mixed cluster)
+		staleLeaderLabelled bool // a PREVIOUS generation's leader sits on a labelled node
+		leaderScheduled     bool
+		wantCliqueTerm      bool
 	}{
 		{
 			name:            "leader sits in a partition: pin the follower to it",
@@ -980,6 +981,16 @@ func TestDynamoComponentDeploymentReconciler_NVLinkTopologyCapability(t *testing
 			leaderNodeLabel: true,
 			leaderScheduled: false,
 			wantCliqueTerm:  false,
+		},
+		{
+			// Mid-rollout both generations carry the component and dynamo-namespace
+			// labels. Only the current generation counts, or the follower could be
+			// pinned into the retiring leader's partition while joining the new
+			// leader's Ray Service.
+			name:                "old-generation leader pod must not satisfy the check",
+			staleLeaderLabelled: true,
+			leaderScheduled:     false,
+			wantCliqueTerm:      false,
 		},
 	}
 
@@ -1014,6 +1025,7 @@ func TestDynamoComponentDeploymentReconciler_NVLinkTopologyCapability(t *testing
 												LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
 													commonconsts.KubeLabelDynamoComponent: "decode",
 													commonconsts.KubeLabelDynamoNamespace: "default",
+													commonconsts.KubeLabelDynamoSelector:  "mydgd-decode-flw",
 												}},
 											},
 										},
@@ -1043,6 +1055,26 @@ func TestDynamoComponentDeploymentReconciler_NVLinkTopologyCapability(t *testing
 					Labels: map[string]string{commonconsts.NodeLabelGPUClique: "clique-z"},
 				}})
 			}
+			if tt.staleLeaderLabelled {
+				staleNode := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+					Name:   "stale-leader-node",
+					Labels: map[string]string{commonconsts.NodeLabelGPUClique: "clique-old"},
+				}}
+				stalePod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "old-leader-0",
+						Namespace: "default",
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent: "decode",
+							commonconsts.KubeLabelDynamoNamespace: "default",
+							// the retiring generation
+							commonconsts.KubeLabelDynamoSelector: "mydgd-decode-OLDHASH",
+						},
+					},
+					Spec: corev1.PodSpec{NodeName: staleNode.Name},
+				}
+				objects = append(objects, staleNode, stalePod)
+			}
 			if tt.leaderScheduled {
 				leaderPod := &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1051,6 +1083,7 @@ func TestDynamoComponentDeploymentReconciler_NVLinkTopologyCapability(t *testing
 						Labels: map[string]string{
 							commonconsts.KubeLabelDynamoComponent: "decode",
 							commonconsts.KubeLabelDynamoNamespace: "default",
+							commonconsts.KubeLabelDynamoSelector:  "mydgd-decode-flw",
 						},
 					},
 					Spec: corev1.PodSpec{NodeName: leaderNode.Name},
@@ -1089,6 +1122,91 @@ func TestDynamoComponentDeploymentReconciler_NVLinkTopologyCapability(t *testing
 			require.Len(t, podTemplate.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution, 1)
 		})
 	}
+}
+
+// The follower deep-copies the leader's spec, so a user's own gpu.clique affinity rides
+// along. Only the term synthesis added may be removed: a user term written with
+// MatchExpressions has no MatchLabels for the leader lookup to resolve, so treating every
+// gpu.clique term as operator-owned would silently discard their scheduling intent.
+func TestDynamoComponentDeploymentReconciler_PreservesInheritedCliqueAffinity(t *testing.T) {
+	s := scheme.Scheme
+	require.NoError(t, v1alpha1.AddToScheme(s))
+	require.NoError(t, appsv1.AddToScheme(s))
+	require.NoError(t, corev1.AddToScheme(s))
+
+	t.Log("Build a follower carrying BOTH a user gpu.clique term and the synthesized one")
+	userTerm := corev1.PodAffinityTerm{
+		TopologyKey: commonconsts.NodeLabelGPUClique,
+		LabelSelector: &metav1.LabelSelector{
+			MatchExpressions: []metav1.LabelSelectorRequirement{{
+				Key:      "app",
+				Operator: metav1.LabelSelectorOpIn,
+				Values:   []string{"my-sidecar"},
+			}},
+		},
+	}
+	synthesizedTerm := corev1.PodAffinityTerm{
+		TopologyKey: commonconsts.NodeLabelGPUClique,
+		LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+			commonconsts.KubeLabelDynamoComponent: "decode",
+			commonconsts.KubeLabelDynamoNamespace: "default",
+			commonconsts.KubeLabelDynamoSelector:  "mydgd-decode-flw",
+		}},
+	}
+
+	alpha := &v1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "mydgd-decode-flw",
+			Namespace:   "default",
+			Annotations: map[string]string{commonconsts.KubeAnnotationElasticEPFollower: commonconsts.KubeLabelValueTrue},
+		},
+		Spec: v1alpha1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ServiceName:     "decode-flw",
+				ComponentType:   commonconsts.ComponentTypeWorker,
+				DynamoNamespace: ptr.To("default"),
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Name: commonconsts.MainContainerName, Image: "test-image:latest"},
+					PodSpec: &corev1.PodSpec{
+						Affinity: &corev1.Affinity{
+							PodAffinity: &corev1.PodAffinity{
+								RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{userTerm, synthesizedTerm},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	dcd := betaDCD(t, alpha)
+
+	// No leader pod exists, so the synthesized term is unsatisfiable and gets dropped.
+	// That is exactly the condition under which a naive loop would take the user's too.
+	r := &DynamoComponentDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(s).WithObjects(dcd).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
+		},
+	}
+
+	t.Log("Render with no leader scheduled, so the synthesized term cannot be satisfied")
+	podTemplate, err := r.workloadRenderer().generatePodTemplateSpec(
+		context.Background(), dcd, dynamo.RoleFollower, noContainerGPUs())
+	require.NoError(t, err)
+
+	t.Log("The user's term survives; only the operator's own term is removed")
+	require.NotNil(t, podTemplate.Spec.Affinity)
+	require.NotNil(t, podTemplate.Spec.Affinity.PodAffinity)
+	remaining := podTemplate.Spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	require.Len(t, remaining, 1, "expected only the user term to remain")
+	require.NotNil(t, remaining[0].LabelSelector)
+	require.Equal(t, userTerm.LabelSelector.MatchExpressions, remaining[0].LabelSelector.MatchExpressions,
+		"the surviving term must be the user's, not the synthesized one")
+	require.Empty(t, remaining[0].LabelSelector.MatchLabels,
+		"the synthesized term must be the one removed")
 }
 
 // The follower runs a bare Ray join, not the Dynamo runtime, so it never registers a
