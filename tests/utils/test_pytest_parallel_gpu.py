@@ -2287,6 +2287,131 @@ def test_gang_waits_only_while_foreign_memory_leaves_too_few_usable_cards(frees_
         )
 
 
+def test_a_gang_hold_is_denominated_in_the_units_the_gang_is_gated_in():
+    """A hold must bound backfill by what the gang has to survive, not by our share.
+
+    The hold gate counts only budget WE committed (`ts.budget + profiled <=
+    budget_multi - required`), but the gate the gang must itself pass counts
+    OBSERVED usage (`total - free + required <= cap`), which includes memory
+    held outside this run. The two are the same number only when that foreign
+    hold is zero. For any F > 0 the hold therefore admits backfill sitting
+    exactly in the band the gang cannot survive -- a band `required` wide.
+
+    Two 10 GiB cards (budget_multi 8.5), a gpu_2 gang needing 6.0, 1.0 GiB held
+    on each card from outside the run. GPU0 also carries 3.0 GiB of our own
+    work, so the gang is blocked and holds both cards. A 2.0 GiB filler clears
+    the old gate on GPU1 (0.0 + 2.0 <= 8.5 - 6.0) -- and the moment it lands the
+    gang cannot collect GPU1 either, because 1.0 + 2.0 + 6.0 > 8.5. Observed,
+    as everywhere else in this file, through what the hold refuses.
+    """
+    gpus = {
+        0: _gpu(0, 10.0, budget_used=3.0, running_count=1),
+        1: _gpu(1, 10.0),
+    }
+    # 1.0 GiB on each card belongs to a process outside this run.
+    actual_free = {0: 10.0 - 3.0 - 1.0, 1: 10.0 - 1.0}
+    gang = _t("gang", 6.0, timeout=1800, gpus=2)
+    filler = _t("filler", 2.0, timeout=15.0)
+    assert _unschedulable_reason(gang, gpus) is None
+    # The card is usable in its own right: 1.0 GiB of foreign memory leaves
+    # 9.0 free on a card that needs to fit 6.0, so condition 2 holds and the
+    # gang is squarely inside the domain the progress property claims.
+    assert 10.0 - 1.0 >= gang.profiled_gib
+
+    launches = _select_checked(
+        [gang, filler], gpus, num_slots=8, running_count=1, actual_free=actual_free
+    )
+
+    assert launches == [], (
+        "the hold admitted a filler that leaves the reserved card unable to "
+        "host a member: 1.0 foreign + 2.0 filler + 6.0 gang = 9.0 > 8.5. The "
+        "hold is gated in our-budget units and the gang in observed-usage units"
+    )
+
+
+def test_a_free_reading_that_overshoots_cannot_loosen_a_gang_hold():
+    """The negative clamp on the foreign-hold term is load bearing in the gate.
+
+    `free + budget > total` is a real, ordinary state: a test is launched and
+    charged to the budget before it has allocated anything, so the live reading
+    still shows the card almost empty. `total - free - budget` then goes
+    NEGATIVE, and without the clamp the hold's line reads
+    `budget_multi - (-x) - required` -- wider than the unheld card, so the hold
+    admits MORE the emptier the card looks.
+
+    GPU0 carries 1.0 GiB of budget for a test that has not ramped yet (free
+    still reads the whole 10.0), and GPU1 is too full for a member, so the gang
+    is blocked and holds both. A 2.0 GiB filler must not land on GPU0:
+    1.0 + 2.0 = 3.0 is already past `8.5 - 6.0`. Unclamped the term is -1.0,
+    the line becomes 3.5, and the filler is let in.
+
+    This clamp used to be an equivalent mutant -- reachable only behind
+    `_can_ever_host`, which excludes the regime where it bites. Sharing the term
+    with the admission gate, which sits behind no such filter, made it real.
+    """
+    gpus = {
+        0: _gpu(0, 10.0, budget_used=1.0, running_count=1),
+        1: _gpu(1, 10.0, budget_used=5.0, running_count=1),
+    }
+    # GPU0: charged 1.0 GiB, has allocated none of it yet -> free + budget > total.
+    actual_free = {0: 10.0, 1: 5.0}
+    gang = _t("gang", 6.0, timeout=1800, gpus=2)
+    filler = _t("filler", 2.0, timeout=15.0)
+    assert _unschedulable_reason(gang, gpus) is None
+    assert actual_free[0] + gpus[0].budget_used > gpus[0].total_gib
+
+    launches = _select_checked(
+        [gang, filler], gpus, num_slots=8, running_count=2, actual_free=actual_free
+    )
+
+    assert launches == [], (
+        "an un-ramped test made the card read emptier than empty and widened "
+        "the hold: 1.0 committed + 2.0 filler = 3.0 is past the 2.5 line"
+    )
+
+
+def test_gang_progress_survives_foreign_memory_that_leaves_every_card_usable():
+    """The multi-pass consequence of the gate above, and the reason it matters.
+
+    Identical to `test_blocked_gang_is_not_starved_by_endless_lower_priority_backfill`
+    except that 1.0 GiB is held on every card from outside the run and the
+    backfill durations do not all divide the hog's lifetime -- a single fill
+    duration makes every card fall clean on the same pass, which hides this.
+
+    Every card reads usable (10.0 - 1.0 >= 6.0), so all five progress
+    conditions hold. With the hold gated correctly the gang launches the pass
+    the hog retires. With it gated in our-budget units the hold bounds nothing:
+    each reserved card carries a filler the gang cannot fit beside, the gang
+    needs all of them clean on the same pass, and it waits on a coincidence
+    whose odds fall geometrically in `gpu_count` -- 13 of 16 seeds never
+    launched in 20,000 passes at gpu_count=4.
+    """
+    gpus = {i: _gpu(i, 10.0) for i in range(3)}
+    hogs = [_t(f"hog{i}", 3.0, timeout=127) for i in range(2)]  # est 42 passes
+    gang = _t("gang", 6.0, timeout=90, gpus=3)  # needs every card
+    assert _unschedulable_reason(gang, gpus) is None
+    # Durations 11/13/17/19/23 passes: coprime with each other and with 42, so
+    # the cards drift out of phase and no coincidence is handed to the gang.
+    durations = itertools.cycle([33.0, 39.0, 51.0, 57.0, 69.0])
+
+    started = _drive_passes(
+        gpus,
+        hogs + [gang],
+        backfill=lambda i: _t(f"fill{i}", 2.0, timeout=next(durations)),
+        passes=4000,
+        external_hold={i: 1.0 for i in range(3)},
+    )
+
+    assert "gang" in started, (
+        "gang never launched in 4000 passes while every card was usable and "
+        "lower-priority backfill kept launching -- starved"
+    )
+    assert started["gang"] <= 43, (
+        f"gang launched on pass {started['gang']}, not the pass the hogs "
+        f"retired (42) -- backfill was let in past the hold ahead of it"
+    )
+
+
 def test_a_foreign_blocked_card_never_outranks_a_usable_one_for_a_hold():
     """The ranking, isolated from the multi-pass driver.
 

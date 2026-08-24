@@ -528,10 +528,14 @@ def _select_launches(
       5. every test this run launches terminates.
 
     Given those: each held member's committed budget can only fall to
-    ``budget_multi - required`` and never rise back above it, holds are placed
-    only on devices ``J`` could actually occupy, the pre-hold occupants all
-    finish, and ``J`` is scanned before every lower-priority test -- so the ``k``
-    members eventually satisfy the gate simultaneously.
+    ``budget_multi - foreign - required`` and never rise back above it -- net of
+    memory held outside the run, because that is the quantity ``J``'s own gate
+    is denominated in, and a hold bounding anything else bounds nothing. So any
+    device admitting backfill under a hold is left able to take a member
+    immediately. Holds are placed only on devices ``J`` could actually occupy,
+    the pre-hold occupants all finish, and ``J`` is scanned before every
+    lower-priority test -- so the ``k`` members eventually satisfy the gate
+    simultaneously.
 
     Conditions 1-4 are properties of the workload and the hardware, not of this
     scheduler. Nothing here assumes memory held outside the run ever frees: if it
@@ -595,23 +599,34 @@ def _select_launches(
         """
         return gpu_states[gi].total_gib >= required
 
+    def _foreign_held(gi: int) -> float:
+        """GiB on ``gi`` held by a process outside this run.
+
+        Budget we committed ourselves is excluded because our own tests end --
+        what remains, ``total - free - budget``, is somebody else's and may not.
+        The two terms cancel exactly against this pass's tentative launches, so
+        the answer does not drift as the pass fills.
+
+        Defined once because both users of it must agree: the hold's ranking
+        (which card to protect) and the hold's admission gate (how much to let
+        in beside it). They were denominated differently once, and a hold that
+        bounds a different quantity from the one its gang is gated on bounds
+        nothing.
+        """
+        ts = tentative[gi]
+        return max(0.0, gpu_states[gi].total_gib - ts.free - ts.budget)
+
     def _usable_now(gi: int, required: float) -> bool:
         """Could ``gi`` host a member *today*, discounting only what we cannot free?
 
         ``_can_ever_host`` asks about the card; this asks about the card as it
-        stands. Budget we committed ourselves is excluded from the judgement
-        because our own tests end -- what remains, ``total - free - budget``, is
-        somebody else's and may not. Note the two cancel exactly against this
-        pass's tentative launches, so the answer does not drift as the pass
-        fills.
+        stands.
 
         A card that fails this is never rejected, only outranked. That is the
         whole distinction from the filter above: foreign memory is a fact about
         right now, and the ordering is rebuilt from scratch on every pass.
         """
-        ts = tentative[gi]
-        foreign_held = max(0.0, gpu_states[gi].total_gib - ts.free - ts.budget)
-        return gpu_states[gi].total_gib - foreign_held >= required
+        return gpu_states[gi].total_gib - _foreign_held(gi) >= required
 
     for idx, test in enumerate(pending):
         if running_count + len(to_launch) >= num_slots:
@@ -676,8 +691,26 @@ def _select_launches(
                     # reaches `budget_multi - required` and stays there, so the
                     # k members eventually hold simultaneously and the gang --
                     # scanned before every lower-priority test -- launches.
+                    #   * net of foreign memory, not gross: the gate the GANG
+                    #     must pass counts observed usage (`total - free`),
+                    #     which includes memory held outside this run; this gate
+                    #     counts only what WE committed. The two are the same
+                    #     number only when that foreign hold is zero, and for
+                    #     any F > 0 the difference is a band exactly `required`
+                    #     wide in which a filler clears this gate and then
+                    #     leaves the reserved card unable to host a member. The
+                    #     hold then bounds nothing: every reserved card carries
+                    #     a filler the gang cannot fit beside, and the gang
+                    #     waits for all `k` of them to fall clean on the same
+                    #     pass -- a coincidence whose odds drop geometrically in
+                    #     `gpu_count`. Subtracting it here is safe in a way it
+                    #     would not be in `_can_ever_host`: this is a per-pass
+                    #     admission decision, not a permanent candidacy one, so
+                    #     a card whose neighbour leaves is admitted again on the
+                    #     very next pass.
                     committed = ts.budget + test.profiled_gib
-                    if committed > gs.budget_multi - reserved_req[gi]:
+                    line = gs.budget_multi - _foreign_held(gi) - reserved_req[gi]
+                    if committed > line:
                         continue  # would crowd out the reserved gang
                 elif backfill_added[gi] + test.profiled_gib > cap - reserved_req[gi]:
                     # Single-GPU reservation: unchanged per-pass semantics, so
