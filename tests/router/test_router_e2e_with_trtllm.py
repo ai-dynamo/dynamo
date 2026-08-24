@@ -21,8 +21,7 @@ from tests.router.e2e_harness import (
 from tests.router.helper import generate_random_suffix
 from tests.utils.constants import DynamoPortRange
 from tests.utils.gpu_args import build_trtllm_override_args, map_cuda_visible_devices
-from tests.utils.health_checks import check_health_ready
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.port_utils import allocate_ports, deallocate_ports
 
 logger = logging.getLogger(__name__)

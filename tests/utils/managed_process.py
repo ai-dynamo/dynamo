@@ -20,6 +20,17 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 from tests.utils.test_output import resolve_test_output_path
 
 
+def check_health_ready(response: requests.Response) -> bool:
+    """Return whether an HTTP health response reports a ready component."""
+    try:
+        return (
+            response.status_code == 200
+            and (response.json() or {}).get("status") == "ready"
+        )
+    except ValueError:
+        return False
+
+
 def terminate_process(process, logger=logging.getLogger(), immediate_kill=False):
     """Terminate a single process.
 
