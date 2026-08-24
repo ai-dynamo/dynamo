@@ -168,8 +168,18 @@ impl RequestLeaseManagerInner {
         }
     }
 
-    fn enqueue_cleanup(&self, record: &RequestLeaseRecord) {
+    fn enqueue_completion(&self, record: &RequestLeaseRecord) {
         self.scheduler.enqueue(record.booking.clone());
+        if let Some(approximate_lru) = &record.approximate_lru {
+            approximate_lru.release_now();
+        }
+    }
+
+    fn enqueue_expiry(&self, record: &RequestLeaseRecord) {
+        // NOTE: Request-liveness expiry is deliberately isolated to this router.
+        // Local and mirrored scheduler copies expire independently, and only an
+        // explicit lifecycle completion publishes `Free` to peer routers.
+        self.scheduler.enqueue_expired(record.booking.clone());
         if let Some(approximate_lru) = &record.approximate_lru {
             approximate_lru.release_now();
         }
@@ -188,7 +198,7 @@ impl RequestLeaseManagerInner {
                 continue;
             }
             self.remove(&record);
-            self.enqueue_cleanup(&record);
+            self.enqueue_expiry(&record);
         }
     }
 }
@@ -284,7 +294,7 @@ impl RequestLeaseManager {
             return;
         }
         self.inner.remove(record);
-        self.inner.enqueue_cleanup(record);
+        self.inner.enqueue_completion(record);
     }
 
     async fn finish(&self, record: &Arc<RequestLeaseRecord>) {

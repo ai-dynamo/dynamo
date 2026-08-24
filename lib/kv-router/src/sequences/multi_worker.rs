@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::prefill_tracker::PrefillTimeLoad;
 use super::prompt_registry::{PromptRegistry, WorkerLoadSnapshot};
-use super::request_maps::RequestIndex;
+use super::request_maps::{RequestBooking, RequestIndex};
 use super::single::{
     ActiveSequences, DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION, PromptMembershipDelta, RequestId,
 };
@@ -310,6 +310,12 @@ pub struct SequenceRequest {
 pub enum LifecycleMutationOutcome {
     Applied,
     NoChange,
+}
+
+#[derive(Clone, Copy)]
+enum BookingReleaseVisibility {
+    Publish,
+    LocalOnly,
 }
 
 /// Observes request attempts mirrored from another router so their local
@@ -940,8 +946,41 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         attempt_id: AttemptId,
         decay_now: Instant,
     ) -> Result<LifecycleMutationOutcome, SequenceError> {
-        if self.request_index.booking_for(request_id)
-            != Some(super::request_maps::RequestBooking { worker, attempt_id })
+        self.release_if_booking(
+            request_id,
+            worker,
+            attempt_id,
+            decay_now,
+            BookingReleaseVisibility::Publish,
+        )
+    }
+
+    /// Expire one request attempt locally without publishing a replica `Free` event.
+    pub(crate) fn expire_if_booking(
+        &self,
+        request_id: &RequestId,
+        worker: WorkerWithDpRank,
+        attempt_id: AttemptId,
+        decay_now: Instant,
+    ) -> Result<LifecycleMutationOutcome, SequenceError> {
+        self.release_if_booking(
+            request_id,
+            worker,
+            attempt_id,
+            decay_now,
+            BookingReleaseVisibility::LocalOnly,
+        )
+    }
+
+    fn release_if_booking(
+        &self,
+        request_id: &RequestId,
+        worker: WorkerWithDpRank,
+        attempt_id: AttemptId,
+        decay_now: Instant,
+        visibility: BookingReleaseVisibility,
+    ) -> Result<LifecycleMutationOutcome, SequenceError> {
+        if self.request_index.booking_for(request_id) != Some(RequestBooking { worker, attempt_id })
         {
             return Ok(LifecycleMutationOutcome::NoChange);
         }
@@ -961,7 +1000,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         let booking_removed = self
             .request_index
             .remove_request_if_booking(request_id, worker, attempt_id);
-        if booking_removed {
+        if booking_removed && matches!(visibility, BookingReleaseVisibility::Publish) {
             self.enqueue_publish_event(ActiveSequenceEvent {
                 request_id: request_id.clone(),
                 worker,
@@ -1004,8 +1043,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         attempt_id: AttemptId,
         decay_now: Instant,
     ) -> Result<LifecycleMutationOutcome, SequenceError> {
-        if self.request_index.booking_for(request_id)
-            != Some(super::request_maps::RequestBooking { worker, attempt_id })
+        if self.request_index.booking_for(request_id) != Some(RequestBooking { worker, attempt_id })
         {
             return Ok(LifecycleMutationOutcome::NoChange);
         }
@@ -1090,8 +1128,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         attempt_id: AttemptId,
         decay_fraction: Option<f64>,
     ) -> Result<LifecycleMutationOutcome, SequenceError> {
-        if self.request_index.booking_for(request_id)
-            != Some(super::request_maps::RequestBooking { worker, attempt_id })
+        if self.request_index.booking_for(request_id) != Some(RequestBooking { worker, attempt_id })
         {
             return Ok(LifecycleMutationOutcome::NoChange);
         }
@@ -2211,6 +2248,51 @@ mod tests {
             LifecycleMutationOutcome::Applied
         );
         assert_eq!(sequences.request_worker(&request_id), None);
+    }
+
+    #[test]
+    fn attempt_expiry_is_local_and_fenced_from_replacement_state() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let (sequences, state) = make_recording_sequences(HashMap::from([(1, (0, 1))]));
+        let request_id = "locally-expired-request".to_string();
+        let now = Instant::now();
+
+        let expired_attempt = sequences
+            .add_request_admitted(local_sequence_request(&request_id, worker), now)
+            .unwrap();
+        state.clear();
+        assert_eq!(
+            sequences
+                .expire_if_booking(&request_id, worker, expired_attempt, now)
+                .unwrap(),
+            LifecycleMutationOutcome::Applied
+        );
+        assert_eq!(sequences.request_worker(&request_id), None);
+        assert!(state.events.lock().unwrap().is_empty());
+
+        let replacement_attempt = sequences
+            .add_request_admitted(local_sequence_request(&request_id, worker), now)
+            .unwrap();
+        state.clear();
+        assert_eq!(
+            sequences
+                .expire_if_booking(&request_id, worker, expired_attempt, now)
+                .unwrap(),
+            LifecycleMutationOutcome::NoChange
+        );
+        assert_eq!(sequences.request_worker(&request_id), Some(worker));
+        assert!(state.events.lock().unwrap().is_empty());
+
+        assert_eq!(
+            sequences
+                .free_if_booking(&request_id, worker, replacement_attempt, now)
+                .unwrap(),
+            LifecycleMutationOutcome::Applied
+        );
+        assert!(matches!(
+            state.events.lock().unwrap().as_slice(),
+            [ActiveSequenceEventData::Free]
+        ));
     }
 
     #[test]

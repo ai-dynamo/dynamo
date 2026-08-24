@@ -35,6 +35,11 @@ boundaries.
 - Keep lifecycle replica sync separate from shared load publication. Replica
   sync carries `AddRequest`, `MarkPrefillCompleted`, and `Free` events, while
   `ActiveLoad` is a whole-worker snapshot rather than a delta.
+- Publish lifecycle events only from the originating router. Replica ingestion
+  applies events locally and must never republish them. Ignore self-originated
+  events using `router_id`. Request expiry for locally admitted and mirrored
+  state is local-only cleanup and must not publish `Free`; only explicit
+  lifecycle completion publishes `Free`.
 - Output-block mutations are replica-local because they are high-frequency and
   each frontend has only a partial view of worker output activity.
 - `add_output_block` must update local `ActiveSequences`, `PromptRegistry`, and

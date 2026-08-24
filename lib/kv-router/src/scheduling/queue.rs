@@ -166,6 +166,7 @@ pub struct SchedulerBookingDescriptor {
 enum SchedulerCleanupTarget {
     Admission { request_id: String },
     Booking(SchedulerBookingDescriptor),
+    ExpiredBooking(SchedulerBookingDescriptor),
 }
 
 struct AdmissionCleanupEntry {
@@ -256,6 +257,13 @@ impl SchedulerBookingCleanup {
     pub fn enqueue(&self, booking: SchedulerBookingDescriptor) {
         self.enqueue_entry(AdmissionCleanupEntry {
             target: SchedulerCleanupTarget::Booking(booking),
+            response: None,
+        });
+    }
+
+    pub fn enqueue_expired(&self, booking: SchedulerBookingDescriptor) {
+        self.enqueue_entry(AdmissionCleanupEntry {
+            target: SchedulerCleanupTarget::ExpiredBooking(booking),
             response: None,
         });
     }
@@ -897,8 +905,9 @@ impl<
                     );
                     let mutation_ready = result.as_ref().is_ok_and(|outcome| outcome.is_applied());
                     let cleanup_ready = drain_cleanup && self.drain_cleanup();
-                    let made_ready = mutation_ready || cleanup_ready;
-                    if made_ready {
+                    if cleanup_ready {
+                        self.handle_update(None).await;
+                    } else if mutation_ready {
                         self.handle_update(Some(booking.worker)).await;
                     }
                     let _ = ack_tx.send(result);
@@ -1085,6 +1094,30 @@ impl<
                             attempt_id = %booking.attempt_id,
                             %error,
                             "Failed to release request-attempt scheduler booking"
+                        );
+                    }
+                }
+                SchedulerCleanupTarget::ExpiredBooking(booking) => {
+                    let result = self
+                        .slots
+                        .expire_if_booking(
+                            &booking.request_id,
+                            booking.worker,
+                            booking.attempt_id,
+                            Instant::now(),
+                        )
+                        .map(|outcome| {
+                            made_ready |= outcome.is_applied();
+                        });
+                    if let Some(response) = cleanup.response {
+                        let _ = response.send(result);
+                    } else if let Err(error) = result {
+                        tracing::error!(
+                            request_id = %booking.request_id,
+                            worker = ?booking.worker,
+                            attempt_id = %booking.attempt_id,
+                            %error,
+                            "Failed to expire request-attempt scheduler booking"
                         );
                     }
                 }
