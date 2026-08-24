@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 
 mod default;
@@ -127,39 +126,13 @@ struct LogitWeights {
 
 struct MaterializedSelectionInput<'a> {
     request: &'a SchedulingRequest,
-    has_tier_overlap_blocks: bool,
-    use_default_cache_fallbacks: bool,
     context: WorkerSelectionContext<'a>,
 }
 
 impl<'a> MaterializedSelectionInput<'a> {
-    fn new<C: WorkerConfigLike>(
-        workers: &'a HashMap<WorkerId, C>,
-        request: &'a SchedulingRequest,
-        eligibility: RoutingEligibility<'a>,
-        block_size: u32,
-        weights: LogitWeights,
-        inputs: WorkerInputs,
-    ) -> Self {
-        let min_active_prefill_tokens = if inputs.contains(WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS)
-            && request.track_prefill_tokens
-            && weights.overlap_score_credit_decay > 0.0
-        {
-            let mut minimum = usize::MAX;
-            eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
-                minimum = minimum.min(request.worker_load_for(worker).active_prefill_tokens);
-            });
-            if minimum == usize::MAX { 0 } else { minimum }
-        } else {
-            0
-        };
-        let has_tier_overlap_blocks = !request.overlap.tier_overlap_blocks.device.is_empty()
-            || !request.overlap.tier_overlap_blocks.host_pinned.is_empty()
-            || !request.overlap.tier_overlap_blocks.disk.is_empty();
+    fn new(request: &'a SchedulingRequest, block_size: u32, weights: LogitWeights) -> Self {
         Self {
             request,
-            has_tier_overlap_blocks,
-            use_default_cache_fallbacks: inputs.contains(WorkerInputs::DEFAULT_POLICY_CACHE),
             context: WorkerSelectionContext {
                 request,
                 request_id: request.mode.request_id().unwrap_or("-"),
@@ -167,7 +140,6 @@ impl<'a> MaterializedSelectionInput<'a> {
                 block_size,
                 track_prefill_tokens: request.track_prefill_tokens,
                 weights,
-                min_active_prefill_tokens,
                 router_temperature_override: request
                     .router_config_override
                     .as_ref()
@@ -181,6 +153,21 @@ impl<'a> MaterializedSelectionInput<'a> {
         worker: WorkerWithDpRank,
         preferred_taint_multiplier: Option<f64>,
         inputs: WorkerInputs,
+    ) -> WorkerCandidate {
+        self.row_with_device_overlap(
+            worker,
+            preferred_taint_multiplier,
+            inputs,
+            |_, device_overlap_blocks| device_overlap_blocks,
+        )
+    }
+
+    fn row_with_device_overlap(
+        &self,
+        worker: WorkerWithDpRank,
+        preferred_taint_multiplier: Option<f64>,
+        inputs: WorkerInputs,
+        select_device_overlap: impl FnOnce(f64, f64) -> f64,
     ) -> WorkerCandidate {
         let cached_tokens = if inputs.contains(WorkerInputs::CACHE)
             || (inputs.contains(WorkerInputs::LOAD) && self.request.track_prefill_tokens)
@@ -196,7 +183,7 @@ impl<'a> MaterializedSelectionInput<'a> {
         };
         let cache = if inputs.contains(WorkerInputs::CACHE) {
             let effective_overlap_blocks = self.request.effective_overlap_blocks_for(worker);
-            let device_overlap_blocks = self
+            let reported_device_overlap_blocks = self
                 .request
                 .overlap
                 .tier_overlap_blocks
@@ -205,26 +192,16 @@ impl<'a> MaterializedSelectionInput<'a> {
                 .copied()
                 .map(|blocks| blocks as f64)
                 .unwrap_or(0.0);
+            let device_overlap_blocks =
+                select_device_overlap(effective_overlap_blocks, reported_device_overlap_blocks);
             let shared_beyond = |device_blocks: f64| {
                 self.request.shared_cache_hits.as_ref().map_or(0, |hits| {
                     // `hits_beyond` expects the unweighted device prefix depth.
                     hits.hits_beyond(device_blocks.round().max(0.0) as u32)
                 })
             };
-            let default_device_overlap_blocks = if self.has_tier_overlap_blocks {
-                device_overlap_blocks
-            } else {
-                effective_overlap_blocks
-            };
-            let (default_shared_beyond_device_blocks, shared_beyond_device_blocks) =
-                if self.use_default_cache_fallbacks {
-                    (shared_beyond(default_device_overlap_blocks), 0)
-                } else {
-                    (0, shared_beyond(device_overlap_blocks))
-                };
             WorkerCacheInput {
                 effective_overlap_blocks,
-                default_device_overlap_blocks,
                 device_overlap_blocks,
                 host_overlap_blocks: self
                     .request
@@ -242,8 +219,7 @@ impl<'a> MaterializedSelectionInput<'a> {
                     .get(&worker)
                     .copied()
                     .unwrap_or(0) as f64,
-                default_shared_beyond_device_blocks,
-                shared_beyond_device_blocks,
+                shared_beyond_device_blocks: shared_beyond(device_overlap_blocks),
             }
         } else {
             WorkerCacheInput::default()
@@ -395,32 +371,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
     }
 
     let weights = selection_weights(kv_router_config, request);
-    let (inputs, needs_filtered_baseline) = match &state {
-        WorkerSelectionPolicyStateRef::Default(_) => (
-            WorkerInputs::ALL
-                | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS
-                | WorkerInputs::DEFAULT_POLICY_CACHE,
-            false,
-        ),
-        WorkerSelectionPolicyStateRef::Custom(state) => {
-            let state = RefCell::borrow(state);
-            let needs_filtered_baseline = !state.filters.is_empty()
-                && state
-                    .scorer_picker_inputs
-                    .contains(WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS)
-                && request.track_prefill_tokens
-                && weights.overlap_score_credit_decay > 0.0;
-            let inputs = state.filter_inputs | state.scorer_picker_inputs;
-            let inputs = if needs_filtered_baseline {
-                inputs.without(WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS)
-            } else {
-                inputs
-            };
-            (inputs, needs_filtered_baseline)
-        }
-    };
-    let mut input =
-        MaterializedSelectionInput::new(workers, request, eligibility, block_size, weights, inputs);
+    let input = MaterializedSelectionInput::new(request, block_size, weights);
     let selected = match state {
         WorkerSelectionPolicyStateRef::Default(picker) => {
             let scorer = DefaultWorkerScorer {
@@ -431,14 +382,8 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
         WorkerSelectionPolicyStateRef::Custom(state) => {
             let mut state = state.borrow_mut();
-            let has_eligible_worker = collect_custom_candidates(
-                &mut state,
-                &mut input,
-                workers,
-                request,
-                eligibility,
-                needs_filtered_baseline,
-            )?;
+            let has_eligible_worker =
+                collect_custom_candidates(&mut state, &input, workers, request, eligibility)?;
             let CustomWorkerSelectionState {
                 picker,
                 picker_inputs,
