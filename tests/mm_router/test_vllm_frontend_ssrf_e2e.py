@@ -95,7 +95,9 @@ class _VllmWorkerProcess(ManagedProcess):
         super().__init__(
             command=command,
             env=_strict_media_env(DYN_SYSTEM_PORT=str(system_port)),
-            health_check_urls=[(f"http://localhost:{system_port}/health", _check_ready)],
+            health_check_urls=[
+                (f"http://localhost:{system_port}/health", _check_ready)
+            ],
             timeout=900,
             straggler_commands=["-m dynamo.vllm"],
             log_dir=_log_dir(request, f"worker-{topology}"),

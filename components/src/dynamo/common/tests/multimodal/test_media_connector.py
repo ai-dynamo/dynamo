@@ -38,9 +38,7 @@ async def test_connector_does_not_fallback_on_client_error(client_error, monkeyp
         pytest.skip("vLLM is not installed")
 
     parent_fetch = AsyncMock()
-    monkeypatch.setattr(
-        connector_class.__mro__[1], "fetch_image_async", parent_fetch
-    )
+    monkeypatch.setattr(connector_class.__mro__[1], "fetch_image_async", parent_fetch)
     connector = object.__new__(connector_class)
     connector._image_loader = AsyncMock()
     connector._image_loader.load_image.side_effect = client_error
