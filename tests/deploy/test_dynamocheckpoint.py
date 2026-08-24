@@ -18,6 +18,7 @@ from kubernetes_asyncio.client import exceptions as k8s_exceptions
 
 from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment, _get_workspace_dir
 from tests.utils.client import send_request, wait_for_model_availability
+from tests.utils.constants import CROSS_BACKEND_SMOKE_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ CHECKPOINT_PLURAL = "dynamocheckpoints"
 
 FRONTEND_COMPONENT = "Frontend"
 TARGET_CONTAINER = "main"
-CHECKPOINT_MODEL = "Qwen/Qwen3-0.6B"
+CHECKPOINT_MODEL = CROSS_BACKEND_SMOKE_MODEL
 CHECKPOINT_STORAGE_MOUNT_PATH = "/checkpoints"
 TRTLLM_HF_HOME = f"{CHECKPOINT_STORAGE_MOUNT_PATH}/trtllm-hf-cache"
 

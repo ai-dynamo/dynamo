@@ -26,6 +26,7 @@ from tests.fault_tolerance.deploy.scenarios import (
     Scenario,
     scenarios,
 )
+from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.test_output import resolve_test_output_path
 
 
@@ -83,8 +84,8 @@ def get_model_from_deployment(
             )
 
     # Fallback to default
-    logging.info("Using default model: Qwen/Qwen3-0.6B")
-    return "Qwen/Qwen3-0.6B"
+    logging.info("Using default model: %s", FAULT_TOLERANCE_MODEL_NAME)
+    return FAULT_TOLERANCE_MODEL_NAME
 
 
 @pytest.fixture

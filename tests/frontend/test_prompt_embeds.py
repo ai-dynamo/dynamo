@@ -33,13 +33,14 @@ from openai import BadRequestError, OpenAI
 
 from tests.utils.device import detect_target_device
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
+from tests.utils.model_registry import QWEN_QWEN3_0_6B
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import ServicePorts
 
 logger = logging.getLogger(__name__)
 
 # Test model - small and fast for CI
-TEST_MODEL = "Qwen/Qwen3-0.6B"
+TEST_MODEL = QWEN_QWEN3_0_6B
 
 pytestmark = [
     pytest.mark.integration,

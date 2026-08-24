@@ -14,6 +14,8 @@ These tests validate core KVBM functionality:
 import pytest
 import requests
 
+from tests.utils.constants import KV_TRANSFER_MODEL
+
 from .common import llm_server_kvbm  # noqa: F401
 from .common import DeterminismTester, assert_deterministic, fetch_kvbm_metrics
 
@@ -98,7 +100,7 @@ def reset_cache(base_url: str) -> None:
 
 
 # Model used for test_kvbm tests (smaller model for faster CI)
-KVBM_TEST_MODEL = "Qwen/Qwen3-0.6B"
+KVBM_TEST_MODEL = KV_TRANSFER_MODEL
 
 
 # Fixtures

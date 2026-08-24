@@ -177,10 +177,17 @@ def _prepare_deployment(
                 str(gib_to_bytes),
             )
 
-    # Stagger engine startup under xdist to avoid vLLM profiling race
-    # (vLLM bug #10643: concurrent profilers miscount each other's memory).
+    # Stagger only uncapped vLLM launches under plain xdist. An explicit
+    # --kv-cache-memory-bytes value skips vLLM's memory profiler, so delaying
+    # those launches only serializes otherwise parallel-safe CI work. The
+    # dedicated GPU scheduler already supplies a cap to every GPU test.
     worker_id = os.environ.get("PYTEST_XDIST_WORKER", "")
-    if worker_id.startswith("gw"):
+    is_vllm = request.node.get_closest_marker("vllm") is not None
+    has_vllm_kv_cap = (
+        "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES" in merged_env
+        or "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES" in os.environ
+    )
+    if is_vllm and not has_vllm_kv_cap and worker_id.startswith("gw"):
         worker_num = int(worker_id.removeprefix("gw"))
         if worker_num > 0:
             stagger_s = worker_num * 15

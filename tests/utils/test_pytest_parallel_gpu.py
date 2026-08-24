@@ -276,7 +276,7 @@ def _legacy_select(pending, gpu_states, actual_free, num_slots, running_count):
 def _simulate_makespan(tests, *, num_slots, gpus_total, order_key, select) -> float:
     """Discrete-event makespan model of run_parallel's loop.
 
-    Polls/staggers are omitted (they affect both schedulers equally); GPU actual
+    Polls are omitted (they affect both schedulers equally); GPU actual
     usage is modeled as the sum of running tests' profiled VRAM. Returns the wall
     time in seconds.
     """

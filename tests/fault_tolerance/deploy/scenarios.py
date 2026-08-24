@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Pattern
 from typing_extensions import Required, TypedDict
 
 from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment
+from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 
 if TYPE_CHECKING:
     from tests.fault_tolerance.deploy.base_checker import BaseChecker
@@ -641,7 +642,7 @@ class TerminateProcessFailure(Failure):
             logger.info(f"Could not get model from {service_name}: {e}")
 
         # Fallback to default
-        model = "Qwen/Qwen3-0.6B"
+        model = FAULT_TOLERANCE_MODEL_NAME
         logger.info(f"Using default model: {model}")
         return model
 
@@ -1343,7 +1344,7 @@ def add_rolling_upgrade_scenarios():
             )
 
             scenario_name = f"{backend}-{worker_mode}-rolling-upgrade"
-            model = "Qwen/Qwen3-0.6B"
+            model = FAULT_TOLERANCE_MODEL_NAME
 
             failure = RollingUpgradeFailure(
                 time=30,

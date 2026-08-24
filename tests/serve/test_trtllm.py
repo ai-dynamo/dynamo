@@ -21,8 +21,9 @@ from tests.serve.conftest import (
     MULTIMODAL_VIDEO_H264_URL,
     MULTIMODAL_VIDEO_H265_URL,
 )
-from tests.utils.constants import DefaultPort
+from tests.utils.constants import TRTLLM_SMOKE_MODEL, DefaultPort
 from tests.utils.engine_process import EngineConfig
+from tests.utils.model_registry import QWEN_QWEN3_0_6B
 from tests.utils.multimodal import make_image_payload_cached_tokens
 from tests.utils.payload_builder import (
     TEXT_PROMPT,
@@ -88,12 +89,16 @@ trtllm_configs = {
                 650
             ),  # 3x measured time (44.66s) + download time (150s)
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=TRTLLM_SMOKE_MODEL,
         frontend_port=DefaultPort.FRONTEND.value,
         delayed_start=5,
         # TRT-LLM blocks greedy n>1 by default. Keep the request OpenAI-shaped
         # with only "n", and enable TRT-LLM's backend guard for this E2E.
-        env={"TLLM_ALLOW_N_GREEDY_DECODING": "1"},
+        env={
+            "MODEL_PATH": TRTLLM_SMOKE_MODEL,
+            "SERVED_MODEL_NAME": TRTLLM_SMOKE_MODEL,
+            "TLLM_ALLOW_N_GREEDY_DECODING": "1",
+        },
         request_payloads=[
             chat_payload_default(),
             chat_payload(
@@ -118,7 +123,7 @@ trtllm_configs = {
             pytest.mark.trtllm,
             pytest.mark.pre_merge,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload_default(),
@@ -143,7 +148,7 @@ trtllm_configs = {
             ),  # KV cache cap (2x safety over min=256)
             pytest.mark.timeout(432),  # ~6x profiled wall time 72s
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         frontend_port=DefaultPort.FRONTEND.value,
         delayed_start=10,
         health_check_workers=True,
@@ -173,7 +178,11 @@ trtllm_configs = {
             ),  # KV cache cap (2x safety over min=1296)
             pytest.mark.timeout(440),  # 3x ~145s (trtllm gpu_1 log)
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=TRTLLM_SMOKE_MODEL,
+        env={
+            "MODEL_PATH": TRTLLM_SMOKE_MODEL,
+            "SERVED_MODEL_NAME": TRTLLM_SMOKE_MODEL,
+        },
         frontend_port=DefaultPort.FRONTEND.value,
         delayed_start=5,
         request_payloads=[
@@ -193,7 +202,7 @@ trtllm_configs = {
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload(content=TEXT_PROMPT, logprobs=True, top_logprobs=5),
@@ -217,7 +226,7 @@ trtllm_configs = {
                 360
             ),  # 3x measured time (37.91s) + download time (180s)
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             router_selection_chat_payload_default(
@@ -250,7 +259,7 @@ trtllm_configs = {
             ),  # KV cache cap (2x safety over min=1296)
             pytest.mark.timeout(300),
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[chat_payload_default()],
     ),
@@ -264,7 +273,7 @@ trtllm_configs = {
             pytest.mark.trtllm,
             pytest.mark.nightly,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=QWEN_QWEN3_0_6B,
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
             chat_payload_default(),
@@ -778,6 +787,7 @@ def test_qwen3_vl_multimodal_engine_configs_set_torch_dtype(config_file):
 @pytest.mark.profiled_vram_gib(3.9)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.timeout(660)  # 3x measured time (159.68s) + download time (180s)
+@pytest.mark.model(TRTLLM_SMOKE_MODEL)
 def test_chat_only_aggregated_with_test_logits_processor(
     request,
     runtime_services_dynamic_ports,
@@ -786,8 +796,8 @@ def test_chat_only_aggregated_with_test_logits_processor(
     monkeypatch,
 ):
     """
-    Run a single aggregated chat-completions test using Qwen 0.6B with the
-    test logits processor enabled, and expect "Hello world" in the response.
+    Run a single aggregated chat-completions test with the test logits
+    processor enabled, and expect "Hello world" in the response.
     """
 
     # Enable HelloWorld logits processor only for this test
@@ -795,14 +805,14 @@ def test_chat_only_aggregated_with_test_logits_processor(
 
     base = trtllm_configs["aggregated"]
     config = TRTLLMConfig(
-        name="aggregated_qwen_chatonly",
+        name="aggregated_smoke_chatonly",
         directory=base.directory,
-        script_name=base.script_name,  # agg.sh
+        script_name=base.script_name,
         marks=[],  # not used by this direct test
         request_payloads=[
             chat_payload_default(expected_response=["Hello world!"]),
         ],
-        model="Qwen/Qwen3-0.6B",
+        model=TRTLLM_SMOKE_MODEL,
         delayed_start=base.delayed_start,
         timeout=base.timeout,
     )
@@ -828,6 +838,7 @@ def test_chat_only_aggregated_with_test_logits_processor(
 @pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.timeout(300)
 @pytest.mark.parametrize("num_system_ports", [1], indirect=True)
+@pytest.mark.model(TRTLLM_SMOKE_MODEL)
 def test_aggregated_health_check_priority(
     request,
     runtime_services_dynamic_ports,
@@ -851,7 +862,7 @@ def test_aggregated_health_check_priority(
         directory=base.directory,
         script_name=base.script_name,
         marks=[],
-        model="Qwen/Qwen3-0.6B",
+        model=TRTLLM_SMOKE_MODEL,
         frontend_port=dynamo_dynamic_ports.frontend_port,
         delayed_start=base.delayed_start,
         timeout=base.timeout,
@@ -861,8 +872,8 @@ def test_aggregated_health_check_priority(
         env={
             "DYN_HEALTH_CHECK_ENABLED": "true",
             "DYN_CANARY_WAIT_TIME": "2",
-            "MODEL_PATH": "Qwen/Qwen3-0.6B",
-            "SERVED_MODEL_NAME": "Qwen/Qwen3-0.6B",
+            "MODEL_PATH": TRTLLM_SMOKE_MODEL,
+            "SERVED_MODEL_NAME": TRTLLM_SMOKE_MODEL,
         },
         request_payloads=[
             chat_payload_default(),

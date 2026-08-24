@@ -29,11 +29,12 @@ from dynamo.common.configuration.groups.router_args import (
     RouterConfigBase,
 )
 from dynamo.common.configuration.utils import add_argument
+from tests.utils.constants import CROSS_BACKEND_SMOKE_MODEL
 
 request_count = 0
 
 # Register needs a model path, so we use a HF model name here.
-HF_MODEL_NAME = "Qwen/Qwen3-0.6B"
+HF_MODEL_NAME = CROSS_BACKEND_SMOKE_MODEL
 
 _ROUTER_MODE_MAP = {
     "round-robin": "RoundRobin",

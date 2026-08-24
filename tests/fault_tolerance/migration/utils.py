@@ -353,7 +353,7 @@ def _parse_migration_metric(
         The metric count, or 0 if not found
     """
     # Match pattern like:
-    # dynamo_frontend_model_migration_total{migration_type="ongoing_request",model="Qwen/Qwen3-0.6B"} 1
+    # dynamo_frontend_model_migration_total{migration_type="ongoing_request",model="<model-id>"} 1
     # Labels can be in any order
     pattern = rf'dynamo_frontend_model_migration_total\{{[^}}]*migration_type="{migration_type}"[^}}]*model="{re.escape(model_name)}"[^}}]*\}}\s+(\d+)'
     match = re.search(pattern, metrics_text)
