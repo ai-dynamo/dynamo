@@ -255,6 +255,18 @@ impl DeviceAwareSelection {
 }
 
 impl RouterMode {
+    const fn telemetry_label(self) -> &'static str {
+        match self {
+            Self::RoundRobin => "round-robin",
+            Self::Random => "random",
+            Self::PowerOfTwoChoices => "power-of-two-choices",
+            Self::KV => "kv",
+            Self::Direct => "direct",
+            Self::LeastLoaded => "least-loaded",
+            Self::DeviceAwareWeighted => "device-aware-weighted",
+        }
+    }
+
     pub fn is_kv_routing(&self) -> bool {
         *self == RouterMode::KV
     }
@@ -1087,13 +1099,23 @@ where
                 self.ensure_discovered_for_dispatch(instance_id)?;
             }
         }
+        let ((metadata, resolved_instance_id), response_stream) = self
+            .generate_with_fault_detection_prepared(
+                instance_id,
+                request,
+                fallback,
+                |request, resolved_instance_id| {
+                    prepare(request, resolved_instance_id)
+                        .map(|metadata| (metadata, resolved_instance_id))
+                },
+            )
+            .await?;
         tracing::info!(
-            router_mode = "direct",
-            worker_id = instance_id,
+            router_mode = self.router_mode.telemetry_label(),
+            worker_id = resolved_instance_id,
             "Selected worker"
         );
-        self.generate_with_fault_detection_prepared(instance_id, request, fallback, prepare)
-            .await
+        Ok((metadata, response_stream))
     }
 
     async fn dispatch_preselected_with_fallback<M, F>(
@@ -2106,6 +2128,23 @@ mod tests {
         }
 
         fn remove_worker(&self, _worker_id: u64) {}
+    }
+
+    #[test]
+    fn router_mode_telemetry_labels_are_stable() {
+        assert_eq!(RouterMode::RoundRobin.telemetry_label(), "round-robin");
+        assert_eq!(RouterMode::Random.telemetry_label(), "random");
+        assert_eq!(
+            RouterMode::PowerOfTwoChoices.telemetry_label(),
+            "power-of-two-choices"
+        );
+        assert_eq!(RouterMode::KV.telemetry_label(), "kv");
+        assert_eq!(RouterMode::Direct.telemetry_label(), "direct");
+        assert_eq!(RouterMode::LeastLoaded.telemetry_label(), "least-loaded");
+        assert_eq!(
+            RouterMode::DeviceAwareWeighted.telemetry_label(),
+            "device-aware-weighted"
+        );
     }
 
     #[test]
