@@ -10,8 +10,10 @@ from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
 
-from aisimulate.config_adapter import PredictionAdapterContext
-from aisimulate.public_config import RouterConfig
+from aisimulate.config_adapter import (
+    PredictionAdapterContext,
+    RecommendationAdapterContext,
+)
 from aisimulate.sweeper.provider import (
     AdapterReplaySpec,
     AdapterSearchPlan,
@@ -22,6 +24,8 @@ from aisimulate.sweeper.provider import (
     SweepContext,
 )
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from .public_config import RouterConfig
 
 _PROVIDER_API_VERSION = 1
 _ROUTER_HOOK_API_VERSION = 1
@@ -146,18 +150,49 @@ def _domain_choices(value: Any, default: list[Any]) -> list[Any]:
     if value is None:
         return list(default)
     if isinstance(value, Mapping) and set(value) == {"choices"}:
-        return list(value["choices"])
+        choices = value["choices"]
+        if not isinstance(choices, list) or not choices:
+            raise ValueError("Router choices must be a nonempty list")
+        if len({repr(choice) for choice in choices}) != len(choices):
+            raise ValueError("Router choices must contain unique values")
+        return list(choices)
     if isinstance(value, Mapping) and set(value) == {"range"}:
         raw = value["range"]
+        if not isinstance(raw, Mapping):
+            raise ValueError("Router range must be a mapping")
+        unknown = set(raw) - {"min", "max", "step", "scale"}
+        if unknown:
+            raise ValueError(f"Router range has unknown fields {sorted(unknown)}")
+        if "min" not in raw or "max" not in raw:
+            raise ValueError("Router range requires min and max")
+        minimum, maximum = raw["min"], raw["max"]
+        if (
+            isinstance(minimum, bool)
+            or isinstance(maximum, bool)
+            or not isinstance(minimum, (int, float))
+            or not isinstance(maximum, (int, float))
+            or not math.isfinite(float(minimum))
+            or not math.isfinite(float(maximum))
+            or minimum > maximum
+        ):
+            raise ValueError("Router range requires finite numeric min <= max")
         step = raw.get("step")
-        if step is None or raw.get("scale", "linear") != "linear":
+        if (
+            step is None
+            or isinstance(step, bool)
+            or not isinstance(step, (int, float))
+            or step <= 0
+            or raw.get("scale", "linear") != "linear"
+        ):
             raise ValueError("Router numeric ranges require a stepped linear range")
         values = []
-        current = raw["min"]
-        while current <= raw["max"]:
+        current = minimum
+        while current <= maximum:
             values.append(current)
             current += step
         return values
+    if isinstance(value, Mapping):
+        raise ValueError("Router domains must contain exactly choices or range")
     return [value]
 
 
@@ -251,8 +286,57 @@ class DynamoRouterSweepConfigProvider:
     """Router search-space preparation and replay-spec materialization."""
 
     name = "dynamo.router"
+    section = "router"
+    config_adapter_api_version = 2
     # Keep the implemented provider ABI independent from the installed consumer.
     api_version = _PROVIDER_API_VERSION
+
+    def validate_prediction_config(
+        self,
+        config: Mapping[str, JSONValue],
+        context: PredictionAdapterContext,
+    ) -> dict[str, JSONValue]:
+        del context
+        return RouterConfig.model_validate(config).model_dump(
+            mode="json", exclude_none=True
+        )
+
+    def validate_recommendation_config(
+        self,
+        config: Mapping[str, JSONValue],
+        context: RecommendationAdapterContext,
+    ) -> dict[str, JSONValue]:
+        del context
+        normalized = deepcopy(dict(config))
+        normalized.setdefault("policy", {"choices": ["round_robin", "kv_router"]})
+        policy_values = _domain_choices(
+            normalized.get("policy"), ["round_robin", "kv_router"]
+        )
+        if set(policy_values) == {"round_robin"}:
+            conflicts = [
+                name
+                for name in (
+                    "overlap_score_credit",
+                    "prefill_load_scale",
+                    "temperature",
+                )
+                if name in normalized
+            ]
+            load_model = normalized.get("prefill_load_model")
+            load_type = (
+                load_model.get("type") if isinstance(load_model, Mapping) else None
+            )
+            if load_type is not None and set(_domain_choices(load_type, ["none"])) != {
+                "none"
+            }:
+                conflicts.append("prefill_load_model.type")
+            if conflicts:
+                raise ValueError(
+                    "router.policy=round_robin rejects KV-router fields "
+                    f"{sorted(conflicts)}"
+                )
+        RouterSearchSpace.model_validate(normalized)
+        return normalized
 
     def generate_search_space(
         self,
@@ -360,7 +444,8 @@ class DynamoRouterSweepConfigProvider:
         config: Mapping[str, JSONValue],
         context: PredictionAdapterContext,
     ) -> AdapterReplaySpec:
-        public = RouterConfig.model_validate(config)
+        concrete = self.validate_prediction_config(config, context)
+        public = RouterConfig.model_validate(concrete)
         concrete = public.model_dump(mode="json", exclude_none=True)
         if public.policy == "round_robin":
             return AdapterReplaySpec(config=concrete)

@@ -17,6 +17,10 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
+from aisimulate.config_adapter import (
+    PredictionAdapterContext,
+    RecommendationAdapterContext,
+)
 from aisimulate.sweeper.provider import CandidateContext, SweepContext
 from aisimulate.sweeper.replay import BackendDeploymentSpec
 
@@ -537,6 +541,44 @@ def test_provider_owns_its_adapter_and_hook_abi_versions() -> None:
     assert planner_provider_module._PROVIDER_API_VERSION == 1
     assert planner_provider_module._PLANNER_HOOK_API_VERSION == 1
     assert adapter.api_version == planner_provider_module._PROVIDER_API_VERSION
+    assert adapter.config_adapter_api_version == 2
+    assert adapter.section == "planner"
+
+
+def test_public_planner_validation_is_owned_by_dynamo_adapter() -> None:
+    adapter = create_provider()
+    prediction_context = PredictionAdapterContext(engine={}, traffic={}, evaluation={})
+    recommendation_context = RecommendationAdapterContext(
+        engine={}, traffic={}, evaluation={}, optimization={}
+    )
+
+    prediction = adapter.validate_prediction_config({}, prediction_context)
+    assert prediction["policy"] == "disabled"
+    assert prediction["max_num_gpus"] == 8
+    assert adapter.validate_recommendation_config({}, recommendation_context)[
+        "policy"
+    ] == {"choices": ["disabled", "enabled"]}
+
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        adapter.validate_prediction_config(
+            {"not_a_planner_knob": True}, prediction_context
+        )
+    with pytest.raises(ValueError, match="cannot be combined"):
+        adapter.validate_recommendation_config(
+            {
+                "scaling_policy": {"preset": "default"},
+                "enable_load_scaling": {"choices": [False, True]},
+            },
+            recommendation_context,
+        )
+
+
+def test_public_planner_prediction_requires_sla_for_throughput_scaling() -> None:
+    with pytest.raises(ValueError, match="throughput scaling requires"):
+        create_provider().validate_prediction_config(
+            {"policy": "enabled"},
+            PredictionAdapterContext(engine={}, traffic={}, evaluation={}),
+        )
 
 
 def test_policy_pruning_diagnostics_remain_visible(monkeypatch) -> None:

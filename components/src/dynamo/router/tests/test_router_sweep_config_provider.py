@@ -14,7 +14,10 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-from aisimulate.config_adapter import PredictionAdapterContext
+from aisimulate.config_adapter import (
+    PredictionAdapterContext,
+    RecommendationAdapterContext,
+)
 from aisimulate.sweeper.provider import CandidateContext, SweepContext
 from aisimulate.sweeper.replay import BackendDeploymentSpec
 
@@ -141,6 +144,37 @@ def test_provider_owns_its_adapter_and_hook_abi_versions() -> None:
     assert router_provider_module._PROVIDER_API_VERSION == 1
     assert router_provider_module._ROUTER_HOOK_API_VERSION == 1
     assert adapter.api_version == router_provider_module._PROVIDER_API_VERSION
+    assert adapter.config_adapter_api_version == 2
+    assert adapter.section == "router"
+
+
+def test_public_router_validation_is_owned_by_dynamo_adapter() -> None:
+    adapter = create_provider()
+    prediction_context = PredictionAdapterContext(engine={}, traffic={}, evaluation={})
+    recommendation_context = RecommendationAdapterContext(
+        engine={}, traffic={}, evaluation={}, optimization={}
+    )
+
+    assert adapter.validate_prediction_config({}, prediction_context) == {
+        "policy": "round_robin",
+        "prefill_load_model": {"type": "none"},
+    }
+    assert adapter.validate_recommendation_config({}, recommendation_context) == {
+        "policy": {"choices": ["round_robin", "kv_router"]}
+    }
+
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        adapter.validate_prediction_config(
+            {"not_a_router_knob": True}, prediction_context
+        )
+    with pytest.raises(ValueError, match="round_robin rejects"):
+        adapter.validate_recommendation_config(
+            {
+                "policy": "round_robin",
+                "prefill_load_model": {"type": "aic"},
+            },
+            recommendation_context,
+        )
 
 
 def test_public_router_search_accepts_custom_values_and_emits_public_config() -> None:

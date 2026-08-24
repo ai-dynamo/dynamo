@@ -6,14 +6,17 @@
 from __future__ import annotations
 
 import itertools
+import math
 import warnings
 from collections.abc import Mapping
 from copy import deepcopy
 from enum import Enum
 from typing import Any, cast
 
-from aisimulate.config_adapter import PredictionAdapterContext
-from aisimulate.public_config import PlannerConfig as PublicPlannerConfig
+from aisimulate.config_adapter import (
+    PredictionAdapterContext,
+    RecommendationAdapterContext,
+)
 from aisimulate.sweeper.provider import (
     AdapterReplaySpec,
     AdapterSearchPlan,
@@ -40,6 +43,7 @@ from .presets import (
     load_sensitivity_fields,
     scaling_fields,
 )
+from .public_config import PlannerConfig
 
 _SCALING_KEYS = frozenset(
     {
@@ -108,18 +112,49 @@ def _public_values(value: Any, defaults: list[Any]) -> list[Any]:
     if value is None:
         return list(defaults)
     if isinstance(value, Mapping) and set(value) == {"choices"}:
-        return list(value["choices"])
+        choices = value["choices"]
+        if not isinstance(choices, list) or not choices:
+            raise ValueError("Planner choices must be a nonempty list")
+        if len({repr(choice) for choice in choices}) != len(choices):
+            raise ValueError("Planner choices must contain unique values")
+        return list(choices)
     if isinstance(value, Mapping) and set(value) == {"range"}:
         raw = value["range"]
+        if not isinstance(raw, Mapping):
+            raise ValueError("Planner range must be a mapping")
+        unknown = set(raw) - {"min", "max", "step", "scale"}
+        if unknown:
+            raise ValueError(f"Planner range has unknown fields {sorted(unknown)}")
+        if "min" not in raw or "max" not in raw:
+            raise ValueError("Planner range requires min and max")
+        minimum, maximum = raw["min"], raw["max"]
+        if (
+            isinstance(minimum, bool)
+            or isinstance(maximum, bool)
+            or not isinstance(minimum, (int, float))
+            or not isinstance(maximum, (int, float))
+            or not math.isfinite(float(minimum))
+            or not math.isfinite(float(maximum))
+            or minimum > maximum
+        ):
+            raise ValueError("Planner range requires finite numeric min <= max")
         step = raw.get("step")
-        if step is None or raw.get("scale", "linear") != "linear":
+        if (
+            step is None
+            or isinstance(step, bool)
+            or not isinstance(step, (int, float))
+            or step <= 0
+            or raw.get("scale", "linear") != "linear"
+        ):
             raise ValueError("Planner independent numeric ranges require step")
         values = []
-        current = raw["min"]
-        while current <= raw["max"]:
+        current = minimum
+        while current <= maximum:
             values.append(current)
             current += step
         return values
+    if isinstance(value, Mapping):
+        raise ValueError("Planner domains must contain exactly choices or range")
     return [value]
 
 
@@ -197,6 +232,30 @@ def _independent_preset_mappings(
             < mapping["throughput_adjustment_interval_seconds"]
         ]
     return mappings
+
+
+def _validate_public_preset_conflicts(planner: Mapping[str, Any]) -> None:
+    groups = {
+        "scaling_policy": _SCALING_KEYS,
+        "fpm_sampling": _FPM_KEYS,
+        "load_sensitivity": _LOAD_KEYS,
+        "load_predictor": _PREDICTOR_KEYS - {"load_predictor"},
+    }
+    for group, knobs in groups.items():
+        control = planner.get(group)
+        if not isinstance(control, Mapping) or "preset" not in control:
+            continue
+        preset = control["preset"]
+        if preset in (False, {}):
+            continue
+        conflicts = sorted(knobs.intersection(planner))
+        if group == "load_predictor" and "type" in control:
+            conflicts.append("load_predictor.type")
+        if conflicts:
+            raise ValueError(
+                f"planner.{group}.preset cannot be combined with independent "
+                f"knobs {conflicts}"
+            )
 
 
 def _validate_preset_entries(
@@ -471,8 +530,7 @@ class PlannerSearchSpace(BaseModel):
             invalid = sorted(set(self.public_policy) - {"disabled", "enabled"})
             if invalid:
                 raise ValueError(
-                    "planner.policy choices must be disabled or enabled; "
-                    f"got {invalid}"
+                    f"planner.policy choices must be disabled or enabled; got {invalid}"
                 )
         if self.planner_target not in (None, "throughput", "latency", "sla", "load"):
             raise ValueError("planner.target must be throughput, latency, sla, or load")
@@ -578,9 +636,48 @@ class DynamoPlannerSweepConfigProvider:
     """Planner search-space preparation and replay-spec materialization."""
 
     name = "dynamo.planner"
+    section = "planner"
+    config_adapter_api_version = 2
     # Provider-owned constant: importing the consumer's current API_VERSION would
     # let an older wheel accidentally self-certify against a newer core package.
     api_version = _PROVIDER_API_VERSION
+
+    def validate_prediction_config(
+        self,
+        config: Mapping[str, JSONValue],
+        context: PredictionAdapterContext,
+    ) -> dict[str, JSONValue]:
+        public = PlannerConfig.model_validate(config)
+        if public.policy == "enabled":
+            source = context.traffic.get("source")
+            trace_format = source.get("format") if isinstance(source, Mapping) else None
+            if trace_format in {"mooncake-delta", "agentic_mooncake"}:
+                raise ValueError(f"{trace_format} requires planner.policy=disabled")
+            if public.enable_throughput_scaling:
+                raw_sla = context.evaluation.get("sla")
+                if (
+                    public.target != "sla"
+                    or not isinstance(raw_sla, Mapping)
+                    or raw_sla.get("ttft_ms") is None
+                    or raw_sla.get("itl_ms") is None
+                ):
+                    raise ValueError(
+                        "Planner throughput scaling requires target='sla' and "
+                        "evaluation.sla.ttft_ms/itl_ms"
+                    )
+        return public.model_dump(mode="json", exclude_none=True)
+
+    def validate_recommendation_config(
+        self,
+        config: Mapping[str, JSONValue],
+        context: RecommendationAdapterContext,
+    ) -> dict[str, JSONValue]:
+        del context
+        normalized = deepcopy(dict(config))
+        normalized.setdefault("policy", {"choices": ["disabled", "enabled"]})
+        _validate_public_preset_conflicts(normalized)
+        PlannerSearchSpace.model_validate(normalized)
+        return normalized
 
     def generate_search_space(
         self,
@@ -811,7 +908,8 @@ class DynamoPlannerSweepConfigProvider:
         config: Mapping[str, JSONValue],
         context: PredictionAdapterContext,
     ) -> AdapterReplaySpec:
-        public = PublicPlannerConfig.model_validate(config)
+        concrete = self.validate_prediction_config(config, context)
+        public = PlannerConfig.model_validate(concrete)
         concrete = public.model_dump(mode="json", exclude_none=True)
         if public.policy == "disabled":
             return AdapterReplaySpec(config={"policy": "disabled"})
