@@ -17,6 +17,11 @@ metadata:
 
 # Perform Adversarial Review
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 Try to falsify a proposed optimization experiment before it consumes GPU time. Review the proposal; do not generate a
 second one, edit its draft, deploy it, or run AIPerf.
 
@@ -122,6 +127,9 @@ Attack the proposal from these directions:
   impact on the primary objective, reversibility, GPU cost, and risk at the target operating region?
 - **Attribution**: Does the complete diff express one independently testable knob? For a coupled bundle, is every field
   required for one mechanism or supported by prior interaction evidence, with an ablation where needed?
+- **Provenance**: When `deployment.origin` is `recipe-confirmed` or `agent-authored`, reject any framing of the
+  baseline as a production reference; iteration 0 characterizes an unvalidated starting point, and topology
+  families inherited from it are open questions, not settled decisions.
 - **Mechanism**: Does the proposed lever address a plausible reducible gap at the target operating region, or merely
   move work that evidence suggests is already bounded? Are internal causes still labeled as hypotheses?
 - **Evaluation**: Is the expected effect tied to the primary objective or failed SLO? Does the proposal state what the

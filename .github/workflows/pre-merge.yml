@@ -43,7 +43,7 @@ jobs:
         # Do not use fetch-depth: 0 — changed-files now works with shallow clone
       - name: Check for changes
         id: changes
-        uses: ./.github/actions/changed-files
+        uses: $/.github/actions/changed-files
         with:
           gh_token: ${{ github.token }}
 
@@ -86,6 +86,7 @@ jobs:
       run: |
         python3 -m pip install \
           'pytest>=8.0' \
+          'jinja2==3.1.6' \
           'pyyaml>=6.0' \
           'pydantic>=2' \
           'pytest-asyncio>=1.0' \
@@ -342,7 +343,7 @@ jobs:
         fetch-depth: 0  # clustertest derives its alpha version from v1.3.0
     - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 #v3.11.1
     - name: Run operator checks
-      uses: ./.github/actions/check-deploy-component
+      uses: $/.github/actions/check-deploy-component
       with:
         component: operator
         platform: linux/amd64
