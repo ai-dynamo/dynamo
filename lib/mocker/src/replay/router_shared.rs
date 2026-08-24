@@ -106,13 +106,28 @@ pub(super) fn replay_slots(
     ))
 }
 
-pub(super) fn replay_selector(config: &KvRouterConfig) -> DefaultWorkerSelector {
-    #[cfg(feature = "replay-bench")]
-    if super::canonical_replay_active() {
-        return DefaultWorkerSelector::new_seeded(Some(config.clone()), "replay", 0xD1A0_5EED);
+pub(super) fn replay_selector(config: &KvRouterConfig) -> anyhow::Result<DefaultWorkerSelector> {
+    replay_selector_with_seed(config, None)
+}
+
+pub(super) fn replay_selector_with_seed(
+    config: &KvRouterConfig,
+    selector_seed: Option<u64>,
+) -> anyhow::Result<DefaultWorkerSelector> {
+    if let Some(instance) = config
+        .selected_worker_selection_policy_instance()
+        .map_err(anyhow::Error::from)?
+    {
+        anyhow::bail!("custom worker-selection policy {instance:?} is not supported by replay");
     }
 
-    DefaultWorkerSelector::new(Some(config.clone()), "replay")
+    Ok(match selector_seed {
+        #[cfg(feature = "replay-bench")]
+        Some(seed) => DefaultWorkerSelector::new_seeded(Some(config.clone()), "replay", seed),
+        #[cfg(not(feature = "replay-bench"))]
+        Some(_) => unreachable!("canonical KV Router replay requires the replay-bench feature"),
+        None => DefaultWorkerSelector::new(Some(config.clone()), "replay"),
+    })
 }
 
 pub(crate) fn replay_router_config(
@@ -124,4 +139,40 @@ pub(crate) fn replay_router_config(
         config.router_queue_policy = policy;
     }
     config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replay_selector_rejects_custom_worker_selection() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            r#"
+worker_selection:
+  aggregated: custom
+  instances:
+    - name: custom
+      type: test
+      parameters: {}
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+
+        let error = match replay_selector(&config) {
+            Err(error) => error,
+            Ok(_) => panic!("replay must reject a custom worker selector it cannot execute"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("custom worker-selection policy \"custom\" is not supported by replay")
+        );
+    }
 }

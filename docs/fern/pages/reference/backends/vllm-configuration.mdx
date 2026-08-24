@@ -186,7 +186,7 @@ These flags control the self-benchmark sweep that runs on startup before the wor
 The sweep does not walk a fixed grid of sample counts. Each axis is derived from the engine's own limits — CUDA-graph axes include every `{capture size, capture size + 1}` boundary and then continue geometrically to the engine limit, and KV-read axes use complete power-of-two block ladders plus their exact feasible maxima. The flags below are per-axis *sample limits* applied to those derived axes: if an axis has more points than its limit allows, points are selected uniformly across the sorted axis while the endpoints are retained. Raising a limit therefore measures more of the same axis; it does not change the axis itself.
 
 <ParamField path="--benchmark-mode" type="string" default="null">
-  Run a self-benchmark on startup before accepting requests. Sweeps prefill input sequence lengths (ISLs) and/or decode `(context_length × batch_size)` operating points, collecting `ForwardPassMetrics` at each point.
+  Run a self-benchmark on startup before accepting requests. Sweeps iteration-total prefill new-token, KV-read-token, and batch-size operating points and/or decode KV-read-token and batch-size operating points, collecting `ForwardPassMetrics` at each point. The axes are derived from the engine's own limits, as described below.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge> <Badge intent="note" minimal>agg</Badge></span>
 

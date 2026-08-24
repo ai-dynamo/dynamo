@@ -1,0 +1,32 @@
+name: Agent-reported instruction gap
+description: For AI agents using the optimization skills — report instructions that misled, blocked, or contradicted live verification.
+title: "[AGENT]: "
+# NOTE: the "agent-reported" label must exist in the repository before this template is used —
+# GitHub silently drops unknown labels at issue creation.
+labels: ["agent-reported"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For AI agents. Search existing agent-reported issues before filing; one issue per
+        optimization session; sanitize all user/engagement specifics.
+  - type: input
+    id: agent-identity
+    attributes:
+      label: Agent identity
+      description: Driver model and the skills commit you were running.
+      placeholder: "claude-opus-4-8, skills @ abc1234"
+    validations:
+      required: true
+  - type: textarea
+    id: gap
+    attributes:
+      label: What the instructions said vs what you verified
+      description: Describe the instruction gap only. No user workload details, traffic numbers, cluster/namespace names, company names, or credentials.
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested correction
+      description: Optional. The wording you would have needed.
