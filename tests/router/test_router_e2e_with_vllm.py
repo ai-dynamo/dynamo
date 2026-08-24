@@ -467,9 +467,12 @@ class VLLMProcess(ManagedEngineProcessMixin):
                         new_worker_id = new.pop()
                         known_ids.add(new_worker_id)
                         break
-                    if time.monotonic() >= deadline:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
                         break
-                    await asyncio.sleep(WORKER_REGISTRATION_POLL_S)
+                    # Short the final sleep so the last poll lands on the deadline instead
+                    # of one interval past it, keeping the wait inside the stated budget.
+                    await asyncio.sleep(min(WORKER_REGISTRATION_POLL_S, remaining))
 
                 registration_s = time.monotonic() - started_at
 
@@ -478,7 +481,8 @@ class VLLMProcess(ManagedEngineProcessMixin):
                     # alone. A worker still running at the deadline means the budget was
                     # too small; a worker that already exited died during startup (CUDA
                     # OOM, port collision, ...) and no budget would have saved it. The
-                    # diagnostic is guarded so it can never mask the timeout it describes.
+                    # diagnostic is guarded against the errors Popen.poll() can raise, so
+                    # it can never mask the timeout it describes.
                     try:
                         returncode = process.proc.poll() if process.proc else None
                         if process.proc is None:
@@ -489,7 +493,7 @@ class VLLMProcess(ManagedEngineProcessMixin):
                             liveness = (
                                 f"subprocess already exited with code {returncode}"
                             )
-                    except Exception as diag_exc:
+                    except (OSError, ValueError) as diag_exc:
                         liveness = f"subprocess liveness unavailable ({diag_exc})"
                     raise RuntimeError(
                         f"Timed out waiting for vLLM worker {worker_idx} to register "
