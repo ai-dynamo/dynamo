@@ -14,6 +14,7 @@ import logging
 import struct
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from io import BytesIO
 from typing import Any, Dict, Optional
@@ -21,6 +22,11 @@ from typing import Any, Dict, Optional
 import numpy as np
 import soundfile as sf
 import torch
+
+try:
+    from vllm_omni.diffusion.utils.media_utils import mux_video_audio_bytes
+except (ImportError, OSError):
+    mux_video_audio_bytes = None  # type: ignore[assignment]
 
 from dynamo.common.protocols.audio_protocol import AudioData, NvAudioSpeechResponse
 from dynamo.common.protocols.image_protocol import ImageData, NvImagesResponse
@@ -37,6 +43,8 @@ from dynamo.vllm.handlers import build_prompt_tokens_details
 from dynamo.vllm.omni.utils import is_empty_payload
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_AUDIO_SAMPLE_RATE = 24000
 
 
 @dataclass
@@ -128,17 +136,18 @@ class DiffusionFormatter:
         images = (
             stage_output.images if hasattr(stage_output, "images") else stage_output
         )
-        if is_empty_payload(images):
-            return None
 
         if request_type == RequestType.VIDEO_GENERATION:
             return await self._encode_video(
                 images,
                 request_id,
+                multimodal_output=self._extract_multimodal_output(stage_output),
                 fps=ctx.get("fps", self._default_fps),
                 response_format=ctx.get("response_format"),
                 output_format=ctx.get("output_format"),
             )
+        if is_empty_payload(images):
+            return None
         return await self._encode_image(
             images,
             request_id,
@@ -148,9 +157,10 @@ class DiffusionFormatter:
 
     async def _encode_video(
         self,
-        images: list,
+        images: Any,
         request_id: str,
         fps: int,
+        multimodal_output: dict[str, Any] | None = None,
         response_format: Optional[str] = None,
         output_format: Optional[str] = None,
     ) -> Dict[str, Any] | None:
@@ -166,30 +176,67 @@ class DiffusionFormatter:
             )
         try:
             start_time = time.time()
-            # Encode with the in-tree VP9 (libvpx-vp9) encoder rather
-            # than diffusers.export_to_video, whose imageio backend defaults to the
-            # H.264 codec that the codec-compliant image no longer ships (it would
-            # fail with "No valid H.264 encoder was found"). encode_to_video_bytes
-            # is the same shared helper the TRT-LLM video handler uses; VP9-in-mp4
-            # is valid and decodes with our VP8/VP9 allowlist.
-            frames_np = frames_to_numpy(normalize_video_frames(images))
-            video_bytes = await asyncio.to_thread(
-                encode_to_video_bytes, frames_np, fps=fps, output_format=output_format
+            multimodal_output = multimodal_output or {}
+            videos = self._split_video_outputs(images, multimodal_output)
+            if not videos:
+                raise ValueError("No video outputs found in generation result")
+            resolved_fps = self._resolve_int_metadata(
+                multimodal_output, "fps", "video"
+            ) or int(fps)
+            audio_sample_rate = self._resolve_audio_sample_rate(multimodal_output)
+            audio_outputs = self._split_audio_outputs(
+                multimodal_output.get("audio"), len(videos)
             )
 
-            if response_format == "b64_json":
+            data = []
+            for index, (video, audio) in enumerate(
+                zip(videos, audio_outputs, strict=True)
+            ):
+                frames_np = self._video_to_numpy_frames(video)
+                if audio is None:
+                    # The codec-compliant standard image retains its existing
+                    # royalty-free VP9 path for silent video models.
+                    video_bytes = await asyncio.to_thread(
+                        encode_to_video_bytes,
+                        frames_np,
+                        fps=resolved_fps,
+                        output_format=output_format,
+                    )
+                else:
+                    if mux_video_audio_bytes is None:
+                        raise RuntimeError(
+                            "Generated audio requires PyAV with H.264 and AAC encoders; "
+                            "use the video-audio codec overlay"
+                        )
+                    audio_np = self._audio_to_numpy(audio)
+                    video_bytes = await asyncio.to_thread(
+                        mux_video_audio_bytes,
+                        frames_np,
+                        audio_np,
+                        fps=float(resolved_fps),
+                        audio_sample_rate=audio_sample_rate,
+                    )
+
                 video_data = VideoData(
                     output_format=output_format,
-                    b64_json=base64.b64encode(video_bytes).decode("utf-8"),
+                    fps=resolved_fps,
+                    audio_sample_rate=audio_sample_rate if audio is not None else None,
                 )
-            else:
-                video_url = await upload_to_fs(
-                    self._media_fs,
-                    f"videos/{request_id}.{output_format}",
-                    video_bytes,
-                    self._media_http_url,
-                )
-                video_data = VideoData(output_format=output_format, url=video_url)
+                if response_format == "b64_json":
+                    video_data.b64_json = base64.b64encode(video_bytes).decode("utf-8")
+                else:
+                    filename = (
+                        f"videos/{request_id}.{output_format}"
+                        if len(videos) == 1
+                        else f"videos/{request_id}/{index}.{output_format}"
+                    )
+                    video_data.url = await upload_to_fs(
+                        self._media_fs,
+                        filename,
+                        video_bytes,
+                        self._media_http_url,
+                    )
+                data.append(video_data)
 
             return NvVideosResponse(
                 id=request_id,
@@ -198,7 +245,7 @@ class DiffusionFormatter:
                 status="completed",
                 progress=100,
                 created=int(time.time()),
-                data=[video_data],
+                data=data,
                 inference_time_s=time.time() - start_time,
             ).model_dump()
         except Exception as e:
@@ -213,6 +260,207 @@ class DiffusionFormatter:
                 data=[],
                 error=str(e),
             ).model_dump()
+
+    @staticmethod
+    def _extract_multimodal_output(stage_output: Any) -> dict[str, Any]:
+        multimodal_output = getattr(stage_output, "multimodal_output", None)
+        if isinstance(multimodal_output, Mapping):
+            return dict(multimodal_output)
+
+        request_output = getattr(stage_output, "request_output", None)
+        if isinstance(request_output, dict):
+            multimodal_output = request_output.get("multimodal_output")
+            if multimodal_output is None:
+                multimodal_output = request_output.get("_multimodal_output")
+        elif request_output is not None:
+            multimodal_output = getattr(request_output, "multimodal_output", None)
+            if multimodal_output is None:
+                multimodal_output = getattr(request_output, "_multimodal_output", None)
+        return dict(multimodal_output) if isinstance(multimodal_output, Mapping) else {}
+
+    @staticmethod
+    def _split_video_outputs(
+        images: Any, multimodal_output: dict[str, Any]
+    ) -> list[Any]:
+        videos = images
+        if is_empty_payload(videos):
+            videos = multimodal_output.get("video")
+        if videos is None:
+            return []
+        if isinstance(videos, (np.ndarray, torch.Tensor)):
+            if videos.ndim == 5:
+                return [videos[index] for index in range(videos.shape[0])]
+            return [videos]
+        if isinstance(videos, (list, tuple)):
+            videos = list(videos)
+            if not videos:
+                return []
+            first = videos[0]
+            if isinstance(first, (np.ndarray, torch.Tensor)) and first.ndim == 5:
+                flattened: list[Any] = []
+                for batch in videos:
+                    if (
+                        not isinstance(batch, (np.ndarray, torch.Tensor))
+                        or batch.ndim != 5
+                    ):
+                        raise ValueError("Video output batches must all be 5-D")
+                    flattened.extend(batch[index] for index in range(batch.shape[0]))
+                return flattened
+            if isinstance(first, (np.ndarray, torch.Tensor)) and first.ndim == 4:
+                return videos
+            if isinstance(first, list):
+                return videos
+            return [videos]
+        return [videos]
+
+    @staticmethod
+    def _video_to_numpy_frames(video: Any) -> np.ndarray:
+        """Normalize one video to uint8 ``(frames, height, width, channels)``."""
+        if isinstance(video, torch.Tensor):
+            video = video.detach().float().cpu().numpy()
+
+        if isinstance(video, np.ndarray):
+            if video.ndim == 3:
+                video = video[None, ...]
+            if video.ndim != 4:
+                raise ValueError(
+                    f"Expected a 4-D video tensor, got shape {video.shape}"
+                )
+            if video.shape[-1] in (1, 3, 4):
+                frames = video
+            else:
+                is_cfhw = video.shape[0] in (1, 3, 4)
+                is_fchw = video.shape[1] in (1, 3, 4)
+                if is_cfhw and is_fchw:
+                    raise ValueError(
+                        "Ambiguous channel-first video tensor; expected an "
+                        "unambiguous CFHW or FCHW shape, "
+                        f"got {video.shape}"
+                    )
+                if is_cfhw:
+                    frames = video.transpose(1, 2, 3, 0)
+                elif is_fchw:
+                    frames = video.transpose(0, 2, 3, 1)
+                else:
+                    raise ValueError(
+                        "Video tensor must use CFHW, FCHW, or FHWC channel layout, "
+                        f"got shape {video.shape}"
+                    )
+            if frames.shape[-1] == 1:
+                frames = np.repeat(frames, 3, axis=-1)
+            elif frames.shape[-1] == 4:
+                frames = frames[..., :3]
+            if np.issubdtype(frames.dtype, np.floating) and frames.min(initial=0.0) < 0:
+                frames = (frames + 1.0) / 2.0
+            return frames_to_numpy(list(np.ascontiguousarray(frames)))
+
+        frames = normalize_video_frames(video if isinstance(video, list) else [video])
+        normalized = []
+        for frame in frames:
+            if isinstance(frame, torch.Tensor):
+                frame = frame.detach().float().cpu().numpy()
+            if isinstance(frame, np.ndarray) and frame.ndim == 3:
+                if frame.shape[-1] in (1, 3, 4):
+                    pass
+                elif frame.shape[0] in (1, 3, 4):
+                    frame = frame.transpose(1, 2, 0)
+                else:
+                    raise ValueError(
+                        "Video frame must use CHW or HWC channel layout, "
+                        f"got shape {frame.shape}"
+                    )
+                if frame.shape[-1] == 1:
+                    frame = np.repeat(frame, 3, axis=-1)
+                elif frame.shape[-1] == 4:
+                    frame = frame[..., :3]
+                if (
+                    np.issubdtype(frame.dtype, np.floating)
+                    and frame.min(initial=0.0) < 0
+                ):
+                    frame = (frame + 1.0) / 2.0
+            normalized.append(frame)
+        return frames_to_numpy(normalized)
+
+    @staticmethod
+    def _split_audio_outputs(audio: Any, expected_count: int) -> list[Any | None]:
+        if audio is None:
+            return [None] * expected_count
+        if isinstance(audio, (np.ndarray, torch.Tensor)):
+            if audio.ndim >= 3 and audio.shape[0] == expected_count:
+                return [audio[index] for index in range(expected_count)]
+            if expected_count == 1:
+                return [audio]
+        if isinstance(audio, (list, tuple)):
+            if len(audio) == expected_count:
+                return list(audio)
+            if expected_count == 1:
+                return [audio]
+        raise ValueError(
+            f"Expected {expected_count} audio outputs for {expected_count} videos"
+        )
+
+    @staticmethod
+    def _audio_to_numpy(audio: Any) -> np.ndarray:
+        if isinstance(audio, torch.Tensor):
+            return audio.detach().float().cpu().numpy()
+        if isinstance(audio, np.ndarray):
+            return audio.astype(np.float32, copy=False)
+        return np.asarray(audio, dtype=np.float32)
+
+    @staticmethod
+    def _resolve_int_metadata(
+        multimodal_output: dict[str, Any],
+        key: str,
+        metadata_section: str,
+        metadata_key: str | None = None,
+    ) -> int | None:
+        value = multimodal_output.get(key)
+        if value is None:
+            metadata = multimodal_output.get("metadata")
+            if isinstance(metadata, Mapping):
+                section = metadata.get(metadata_section)
+                if isinstance(section, Mapping):
+                    value = section.get(metadata_key or key)
+        if value is None:
+            return None
+        try:
+            resolved = int(value.item() if hasattr(value, "item") else value)
+        except (TypeError, ValueError):
+            return None
+        return resolved if resolved > 0 else None
+
+    def _resolve_audio_sample_rate(self, multimodal_output: dict[str, Any]) -> int:
+        for key in ("audio_sample_rate", "sample_rate", "sampling_rate", "sr"):
+            sample_rate = self._coerce_positive_int(multimodal_output.get(key))
+            if sample_rate is not None:
+                return sample_rate
+
+        metadata = multimodal_output.get("metadata")
+        audio_metadata = (
+            metadata.get("audio") if isinstance(metadata, Mapping) else None
+        )
+        if isinstance(audio_metadata, Mapping):
+            for key in (
+                "audio_sample_rate",
+                "sample_rate",
+                "sampling_rate",
+                "sr",
+            ):
+                sample_rate = self._coerce_positive_int(audio_metadata.get(key))
+                if sample_rate is not None:
+                    return sample_rate
+
+        return DEFAULT_AUDIO_SAMPLE_RATE
+
+    @staticmethod
+    def _coerce_positive_int(value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            resolved = int(value.item() if hasattr(value, "item") else value)
+        except (TypeError, ValueError):
+            return None
+        return resolved if resolved > 0 else None
 
     async def _encode_image(
         self,
@@ -727,11 +975,13 @@ class OutputFormatter:
         media_http_url: Optional[str] = None,
         default_fps: int = 16,
     ) -> None:
+        diffusion_formatter = DiffusionFormatter(
+            model_name, media_fs, media_http_url, default_fps
+        )
         self._formatters: Dict[str, Any] = {
             "text": TextFormatter(model_name),
-            "image": DiffusionFormatter(
-                model_name, media_fs, media_http_url, default_fps
-            ),
+            "image": diffusion_formatter,
+            "video": diffusion_formatter,
             "audio": AudioFormatter(model_name, media_fs, media_http_url),
         }
 
