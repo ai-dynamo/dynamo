@@ -217,6 +217,9 @@ class OmniHandler(BaseOmniHandler):
             media_fs=media_output_fs,
             media_http_url=media_output_http_url,
             default_fps=getattr(config, "default_video_fps", 16),
+            model_config=getattr(
+                getattr(self.engine_client, "model_config", None), "hf_config", None
+            ),
         )
 
         # Audio/TTS handler — composition, not inheritance.
@@ -732,5 +735,7 @@ class OmniHandler(BaseOmniHandler):
             sampling_params_list=sampling_params_list,
             request_type=RequestType.VIDEO_GENERATION,
             fps=fps,
+            response_format=req.response_format,
+            output_format=req.output_format,
             lora_request=lora_request,
         )
