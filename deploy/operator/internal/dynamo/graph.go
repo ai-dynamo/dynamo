@@ -528,38 +528,6 @@ func normalizeDGDComponent(
 	return normalized, nil
 }
 
-// generateSingleDCD creates a DynamoComponentDeployment for a single service.
-func generateSingleDCD(
-	parentDGD *v1beta1.DynamoGraphDeployment,
-	componentName string,
-	component *v1beta1.DynamoComponentDeploymentSharedSpec,
-	dynamoNamespace string,
-	backendFramework string,
-	restartState *RestartState,
-	existingRestartAnnotations map[string]string,
-	rollingUpdateCtx RollingUpdateContext,
-) (*v1beta1.DynamoComponentDeployment, error) {
-	normalized, err := normalizeDGDComponent(
-		parentDGD,
-		componentName,
-		component,
-		restartState,
-		existingRestartAnnotations,
-		rollingUpdateCtx,
-	)
-	if err != nil {
-		return nil, err
-	}
-	return generateSingleDCDFromNormalized(
-		parentDGD,
-		componentName,
-		normalized,
-		dynamoNamespace,
-		backendFramework,
-		rollingUpdateCtx,
-	)
-}
-
 func generateSingleDCDFromNormalized(
 	parentDGD *v1beta1.DynamoGraphDeployment,
 	componentName string,
