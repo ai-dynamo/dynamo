@@ -136,6 +136,14 @@ impl
         let ctx = context.context();
         let response_ctx = ctx.clone();
         let request_id = ctx.id().to_string();
+        assert_ne!(
+            request
+                .nvext
+                .as_ref()
+                .and_then(|nvext| nvext.frontend_accepts_audio_chunks),
+            Some(true)
+        );
+        let output_format = request.response_format.unwrap_or_else(|| "wav".to_string());
         let model = request.model.unwrap_or_default();
         let waiting = self.waiting.clone();
         let release = self.release.clone();
@@ -146,7 +154,7 @@ impl
             yield audio_response(
                 &request_id,
                 &model,
-                "mp3",
+                &output_format,
                 b"complete-audio",
                 "completed",
             );
@@ -1801,6 +1809,7 @@ async fn test_audio_speech_streams_worker_chunks() {
     .unwrap();
     assert!(response.status().is_success());
     assert_eq!(response.headers().get("content-type").unwrap(), "audio/pcm");
+    assert_eq!(response.content_length(), None);
 
     let mut chunks = response.bytes_stream();
     let first = timeout(std::time::Duration::from_secs(1), chunks.next())
@@ -1824,46 +1833,58 @@ async fn test_audio_speech_streams_worker_chunks() {
 }
 
 #[tokio::test]
-async fn test_audio_speech_waits_for_complete_file_response() {
-    let engine = Arc::new(CompleteAudioEngine::default());
-    let (port, cancel_token, task) = start_audio_service(engine.clone()).await;
+async fn test_audio_speech_buffers_complete_response_with_content_length() {
+    for (response_format, speed, content_type) in
+        [("mp3", None, "audio/mpeg"), ("wav", Some(2.0), "audio/wav")]
+    {
+        let engine = Arc::new(CompleteAudioEngine::default());
+        let (port, cancel_token, task) = start_audio_service(engine.clone()).await;
 
-    let client = reqwest::Client::new();
-    let mut request = Box::pin(
-        client
-            .post(format!("http://localhost:{port}/v1/audio/speech"))
-            .json(&serde_json::json!({
-                "model": "audio-model",
-                "input": "hello",
-                "response_format": "mp3"
-            }))
-            .send(),
-    );
-    timeout(std::time::Duration::from_secs(1), async {
-        tokio::select! {
-            result = &mut request => {
-                panic!("response headers arrived before complete-file encoding: {result:?}");
-            }
-            _ = engine.waiting.notified() => {}
+        let mut body = serde_json::json!({
+            "model": "audio-model",
+            "input": "hello",
+            "response_format": response_format
+        });
+        if let Some(speed) = speed {
+            body["speed"] = speed.into();
         }
-    })
-    .await
-    .expect("worker should reach the complete-file gate");
-
-    engine.release.notify_one();
-    let response = timeout(std::time::Duration::from_secs(1), request)
+        let client = reqwest::Client::new();
+        let mut request = Box::pin(
+            client
+                .post(format!("http://localhost:{port}/v1/audio/speech"))
+                .json(&body)
+                .send(),
+        );
+        timeout(std::time::Duration::from_secs(1), async {
+            tokio::select! {
+                result = &mut request => {
+                    panic!("response headers arrived before complete-file encoding: {result:?}");
+                }
+                _ = engine.waiting.notified() => {}
+            }
+        })
         .await
-        .expect("complete MP3 should arrive after release")
-        .unwrap();
-    assert!(response.status().is_success());
-    assert_eq!(
-        response.headers().get("content-type").unwrap(),
-        "audio/mpeg"
-    );
-    assert_eq!(response.bytes().await.unwrap(), "complete-audio");
+        .expect("worker should reach the complete-file gate");
 
-    cancel_token.cancel();
-    task.await.unwrap().unwrap();
+        engine.release.notify_one();
+        let response = timeout(std::time::Duration::from_secs(1), request)
+            .await
+            .expect("complete audio should arrive after release")
+            .unwrap();
+        assert!(response.status().is_success());
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            content_type
+        );
+        assert_eq!(
+            response.content_length(),
+            Some(b"complete-audio".len() as u64)
+        );
+        assert_eq!(response.bytes().await.unwrap(), "complete-audio");
+
+        cancel_token.cancel();
+        task.await.unwrap().unwrap();
+    }
 }
 
 #[tokio::test]
