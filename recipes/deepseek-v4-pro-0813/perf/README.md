@@ -6,11 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 # DeepSeek-V4-Pro-0813 Benchmark Recipe
 
 An [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay against a deployed DGD. The
-benchmark is identical for both profiles; only `ENDPOINT` changes. The client waits for the
-model on the frontend, runs a short warmup, replays the configured trace at one
-`CONCURRENCY` value, and writes raw artifacts to the shared `model-cache` PVC.
+client waits for the model on the frontend, runs a short warmup, replays the configured
+trace at one `CONCURRENCY` value, and writes raw artifacts to the shared `model-cache` PVC.
 
-## Targeting a variant
+## Targeting the profile
 
 | Profile | `ENDPOINT` |
 | --- | --- |
@@ -46,8 +45,8 @@ for line in open(src):
 ```
 
 Confirm a run replayed the whole file: `Request Count` in
-`profile_export_aiperf.csv` should be ~3,411, plus ~130 rows that exceed the 262,144-token
-context and return errors.
+`profile_export_aiperf.csv` should be 3,541 — 3,526 valid, plus 15 errors, 13 of which are
+rows that exceed the 1,048,576-token context window.
 
 ## Workflow
 
@@ -55,7 +54,7 @@ context and return errors.
 export NAMESPACE=your-namespace
 ```
 
-### 1. Deploy the variant
+### 1. Deploy the aggregated profile
 
 See the deployment instructions in the recipe [README](../README.md).
 
@@ -136,7 +135,7 @@ before reporting aggregate throughput.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `ENDPOINT` | per profile — see the table above | |
+| `ENDPOINT` | `dsv4-pro-0813-agg-gb200-agentic-frontend:8000` | The aggregated frontend service |
 | `CONCURRENCY` | sweep to the SLA knee | Single value per run; restart server pods between values |
 | `TRACE_FILE` | `/model-cache/traces/mooncake_agentic.jsonl` | 3,541-request agentic trace with timestamps |
 | `TARGET_MODEL` | `deepseek-ai/DeepSeek-V4-Pro-0813` | Must match `--served-model-name` |

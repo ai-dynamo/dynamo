@@ -15,7 +15,7 @@
 #
 # AIPerf trace-replay benchmark for DeepSeek-V4-Pro-0813 DGDs.
 #
-# Runs the aggregated GB200 agentic variant. Edit CONCURRENCY below to select an
+# Runs the aggregated GB200 agentic profile. Edit CONCURRENCY below to select an
 # operating point. Restart the DGD pods between independent concurrency points so
 # vLLM and Dynamo routing state are reset.
 #
@@ -43,8 +43,7 @@ spec:
       labels:
         app: dsv4-pro-0813-fp8-bench
     spec:
-      # Co-locate the benchmark pod with a DGD frontend. Keep only the target
-      # DGD in values when both variants are deployed in the same namespace.
+      # Co-locate the benchmark pod with the DGD frontend.
       affinity:
         podAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -191,7 +190,7 @@ spec:
           value: /model-cache/traces/mooncake_agentic.jsonl
         - name: CONCURRENCY
           value: "8"
-        # --- The remainder is shared across both variants. ---
+        # --- Client-side settings, independent of the operating point. ---
         - name: TARGET_MODEL
           value: deepseek-ai/DeepSeek-V4-Pro-0813
         - name: AIPERF_HTTP_CONNECTION_LIMIT

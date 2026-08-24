@@ -22,8 +22,9 @@ spec:
     - ReadWriteMany
   resources:
     requests:
-      # DeepSeek-V4-Pro-0813 is ~122 GiB. 500Gi leaves room for the tokenizer,
-      # HF cache metadata, and benchmark traces/artifacts on the same PVC.
-      storage: 500Gi
+      # DeepSeek-V4-Pro-0813 is ~892.7 GB (~832 GiB) of native-FP8 weights. 1Ti
+      # leaves room for the tokenizer, HF cache metadata, and benchmark
+      # traces/artifacts on the same PVC.
+      storage: 1Ti
   # Edit this
   storageClassName: "your-storage-class-name"
