@@ -77,27 +77,30 @@ pub struct ConnectionHandle {
 /// protocol event immediately before yielding it. The disconnect monitor reads
 /// only when the source stream ends or its guards are dropped, avoiding
 /// synchronization on successful per-token events.
-#[derive(Clone, Default)]
-pub(super) struct StreamErrorSignal {
-    error_type: Arc<OnceLock<ErrorType>>,
-    terminal_event_emitted: Arc<AtomicBool>,
+#[derive(Default)]
+struct StreamErrorState {
+    error_type: OnceLock<ErrorType>,
+    terminal_event_emitted: AtomicBool,
 }
+
+#[derive(Clone, Default)]
+pub(super) struct StreamErrorSignal(Arc<StreamErrorState>);
 
 impl StreamErrorSignal {
     pub(super) fn set(&self, error_type: ErrorType) {
-        let _ = self.error_type.set(error_type);
+        let _ = self.0.error_type.set(error_type);
     }
 
     fn get(&self) -> Option<&ErrorType> {
-        self.error_type.get()
+        self.0.error_type.get()
     }
 
     pub(super) fn mark_terminal_event_emitted(&self) {
-        self.terminal_event_emitted.store(true, Ordering::Release);
+        self.0.terminal_event_emitted.store(true, Ordering::Release);
     }
 
     fn terminal_event_emitted(&self) -> bool {
-        self.terminal_event_emitted.load(Ordering::Acquire)
+        self.0.terminal_event_emitted.load(Ordering::Acquire)
     }
 }
 

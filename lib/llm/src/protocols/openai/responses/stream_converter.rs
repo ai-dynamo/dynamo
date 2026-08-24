@@ -52,6 +52,7 @@ pub struct ResponseStreamConverter {
     message_item_id: String,
     message_started: bool,
     message_output_index: u32,
+    message_output_status: Option<OutputStatus>,
     accumulated_text: String,
     // Reasoning summary tracking
     reasoning_item_id: String,
@@ -105,6 +106,7 @@ impl ResponseStreamConverter {
             message_item_id: format!("msg_{}", Uuid::new_v4().simple()),
             message_started: false,
             message_output_index: 0,
+            message_output_status: None,
             accumulated_text: String::new(),
             reasoning_item_id: format!("rs_{}", Uuid::new_v4().simple()),
             reasoning_started: false,
@@ -533,6 +535,15 @@ impl ResponseStreamConverter {
             {
                 should_finish_function_calls = true;
             }
+
+            if self.message_started
+                && matches!(
+                    choice.finish_reason.as_ref(),
+                    Some(FinishReason::Stop | FinishReason::ToolCalls | FinishReason::FunctionCall)
+                )
+            {
+                self.message_output_status = Some(OutputStatus::Completed);
+            }
         }
 
         if should_finish_function_calls {
@@ -669,6 +680,20 @@ impl ResponseStreamConverter {
         self.output_with_status(self.output_status())
     }
 
+    fn message_output(&self, output_status: OutputStatus) -> OutputMessage {
+        OutputMessage {
+            id: self.message_item_id.clone(),
+            content: vec![OutputMessageContent::OutputText(OutputTextContent {
+                text: self.accumulated_text.clone(),
+                annotations: vec![],
+                logprobs: Some(vec![]),
+            })],
+            role: AssistantRole::Assistant,
+            phase: None,
+            status: self.message_output_status.unwrap_or(output_status),
+        }
+    }
+
     fn output_with_status(&self, output_status: OutputStatus) -> Vec<OutputItem> {
         let mut output = Vec::new();
         if self.reasoning_started {
@@ -688,17 +713,7 @@ impl ResponseStreamConverter {
         if self.message_started {
             output.push((
                 self.message_output_index,
-                OutputItem::Message(OutputMessage {
-                    id: self.message_item_id.clone(),
-                    content: vec![OutputMessageContent::OutputText(OutputTextContent {
-                        text: self.accumulated_text.clone(),
-                        annotations: vec![],
-                        logprobs: Some(vec![]),
-                    })],
-                    role: AssistantRole::Assistant,
-                    phase: None,
-                    status: output_status,
-                }),
+                OutputItem::Message(self.message_output(output_status)),
             ));
         }
         for function_call in &self.function_call_items {
@@ -756,17 +771,7 @@ impl ResponseStreamConverter {
         let item_done = ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
             sequence_number: self.next_seq(),
             output_index: self.message_output_index,
-            item: OutputItem::Message(OutputMessage {
-                id: self.message_item_id.clone(),
-                content: vec![OutputMessageContent::OutputText(OutputTextContent {
-                    text: self.accumulated_text.clone(),
-                    annotations: vec![],
-                    logprobs: Some(vec![]),
-                })],
-                role: AssistantRole::Assistant,
-                phase: None,
-                status: output_status,
-            }),
+            item: OutputItem::Message(self.message_output(output_status)),
         });
         events.push(self.make_sse_event(&item_done));
     }
@@ -809,16 +814,18 @@ impl ResponseStreamConverter {
     /// Emit error events when the stream ends due to a backend error.
     pub fn emit_error_events(&mut self, error: ErrorObject) -> Vec<Result<Event, anyhow::Error>> {
         let mut events = Vec::new();
-        self.append_error_events(error, &mut events);
+        let terminal_event = self.append_error_events(error, &mut events);
+        events.push(terminal_event);
         events
     }
 
-    /// Append error events when the stream ends due to a backend error.
+    /// Append completion events for open output items and return the terminal
+    /// `response.failed` event.
     pub fn append_error_events(
         &mut self,
         error: ErrorObject,
         events: &mut Vec<Result<Event, anyhow::Error>>,
-    ) {
+    ) -> Result<Event, anyhow::Error> {
         let output_status = OutputStatus::Incomplete;
         self.append_reasoning_done_events(events, output_status);
         self.close_open_message_item(events, output_status);
@@ -831,7 +838,7 @@ impl ResponseStreamConverter {
             sequence_number: self.next_seq(),
             response,
         });
-        events.push(self.make_sse_event(&failed));
+        self.make_sse_event(&failed)
     }
 }
 
@@ -1401,6 +1408,33 @@ mod tests {
             panic!("expected function call output");
         };
         assert_eq!(call.status, Some(OutputStatus::Completed));
+    }
+
+    #[test]
+    fn test_backend_error_preserves_completed_message_status() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        let _ = conv.process_chunk(&text_chunk("complete answer"));
+        let _ = conv.process_chunk(&finish_chunk(FinishReason::Stop));
+
+        let events = conv.emit_error_events(ErrorObject {
+            code: "server_error".to_string(),
+            message: "backend error".to_string(),
+        });
+        assert_eq!(
+            event_types(&events),
+            vec![
+                "response.output_text.done".to_string(),
+                "response.content_part.done".to_string(),
+                "response.output_item.done".to_string(),
+                "response.failed".to_string(),
+            ]
+        );
+
+        let output = conv.output_with_status(OutputStatus::Incomplete);
+        let OutputItem::Message(message) = &output[0] else {
+            panic!("expected message output");
+        };
+        assert_eq!(message.status, OutputStatus::Completed);
     }
 
     #[test]

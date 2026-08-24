@@ -3611,10 +3611,7 @@ async fn responses(
             }
 
             if let Some(error) = backend_error {
-                converter.append_error_events(error, &mut events);
-                let terminal_event = events
-                    .pop()
-                    .expect("append_error_events must append response.failed");
+                let terminal_event = converter.append_error_events(error, &mut events);
                 for event in events.drain(..) {
                     yield event.map_err(axum::Error::new);
                 }
