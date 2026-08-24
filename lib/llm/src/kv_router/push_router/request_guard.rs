@@ -172,9 +172,14 @@ impl RequestObservability {
         self.dispatch_guard = Some(StageGuard::new(STAGE_DISPATCH, phase_label));
     }
 
-    fn record_prefill_start(&self) {
-        if let Some(tracker) = &self.tracker {
-            tracker.record_prefill_start();
+    fn record_prefill_start(&self, phase: RequestPhase) {
+        match phase {
+            RequestPhase::Prefill | RequestPhase::Aggregated => {
+                if let Some(tracker) = &self.tracker {
+                    tracker.record_prefill_start();
+                }
+            }
+            RequestPhase::Decode => {}
         }
     }
 
@@ -397,8 +402,8 @@ where
         self.observability.start_dispatch(phase_label);
     }
 
-    pub(super) fn record_prefill_start(&self) {
-        self.observability.record_prefill_start();
+    pub(super) fn record_prefill_start(&self, phase: RequestPhase) {
+        self.observability.record_prefill_start(phase);
     }
 
     pub(super) fn mark_dispatched(&mut self) {

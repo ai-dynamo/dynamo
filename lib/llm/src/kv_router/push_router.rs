@@ -502,7 +502,7 @@ where
             );
         }
         let updated_request = context.map(|_| backend_input);
-        guard.record_prefill_start();
+        guard.record_prefill_start(phase);
 
         let dispatch = async {
             if exact {
@@ -611,7 +611,7 @@ where
         drop(route_guard);
 
         guard.start_dispatch(&phase_label);
-        guard.record_prefill_start();
+        guard.record_prefill_start(phase);
         let dispatch_result = if let Some(target) = explicit {
             request.routing_mut().dp_rank = target.dp_rank;
             let metadata = match prepare(&mut request, target) {
@@ -963,7 +963,10 @@ mod tests {
         http::service::metrics::Metrics,
         local_model::runtime_config::ModelRuntimeConfig,
         migration::Migration,
-        protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+        protocols::common::{
+            extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+            timing::RequestTracker,
+        },
     };
 
     fn request() -> PreprocessedRequest {
@@ -1217,6 +1220,66 @@ mod tests {
     async fn session_affinity_disabled_does_not_create_coordinator() {
         let (router, runtime) = router(None).await;
         assert!(router.affinity.is_none());
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn prefill_start_recording_is_phase_aware() {
+        let (router, runtime) = router(None).await;
+
+        // KV and hosted-policy dispatch share this RequestGuard transition.
+        for (phase, expected) in [
+            (RequestPhase::Prefill, true),
+            (RequestPhase::Aggregated, true),
+            (RequestPhase::Decode, false),
+        ] {
+            let tracker = Arc::new(RequestTracker::new());
+            let _phase_permit = tracker.set_phase(phase).await;
+            let mut tracked_request = request();
+            tracked_request.tracker = Some(Arc::clone(&tracker));
+            let mut guard = RequestGuard::new_kv(
+                Arc::clone(router.kv_router()),
+                Arc::clone(&router.request_metrics),
+                format!("prefill-start-{phase}"),
+                WorkerWithDpRank::new(7, 0),
+                &tracked_request,
+                false,
+            );
+
+            guard.record_prefill_start(tracker.phase());
+            assert_eq!(
+                tracker.prefill_wait_time_ms().is_some(),
+                expected,
+                "unexpected prefill-start state for {phase}"
+            );
+            guard.abort().await;
+        }
+
+        let tracker = Arc::new(RequestTracker::new());
+        let mut tracked_request = request();
+        tracked_request.tracker = Some(Arc::clone(&tracker));
+        let mut guard = RequestGuard::new_kv(
+            Arc::clone(router.kv_router()),
+            Arc::clone(&router.request_metrics),
+            "prefill-start-prefill-decode".to_string(),
+            WorkerWithDpRank::new(7, 0),
+            &tracked_request,
+            false,
+        );
+
+        let prefill_permit = tracker.set_phase(RequestPhase::Prefill).await;
+        guard.record_prefill_start(tracker.phase());
+        let prefill_start = tracker
+            .prefill_wait_time_ms()
+            .expect("prefill phase should record prefill start");
+        drop(prefill_permit);
+
+        let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
+        guard.record_prefill_start(tracker.phase());
+        assert_eq!(tracker.prefill_wait_time_ms(), Some(prefill_start));
+        guard.abort().await;
 
         drop(router);
         runtime.shutdown();
