@@ -22,11 +22,82 @@ on:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      standard_hook_canary:
+        description: 'Run the isolated standard-hook latency or TensorRT-LLM canary'
+        type: choice
+        options:
+          - none
+          - latency
+          - trtllm
+        default: none
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
+
+  standard-hook-latency:
+    if: inputs.standard_hook_canary == 'latency'
+    name: Standard hook latency canary
+    runs-on: codex-standard-hook-1gpu
+    timeout-minutes: 15
+    container:
+      image: nvcr.io/nvidia/cuda:12.8.1-base-ubuntu22.04
+    steps:
+      - name: Verify isolated GPU runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(nvidia-smi -L | wc -l | tr -d ' ')" = "1"
+          echo "runner=${{ runner.name }} job_pod=$(hostname)"
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Probe 01
+        run: date +%s%3N
+      - name: Probe 02
+        run: date +%s%3N
+      - name: Probe 03
+        run: date +%s%3N
+      - name: Probe 04
+        run: date +%s%3N
+      - name: Probe 05
+        run: date +%s%3N
+      - name: Probe 06
+        run: date +%s%3N
+      - name: Probe 07
+        run: date +%s%3N
+      - name: Probe 08
+        run: date +%s%3N
+      - name: Probe 09
+        run: date +%s%3N
+      - name: Probe 10
+        run: date +%s%3N
+
+  standard-hook-trtllm:
+    if: inputs.standard_hook_canary == 'trtllm'
+    name: trtllm-runtime
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: trtllm
+      test_type: Test
+      amd_runner: codex-standard-hook-1gpu
+      target_tag_plain: trtllm-runtime
+      cuda_version: '["13.1"]'
+      platform: '["amd64"]'
+      container_workspace: /workspace
+      run_sanity_check: true
+      run_cpu_only_tests: true
+      cpu_only_test_markers: pre_merge and trtllm and gpu_0
+      cpu_only_test_timeout_minutes: 10
+      cpu_parallel_mode: auto
+      run_gpu_tests: true
+      gpu_test_markers: pre_merge and trtllm and gpu_1
+      gpu_test_timeout_minutes: 30
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '24'
+      source_ref: 0d2a46844c7a2627467a8b9d394152218e49ea54
+      dd_env: ci-canary
+    secrets: inherit
 
   init:
     runs-on: ubuntu-slim
