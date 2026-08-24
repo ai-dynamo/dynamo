@@ -23,16 +23,38 @@ import time
 from copy import deepcopy
 from dataclasses import dataclass, field
 from io import BytesIO
-from typing import Any, Callable, Dict, List, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, cast
 
 import requests
 
-from dynamo import prometheus_names  # type: ignore[attr-defined]
+if TYPE_CHECKING:
+    from tests.utils.inference_endpoint import InferenceEndpoint
+
 from tests.utils.constants import DefaultPort
 from tests.utils.prometheus import find_metric_samples, sum_metric_samples
 from tests.utils.router_nvext import RouterNvextExpectation, validate_router_nvext
 
 logger = logging.getLogger(__name__)
+
+
+class _LazyPrometheusNames:
+    """Defer ``from dynamo import prometheus_names`` to first attribute access.
+
+    Only the metric-scraping payloads need it, and those never run outside a
+    Dynamo container. The Kubernetes deploy job, by contrast, runs pytest on a
+    bare runner that installs container/deps/requirements.test.txt and not the
+    ai-dynamo wheel (.github/actions/dynamo-deploy-test/action.yml). Importing
+    at module scope would make this whole module -- and therefore the shared
+    request/response verification layer -- unimportable there.
+    """
+
+    def __getattr__(self, name: str) -> Any:
+        from dynamo import prometheus_names as _prometheus_names
+
+        return getattr(_prometheus_names, name)
+
+
+prometheus_names = _LazyPrometheusNames()
 
 
 @dataclass
@@ -51,16 +73,40 @@ class BasePayload:
     repeat_count: int = 1
     timeout: int = 60
 
-    # Connection info
+    # Connection info.
+    #
+    # ``base_url`` is the deployment-agnostic form: set it and the payload
+    # targets that address regardless of how Dynamo was deployed (local
+    # process, port-forwarded Kubernetes frontend, remote ingress). ``host`` and
+    # ``port`` remain the in-container form, where the harness rewrites ``port``
+    # per test from the dynamic-port fixture; they are also how the
+    # topology-dependent payloads address an individual worker's system port,
+    # which has no equivalent in a single frontend URL.
+    #
+    # Precedence: ``base_url`` wins when set, so binding a payload to an
+    # endpoint does not have to unpick host/port.
+    base_url: Optional[str] = None
     host: str = "localhost"
     port: int = DefaultPort.FRONTEND.value
     endpoint: str = ""
     method: str = "POST"
+    # Extra headers for every request this payload makes. Used by deployments
+    # that route on a header (for example the Gateway API ``Host`` header).
+    headers: Dict[str, str] = field(default_factory=dict)
     # Optional additional ports used by specialized payloads (e.g. LoRA system/control-plane APIs).
     # This is intentionally empty by default to preserve prior semantics.
     system_ports: list[int] = field(default_factory=list)
     # When True, the HTTP request is made with stream=True (for SSE responses).
     http_stream: bool = False
+    # Minimum length of the extracted content. 0 means "non-empty is enough"
+    # (the handlers already reject empty content). Raise it when a short but
+    # non-empty answer would be a regression, e.g. a deployment smoke test that
+    # must see the model actually generate rather than emit one token.
+    min_content_length: int = 0
+    # When set, assert the response's ``model`` field equals this. Catches a
+    # frontend serving a different model than the one requested -- invisible to
+    # a content-only assertion.
+    expected_model: Optional[str] = None
     # Maximum number of attempts for validation inside run_serve_deployment.
     # ``1`` (default) means no retry — first validation failure surfaces
     # immediately. Set >1 only when the test target is non-deterministic and
@@ -70,7 +116,8 @@ class BasePayload:
 
     def url(self) -> str:
         ep = self.endpoint.lstrip("/")
-        return f"http://{self.host}:{self.port}/{ep}"
+        base = self.base_url or f"http://{self.host}:{self.port}"
+        return f"{base.rstrip('/')}/{ep}"
 
     def with_model(self, model):
         p = deepcopy(self)
@@ -78,9 +125,34 @@ class BasePayload:
             p.body = {**p.body, "model": model}
         return p
 
+    def bind(self, endpoint: "InferenceEndpoint") -> "BasePayload":
+        """Return a copy addressed at ``endpoint``.
+
+        This is the whole of what a deployment-agnostic test needs to know
+        about its deployment: a base URL (and any routing headers). Payloads
+        that also address a worker system port keep their ``system_ports``
+        untouched -- those are topology-dependent by construction.
+        """
+        p = deepcopy(self)
+        p.base_url = endpoint.base_url
+        if endpoint.headers:
+            p.headers = {**endpoint.headers, **p.headers}
+        if endpoint.model is not None:
+            p = p.with_model(endpoint.model)
+        return p
+
     def body_for_iteration(self, _iteration: int) -> Dict[str, Any]:
         """Return the request body for one repeat_count iteration."""
         return self.body
+
+    def declares_log_assertions(self) -> bool:
+        """Whether this payload will assert against the server's log.
+
+        Read at COLLECTION time to classify a test as ``topology_dependent``,
+        so a payload that only populates ``expected_log`` later (per iteration)
+        must override this to say so -- the field alone is not yet truthful.
+        """
+        return bool(self.expected_log)
 
     def response_handler(self, response: Any) -> str:
         """Extract a text representation of the response for logging/validation."""
@@ -122,6 +194,29 @@ class BasePayload:
                 f"SUCCESS: Found {len(found_keywords)}/{len(self.expected_response)} expected keywords: {found_keywords}"
             )
 
+        if self.min_content_length and len(content) < self.min_content_length:
+            raise AssertionError(
+                f"Response content too short: {len(content)} chars "
+                f"(min: {self.min_content_length}). Content: {content[:200]}"
+            )
+
+        if self.expected_model is not None:
+            self._validate_model(response)
+
+    def _validate_model(self, response: Any) -> None:
+        """Assert the response reports the model that was requested."""
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise AssertionError(
+                f"expected_model={self.expected_model!r} requires a JSON response; "
+                f"parsing failed: {exc}. Body: {response.text[:200]}"
+            ) from exc
+        assert "model" in data, f"Response missing 'model' field: {data}"
+        assert (
+            data["model"] == self.expected_model
+        ), f"Expected model '{self.expected_model}', got '{data['model']}'"
+
     def process_response(self, response: Any) -> str:
         """Convenience: run response_handler then validate; return content."""
         content = self.response_handler(response)
@@ -135,6 +230,13 @@ class ChatPayload(BasePayload):
 
     endpoint: str = "/v1/chat/completions"
     expected_num_choices: Optional[int] = None
+    # When set, assert the first choice's message carries this role.
+    expected_role: Optional[str] = None
+    # When True, assert the answer came back in message["content"] specifically.
+    # extract_content() deliberately falls back to reasoning_content, refusal
+    # and tool-call arguments, so without this a refusal long enough to clear
+    # min_content_length would pass as a successful generation.
+    require_content_field: bool = False
 
     @staticmethod
     def extract_content(response):
@@ -188,6 +290,29 @@ class ChatPayload(BasePayload):
 
     def validate(self, response: Any, content: str) -> None:
         super().validate(response, content)
+
+        if self.expected_role is not None or self.require_content_field:
+            message = response.json()["choices"][0]["message"]
+
+            if self.expected_role is not None:
+                role = message.get("role")
+                assert (
+                    role == self.expected_role
+                ), f"Expected role '{self.expected_role}', got '{role}'"
+
+            if self.require_content_field:
+                assert (
+                    "content" in message
+                ), f"Message missing 'content' field: {message}"
+                # Non-empty regardless of min_content_length: a caller that
+                # sets 0 means "any real answer", not "an empty string counts".
+                content_field = message["content"] or ""
+                assert content_field, f"Message 'content' is empty: {message}"
+                assert len(content_field) >= self.min_content_length, (
+                    f"message['content'] too short: {len(content_field)} chars "
+                    f"(min: {self.min_content_length}). "
+                    f"Content: {content_field[:200]}"
+                )
 
         if self.expected_num_choices is None:
             return

@@ -222,13 +222,21 @@ logging.basicConfig(
 
 def pytest_configure(config: pytest.Config) -> None:
     """Configure session: validate --models-dir and detect GPUs for --max-vram-gib."""
-    # Dual-register custom markers (also declared in pyproject
-    # [tool.pytest.ini_options].markers) so --strict-markers recognizes them
+    # Dual-register custom markers so --strict-markers recognizes them
     # regardless of config-load order. See .ai/pytest-guidelines.md.
+    # `elastic_ep` is registered ONLY here; the rest are also declared in
+    # pyproject [tool.pytest.ini_options].markers.
     config.addinivalue_line(
         "markers",
         "elastic_ep: marks vLLM elastic expert-parallelism (ePLB) scaling tests "
         "(scale_elastic_ep over the Ray DP backend)",
+    )
+    config.addinivalue_line(
+        "markers",
+        "topology_dependent: marks tests whose assertions depend on HOW Dynamo is "
+        "deployed (worker count, routing, disaggregation, per-worker metrics, "
+        "process/pod logs, scaling, fault injection) rather than only on the "
+        "inference response",
     )
     config.addinivalue_line(
         "markers",

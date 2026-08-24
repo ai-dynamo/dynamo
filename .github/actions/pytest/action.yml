@@ -127,11 +127,28 @@ runs:
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
 
+        # This job runs pytest INSIDE the runtime container, with no Kubernetes
+        # cluster reachable. Tests marked `k8s` deploy a DynamoGraphDeployment and
+        # belong to the separate cluster job (.github/actions/dynamo-deploy-test).
+        # Exclude them centrally rather than expecting every caller's marker
+        # expression to remember.
+        #
+        # An empty expression is reachable (several marker inputs have no default),
+        # and `()` would make pytest exit on a parse error, so fall back to the
+        # bare exclusion.
+        CALLER_MARKS="${{ inputs.pytest_marks }}"
+        if [[ -n "${CALLER_MARKS// /}" ]]; then
+          MARKERS="(${CALLER_MARKS}) and not k8s"
+        else
+          MARKERS="not k8s"
+        fi
+        echo "Marker expression: ${MARKERS}"
+
         # Determine docker runtime flags and pytest command based on dry_run mode
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
           echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
           GPU_FLAGS=""
-          PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest -v --collect-only -m \"${MARKERS}\""
         else
           echo "🚀 Running pytest in normal mode"
 
@@ -144,7 +161,7 @@ runs:
             COVERAGE_ENV="--env COVERAGE_FILE=/workspace/test-results/.coverage --env PYTHONPATH=/workspace/components/src:/workspace/lib/bindings/python/src"
           fi
 
-          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=20 ${COVERAGE_FLAGS} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=20 ${COVERAGE_FLAGS} -m \"${MARKERS}\""
 
           # Detect GPU availability and conditionally add GPU flags
           GPU_FLAGS=""
@@ -219,11 +236,28 @@ runs:
         # (64MB in K8s pods by default), silently ignoring the size we set.
         DOCKER_OPTS="--shm-size=200m --ulimit memlock=-1 --ulimit stack=67108864 --ulimit nofile=65536:65536"
 
+        # This job runs pytest INSIDE the runtime container, with no Kubernetes
+        # cluster reachable. Tests marked `k8s` deploy a DynamoGraphDeployment and
+        # belong to the separate cluster job (.github/actions/dynamo-deploy-test).
+        # Exclude them centrally rather than expecting every caller's marker
+        # expression to remember.
+        #
+        # An empty expression is reachable (several marker inputs have no default),
+        # and `()` would make pytest exit on a parse error, so fall back to the
+        # bare exclusion.
+        CALLER_MARKS="${{ inputs.pytest_marks }}"
+        if [[ -n "${CALLER_MARKS// /}" ]]; then
+          MARKERS="(${CALLER_MARKS}) and not k8s"
+        else
+          MARKERS="not k8s"
+        fi
+        echo "Marker expression: ${MARKERS}"
+
         # Determine docker runtime flags and pytest command based on dry_run mode
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
           echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
           GPU_FLAGS=""
-          PYTEST_CMD="pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest -v --collect-only -m \"${MARKERS}\""
         else
           echo "🚀 Running pytest in normal mode"
           # Set device-specific docker flags
@@ -281,7 +315,7 @@ runs:
             DIST_OPTS="--dist=loadscope"
           fi
 
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} ${VRAM_OPTS} ${DIST_OPTS} --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=10 ${COVERAGE_FLAGS} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} ${VRAM_OPTS} ${DIST_OPTS} --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --alluredir=/workspace/test-results/allure-results --durations=10 ${COVERAGE_FLAGS} -m \"${MARKERS}\""
 
         fi
 

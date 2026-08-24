@@ -906,6 +906,8 @@ def lora_chat_payload(
 @pytest.mark.requested_vllm_kv_cache_bytes(
     941_712_000
 )  # 2x safety over min=470_855_680
+# LoraTestChatPayload POSTs the adapter to a worker system port
+@pytest.mark.topology_dependent
 @pytest.mark.timeout(300)  # LoRA setup adds overhead; L4 machines are slower
 @pytest.mark.post_merge
 def test_lora_aggregated(
@@ -957,6 +959,8 @@ def test_lora_aggregated(
     )
 
 
+# LoraTestChatPayload POSTs the adapter to a worker system port
+@pytest.mark.topology_dependent
 @pytest.mark.vllm
 @pytest.mark.router
 @pytest.mark.e2e
@@ -1114,6 +1118,8 @@ _EMBED_MODEL_B = "BAAI/bge-small-en-v1.5"
 @pytest.mark.timeout(
     420
 )  # 2x cold-load vs single-worker embedding_agg (2 GPUs in parallel)
+# asserts per-worker request counters on two system ports
+@pytest.mark.topology_dependent
 @pytest.mark.pre_merge
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_embedding_multi_worker_same_model_load_balance(
@@ -1174,6 +1180,8 @@ def test_embedding_multi_worker_same_model_load_balance(
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
 
 
+# asserts per-worker request counters on two system ports
+@pytest.mark.topology_dependent
 @pytest.mark.vllm
 @pytest.mark.core
 @pytest.mark.e2e

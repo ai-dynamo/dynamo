@@ -13,101 +13,23 @@ import logging
 import os
 import subprocess
 import time
-from typing import Any, Dict
 
 import kr8s
 import pytest
-import requests
 import yaml
 
-from tests.deploy.conftest import DeploymentTarget
+from tests.deploy.conftest import SERVING_READY_TIMEOUT_S, DeploymentTarget
 from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment, _get_workspace_dir
-from tests.utils.client import send_request, wait_for_model_availability
+from tests.utils.inference_endpoint import InferenceEndpoint, wait_until_serving
+from tests.utils.payload_builder import deployment_smoke_chat_payload
+from tests.utils.verification import run_payloads
 
 logger = logging.getLogger(__name__)
 
-# Test prompt designed to validate model capabilities:
-# - Long enough to test context handling (multiple sentences, ~150 words)
-# - Descriptive content requiring multi-sentence responses
-# - Consistent across test runs for reproducibility
-# This prompt is maintained from the original shell-based deployment tests.
-TEST_PROMPT = """In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, \
-lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried \
-beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, \
-known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at \
-the city's location. Your journey will take you through treacherous deserts, enchanted forests, \
-and across perilous mountain ranges. Describe your first steps into the ruins of Aeloria."""
-
-DEFAULT_MAX_TOKENS = 30
-DEFAULT_TEMPERATURE = 0.0
-DEFAULT_REQUEST_TIMEOUT = 120
-# Minimum response content length to validate that the model is generating meaningful output.
-# This matches the validation threshold from the original shell-based deployment tests.
-MIN_RESPONSE_CONTENT_LENGTH = 100
 GAIE_MODEL_NAME = "Qwen/Qwen3-0.6B"
 # The install script deploys the Gateway into agentgateway-system; the
 # controller provisions the proxy Service in that same namespace.
 GAIE_AGW_NAMESPACE = "agentgateway-system"
-
-
-def validate_chat_response(
-    response: requests.Response,
-    expected_model: str,
-    min_content_length: int = MIN_RESPONSE_CONTENT_LENGTH,
-) -> Dict[str, Any]:
-    """Validate the structure and content of a chat completion response.
-
-    Args:
-        response: HTTP response from the chat completion endpoint
-        expected_model: Expected model name in the response
-        min_content_length: Minimum required length for response content
-
-    Returns:
-        Parsed response JSON on success
-
-    Raises:
-        AssertionError: If validation fails
-    """
-    # Check HTTP status
-    assert response.status_code == 200, (
-        f"Expected status 200, got {response.status_code}. "
-        f"Response: {response.text[:500]}"
-    )
-
-    try:
-        data = response.json()
-    except ValueError as e:
-        pytest.fail(f"Response is not valid JSON: {e}. Response: {response.text[:500]}")
-
-    assert "choices" in data, f"Response missing 'choices' field: {data}"
-    assert len(data["choices"]) > 0, f"Response has empty 'choices': {data}"
-
-    choice = data["choices"][0]
-    assert "message" in choice, f"Choice missing 'message' field: {choice}"
-
-    message = choice["message"]
-    assert (
-        message.get("role") == "assistant"
-    ), f"Expected role 'assistant', got '{message.get('role')}'"
-    assert "content" in message, f"Message missing 'content' field: {message}"
-
-    content = message["content"]
-    assert len(content) >= min_content_length, (
-        f"Response content too short: {len(content)} chars (min: {min_content_length}). "
-        f"Content: {content[:200]}"
-    )
-
-    assert "model" in data, f"Response missing 'model' field: {data}"
-    assert (
-        data["model"] == expected_model
-    ), f"Expected model '{expected_model}', got '{data['model']}'"
-
-    logger.info(
-        f"Response validation passed: model={data['model']}, "
-        f"content_length={len(content)}"
-    )
-
-    return data
 
 
 @pytest.mark.framework_only
@@ -117,129 +39,25 @@ def validate_chat_response(
 @pytest.mark.e2e
 @pytest.mark.timeout(1200)
 async def test_deployment(
+    deployed_endpoint: InferenceEndpoint,
     deployment_target: DeploymentTarget,
-    deployment_spec: DeploymentSpec,
-    namespace: str,
-    skip_service_restart: bool,
-    request,
 ) -> None:
-    """Test Kubernetes deployment end-to-end.
+    """A deployed Dynamo frontend answers a chat completion.
 
-    This test:
-    1. Deploys the specified configuration to Kubernetes
-    2. Waits for all pods to become ready
-    3. Port-forwards to the frontend service
-    4. Waits for the model to be available
-    5. Sends a test chat completion request
-    6. Validates the response structure and content
-
-    Args:
-        deployment_target: The deployment target containing path and metadata
-        deployment_spec: Configured DeploymentSpec from fixture
-        namespace: Kubernetes namespace for the deployment
-        skip_service_restart: Whether to skip restarting NATS/etcd services (default: True).
-            Use --restart-services flag to restart services before deployment.
-        request: Pytest request object for accessing test metadata
+    Deployment, readiness and teardown are the ``deployed_endpoint`` fixture's
+    job; this test only sends a payload and asserts on the response, so the
+    same assertion runs against any Dynamo frontend URL.
     """
-    # Extract identifying information from the target
-    framework = deployment_target.framework
-    profile = deployment_target.profile
-
-    # NIXL_ERR_BACKEND: vCluster CI nodes lack RDMA/UCX for inter-pod KV
-    # transfer.  Prefill workers crash in NixlWrapper.create_backend.
-    if framework == "vllm" and profile in ("disagg", "disagg_router"):
-        pytest.skip(
-            "NIXL_ERR_BACKEND: CI cluster lacks RDMA/UCX for inter-pod KV transfer"
-        )
-
-    # CI deploy cluster uses MIG-partitioned GPUs (~10 GiB slices); lower
-    # gpu-memory-utilization so vLLM 0.23.0+ flashinfer sampler warmup fits
-    # without triggering cudaMalloc -> NVML query, which is restricted on MIG.
-    # TODO (ops): remove this if CI transitions to e.g. CUDA MPS
-    if framework == "vllm":
-        deployment_spec.add_arg_to_service(
-            "VllmDecodeWorker", "--gpu-memory-utilization", "0.7"
-        )
-
-    model = next((s.model for s in deployment_spec.services if s.model), None)
-    if not model:
-        pytest.fail(
-            f"Could not determine model name from deployment spec for "
-            f"{framework}/{profile}"
-        )
+    payload = deployment_smoke_chat_payload(model=deployed_endpoint.model)
+    run_payloads([payload.bind(deployed_endpoint)], log=logger)
 
     logger.info(
-        f"Starting deployment test for {deployment_target.test_id} "
-        f"(source: {deployment_target.source}, model: {model}, namespace: {namespace})"
+        "Deployment test PASSED for %s (source: %s, model: %s, url: %s)",
+        deployment_target.test_id,
+        deployment_target.source,
+        deployed_endpoint.model,
+        deployed_endpoint.base_url,
     )
-    logger.info(f"Log directory: {request.node.name}")
-
-    # Deploy and test
-    async with ManagedDeployment(
-        log_dir=request.node.name,
-        deployment_spec=deployment_spec,
-        namespace=namespace,
-        skip_service_restart=skip_service_restart,
-    ) as deployment:
-        # Get frontend pod for port forwarding
-        frontend_pods = deployment.get_pods([deployment.frontend_service_name])
-        frontend_pod_list = frontend_pods.get(deployment.frontend_service_name, [])
-
-        assert (
-            len(frontend_pod_list) > 0
-        ), f"No frontend pods found for deployment {deployment_spec.name}"
-
-        frontend_pod = frontend_pod_list[0]
-        logger.info(f"Found frontend pod: {frontend_pod.name}")
-
-        # Setup port forwarding
-        port = deployment_spec.port
-        port_forward = deployment.port_forward(frontend_pod, port)
-        assert (
-            port_forward is not None
-        ), f"Failed to establish port forward to {frontend_pod.name}:{port}"
-
-        base_url = f"http://localhost:{port_forward.local_port}"
-        logger.info(f"Port forwarding established: {base_url}")
-
-        # Wait for model to be available
-        endpoint = deployment_spec.endpoint
-        model_ready = wait_for_model_availability(
-            url=base_url,
-            endpoint=endpoint,
-            model=model,
-            logger=logger,
-            max_attempts=30,
-        )
-
-        assert (
-            model_ready
-        ), f"Model '{model}' did not become available within the timeout period"
-
-        # Send test request
-        url = f"{base_url}{endpoint}"
-        payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": TEST_PROMPT}],
-            "max_tokens": DEFAULT_MAX_TOKENS,
-            "temperature": DEFAULT_TEMPERATURE,
-            "stream": False,
-        }
-        response = send_request(
-            url, payload, timeout=float(DEFAULT_REQUEST_TIMEOUT), method="POST"
-        )
-
-        # Validate response
-        validate_chat_response(
-            response=response,
-            expected_model=model,
-            min_content_length=MIN_RESPONSE_CONTENT_LENGTH,
-        )
-
-        logger.info(
-            f"Deployment test PASSED for {deployment_target.test_id} "
-            f"(source: {deployment_target.source}, model: {model}, namespace: {namespace})"
-        )
 
 
 # GAIE (Gateway API Inference Extension) deployment test
@@ -405,55 +223,26 @@ async def test_gaie_deployment(
         time.sleep(2)
 
         try:
-            gateway_url = f"http://localhost:{gateway_pf.local_port}"
-            logger.info(f"Gateway port-forward established: {gateway_url}")
-
-            endpoint = deployment_spec.endpoint
-            headers = {"Host": route_hostname}
-            logger.info(f"Using Host header: {route_hostname}")
-
-            model_ready = wait_for_model_availability(
-                url=gateway_url,
-                endpoint=endpoint,
+            # The Gateway routes on Host, so it is part of the address rather
+            # than of the request under test.
+            gateway = InferenceEndpoint.from_port(
+                gateway_pf.local_port,
                 model=GAIE_MODEL_NAME,
-                logger=logger,
-                max_attempts=30,
-                headers=headers,
+                headers={"Host": route_hostname},
             )
-            assert model_ready, (
-                f"Model '{GAIE_MODEL_NAME}' did not become available "
-                f"within the timeout period"
-            )
-
-            url = f"{gateway_url}{endpoint}"
-            payload = {
-                "model": GAIE_MODEL_NAME,
-                "messages": [{"role": "user", "content": TEST_PROMPT}],
-                "max_tokens": DEFAULT_MAX_TOKENS,
-                "temperature": DEFAULT_TEMPERATURE,
-                "stream": False,
-            }
-            logger.info(f"Sending inference request to {url}")
-            response = requests.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=DEFAULT_REQUEST_TIMEOUT,
-            )
-
-            validate_chat_response(
-                response=response,
-                expected_model=GAIE_MODEL_NAME,
-                min_content_length=MIN_RESPONSE_CONTENT_LENGTH,
-            )
-
-            data = response.json()
-            content = data["choices"][0]["message"]["content"]
             logger.info(
-                f"GAIE deployment test PASSED | "
-                f"model={data['model']}, status={response.status_code}, "
-                f"response_length={len(content)} chars\n"
-                f"Model response: {content}"
+                "Gateway port-forward established: %s (Host: %s)",
+                gateway.base_url,
+                route_hostname,
             )
+
+            wait_until_serving(gateway, timeout=SERVING_READY_TIMEOUT_S, log=logger)
+
+            # Same payload and same assertions as the non-GAIE deployment test;
+            # only the address differs.
+            payload = deployment_smoke_chat_payload(model=GAIE_MODEL_NAME)
+            run_payloads([payload.bind(gateway)], log=logger)
+
+            logger.info("GAIE deployment test PASSED via %s", gateway.base_url)
         finally:
             gateway_pf.stop()

@@ -809,6 +809,8 @@ def lora_chat_payload(
     "match lora_b_weights dtype, pending fix in vLLM XPU backend",
     strict=False,
 )
+# LoraTestChatPayload POSTs the adapter to a worker system port
+@pytest.mark.topology_dependent
 def test_lora_aggregated(
     request,
     runtime_services_dynamic_ports,
@@ -871,6 +873,8 @@ def test_lora_aggregated(
     "match lora_b_weights dtype, pending fix in vLLM XPU backend",
     strict=False,
 )
+# LoraTestChatPayload POSTs the adapter to a worker system port
+@pytest.mark.topology_dependent
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_lora_aggregated_router(
     request,

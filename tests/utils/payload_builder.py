@@ -59,6 +59,60 @@ brief account of the team's morning review, including how they preserve raw meas
 the next observation window. Keep the answer factual and concise while retaining the cobalt-orchid-riverstone marker."""
 
 
+# Prompt for the deployment smoke check. Long enough to exercise context
+# handling and to make a >=100-character answer the normal outcome, and fixed
+# across runs for reproducibility. Carried over from the shell-based deployment
+# tests this replaced.
+DEPLOYMENT_SMOKE_PROMPT = """In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, \
+lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried \
+beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, \
+known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at \
+the city's location. Your journey will take you through treacherous deserts, enchanted forests, \
+and across perilous mountain ranges. Describe your first steps into the ruins of Aeloria."""
+
+# Minimum answer length that counts as "the model is really generating".
+# Matches the threshold the shell-based deployment tests used.
+DEPLOYMENT_SMOKE_MIN_CONTENT_LENGTH = 100
+
+
+def deployment_smoke_chat_payload(
+    model: str,
+    *,
+    prompt: str = DEPLOYMENT_SMOKE_PROMPT,
+    max_tokens: int = 30,
+    temperature: float = 0.0,
+    timeout: int = 120,
+    min_content_length: int = DEPLOYMENT_SMOKE_MIN_CONTENT_LENGTH,
+) -> ChatPayload:
+    """One chat completion that proves a deployment actually serves inference.
+
+    Deployment-agnostic: bind it to any ``InferenceEndpoint`` (local process,
+    port-forwarded Kubernetes frontend, remote ingress) with
+    ``payload.bind(endpoint)``.
+
+    Asserts response shape, an assistant role, a substantive answer in
+    ``message["content"]`` specifically, and that the frontend echoed back the
+    model that was requested. There is no keyword expectation because the
+    answer is open-ended.
+    """
+    return ChatPayload(
+        body={
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": False,
+        },
+        expected_response=[],
+        expected_log=[],
+        timeout=timeout,
+        min_content_length=min_content_length,
+        expected_model=model,
+        expected_role="assistant",
+        require_content_field=True,
+    )
+
+
 def chat_payload_default(
     repeat_count: int = 3,
     expected_response: Optional[List[str]] = None,
