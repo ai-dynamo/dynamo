@@ -94,6 +94,7 @@ CUDA_VISIBLE_DEVICES="$SGLANG_WORKER1_GPU" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_WORKER1_HTTP_PORT" \
     --grpc-port "$SGLANG_WORKER1_GRPC_PORT" \
+    --incremental-streaming-output \
     --kv-events-config "$KV_EVENTS_CONFIG_1" \
     --page-size "$SGLANG_PAGE_SIZE" \
     --context-length "$MAX_MODEL_LEN" \
@@ -108,6 +109,7 @@ CUDA_VISIBLE_DEVICES="$SGLANG_WORKER2_GPU" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_WORKER2_HTTP_PORT" \
     --grpc-port "$SGLANG_WORKER2_GRPC_PORT" \
+    --incremental-streaming-output \
     --kv-events-config "$KV_EVENTS_CONFIG_2" \
     --page-size "$SGLANG_PAGE_SIZE" \
     --context-length "$MAX_MODEL_LEN" \

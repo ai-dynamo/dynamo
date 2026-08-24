@@ -90,6 +90,7 @@ CUDA_VISIBLE_DEVICES="$SGLANG_PREFILL_GPU" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_PREFILL_HTTP_PORT" \
     --grpc-port "$SGLANG_PREFILL_GRPC_PORT" \
+    --incremental-streaming-output \
     --disaggregation-mode prefill \
     --disaggregation-bootstrap-port "$SGLANG_DISAGGREGATION_BOOTSTRAP_PORT" \
     --disaggregation-transfer-backend nixl \
@@ -105,6 +106,7 @@ CUDA_VISIBLE_DEVICES="$SGLANG_DECODE_GPU" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_DECODE_HTTP_PORT" \
     --grpc-port "$SGLANG_DECODE_GRPC_PORT" \
+    --incremental-streaming-output \
     --disaggregation-mode decode \
     --disaggregation-bootstrap-port "$SGLANG_DISAGGREGATION_BOOTSTRAP_PORT" \
     --disaggregation-transfer-backend nixl \

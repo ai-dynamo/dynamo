@@ -146,7 +146,7 @@ async fn collect_with_context(
 }
 
 #[tokio::test]
-async fn sidecar_discovers_and_streams_mocker_tokens_logprobs_and_usage() {
+async fn sidecar_streams_incremental_mocker_tokens_logprobs_and_usage() {
     let server = RunningServer::start(ServerMode::Aggregated, fast_engine_args()).await;
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
     let config = engine.start(0).await.unwrap();
