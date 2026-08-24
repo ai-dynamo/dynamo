@@ -1,0 +1,194 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Edit guide: change the DGD and ConfigMap names, model variables, image, replicas, GPU count, and runtime configuration.
+# External references: model-cache and hf-token-secret are logical references that must stay consistent.
+# Optional resources: remove either ConfigMap only with its worker's engine-config volume,
+# /opt/dynamo/configs mount, configMap.name reference, ENGINE_ARGS value, and --extra-engine-args flag.
+# Put scheduling, storage identity, Secret identity, and provider-network settings in Kustomize.
+# Optional prefill ConfigMap: when removed, also remove PrefillWorker's prefill-engine-config
+# volume, matching /opt/dynamo/configs mount, configMap.name reference, ENGINE_ARGS value,
+# and --extra-engine-args flag.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nemotron-super-trtllm-prefill-config
+data:
+  config.yaml: |
+    backend: pytorch
+    tensor_parallel_size: 2
+    moe_expert_parallel_size: 1
+    enable_attention_dp: false
+    enable_chunked_prefill: true
+    max_batch_size: 16
+    max_num_tokens: 8192
+    trust_remote_code: true
+    kv_cache_config:
+      free_gpu_memory_fraction: 0.85
+      # Nemotron-H uses a Mamba hybrid cache. Block reuse is unsupported.
+      enable_block_reuse: false
+    moe_config:
+      backend: TRTLLM
+    cache_transceiver_config:
+      # UCX is required because NIXL/MOONCAKE do not support Mamba SSM transfer.
+      backend: UCX
+    cuda_graph_config:
+      enable_padding: true
+      max_batch_size: 16
+    disable_overlap_scheduler: true
+---
+# Optional decode ConfigMap: when removed, also remove DecodeWorker's decode-engine-config
+# volume, matching /opt/dynamo/configs mount, configMap.name reference, ENGINE_ARGS value,
+# and --extra-engine-args flag.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nemotron-super-trtllm-decode-config
+data:
+  config.yaml: |
+    backend: pytorch
+    tensor_parallel_size: 2
+    moe_expert_parallel_size: 1
+    enable_attention_dp: false
+    enable_chunked_prefill: true
+    max_batch_size: 16
+    max_num_tokens: 8192
+    trust_remote_code: true
+    kv_cache_config:
+      free_gpu_memory_fraction: 0.85
+      # Nemotron-H uses a Mamba hybrid cache. Block reuse is unsupported.
+      enable_block_reuse: false
+    moe_config:
+      backend: TRTLLM
+    cache_transceiver_config:
+      # UCX is required because NIXL/MOONCAKE do not support Mamba SSM transfer.
+      backend: UCX
+    cuda_graph_config:
+      enable_padding: true
+      max_batch_size: 16
+    disable_overlap_scheduler: false
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: nemotron-super-trtllm-disaggregated
+spec:
+  backendFramework: trtllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
+          command: [python3]
+          args: [-m, dynamo.frontend, --router-mode, round-robin, --http-port, "8000"]
+
+    PrefillWorker:
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      envFromSecret: hf-token-secret
+      resources:
+        requests:
+          gpu: "2"
+        limits:
+          gpu: "2"
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 16Gi
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
+          command: [/bin/bash, -lc]
+          args:
+            - |
+              python3 -m dynamo.trtllm \
+                --model-path "${MODEL_NAME}" \
+                --served-model-name "${SERVED_MODEL_NAME}" \
+                --extra-engine-args "${ENGINE_ARGS}" \
+                --disaggregation-mode prefill \
+                --dyn-tool-call-parser nemotron_nano \
+                --dyn-reasoning-parser nemotron_nano
+          env:
+            - name: MODEL_NAME
+              value: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8
+            - name: SERVED_MODEL_NAME
+              value: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8
+            - name: ENGINE_ARGS
+              value: /opt/dynamo/configs/config.yaml
+            - name: HF_HOME
+              value: /opt/models
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 600
+          volumeMounts:
+            - name: prefill-engine-config
+              mountPath: /opt/dynamo/configs
+              readOnly: true
+        volumes:
+          - name: prefill-engine-config
+            configMap:
+              name: nemotron-super-trtllm-prefill-config
+
+    DecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      envFromSecret: hf-token-secret
+      resources:
+        requests:
+          gpu: "2"
+        limits:
+          gpu: "2"
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 16Gi
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.3.0
+          command: [/bin/bash, -lc]
+          args:
+            - |
+              python3 -m dynamo.trtllm \
+                --model-path "${MODEL_NAME}" \
+                --served-model-name "${SERVED_MODEL_NAME}" \
+                --extra-engine-args "${ENGINE_ARGS}" \
+                --disaggregation-mode decode \
+                --dyn-tool-call-parser nemotron_nano \
+                --dyn-reasoning-parser nemotron_nano
+          env:
+            - name: MODEL_NAME
+              value: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8
+            - name: SERVED_MODEL_NAME
+              value: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8
+            - name: ENGINE_ARGS
+              value: /opt/dynamo/configs/config.yaml
+            - name: HF_HOME
+              value: /opt/models
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 600
+          volumeMounts:
+            - name: decode-engine-config
+              mountPath: /opt/dynamo/configs
+              readOnly: true
+        volumes:
+          - name: decode-engine-config
+            configMap:
+              name: nemotron-super-trtllm-decode-config

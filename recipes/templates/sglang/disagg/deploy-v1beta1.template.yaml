@@ -1,0 +1,257 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Edit guide: change the DGD and ConfigMap names, model variables, image, replicas, GPU count, and runtime configuration.
+# External references: model-cache and hf-token-secret are logical references that must stay consistent.
+# Optional resources: remove the ConfigMap only with both workers' sglang-config volumes, mounts, and --config arguments.
+# Put scheduling, storage identity, Secret identity, and provider-network settings in Kustomize.
+# Optional ConfigMap: when removed, also remove both workers' sglang-config volumes,
+# matching volume mounts, and --config arguments; this example has no configMapKeyRef.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: glm52-sglang-disaggregated-config
+data:
+  prefill.yaml: |-
+    model-path: nvidia/GLM-5.2-NVFP4
+    served-model-name: zai-org/GLM-5.2
+    host: 0.0.0.0
+    trust-remote-code: true
+    tensor-parallel-size: 4
+    data-parallel-size: 4
+    enable-dp-attention: true
+    ep-size: 4
+    quantization: modelopt_fp4
+    kv-cache-dtype: fp8_e4m3
+    context-length: 500000
+    mem-fraction-static: 0.93
+    attention-backend: dsa
+    dsa-prefill-backend: trtllm
+    dsa-decode-backend: trtllm
+    moe-runner-backend: flashinfer_trtllm_routed
+    chunked-prefill-size: 16384
+    max-prefill-tokens: 32768
+    max-running-requests: 32
+    watchdog-timeout: 3600
+    cuda-graph-backend-prefill: disabled
+    cuda-graph-backend-decode: disabled
+    disaggregation-mode: prefill
+    disaggregation-transfer-backend: nixl
+    disaggregation-bootstrap-port: 12345
+    speculative-algorithm: EAGLE
+    speculative-num-steps: 3
+    speculative-eagle-topk: 1
+    speculative-num-draft-tokens: 4
+    enable-dp-lm-head: true
+    hicache-size: 200
+    enable-hierarchical-cache: true
+    kv-events-config:
+      publisher: zmq
+      topic: kv-events
+      endpoint: tcp://*:5557
+    model-loader-extra-config:
+      enable_multithread_load: true
+      num_threads: 32
+    disable-overlap-schedule: true
+    enable-metrics: true
+
+  decode.yaml: |-
+    model-path: nvidia/GLM-5.2-NVFP4
+    served-model-name: zai-org/GLM-5.2
+    trust-remote-code: true
+    tensor-parallel-size: 8
+    data-parallel-size: 8
+    enable-dp-attention: true
+    moe-a2a-backend: none
+    fp4-gemm-backend: flashinfer_cutlass
+    enable-symm-mem: true
+    quantization: modelopt_fp4
+    kv-cache-dtype: fp8_e4m3
+    context-length: 500000
+    disaggregation-mode: decode
+    disaggregation-transfer-backend: nixl
+    disaggregation-bootstrap-port: 12345
+    speculative-algorithm: EAGLE
+    speculative-num-steps: 3
+    speculative-eagle-topk: 1
+    speculative-num-draft-tokens: 4
+    speculative-attention-mode: decode
+    max-running-requests: 256
+    watchdog-timeout: 3600
+    cuda-graph-max-bs: 256
+    mem-fraction-static: 0.87
+    enable-metrics: true
+    speculative-moe-runner-backend: flashinfer_cutlass
+    speculative-moe-a2a-backend: none
+    num-continuous-decode-steps: 3
+    enable-flashinfer-allreduce-fusion: true
+    enable-dp-lm-head: true
+    model-loader-extra-config:
+      enable_multithread_load: true
+      num_threads: 32
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: glm52-sglang-disaggregated
+spec:
+  backendFramework: sglang
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1
+              imagePullPolicy: Always
+              command: [python3]
+              args: [-m, dynamo.frontend, --trust-remote-code]
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: DYN_ROUTER_MODE
+                  value: kv
+
+    - name: PrefillWorker
+      type: prefill
+      replicas: 3
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1
+              imagePullPolicy: Always
+              workingDir: /workspace/
+              command: [/bin/bash, -lc]
+              args:
+                - |
+                  python3 -m dynamo.sglang \
+                    --model-path "${MODEL_NAME}" \
+                    --served-model-name "${SERVED_MODEL_NAME}" \
+                    --config /etc/sglang/prefill.yaml \
+                    --dyn-tool-call-parser glm47 \
+                    --dyn-reasoning-parser glm45 \
+                    --reasoning-parser glm45
+              env:
+                - name: MODEL_NAME
+                  value: nvidia/GLM-5.2-NVFP4
+                - name: SERVED_MODEL_NAME
+                  value: zai-org/GLM-5.2
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+                - name: DYN_SGL_ALLOW_TOP_LOGPROBS
+                  value: "1"
+                - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
+                  value: UCX
+                - name: UCX_TLS
+                  value: cuda_ipc,cuda_copy,rc
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              startupProbe:
+                failureThreshold: 120
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+              resources:
+                requests:
+                  nvidia.com/gpu: "4"
+                  memory: 1Ti
+                limits:
+                  nvidia.com/gpu: "4"
+                  memory: 1Ti
+              volumeMounts:
+                - name: sglang-config
+                  mountPath: /etc/sglang
+                  readOnly: true
+                - name: model-cache
+                  mountPath: /model-cache
+          volumes:
+            - name: sglang-config
+              configMap:
+                name: glm52-sglang-disaggregated-config
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+
+    - name: DecodeWorker
+      type: decode
+      replicas: 1
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.3.0-glm-5.2-dev.1
+              imagePullPolicy: Always
+              workingDir: /workspace/
+              command: [/bin/bash, -lc]
+              args:
+                - |
+                  python3 -m dynamo.sglang \
+                    --model-path "${MODEL_NAME}" \
+                    --served-model-name "${SERVED_MODEL_NAME}" \
+                    --config /etc/sglang/decode.yaml \
+                    --dyn-tool-call-parser glm47 \
+                    --dyn-reasoning-parser glm45 \
+                    --reasoning-parser glm45
+              env:
+                - name: MODEL_NAME
+                  value: nvidia/GLM-5.2-NVFP4
+                - name: SERVED_MODEL_NAME
+                  value: zai-org/GLM-5.2
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+                - name: DYN_SGL_ALLOW_TOP_LOGPROBS
+                  value: "1"
+                - name: SGLANG_DISAGGREGATION_WAITING_TIMEOUT
+                  value: "3600"
+                - name: SGLANG_DISAGGREGATION_NIXL_BACKEND
+                  value: UCX
+                - name: UCX_TLS
+                  value: cuda_ipc,cuda_copy,rc
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              startupProbe:
+                failureThreshold: 120
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 60
+                timeoutSeconds: 20
+              resources:
+                requests:
+                  nvidia.com/gpu: "8"
+                  memory: 200Gi
+                limits:
+                  nvidia.com/gpu: "8"
+                  memory: 200Gi
+              volumeMounts:
+                - name: sglang-config
+                  mountPath: /etc/sglang
+                  readOnly: true
+                - name: model-cache
+                  mountPath: /model-cache
+          volumes:
+            - name: sglang-config
+              configMap:
+                name: glm52-sglang-disaggregated-config
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache

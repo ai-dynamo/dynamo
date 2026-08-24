@@ -1,0 +1,126 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Edit guide: change the DGD name, model variables, image, replicas, GPU count, and runtime flags.
+# External references: model-cache is a logical reference that must stay consistent.
+# Optional resources: none; this is a DGD-only example.
+# Put scheduling, storage identity, Secret identity, and provider-network settings in Kustomize.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: inkling-sglang-aggregate
+spec:
+  backendFramework: sglang
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1
+              command: [python3]
+              args:
+                - -m
+                - dynamo.frontend
+                - --model-path
+                - /model-cache/thinkingmachines/Inkling-NVFP4
+                - --model-name
+                - thinkingmachines/Inkling-NVFP4
+                - --dyn-chat-processor
+                - sglang
+                - --reasoning-parser
+                - inkling
+                - --tool-call-parser
+                - inkling
+                - --trust-remote-code
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+
+    - name: Worker
+      type: worker
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1
+              workingDir: /workspace/examples/backends/sglang
+              command: [/bin/bash, -lc]
+              args:
+                - |
+                  python3 -m dynamo.sglang \
+                    --model-path "${MODEL_NAME}" \
+                    --served-model-name "${SERVED_MODEL_NAME}" \
+                    --trust-remote-code \
+                    --tp 8 \
+                    --quantization modelopt_fp4 \
+                    --attention-backend fa4 \
+                    --page-size 128 \
+                    --fp4-gemm-backend flashinfer_trtllm \
+                    --moe-runner-backend flashinfer_trtllm_routed \
+                    --enable-torch-symm-mem \
+                    --mamba-radix-cache-strategy extra_buffer \
+                    --mem-fraction-static 0.75 \
+                    --swa-full-tokens-ratio 0.1 \
+                    --mamba-full-memory-ratio 0.1 \
+                    --enable-multimodal \
+                    --reasoning-parser inkling \
+                    --tool-call-parser inkling \
+                    --speculative-algorithm EAGLE \
+                    --speculative-num-steps 8 \
+                    --speculative-eagle-topk 1 \
+                    --speculative-num-draft-tokens 9 \
+                    --enable-multi-layer-eagle \
+                    --speculative-use-rejection-sampling
+              env:
+                - name: MODEL_NAME
+                  value: /model-cache/thinkingmachines/Inkling-NVFP4
+                - name: SERVED_MODEL_NAME
+                  value: thinkingmachines/Inkling-NVFP4
+                - name: DYN_FORWARDPASS_METRIC_PORT
+                  value: ""
+                - name: SGLANG_ENABLE_UNIFIED_RADIX_TREE
+                  value: "1"
+                - name: HF_HOME
+                  value: /tmp/hf-cache
+                - name: FLASHINFER_DISABLE_VERSION_CHECK
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "64"
+                  memory: 512Gi
+                  ephemeral-storage: 200Gi
+                limits:
+                  nvidia.com/gpu: "8"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+                  readOnly: true
+                - name: dshm
+                  mountPath: /dev/shm
+                - name: tmp
+                  mountPath: /tmp
+                - name: flashinfer-cache
+                  mountPath: /root/.cache/flashinfer
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 512Gi
+            - name: tmp
+              emptyDir:
+                sizeLimit: 200Gi
+            - name: flashinfer-cache
+              emptyDir:
+                sizeLimit: 32Gi
