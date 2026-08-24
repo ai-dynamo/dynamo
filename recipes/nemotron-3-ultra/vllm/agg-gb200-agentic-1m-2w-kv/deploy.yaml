@@ -135,10 +135,15 @@ spec:
         - name: nvcr-secret
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-GB200
+          kubernetes.io/arch: arm64
         tolerations:
         - key: nvidia.com/gpu
           operator: Equal
-          value: 'true'
+          value: present
+          effect: NoSchedule
+        - key: kubernetes.io/arch
+          operator: Equal
+          value: arm64
           effect: NoSchedule
         containers:
         - name: main
