@@ -46,7 +46,7 @@ Default Pareto axes are `output_tput_per_gpu` and `tokens_per_sec_per_user`.
 - `EXP_ROOT`: `runs/<EXP_ID>/`, created by `user-interviewer` once for an optimization job.
 - `user_workload.yaml`: canonical workload contract synthesized from the user interview, with the baseline DGD
   path-and-hash record.
-- `user_provided_dgd.yaml`: immutable baseline DGD supplied by the user and captured under `EXP_ROOT/inputs/`.
+- `user_provided_dgd.yaml`: immutable baseline DGD supplied or explicitly confirmed by the user and captured under `EXP_ROOT/inputs/`.
 - `DEPLOY_ROOT`: `runs/<EXP_ID>/artifacts/deploy-iter-<NNN>/`, created for one candidate DGD.
 - `deployment_ledger.json`: deployment and smoke-test record.
 - `benchmark_summary.json`: parsed AIPerf metrics and comparison record.
@@ -60,7 +60,7 @@ Default Pareto axes are `output_tput_per_gpu` and `tokens_per_sec_per_user`.
 ## Agent Roles
 
 - **User Interviewer**: turns the user's initial request and minimal follow-up answers into `user_workload.yaml`,
-  captures the user-provided baseline DGD, and hands both immutable inputs to `recipe-deployer`.
+  captures the user-provided or user-confirmed baseline DGD, and hands both immutable inputs to `recipe-deployer`.
 - **Recipe Deployer**: deploys the user-provided baseline DGD or a later challenger-approved DGD and verifies the
   endpoint.
 - **Performance Analyzer**: interprets AIPerf artifacts.
