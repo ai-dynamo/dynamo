@@ -170,7 +170,7 @@ Then start the frontend and a worker as shown above. See the [full installation 
 
 ### Option C: Kubernetes (recommended)
 
-For production multi-node clusters, install the [Dynamo Platform](https://docs.nvidia.com/dynamo/kubernetes-deployment/start-here/installation-guide) and deploy with a single manifest:
+For production multi-node clusters, install the [Dynamo Platform](https://docs.nvidia.com/dynamo/latest/kubernetes/installation/install-dynamo) and deploy with a single manifest:
 
 ```yaml
 # Zero-config deploy: specify model + SLA, Dynamo handles the rest
