@@ -2509,4 +2509,30 @@ mod tests {
         assert!(body["error"].is_string(), "expected {{\"error\": \"...\"}}");
         handle.abort();
     }
+
+    /// A well-formed body that does not match the schema must stay a 422.
+    /// Unlike the openai and anthropic routers, whose middleware rewrites 422
+    /// to 400, this route's `json_error_middleware` keeps the 422, so reading
+    /// the body by hand must not collapse both parse failures into a 400.
+    #[tokio::test]
+    async fn test_busy_threshold_schema_mismatch_stays_422() {
+        let (port, handle) = spawn_default_service().await;
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://localhost:{port}/busy_threshold"))
+            .header("content-type", "application/json")
+            .body(r#"{"model": 123}"#)
+            .send()
+            .await
+            .expect("request failed");
+
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            "a schema mismatch must stay 422, not become 400"
+        );
+        let body: serde_json::Value = resp.json().await.expect("body must be JSON");
+        assert!(body["error"].is_string());
+        handle.abort();
+    }
 }

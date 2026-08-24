@@ -194,8 +194,18 @@ async fn read_busy_threshold_request(
         })?;
 
     serde_json::from_slice(&bytes).map_err(|err| {
+        // Preserve the status split Axum's `Json` extractor made: a syntax
+        // error is a 400, a well-formed body that does not match the schema is
+        // a 422. Unlike the openai and anthropic routers, whose middleware
+        // rewrites 422 to 400, this route's `json_error_middleware` keeps the
+        // 422 and only reshapes the body, so collapsing both to 400 here would
+        // change the status callers see for a schema mismatch.
+        let code = match err.classify() {
+            serde_json::error::Category::Data => StatusCode::UNPROCESSABLE_ENTITY,
+            _ => StatusCode::BAD_REQUEST,
+        };
         error(
-            StatusCode::BAD_REQUEST,
+            code,
             format!("Failed to parse the request body as JSON: {err}"),
         )
     })
