@@ -678,11 +678,12 @@ def test_kubernetes_type_references_stay_package_local(
     kubernetes_package_pairs: _KubernetesPackagePairs,
 ) -> None:
     _, packages = kubernetes_package_pairs
+    all_anchors = {type_.anchor for package in packages for type_ in package.types}
     for package in packages:
         package_anchors = {type_.anchor for type_ in package.types}
-        refs = list(package.resource_types)
-        refs.extend(ref for type_ in package.types for ref in type_.appears_in)
-        assert all(ref.anchor in package_anchors for ref in refs)
+        assert all(ref.anchor in package_anchors for ref in package.resource_types)
+        appears_in = [ref for type_ in package.types for ref in type_.appears_in]
+        assert all(ref.anchor in all_anchors for ref in appears_in)
 
 
 def test_kubernetes_field_links_follow_package_remaps(
