@@ -282,6 +282,10 @@ pub(crate) fn connection_timeout(message: impl Into<String>) -> DynamoError {
     backend(BackendError::ConnectionTimeout, message)
 }
 
+pub(crate) fn cancelled(message: impl Into<String>) -> DynamoError {
+    backend(BackendError::Cancelled, message)
+}
+
 pub fn protocol_error(message: impl Into<String>) -> DynamoError {
     backend(BackendError::Unknown, message)
 }

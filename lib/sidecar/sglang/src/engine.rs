@@ -35,13 +35,13 @@ pub struct SglangSidecarEngine {
     disaggregation_mode: DisaggregationMode,
     bootstrap_host: Option<String>,
     bootstrap_port: Option<u16>,
-    native_http: Option<NativeHttp>,
     state: OnceCell<StartedState>,
     cancel: CancellationToken,
 }
 
 struct StartedState {
     pool: Pool,
+    native_http: Option<NativeHttp>,
     kv_event_sources: Vec<DiscoveredKvEventSource>,
 }
 
@@ -84,9 +84,6 @@ impl SglangSidecarEngine {
         } else {
             None
         };
-        let native_http =
-            NativeHttp::discover(&endpoint, &discovery, transport.connect_attempt_timeout)?;
-
         tracing::info!(
             %endpoint,
             mode = ?disaggregation_mode,
@@ -128,7 +125,6 @@ impl SglangSidecarEngine {
                 disaggregation_mode,
                 bootstrap_host,
                 bootstrap_port,
-                native_http,
                 state: OnceCell::new(),
                 cancel: CancellationToken::new(),
             },
@@ -187,7 +183,29 @@ impl LLMEngine for SglangSidecarEngine {
             self.bootstrap_host.clone(),
             self.bootstrap_port,
         )?;
-        if self.native_http.is_some() {
+        let native_http = match NativeHttp::discover(
+            &self.endpoint,
+            &discovery,
+            self.transport.connect_attempt_timeout,
+        )? {
+            Some(native_http) => {
+                match native_http
+                    .await_ready(deadline, self.transport.retry_interval)
+                    .await
+                {
+                    Ok(()) => Some(native_http),
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            "SGLang native HTTP generation is unavailable; continuing with gRPC"
+                        );
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        if native_http.is_some() {
             config
                 .runtime_data
                 .insert("sglang_generate".into(), true.into());
@@ -198,6 +216,7 @@ impl LLMEngine for SglangSidecarEngine {
         self.state
             .set(StartedState {
                 pool,
+                native_http,
                 kv_event_sources,
             })
             .map_err(|_| client::engine_shutdown("sglang sidecar already started"))?;
@@ -227,9 +246,9 @@ impl LLMEngine for SglangSidecarEngine {
             self.bootstrap_host.as_deref(),
             self.bootstrap_port,
         )? {
-            let native_http = self.native_http.clone().ok_or_else(|| {
+            let native_http = state.native_http.clone().ok_or_else(|| {
                 client::invalid_arg(
-                    "native SGLang Generate is unavailable because GetServerInfo did not report an HTTP port",
+                    "native SGLang Generate is unavailable because no ready incremental HTTP endpoint was discovered",
                 )
             })?;
             return Ok(native_http.generate(native_request, ctx, self.cancel.clone()));
