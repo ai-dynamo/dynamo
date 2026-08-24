@@ -21,6 +21,11 @@ Throughout this guide, **deployer** refers to the team responsible for deploying
 and operating Dynamo in a cluster — distinct from the **Dynamo Operator**, the
 Kubernetes operator component.
 
+> [!NOTE]
+> Configuration variables are shown inline here for now. As the canonical component
+> reference pages gain their security sections, that variable-level detail will move
+> there and this guide will link to those sections instead of duplicating them.
+
 > [!WARNING]
 > Do not expose the Dynamo frontend, planner dashboard, standalone router
 > services, NATS, etcd, or ZMQ endpoints directly to an untrusted network.
