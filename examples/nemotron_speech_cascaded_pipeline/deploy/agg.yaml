@@ -1,0 +1,201 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: nemotron-speech-cascaded
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: ${DYNAMO_FRONTEND_IMAGE}
+              command: [python3, -m, dynamo.frontend]
+              args: [--http-port, "8000"]
+      replicas: 1
+      type: frontend
+    - name: SpeechAsrWorker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: ${CUSTOM_SPEECH_ADAPTER_IMAGE}
+              command: [python3, -m, nemotron_speech.asr_worker]
+              args:
+                - --nim-server
+                - localhost:50052
+                - --nim-startup-timeout-s
+                - "3600"
+                - --commit-padding-ms
+                - "400"
+                - --model-name
+                - nemotron-asr-streaming
+              resources:
+                limits: {cpu: "2", memory: 4Gi}
+                requests: {cpu: "1", memory: 2Gi}
+            - name: asr-nim
+              image: nvcr.io/nim/nvidia/nemotron-asr-streaming:1.2.0
+              env:
+                - name: NGC_API_KEY
+                  valueFrom:
+                    secretKeyRef: {key: NGC_API_KEY, name: ngc-api}
+                - {name: NIM_GRPC_API_PORT, value: "50052"}
+                - {name: NIM_HTTP_API_PORT, value: "9001"}
+                - {name: NIM_TAGS_SELECTOR, value: "type=en-US,mode=str"}
+              ports:
+                - {containerPort: 9001, name: nim-http}
+              resources: &nimResources
+                limits:
+                  nvidia.com/gpu: "1"
+                requests:
+                  cpu: "4"
+                  memory: 16Gi
+                  nvidia.com/gpu: "1"
+              startupProbe: &asrStartupProbe
+                httpGet: {path: /v1/health/ready, port: nim-http}
+                failureThreshold: 360
+                initialDelaySeconds: 40
+                periodSeconds: 10
+                timeoutSeconds: 5
+              livenessProbe: &asrLivenessProbe
+                httpGet: {path: /v1/health/live, port: nim-http}
+                failureThreshold: 3
+                periodSeconds: 10
+                timeoutSeconds: 5
+              readinessProbe: &asrReadinessProbe
+                httpGet: {path: /v1/health/ready, port: nim-http}
+                failureThreshold: 3
+                periodSeconds: 10
+                timeoutSeconds: 5
+              volumeMounts:
+                - {mountPath: /opt/nim/.cache, name: model-cache, subPath: nemotron-speech-cascaded-asr}
+                - {mountPath: /dev/shm, name: shared-memory}
+          imagePullSecrets: &speechImagePullSecrets
+            - name: custom-adapter-image-pull-secret
+            - name: ngc-secret
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim: {claimName: model-cache}
+      replicas: 1
+      scalingAdapter: {}
+      sharedMemorySize: 16Gi
+      type: worker
+    - name: VllmWorker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: ${DYNAMO_VLLM_IMAGE}
+              command: [python3, -m, dynamo.vllm]
+              args:
+                - --model
+                - nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8
+                - --served-model-name
+                - nvidia/nemotron-3-nano
+                - --tensor-parallel-size
+                - "1"
+                - --trust-remote-code
+                - --reasoning-parser
+                - nemotron_v3
+                - --kv-cache-dtype
+                - fp8
+                - --max-model-len
+                - "32768"
+                - --max-num-seqs
+                - "256"
+                - --use-vllm-tokenizer
+              env:
+                - {name: HF_HOME, value: /home/dynamo/.cache/huggingface}
+                - {name: VLLM_USE_FLASHINFER_MOE_FP8, value: "1"}
+              envFrom:
+                - secretRef: {name: hf-token-secret}
+              resources:
+                limits:
+                  nvidia.com/gpu: "1"
+                requests:
+                  cpu: "8"
+                  memory: 32Gi
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - {mountPath: /home/dynamo/.cache/huggingface, name: model-cache, subPath: nemotron-speech-cascaded-llm}
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim: {claimName: model-cache}
+      replicas: 1
+      scalingAdapter: {}
+      sharedMemorySize: 16Gi
+      type: worker
+    - name: SpeechTtsWorker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: ${CUSTOM_SPEECH_ADAPTER_IMAGE}
+              command: [python3, -m, nemotron_speech.tts_worker]
+              args:
+                - --nim-server
+                - localhost:50051
+                - --nim-startup-timeout-s
+                - "3600"
+                - --model-name
+                - nvidia/magpie-tts-multilingual
+                - --sample-rate-hz
+                - "24000"
+              resources:
+                limits: {cpu: "2", memory: 4Gi}
+                requests: {cpu: "1", memory: 2Gi}
+            - name: tts-nim
+              image: nvcr.io/nim/nvidia/magpie-tts-multilingual:1.8.0
+              env:
+                - name: NGC_API_KEY
+                  valueFrom:
+                    secretKeyRef: {key: NGC_API_KEY, name: ngc-api}
+                - {name: NIM_GRPC_API_PORT, value: "50051"}
+                - {name: NIM_HTTP_API_PORT, value: "9000"}
+                - {name: NIM_TAGS_SELECTOR, value: "name=magpie-tts-multilingual,batch_size=8"}
+              ports:
+                - {containerPort: 9000, name: nim-http}
+              resources: *nimResources
+              startupProbe:
+                httpGet: {path: /v1/health/ready, port: nim-http}
+                failureThreshold: 360
+                initialDelaySeconds: 40
+                periodSeconds: 10
+                timeoutSeconds: 5
+              livenessProbe:
+                httpGet: {path: /v1/health/live, port: nim-http}
+                failureThreshold: 3
+                periodSeconds: 10
+                timeoutSeconds: 5
+              readinessProbe:
+                httpGet: {path: /v1/health/ready, port: nim-http}
+                failureThreshold: 3
+                periodSeconds: 10
+                timeoutSeconds: 5
+              volumeMounts:
+                - {mountPath: /opt/nim/.cache, name: model-cache, subPath: nemotron-speech-cascaded-tts}
+                - {mountPath: /dev/shm, name: shared-memory}
+          imagePullSecrets: *speechImagePullSecrets
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim: {claimName: model-cache}
+      replicas: 1
+      scalingAdapter: {}
+      sharedMemorySize: 16Gi
+      type: worker
