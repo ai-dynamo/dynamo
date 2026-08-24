@@ -489,7 +489,7 @@ pub enum ResidencyOwner {
 /// Lower-tier edges carry this fixed-size value instead of embedding the full
 /// [`CacheOwnerId`] in every ownership entry. The full owner remains in the
 /// reverse index once per logical owner so dumps can round-trip it exactly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ResidencyOwnerKey([u8; 16]);
 
 impl ResidencyOwnerKey {
@@ -560,7 +560,7 @@ fn update_cache_owner_hash(hasher: &mut blake3::Hasher, owner: CacheOwnerId) {
 /// Router-core stores no discovery state. The lib/llm wrapper resolves and
 /// swaps this snapshot when source, attachment, or readability membership
 /// changes; one snapshot is pinned for each tiered lookup.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResidencyProjection {
     exact_owners: FxHashMap<ResidencyOwnerKey, WorkerWithDpRank>,
 }
@@ -605,6 +605,81 @@ impl ResidencyProjection {
 
     pub fn is_empty(&self) -> bool {
         self.exact_owners.is_empty()
+    }
+}
+
+/// Persistent source metadata used to resolve a cache owner into a router hint.
+///
+/// This is advisory discovery metadata. Endpoint health and ownership takeover
+/// are guaranteed by the persistent cache implementation, not probed by Dynamo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouterHintSourceMetadata {
+    pub source_control_endpoint: String,
+    pub worker_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRouterHintSource {
+    pub metadata: RouterHintSourceMetadata,
+    pub attached_worker: Option<WorkerWithDpRank>,
+}
+
+/// One immutable lookup snapshot for scheduling projection and persistent hint sources.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResidencyRoutingSnapshot {
+    projection: ResidencyProjection,
+    router_hint_sources: FxHashMap<ResidencyOwnerKey, ResolvedRouterHintSource>,
+}
+
+impl ResidencyRoutingSnapshot {
+    pub fn from_projection(projection: ResidencyProjection) -> Self {
+        Self {
+            projection,
+            router_hint_sources: FxHashMap::default(),
+        }
+    }
+
+    pub fn new(
+        projection: ResidencyProjection,
+        router_hint_sources: impl IntoIterator<
+            Item = (
+                CacheOwnerId,
+                RouterHintSourceMetadata,
+                Option<WorkerWithDpRank>,
+            ),
+        >,
+    ) -> Self {
+        let router_hint_sources = router_hint_sources
+            .into_iter()
+            .map(|(owner, metadata, attached_worker)| {
+                (
+                    ResidencyOwner::cache_owner(owner).compact_key(),
+                    ResolvedRouterHintSource {
+                        metadata,
+                        attached_worker,
+                    },
+                )
+            })
+            .collect();
+        Self {
+            projection,
+            router_hint_sources,
+        }
+    }
+
+    pub fn projection(&self) -> &ResidencyProjection {
+        &self.projection
+    }
+
+    pub fn router_hint_source(
+        &self,
+        owner: ResidencyOwnerKey,
+    ) -> Option<&ResolvedRouterHintSource> {
+        self.router_hint_sources.get(&owner)
+    }
+
+    pub fn has_router_hint_source(&self, owner: ResidencyOwnerKey) -> bool {
+        self.router_hint_sources.contains_key(&owner)
     }
 }
 

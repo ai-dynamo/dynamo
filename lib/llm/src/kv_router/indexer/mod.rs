@@ -12,7 +12,10 @@ use dynamo_kv_router::{
         KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierIndexers,
         ThreadPoolIndexer, record_unsupported_residency_event,
     },
-    protocols::{DpRank, KvCacheEventData, ResidencyProjection, RouterEvent, WorkerId},
+    protocols::{
+        DpRank, KvCacheEventData, ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent,
+        WorkerId,
+    },
 };
 
 // Re-export tiered-match types so internal callers (`indexer::TieredMatchDetails`)
@@ -101,6 +104,15 @@ impl Indexer {
         match self {
             Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
                 lower_tier.set_residency_projection(projection)
+            }
+            Self::Remote { .. } | Self::None => {}
+        }
+    }
+
+    pub fn set_residency_routing_snapshot(&self, snapshot: ResidencyRoutingSnapshot) {
+        match self {
+            Self::KvIndexer { lower_tier, .. } | Self::Concurrent { lower_tier, .. } => {
+                lower_tier.set_residency_routing_snapshot(snapshot)
             }
             Self::Remote { .. } | Self::None => {}
         }
