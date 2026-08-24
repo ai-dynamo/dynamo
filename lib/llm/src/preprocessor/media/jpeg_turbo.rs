@@ -12,6 +12,7 @@
 
 use std::{
     os::raw::{c_int, c_uchar, c_ulong, c_void},
+    ptr::NonNull,
     sync::OnceLock,
 };
 
@@ -20,6 +21,8 @@ use libloading::{Library, Symbol};
 
 type TjHandle = *mut c_void;
 const TJCS_GRAY: c_int = 2;
+const TJCS_CMYK: c_int = 3;
+const TJCS_YCCK: c_int = 4;
 const TJPF_RGB: c_int = 0;
 const TJPF_GRAY: c_int = 6;
 
@@ -52,6 +55,33 @@ struct TurboJpeg {
     header: TjDecompressHeader3,
     decompress: TjDecompress2,
     destroy: TjDestroy,
+}
+
+struct TurboJpegHandle<'a> {
+    api: &'a TurboJpeg,
+    handle: NonNull<c_void>,
+}
+
+impl<'a> TurboJpegHandle<'a> {
+    fn new(api: &'a TurboJpeg) -> Option<Self> {
+        // SAFETY: `init` is the resolved tjInitDecompress symbol.
+        let handle = NonNull::new(unsafe { (api.init)() })?;
+        Some(Self { api, handle })
+    }
+
+    fn as_ptr(&self) -> TjHandle {
+        self.handle.as_ptr()
+    }
+}
+
+impl Drop for TurboJpegHandle<'_> {
+    fn drop(&mut self) {
+        // SAFETY: This guard uniquely owns the non-null handle, and borrowing
+        // `api` keeps the library and tjDestroy symbol alive through this call.
+        unsafe {
+            (self.api.destroy)(self.handle.as_ptr());
+        }
+    }
 }
 
 // The resolved symbols are immutable C entry points. The Library is retained
@@ -133,20 +163,19 @@ pub(crate) fn decode_jpeg(
     };
 
     // SAFETY:
-    // - The handle is null-checked and destroyed on every exit path below.
+    // - TurboJpegHandle owns the non-null handle and destroys it on every exit.
     // - `bytes` is a valid immutable input buffer for the duration of each C call.
     // - `buf` is allocated to exactly width * height * channels after checked
     //   arithmetic and configured allocation limits; the selected TurboJPEG
     //   pixel format with pitch 0 writes that layout.
     unsafe {
-        let handle = (tj.init)();
-        if handle.is_null() {
+        let Some(handle) = TurboJpegHandle::new(tj) else {
             return Ok(None);
-        }
+        };
 
         let (mut w, mut h, mut subsamp, mut colorspace) = (0_i32, 0_i32, 0_i32, 0_i32);
         let hdr = (tj.header)(
-            handle,
+            handle.as_ptr(),
             bytes.as_ptr(),
             bytes.len() as c_ulong,
             &mut w,
@@ -155,7 +184,11 @@ pub(crate) fn decode_jpeg(
             &mut colorspace,
         );
         if hdr != 0 || w <= 0 || h <= 0 {
-            (tj.destroy)(handle);
+            return Ok(None);
+        }
+        // TurboJPEG cannot convert CMYK/YCCK JPEGs directly to TJPF_RGB.
+        // Decline before allocating the RGB output so ImageReader handles them.
+        if matches!(colorspace, TJCS_CMYK | TJCS_YCCK) {
             return Ok(None);
         }
 
@@ -163,7 +196,6 @@ pub(crate) fn decode_jpeg(
         if max_width.is_some_and(|limit| width > limit)
             || max_height.is_some_and(|limit| height > limit)
         {
-            (tj.destroy)(handle);
             bail!("Image dimensions exceed configured limits: {width}x{height}");
         }
 
@@ -178,32 +210,28 @@ pub(crate) fn decode_jpeg(
         {
             Some(n) => n,
             None => {
-                (tj.destroy)(handle);
                 bail!("Image allocation size overflow for dimensions: {width}x{height}");
             }
         };
         if let Some(limit) = max_alloc
             && nbytes > limit
         {
-            (tj.destroy)(handle);
             bail!("Image allocation {nbytes} bytes exceeds configured limit {limit} bytes");
         }
 
         let nbytes = match usize::try_from(nbytes) {
             Ok(n) => n,
             Err(_) => {
-                (tj.destroy)(handle);
                 bail!("Image allocation size does not fit in usize: {nbytes} bytes");
             }
         };
         let mut buf = Vec::new();
         if let Err(err) = buf.try_reserve_exact(nbytes) {
-            (tj.destroy)(handle);
             bail!("Image allocation {nbytes} bytes could not be reserved: {err:?}");
         }
         buf.resize(nbytes, 0);
         let rc = (tj.decompress)(
-            handle,
+            handle.as_ptr(),
             bytes.as_ptr(),
             bytes.len() as c_ulong,
             buf.as_mut_ptr(),
@@ -213,7 +241,6 @@ pub(crate) fn decode_jpeg(
             pixel_format,
             0,
         );
-        (tj.destroy)(handle);
         if rc != 0 {
             return Ok(None);
         }

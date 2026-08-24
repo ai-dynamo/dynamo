@@ -260,18 +260,19 @@ mod tests {
     }
 
     #[rstest]
-    #[case(3, image::ImageFormat::Png, 10, 10, 3, "RGB PNG")]
-    #[case(4, image::ImageFormat::Png, 25, 30, 4, "RGBA PNG")]
-    #[case(1, image::ImageFormat::Png, 8, 12, 1, "Grayscale PNG")]
-    #[case(3, image::ImageFormat::Jpeg, 15, 20, 3, "RGB JPEG")]
-    #[case(3, image::ImageFormat::Bmp, 12, 18, 3, "RGB BMP")]
-    #[case(3, image::ImageFormat::WebP, 8, 8, 3, "RGB WebP")]
+    #[case(3, ImageFormat::Png, 10, 10, 3, ColorType::Rgb8, "RGB PNG")]
+    #[case(4, ImageFormat::Png, 25, 30, 4, ColorType::Rgba8, "RGBA PNG")]
+    #[case(1, ImageFormat::Png, 8, 12, 1, ColorType::L8, "Grayscale PNG")]
+    #[case(3, ImageFormat::Jpeg, 15, 20, 3, ColorType::Rgb8, "RGB JPEG")]
+    #[case(3, ImageFormat::Bmp, 12, 18, 3, ColorType::Rgb8, "RGB BMP")]
+    #[case(3, ImageFormat::WebP, 8, 8, 3, ColorType::Rgb8, "RGB WebP")]
     fn test_image_decode(
         #[case] input_channels: u32,
         #[case] format: image::ImageFormat,
         #[case] width: u32,
         #[case] height: u32,
         #[case] expected_channels: u32,
+        #[case] expected_color_type: ColorType,
         #[case] description: &str,
     ) {
         let decoder = ImageDecoder::default();
@@ -287,6 +288,13 @@ mod tests {
             vec![height as usize, width as usize, expected_channels as usize]
         );
         assert_eq!(decoded.tensor_info.dtype, DataType::UINT8);
+        match decoded.tensor_info.metadata {
+            Some(DecodedMediaMetadata::Image(metadata)) => {
+                assert_eq!(metadata.format, Some(format));
+                assert_eq!(metadata.color_type, expected_color_type);
+            }
+            other => panic!("expected image metadata, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -464,46 +472,6 @@ mod tests {
     }
 
     #[test]
-    fn test_libjpeg_falls_back_for_non_jpeg() {
-        let decoder = ImageDecoder {
-            enable_libjpeg: true,
-            ..Default::default()
-        };
-        let image_bytes = create_test_image(8, 9, 3, ImageFormat::Png);
-        let decoded = decoder
-            .decode(create_encoded_media_data(image_bytes))
-            .unwrap();
-        assert_eq!(decoded.tensor_info.shape, vec![9, 8, 3]);
-        match decoded.tensor_info.metadata {
-            Some(DecodedMediaMetadata::Image(metadata)) => {
-                assert_eq!(metadata.format, Some(ImageFormat::Png));
-                assert_eq!(metadata.color_type, ColorType::Rgb8);
-            }
-            other => panic!("expected image metadata, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_libjpeg_falls_back_for_rgba_png() {
-        let decoder = ImageDecoder {
-            enable_libjpeg: true,
-            ..Default::default()
-        };
-        let image_bytes = create_test_image(8, 9, 4, ImageFormat::Png);
-        let decoded = decoder
-            .decode(create_encoded_media_data(image_bytes))
-            .unwrap();
-        assert_eq!(decoded.tensor_info.shape, vec![9, 8, 4]);
-        match decoded.tensor_info.metadata {
-            Some(DecodedMediaMetadata::Image(metadata)) => {
-                assert_eq!(metadata.format, Some(ImageFormat::Png));
-                assert_eq!(metadata.color_type, ColorType::Rgba8);
-            }
-            other => panic!("expected image metadata, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn test_libjpeg_enforces_configured_limits() {
         if !jpeg_turbo::available() {
             eprintln!("skipping libjpeg-turbo limit test: libturbojpeg not available");
@@ -571,6 +539,23 @@ mod tests {
     }
 
     #[test]
+    fn test_libjpeg_turbo_declines_cmyk_before_output_allocation() {
+        let require = std::env::var_os(REQUIRE_LIBJPEG_TURBO_TEST_ENV).is_some();
+        if !jpeg_turbo::available() {
+            if require {
+                panic!("{REQUIRE_LIBJPEG_TURBO_TEST_ENV} is set but libturbojpeg is unavailable");
+            }
+            eprintln!("skipping CMYK JPEG test: libturbojpeg not available");
+            return;
+        }
+
+        let jpeg_bytes = cmyk_jpeg_fixture();
+        let decoded = jpeg_turbo::decode_jpeg(&jpeg_bytes, None, None, Some(0))
+            .expect("CMYK JPEG should decline before applying the RGB output allocation limit");
+        assert!(decoded.is_none());
+    }
+
+    #[test]
     fn test_libjpeg_turbo_gray_jpeg_shape() {
         let require = std::env::var_os(REQUIRE_LIBJPEG_TURBO_TEST_ENV).is_some();
         if !jpeg_turbo::available() {
@@ -620,5 +605,16 @@ mod tests {
         assert_eq!(expected_rgb.len(), (WIDTH * HEIGHT * 3) as usize);
 
         (jpeg_bytes, expected_rgb, WIDTH, HEIGHT)
+    }
+
+    fn cmyk_jpeg_fixture() -> Vec<u8> {
+        use base64::{Engine as _, engine::general_purpose};
+
+        // Pillow-generated 2x2 CMYK JPEG; TurboJPEG reports TJCS_CMYK.
+        const JPEG_B64: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/media/cmyk_2x2.jpg.b64"
+        ));
+        general_purpose::STANDARD.decode(JPEG_B64.trim()).unwrap()
     }
 }
