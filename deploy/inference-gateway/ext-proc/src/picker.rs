@@ -10,6 +10,8 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 
+use dynamo_llm::protocols::common::extensions::{HEADER_TENANT_ID, last_non_empty_trimmed_value};
+
 /// A model server pod endpoint available for serving requests.
 #[derive(Debug, Clone)]
 pub struct Endpoint {
@@ -33,23 +35,6 @@ impl Endpoint {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::Endpoint;
-
-    #[test]
-    fn address_port_brackets_ipv6() {
-        let endpoint = Endpoint {
-            pod_name: "prefill-0".to_string(),
-            address: "2001:db8::10".to_string(),
-            port: "8001".to_string(),
-            labels: Default::default(),
-        };
-
-        assert_eq!(endpoint.address_port(), "[2001:db8::10]:8001");
-    }
-}
-
 /// Metadata about the incoming HTTP request.
 #[derive(Debug, Clone)]
 pub struct RequestInfo {
@@ -67,6 +52,19 @@ pub struct RequestInfo {
     pub model: String,
     /// From x-gateway-destination-endpoint-subset metadata
     pub candidate_subset: Vec<String>,
+}
+
+/// How `PickResult.cache_namespace` is written into the forwarded request body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CacheSaltForwarding {
+    /// Leave the body's cache salt untouched. Dynamo-runtime backends encode
+    /// it themselves.
+    #[default]
+    Preserve,
+    /// Write `cache_salt = "dynamo-cache-salt:" + namespace` at the top level.
+    /// Raw native vLLM has no Dynamo code in the request path to add the
+    /// marker, so the EPP must add it.
+    NativeVllm,
 }
 
 /// The endpoint selection result, with the Dynamo-specific routing headers
@@ -91,12 +89,40 @@ pub struct PickResult {
     /// Injected into the request body as `nvext.token_data` so the backend
     /// skips redundant tokenization.
     pub token_ids: Option<Vec<u32>>,
+    /// Cache namespace used for selection. Whether and how it is written into
+    /// the forwarded body is decided by `cache_salt_forwarding`.
+    pub cache_namespace: Option<String>,
+    /// Body-encoding policy for `cache_namespace`.
+    pub cache_salt_forwarding: CacheSaltForwarding,
     /// Booking id the picker recorded for this request's load reservation, if
     /// any. The server carries it on the per-stream context and hands it back to
     /// [`EndpointPicker::on_prefill_complete`] / [`EndpointPicker::on_request_complete`]
     /// so the picker can free the exact reservation for this stream without a
     /// shared, request-id-keyed lookup. `None` when the picker booked nothing.
     pub reservation_id: Option<String>,
+}
+
+/// Resolve the request's cache namespace with the canonical precedence:
+/// non-empty `x-tenant-id` header, then `nvext.cache_salt`, then top-level
+/// `cache_salt`. Empty values count as absent.
+pub fn resolve_cache_namespace(
+    headers: &[(String, String)],
+    nvext_cache_salt: Option<&str>,
+    top_level_cache_salt: Option<&str>,
+) -> Option<String> {
+    last_non_empty_trimmed_value(
+        headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case(HEADER_TENANT_ID))
+            .map(|(_, value)| value.as_str()),
+    )
+    .map(str::to_owned)
+    .or_else(|| non_empty_owned(nvext_cache_salt))
+    .or_else(|| non_empty_owned(top_level_cache_salt))
+}
+
+fn non_empty_owned(value: Option<&str>) -> Option<String> {
+    value.filter(|v| !v.is_empty()).map(str::to_owned)
 }
 
 /// The central abstraction for endpoint selection.
@@ -177,4 +203,85 @@ pub enum PickError {
     /// multiplexing means the connection cap does not bound concurrent requests.
     #[error("endpoint picker overloaded")]
     Overloaded,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn address_port_brackets_ipv6() {
+        let endpoint = Endpoint {
+            pod_name: "prefill-0".to_string(),
+            address: "2001:db8::10".to_string(),
+            port: "8001".to_string(),
+            labels: Default::default(),
+        };
+
+        assert_eq!(endpoint.address_port(), "[2001:db8::10]:8001");
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn tenant_header_wins_over_body_sources() {
+        let resolved = resolve_cache_namespace(
+            &headers(&[("X-Tenant-ID", "tenant-header")]),
+            Some("nvext-salt"),
+            Some("top-level-salt"),
+        );
+        assert_eq!(resolved.as_deref(), Some("tenant-header"));
+    }
+
+    #[test]
+    fn nvext_cache_salt_wins_over_top_level() {
+        let resolved = resolve_cache_namespace(&[], Some("nvext-salt"), Some("top-level-salt"));
+        assert_eq!(resolved.as_deref(), Some("nvext-salt"));
+    }
+
+    #[test]
+    fn top_level_cache_salt_is_fallback() {
+        let resolved = resolve_cache_namespace(&[], None, Some("top-level-salt"));
+        assert_eq!(resolved.as_deref(), Some("top-level-salt"));
+    }
+
+    #[test]
+    fn empty_values_are_absent() {
+        // Empty nvext falls through to top-level; empty top-level is absent.
+        let resolved = resolve_cache_namespace(&[], Some(""), Some("top-level-salt"));
+        assert_eq!(resolved.as_deref(), Some("top-level-salt"));
+
+        let resolved = resolve_cache_namespace(&[], Some("nvext-salt"), Some(""));
+        assert_eq!(resolved.as_deref(), Some("nvext-salt"));
+
+        // Empty header falls through to the body; whitespace-only is empty too.
+        let hdrs = headers(&[("x-tenant-id", ""), ("X-Tenant-ID", "   ")]);
+        let resolved = resolve_cache_namespace(&hdrs, Some("nvext-salt"), None);
+        assert_eq!(resolved.as_deref(), Some("nvext-salt"));
+
+        assert_eq!(resolve_cache_namespace(&[], None, None), None);
+    }
+
+    #[test]
+    fn last_non_empty_trimmed_tenant_header_wins() {
+        let hdrs = headers(&[
+            ("x-tenant-id", "tenant-client"),
+            ("X-Tenant-ID", "   "),
+            ("x-tenant-id", " tenant-gateway "),
+        ]);
+        let resolved = resolve_cache_namespace(&hdrs, Some("nvext-salt"), None);
+        assert_eq!(resolved.as_deref(), Some("tenant-gateway"));
+    }
+
+    #[test]
+    fn pick_result_defaults_to_preserve_forwarding() {
+        let result = PickResult::default();
+        assert_eq!(result.cache_salt_forwarding, CacheSaltForwarding::Preserve);
+        assert!(result.cache_namespace.is_none());
+    }
 }

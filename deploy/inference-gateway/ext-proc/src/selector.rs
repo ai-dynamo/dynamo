@@ -54,6 +54,7 @@ pub struct SelectRequest {
     pub strict_priority: Option<u32>,
     pub expected_output_tokens: Option<u32>,
     pub policy_class: Option<String>,
+    pub cache_namespace: Option<String>,
 }
 
 /// Observability overlap summary (matched token counts).
@@ -277,6 +278,12 @@ impl Selector {
     /// rather than cloned on the hot path.
     pub async fn select_and_reserve(&self, req: SelectRequest) -> Result<SelectResponse> {
         let reservation_id = req.reservation_id;
+        tracing::trace!(
+            reservation_id = %reservation_id,
+            cache_namespace = ?req.cache_namespace,
+            token_count = req.token_ids.len(),
+            "select_and_reserve using cache namespace"
+        );
         let core_req = CoreSelectAndReserveRequest {
             model_name: req.model_name,
             routing_group: DEFAULT_ROUTING_GROUP.to_string(),
@@ -286,6 +293,7 @@ impl Selector {
             selection_id: Some(reservation_id.clone()),
             prompt: PromptRequest {
                 token_ids: Some(req.token_ids),
+                cache_namespace: req.cache_namespace,
                 ..Default::default()
             },
             router_config_override: None,
@@ -509,6 +517,7 @@ models:
             strict_priority: None,
             expected_output_tokens: None,
             policy_class: None,
+            cache_namespace: None,
         }
     }
 
@@ -1055,5 +1064,105 @@ worker_selection:
             .select_and_reserve(synthetic_req)
             .await
             .expect("synthetic profile must ignore any policy_class value");
+    }
+
+    /// Request/event parity for the cache namespace: a BlockStored event whose
+    /// `extra_keys` carry the Dynamo-tagged salt — exactly what the standalone
+    /// EPP writes into the forwarded body's `cache_salt` and vLLM reports back —
+    /// is selectable only through `SelectRequest.cache_namespace` with the same
+    /// raw salt, and matches nothing under a different salt.
+    #[tokio::test]
+    async fn request_and_event_cache_namespace_parity() {
+        use std::sync::atomic::AtomicU32;
+
+        use dynamo_kv_router::identity::RoutingPartitionId;
+        use dynamo_kv_router::protocols::WorkerWithDpRank;
+        use dynamo_kv_router::zmq_wire::{
+            BlockHashValue, DYNAMO_CACHE_SALT_PREFIX, ExtraKeyItem, RawKvEvent, convert_event,
+            extra_keys_to_cache_namespace,
+        };
+
+        let selector = selector_with_schedulable_worker().await;
+        let tokens: Vec<u32> = (1..=32).collect(); // two full 16-token blocks
+        let extra_keys = vec![
+            Some(vec![ExtraKeyItem::Hash(format!(
+                "{DYNAMO_CACHE_SALT_PREFIX}salt-a"
+            ))]),
+            None,
+        ];
+        let raw = RawKvEvent::BlockStored {
+            block_hashes: vec![BlockHashValue::Unsigned(111), BlockHashValue::Unsigned(222)],
+            parent_block_hash: None,
+            token_ids: tokens.clone(),
+            block_size: 16,
+            medium: None,
+            lora_name: None,
+            cache_namespace: extra_keys_to_cache_namespace(Some(&extra_keys), None),
+            block_mm_infos: None,
+            is_eagle: Some(false),
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
+            locality: None,
+            ownership: None,
+        };
+        let warning_count = Arc::new(AtomicU32::new(0));
+        let event = convert_event(
+            raw,
+            0,
+            16,
+            WorkerWithDpRank::new(1, 0),
+            &warning_count,
+            None,
+            None,
+        )
+        .expect("event converts")
+        .into_router_event()
+        .expect("local placement converts to router event");
+        selector
+            .service
+            .apply_indexer_event(
+                &RoutingPartitionId::new("test-model", DEFAULT_ROUTING_GROUP),
+                event,
+            )
+            .await
+            .expect("apply event");
+
+        // Same salt: the full prompt matches the event-side blocks.
+        let resp = selector
+            .select_and_reserve(SelectRequest {
+                token_ids: tokens.clone(),
+                cache_namespace: Some("salt-a".to_string()),
+                ..select_request("parity-salt-a")
+            })
+            .await
+            .expect("salted select");
+        assert_eq!(
+            resp.overlap.longest_matched,
+            tokens.len() as u32,
+            "same salt must match the event-side blocks (same-salt reuse)"
+        );
+        selector
+            .free_reservation("parity-salt-a")
+            .await
+            .expect("free");
+
+        // Different salt: same tokens, different cache domain, no match.
+        let resp = selector
+            .select_and_reserve(SelectRequest {
+                token_ids: tokens.clone(),
+                cache_namespace: Some("salt-b".to_string()),
+                ..select_request("parity-salt-b")
+            })
+            .await
+            .expect("cross-salt select");
+        assert_eq!(
+            resp.overlap.longest_matched, 0,
+            "different salt must not match the event-side blocks (cross-salt isolation)"
+        );
+        selector
+            .free_reservation("parity-salt-b")
+            .await
+            .expect("free");
     }
 }

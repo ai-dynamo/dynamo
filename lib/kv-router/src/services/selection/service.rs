@@ -6,7 +6,8 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::KvRouterConfig;
-use crate::protocols::WorkerId;
+use crate::identity::RoutingPartitionId;
+use crate::protocols::{RouterEvent, WorkerId};
 use crate::scheduling::PotentialLoad;
 use crate::services::common::replica_sync::{
     PeerManager, ReplicaPeerError, ReplicaSyncRuntime, setup_replica_sync,
@@ -390,6 +391,17 @@ impl SelectionService {
 
     pub async fn indexer_snapshot(&self) -> serde_json::Value {
         self.core.dump_indexer_events().await
+    }
+
+    /// Apply a KV-cache event to a model/routing-group partition's index,
+    /// bypassing the ZMQ listener. For embedded callers and tests that feed
+    /// events from an in-process transport.
+    pub async fn apply_indexer_event(
+        &self,
+        key: &RoutingPartitionId,
+        event: RouterEvent,
+    ) -> Result<(), SelectionError> {
+        self.core.apply_indexer_event(key, event).await
     }
 
     pub async fn recover_indexer_from_peers(&self, peers: &[String]) -> anyhow::Result<bool> {

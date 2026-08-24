@@ -14,8 +14,8 @@ use tokio_util::sync::CancellationToken;
 use crate::identity::RoutingPartitionId;
 use crate::indexer::TieredMatchDetails;
 use crate::protocols::{
-    ActiveSequenceEvent, LocalBlockHash, PrefillLoadHint, RoutingConstraints, WorkerAffinityTarget,
-    WorkerId, WorkerWithDpRank,
+    ActiveSequenceEvent, LocalBlockHash, PrefillLoadHint, RouterEvent, RoutingConstraints,
+    WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::selector::WorkerSelectionPolicy;
@@ -325,6 +325,24 @@ impl SelectionCore {
         routing_group: Option<&str>,
     ) -> Vec<WorkerCatalogRecord> {
         self.catalog.list(model_name, routing_group)
+    }
+
+    /// Apply a KV-cache event directly to a partition's indexer, bypassing the
+    /// ZMQ listener. For embedded callers and tests that feed events from an
+    /// in-process transport instead of a worker socket.
+    pub async fn apply_indexer_event(
+        &self,
+        key: &RoutingPartitionId,
+        event: RouterEvent,
+    ) -> Result<(), SelectionError> {
+        let entry = self
+            .entry(key)
+            .ok_or_else(|| SelectionError::NotFound(format!("no selection entry for {key}")))?;
+        entry
+            .indexer
+            .apply_event_routed(event)
+            .await
+            .map_err(|error| SelectionError::Internal(error.to_string()))
     }
 
     pub fn ready(&self) -> ReadyResponse {
