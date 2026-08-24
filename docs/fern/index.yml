@@ -40,6 +40,10 @@ tabs:
   recipes:
     display-name: Recipes
     icon: file-code
+  agent-skills:
+    display-name: Agent Skills
+    icon: robot
+    slug: agent-skills
   developer-guide:
     display-name: Developer Guide
     icon: code
@@ -590,6 +594,12 @@ navigation:
             slug: kv-router-ab-testing
             hidden: true
 
+  - tab: agent-skills
+    layout:
+      - page: Overview
+        path: pages/agent-skills/overview.mdx
+
+  # ==================== Developer Guide ====================
   - tab: developer-guide
     layout:
       # ==================== Knowledge Base ====================
@@ -1210,6 +1220,9 @@ navigation:
         contents:
           # Keep this archive in reverse chronological order. Publication dates are
           # rendered in each article header and on the custom landing page.
+          - page: "Dynamo Agent Optimization Skills"
+            path: pages/blog/2026/agent-optimization-skills.mdx
+            slug: agent-optimization-skills
           - page: "DynoSim Pareto Frontier"
             path: pages/blog/2026/dynosim-pareto-frontier.mdx
             slug: dynosim-pareto-frontier

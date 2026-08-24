@@ -213,6 +213,22 @@ def test_frontend_metric_with_partial_data():
     assert metric.pod is None
 
 
+@patch("dynamo.planner.monitoring.traffic_metrics.PrometheusConnect")
+def test_prometheus_client_configures_request_timeout(mock_prometheus_connect):
+    PrometheusAPIClient(
+        "http://localhost:9090",
+        "test_namespace",
+        request_timeout_seconds=2.5,
+    )
+
+    mock_prometheus_connect.assert_called_once_with(
+        url="http://localhost:9090",
+        disable_ssl=True,
+        retry=0,
+        timeout=2.5,
+    )
+
+
 def test_get_average_metric_none_result():
     """Test _get_average_metric when prometheus returns None"""
     # TODO: Replace hardcoded port with allocate_port() from tests.utils.port_utils
