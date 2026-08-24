@@ -32,8 +32,15 @@ pytestmark = [
 ]
 
 
-def _stub_cli_dependencies(monkeypatch, seen: dict) -> None:
-    monkeypatch.setattr(replay_main, "_load_engine_args", lambda value: value)
+def _stub_cli_dependencies(
+    monkeypatch, seen: dict, *, stub_engine_args: bool = True
+) -> None:
+    # `stub_engine_args=False` lets the real MockEngineArgs validators run, which
+    # is the point for the tests that assert a bad flag becomes a usage error:
+    # with the pass-through stub nothing validates, so such a test would only be
+    # exercising a CLI-side duplicate of the engine's own check.
+    if stub_engine_args:
+        monkeypatch.setattr(replay_main, "_load_engine_args", lambda value: value)
     monkeypatch.setattr(
         replay_main,
         "_load_router_config",
@@ -471,7 +478,7 @@ def test_accept_rates_without_nextn_is_a_usage_error(monkeypatch) -> None:
     # MockEngineArgs.from_json, outside the handling that produces a usage
     # message, so the user would see a traceback instead.
     seen: dict = {}
-    _stub_cli_dependencies(monkeypatch, seen)
+    _stub_cli_dependencies(monkeypatch, seen, stub_engine_args=False)
 
     with pytest.raises(SystemExit):
         replay_main.main(
@@ -492,11 +499,11 @@ def test_accept_rates_without_nextn_is_a_usage_error(monkeypatch) -> None:
 
 @pytest.mark.parametrize("nextn", ["0", "6"])
 def test_out_of_range_nextn_is_a_usage_error(monkeypatch, nextn) -> None:
-    # normalize_conditional_accept_rates already rejects anything outside
-    # 1..=5, but defaulting the flag into the engine args moves that error
-    # ahead of the handling that turns it into a usage message.
+    # The engine rejects anything outside 1..=5. This asserts the CLI turns that
+    # into a usage error rather than a traceback, so the real validator has to
+    # run here.
     seen: dict = {}
-    _stub_cli_dependencies(monkeypatch, seen)
+    _stub_cli_dependencies(monkeypatch, seen, stub_engine_args=False)
 
     with pytest.raises(SystemExit):
         replay_main.main(

@@ -657,16 +657,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error(
                 "--max-sim-time-seconds is not supported with --planner-config"
             )
-    # These two checks exist because defaulting the flags into the engine args
-    # moves their validation earlier. Both conditions are already rejected, by
-    # normalize_conditional_accept_rates, but that now raises from
-    # MockEngineArgs.from_json below, which is outside the error handling that
-    # turns a bad value into a usage message.
-    if args.aic_nextn_accept_rates is not None and args.aic_nextn is None:
-        parser.error("--aic-nextn-accept-rates requires --aic-nextn")
-    if args.aic_nextn is not None and not 1 <= args.aic_nextn <= 5:
-        parser.error(f"--aic-nextn must be in 1..=5, got {args.aic_nextn}")
-
     # Speculation is a decode-side concept, so the flags are defaulted into the
     # aggregated or the decode engine args, never prefill: prefill does not
     # speculate and modelling it there would change prefill timing.
@@ -684,14 +674,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         if disagg_engine_args
         else _with_aic_speculation(base_config.extra_engine_args, args)
     )
-    extra_engine_args = _load_engine_args(
-        json.dumps(extra_raw) if extra_raw is not None else None
-    )
-    prefill_engine_args = _load_engine_args(
-        json.dumps(base_config.prefill_engine_args)
-        if base_config.prefill_engine_args is not None
-        else None
-    )
     # Only when decode args already exist. Creating them from the flags alone
     # would turn "prefill and decode must be provided together" into a
     # different failure.
@@ -700,9 +682,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         if base_config.decode_engine_args is not None
         else None
     )
-    decode_engine_args = _load_engine_args(
-        json.dumps(decode_raw) if decode_raw is not None else None
-    )
+    # The engine-args validators live in the simulation engine and raise out of
+    # MockEngineArgs.from_json. Report them as usage errors, the way the
+    # neighbouring config loads in this function already do, so a bad flag or a
+    # bad --extra-engine-args key gives a usage message instead of a traceback.
+    try:
+        extra_engine_args = _load_engine_args(
+            json.dumps(extra_raw) if extra_raw is not None else None
+        )
+        prefill_engine_args = _load_engine_args(
+            json.dumps(base_config.prefill_engine_args)
+            if base_config.prefill_engine_args is not None
+            else None
+        )
+        decode_engine_args = _load_engine_args(
+            json.dumps(decode_raw) if decode_raw is not None else None
+        )
+    except (ValueError, RuntimeError) as exc:
+        parser.error(str(exc))
     router_config = _load_router_config(
         args.router_config,
         args.router_policy_config,
