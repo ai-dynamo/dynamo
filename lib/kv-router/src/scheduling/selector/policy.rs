@@ -57,8 +57,7 @@ impl WorkerInputs {
     pub const LOAD: Self = Self(1 << 1);
     /// Request preferred-taint routing metadata.
     pub const PREFERRED_TAINT: Self = Self(1 << 2);
-    pub(super) const ALL_SIGNALS: Self =
-        Self(Self::CACHE.0 | Self::LOAD.0 | Self::PREFERRED_TAINT.0);
+    pub(super) const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::PREFERRED_TAINT.0);
 
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0

@@ -217,47 +217,6 @@ impl CanonicalOutputTracker {
     }
 }
 
-/// Policy-specific state released by the host's common request lifecycle.
-enum RequestCleanup<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    Kv(KvRequestCleanup<Sel>),
-    Stateless { worker_id: u64 },
-}
-
-impl<Sel> RequestCleanup<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    fn worker_id(&self) -> u64 {
-        match self {
-            Self::Kv(cleanup) => cleanup.worker.worker_id,
-            Self::Stateless { worker_id } => *worker_id,
-        }
-    }
-
-    fn context_id(&self) -> Option<&str> {
-        match self {
-            Self::Kv(cleanup) => Some(&cleanup.context_id),
-            Self::Stateless { .. } => None,
-        }
-    }
-
-    fn set_stateless_worker(&mut self, worker_id: u64) {
-        match self {
-            Self::Kv(_) => debug_assert!(false, "KV cleanup target cannot be retargeted"),
-            Self::Stateless { worker_id: current } => *current = worker_id,
-        }
-    }
-
-    async fn finish(&mut self) {
-        if let Self::Kv(cleanup) = self {
-            cleanup.finish().await;
-        }
-    }
-}
-
 /// Owns request-scoped timing and metrics state.
 struct RequestObservability {
     tracker: Option<Arc<RequestTracker>>,
@@ -473,6 +432,40 @@ where
                 );
             }
         });
+    }
+}
+
+/// Policy-specific state released by the host's common request lifecycle.
+enum RequestCleanup<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    Kv(KvRequestCleanup<Sel>),
+    Stateless { worker_id: u64 },
+}
+
+impl<Sel> RequestCleanup<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    fn worker_id(&self) -> u64 {
+        match self {
+            Self::Kv(cleanup) => cleanup.worker.worker_id,
+            Self::Stateless { worker_id } => *worker_id,
+        }
+    }
+
+    fn context_id(&self) -> Option<&str> {
+        match self {
+            Self::Kv(cleanup) => Some(&cleanup.context_id),
+            Self::Stateless { .. } => None,
+        }
+    }
+
+    async fn finish(&mut self) {
+        if let Self::Kv(cleanup) = self {
+            cleanup.finish().await;
+        }
     }
 }
 
@@ -781,7 +774,7 @@ where
         if let Some(lease) = &self.approximate_lru {
             lease.release_now();
         }
-        // RequestCleanup drops immediately afterward and performs resource cleanup.
+        // RequestCleanup drops immediately afterward and performs scheduler cleanup.
     }
 }
 
