@@ -2209,46 +2209,119 @@ def test_making_a_gpu_larger_never_delays_a_gang():
         )
 
 
-@pytest.mark.parametrize("frees_at", [None, 40, 80])
-def test_progress_under_foreign_memory_is_conditional_on_it_being_released(frees_at):
-    """The stated limit of the progress property, pinned in both directions.
+def test_foreign_memory_on_a_card_the_gang_does_not_need_never_delays_it():
+    """Progress must not depend on a card the gang has no need of.
 
-    Reservation placement looks only at card size, never at live free memory,
-    because ``(total - free) - budget`` cannot separate a neighbour's allocation
-    -- which may never be released -- from our own test overshooting its profile
-    or still ramping, which always is. Consulting it would reject cards that
-    recover while admitting cards that do not.
+    The physical-size filter was not the whole of the defect it closed. A hold is
+    useless on any card the gang cannot occupy, and physical size is only one of
+    the two reasons a card can be unoccupiable -- memory held by a process
+    OUTSIDE this run is the other, and it produces the identical failure through
+    the identical mechanism: an idle card scores its whole capacity for a
+    protector slot precisely BECAUSE it is idle, wins one, and can never honour
+    it.
 
-    So a gang needing a card that a neighbour is holding waits, and that is the
-    honest guarantee: three 10 GiB cards, a gang wanting 6.0 on two of them, and
-    4.5 GiB held on GPU2 by something outside this run.
-
-    - held forever: the gang never launches. This is regime D -- outside the
-      claimed domain, and stated rather than papered over.
-    - released at pass 40 or 80: the gang launches on exactly that pass, so
-      nothing the scheduler did in the meantime cost it its place.
+    Three 10 GiB cards, a gpu_2 gang needing 6.0, and 4.5 GiB held forever on
+    GPU2 by something outside this run. GPU0 and GPU1 are free, permanently, and
+    two cards is exactly what the gang needs -- so it must launch as soon as the
+    hog retires. Before this was fixed the hold landed on {1, 2}, GPU0 was left
+    unprotected, the backfill took it, and the gang never launched in 400 passes.
     """
     gpus = {0: _gpu(0, 10.0), 1: _gpu(1, 10.0), 2: _gpu(2, 10.0)}
+    gang = _t("gang", 6.0, timeout=90, gpus=2)
+    assert _unschedulable_reason(gang, gpus) is None
+
     started = _drive_passes(
         gpus,
-        [_t("hog", 3.0, timeout=120), _t("gang", 6.0, timeout=90, gpus=2)],
+        [_t("hog", 3.0, timeout=120), gang],
+        backfill=lambda i: _t(f"fill{i}", 2.0, timeout=21.0),
+        passes=400,
+        external_hold=lambda now: {2: 4.5},
+    )
+
+    assert "gang" in started, (
+        "gang starved by a hold placed on the one card it can never occupy -- "
+        "two permanently free cards big enough for it were available throughout"
+    )
+    assert started["gang"] <= 41, started["gang"]
+
+
+@pytest.mark.parametrize("frees_at", [None, 60])
+def test_gang_waits_only_while_foreign_memory_leaves_too_few_usable_cards(frees_at):
+    """The honest remaining limit, pinned in both directions.
+
+    Preferring usable cards for a hold cannot manufacture capacity. When foreign
+    memory blocks so many cards that fewer than ``gpu_count`` remain, the gang
+    genuinely cannot run and waiting is correct -- that is a property of the box,
+    not of this scheduler. What it must NOT do is lose its place: the moment the
+    neighbour releases, the gang launches on that very pass, which is only true
+    if the holds were positioned on the cards that came back.
+
+    Two of three cards blocked, so exactly one is usable against a need of two.
+    """
+    gpus = {0: _gpu(0, 10.0), 1: _gpu(1, 10.0), 2: _gpu(2, 10.0)}
+    gang = _t("gang", 6.0, timeout=90, gpus=2)
+    assert _unschedulable_reason(gang, gpus) is None
+
+    started = _drive_passes(
+        gpus,
+        [_t("hog", 3.0, timeout=120), gang],
         backfill=lambda i: _t(f"fill{i}", 2.0, timeout=21.0),
         passes=400,
         external_hold=(
-            lambda now: {2: 4.5} if (frees_at is None or now < frees_at) else {}
+            lambda now: {1: 4.5, 2: 4.5}
+            if (frees_at is None or now < frees_at)
+            else {}
         ),
     )
 
     if frees_at is None:
         assert "gang" not in started, (
-            "documented limitation changed: the gang launched despite a card it "
-            "needs being held by a process outside this run"
+            "only one card was ever usable and the gang needs two -- launching "
+            "would mean the memory accounting is wrong, not that it made progress"
         )
     else:
         assert started.get("gang") == frees_at, (
             f"gang should launch the pass the foreign memory is released "
-            f"({frees_at}), got {started.get('gang')}"
+            f"({frees_at}), got {started.get('gang')} -- it was not holding the "
+            "cards that came back"
         )
+
+
+def test_a_foreign_blocked_card_never_outranks_a_usable_one_for_a_hold():
+    """The ranking, isolated from the multi-pass driver.
+
+    Headroom alone is the wrong sort key for a gang hold, and an idle card is
+    exactly where it misleads: ``_cap`` of an idle card is the whole card, so a
+    card carrying 4.5 GiB of somebody else's memory still scores a perfect 10.0
+    and takes a protector slot off a card that is genuinely free.
+
+    GPU0 is busy with our own work -- which will finish -- and GPU1/GPU2 are
+    idle, but GPU2 is holding foreign memory. The hold has to land on {0, 1}: the
+    two cards a 6.0 GiB gang member could occupy once our own test retires.
+    Observed, as everywhere else in this file, through what the hold refuses --
+    the filler can only land on the one card not protected.
+    """
+    gpus = {
+        0: _gpu(0, 10.0, budget_used=5.0, running_count=1),
+        1: _gpu(1, 10.0),
+        2: _gpu(2, 10.0),
+    }
+    # GPU2 reads 5.5 free while committing no budget of ours: 4.5 GiB is held by
+    # a process outside this run, so it cannot take a 6.0 GiB member today.
+    actual_free = {0: 5.0, 1: 10.0, 2: 5.5}
+    gang = _t("gang", 6.0, timeout=1800, gpus=2)
+    filler = _t("filler", 3.0, timeout=15.0)
+    assert _unschedulable_reason(gang, gpus) is None
+
+    launches = _select_checked(
+        [gang, filler], gpus, num_slots=8, running_count=1, actual_free=actual_free
+    )
+
+    assert launches == [(1, (2,))], (
+        "the hold went to a card holding another process's memory instead of a "
+        "card the gang could actually occupy; the filler proves which card was "
+        "left unprotected"
+    )
 
 
 def test_gpu1_control_is_unaffected_by_an_unusable_card():
@@ -2586,6 +2659,84 @@ def test_gang_falls_back_to_a_full_hold_when_only_some_cards_look_usable():
     assert started["gang"] <= 60, (
         f"gang launched on pass {started['gang']}: with only one card passing "
         "the filter it went unprotected instead of falling back to a full hold"
+    )
+
+
+def test_a_gang_holds_nothing_rather_than_hold_cards_it_can_never_run_on():
+    """The size filter still has to be load bearing on its own.
+
+    Preferring usable cards in the ordering hides the filter in every scenario
+    where a better card exists, because a card too small to host a member can
+    never be usable either -- the preference sorts it last anyway. The filter
+    earns its keep exactly where the ordering cannot help: when nothing better
+    is LEFT. Then a preference has no choice but to hand the slot over, and a
+    filter refuses.
+
+    GPU0/GPU1 are the only cards that could host this 6.0 GiB gang, and a
+    higher-priority gang has already taken them. What remains for the second
+    gang is two 5.9 GiB cards it could never run on. Holding them would bound
+    backfill that has nowhere else to go, in exchange for a launch that can
+    never happen -- so it holds nothing, and the filler lands.
+    """
+    gpus = {
+        0: _gpu(0, 10.0, budget_used=5.0, running_count=1),
+        1: _gpu(1, 10.0, budget_used=5.0, running_count=1),
+        2: _gpu(2, 5.9),
+        3: _gpu(3, 5.9),
+    }
+    actual_free = {0: 5.0, 1: 5.0, 2: 5.9, 3: 5.9}
+    first = _t("first", 6.0, timeout=1800, gpus=2)
+    second = _t("second", 6.0, timeout=90, gpus=2)
+    filler = _t("filler", 2.0, timeout=15.0)
+    assert _unschedulable_reason(second, gpus) is None
+
+    launches = _select_checked(
+        [first, second, filler],
+        gpus,
+        num_slots=8,
+        running_count=2,
+        actual_free=actual_free,
+    )
+
+    assert launches == [(2, (2,))], (
+        "the second gang took a hold on cards it can never run on, and the "
+        "filler -- which had nowhere else to go -- was blocked for a launch "
+        "that could never happen"
+    )
+
+
+def test_a_card_whose_usable_capacity_exactly_meets_the_need_is_still_preferred():
+    """The preference boundary, matching the filter's boundary.
+
+    ``_can_ever_host`` admits a card whose physical size exactly equals the
+    requirement, because pre-flight does. ``_usable_now`` has to agree at its own
+    boundary for the same reason: a card carrying foreign memory that leaves
+    exactly the requirement free is usable, and ranking it below a card that is
+    genuinely short would hand the hold to the wrong one.
+
+    GPU0 has 4.0 GiB of foreign memory on a 10.0 GiB card -- exactly 6.0 usable.
+    GPU2 is the most attractive card by headroom and the least usable. A strict
+    ``>`` at the boundary demotes GPU0 beneath it, the hold lands on {1, 2}, and
+    the filler that should have had GPU2 is refused everywhere.
+    """
+    gpus = {
+        0: _gpu(0, 10.0, budget_used=5.0, running_count=1),
+        1: _gpu(1, 10.0, budget_used=5.0, running_count=1),
+        2: _gpu(2, 10.0, running_count=1),
+    }
+    # GPU0: 4.0 GiB foreign -> exactly 6.0 usable. GPU2: 4.5 GiB foreign -> 5.5.
+    actual_free = {0: 1.0, 1: 5.0, 2: 5.5}
+    gang = _t("gang", 6.0, timeout=1800, gpus=2)
+    filler = _t("filler", 3.0, timeout=15.0)
+    assert _unschedulable_reason(gang, gpus) is None
+
+    launches = _select_checked(
+        [gang, filler], gpus, num_slots=8, running_count=3, actual_free=actual_free
+    )
+
+    assert launches == [(1, (2,))], (
+        "the hold skipped the card with exactly enough usable capacity and took "
+        "the emptiest-looking one instead, which cannot host a member at all"
     )
 
 

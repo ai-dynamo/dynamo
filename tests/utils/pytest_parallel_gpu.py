@@ -516,8 +516,9 @@ def _select_launches(
       1. at least ``k`` devices have ``r <= budget_multi``, so ``J`` can share a
          card rather than needing one to itself;
       2. at least ``k`` of those are not blocked by memory held outside this
-         run -- reservation placement cannot detect that, so such a gang waits
-         until the neighbour releases it;
+         run; holds prefer the cards that are, so foreign memory delays ``J``
+         only while it leaves fewer than ``k`` usable, and never merely because
+         it sits on a card ``J`` had no need of;
       3. the competing work is VRAM-bearing -- a zero-VRAM filler bypasses the
          budget gates yet still raises ``running_count``, and can hold off a
          gang profiled above ``budget_multi`` for its lifetime;
@@ -533,9 +534,11 @@ def _select_launches(
     members eventually satisfy the gate simultaneously.
 
     Conditions 1-4 are properties of the workload and the hardware, not of this
-    scheduler. Nothing here assumes memory held outside the run ever frees; if it
-    blocks more than ``len(gpu_states) - k`` devices, ``J`` waits, which is
-    correct because it cannot run.
+    scheduler. Nothing here assumes memory held outside the run ever frees: if it
+    leaves fewer than ``k`` devices usable, condition 2 fails and ``J`` waits,
+    which is correct because it cannot run. It waits holding the devices that
+    were usable, so it launches on the pass the neighbour releases rather than
+    re-entering the queue behind the backfill that accumulated meanwhile.
     """
     tentative = {
         gi: _TentativeGpu(
@@ -578,16 +581,37 @@ def _select_launches(
         test that clears pre-flight is never rejected here by a rounding
         difference.
 
-        Live free memory is deliberately NOT consulted. It would have to
+        Live free memory is deliberately not consulted HERE. It would have to
         distinguish memory held by a neighbour on the box, which may never free,
         from our own test overshooting its profile or still ramping, which always
         does -- and ``(total - free) - budget`` cannot tell those apart in either
-        direction. Using it would reject a card that recovers while admitting one
-        that does not, which is worse than not filtering at all. A gang blocked
-        by memory outside this run therefore waits; see the progress conditions
-        on ``_select_launches``.
+        direction. A filter built on it would reject a card that recovers, and a
+        rejection here is permanent by construction.
+
+        That reasoning bars it from the FILTER, not from the ordering. See
+        ``_usable_now``, which consults exactly that quantity to rank candidates
+        the filter has already admitted: a misjudgement there costs a card its
+        place in a list that is rebuilt next pass, never its candidacy.
         """
         return gpu_states[gi].total_gib >= required
+
+    def _usable_now(gi: int, required: float) -> bool:
+        """Could ``gi`` host a member *today*, discounting only what we cannot free?
+
+        ``_can_ever_host`` asks about the card; this asks about the card as it
+        stands. Budget we committed ourselves is excluded from the judgement
+        because our own tests end -- what remains, ``total - free - budget``, is
+        somebody else's and may not. Note the two cancel exactly against this
+        pass's tentative launches, so the answer does not drift as the pass
+        fills.
+
+        A card that fails this is never rejected, only outranked. That is the
+        whole distinction from the filter above: foreign memory is a fact about
+        right now, and the ordering is rebuilt from scratch on every pass.
+        """
+        ts = tentative[gi]
+        foreign_held = max(0.0, gpu_states[gi].total_gib - ts.free - ts.budget)
+        return gpu_states[gi].total_gib - foreign_held >= required
 
     for idx, test in enumerate(pending):
         if running_count + len(to_launch) >= num_slots:
@@ -706,9 +730,36 @@ def _select_launches(
                 gi for gi in unreserved if _can_ever_host(gi, test.profiled_gib)
             ]
         if len(unreserved) >= need:
-            unreserved.sort(
-                key=lambda gi: (-(_cap(gi) - tentative[gi].budget), rank[gi])
-            )
+            if need > 1:
+                # Headroom alone is the wrong key, for the same reason it was the
+                # wrong key before the size filter: an IDLE card scores its whole
+                # capacity, so a card sitting under somebody else's 4.5 GiB still
+                # scores a perfect 10.0 and takes a protector slot off a card
+                # that is genuinely free. Size is permanent and belongs in the
+                # filter; foreign memory is a fact about right now and belongs
+                # here, as a preference, where being wrong costs a card its place
+                # in a list rebuilt next pass rather than its candidacy. Cards
+                # that could host a member today therefore sort ahead of cards
+                # that could not, and headroom breaks ties within each group.
+                #
+                # It cannot manufacture capacity: when fewer than `need` cards
+                # are usable the gang waits, which is correct -- but it holds the
+                # ones that came back, so it launches on the pass they do.
+                req = test.profiled_gib
+
+                def _hold_key(gi: int) -> tuple[bool, float, int]:
+                    return (
+                        not _usable_now(gi, req),
+                        -(_cap(gi) - tentative[gi].budget),
+                        rank[gi],
+                    )
+
+                unreserved.sort(key=_hold_key)
+            else:
+                # gpu_1 keeps the upstream ordering, bit for bit.
+                unreserved.sort(
+                    key=lambda gi: (-(_cap(gi) - tentative[gi].budget), rank[gi])
+                )
             for gi in unreserved[:need]:
                 reserved_req[gi] = test.profiled_gib
                 backfill_added[gi] = 0.0
