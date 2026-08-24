@@ -17,6 +17,11 @@ metadata:
 
 # Consult Performance Knowledge
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 Turn the current audited performance finding into one documented configuration proposal. Write the reasoning record;
 do not edit a deployment manifest, deploy anything, or run AIPerf.
 

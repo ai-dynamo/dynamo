@@ -64,8 +64,13 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     tcp_tls_cert_path: Optional[str] = None
     tcp_tls_key_path: Optional[str] = None
     tcp_tls_ca_cert_path: Optional[str] = None
+    tcp_tls_client_cert_path: Optional[str] = None
+    tcp_tls_client_key_path: Optional[str] = None
+    tcp_tls_client_ca_cert_path: Optional[str] = None
     nats_tls_ca_cert_path: Optional[str] = None
     nats_tls_insecure: bool = False
+    nats_tls_client_cert_path: Optional[str] = None
+    nats_tls_client_key_path: Optional[str] = None
 
     namespace: Optional[str] = None
     namespace_prefix: Optional[str] = None
@@ -317,6 +322,31 @@ class FrontendArgGroup(ArgGroup):
 
         add_argument(
             g,
+            flag_name="--tcp-tls-client-cert-path",
+            env_var="DYN_TCP_TLS_CLIENT_CERT_PATH",
+            default=None,
+            help="Path to PEM client certificate presented to the TCP server for mTLS.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-client-key-path",
+            env_var="DYN_TCP_TLS_CLIENT_KEY_PATH",
+            default=None,
+            help="Path to PEM private key for the TCP client certificate (mTLS).",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-client-ca-cert-path",
+            env_var="DYN_TCP_TLS_CLIENT_CA_CERT_PATH",
+            default=None,
+            help="Path to PEM CA certificate the TCP server uses to verify client "
+            "certificates. When set, clients must present a trusted certificate (mTLS enforced).",
+        )
+
+        add_argument(
+            g,
             flag_name="--nats-tls-ca-cert-path",
             env_var="NATS_TLS_CA_CERT_PATH",
             default=None,
@@ -329,6 +359,22 @@ class FrontendArgGroup(ArgGroup):
             env_var="NATS_TLS_INSECURE",
             default=False,
             help="Disable NATS TLS certificate verification. For local development only.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--nats-tls-client-cert-path",
+            env_var="NATS_TLS_CLIENT_CERT_PATH",
+            default=None,
+            help="Path to PEM client certificate presented to the NATS server for mTLS.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--nats-tls-client-key-path",
+            env_var="NATS_TLS_CLIENT_KEY_PATH",
+            default=None,
+            help="Path to PEM private key for the NATS client certificate (mTLS).",
         )
 
         # Router options (shared with dynamo.router)
