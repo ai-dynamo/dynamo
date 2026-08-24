@@ -15,11 +15,11 @@
 #
 # AIPerf trace-replay benchmark for DeepSeek-V4-Pro-0813 DGDs.
 #
-# One Job covers the aggregated and disaggregated GB200 agentic variants. Edit
-# ENDPOINT and CONCURRENCY below to select a DGD. Restart the DGD pods between
-# independent concurrency points so vLLM and Dynamo routing state are reset.
+# Runs the aggregated GB200 agentic variant. Edit CONCURRENCY below to select an
+# operating point. Restart the DGD pods between independent concurrency points so
+# vLLM and Dynamo routing state are reset.
 #
-# Reported points: aggregated c64, disaggregated c18.
+# Reported point: aggregated c8 (SLA knee).
 #
 # Prerequisites:
 # - Target DGD is Ready (see ../README.md)
@@ -58,7 +58,6 @@ spec:
                 operator: In
                 values:
                 - dsv4-pro-0813-agg-gb200-agentic
-                - dsv4-pro-0813-disagg-gb200-agentic
             topologyKey: kubernetes.io/hostname
       # tolerations: # Uncomment and populate for tainted frontend nodes.
       containers:
@@ -185,15 +184,13 @@ spec:
           echo ""
           echo "Done. Root: ${ROOT_DIR}"
         env:
-        # --- Edit ENDPOINT and CONCURRENCY to target aggregated or disaggregated. ---
-        # aggregated:    dsv4-pro-0813-agg-gb200-agentic-frontend:8000    CONCURRENCY 64
-        # disaggregated: dsv4-pro-0813-disagg-gb200-agentic-frontend:8000 CONCURRENCY 18
+        # --- Aggregated GB200 agentic. SLA knee is CONCURRENCY 8. ---
         - name: ENDPOINT
           value: dsv4-pro-0813-agg-gb200-agentic-frontend:8000
         - name: TRACE_FILE
           value: /model-cache/traces/mooncake_agentic.jsonl
         - name: CONCURRENCY
-          value: "64"
+          value: "8"
         # --- The remainder is shared across both variants. ---
         - name: TARGET_MODEL
           value: deepseek-ai/DeepSeek-V4-Pro-0813

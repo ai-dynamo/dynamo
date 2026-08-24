@@ -14,13 +14,11 @@ model on the frontend, runs a short warmup, replays the configured trace at one
 
 | Profile | `ENDPOINT` |
 | --- | --- |
-| Aggregated (tp2 + DSpark) | `dsv4-pro-0813-agg-gb200-agentic-frontend:8000` |
-| Disaggregated (1P2D)   | `dsv4-pro-0813-disagg-gb200-agentic-frontend:8000` |
+| Aggregated (TP8 + DSpark) | `dsv4-pro-0813-agg-gb200-agentic-frontend:8000` |
 
-Both serve `deepseek-ai/DeepSeek-V4-Pro-0813`. Deploy from
-[`../vllm/agg-gb200-agentic/deploy.yaml`](../vllm/agg-gb200-agentic/deploy.yaml) or
-[`../vllm/disagg-gb200-agentic/deploy.yaml`](../vllm/disagg-gb200-agentic/deploy.yaml) (see
-the recipe [README](../README.md)).
+It serves `deepseek-ai/DeepSeek-V4-Pro-0813`. Deploy from
+[`../vllm/agg-gb200-agentic/deploy.yaml`](../vllm/agg-gb200-agentic/deploy.yaml) (see
+the recipe [README](../README.md)). A disaggregated profile is not published yet.
 
 ## Dataset
 
@@ -79,8 +77,8 @@ Keep `pvc-helper` around for fetching artifacts later, or
 
 ### 3. Run AIPerf
 
-`perf.yaml` in this directory runs the replay as a Job. Edit `ENDPOINT` and `CONCURRENCY`
-to select a variant — aggregated at c64, disaggregated at c18 — then:
+`perf.yaml` in this directory runs the replay as a Job. Edit `CONCURRENCY` to select the
+operating point — aggregated is at its SLA knee at c8 — then:
 
 ```bash
 kubectl apply -f recipes/deepseek-v4-pro-0813/perf/perf.yaml -n ${NAMESPACE}
@@ -122,7 +120,7 @@ Run one `CONCURRENCY` at a time; reset vLLM KV and Dynamo router state between i
 runs by restarting the DGD pods:
 
 ```bash
-DGD=dsv4-pro-0813-agg-gb200-agentic # or dsv4-pro-0813-disagg-gb200-agentic
+DGD=dsv4-pro-0813-agg-gb200-agentic
 kubectl delete pods -n ${NAMESPACE} -l nvidia.com/dynamo-graph-deployment-name=${DGD}
 kubectl wait --for=condition=Ready pod -n ${NAMESPACE} \
   -l nvidia.com/dynamo-graph-deployment-name=${DGD} --timeout=7200s
