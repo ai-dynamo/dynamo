@@ -90,7 +90,6 @@ pub struct KvStateAttachmentStatus {
     pub generation: u64,
     pub worker: WorkerWithDpRank,
     pub ready: bool,
-    pub cache_readable: bool,
     pub ready_at_outbound_cursor: u64,
 }
 
@@ -180,7 +179,13 @@ pub enum WorkerKvQueryResponse {
         events: Vec<RouterEvent>,
         last_event_id: u64,
     },
-    /// Full tree dump (with synthetic 0-indexed event IDs).
+    /// Full replay-ordered tree dump (with synthetic 0-indexed event IDs).
+    ///
+    /// Parent-addressed stored events appear after the event that introduces their parent.
+    /// Consumers may therefore rebuild exact source state in one pass. Indexers that describe
+    /// state positionally may use `start_position`; consumers that require parent-addressed
+    /// replay must reject unsupported non-zero orphan positions rather than treating them as
+    /// independent roots.
     /// Includes `last_event_id`: the newest real event ID in the worker's buffer
     /// at the time of the dump, so the caller can set its tracking cursor correctly.
     TreeDump {

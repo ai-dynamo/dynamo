@@ -8,8 +8,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
 from aisimulate.sweeper.provider import (
     AdapterReplaySpec,
     AdapterSearchPlan,
@@ -19,6 +17,7 @@ from aisimulate.sweeper.provider import (
     SearchSpaceFragment,
     SweepContext,
 )
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 _PROVIDER_API_VERSION = 1
 _ROUTER_HOOK_API_VERSION = 1

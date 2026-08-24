@@ -8,8 +8,16 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-import msgspec
 import pytest
+from _deps import HAS_GMS
+
+if not HAS_GMS:
+    pytest.skip(
+        "gpu_memory_service package is not available in this test image",
+        allow_module_level=True,
+    )
+
+import msgspec
 from _fake_vmm import FakeVMM
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.snapshot import disk as snapshot_disk
