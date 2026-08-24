@@ -159,9 +159,13 @@ def test_public_router_validation_is_owned_by_dynamo_adapter() -> None:
         "policy": "round_robin",
         "prefill_load_model": {"type": "none"},
     }
-    assert adapter.validate_recommendation_config({}, recommendation_context) == {
-        "policy": {"choices": ["round_robin", "kv_router"]}
-    }
+    recommendation = adapter.validate_recommendation_config({}, recommendation_context)
+    assert recommendation == {"policy": {"choices": ["round_robin", "kv_router"]}}
+    plan = adapter.generate_search_space(recommendation, _sweep_context())
+    assert plan.fragment.choices_by_branch["agg"]["mode"] == [
+        "round_robin",
+        "kv_router",
+    ]
 
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         adapter.validate_prediction_config(

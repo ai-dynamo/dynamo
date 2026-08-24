@@ -555,9 +555,15 @@ def test_public_planner_validation_is_owned_by_dynamo_adapter() -> None:
     assert adapter.validate_prediction_config({}, prediction_context) == {
         "policy": "disabled"
     }
-    assert adapter.validate_recommendation_config({}, recommendation_context)[
-        "policy"
-    ] == {"choices": ["disabled", "enabled"]}
+    recommendation = adapter.validate_recommendation_config({}, recommendation_context)
+    assert recommendation["policy"] == {"choices": ["disabled", "enabled"]}
+    plan = adapter.generate_search_space(
+        recommendation, _sweep_context(target="throughput")
+    )
+    assert plan.fragment.choices_by_branch["agg"]["policy"] == [
+        "disabled",
+        "enabled",
+    ]
 
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         adapter.validate_prediction_config(
