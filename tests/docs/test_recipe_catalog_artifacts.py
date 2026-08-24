@@ -385,6 +385,42 @@ def test_recipe_image_validation_rejects_overlapping_effective_periods() -> None
     )
 
 
+def test_recipe_image_validation_rejects_same_start_overlapping_periods() -> None:
+    image = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-overlap-dev.1"
+    entries = {
+        "recipe-a": {
+            "artifacts": {
+                "recipe_specific_image_periods": [
+                    {
+                        "image": image,
+                        "effective_from": "2026-01-01",
+                        "source_revision": "a" * 40,
+                    }
+                ],
+            }
+        },
+        "recipe-b": {
+            "artifacts": {
+                "recipe_specific_image_periods": [
+                    {
+                        "image": image,
+                        "effective_from": "2026-01-01",
+                        "effective_to": "2026-02-01",
+                        "source_revision": "b" * 40,
+                    }
+                ],
+            }
+        },
+    }
+    catalog_validate.ERRORS.clear()
+
+    catalog_validate.check_recipe_specific_image_ownership(entries)
+
+    assert any(
+        "overlapping ownership periods" in error for error in catalog_validate.ERRORS
+    )
+
+
 def test_recipe_image_validation_rejects_invalid_calendar_date() -> None:
     artifacts = {
         "recipe_specific_images": [

@@ -238,7 +238,7 @@ def _entry_ownership(recipe_id, obj):
 
 def _overlap_errors(image, periods):
     errors = []
-    ordered = sorted(periods)
+    ordered = sorted(periods, key=lambda p: (p[0], p[1] or "9999-12-31", p[2]))
     for index, (start, end, recipe_id) in enumerate(ordered):
         upper = end if isinstance(end, str) else "9999-12-31"
         for other_start, other_end, other_recipe_id in ordered[index + 1 :]:
