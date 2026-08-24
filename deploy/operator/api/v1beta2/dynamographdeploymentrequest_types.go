@@ -247,6 +247,7 @@ type ObjectiveSLASpec struct {
 
 // ObjectiveSpec defines scalar optimization or a multi-objective Pareto search.
 // +kubebuilder:validation:XValidation:rule="(self.mode == 'optimize' && has(self.metric) && !has(self.metrics)) || (self.mode == 'pareto' && !has(self.metric))",message="optimize requires metric; pareto accepts only metrics"
+// +kubebuilder:validation:XValidation:rule="!has(self.metrics) || self.metrics.all(m, self.metrics.filter(x, x == m).size() == 1)",message="metrics must be unique"
 type ObjectiveSpec struct {
 	// Mode is optimize or pareto.
 	Mode ObjectiveMode `json:"mode"`
@@ -259,7 +260,6 @@ type ObjectiveSpec struct {
 	// its default pair when omitted.
 	// +optional
 	// +kubebuilder:validation:MinItems=2
-	// +kubebuilder:validation:UniqueItems=true
 	Metrics []ObjectiveMetric `json:"metrics,omitempty"`
 
 	// SLA defines per-request latency bounds used to calculate goodput.
@@ -331,13 +331,13 @@ type OverridesSpec struct {
 }
 
 // DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
+// +kubebuilder:validation:XValidation:rule="self.backends.all(b, self.backends.filter(x, x == b).size() == 1)",message="backends must be unique"
 type DynamoGraphDeploymentRequestSpec struct {
 	// ModelRef identifies the model whose deployment configurations are evaluated.
 	ModelRef ModelReference `json:"modelRef"`
 
 	// Backends lists one or more inference backends searched by Sweeper and used by generated candidates.
 	// +kubebuilder:validation:MinItems=1
-	// +kubebuilder:validation:UniqueItems=true
 	Backends []Backend `json:"backends"`
 
 	// Image is the versioned container image used by the controller-generated search Job.
