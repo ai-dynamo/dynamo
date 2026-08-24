@@ -118,6 +118,7 @@ ignore:
   - '.github/dco.yml'
   - '.github/secret_scanning.yml'
   - '.github/allurerc.mjs'
+  - '.github/actionlint.yaml'
   - 'container/Dockerfile.docs'
   - 'container/run.sh'
   - 'container/use-sccache.sh'

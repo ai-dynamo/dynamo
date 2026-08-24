@@ -369,46 +369,28 @@ impl TcpStreamServer {
     }
 
     /// Build a TLS acceptor from env vars if `DYN_TCP_TLS_CERT_PATH` and
-    /// `DYN_TCP_TLS_KEY_PATH` are set.
-    fn build_tls_acceptor() -> anyhow::Result<Option<Arc<TlsAcceptor>>> {
+    /// `DYN_TCP_TLS_KEY_PATH` are set. Validation and diagnostics are shared with
+    /// the request-plane server via
+    /// [`crate::tls_utils::server_tls_acceptor_config`]; a client CA enables mTLS.
+    fn build_tls_acceptor() -> anyhow::Result<Option<TlsAcceptor>> {
         use crate::config::environment_names::tcp_response_stream::tls as env;
         let cert_path = std::env::var(env::DYN_TCP_TLS_CERT_PATH).ok();
         let key_path = std::env::var(env::DYN_TCP_TLS_KEY_PATH).ok();
-        match (cert_path, key_path) {
-            (Some(cert), Some(key)) => {
-                let server_config =
-                    crate::tls_utils::server_tls_config(cert.as_ref(), key.as_ref())?;
-                tracing::info!("TCP server: TLS enabled");
-                Ok(Some(Arc::new(TlsAcceptor::from(Arc::new(server_config)))))
-            }
-            (None, None) => {
-                // Warn if the client side has TLS configured — mixing plaintext server with
-                // TLS client (or vice versa) results in failed connections that are hard to debug.
-                let client_tls_set = std::env::var(env::DYN_TCP_TLS_CA_CERT_PATH).is_ok()
-                    || crate::config::env_is_truthy(env::DYN_TCP_TLS_INSECURE);
-                if client_tls_set {
-                    tracing::warn!(
-                        "TCP server is running in plaintext mode but client TLS env vars are set. \
-                         Set {} and {} to enable server-side TLS, or unset client TLS vars.",
-                        env::DYN_TCP_TLS_CERT_PATH,
-                        env::DYN_TCP_TLS_KEY_PATH,
-                    );
-                }
-                Ok(None)
-            }
-            _ => anyhow::bail!(
-                "Both {} and {} must be set to enable TCP TLS",
-                env::DYN_TCP_TLS_CERT_PATH,
-                env::DYN_TCP_TLS_KEY_PATH
-            ),
-        }
+        let client_ca = std::env::var(env::DYN_TCP_TLS_CLIENT_CA_CERT_PATH).ok();
+        Ok(crate::tls_utils::server_tls_acceptor_config(
+            "TCP server",
+            cert_path.as_deref().map(std::path::Path::new),
+            key_path.as_deref().map(std::path::Path::new),
+            client_ca.as_deref().map(std::path::Path::new),
+        )?
+        .map(|config| TlsAcceptor::from(Arc::new(config))))
     }
 
     async fn start(
         local_ip: String,
         local_port: u16,
         state: Arc<Mutex<State>>,
-        tls_acceptor: Option<Arc<TlsAcceptor>>,
+        tls_acceptor: Option<TlsAcceptor>,
     ) -> Result<u16> {
         let addr = format!("{}:{}", local_ip, local_port);
         let state_clone = state.clone();
@@ -789,7 +771,7 @@ type BoxWrite = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
 async fn tcp_listener(
     addr: String,
     state: Arc<Mutex<State>>,
-    tls_acceptor: Option<Arc<TlsAcceptor>>,
+    tls_acceptor: Option<TlsAcceptor>,
     read_tx: tokio::sync::oneshot::Sender<Result<u16>>,
 ) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -1363,9 +1345,18 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_no_env_vars_is_plaintext() {
-        temp_env::with_vars_unset(["DYN_TCP_TLS_CERT_PATH", "DYN_TCP_TLS_KEY_PATH"], || {
-            assert!(TcpStreamServer::build_tls_acceptor().unwrap().is_none());
-        });
+        // Also clear the client-CA var: ambient it would turn this into an error
+        // (client CA without a server cert/key) instead of plaintext.
+        temp_env::with_vars_unset(
+            [
+                "DYN_TCP_TLS_CERT_PATH",
+                "DYN_TCP_TLS_KEY_PATH",
+                "DYN_TCP_TLS_CLIENT_CA_CERT_PATH",
+            ],
+            || {
+                assert!(TcpStreamServer::build_tls_acceptor().unwrap().is_none());
+            },
+        );
     }
 
     #[test]
@@ -1400,6 +1391,39 @@ mod tests {
                 ("DYN_TCP_TLS_KEY_PATH", Some(key.path().to_str().unwrap())),
             ],
             || assert!(TcpStreamServer::build_tls_acceptor().unwrap().is_some()),
+        );
+    }
+
+    #[test]
+    fn build_tls_acceptor_with_client_ca_is_mtls() {
+        // A client CA turns the response-stream server into an mTLS acceptor.
+        let (cert, key) = make_cert_files();
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", Some(cert.path().to_str().unwrap())),
+                ("DYN_TCP_TLS_KEY_PATH", Some(key.path().to_str().unwrap())),
+                (
+                    "DYN_TCP_TLS_CLIENT_CA_CERT_PATH",
+                    Some(cert.path().to_str().unwrap()),
+                ),
+            ],
+            || assert!(TcpStreamServer::build_tls_acceptor().unwrap().is_some()),
+        );
+    }
+
+    #[test]
+    fn build_tls_acceptor_client_ca_without_server_identity_errors() {
+        let (cert, _key) = make_cert_files();
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", None),
+                ("DYN_TCP_TLS_KEY_PATH", None),
+                (
+                    "DYN_TCP_TLS_CLIENT_CA_CERT_PATH",
+                    Some(cert.path().to_str().unwrap()),
+                ),
+            ],
+            || assert!(TcpStreamServer::build_tls_acceptor().is_err()),
         );
     }
 
