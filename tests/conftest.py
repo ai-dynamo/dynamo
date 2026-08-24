@@ -670,7 +670,9 @@ def pytest_collection_modifyitems(config, items):
         if importlib.util.find_spec(module_name) is None:
             skip = pytest.mark.skip(reason=f"{module_name} is not installed")
             for item in items:
-                if _item_has_marker(item, marker_name):
+                if _item_has_marker(item, marker_name) and not _item_has_marker(
+                    item, "k8s"
+                ):
                     item.add_marker(skip)
 
     # Deselect tests based on --max-vram-gib:

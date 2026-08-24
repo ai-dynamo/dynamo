@@ -130,6 +130,76 @@ In addition to process and pod failures, the suite includes tests for **token ov
 
 The combined results of these two phases demonstrate both the system's ability to reject invalid inputs and its stability after handling them.
 
+#### TRT-LLM Cancellation Burst Recovery Tests
+
+The TRT-LLM cancellation burst recovery test targets a production failure mode
+where the deployment looks healthy from the outside, but has quietly stopped
+serving generation work. In that state pods are running, ports are open, and
+`/live` and `/health` can still return 200, while fresh inference requests time
+out until the worker is restarted.
+
+Unlike process or pod termination tests, this scenario injects pressure from the
+client side. AI-Perf drives concurrent long-prompt load, cancels a burst of
+in-flight streaming requests, and then sends a fresh non-cancelled probe request
+set.
+
+| Coverage Area | Test Behavior | Pass/Fail Oracle |
+|----------------|---------------|------------------|
+| Burst cancellation pressure | Concurrent long-prompt requests are cancelled during generation. | Raw `profile_export.jsonl` records must show cancelled requests. |
+| Post-fault serving recovery | A separate fresh probe runs after the cancellation burst. | Fresh probe records must complete successfully with no timeout/error records. |
+| Health-check false positives | `/health` is checked, but not treated as sufficient. | Real post-burst generation is required even if health endpoints are green. |
+| Slow creep coverage | `--set profile=soak` repeats the pressure, cancellation, and recovery sequence. | Each cycle must drain visible in-flight work and complete the fresh probe. |
+| Diagnostics | Frontend and TRT-LLM worker metrics are saved for each phase. | Public `trtllm_*` metrics must be present; hidden allocator counters are not required. |
+
+| Topology | Template | Worker Services | Purpose |
+|----------|----------|-----------------|---------|
+| Aggregated | `templates/trtllm/agg_cancel_burst_recovery.yaml` | `TRTLLMWorker` | Covers the general long-prompt cancellation wedge symptom. |
+| Disaggregated | `templates/trtllm/disagg_cancel_burst_recovery.yaml` | `prefill`, `decode` | Covers the same recovery oracle in the prefill/decode KV-transfer topology. |
+
+Raw AI-Perf request records are mandatory for CI. If the fresh probe times out or
+AI-Perf fails to emit per-request records, the test fails deterministically even
+when aggregate AI-Perf summary files are missing.
+
+| Caveat | Scope |
+|--------|-------|
+| Exact root-cause attribution | This test catches the externally visible wedge symptom, but does not prove the hidden TRT-LLM KV, bootstrap, or block allocator root cause. That still needs internal counters or fixed-image comparison. |
+
+Run the default burst recovery profile:
+
+```bash
+pytest tests/fault_tolerance/deploy/test_trtllm_cancel_burst_recovery.py -s -v \
+  --namespace ${NAMESPACE} \
+  --image ${TRTLLM_RUNTIME_IMAGE}
+```
+
+Run only the disaggregated topology:
+
+```bash
+pytest tests/fault_tolerance/deploy/test_trtllm_cancel_burst_recovery.py::test_trtllm_cancel_burst_recovery[disagg] -s -v \
+  --namespace ${NAMESPACE} \
+  --image ${TRTLLM_RUNTIME_IMAGE}
+```
+
+Run the soak profile:
+
+```bash
+pytest tests/fault_tolerance/deploy/test_trtllm_cancel_burst_recovery.py -s -v \
+  --namespace ${NAMESPACE} \
+  --image ${TRTLLM_RUNTIME_IMAGE} \
+  --set profile=soak
+```
+
+Validate the fresh-probe oracle with debug-only timeout record injection. This
+mode is expected to fail after preserving the real fresh-probe raw records as
+`profile_export.before_debug_injection.jsonl`:
+
+```bash
+pytest tests/fault_tolerance/deploy/test_trtllm_cancel_burst_recovery.py::test_trtllm_cancel_burst_recovery[agg] -s -v \
+  --namespace ${NAMESPACE} \
+  --image ${TRTLLM_RUNTIME_IMAGE} \
+  --set debug_fresh_probe_failure=timeout_records
+```
+
 #### Example Scenario Breakdown
 
 **Scenario**: `sglang-agg-tp-2-dp-1-decode_worker`
@@ -164,11 +234,12 @@ test_fault_scenario[sglang-agg-tp-1-dp-1-frontend]
 .
 ├── client_0/
 │   └── attempt_0/
-│       ├── profile_export_aiperf.json    # AI-Perf metrics in JSON format
-│       ├── profile_export_aiperf.csv     # AI-Perf metrics in CSV format
-│       ├── genai_perf.log                # AI-Perf execution log
+│       ├── profile_export.jsonl          # Raw per-request AI-Perf records
+│       ├── profile_export_aiperf.json    # Aggregate AI-Perf metrics in JSON format, when emitted
+│       ├── profile_export_aiperf.csv     # Aggregate AI-Perf metrics in CSV format, when emitted
+│       ├── genai_perf.log                # AI-Perf stdout/stderr; legacy filename
 │       └── logs/
-│           └── aiperf.log                # Detailed AI-Perf logs
+│           └── aiperf.log                # Detailed AI-Perf logs, when emitted
 ├── client_1/
 │   ├── attempt_0/                        # First attempt (may fail during fault)
 │   └── attempt_1/                        # Retry attempt after failure
@@ -187,9 +258,10 @@ test_fault_scenario[sglang-agg-tp-1-dp-1-frontend]
 | File/Directory Name                | Description                                                                                      |
 |------------------------------------|------------------------------------------------------------------------------------------------|
 | **client_N/attempt_M/**            | AI-Perf results for client N, attempt M (supports multiple retry attempts)                      |
-| **profile_export_aiperf.json**     | Complete AI-Perf metrics including latencies (P50/P90/P99), throughput, token counts           |
-| **profile_export_aiperf.csv**      | Tabular format of key metrics for easy analysis                                                |
-| **genai_perf.log**                 | AI-Perf execution output (stdout/stderr)                                                       |
+| **profile_export.jsonl**           | Raw per-request AI-Perf records; mandatory for tests that validate individual request outcomes |
+| **profile_export_aiperf.json**     | Aggregate AI-Perf metrics including latencies (P50/P90/P99), throughput, token counts, when emitted |
+| **profile_export_aiperf.csv**      | Tabular aggregate metrics for easy analysis, when emitted                                      |
+| **genai_perf.log**                 | AI-Perf execution output (stdout/stderr); the filename is retained for compatibility with older tooling |
 | **{Service}/*.log**                | Current container log for pod (Frontend, decode, etc.)                                         |
 | **{Service}/*.previous.log**       | Previous container log before restart (contains pre-fault logs)                                |
 | **{Service}/*.metrics.log**        | Prometheus metrics from `/metrics` endpoint                                                    |
