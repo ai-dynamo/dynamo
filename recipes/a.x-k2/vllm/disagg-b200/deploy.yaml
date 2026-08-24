@@ -105,6 +105,8 @@ spec:
                   value: /models/runtime-cache/axk2-nvfp4/flashinfer
                 - name: VLLM_USE_FLASHINFER_MOE_FP4
                   value: "1"
+                - name: VLLM_OMNI_USE_QUACK_FP8
+                  value: "0"
                 - name: FLASHINFER_DISABLE_VERSION_CHECK
                   value: "1"
                 - name: VLLM_SKIP_P2P_CHECK
@@ -215,6 +217,8 @@ spec:
                   value: /models/runtime-cache/axk2-nvfp4/flashinfer
                 - name: VLLM_USE_FLASHINFER_MOE_FP4
                   value: "1"
+                - name: VLLM_OMNI_USE_QUACK_FP8
+                  value: "0"
                 - name: FLASHINFER_DISABLE_VERSION_CHECK
                   value: "1"
                 - name: VLLM_SKIP_P2P_CHECK
