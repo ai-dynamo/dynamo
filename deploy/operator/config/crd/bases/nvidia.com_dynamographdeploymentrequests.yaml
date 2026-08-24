@@ -9522,6 +9522,7 @@ spec:
                       - sglang
                       - trtllm
                     type: string
+                  maxItems: 3
                   minItems: 1
                   type: array
                 hardware:
@@ -9625,6 +9626,7 @@ spec:
                           - goodput
                           - goodputPerGpu
                         type: string
+                      maxItems: 6
                       minItems: 2
                       type: array
                     mode:
