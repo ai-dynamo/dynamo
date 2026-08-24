@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Documentation Style Guide
-subtitle: How to write and structure Dynamo docs, examples, and recipes
+subtitle: How to write and structure Dynamo docs and examples
 ---
 
 This is the documentation standard for NVIDIA Dynamo. Follow it for every page under `docs/`, and for
-the READMEs and configuration under `examples/` and `recipes/`. Consistent structure, accurate
+the READMEs and configuration under `examples/`, including
+[`examples/deployments/kubernetes`](https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/kubernetes).
+Consistent structure, accurate
 cross-references, and plain technical prose keep the docs usable across both the Fern-published site
 and GitHub.
 
@@ -274,7 +276,7 @@ Link targets are handled differently depending on whether they live inside `docs
   `[Routing Concepts](router-concepts.md)` or `[Deployment](../kubernetes/quickstart.mdx)`. Fern resolves
   these to published-site URLs. Don't hardcode `https://docs.nvidia.com/...` links to pages in this
   repo.
-- **Outside `docs/`** (examples, recipes, source, `container/`, sibling repos): an **absolute GitHub
+- **Outside `docs/`** (examples, source, `container/`, sibling repos): an **absolute GitHub
   URL** like `https://github.com/ai-dynamo/dynamo/blob/main/<path>` (use `/tree/main/` for a
   directory). A relative `../` path that escapes `docs/` (e.g. `../../../../examples/...`) breaks on
   the published site and after version path-rewrites, so don't use it.
@@ -365,23 +367,20 @@ Author source pages under `docs/fern/`. Use the lightest format that supports th
 - Don't duplicate content across pages; link the canonical page. Prefer extending an existing page
   over adding a new file.
 
-## Examples and recipes
+## Examples
 
 - **Examples** (`examples/`): code-first, each in a topic directory with a `README.md`, surfaced
   from the relevant `docs/<area>/*-examples.md` page.
-- **Recipes** (`recipes/`): one `<model>/` directory each, with a `README.md`, `Dockerfile`, and
-  configs. Add every new recipe to the **Available Recipes** table in `recipes/README.md`.
 - Their READMEs use the HTML-comment SPDX form (no frontmatter).
 
 ## Pre-merge checklist
 
-These are checked automatically on every docs/examples/recipes pull request; resolve each before
+These are checked automatically on every docs/examples pull request; resolve each before
 merge:
 
 - [ ] SPDX header present, correct form for the file type, `2025-2026` range
 - [ ] No body `# H1` (Fern renders the title from the nav `page:`); frontmatter has SPDX + at least one key (`title`/`subtitle`/`sidebar-title`)
-- [ ] New, moved, or deleted page reflected in the right index (`docs/fern/index.yml`, `*-examples.md`, or
-      `recipes/README.md`)
+- [ ] New, moved, or deleted page reflected in the right index (`docs/fern/index.yml` or `*-examples.md`)
 - [ ] Links: relative + extension within docs, absolute GitHub URL outside docs (no `../` escapes);
       link text describes the destination; every internal link and `#anchor` resolves
 - [ ] Code fences language-tagged, no shell prompts, output in `text`; admonitions match the source

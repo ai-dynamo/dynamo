@@ -3,9 +3,9 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Agent instructions — docs, examples, recipes
+# Agent instructions — docs and examples
 
-When creating or editing files under `docs/`, `examples/`, or `recipes/`, follow the
+When creating or editing files under `docs/` or `examples/`, follow the
 [documentation style guide](pages/community/contributing/documentation/documentation-style-guide.md). Non-negotiables:
 
 - SPDX header on every file: frontmatter `#` form for Fern docs, `<!-- -->` for plain READMEs,

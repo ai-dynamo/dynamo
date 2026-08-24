@@ -188,15 +188,7 @@ spec:
   autoApply: true
 ```
 
-Pre-built recipes for common models:
-
-| Model | Framework | Mode | Recipe |
-|-------|-----------|------|--------|
-| Llama-3-70B | vLLM | Aggregated | [View](recipes/llama-3-70b/vllm/) |
-| DeepSeek-R1 | SGLang | Disaggregated | [View](recipes/deepseek-r1/sglang/) |
-| Qwen3-32B-FP8 | TensorRT-LLM | Aggregated | [View](recipes/qwen3-32b-fp8/trtllm/) |
-
-See [recipes/](recipes/README.md) for the full list. Cloud-specific guides: [AWS EKS](docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/eks-setup.mdx) · [Google GKE](docs/fern/pages/kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx) · [Azure AKS](docs/fern/pages/kubernetes/installation/managed-kubernetes/azure/aks-setup.mdx) · [Amazon ECS](docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/ecs.mdx)
+Runnable backend and topology examples live in [examples/deployments/kubernetes](examples/deployments/kubernetes): vLLM, TensorRT-LLM, and SGLang aggregated and disaggregated serving, plus KV-cache offload, multimodal, and multinode deployments. Cloud-specific guides: [AWS EKS](docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/eks-setup.mdx) · [Google GKE](docs/fern/pages/kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx) · [Azure AKS](docs/fern/pages/kubernetes/installation/managed-kubernetes/azure/aks-setup.mdx) · [Amazon ECS](docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/ecs.mdx)
 
 ## Building from Source
 

@@ -280,11 +280,11 @@ template and adapt it:
 | [DGDR](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx) | You want Dynamo to generate a DGD from model, backend, hardware, and SLA intent. |
 | [Sizing with AIConfigurator](../../developer-guide/additional-resources/aiconfigurator-reference.md) | You want to compare aggregated vs. disaggregated layouts and estimate prefill/decode sizing first. |
 
-Good recipe starting points:
+Current deployment example starting points:
 
-- [Qwen3-32B vLLM disagg + KV router](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b)
-- [DeepSeek V3.2 TensorRT-LLM disagg + KV router](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v32-fp4)
-- [Llama 3 70B vLLM disaggregated recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b)
+- [Qwen3-32B-FP8 vLLM disaggregated serving](https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/kubernetes/llm/vllm/disaggregated-qwen3-32b-fp8)
+- [Qwen3-32B-FP8 TensorRT-LLM disaggregated serving](https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/kubernetes/llm/trtllm/disaggregated-qwen3-32b-fp8)
+- [Llama 3 70B vLLM multi-node disaggregated serving](https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/kubernetes/llm/vllm/multinode-disaggregated-llama-3-70b)
 
 Backend deployment examples with concrete worker flags:
 

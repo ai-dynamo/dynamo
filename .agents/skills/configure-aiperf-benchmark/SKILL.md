@@ -30,8 +30,8 @@ Read `agent-docs/rules/execution/user-workload.md`,
 `agent-docs/rules/benchmarking/evidence-eligibility.md`,
 `agent-docs/rules/benchmarking/proxy-workload-selection.md`, and
 `agent-docs/rules/benchmarking/series-boundaries.md` before selecting flags. Also read the user workload, deployment
-ledger, and the AIPerf documentation matching the pinned source or runtime. Inspect matching Dynamo recipe `perf.yaml`
-files when available.
+ledger, and the AIPerf documentation matching the pinned source or runtime. Inspect matching deployment-example
+`perf.yaml` files when available.
 
 ## Inputs
 
@@ -53,7 +53,7 @@ Require:
 4. Select workload input in this order:
    - user-provided Mooncake trace;
    - exact user-provided ISL/OSL and traffic controls;
-   - closest Dynamo recipe trace as a `recipe_proxy`.
+   - closest compatible deployment-example trace as a `recipe_proxy`.
 5. Validate a selected trace as JSONL. Record its path, SHA256, row count, timestamp range, ISL/OSL distribution,
    prefix/hash information, and any rows outside the served context limit. Do not silently filter or clip rows.
 6. Choose the experiment that best exposes the behavior under investigation:
@@ -106,7 +106,7 @@ The plan must identify:
 
 - `perf.yaml` is a Kubernetes Job, not the AIPerf-native config.
 - Run AIPerf inside the cluster and use the target context and namespace.
-- Prefer an existing compatible recipe Job as a starting point. Modify only the run-scoped copy.
+- Prefer an existing compatible deployment-example Job as a starting point. Modify only the run-scoped copy.
 - Enforce the 30-minute measurement limit with AIPerf workload controls. Do not rely only on a Kubernetes Job timeout.
 - Ensure raw artifacts remain available after Job completion, either on a PVC or in the completed pod until copied.
 - Read referenced secret names from existing manifests; never copy secret values into benchmark files.

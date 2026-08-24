@@ -116,7 +116,6 @@ COPY --chown=dynamo: benchmarks /workspace/benchmarks
 COPY --chown=dynamo: deploy /workspace/deploy
 COPY --chown=dynamo: dev /workspace/dev
 COPY --chown=dynamo: components/ /workspace/components/
-COPY --chown=dynamo: recipes/ /workspace/recipes/
 # Copy LICENSE; ATTRIBUTIONS files removed in favor of /legal/ generated at build time.
 COPY --chown=dynamo: LICENSE /workspace/
 

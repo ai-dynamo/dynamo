@@ -33,10 +33,6 @@ limitations under the License.
 
 # Dynamo
 
-<!-- TEMPORARY BANNER: remove once V4 recipes mature. -->
-> [!NOTE]
-> **DeepSeek-V4 首日配方已可用。** [DeepSeek-V4-Pro](recipes/deepseek-v4/deepseek-v4-pro/) 和 [DeepSeek-V4-Flash](recipes/deepseek-v4/deepseek-v4-flash/) 的 Kubernetes 部署路径已经过测试，并已在 **vLLM** 与 **SGLang** 两个后端合并到 main；预构建的 SGLang 容器镜像也已发布到 NGC。
-
 **开源的数据中心级推理栈。** Dynamo 是位于推理引擎之上的编排层。它不会取代 SGLang、TensorRT-LLM 或 vLLM，而是把它们组织成一个协同工作的多节点推理系统。分离式服务、智能路由、多层 KV 缓存和自动扩缩容协同工作，为 LLM、推理、多模态和视频生成工作负载最大化吞吐并最小化延迟。
 
 使用 Rust 构建以获得性能，使用 Python 扩展以获得灵活性。
@@ -160,15 +156,7 @@ spec:
   autoApply: true
 ```
 
-常见模型的预构建配方：
-
-| 模型 | 框架 | 模式 | 配方 |
-|------|------|------|------|
-| Llama-3-70B | vLLM | 聚合式 | [查看](recipes/llama-3-70b/vllm/) |
-| DeepSeek-R1 | SGLang | 分离式 | [查看](recipes/deepseek-r1/sglang/) |
-| Qwen3-32B-FP8 | TensorRT-LLM | 聚合式 | [查看](recipes/qwen3-32b-fp8/trtllm/) |
-
-完整列表见 [recipes/](recipes/README.md)。云平台专用指南：[AWS EKS](docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/eks-setup.mdx) · [Google GKE](docs/fern/pages/kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx) · [Azure AKS](docs/fern/pages/kubernetes/installation/managed-kubernetes/azure/aks-setup.mdx) · [Amazon ECS](docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/ecs.mdx)
+可运行的后端和拓扑示例位于 [examples/deployments/kubernetes](examples/deployments/kubernetes)：包含 vLLM、TensorRT-LLM 和 SGLang 的聚合式及分离式服务，以及 KV 缓存卸载、多模态和多节点部署。云平台专用指南：[AWS EKS](docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/eks-setup.mdx) · [Google GKE](docs/fern/pages/kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx) · [Azure AKS](docs/fern/pages/kubernetes/installation/managed-kubernetes/azure/aks-setup.mdx) · [Amazon ECS](docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/ecs.mdx)
 
 ## 从源码构建
 

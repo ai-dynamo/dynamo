@@ -47,10 +47,6 @@ versions:
     path: ./index.yml
 
 redirects:
-  # Recipe slug renamed to include -fp8 suffix to match HF model ID.
-  - source: "/dynamo/dev/recipes/qwen-3-8-2-4t-a95b"
-    destination: "/dynamo/dev/recipes/qwen-3-8-2-4t-a95b-fp8"
-
   # The per-class NIXL Connect pages were replaced by the generated Python API
   # reference, which covers the same classes from source plus seven more.
   # Keep their published URLs serving, anchored at the matching class.
@@ -596,7 +592,7 @@ redirects:
   # cross-version (latest / vX.Y.Z) redirects kept unchanged.
   # ------------------------------------------------------------
   - source: "/dynamo/dev/walkthroughs/overview"
-    destination: "/dynamo/dev/recipes/browse"
+    destination: "/dynamo/dev/recipes/kubernetes-templates/dgd/vllm"
   - source: "/dynamo/dev/cli/building-from-source"
     destination: "/dynamo/dev/advanced-customizations/building-from-source"
   - source: "/dynamo/dev/kubernetes/installation/managed-kubernetes/azure/spot-v-ms"
@@ -850,9 +846,9 @@ redirects:
   - source: "/dynamo/digest/:slug*"
     destination: "/dynamo/dev/digest/:slug*"
   - source: "/dynamo/recipes"
-    destination: "/dynamo/dev/recipes/browse"
+    destination: "/dynamo/dev/recipes/kubernetes-templates/dgd/vllm"
   - source: "/dynamo/recipes/:slug*"
-    destination: "/dynamo/dev/recipes/:slug*"
+    destination: "/dynamo/dev/recipes/kubernetes-templates/dgd/vllm"
   - source: "/dynamo/connect"
     destination: "/dynamo/dev/community"
   - source: "/dynamo/connect/:slug*"

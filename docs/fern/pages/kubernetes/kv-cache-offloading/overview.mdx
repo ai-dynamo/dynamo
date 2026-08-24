@@ -53,7 +53,7 @@ SGLang HiCache does not use the `--kv-transfer-config` connector mechanism. On a
 
 </Step>
 <Step title="Worked example: KVBM on a vLLM worker" id="worked-example-kvbm-on-a-vllm-worker">
-This aggregated Qwen3-32B worker offloads KV blocks to 100 GB of host memory. It is the worker section of the [agg-kvbm recipe](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3-32b/vllm/agg-kvbm/deploy.yaml):
+This aggregated Qwen3-32B worker offloads KV blocks to 100 GB of host memory. A maintained [KV-cache-offload deployment example](https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/kubernetes/llm/vllm/kv-cache-offload-qwen3-32b) provides the complete manifest set:
 
 ```yaml
 spec:

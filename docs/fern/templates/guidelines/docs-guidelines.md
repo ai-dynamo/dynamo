@@ -20,8 +20,8 @@ Give each page one primary reader goal.
 | Reference | Look up an exact field, flag, API, environment variable, or contract | Reference | [Writing Reference Pages](reference-pages.md) |
 | Home page | Understand what Dynamo is and choose the next action | Home | [Designing the Home Page](home-page.md) |
 | Blog post | Read a dated technical or project article | Blog | [Writing Blog Posts](blog-posts.md) |
-| Kubernetes manifest collection | Find and adapt ready-to-apply manifests | Recipes | [Kubernetes deployment template](../recipes/kubernetes-templates.mdx) |
-| Recipe or feature benchmark | Deploy a validated configuration or review measured evidence | Recipes | [Recipe and Feature Benchmark Authoring](../../pages/recipes/_catalog/README.md) |
+| Kubernetes manifest collection | Find and adapt ready-to-apply manifests | Kubernetes deployment examples | [Kubernetes deployment template](../recipes/kubernetes-templates.mdx) |
+| Feature benchmark | Review measured evidence and reproduce a benchmark | Feature Benchmarks | [Benchmarking guide](../../pages/recipes/feature-benchmarks/benchmarking-guide.md) |
 
 For custom layouts and styling, see [Site Design and Styling](site-design.md). For translated pages,
 see [Maintaining Translations](translations.md).
@@ -60,5 +60,5 @@ Match the source tree to the site structure:
 - Use nested directories for sidebar sections and topic groups.
 - Keep filenames aligned with page titles and URL slugs.
 - Do not use `README.md` as a published page name.
-- Keep canonical user documentation under `docs/`. A README beside code, an example, or a recipe
+- Keep canonical user documentation under `docs/`. A README beside code or an example
   should document that local artifact and link to the canonical documentation when appropriate.

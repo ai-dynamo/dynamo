@@ -446,69 +446,6 @@ navigation:
             path: pages/use-cases/tool-calling-and-reasoning/troubleshooting-tool-calls.md
   - tab: recipes
     layout:
-      # ==================== Model Recipes ====================
-      - section: Model Recipes
-        icon: file-code
-        skip-slug: true
-        contents:
-          - page: Overview
-            path: pages/recipes/model-recipes/overview.mdx
-            slug: browse
-          - page: Kimi-K3
-            path: pages/recipes/model-recipes/kimi-k3.mdx
-            slug: kimi-k3
-          - page: Qwen3.8-2.4T-A95B
-            path: pages/recipes/model-recipes/qwen-3-8-2-4t-a95b-fp8.mdx
-            slug: qwen-3-8-2-4t-a95b-fp8
-          - page: GLM-5.2
-            path: pages/recipes/model-recipes/glm-5-2.mdx
-            slug: glm-5-2
-          - page: Inkling NVFP4
-            path: pages/recipes/model-recipes/inkling-nvfp4.mdx
-            slug: inkling
-          - page: Kimi-K2.6
-            path: pages/recipes/model-recipes/kimi-k2-6.mdx
-            slug: kimi-k2-6
-          - page: Nemotron 3.5 Lightning
-            path: pages/recipes/model-recipes/nemotron-3-5-lightning.mdx
-            slug: nemotron-3-5-lightning
-          - page: Nemotron 3 Ultra
-            path: pages/recipes/model-recipes/nemotron-3-ultra.mdx
-            slug: nemotron-3-ultra
-          - page: Nemotron 3 Super
-            path: pages/recipes/model-recipes/nemotron-3-super.mdx
-            slug: nemotron-3-super
-          - page: GLM-5 NVFP4
-            path: pages/recipes/model-recipes/glm-5-nvfp4.mdx
-            slug: glm-5-nvfp4
-          - page: DeepSeek-V4-Pro
-            path: pages/recipes/model-recipes/deepseek-v4-pro.mdx
-            slug: deepseek-v4-pro
-          - page: DeepSeek-V4-Flash
-            path: pages/recipes/model-recipes/deepseek-v4-flash.mdx
-            slug: deepseek-v4-flash
-          - page: DeepSeek V3.2 NVFP4
-            path: pages/recipes/model-recipes/deepseek-v3-2-nvfp4.mdx
-            slug: deepseek-v3-2-nvfp4
-          - page: GPT-OSS-120B
-            path: pages/recipes/model-recipes/gpt-oss-120b.mdx
-            slug: gpt-oss-120b
-          - page: Qwen3-32B
-            path: pages/recipes/model-recipes/qwen3-32b.mdx
-            slug: qwen3-32b
-          - page: Qwen3.5-122B-A10B
-            path: pages/recipes/model-recipes/qwen3-5-122b.mdx
-            slug: qwen3-5-122b
-          - page: Qwen3-235B-A22B FP8
-            path: pages/recipes/model-recipes/qwen3-235b-a22b-fp8.mdx
-            slug: qwen3-235b-a22b-fp8
-          - page: Qwen3-32B FP8
-            path: pages/recipes/model-recipes/qwen3-32b-fp8.mdx
-            slug: qwen3-32b-fp8
-          - page: Llama-3.3-70B FP8
-            path: pages/recipes/model-recipes/llama-3-3-70b-fp8.mdx
-            slug: llama-3-3-70b
-
       # ==================== Kubernetes Templates ====================
       - section: Kubernetes Templates
         icon: fa-brands fa-kubernetes
@@ -537,26 +474,13 @@ navigation:
             path: pages/recipes/cli-templates/sglang.mdx
 
       # ==================== Feature Benchmarks ====================
-      # Evidence pages behind the recipes: controlled A/B benchmarks whose
-      # winning configs promote into recipes. Kept adjacent to Recipes so the
-      # cross-links between the two surfaces resolve. Detail pages are hidden
-      # from the sidebar (the Browse landing rows are the real index) — same
-      # pattern as main.
       - section: Feature Benchmarks
-        path: pages/recipes/feature-benchmarks/browse-all-benchmarks.mdx
+        path: pages/recipes/feature-benchmarks/benchmarking-guide.md
         slug: benchmarks
         contents:
-          - page: Browse All Benchmarks
-            path: pages/recipes/feature-benchmarks/browse-all-benchmarks.mdx
-            slug: browse
           - page: Benchmarking Guide
             path: pages/recipes/feature-benchmarks/benchmarking-guide.md
-            slug: benchmarking
-            hidden: true
-          - page: Embedding Cache
-            path: pages/recipes/feature-benchmarks/embedding-cache.md
-            slug: embedding-cache
-            hidden: true
+            slug: overview
           - page: Mocker Trace Replay
             path: pages/recipes/feature-benchmarks/mocker-trace-replay.md
             slug: mocker-trace-replay
@@ -564,30 +488,6 @@ navigation:
           - page: Planner Replay Benchmarking
             path: pages/recipes/feature-benchmarks/planner-replay-benchmarking.md
             slug: planner-replay-benchmarking
-            hidden: true
-          - page: Qwen3-32B KV Routing A/B
-            path: pages/recipes/feature-benchmarks/qwen3-32b-kv-routing-a-b.mdx
-            slug: qwen3-32b-kv-routing
-            hidden: true
-          - page: Agentic Coding Throughput Stack - Kimi-K2.5
-            path: pages/recipes/feature-benchmarks/agentic-coding-throughput-stack-kimi-k2-5.mdx
-            slug: kimi-k2-5-feature-stack
-            hidden: true
-          - page: Qwen3.6-35B Feature Stack
-            path: pages/recipes/feature-benchmarks/qwen3-6-35b-feature-stack.mdx
-            slug: qwen3-6-35b-feature-stack
-            hidden: true
-          - page: Qwen3-VL Embedding Cache
-            path: pages/recipes/feature-benchmarks/qwen3-vl-embedding-cache.mdx
-            slug: qwen3-vl-embedding-cache
-            hidden: true
-          - page: DeepSeek V3.2 WideEP Routing
-            path: pages/recipes/feature-benchmarks/deepseek-v3-2-wideep-routing.mdx
-            slug: deepseek-v3-2-wideep-routing
-            hidden: true
-          - page: Llama-3.3-70B Topology
-            path: pages/recipes/feature-benchmarks/llama-3-3-70b-topology.mdx
-            slug: llama-3-70b-topology
             hidden: true
           - page: KV Router A/B Testing
             path: pages/recipes/feature-benchmarks/kv-router-a-b-testing.md

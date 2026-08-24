@@ -5,7 +5,7 @@ K8s aiperf Job launcher.
 
 Runs aiperf as a k8s Job inside the same namespace as the DGD, using the
 in-cluster service DNS endpoint. Uses python:3.12-slim with pip-installed
-aiperf (same pattern as recipes/qwen3-235b-a22b-fp8/trtllm/agg/perf.yaml).
+aiperf (same pattern as a Dynamo TensorRT-LLM performance manifest).
 
 Artifacts are written inside the pod, then copied back to the local host
 via kubectl cp.
@@ -136,7 +136,7 @@ def _build_job_yaml(
     """Build the aiperf k8s Job YAML.
 
     Uses python:3.12-slim with pip-installed aiperf (same pattern as
-    recipes/qwen3-235b-a22b-fp8/trtllm/agg/perf.yaml).
+    a Dynamo TensorRT-LLM performance manifest).
     """
     image_pull_secret_block = ""
     if image_pull_secret:

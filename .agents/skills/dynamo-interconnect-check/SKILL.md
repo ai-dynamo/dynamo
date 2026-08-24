@@ -33,12 +33,12 @@ This skill is read-only. It never mutates the cluster and never prints secrets.
 
 - Python 3.10+ on the operator machine.
 - `kubectl exec` access to a worker pod in the target Dynamo deployment.
-- Read access to the recipe directory (`recipes/<model>/<framework>/<mode>`).
+- Read access to the selected deployment manifest directory.
 - For node-capability checks: tools like `ibstat`, `nvidia-smi`, `lsmod` available in the worker pod image (missing tools are reported as `skipped`, not failures).
 
 ## When To Use
 
-- After `deploy-dynamo-recipe` deploys a **disagg** or multi-node recipe.
+- After `deploy-dynamo-recipe` deploys a **disagg** or multi-node deployment.
 - Before reporting disagg throughput/latency, so numbers reflect the real
   transport.
 - When agg works but disagg is slow, hangs, or returns wrong output and you
@@ -49,10 +49,10 @@ For diagnosing pods that are already crashing or unschedulable, use
 
 ## Instructions
 
-### 1. Check Transport Env Vars On The Recipe
+### 1. Check Transport Env Vars In The Manifest
 
 ```bash
-python3 scripts/check_interconnect.py env recipes/<model>/<framework>/<mode>
+python3 scripts/check_interconnect.py env <deployment-manifest-dir>
 ```
 
 Reports which NIXL/UCX/NCCL transport variables are set and flags
@@ -89,23 +89,23 @@ two scheduled GPU pods on the fabric.
 
 | Script | Purpose | Arguments |
 |---|---|---|
-| `scripts/check_interconnect.py env` | Inspect NIXL/UCX/NCCL env vars on a recipe | positional recipe path |
+| `scripts/check_interconnect.py env` | Inspect NIXL/UCX/NCCL env vars in a deployment manifest | manifest file or directory |
 | `scripts/check_interconnect.py node` | Probe InfiniBand, GPUDirect RDMA, GDRCopy, NVLink on a node or pod | `--namespace`, `--pod` |
 | `scripts/check_interconnect.py nixl` | Surface NIXL transfer-test readiness for a pod | `--namespace`, `--pod` |
 
 Invoke via the agentskills.io `run_script()` protocol:
 
 ```python
-run_script("scripts/check_interconnect.py", args=["env", "recipes/qwen3-32b-fp8/vllm/disagg"])
+run_script("scripts/check_interconnect.py", args=["env", "/path/to/deployment-manifests"])
 run_script("scripts/check_interconnect.py", args=["node", "--namespace", "dynamo-demo", "--pod", "qwen-worker-0"])
 ```
 
 ## Examples
 
-Verify a disagg recipe's transport env shape before deploy:
+Verify a disaggregated deployment's transport env shape before deploy:
 
 ```bash
-python3 scripts/check_interconnect.py env recipes/qwen3-32b-fp8/vllm/disagg
+python3 scripts/check_interconnect.py env /path/to/deployment-manifests
 ```
 
 After deploy, validate a worker pod's fabric:
@@ -137,7 +137,7 @@ plus a rolled-up verdict on disagg transport readiness. Report:
 
 - Read-only fabric probe; does not run a full pairwise NIXL transfer (requires two scheduled GPU pods and the in-pod NIXL test tools).
 - `skipped` results for missing tools (`ibstat`, `nvidia-smi`, `lsmod`) are inconclusive, not a pass.
-- Env-var check inspects the recipe text; values injected at runtime via initContainers or operator-applied envs are not detected.
+- Env-var check inspects the manifest text; values injected at runtime via initContainers or operator-applied envs are not detected.
 - Single-node agg deployments do not exercise the transport — this skill is for disagg / multi-node validation.
 
 ## Troubleshooting

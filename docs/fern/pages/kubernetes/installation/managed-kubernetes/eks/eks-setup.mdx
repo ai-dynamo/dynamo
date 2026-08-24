@@ -175,18 +175,18 @@ dynamoworkermetadatas.nvidia.com                  2026-03-17T13:18:11Z
 
 ### Cache Models on EFS
 
-Before deploying an inference graph, download the model weights onto the shared EFS file system. Each Dynamo recipe includes a `model-cache/model-download.yaml` Job manifest that downloads the model from HuggingFace.
+Before deploying an inference graph, download the model weights onto the shared EFS file system. The maintained [Kubernetes examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/kubernetes) include a `model-download.yaml` Job manifest that downloads the model from Hugging Face.
 
-Copy the recipe's download manifest into the local kustomize directory and apply it:
+From a Dynamo checkout, copy the chosen example's download manifest into the local Kustomize directory and apply it:
 
 ```bash
-# Example: cache the Qwen3-32B model which we will be using later
-cp ../../../recipes/qwen3-32b/model-cache/model-download.yaml manifests/model-download/model-download.yaml
+# Example: cache the Qwen3-32B-FP8 model used by the vLLM disaggregated example
+cp examples/deployments/kubernetes/llm/vllm/disaggregated-qwen3-32b-fp8/model-download.yaml manifests/model-download/model-download.yaml
 kubectl kustomize manifests/model-download | kubectl -n ${DYNAMO_NAMESPACE} apply -f -
 rm -f manifests/model-download/model-download.yaml
 ```
 
-The recipe manifests don't set any memory resources on the download container. Without a memory request, the Job pod can get OOMKilled during download — especially for large models. The `kustomization.yaml` in `manifests/model-download/` patches in a memory request to prevent this. By default it adds `4Gi`.
+The example manifest sets a resource request for the download container. The `kustomization.yaml` in `manifests/model-download/` can add or raise a memory request when the selected model needs more headroom.
 
 For larger models (e.g. DeepSeek-R1, Nemotron-3-Super-120B) increase this value in `manifests/model-download/kustomization.yaml` before applying:
 

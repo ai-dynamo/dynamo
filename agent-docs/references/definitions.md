@@ -9,8 +9,8 @@ Shared terms for Dynamo agentic deployment, benchmarking, and optimization.
 
 ## Deployment
 
-- **Recipe family**: a model recipe directory under `recipes/`, such as `recipes/kimi-k2.6`.
-- **Recipe variant**: one deployable recipe configuration, usually a specific `deploy.yaml`.
+- **Deployment example**: a runnable backend/topology directory in [`examples/deployments/kubernetes`](../../examples/deployments/kubernetes).
+- **Deployment variant**: one deployable configuration, usually a specific `deploy.yaml`.
 - **DGD**: `DynamoGraphDeployment`, the Kubernetes resource that defines a Dynamo serving graph.
 - **Component**: a named DGD serving unit, such as `frontend`, `worker`, `prefill`, or `decode`.
 - **Aggregated serving**: workers handle both prefill and decode.

@@ -1,7 +1,7 @@
 ---
 name: author-baseline-dgd
 description: >-
-  Drafts a candidate baseline DynamoGraphDeployment from interview requirements when no catalog recipe matches the
+  Drafts a candidate baseline DynamoGraphDeployment from interview requirements when no deployment example matches the
   user's model, hardware, and backend, presenting per-decision evidence for the user's confirmation. Use only from
   user-interviewer at interview time, at rung 3 of the baseline-source ladder, and never to deploy or to replace a
   baseline the user already provided.
@@ -32,13 +32,13 @@ Require:
 
 - the interview fact table from `synthesize-user-workload` (model source and revision, hardware type and count,
   backend and precision preferences, workload shape, SLOs, Kubernetes context and namespace);
-- the recipe catalog scan that established rung 3 (no exact or close recipe), including the nearest recipes
+- the deployment-example scan that established rung 3 (no exact or close example), including the nearest examples
   considered and why each was rejected as a base; and
 - any user-stated constraints (`resources.pinned` candidates, budgets) already collected.
 
 If model identity or hardware type and count is missing, return the question to `user-interviewer` instead of
 guessing. Backend is different: when the user explicitly has no preference, CHOOSE it here with evidence - prefer
-the backend whose nearest catalog recipe scaffolds this model family and hardware, per the knob guides' coverage -
+the backend whose nearest deployment example scaffolds this model family and hardware, per the knob guides' coverage -
 and record the choice and its evidence in the decision table the user confirms. A confirmed draft's backend is a
 confirmed decision, not an invented default; the contract's `preferences.framework` still records only what the
 user themselves stated.
@@ -52,7 +52,7 @@ Always read:
 - the chosen backend's guide (`agent-docs/guides/knob-tuning/vllm.md`, `sglang.md`, or `tensorrt-llm.md`) -
   when choosing the backend here, read the candidates' guides as needed to make the choice;
 - `agent-docs/guides/knob-tuning/dynamo.md`; and
-- the nearest catalog recipes' manifests, as structural scaffolding only.
+- the nearest deployment examples' manifests, as structural scaffolding only.
 
 Read `agent-docs/guides/rate-matching/matching.md` only when the draft is disaggregated (rare for a baseline;
 prefer aggregated unless the user's SLOs demand otherwise).
@@ -64,7 +64,7 @@ prefer aggregated unless the user's SLOs demand otherwise).
    workloads; raise TP above `min_tp` only when headroom demands it, recording the replica cost).
 2. **Choose topology conservatively**: an aggregated single-node layout unless the user's hardware or SLOs force
    otherwise. The baseline's job is to run and measure, not to win; the optimization loop owns improvement.
-3. **Scaffold from the nearest recipe**: copy its structure (components, probes, service wiring, image versions
+3. **Scaffold from the nearest deployment example**: copy its structure (components, probes, service wiring, image versions
    for the chosen backend) and replace model, parallelism, resources, and any hardware-bound fields, naming every
    replacement. Never carry a hardware-bound topology, transport, or checkpoint choice across without evidence it
    fits the target.
@@ -81,7 +81,7 @@ Return to `user-interviewer`, for relay to the user:
 - the complete draft manifest;
 - a per-decision evidence table: each major choice (TP, replicas, memory settings, backend, image, topology) with
   the guide citation or arithmetic that produced it;
-- the nearest recipes considered and why each was rejected as a base; and
+- the nearest deployment examples considered and why each was rejected as a base; and
 - the explicit statement that this draft is unvalidated on hardware and iteration 0 will characterize it.
 
 Do not proceed on silence, enthusiasm, or a partial answer: confirmation is the user's explicit acceptance of THIS

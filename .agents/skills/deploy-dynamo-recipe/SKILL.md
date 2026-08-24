@@ -72,8 +72,8 @@ Create exactly one directory for the assigned candidate:
 Create `applied_manifests/` beneath it. Copy the assigned DGD and every explicitly handed-off support manifest used by
 the deployment into that directory with stable names such as `deploy.yaml`, `model-cache.yaml`,
 `model-download.yaml`, and `model-validate.yaml` — normalizing the filename at copy time. A recipe may ship
-variant-specific manifests (`recipes/deepseek-v4/*` ship `model-download-fp8.yaml` and `model-download-nvfp4.yaml`):
-select the one matching the assigned DGD's precision and copy it as `model-download.yaml`. Few recipes ship a
+variant-specific manifests (for example `model-download-fp8.yaml` and `model-download-nvfp4.yaml`): select the one
+matching the assigned DGD's precision and copy it as `model-download.yaml`. Few deployment example sets ship a
 validation job at all. Copy what the handoff actually contains. Never modify the handed-off source files.
 
 Update these run-scoped copies in place when a compatibility fix is required, then reapply them. Record every change

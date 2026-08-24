@@ -1,4 +1,0 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-INSTANCE_TYPE: p6-b200.48xlarge
-EFAS_PER_GPU: 1

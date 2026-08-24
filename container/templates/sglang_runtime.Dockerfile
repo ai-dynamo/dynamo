@@ -287,7 +287,6 @@ COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/common /workspace/compon
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/frontend /workspace/components/src/dynamo/frontend
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/sglang /workspace/components/src/dynamo/sglang
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/mocker /workspace/components/src/dynamo/mocker
-COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
 # The vllm and trtllm images already copy lib/; sglang did not, so its tests had
 # no lib/llm/tests/data/media fixtures and any test needing a local media clip
 # could only skip. ~32 MB, negligible here and it keeps the three consistent.

@@ -153,7 +153,7 @@ Sibling repositories this repo integrates with:
 | `deploy/` | Kubernetes `operator`, Helm charts, `inference-gateway` ext-proc, `observability` |
 | `container/` | Dockerfiles and build scripts for runtime and dev images |
 | `docs/`, `fern/` | Documentation sources and the Fern docs-site config — read [`docs/AGENTS.md`](docs/fern/AGENTS.md) before editing |
-| `examples/`, `recipes/` | Runnable examples and deployment recipes — also covered by [`docs/AGENTS.md`](docs/fern/AGENTS.md) |
+| `examples/` | Runnable code examples, including [Kubernetes deployment examples](examples/deployments/kubernetes/) — also covered by [`docs/AGENTS.md`](docs/fern/AGENTS.md) |
 | `benchmarks/`, `tests/` | Benchmark harnesses and the top-level pytest suite |
 | `.ai/` | Agent topic guidelines: `bash-launch-guidelines.md`, `ci-guidelines.md`, `linear-ticket-refs.md`, `pytest-guidelines.md`, `python-guidelines.md`, `test-model-size-guardrails.md` |
 | `.agents/skills/` | Agent skills (see [Skills](#skills)) |
@@ -226,9 +226,9 @@ cargo fmt --all && cargo clippy --workspace
 See [`docs/contribution-guide.md`](docs/fern/pages/community/contributing/overview.md) for the full workflow
 (issue sizing, CODEOWNERS, review process).
 
-## Docs, Examples, Recipes
+## Docs and Examples
 
-Any change under `docs/`, `examples/`, or `recipes/` must follow
+Any change under `docs/` or `examples/` must follow
 [`docs/AGENTS.md`](docs/fern/AGENTS.md) and the
 [documentation style guide](docs/fern/pages/community/contributing/documentation/documentation-style-guide.md): SPDX headers, Fern
 frontmatter (no body `# H1`), GitHub-style admonitions, and backend casing

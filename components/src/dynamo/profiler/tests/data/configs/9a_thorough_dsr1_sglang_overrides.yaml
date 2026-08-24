@@ -3,8 +3,8 @@
 
 # Case 9a: Thorough sweep for DeepSeek-R1 on SGLang with DGD overrides.
 # Overrides are derived by comparing the profiler's internal SGLang disagg blueprint
-# (components/src/dynamo/profiler/templates/dgd/sglang/disagg.yaml) with the DSR1 recipe
-# (recipes/deepseek-r1/sglang/disagg-8gpu/deploy.yaml), excluding
+# (components/src/dynamo/profiler/templates/dgd/sglang/disagg.yaml) with a former DeepSeek-R1
+# SGLang disaggregated deployment manifest, excluding
 # parallelization-mapping fields (--tp, --dp, --ep-size,
 # --enable-dp-attention) which are swept by the profiler.
 model: "deepseek-ai/DeepSeek-R1"

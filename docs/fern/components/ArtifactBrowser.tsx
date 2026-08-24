@@ -9,7 +9,7 @@
  * Filtering is CSS-only: five hidden radio inputs sit first inside the panel,
  * and :checked general-sibling selectors hide the rows (and their group
  * headers) whose data-cat does not match — same pattern as the recipe catalog
- * in recipes/README.mdx. Server component; shared vocabulary (panel, eyebrow,
+ * in the deployment catalog. Server component; shared vocabulary (panel, eyebrow,
  * badges, copy buttons) comes from ReferenceStyles — place <ReferenceStyles />
  * on the page alongside this component. Only the .dynref-ab-* layout classes
  * are defined here.
