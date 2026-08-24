@@ -112,14 +112,14 @@ class TestDiffusionParallelConfigCoverage:
         config = _make_config()
         config.diffusion = dataclasses.replace(
             OmniDiffusionKwargs(),
-            task_type="t2va",
+            task_type="fl2va",
             lora_path=["/models/fasth3/adapter_model.safetensors"],
             diffusion_attention_backend="TRTLLM_ATTN",
         )
 
         kwargs = _build_kwargs(config)
 
-        assert kwargs["task_type"] == "t2va"
+        assert kwargs["task_type"] == "fl2va"
         assert kwargs["lora_path"] == ["/models/fasth3/adapter_model.safetensors"]
         assert kwargs["diffusion_attention_backend"] == "TRTLLM_ATTN"
 
