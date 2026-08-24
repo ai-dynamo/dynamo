@@ -59,7 +59,7 @@ python -m dynamo.frontend --router-mode kv --http-port 8000 --router-replica-syn
 python -m dynamo.frontend --router-mode kv --http-port 8001 --router-replica-sync
 ```
 
-With replica sync enabled, a new router still starts with zero active-block knowledge, but its view improves through live request handling and active-sequence events from other replicas. The channel is fire-and-forget and its bounded outbound publisher queue drops the newest event when full, so replicas can temporarily disagree. Add, prefill-complete, and free lifecycle events are synchronized; output-block growth remains local. Stale synchronized entries are force-expired after `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS` (default `300` seconds). Without replica sync, each replica keeps an isolated active-block view, which can lead to suboptimal load balancing.
+With replica sync enabled, a new router still starts with zero active-block knowledge, but its view improves through live request handling and active-sequence events from other replicas. The channel is fire-and-forget and its bounded outbound publisher queue drops the newest event when full, so replicas can temporarily disagree. Add, prefill-complete, and free lifecycle events are synchronized; output-block growth remains local. A router-owned CLOCK reaper scans at `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS` (default `300` seconds) and reclaims quiet entries roughly 5–10 minutes after their latest progress touch. Without replica sync, each replica keeps an isolated active-block view, which can lead to suboptimal load balancing.
 
 Session-affinity synchronization starts automatically when
 `--router-session-affinity-ttl-secs` is set. That path is best effort: each replica

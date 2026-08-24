@@ -12,13 +12,14 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     ApproximateLruClient, ApproximateLruCommandSink, ApproximateLruIncarnation, ApproximateLruLane,
-    ApproximateLruLease, ApproximateLruRequestId, ApproximateLruStats, ApproximateLruTask,
-    ApproximateRetentionConfig, DumpRequest, EventKind, FlushRequest, GetWorkersRequest,
-    KvIndexerInterface, KvIndexerMetrics, KvRouterError, MatchDetails, MatchDetailsRequest,
-    MatchRequest, PreBoundEventCounters, RadixTree, RoutingDecisionRequest, panic_payload_message,
+    ApproximateLruLease, ApproximateLruStats, ApproximateLruTask, ApproximateRetentionConfig,
+    DumpRequest, EventKind, FlushRequest, GetWorkersRequest, KvIndexerInterface, KvIndexerMetrics,
+    KvRouterError, MatchDetails, MatchDetailsRequest, MatchRequest, PreBoundEventCounters,
+    RadixTree, RoutingDecisionRequest, panic_payload_message,
 };
 use crate::indexer::pruning::{BlockEntry, PruneConfig, WorkerPruneManager};
 use crate::protocols::*;
+use crate::scheduling::AttemptId;
 use dynamo_tokens::SequenceHash;
 
 fn apply_event_with_counters(
@@ -896,11 +897,11 @@ impl KvIndexer {
         &self,
         worker: WorkerWithDpRank,
         incarnation: ApproximateLruIncarnation,
-        lru_request_id: ApproximateLruRequestId,
+        attempt_id: AttemptId,
     ) -> Option<ApproximateLruLease> {
         self.approximate_lru
             .as_ref()
-            .map(|client| client.begin_request(worker, incarnation, lru_request_id))
+            .map(|client| client.begin_request(worker, incarnation, attempt_id))
     }
 
     pub async fn set_approximate_lru_capacity(

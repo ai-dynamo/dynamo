@@ -4,10 +4,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
     time::Instant,
 };
 
@@ -17,8 +14,7 @@ use dynamo_kv_router::{
     SharedKvCache, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::{
-        ApproximateLruIncarnation, ApproximateLruRequestId, ApproximateLruStats, KvRouterError,
-        RoutingDecisionHashes,
+        ApproximateLruIncarnation, ApproximateLruStats, KvRouterError, RoutingDecisionHashes,
     },
     protocols::KV_EVENT_SUBJECT,
     protocols::{
@@ -28,7 +24,7 @@ use dynamo_kv_router::{
     },
     router_hint::{RouterHint, RouterHintRootCandidates},
     scheduling::{
-        CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, ScheduleMode,
+        AttemptId, CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, ScheduleMode,
         ScheduleRequest, TieredOverlapRefresher, WorkerAvailabilityProvider,
         effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
     },
@@ -61,6 +57,7 @@ pub mod metrics;
 pub mod prefill_router;
 pub mod publisher;
 pub mod push_router;
+mod request_lease;
 mod route_lookup;
 pub mod scheduler;
 pub mod sequence;
@@ -382,8 +379,21 @@ pub(super) enum FindBestMatchAdmission {
     WithoutAdmission,
 }
 
+#[doc(hidden)]
+pub struct AdmittedFindBestMatchOutcome {
+    pub(super) outcome: FindBestMatchOutcome,
+    pub(super) attempt_id: Option<AttemptId>,
+}
+
+impl AdmittedFindBestMatchOutcome {
+    #[doc(hidden)]
+    pub fn into_parts(self) -> (FindBestMatchOutcome, Option<AttemptId>) {
+        (self.outcome, self.attempt_id)
+    }
+}
+
 pub(super) enum FindBestMatchInnerOutcome {
-    WithAdmission(FindBestMatchOutcome),
+    WithAdmission(AdmittedFindBestMatchOutcome),
     WithoutAdmission(FindBestMatchAdvisoryOutcome),
 }
 
@@ -532,7 +542,7 @@ where
     tracking_hash: TrackingHashContext,
     tracking_model_name: String,
     approximate_lru_ranks: ApproximateLruRanks,
-    next_approximate_lru_request_id: AtomicU64,
+    request_leases: request_lease::RequestLeaseManager,
     _served_indexer_handle: Option<ServedIndexerHandle>,
     /// Optional external shared KV cache pool. When present, `find_best_match`
     /// queries it in parallel with the indexer and factors shared hits into scoring.
@@ -710,6 +720,16 @@ where
             cancellation_token.child_token(),
         )
         .await?;
+        let request_leases = request_lease::RequestLeaseManager::new(
+            scheduler.booking_cleanup(),
+            cancellation_token.child_token(),
+        );
+        if !scheduler.set_replica_request_lease_observer(Arc::new(request_leases.clone())) {
+            return Err(anyhow::anyhow!(
+                "request lease observer is already installed for this router"
+            ));
+        }
+
         // Start KV event subscription if needed — skip when using a remote indexer.
         let kv_event_subscription = if kv_event_source_requirement
             .should_subscribe(&kv_router_config)
@@ -777,7 +797,7 @@ where
             tracking_hash,
             tracking_model_name,
             approximate_lru_ranks,
-            next_approximate_lru_request_id: AtomicU64::new(0),
+            request_leases,
             _served_indexer_handle: served_indexer_handle,
             shared_cache,
             lora_filter,
@@ -885,14 +905,6 @@ where
         Some(registration)
     }
 
-    fn next_approximate_lru_request_id(&self) -> ApproximateLruRequestId {
-        ApproximateLruRequestId::new(
-            self.next_approximate_lru_request_id
-                .fetch_add(1, Ordering::Relaxed)
-                .wrapping_add(1),
-        )
-    }
-
     fn tracking_hash_scope(&self) -> TrackingHashScope<'_> {
         TrackingHashScope {
             partition: RoutingPartitionRef::new(&self.tracking_model_name, DEFAULT_ROUTING_GROUP),
@@ -982,14 +994,92 @@ where
         mut tokens_with_hashes: TokensWithHashes,
         worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError> {
-        // Query-only, detached, and public admission paths do not own an LRU
-        // request lifecycle. Keep them on the legacy TTL/no-op path.
-        if self.indexer.uses_approximate_lru() {
-            return Ok(());
-        }
         self.indexer
             .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
             .await
+    }
+
+    /// Record an update that has no admitted request attempt. Capacity-bounded
+    /// LRU requires acquire/release lifecycle fencing, so query-only callers
+    /// intentionally leave it unchanged. TTL recording retains its existing behavior.
+    #[doc(hidden)]
+    pub async fn record_query_only_routing_decision(
+        &self,
+        tokens_with_hashes: TokensWithHashes,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError> {
+        if self.indexer.uses_approximate_lru() {
+            return Ok(());
+        }
+        self.record_routing_decision(tokens_with_hashes, worker)
+            .await
+    }
+
+    /// Install the detached lifecycle used by public request-ID admissions.
+    /// Registration precedes the fallible LRU acquire so an indexing failure
+    /// cannot strand the scheduler booking.
+    #[doc(hidden)]
+    pub async fn enroll_public_request_attempt(
+        &self,
+        request_id: String,
+        worker: WorkerWithDpRank,
+        attempt_id: AttemptId,
+        mut routing_decision: Option<TokensWithHashes>,
+    ) -> Result<(), KvRouterError> {
+        let lru_registration = self.approximate_lru_rank_registration(worker);
+        let approximate_lru = lru_registration.and_then(|registration| {
+            self.indexer
+                .begin_approximate_lru_request(worker, registration.incarnation, attempt_id)
+        });
+        let booking = scheduler::SchedulerBookingDescriptor {
+            request_id,
+            worker,
+            attempt_id,
+        };
+        self.request_leases
+            .register_detached(booking.clone(), approximate_lru.clone());
+
+        let Some(tokens_with_hashes) = routing_decision.as_mut() else {
+            return Ok(());
+        };
+        if let (Some(mut lease), Some(_)) = (approximate_lru, lru_registration) {
+            let token_count = tokens_with_hashes.len();
+            let local_hashes = tokens_with_hashes.get_or_compute_block_hashes().to_vec();
+            let sequence_hashes = tokens_with_hashes.get_or_compute_seq_hashes().to_vec();
+            let private_blocks = push_router::prompt_private_blocks(
+                token_count,
+                local_hashes.len(),
+                usize::try_from(self.block_size).unwrap_or(usize::MAX),
+                self.is_eagle,
+            );
+            if let Err(error) = lease
+                .acquire(
+                    RoutingDecisionHashes {
+                        local_hashes,
+                        sequence_hashes,
+                    },
+                    private_blocks,
+                )
+                .await
+            {
+                self.request_leases.finish_booking(&booking).await;
+                return Err(error);
+            }
+            return Ok(());
+        }
+        if self.indexer.uses_approximate_lru() {
+            return Ok(());
+        }
+        let result = self
+            .record_routing_decision(
+                routing_decision.expect("routing decision is present"),
+                worker,
+            )
+            .await;
+        if result.is_err() {
+            self.request_leases.finish_booking(&booking).await;
+        }
+        result
     }
 
     pub(crate) async fn record_routing_decision_hashes(
@@ -1115,6 +1205,59 @@ where
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> anyhow::Result<FindBestMatchOutcome> {
+        let admitted = self
+            .find_best_match_details_with_policy_class_admitted(
+                context_id,
+                tokens,
+                block_mm_infos,
+                router_config_override,
+                update_states,
+                return_routing_hashes,
+                lora_name,
+                cache_namespace,
+                priority_jump,
+                strict_priority,
+                policy_class,
+                session_context,
+                expected_output_tokens,
+                pinned_worker,
+                allowed_worker_ids,
+                routing_constraints,
+            )
+            .await?;
+        if let (Some(request_id), FindBestMatchOutcome::Routed { worker, .. }, Some(attempt_id)) =
+            (context_id, &admitted.outcome, admitted.attempt_id)
+        {
+            self.enroll_public_request_attempt(request_id.to_string(), *worker, attempt_id, None)
+                .await?;
+        }
+        Ok(admitted.outcome)
+    }
+
+    /// Return the admitted routing wrapper without enrolling it in a detached
+    /// lifecycle lease. Internal bindings use this to attach optional LRU state
+    /// before installing the one shared request lease.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn find_best_match_details_with_policy_class_admitted(
+        &self,
+        context_id: Option<&str>,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
+        return_routing_hashes: bool,
+        lora_name: Option<String>,
+        cache_namespace: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        policy_class: Option<String>,
+        session_context: Option<dynamo_kv_router::SessionContext>,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+    ) -> anyhow::Result<AdmittedFindBestMatchOutcome> {
         match self
             .find_best_match_details_with_policy_class_inner(
                 context_id,
@@ -1139,7 +1282,7 @@ where
             )
             .await?
         {
-            FindBestMatchInnerOutcome::WithAdmission(outcome) => Ok(outcome),
+            FindBestMatchInnerOutcome::WithAdmission(admitted) => Ok(admitted),
             FindBestMatchInnerOutcome::WithoutAdmission(_) => {
                 unreachable!("with-admission routing returned advisory outcome")
             }
@@ -1354,17 +1497,20 @@ where
             routing_constraints,
             shared_cache_hits,
         };
-        let (response, selected_worker_load) = match admission {
+        let (response, attempt_id, selected_worker_load) = match admission {
             FindBestMatchAdmission::WithAdmission { .. } => match self
                 .scheduler
-                .schedule_request(schedule_request)
+                .schedule_request_admitted(schedule_request)
                 .instrument(tracing::info_span!("kv_router.schedule"))
                 .await
             {
-                Ok(response) => (response, None),
+                Ok(admitted) => (admitted.response, admitted.attempt_id, None),
                 Err(KvSchedulerError::QueueRejected(rejection)) => {
                     return Ok(FindBestMatchInnerOutcome::WithAdmission(
-                        FindBestMatchOutcome::QueueRejected { rejection },
+                        AdmittedFindBestMatchOutcome {
+                            outcome: FindBestMatchOutcome::QueueRejected { rejection },
+                            attempt_id: None,
+                        },
                     ));
                 }
                 Err(error) => return Err(map_scheduler_error(error)),
@@ -1375,7 +1521,7 @@ where
                 .instrument(tracing::info_span!("kv_router.select_without_admission"))
                 .await
             {
-                Ok(advisory) => (advisory.response, Some(advisory.selected_worker_load)),
+                Ok(advisory) => (advisory.response, None, Some(advisory.selected_worker_load)),
                 Err(KvSchedulerError::QueueRejected(rejection)) => {
                     return Ok(FindBestMatchInnerOutcome::WithoutAdmission(
                         FindBestMatchAdvisoryOutcome::QueueRejected { rejection },
@@ -1435,14 +1581,17 @@ where
 
         match admission {
             FindBestMatchAdmission::WithAdmission { .. } => Ok(
-                FindBestMatchInnerOutcome::WithAdmission(FindBestMatchOutcome::Routed {
-                    worker: response.best_worker,
-                    overlap_blocks: response.effective_overlap_blocks.round() as u32,
-                    effective_overlap_blocks: response.effective_overlap_blocks,
-                    cached_tokens: response.cached_tokens,
-                    potential_decode_blocks: response.potential_decode_blocks as u64,
-                    routing_hashes,
-                    router_hint,
+                FindBestMatchInnerOutcome::WithAdmission(AdmittedFindBestMatchOutcome {
+                    outcome: FindBestMatchOutcome::Routed {
+                        worker: response.best_worker,
+                        overlap_blocks: response.effective_overlap_blocks.round() as u32,
+                        effective_overlap_blocks: response.effective_overlap_blocks,
+                        cached_tokens: response.cached_tokens,
+                        potential_decode_blocks: response.potential_decode_blocks as u64,
+                        routing_hashes,
+                        router_hint,
+                    },
+                    attempt_id,
                 }),
             ),
             FindBestMatchAdmission::WithoutAdmission => Ok(
@@ -1548,9 +1697,9 @@ where
         let prefill_load_hint =
             self.prefill_load_hint_for(isl_tokens, cached_tokens, track_prefill_tokens);
 
-        if let Err(error) = self
+        let admission = self
             .scheduler
-            .add_request(SequenceRequest {
+            .add_request_admitted(SequenceRequest {
                 request_id: request_id.clone(),
                 token_sequence: maybe_seq_hashes,
                 track_prefill_tokens,
@@ -1559,17 +1708,34 @@ where
                 worker,
                 lora_name,
             })
-            .await
-        {
-            tracing::warn!("Failed to add request {request_id}: {error}");
-        }
+            .await;
+        let attempt_id = match admission {
+            Ok(attempt_id) => attempt_id,
+            Err(error) => {
+                tracing::warn!("Failed to add request {request_id}: {error}");
+                return;
+            }
+        };
+        self.request_leases.register_detached(
+            scheduler::SchedulerBookingDescriptor {
+                request_id,
+                worker,
+                attempt_id,
+            },
+            None,
+        );
     }
 
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
-        self.scheduler.mark_prefill_completed(request_id).await
+        self.scheduler.mark_prefill_completed(request_id).await?;
+        self.request_leases.touch_request(request_id);
+        Ok(())
     }
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
+        if self.request_leases.finish_request(request_id).await {
+            return Ok(());
+        }
         self.scheduler.free(request_id).await
     }
 
@@ -1583,6 +1749,19 @@ where
         worker: WorkerWithDpRank,
     ) -> Result<(), SequenceError> {
         self.scheduler.free_if_worker(request_id, worker).await
+    }
+
+    pub(crate) fn request_lease_manager(&self) -> &request_lease::RequestLeaseManager {
+        &self.request_leases
+    }
+
+    pub(crate) async fn mark_prefill_completed_if_booking(
+        &self,
+        booking: &scheduler::SchedulerBookingDescriptor,
+    ) -> Result<(), KvSchedulerError> {
+        self.scheduler
+            .mark_prefill_completed_if_booking(booking)
+            .await
     }
 
     /// Number of requests currently parked in the scheduler queue.
@@ -1651,6 +1830,16 @@ where
         decay_fraction: Option<f64>,
     ) -> Result<(), SequenceError> {
         self.scheduler.add_output_block(request_id, decay_fraction)
+    }
+
+    pub(crate) async fn add_output_block_if_booking(
+        &self,
+        booking: &scheduler::SchedulerBookingDescriptor,
+        decay_fraction: Option<f64>,
+    ) -> Result<(), KvSchedulerError> {
+        self.scheduler
+            .add_output_block_if_booking(booking, decay_fraction)
+            .await
     }
 
     pub fn block_size(&self) -> u32 {

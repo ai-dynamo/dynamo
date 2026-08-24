@@ -15,10 +15,11 @@ use dynamo_bench::kv_router_common::replay::{
     WorkerReplayArtifacts, generate_replay_artifacts, process_mooncake_trace,
 };
 use dynamo_kv_router::indexer::{
-    ApproximateAcquireMode, ApproximateLruBlock, ApproximateLruLease, ApproximateLruRequestId,
-    ApproximateLruStats, ApproximateRetentionConfig, KvIndexerInterface, KvIndexerMetrics,
+    ApproximateAcquireMode, ApproximateLruBlock, ApproximateLruLease, ApproximateLruStats,
+    ApproximateRetentionConfig, KvIndexerInterface, KvIndexerMetrics,
 };
 use dynamo_kv_router::protocols::{LocalBlockHash, WorkerWithDpRank};
+use dynamo_kv_router::scheduling::AttemptId;
 use dynamo_kv_router::{ConcurrentRadixTreeCompressed, ThreadPoolIndexer, approx::PruneConfig};
 use dynamo_tokens::SequenceHash;
 use serde::Serialize;
@@ -127,7 +128,7 @@ struct LogicalOperation {
 }
 
 struct PreparedRequest {
-    lru_request_id: ApproximateLruRequestId,
+    attempt_id: AttemptId,
     lookup_hashes: Vec<LocalBlockHash>,
     local_hashes: Vec<LocalBlockHash>,
     sequence_hashes: Vec<SequenceHash>,
@@ -348,7 +349,7 @@ fn prepare_trial(
                     .checked_add(source.private_blocks)
                     .context("private prompt-block count overflow")?;
                 requests.push(PreparedRequest {
-                    lru_request_id: ApproximateLruRequestId::for_benchmark(attempt_value),
+                    attempt_id: AttemptId::for_benchmark(attempt_value),
                     lookup_hashes: source.local_hashes.clone(),
                     local_hashes: source.local_hashes.clone(),
                     sequence_hashes: source.sequence_hashes.clone(),
@@ -553,7 +554,7 @@ async fn execute_payload(
                     let Some(lease) = indexer.begin_approximate_lru_request(
                         worker,
                         RANK_INCARNATION,
-                        request.lru_request_id,
+                        request.attempt_id,
                     ) else {
                         return (None, Some("LRU lease unavailable".to_string()));
                     };

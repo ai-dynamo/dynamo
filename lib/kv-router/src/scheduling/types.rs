@@ -21,6 +21,29 @@ use crate::router_hint::RouterHintRootCandidates;
 use crate::scheduling::policy_queue::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
 
+/// Router-internal identity for one admitted request attempt.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AttemptId(u64);
+
+impl AttemptId {
+    pub(crate) fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    #[cfg(feature = "bench")]
+    #[doc(hidden)]
+    pub fn for_benchmark(value: u64) -> Self {
+        Self::new(value)
+    }
+}
+
+impl std::fmt::Display for AttemptId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 pub type OverloadedWorkerProvider =
     Arc<dyn Fn() -> Option<HashSet<WorkerId>> + Send + Sync + 'static>;
 
@@ -115,6 +138,14 @@ pub struct SchedulingResponse {
     pub target_cached_prefix_blocks: u32,
     pub router_hint_candidates: Option<RouterHintRootCandidates>,
     pub potential_decode_blocks: usize,
+}
+
+/// Internal result that pairs a public scheduling response with its attempt identity.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct AdmittedSchedulingResponse {
+    pub response: SchedulingResponse,
+    pub attempt_id: Option<AttemptId>,
 }
 
 /// A routing decision that selected less KV overlap than another eligible worker.
