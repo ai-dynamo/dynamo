@@ -101,12 +101,13 @@ Workers register their endpoints and are discovered through the discovery plane.
   custom resources; reads and writes are authorized by the Kubernetes API server
   using each pod's ServiceAccount, so there is no anonymous, network-reachable
   discovery store to protect.
-- **Alternative — authenticated etcd.** If you use etcd for discovery, enable
-  authentication; never run it with anonymous access on a shared network.
-  Dynamo's etcd client supports username/password
-  (`ETCD_AUTH_USERNAME`/`ETCD_AUTH_PASSWORD`) and mutual TLS (`ETCD_AUTH_CA`,
-  `ETCD_AUTH_CLIENT_CERT`, `ETCD_AUTH_CLIENT_KEY`); provide the matching
-  credentials to every component.
+- **etcd (legacy — local, bare-metal, or non-Kubernetes only).** etcd discovery is
+  **deprecated for Kubernetes**; the Dynamo Operator uses Kubernetes-native
+  discovery by default, and a Kubernetes deployment should not add a second
+  network-reachable discovery store. Where you do use etcd, enable authentication —
+  never anonymous access on a shared network. Dynamo's etcd client supports
+  username/password (`ETCD_AUTH_USERNAME`/`ETCD_AUTH_PASSWORD`) and mutual TLS
+  (`ETCD_AUTH_CA`, `ETCD_AUTH_CLIENT_CERT`, `ETCD_AUTH_CLIENT_KEY`).
 
 **Why it matters:** an unauthenticated discovery plane lets any peer on the
 network enumerate workers and inject or alter routing metadata. See the
@@ -199,23 +200,16 @@ reachable.
   trusted monitoring systems; scope it to your observability stack rather than
   exposing it to untrusted networks.
 
-### Worker control surface
+### Internal control and diagnostic interfaces
 
-Each worker runs a system server (the `/engine/*` routes on `DYN_SYSTEM_PORT`)
-that exposes advanced control operations — profiling, memory management, and
-weight updates. Keep this port on the trusted network only, and expose only the
-routes a deployment actually uses.
-
-### Other in-cluster listeners
-
-Several components run additional HTTP or diagnostic listeners that bind broadly
-and are unauthenticated. Keep them on the trusted network (bind to loopback or a
-private interface and restrict with NetworkPolicy), and disable them where not
-needed:
-
-- The **planner live dashboard** binds `0.0.0.0` with no authentication.
-- The standalone **KV router services** — indexer, selection, and slot-tracker —
-  bind on all interfaces.
+Dynamo's internal control and diagnostic interfaces **do not authenticate
+callers** — including the worker system server (`/engine/*` on `DYN_SYSTEM_PORT`),
+the planner live dashboard and plugin registration, and the standalone KV router
+services (indexer, selection, and slot tracker). Several bind on all interfaces,
+and any caller-supplied identifier such as `routing_group` only partitions state —
+it does not establish identity. Keep every such interface on the trusted network,
+expose only the routes a deployment uses, and disable the ones you don't need. See
+each component's documentation for its specific listeners and controls.
 
 ## Securing Model and Backend Code
 
@@ -232,6 +226,9 @@ privileges.
   `--trust-remote-code` flag in a deployment template or worker config does **not**
   by itself indicate that a deployer reviewed and approved it — some stock
   templates ship it — so audit templates and pin the provenance of any such flag.
+- **Pin what you run.** Pin container images by digest and models to an immutable
+  commit/revision (or a reviewed local snapshot), and review generated deployment
+  configuration rather than trusting a templated flag to reflect your intent.
 - **Validate request-derived values.** When integrating or extending Dynamo,
   validate values taken from a request before using them in security-sensitive
   operations such as outbound network requests, file paths, or deserialization.
