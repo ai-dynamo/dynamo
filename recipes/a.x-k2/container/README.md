@@ -14,10 +14,10 @@ overlays its Python package on
 image retains the base image's compiled CUDA extensions, Dynamo integration,
 and NIXL libraries without rebuilding vLLM.
 
-This integration is experimental. The build checks the vLLM version, compiled
-extension, A.X K2 registration, Dynamo imports, NIXL library, and parser
-registration. A 4-GPU B200 smoke test is still required before treating the
-image as deployable.
+This integration is experimental. The build checks the vLLM version and the
+presence of the compiled extension and A.X K2 implementation without loading
+architecture-specific CUDA libraries. Verify Dynamo imports, NIXL, parser
+registration, and model execution with a 4-GPU B200 smoke test.
 
 ## Build
 
@@ -44,10 +44,10 @@ the Dockerfile rejects another version during the build.
 
 ## Verify
 
-Run import checks without a GPU:
+Run import checks on an AMD64 host with an NVIDIA driver:
 
 ```bash
-docker run --rm --entrypoint python3 "${AXK2_IMAGE}" -c \
+docker run --rm --gpus all --entrypoint python3 "${AXK2_IMAGE}" -c \
   "import dynamo.vllm; from vllm.transformers_utils.configs.axk2 import AXK2Config; print(AXK2Config.model_type)"
 ```
 
