@@ -1867,9 +1867,23 @@ mod tests {
         temp_env::async_with_vars([(env_llm::DYN_HTTP_BODY_LIMIT_MB, Some("1"))], async move {
             let (port, handle) = spawn_default_service().await;
 
+            // Only just over the limit, deliberately. The server answers 413 and
+            // closes as soon as it has read one byte past the cap, so a large
+            // overshoot leaves the client still writing into a socket whose peer
+            // has gone away, and the reset can take the buffered response with
+            // it. The status arrives, then reading the body fails with
+            // `hyper::Error(Body, "connection error")`.
+            //
+            // That is ordinary HTTP rather than a server bug, so the fix is to
+            // stop racing: a small overshoot is fully written before the server
+            // replies. Keep it small if you touch this. Measured on macOS at a
+            // 1 MiB cap: a 2 MiB body failed 13 of 16 runs, this passes 24 of 24.
+            // Linux CI does not surface it, so a green `rust-tests` is not
+            // evidence the race is gone.
+            const BODY_LIMIT_BYTES: usize = 1024 * 1024;
             let oversized = serde_json::json!({
                 "model": "model",
-                "input": "x".repeat(2 * 1024 * 1024),
+                "input": "x".repeat(BODY_LIMIT_BYTES + 4096),
             });
             let resp = reqwest::Client::new()
                 .post(format!("http://localhost:{port}/v1/responses"))
