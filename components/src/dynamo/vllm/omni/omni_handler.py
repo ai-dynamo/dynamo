@@ -361,9 +361,8 @@ class OmniHandler(BaseOmniHandler):
             inputs.sampling_params_list = streaming_sampling_params(
                 self.engine_client, inputs.sampling_params_list
             )
-        sampling_params_list = inputs.sampling_params_list
-        if sampling_params_list is not None:
-            generate_kwargs["sampling_params_list"] = sampling_params_list
+        if inputs.sampling_params_list is not None:
+            generate_kwargs["sampling_params_list"] = inputs.sampling_params_list
             # Note: For diffusion paths, lora_request is embedded in sampling_params_list
             # and will be refreshed in create_generator under the admission lock.
             # We do NOT add it here; instead, it's updated via _apply_lora_to_sampling_params.
