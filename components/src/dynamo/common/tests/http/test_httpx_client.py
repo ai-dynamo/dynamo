@@ -69,6 +69,51 @@ async def test_fetch_bytes_returns_body_on_200() -> None:
     assert result == b"hello"
 
 
+async def test_fetch_bytes_aborts_when_stream_exceeds_limit() -> None:
+    response = MagicMock(spec=httpx.Response)
+    response.is_redirect = False
+    response.headers = {}
+    response.raise_for_status = MagicMock(return_value=None)
+    response.aclose = AsyncMock(return_value=None)
+
+    async def _chunks(*args, **kwargs):
+        yield b"too"
+        yield b" large"
+
+    response.aiter_bytes = _chunks
+    inner = MagicMock(spec=httpx.AsyncClient)
+    inner.is_closed = False
+    inner.build_request = MagicMock(
+        side_effect=lambda method, url, **kw: MagicMock(url=httpx.URL(url))
+    )
+    inner.send = MagicMock(side_effect=_async_returning(response))
+    client = _make_client_with_inner(inner)
+
+    with pytest.raises(mm_http.HttpBodyTooLargeError):
+        await client.fetch_bytes("https://h/x", 30.0, policy=_PERMISSIVE, max_bytes=4)
+
+
+async def test_fetch_bytes_rejects_declared_body_over_limit() -> None:
+    response = MagicMock(spec=httpx.Response)
+    response.headers = {"Content-Length": "1024"}
+    response.raise_for_status = MagicMock(return_value=None)
+
+    async def _chunks(*args, **kwargs):
+        yield b"not-read"
+
+    response.aiter_bytes = _chunks
+    stream_context = AsyncMock()
+    stream_context.__aenter__.return_value = response
+    stream_context.__aexit__.return_value = False
+    inner = MagicMock(spec=httpx.AsyncClient)
+    inner.is_closed = False
+    inner.stream = MagicMock(return_value=stream_context)
+    client = _make_client_with_inner(inner)
+
+    with pytest.raises(mm_http.HttpBodyTooLargeError):
+        await client.fetch_bytes("https://h/x", 30.0, max_bytes=4)
+
+
 async def test_fetch_bytes_maps_timeout() -> None:
     inner = MagicMock(spec=httpx.AsyncClient)
     inner.is_closed = False
@@ -139,3 +184,42 @@ async def test_redirect_resolved_through_policy_path() -> None:
     client = _make_client_with_inner(inner)
     body = await client.fetch_bytes("https://h/x.png", 30.0, policy=_PERMISSIVE)
     assert body == b"final"
+
+
+async def test_redirect_target_is_subject_to_body_limit() -> None:
+    redirect_response = MagicMock(spec=httpx.Response)
+    redirect_response.is_redirect = True
+    redirect_response.headers = {"location": "/next.png"}
+    redirect_response.url = httpx.URL("https://h/x.png")
+    redirect_response.aclose = AsyncMock(return_value=None)
+
+    final_response = MagicMock(spec=httpx.Response)
+    final_response.is_redirect = False
+    final_response.headers = {}
+    final_response.raise_for_status = MagicMock(return_value=None)
+    final_response.aclose = AsyncMock(return_value=None)
+
+    async def _chunks(*args, **kwargs):
+        yield b"too large"
+
+    final_response.aiter_bytes = _chunks
+    responses_by_url = {
+        "https://h/x.png": redirect_response,
+        "https://h/next.png": final_response,
+    }
+
+    async def _send(request, *args, **kwargs):
+        return responses_by_url[str(request.url)]
+
+    inner = MagicMock(spec=httpx.AsyncClient)
+    inner.is_closed = False
+    inner.build_request = MagicMock(
+        side_effect=lambda method, url, **kw: MagicMock(url=httpx.URL(url))
+    )
+    inner.send = MagicMock(side_effect=_send)
+    client = _make_client_with_inner(inner)
+
+    with pytest.raises(mm_http.HttpBodyTooLargeError):
+        await client.fetch_bytes(
+            "https://h/x.png", 30.0, policy=_PERMISSIVE, max_bytes=4
+        )
