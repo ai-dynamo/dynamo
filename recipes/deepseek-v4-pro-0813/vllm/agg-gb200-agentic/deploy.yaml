@@ -126,6 +126,29 @@ spec:
                   value: "1"
                 - name: UCX_CUDA_IPC_ENABLE_MNNVL
                   value: "y"
+                - name: NCCL_P2P_LEVEL
+                  value: NVL
+                # Pin the control-plane interface; multinode bootstrap otherwise picks
+                # an arbitrary NIC and can hang.
+                - name: NCCL_SOCKET_IFNAME
+                  value: eth0
+                - name: GLOO_SOCKET_IFNAME
+                  value: eth0
+                # A 892.7 GB load can outlast the default NCCL store timeout.
+                - name: NCCL_STORE_TIMEOUT
+                  value: "7200"
+                - name: UCX_TLS
+                  value: cuda_copy,cuda_ipc,tcp
+                - name: UCX_MEMTYPE_CACHE
+                  value: "n"
+                - name: NVIDIA_GDRCOPY
+                  value: "1"
+                # Upstream's GB200 manifests set this to 1. We ship 0: with symmetric
+                # memory enabled this checkpoint crashes under sustained load on GB200.
+                - name: VLLM_USE_NCCL_SYMM_MEM
+                  value: "0"
+                - name: TILELANG_CLEANUP_TEMP_FILES
+                  value: "1"
                 - name: HF_HOME
                   value: /opt/models
                 - name: HF_HUB_OFFLINE
