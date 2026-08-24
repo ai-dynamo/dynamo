@@ -23,19 +23,16 @@ use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::WorkerPlacement;
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, KvSchedulerError,
-    NonMaxOverlapSelection, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
-    SchedulingContext, SchedulingRequest, SchedulingResponse, WorkerAvailabilityProvider,
+    AdvisorySchedulingResponse, AdvisoryWorkerLoad, KvSchedulerError, NonMaxOverlapSelection,
+    NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, SchedulingContext, SchedulingRequest,
+    SchedulingResponse, WorkerAvailabilityProvider,
 };
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerSelectionResult,
     WorkerWithDpRank,
 };
 use crate::sequences::topology::WorkerDpRange;
-use crate::sequences::{
-    ActiveSequencesMultiWorker, LifecycleMutationOutcome, SequenceError, SequencePublisher,
-    SequenceRequest,
-};
+use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher, SequenceRequest};
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
 pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
@@ -57,7 +54,6 @@ pub struct ClassQueueStats {
 
 struct QueuedRequest {
     request: SchedulingRequest,
-    attempt_tx: Option<oneshot::Sender<AttemptId>>,
     enqueue_at: Instant,
     block_hashes: Option<Vec<LocalBlockHash>>,
 }
@@ -129,7 +125,6 @@ fn target_cached_prefix_blocks(request: &SchedulingRequest, target: WorkerWithDp
 enum AdmissionCommand {
     Enqueue {
         request: SchedulingRequest,
-        attempt_tx: Option<oneshot::Sender<AttemptId>>,
         block_hashes: Option<Vec<LocalBlockHash>>,
         lease: Option<Box<RequestLifecycleLease>>,
         ack_tx: oneshot::Sender<Option<Box<RequestLifecycleLease>>>,
@@ -142,35 +137,12 @@ enum AdmissionCommand {
         worker: Option<WorkerWithDpRank>,
         ack_tx: oneshot::Sender<()>,
     },
-    MarkPrefillCompleted {
-        booking: SchedulerBookingDescriptor,
-        ack_tx: oneshot::Sender<Result<LifecycleMutationOutcome, SequenceError>>,
-    },
-    AddOutputBlock {
-        booking: SchedulerBookingDescriptor,
-        decay_fraction: Option<f64>,
-        ack_tx: oneshot::Sender<Result<LifecycleMutationOutcome, SequenceError>>,
-    },
     Cleanup,
 }
 
-#[doc(hidden)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SchedulerBookingDescriptor {
-    pub request_id: String,
-    pub worker: WorkerWithDpRank,
-    pub attempt_id: AttemptId,
-}
-
 #[derive(Debug, PartialEq, Eq)]
-enum SchedulerCleanupTarget {
-    Admission { request_id: String },
-    Booking(SchedulerBookingDescriptor),
-}
-
 struct AdmissionCleanupEntry {
-    target: SchedulerCleanupTarget,
-    response: Option<oneshot::Sender<Result<(), SequenceError>>>,
+    request_id: String,
 }
 
 #[derive(Default)]
@@ -207,76 +179,6 @@ impl AdmissionCleanup {
     }
 }
 
-fn enqueue_cleanup_entry(
-    cleanup: &AdmissionCleanup,
-    actor_tx: &mpsc::Sender<AdmissionCommand>,
-    entry: AdmissionCleanupEntry,
-) {
-    if !cleanup.enqueue(entry) {
-        return;
-    }
-    match actor_tx.try_send(AdmissionCommand::Cleanup) {
-        Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
-        Err(mpsc::error::TrySendError::Closed(_)) => {
-            // The serialized owner no longer exists, so its state cannot outlive
-            // the subsystem. Complete acknowledgements instead of stranding finish().
-            for entry in cleanup.drain() {
-                if let Some(response) = entry.response {
-                    let _ = response.send(Ok(()));
-                }
-            }
-        }
-    }
-}
-
-/// Cloneable non-blocking ingress for attempt-scoped scheduler cleanup.
-#[doc(hidden)]
-#[derive(Clone)]
-pub struct SchedulerBookingCleanup {
-    cleanup: Arc<AdmissionCleanup>,
-    actor_tx: mpsc::Sender<AdmissionCommand>,
-}
-
-#[doc(hidden)]
-pub struct SchedulerCleanupAck {
-    response: oneshot::Receiver<Result<(), SequenceError>>,
-}
-
-impl SchedulerCleanupAck {
-    pub async fn wait(self) -> Result<(), SequenceError> {
-        self.response.await.unwrap_or(Ok(()))
-    }
-}
-
-impl SchedulerBookingCleanup {
-    fn enqueue_entry(&self, entry: AdmissionCleanupEntry) {
-        enqueue_cleanup_entry(&self.cleanup, &self.actor_tx, entry);
-    }
-
-    pub fn enqueue(&self, booking: SchedulerBookingDescriptor) {
-        self.enqueue_entry(AdmissionCleanupEntry {
-            target: SchedulerCleanupTarget::Booking(booking),
-            response: None,
-        });
-    }
-
-    pub fn enqueue_acknowledged(&self, booking: SchedulerBookingDescriptor) -> SchedulerCleanupAck {
-        let (response, receiver) = oneshot::channel();
-        self.enqueue_entry(AdmissionCleanupEntry {
-            target: SchedulerCleanupTarget::Booking(booking),
-            response: Some(response),
-        });
-        SchedulerCleanupAck { response: receiver }
-    }
-
-    pub async fn enqueue_and_wait(
-        &self,
-        booking: SchedulerBookingDescriptor,
-    ) -> Result<(), SequenceError> {
-        self.enqueue_acknowledged(booking).wait().await
-    }
-}
-
 /// Single-owner cleanup lease for one scheduler-tracked request.
 pub(crate) struct RequestLifecycleLease {
     cleanup: Arc<AdmissionCleanup>,
@@ -304,14 +206,9 @@ impl Drop for RequestLifecycleLease {
         let Some(request_id) = self.request_id.take() else {
             return;
         };
-        enqueue_cleanup_entry(
-            &self.cleanup,
-            &self.actor_tx,
-            AdmissionCleanupEntry {
-                target: SchedulerCleanupTarget::Admission { request_id },
-                response: None,
-            },
-        );
+        if self.cleanup.enqueue(AdmissionCleanupEntry { request_id }) {
+            let _ = self.actor_tx.try_send(AdmissionCommand::Cleanup);
+        }
     }
 }
 
@@ -323,6 +220,7 @@ struct SchedulerQueueActor<
 > {
     pending: PolicyQueue<QueuedRequest>,
     cleanup: Arc<AdmissionCleanup>,
+    queueing_enabled: bool,
     profile: PolicyProfile,
     pending_count: Arc<AtomicUsize>,
     pending_isl_tokens: Arc<AtomicUsize>,
@@ -490,6 +388,7 @@ impl<
         let actor = SchedulerQueueActor {
             pending,
             cleanup: Arc::clone(&cleanup),
+            queueing_enabled,
             profile,
             pending_count: Arc::clone(&pending_count),
             pending_isl_tokens: Arc::clone(&pending_isl_tokens),
@@ -640,20 +539,9 @@ impl<
 
     pub(crate) async fn enqueue_with_block_hashes_and_lease(
         &self,
-        request: SchedulingRequest,
-        block_hashes: Option<Vec<LocalBlockHash>>,
-        lease: Option<Box<RequestLifecycleLease>>,
-    ) -> Option<Box<RequestLifecycleLease>> {
-        self.enqueue_admitted_with_block_hashes_and_lease(request, block_hashes, lease, None)
-            .await
-    }
-
-    pub(crate) async fn enqueue_admitted_with_block_hashes_and_lease(
-        &self,
         mut request: SchedulingRequest,
         block_hashes: Option<Vec<LocalBlockHash>>,
         lease: Option<Box<RequestLifecycleLease>>,
-        attempt_tx: Option<oneshot::Sender<AttemptId>>,
     ) -> Option<Box<RequestLifecycleLease>> {
         if self.queueing_enabled && lease.is_none() && request.mode.lifecycle_request_id().is_some()
         {
@@ -673,7 +561,6 @@ impl<
         let (ack_tx, ack_rx) = oneshot::channel();
         let command = AdmissionCommand::Enqueue {
             request,
-            attempt_tx,
             block_hashes: self.prepare_block_hashes_for_refresh(block_hashes),
             lease,
             ack_tx,
@@ -711,13 +598,6 @@ impl<
         }))
     }
 
-    pub fn booking_cleanup(&self) -> SchedulerBookingCleanup {
-        SchedulerBookingCleanup {
-            cleanup: Arc::clone(&self.cleanup),
-            actor_tx: self.admission_tx.clone(),
-        }
-    }
-
     /// Select a worker from current scheduler state without entering admission.
     ///
     /// This is for advisory policy probes that must not wait in the router
@@ -748,43 +628,6 @@ impl<
 
     pub(crate) async fn update_worker(&self, worker: WorkerWithDpRank) {
         self.update_after(Some(worker)).await;
-    }
-
-    pub(crate) async fn mark_prefill_completed_if_booking(
-        &self,
-        booking: SchedulerBookingDescriptor,
-    ) -> Result<(), KvSchedulerError> {
-        let (ack_tx, ack_rx) = oneshot::channel();
-        self.admission_tx
-            .send(AdmissionCommand::MarkPrefillCompleted { booking, ack_tx })
-            .await
-            .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
-        ack_rx
-            .await
-            .map_err(|_| KvSchedulerError::SubscriberShutdown)?
-            .map(|_| ())
-            .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))
-    }
-
-    pub(crate) async fn add_output_block_if_booking(
-        &self,
-        booking: SchedulerBookingDescriptor,
-        decay_fraction: Option<f64>,
-    ) -> Result<(), KvSchedulerError> {
-        let (ack_tx, ack_rx) = oneshot::channel();
-        self.admission_tx
-            .send(AdmissionCommand::AddOutputBlock {
-                booking,
-                decay_fraction,
-                ack_tx,
-            })
-            .await
-            .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
-        ack_rx
-            .await
-            .map_err(|_| KvSchedulerError::SubscriberShutdown)?
-            .map(|_| ())
-            .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))
     }
 
     async fn update_after(&self, worker: Option<WorkerWithDpRank>) {
@@ -847,15 +690,17 @@ impl<
     async fn run(mut self, mut rx: mpsc::Receiver<AdmissionCommand>) {
         let mut commands_since_cleanup = 0usize;
         while let Some(command) = rx.recv().await {
-            commands_since_cleanup += 1;
-            let drain_cleanup = rx.is_empty() || commands_since_cleanup == 256;
-            if drain_cleanup {
-                commands_since_cleanup = 0;
-            }
+            let drain_cleanup = self.queueing_enabled && {
+                commands_since_cleanup += 1;
+                let drain_cleanup = rx.is_empty() || commands_since_cleanup == 256;
+                if drain_cleanup {
+                    commands_since_cleanup = 0;
+                }
+                drain_cleanup
+            };
             match command {
                 AdmissionCommand::Enqueue {
                     request,
-                    attempt_tx,
                     block_hashes,
                     mut lease,
                     ack_tx,
@@ -864,14 +709,13 @@ impl<
                         .as_ref()
                         .and_then(|_| request.mode.tracked_request_id().map(str::to_owned));
                     let (enqueue_ready, owns_lifecycle) =
-                        self.handle_enqueue(request, attempt_tx, block_hashes);
+                        self.handle_enqueue(request, block_hashes);
                     if let Some(lease) = lease.as_mut()
                         && owns_lifecycle
                     {
                         lease.request_id = request_id;
                     }
-                    let cleanup_ready = drain_cleanup && self.drain_cleanup();
-                    let made_ready = enqueue_ready || cleanup_ready;
+                    let made_ready = enqueue_ready | (drain_cleanup && self.drain_cleanup());
                     if made_ready {
                         self.handle_update(None).await;
                     }
@@ -887,37 +731,6 @@ impl<
                         self.handle_update(None).await;
                     }
                     let _ = ack_tx.send(());
-                }
-                AdmissionCommand::MarkPrefillCompleted { booking, ack_tx } => {
-                    let result = self.slots.mark_prefill_completed_if_booking(
-                        &booking.request_id,
-                        booking.worker,
-                        booking.attempt_id,
-                        Instant::now(),
-                    );
-                    let mutation_ready = result.as_ref().is_ok_and(|outcome| outcome.is_applied());
-                    let cleanup_ready = drain_cleanup && self.drain_cleanup();
-                    let made_ready = mutation_ready || cleanup_ready;
-                    if made_ready {
-                        self.handle_update(Some(booking.worker)).await;
-                    }
-                    let _ = ack_tx.send(result);
-                }
-                AdmissionCommand::AddOutputBlock {
-                    booking,
-                    decay_fraction,
-                    ack_tx,
-                } => {
-                    let result = self.slots.add_output_block_if_booking(
-                        &booking.request_id,
-                        booking.worker,
-                        booking.attempt_id,
-                        decay_fraction,
-                    );
-                    if drain_cleanup && self.drain_cleanup() {
-                        self.handle_update(None).await;
-                    }
-                    let _ = ack_tx.send(result);
                 }
                 AdmissionCommand::Cleanup => {
                     if self.drain_cleanup() {
@@ -952,7 +765,6 @@ impl<
     fn handle_enqueue(
         &mut self,
         request: SchedulingRequest,
-        attempt_tx: Option<oneshot::Sender<AttemptId>>,
         block_hashes: Option<Vec<LocalBlockHash>>,
     ) -> (bool, bool) {
         let decay_now = Instant::now();
@@ -976,7 +788,7 @@ impl<
             self.all_workers_prefill_busy(class, request.eligibility(), decay_now)
         });
         if !should_queue {
-            return (false, self.admit_one(request, attempt_tx, decay_now));
+            return (false, self.admit_one(request, decay_now));
         }
 
         let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&request));
@@ -989,7 +801,6 @@ impl<
             .map_or(WorkerPlacement::Any, WorkerPlacement::Exact);
         let queued = QueuedRequest {
             request,
-            attempt_tx,
             enqueue_at: decay_now,
             block_hashes,
         };
@@ -1051,44 +862,14 @@ impl<
         let mut removed_ready_head = false;
         let mut unmanaged_request_ids = HashSet::new();
         for cleanup in dirty {
-            match cleanup.target {
-                SchedulerCleanupTarget::Admission { request_id } => {
-                    if self.slots.request_worker(&request_id).is_some() {
-                        if let Err(error) = self.slots.free(&request_id, Instant::now()) {
-                            tracing::error!(%request_id, %error, "Failed to release dropped scheduler booking");
-                        }
-                        made_ready = true;
-                    }
-                    unmanaged_request_ids.insert(request_id);
-                    if let Some(response) = cleanup.response {
-                        let _ = response.send(Ok(()));
-                    }
+            let request_id = &cleanup.request_id;
+            if self.slots.request_worker(request_id).is_some() {
+                if let Err(error) = self.slots.free(request_id, Instant::now()) {
+                    tracing::error!(%request_id, %error, "Failed to release dropped scheduler booking");
                 }
-                SchedulerCleanupTarget::Booking(booking) => {
-                    let result = self
-                        .slots
-                        .free_if_booking(
-                            &booking.request_id,
-                            booking.worker,
-                            booking.attempt_id,
-                            Instant::now(),
-                        )
-                        .map(|outcome| {
-                            made_ready |= outcome.is_applied();
-                        });
-                    if let Some(response) = cleanup.response {
-                        let _ = response.send(result);
-                    } else if let Err(error) = result {
-                        tracing::error!(
-                            request_id = %booking.request_id,
-                            worker = ?booking.worker,
-                            attempt_id = %booking.attempt_id,
-                            %error,
-                            "Failed to release request-attempt scheduler booking"
-                        );
-                    }
-                }
+                made_ready = true;
             }
+            unmanaged_request_ids.insert(cleanup.request_id);
         }
         if !unmanaged_request_ids.is_empty() {
             for class_index in 0..self.profile.classes().len() {
@@ -1218,7 +999,7 @@ impl<
                 policy_class = class.name,
                 "scheduling request from pending queue"
             );
-            self.admit_one(request, queued.attempt_tx, admit_now);
+            self.admit_one(request, admit_now);
         }
     }
 
@@ -1310,12 +1091,7 @@ impl<
 
     /// Run the full scheduling pipeline for a single request:
     /// compute projected load -> select worker -> book tracked state -> respond.
-    fn admit_one(
-        &mut self,
-        mut request: SchedulingRequest,
-        attempt_tx: Option<oneshot::Sender<AttemptId>>,
-        decay_now: Instant,
-    ) -> bool {
+    fn admit_one(&mut self, mut request: SchedulingRequest, decay_now: Instant) -> bool {
         let selected = match self.select_worker_for_request(&mut request, decay_now) {
             Ok(s) => s,
             Err(e) => {
@@ -1366,7 +1142,6 @@ impl<
         };
         self.book_and_respond(
             request,
-            attempt_tx,
             sequence_request,
             response,
             non_max_overlap_selection,
@@ -1381,7 +1156,6 @@ impl<
     fn book_and_respond(
         &self,
         mut request: SchedulingRequest,
-        attempt_tx: Option<oneshot::Sender<AttemptId>>,
         sequence_request: SequenceRequest,
         response: SchedulingResponse,
         non_max_overlap_selection: Option<NonMaxOverlapSelection>,
@@ -1395,21 +1169,12 @@ impl<
         }
 
         let request_id = sequence_request.request_id.clone();
-        let worker = sequence_request.worker;
-        let attempt_id = match self
-            .slots
-            .add_request_admitted(sequence_request, Instant::now())
-        {
-            Ok(attempt_id) => attempt_id,
-            Err(error) => {
-                tracing::warn!(%request_id, %error, "Failed to book scheduler state");
-                request.respond(Err(KvSchedulerError::BookingFailed(error.to_string())));
-                return false;
-            }
-        };
-        if let Some(attempt_tx) = attempt_tx {
-            let _ = attempt_tx.send(attempt_id);
+        if let Err(error) = self.slots.add_request(sequence_request, Instant::now()) {
+            tracing::warn!(%request_id, %error, "Failed to book scheduler state");
+            request.respond(Err(KvSchedulerError::BookingFailed(error.to_string())));
+            return false;
         }
+
         if request.respond(Ok(response)) {
             if let Some(selection) = non_max_overlap_selection {
                 self.dispatch_non_max_overlap_selection(request_id, selection);
@@ -1418,10 +1183,7 @@ impl<
         }
 
         tracing::debug!(%request_id, "Rolling back undelivered scheduler booking");
-        if let Err(error) =
-            self.slots
-                .free_if_booking(&request_id, worker, attempt_id, Instant::now())
-        {
+        if let Err(error) = self.slots.free(&request_id, Instant::now()) {
             tracing::error!(%request_id, %error, "Failed to roll back scheduler booking");
         }
         false

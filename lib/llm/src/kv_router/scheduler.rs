@@ -5,22 +5,17 @@ use dynamo_kv_router::protocols::{LocalBlockHash, SharedCacheHits};
 pub use dynamo_kv_router::scheduling::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap,
 };
-pub(crate) use dynamo_kv_router::scheduling::queue::{
-    SchedulerBookingCleanup, SchedulerBookingDescriptor,
-};
 pub use dynamo_kv_router::scheduling::{
-    AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId, KvSchedulerError,
-    LocalScheduler, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad,
-    ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
-    WorkerAvailabilityProvider,
+    AdvisorySchedulingResponse, KvSchedulerError, LocalScheduler, NonMaxOverlapSelectionObserver,
+    OverloadedWorkerProvider, PotentialLoad, ScheduleRequest, SchedulingRequest,
+    SchedulingResponse, TierOverlapBlocks, WorkerAvailabilityProvider,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
 
 use super::metrics::{ROUTER_QUEUE_METRICS, RouterQueueMetricHandles, RouterRequestMetrics};
 use super::sequence::{
-    DeferredReplicaRequestLeaseObserver, RuntimeSequencePublisher, SequenceError, SequenceRequest,
-    create_multi_worker_sequences_with_observer,
+    RuntimeSequencePublisher, SequenceError, SequenceRequest, create_multi_worker_sequences,
 };
 use crate::discovery::RuntimeConfigWatch;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
@@ -29,7 +24,6 @@ use anyhow::Result;
 use dynamo_kv_router::{
     PrefillLoadEstimator,
     config::{KvRouterConfig, RouterConfigOverride},
-    multi_worker_sequence::ReplicaRequestLeaseObserver,
     protocols::{RoutingConstraints, WorkerId, WorkerWithDpRank},
 };
 use dynamo_runtime::component::Endpoint;
@@ -46,7 +40,6 @@ where
     RF: OverlapScoresRefresh,
 {
     inner: Arc<LocalScheduler<RuntimeSequencePublisher, ModelRuntimeConfig, Sel, RF>>,
-    replica_request_lease_observer: Arc<DeferredReplicaRequestLeaseObserver>,
     queue_metrics: Vec<RouterQueueMetricHandles>,
     queue_metric_indices: HashMap<String, usize>,
 }
@@ -77,17 +70,13 @@ where
             workers_with_configs.borrow().clone();
 
         let router_id = endpoint.drt().discovery().instance_id();
-        let replica_request_lease_observer =
-            Arc::new(DeferredReplicaRequestLeaseObserver::default());
-        let observer: Arc<dyn ReplicaRequestLeaseObserver> = replica_request_lease_observer.clone();
-        let slots = create_multi_worker_sequences_with_observer(
+        let slots = create_multi_worker_sequences(
             endpoint,
             block_size as usize,
             initial_workers,
             kv_router_config.router_replica_sync,
             router_id,
             worker_type,
-            Some(observer),
             cancellation_token.child_token(),
         )
         .await
@@ -189,7 +178,6 @@ where
 
         Ok(Self {
             inner,
-            replica_request_lease_observer,
             queue_metrics,
             queue_metric_indices,
         })
@@ -200,15 +188,6 @@ where
         request: ScheduleRequest,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
         let response = self.inner.schedule_request(request).await;
-        self.observe_schedule_result(&response);
-        response
-    }
-
-    pub(crate) async fn schedule_request_admitted(
-        &self,
-        request: ScheduleRequest,
-    ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
-        let response = self.inner.schedule_request_admitted(request).await;
         self.observe_schedule_result(&response);
         response
     }
@@ -351,7 +330,7 @@ where
         response
     }
 
-    fn observe_schedule_result<T>(&self, response: &Result<T, KvSchedulerError>) {
+    fn observe_schedule_result(&self, response: &Result<SchedulingResponse, KvSchedulerError>) {
         if let Err(KvSchedulerError::QueueRejected(rejection)) = response
             && let Some(metrics) = self
                 .queue_metric_indices
@@ -389,13 +368,6 @@ where
         self.inner.add_request(req).await
     }
 
-    pub async fn add_request_admitted(
-        &self,
-        req: SequenceRequest,
-    ) -> Result<AttemptId, SequenceError> {
-        self.inner.add_request_admitted(req).await
-    }
-
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
         self.inner.mark_prefill_completed(request_id).await?;
         self.update_queue_metrics();
@@ -419,28 +391,6 @@ where
         Ok(())
     }
 
-    pub(crate) fn booking_cleanup(&self) -> SchedulerBookingCleanup {
-        self.inner.booking_cleanup()
-    }
-
-    pub(crate) fn set_replica_request_lease_observer(
-        &self,
-        observer: Arc<dyn ReplicaRequestLeaseObserver>,
-    ) -> bool {
-        self.replica_request_lease_observer.install(observer)
-    }
-
-    pub(crate) async fn mark_prefill_completed_if_booking(
-        &self,
-        booking: &SchedulerBookingDescriptor,
-    ) -> Result<(), KvSchedulerError> {
-        self.inner
-            .mark_prefill_completed_if_booking(booking)
-            .await?;
-        self.update_queue_metrics();
-        Ok(())
-    }
-
     pub fn pending_count(&self) -> usize {
         self.inner.pending_count()
     }
@@ -459,16 +409,6 @@ where
         decay_fraction: Option<f64>,
     ) -> Result<(), SequenceError> {
         self.inner.add_output_block(request_id, decay_fraction)
-    }
-
-    pub(crate) async fn add_output_block_if_booking(
-        &self,
-        booking: &SchedulerBookingDescriptor,
-        decay_fraction: Option<f64>,
-    ) -> Result<(), KvSchedulerError> {
-        self.inner
-            .add_output_block_if_booking(booking, decay_fraction)
-            .await
     }
 
     pub fn get_potential_loads(

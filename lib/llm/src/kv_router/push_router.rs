@@ -42,7 +42,6 @@ mod selection;
 
 use cancellation::cancel_on_stop;
 use request_guard::RequestGuard;
-pub(super) use request_guard::prompt_private_blocks;
 use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
@@ -288,7 +287,6 @@ where
             self.request_metrics.clone(),
             context_id.clone(),
             selected_worker,
-            selection.attempt_id,
             request,
             !is_query_only,
         );
@@ -811,7 +809,6 @@ mod tests {
             Arc::clone(&router.request_metrics),
             "terminal-drain".to_string(),
             WorkerWithDpRank::from_worker_id(0),
-            None,
             &request(),
             false,
         );

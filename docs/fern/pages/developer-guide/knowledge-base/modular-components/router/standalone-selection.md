@@ -76,16 +76,9 @@ APIs. Those bindings should wrap `SelectionService` rather than construct
 | `--router-tracking-hash` | environment/default | Override the tracking algorithm with `public-xxh3-v1` or experimental `keyed-xxh3-v1`. |
 | `--router-tracking-key-file` | environment/none | Override the path to the 32-byte provider key file. |
 | `--router-tracking-key-id` | environment/none | Override the provider-managed key epoch. |
-| `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS` | `300` | Override the absolute request age at which the standalone slot tracker may reclaim stale active state. |
 
 Router scheduling behavior continues to use the standard Dynamo router
 environment configuration.
-
-The standalone expiry guard measures absolute age from admission; output progress does not refresh
-it. Periodic cleanup therefore reclaims stale state approximately five to six minutes after
-admission by default. The embedded `KvRouter` uses the same `300`-second value as its shared
-request-liveness CLOCK scan interval and reclaims an idle lease approximately five to ten minutes
-after the last progress touch.
 
 ## Worker Registration
 

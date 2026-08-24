@@ -4,86 +4,14 @@
 use dynamo_kv_router::{
     ConcurrentRadixTreeCompressed,
     indexer::{
-        ApproximateAcquireMode, ApproximateLruBlock, ApproximateLruIncarnation,
-        ApproximateLruLease, ApproximateLruReleaseAck, KvIndexer, KvIndexerInterface,
-        KvRouterError, RoutingDecisionHashes, ThreadPoolIndexer,
+        ApproximateLruIncarnation, ApproximateLruLease, ApproximateLruRequestId, KvIndexer,
+        KvIndexerInterface, KvRouterError, RoutingDecisionHashes, ThreadPoolIndexer,
     },
     protocols::{LocalBlockHash, TokensWithHashes, WorkerWithDpRank},
-    scheduling::AttemptId,
 };
 use dynamo_tokens::SequenceHash;
-use std::sync::{
-    Arc,
-    atomic::{AtomicU8, Ordering},
-};
 
 use super::{Indexer, SideIndexer, remote::RemoteIndexer};
-
-#[derive(Clone)]
-pub(crate) struct ApproximateRequestLease {
-    lease: ApproximateLruLease,
-    mode: Arc<AtomicU8>,
-}
-
-impl ApproximateRequestLease {
-    pub(crate) async fn acquire(
-        &mut self,
-        hashes: RoutingDecisionHashes,
-        private_blocks: usize,
-    ) -> Result<ApproximateAcquireMode, KvRouterError> {
-        let blocks = hashes
-            .local_hashes
-            .iter()
-            .zip(&hashes.sequence_hashes)
-            .map(|(&local_hash, &sequence_hash)| ApproximateLruBlock {
-                local_hash,
-                sequence_hash,
-            })
-            .collect();
-        let mode = self.lease.acquire(blocks, private_blocks).await?;
-        self.mode.store(
-            match mode {
-                ApproximateAcquireMode::Lru => 1,
-                ApproximateAcquireMode::TtlFallback => 2,
-                ApproximateAcquireMode::Ignored => 0,
-            },
-            Ordering::Release,
-        );
-        if mode == ApproximateAcquireMode::Lru {
-            return Ok(mode);
-        }
-        if mode == ApproximateAcquireMode::Ignored {
-            return Ok(mode);
-        }
-        Ok(mode)
-    }
-
-    pub(crate) fn materialize(
-        &self,
-        parent_hash: Option<SequenceHash>,
-        blocks: Vec<ApproximateLruBlock>,
-        start_position: usize,
-        private_blocks: usize,
-    ) -> Result<(), KvRouterError> {
-        if !self.is_active_lru() {
-            return Ok(());
-        }
-        self.lease
-            .materialize(parent_hash, blocks, start_position, private_blocks)
-    }
-
-    pub(crate) fn begin_finish(&self) -> Result<Option<ApproximateLruReleaseAck>, KvRouterError> {
-        self.lease.begin_finish()
-    }
-
-    pub(crate) fn release_now(&self) {
-        self.lease.release_now();
-    }
-
-    pub(crate) fn is_active_lru(&self) -> bool {
-        self.mode.load(Ordering::Acquire) == 1
-    }
-}
 
 #[derive(Clone, Copy)]
 pub(super) enum RouteRecordingTarget<'a> {
@@ -99,21 +27,17 @@ impl Indexer {
         &self,
         worker: WorkerWithDpRank,
         incarnation: ApproximateLruIncarnation,
-        attempt_id: AttemptId,
-    ) -> Option<ApproximateRequestLease> {
-        let lease = match self {
+        request_id: ApproximateLruRequestId,
+    ) -> Option<ApproximateLruLease> {
+        match self {
             Self::KvIndexer { primary, .. } => {
-                primary.begin_approximate_lru_request(worker, incarnation, attempt_id)?
+                primary.begin_approximate_lru_request(worker, incarnation, request_id)
             }
             Self::Concurrent { primary, .. } => {
-                primary.begin_approximate_lru_request(worker, incarnation, attempt_id)?
+                primary.begin_approximate_lru_request(worker, incarnation, request_id)
             }
-            Self::Remote { .. } | Self::None => return None,
-        };
-        Some(ApproximateRequestLease {
-            lease,
-            mode: Arc::new(AtomicU8::new(0)),
-        })
+            Self::Remote { .. } | Self::None => None,
+        }
     }
 
     pub(crate) fn records_routing_decisions(&self) -> bool {

@@ -4,13 +4,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    kv_router::{
-        KvRouter,
-        indexer::ApproximateRequestLease,
-        metrics::RouterRequestMetrics,
-        request_lease::RequestAttemptLease,
-        scheduler::{DefaultWorkerSelector, SchedulerBookingDescriptor},
-    },
+    kv_router::{KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector},
     local_model::runtime_config::ModelRuntimeConfig,
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -20,12 +14,13 @@ use crate::{
     },
 };
 use dynamo_kv_router::{
-    indexer::{ApproximateAcquireMode, ApproximateLruBlock, RoutingDecisionHashes},
+    indexer::{
+        ApproximateAcquireMode, ApproximateLruBlock, ApproximateLruLease, RoutingDecisionHashes,
+    },
     protocols::{
         BlockExtraInfo, BlockHashOptions, WorkerWithDpRank, compute_block_hash_for_seq,
         compute_next_seq_hash,
     },
-    scheduling::AttemptId,
     selector::WorkerSelector,
 };
 use dynamo_runtime::{
@@ -50,7 +45,7 @@ struct MaterializedOutputBlocks {
     private_blocks: usize,
 }
 
-pub(crate) fn prompt_private_blocks(
+fn prompt_private_blocks(
     token_count: usize,
     complete_blocks: usize,
     block_size: usize,
@@ -348,6 +343,93 @@ struct OutputBlockTracker {
     expected_output_tokens: Option<u32>,
 }
 
+/// Owns the legacy scheduler cleanup after a worker is selected.
+///
+/// Approximate-LRU references are deliberately owned separately by `RequestGuard`.
+struct RequestCleanup<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    chooser: Arc<KvRouter<Sel>>,
+    context_id: String,
+    worker: WorkerWithDpRank,
+    scheduler_tracked: bool,
+    freed: bool,
+}
+
+impl<Sel> RequestCleanup<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    fn new(
+        chooser: Arc<KvRouter<Sel>>,
+        context_id: String,
+        worker: WorkerWithDpRank,
+        scheduler_tracked: bool,
+    ) -> Self {
+        Self {
+            chooser,
+            context_id,
+            worker,
+            scheduler_tracked,
+            freed: false,
+        }
+    }
+
+    async fn finish(&mut self) {
+        if self.freed {
+            return;
+        }
+        if self.scheduler_tracked
+            && let Err(error) = self
+                .chooser
+                .free_if_worker(&self.context_id, self.worker)
+                .await
+        {
+            tracing::warn!(
+                request_id = %self.context_id,
+                worker = ?self.worker,
+                %error,
+                "Failed to free request"
+            );
+        }
+        self.freed = true;
+    }
+}
+
+impl<Sel> Drop for RequestCleanup<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    fn drop(&mut self) {
+        if self.freed || !self.scheduler_tracked {
+            return;
+        }
+
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                request_id = %self.context_id,
+                "No tokio runtime for request cleanup"
+            );
+            return;
+        };
+
+        let chooser = self.chooser.clone();
+        let context_id = self.context_id.clone();
+        let worker = self.worker;
+        handle.spawn(async move {
+            if let Err(error) = chooser.free_if_worker(&context_id, worker).await {
+                tracing::warn!(
+                    request_id = %context_id,
+                    ?worker,
+                    %error,
+                    "Failed to free request from drop guard"
+                );
+            }
+        });
+    }
+}
+
 impl OutputBlockTracker {
     fn new(
         track_output_blocks: bool,
@@ -391,13 +473,10 @@ pub(super) struct RequestGuard<Sel = DefaultWorkerSelector>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
-    chooser: Arc<KvRouter<Sel>>,
-    context_id: String,
-    worker: WorkerWithDpRank,
-    lifecycle: Option<RequestAttemptLease>,
+    cleanup: RequestCleanup<Sel>,
     observability: RequestObservability,
     output_blocks: OutputBlockTracker,
-    approximate_lru: Option<ApproximateRequestLease>,
+    approximate_lru: Option<ApproximateLruLease>,
     output_hashes: Option<CanonicalOutputTracker>,
     prefill_marked: bool,
     migration_state: Option<MigrationState>,
@@ -412,7 +491,6 @@ where
         request_metrics: Arc<RouterRequestMetrics>,
         context_id: String,
         worker: WorkerWithDpRank,
-        attempt_id: Option<AttemptId>,
         request: &PreprocessedRequest,
         scheduler_tracked: bool,
     ) -> Self {
@@ -429,8 +507,6 @@ where
         if scheduler_tracked {
             request_metrics.requests_started_total().inc();
         }
-        let attempt_id = scheduler_tracked
-            .then(|| attempt_id.expect("scheduler-tracked selection must carry an attempt ID"));
         let lru_registration = scheduler_tracked
             .then(|| chooser.approximate_lru_rank_registration(worker))
             .flatten();
@@ -438,29 +514,14 @@ where
             chooser.indexer().begin_approximate_lru_request(
                 worker,
                 registration.incarnation,
-                attempt_id.expect("LRU registration requires an admitted attempt"),
+                chooser.next_approximate_lru_request_id(),
             )
         });
         let output_hashes = approximate_lru
             .as_ref()
             .map(|_| CanonicalOutputTracker::new(request, block_size as u32, chooser.is_eagle()));
-        let lifecycle = scheduler_tracked.then(|| {
-            let attempt_id = attempt_id.expect("tracked request requires an admitted attempt");
-            chooser.request_lease_manager().register_local(
-                SchedulerBookingDescriptor {
-                    request_id: context_id.clone(),
-                    worker,
-                    attempt_id,
-                },
-                approximate_lru.clone(),
-            )
-        });
-
         Self {
-            chooser,
-            context_id,
-            worker,
-            lifecycle,
+            cleanup: RequestCleanup::new(chooser, context_id, worker, scheduler_tracked),
             observability: RequestObservability::new(request.tracker.clone(), request_metrics),
             output_blocks: OutputBlockTracker::new(
                 track_output_blocks,
@@ -477,7 +538,7 @@ where
 
     pub(super) fn record_migration_failure(&self, error: Option<DynamoError>) {
         if let Some(state) = self.migration_state.as_ref() {
-            state.record_failure(self.worker.worker_id, error);
+            state.record_failure(self.cleanup.worker.worker_id, error);
         }
     }
 
@@ -510,12 +571,22 @@ where
             .output_hashes
             .as_ref()
             .map_or(0, CanonicalOutputTracker::initial_private_blocks);
-        let Some(lease) = self.approximate_lru.as_mut() else {
+        let Some(lease) = self.approximate_lru.as_ref() else {
             return Ok(());
         };
-        let mode = lease.acquire(hashes, private_blocks).await?;
+        let blocks = hashes
+            .local_hashes
+            .iter()
+            .zip(&hashes.sequence_hashes)
+            .map(|(&local_hash, &sequence_hash)| ApproximateLruBlock {
+                local_hash,
+                sequence_hash,
+            })
+            .collect();
+        let mode = lease.acquire(blocks, private_blocks).await?;
         if mode != ApproximateAcquireMode::Lru {
             self.output_hashes = None;
+            self.approximate_lru = None;
             return Ok(());
         }
         if let Some(output_hashes) = self.output_hashes.as_mut() {
@@ -528,27 +599,21 @@ where
         self.observability.observe_response();
 
         let new_tokens = item.data.as_ref().map_or(0, |data| data.token_ids.len());
-        if new_tokens > 0
-            && let Some(lifecycle) = &self.lifecycle
-        {
-            lifecycle.touch();
-        }
-
         if !self.prefill_marked {
             let has_tokens = item
                 .data
                 .as_ref()
                 .is_some_and(|data| !data.token_ids.is_empty());
             if has_tokens {
-                if let Some(lifecycle) = &self.lifecycle
-                    && lifecycle.is_active()
+                if self.cleanup.scheduler_tracked
                     && let Err(error) = self
+                        .cleanup
                         .chooser
-                        .mark_prefill_completed_if_booking(lifecycle.booking())
+                        .mark_prefill_completed(&self.cleanup.context_id)
                         .await
                 {
                     tracing::warn!(
-                        request_id = %self.context_id,
+                        request_id = %self.cleanup.context_id,
                         %error,
                         "Failed to mark prefill completed"
                     );
@@ -557,17 +622,12 @@ where
             }
         }
 
-        if self
-            .lifecycle
-            .as_ref()
-            .is_some_and(RequestAttemptLease::is_active)
-            && let (Some(data), Some(output_hashes), Some(lease)) = (
-                item.data.as_ref(),
-                self.output_hashes.as_mut(),
-                self.approximate_lru.as_ref(),
-            )
-            && let Some(materialized) =
-                output_hashes.observe(data.index.unwrap_or(0), &data.token_ids)
+        if let (Some(data), Some(output_hashes), Some(lease)) = (
+            item.data.as_ref(),
+            self.output_hashes.as_mut(),
+            self.approximate_lru.as_ref(),
+        ) && let Some(materialized) =
+            output_hashes.observe(data.index.unwrap_or(0), &data.token_ids)
             && let Err(error) = lease.materialize(
                 materialized.parent_hash,
                 materialized.blocks,
@@ -576,7 +636,7 @@ where
             )
         {
             tracing::warn!(
-                request_id = %self.context_id,
+                request_id = %self.cleanup.context_id,
                 %error,
                 "Failed to materialize approximate LRU output blocks"
             );
@@ -587,19 +647,13 @@ where
             return;
         };
 
-        let Some(lifecycle) = &self.lifecycle else {
-            return;
-        };
-        if !lifecycle.is_active() {
-            return;
-        }
         if let Err(error) = self
+            .cleanup
             .chooser
-            .add_output_block_if_booking(lifecycle.booking(), update.decay_fraction)
-            .await
+            .add_output_block(&self.cleanup.context_id, update.decay_fraction)
         {
             tracing::warn!(
-                request_id = %self.context_id,
+                request_id = %self.cleanup.context_id,
                 %error,
                 "Failed to add output block"
             );
@@ -611,18 +665,35 @@ where
     pub(super) async fn finish(&mut self) {
         // Metrics must observe the completed request before cleanup releases its state.
         self.observability.record_metrics();
-        self.finish_lifecycle().await;
+        let lru_ack = self
+            .approximate_lru
+            .as_ref()
+            .map_or(Ok(None), ApproximateLruLease::begin_finish);
+        self.cleanup.finish().await;
+        match lru_ack {
+            Ok(Some(ack)) => {
+                if let Err(error) = ack.wait().await {
+                    tracing::warn!(
+                        request_id = %self.cleanup.context_id,
+                        %error,
+                        "Failed to release approximate LRU request lease"
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                request_id = %self.cleanup.context_id,
+                %error,
+                "Failed to enqueue approximate LRU request release"
+            ),
+        }
     }
 
     pub(super) async fn abort(&mut self) {
-        self.finish_lifecycle().await;
-    }
-
-    async fn finish_lifecycle(&self) {
-        let Some(lifecycle) = &self.lifecycle else {
-            return;
-        };
-        lifecycle.finish().await;
+        if let Some(lease) = &self.approximate_lru {
+            lease.release_now();
+        }
+        self.cleanup.finish().await;
     }
 }
 
@@ -632,6 +703,10 @@ where
 {
     fn drop(&mut self) {
         self.observability.record_metrics();
+        if let Some(lease) = &self.approximate_lru {
+            lease.release_now();
+        }
+        // RequestCleanup drops immediately afterward and performs scheduler cleanup.
     }
 }
 

@@ -15,15 +15,12 @@ use super::overlap::OverlapSignals;
 use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
 use super::policy_config::PolicyProfile;
 use super::prefill_load::PrefillLoadEstimator;
-use super::queue::{
-    ClassQueueStats, SchedulerBookingCleanup, SchedulerBookingDescriptor, SchedulerQueue,
-};
+use super::queue::{ClassQueueStats, SchedulerQueue};
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId, KvSchedulerError,
-    NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad, ScheduleMode,
-    ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
-    WorkerAvailabilityProvider,
+    AdvisorySchedulingResponse, KvSchedulerError, NonMaxOverlapSelectionObserver,
+    OverloadedWorkerProvider, PotentialLoad, ScheduleMode, ScheduleRequest, SchedulingRequest,
+    SchedulingResponse, TierOverlapBlocks, WorkerAvailabilityProvider,
 };
 use crate::protocols::RoutingConstraints;
 use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
@@ -315,20 +312,7 @@ where
         &self,
         request: ScheduleRequest,
     ) -> Result<SchedulingResponse, KvSchedulerError> {
-        self.schedule_request_admitted(request)
-            .await
-            .map(|admitted| admitted.response)
-    }
-
-    /// Schedule a request and return the router-internal admitted-attempt identity.
-    #[doc(hidden)]
-    pub async fn schedule_request_admitted(
-        &self,
-        request: ScheduleRequest,
-    ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
-        let tracked = request.mode.is_tracked();
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
         let lifecycle_lease = self
             .queue
             .new_request_lifecycle_lease(request.mode.lifecycle_request_id());
@@ -336,33 +320,16 @@ where
 
         let mut lifecycle_lease = self
             .queue
-            .enqueue_admitted_with_block_hashes_and_lease(
-                request,
-                block_hashes,
-                lifecycle_lease,
-                tracked.then_some(attempt_tx),
-            )
+            .enqueue_with_block_hashes_and_lease(request, block_hashes, lifecycle_lease)
             .await;
 
         let response = resp_rx
             .await
-            .map_err(|_| KvSchedulerError::SubscriberShutdown)??;
-        let attempt_id = if tracked {
-            Some(
-                attempt_rx
-                    .await
-                    .map_err(|_| KvSchedulerError::SubscriberShutdown)?,
-            )
-        } else {
-            None
-        };
+            .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
         if let Some(lease) = lifecycle_lease.as_mut() {
             lease.disarm();
         }
-        Ok(AdmittedSchedulingResponse {
-            response,
-            attempt_id,
-        })
+        response
     }
 
     /// Select a worker from current scheduler state without queue admission or booking.
@@ -532,15 +499,6 @@ where
         self.slots.add_request(req, Instant::now())
     }
 
-    /// Book a request and return the router-internal attempt identity.
-    #[doc(hidden)]
-    pub async fn add_request_admitted(
-        &self,
-        req: SequenceRequest,
-    ) -> Result<AttemptId, SequenceError> {
-        self.slots.add_request_admitted(req, Instant::now())
-    }
-
     /// Book a request only when its worker is already registered, so a request
     /// racing worker removal cannot lazily recreate the removed worker/rank.
     pub async fn add_request_if_registered(
@@ -604,21 +562,6 @@ where
         Ok(())
     }
 
-    #[doc(hidden)]
-    pub fn booking_cleanup(&self) -> SchedulerBookingCleanup {
-        self.queue.booking_cleanup()
-    }
-
-    #[doc(hidden)]
-    pub async fn mark_prefill_completed_if_booking(
-        &self,
-        booking: &SchedulerBookingDescriptor,
-    ) -> Result<(), KvSchedulerError> {
-        self.queue
-            .mark_prefill_completed_if_booking(booking.clone())
-            .await
-    }
-
     pub fn pending_count(&self) -> usize {
         self.queue.pending_count()
     }
@@ -650,17 +593,6 @@ where
     ) -> Result<(), SequenceError> {
         self.slots
             .add_output_block(&request_id.to_string(), decay_fraction)
-    }
-
-    #[doc(hidden)]
-    pub async fn add_output_block_if_booking(
-        &self,
-        booking: &SchedulerBookingDescriptor,
-        decay_fraction: Option<f64>,
-    ) -> Result<(), KvSchedulerError> {
-        self.queue
-            .add_output_block_if_booking(booking.clone(), decay_fraction)
-            .await
     }
 
     pub fn get_potential_loads(
