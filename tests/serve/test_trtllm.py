@@ -824,12 +824,9 @@ def test_chat_only_aggregated_with_test_logits_processor(
 @pytest.mark.trtllm
 @pytest.mark.core
 @pytest.mark.nightly
-@pytest.mark.profiled_vram_gib(3.9)
+# Keep this startup-sensitive test in the sequential GPU stage.
+# @pytest.mark.profiled_vram_gib(3.9)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
-# Packed H100 runs can start several TRT-LLM MPI engines on one GPU at once;
-# reserve this GPU so the test measures canary readiness instead of startup
-# contention.
-@pytest.mark.gpu_parallel_exclusive
 @pytest.mark.timeout(300)
 @pytest.mark.parametrize("num_system_ports", [1], indirect=True)
 def test_aggregated_health_check_priority(

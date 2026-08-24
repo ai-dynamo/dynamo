@@ -11,20 +11,15 @@ the VRAM-aware ordering beats the legacy timeout-sorted first-fit. No GPU or
 
 from __future__ import annotations
 
-import json
-from types import SimpleNamespace
-
 import pytest
 
 from tests.utils.pytest_parallel_gpu import (
-    _SCHEDULER_STALL_TIMEOUT_S,
     _GpuState,
     _priority_key,
     _select_launches,
     _TestEntry,
-    _update_scheduler_stall,
 )
-from tests.utils.vram_utils import VRAM_MULTI_PROC_MARGIN, write_test_meta
+from tests.utils.vram_utils import VRAM_MULTI_PROC_MARGIN
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
@@ -38,7 +33,6 @@ def _gpu(
     *,
     budget_used: float = 0.0,
     running_count: int = 0,
-    exclusive_running: bool = False,
 ) -> _GpuState:
     return _GpuState(
         index=index,
@@ -46,24 +40,11 @@ def _gpu(
         budget_multi=total_gib * (1.0 - VRAM_MULTI_PROC_MARGIN),
         budget_used=budget_used,
         running_count=running_count,
-        exclusive_running=exclusive_running,
     )
 
 
-def _t(
-    name: str,
-    profiled: float,
-    timeout: float = 600.0,
-    *,
-    exclusive: bool = False,
-) -> _TestEntry:
-    return _TestEntry(
-        id=name,
-        name=name,
-        profiled_gib=profiled,
-        timeout=timeout,
-        gpu_parallel_exclusive=exclusive,
-    )
+def _t(name: str, profiled: float, timeout: float = 600.0) -> _TestEntry:
+    return _TestEntry(id=name, name=name, profiled_gib=profiled, timeout=timeout)
 
 
 def _select(pending, gpus, *, num_slots, running_count=0, actual_free=None):
@@ -96,32 +77,6 @@ def test_priority_orders_vram_first_then_duration_then_size():
     assert names[-1] == "filler"
     # Among VRAM tests: longest est_duration first; ties broken by larger VRAM.
     assert names[:3] == ["long_big", "long_small", "short_big"]
-
-
-def test_priority_orders_gpu_exclusive_first():
-    regular_long = _t("regular_long", 13.0, timeout=1800)
-    exclusive_short = _t("exclusive_short", 3.9, timeout=300, exclusive=True)
-
-    ordered = sorted([regular_long, exclusive_short], key=_priority_key, reverse=True)
-
-    assert [test.name for test in ordered] == ["exclusive_short", "regular_long"]
-
-
-def test_gpu_exclusive_marker_is_written_to_scheduler_metadata(tmp_path):
-    markers = {
-        "profiled_vram_gib": SimpleNamespace(args=(3.9,), kwargs={}),
-        "requested_trtllm_kv_tokens": SimpleNamespace(args=(2592,), kwargs={}),
-        "gpu_parallel_exclusive": SimpleNamespace(args=(), kwargs={}),
-    }
-    item = SimpleNamespace(
-        nodeid="tests/serve/test_trtllm.py::test_health",
-        get_closest_marker=lambda name: markers.get(name),
-    )
-
-    write_test_meta([item], str(tmp_path))
-
-    metadata = json.loads((tmp_path / "pytest_gpu_parallel_test_meta.json").read_text())
-    assert metadata[item.nodeid]["gpu_parallel_exclusive"] is True
 
 
 # --------------------------------------------------------------------------- #
@@ -198,106 +153,6 @@ def test_actual_usage_gate_blocks_when_live_vram_exceeds_budget():
     # Only 5 GiB actually free => 17 GiB live-used; 17 + 13 = 30 > 22 cap -> the
     # actual-usage gate blocks the launch the budget gate would have allowed.
     assert _select(pending, gpus, num_slots=8, actual_free={0: 5.0}) == []
-
-
-# --------------------------------------------------------------------------- #
-# _select_launches: GPU-exclusive tests
-# --------------------------------------------------------------------------- #
-def test_gpu_exclusive_test_blocks_vram_backfill_but_allows_filler():
-    gpus = {0: _gpu(0, 80.0)}
-    pending = [
-        _t("exclusive", 3.9, exclusive=True),
-        _t("regular", 3.9),
-        _t("filler", 0.0),
-    ]
-
-    launches = _select(pending, gpus, num_slots=8)
-
-    assert launches == [(0, 0), (2, 0)]
-
-
-def test_gpu_exclusive_test_reserves_busy_gpu_but_allows_filler():
-    gpus = {0: _gpu(0, 80.0, budget_used=3.9, running_count=1)}
-    pending = [
-        _t("exclusive", 3.9, exclusive=True),
-        _t("regular", 3.9),
-        _t("filler", 0.0),
-    ]
-
-    launches = _select(pending, gpus, num_slots=8, running_count=1)
-
-    assert launches == [(2, 0)]
-
-
-def test_gpu_exclusive_test_can_start_while_zero_vram_filler_is_running():
-    # running_count is the global slot count; the per-GPU VRAM process count
-    # remains zero because the existing subprocess is a zero-VRAM filler.
-    gpus = {0: _gpu(0, 80.0, running_count=0)}
-    pending = [_t("exclusive", 3.9, exclusive=True)]
-
-    launches = _select(pending, gpus, num_slots=8, running_count=1)
-
-    assert launches == [(0, 0)]
-
-
-def test_running_gpu_exclusive_test_blocks_vram_test_but_allows_filler():
-    gpus = {
-        0: _gpu(
-            0,
-            80.0,
-            budget_used=3.9,
-            running_count=1,
-            exclusive_running=True,
-        )
-    }
-    pending = [_t("regular", 3.9), _t("filler", 0.0)]
-
-    launches = _select(pending, gpus, num_slots=8, running_count=1)
-
-    assert launches == [(1, 0)]
-
-
-def test_scheduler_stall_timeout_is_bounded_and_resets_on_progress():
-    blocked_since, stalled = _update_scheduler_stall(
-        None,
-        100.0,
-        has_pending=True,
-        running_count=0,
-        launch_count=0,
-    )
-    assert blocked_since == 100.0
-    assert stalled is False
-
-    blocked_since, stalled = _update_scheduler_stall(
-        blocked_since,
-        100.0 + _SCHEDULER_STALL_TIMEOUT_S,
-        has_pending=True,
-        running_count=0,
-        launch_count=0,
-    )
-    assert stalled is True
-
-    blocked_since, stalled = _update_scheduler_stall(
-        blocked_since,
-        100.0 + _SCHEDULER_STALL_TIMEOUT_S,
-        has_pending=True,
-        running_count=1,
-        launch_count=0,
-    )
-    assert blocked_since is None
-    assert stalled is False
-
-
-def test_gpu_exclusive_reservation_allows_other_gpu_to_make_progress():
-    gpus = {
-        0: _gpu(0, 80.0, budget_used=3.9, running_count=1),
-        1: _gpu(1, 80.0, budget_used=7.8, running_count=2),
-    }
-    pending = [_t("exclusive", 3.9, exclusive=True), _t("regular", 3.9)]
-
-    launches = _select(pending, gpus, num_slots=8, running_count=3)
-
-    assert launches == [(1, 1)]
 
 
 # --------------------------------------------------------------------------- #
