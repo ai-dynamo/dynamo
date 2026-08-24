@@ -81,6 +81,7 @@ OTEL_SERVICE_NAME=dynamo-worker-1 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT_WORKER1:-808
 python3 -m dynamo.sglang \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
+  --stream-interval 20 \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \
@@ -94,6 +95,7 @@ OTEL_SERVICE_NAME=dynamo-worker-2 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT_WORKER2:-808
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --model-path "$MODEL" \
   --served-model-name "$MODEL" \
+  --stream-interval 20 \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \

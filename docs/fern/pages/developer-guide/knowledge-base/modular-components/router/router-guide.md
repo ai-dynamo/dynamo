@@ -14,6 +14,12 @@ This guide helps you get started with using the Dynamo router and points to the 
 
 The router can be deployed using [Python / CLI](#python--cli-deployment), [Kubernetes](#kubernetes-deployment), or as a [standalone component](#standalone-router).
 
+> [!IMPORTANT]
+> Event-driven KV routing requires both `--router-mode kv` on the frontend and
+> `--kv-events-config` on each event-producing backend worker. The frontend flag does not start the
+> vLLM or SGLang event publisher. If workers do not publish events, use
+> `--no-router-kv-events` for approximate cache prediction.
+
 ### Python / CLI Deployment
 
 To launch the Dynamo frontend with the KV Router:
@@ -27,7 +33,21 @@ This command:
 - Exposes the service on port 8000 (configurable)
 - Automatically handles all backend workers registered to the Dynamo endpoint
 
-Backend workers register themselves using the `register_model` API. For accurate prefix-cache state, workers must also publish KV cache events with the backend-specific event flags; otherwise the router can run in approximate mode with `--no-router-kv-events`.
+Backend workers register with the `register_model` API. For event-driven prefix-cache state, add
+the applicable worker flag:
+
+```bash
+# vLLM: enable_kv_cache_events is required
+python -m dynamo.vllm --model MODEL_NAME \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+
+# SGLang: publisher and endpoint are required; topic is optional
+python -m dynamo.sglang --model-path MODEL_NAME \
+  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+```
+
+For workers that share a network namespace, use a unique endpoint port. See the
+[Router Quick Start](overview.md#quick-start) for the event flow and backend schemas.
 
 The [Frontend Configuration Reference](../../../../reference/components/frontend-configuration.mdx#router) is the
 canonical list of embedded-router CLI arguments, environment variables, defaults,
@@ -57,7 +77,8 @@ spec:
 
 **Key Points:**
 - Set `DYN_ROUTER_MODE=kv` on the **Frontend** service only
-- Configure worker-side KV event publishing when you want event-driven prefix-cache state
+- Add the backend `--kv-events-config` to every event-producing worker
+- Frontend KV mode does not enable worker event publication
 - Use `--no-router-kv-events` for approximate cache-state prediction when workers are not publishing events
 
 For exact environment-variable mappings, see the
@@ -132,15 +153,19 @@ Use `DYN_ENCODER_CUDA_TO_CPU_RATIO` to approximate the throughput ratio of a non
 
 When only one device class is present, the policy degenerates to standard least-loaded routing.
 
-### KV Event Transport Modes (within `--router-mode kv`)
+### KV Cache State Modes (within `--router-mode kv`)
 
-When using KV routing, the router needs to know what each worker has cached. There are three ways to get this information:
+The KV router needs the cache state of each worker. Choose one of these state modes:
 
-| Event Mode | How to Enable | Description |
+| State Mode | How to Enable | Description |
 |------------|---------------|-------------|
-| **ZMQ (local indexer)** | Router default (no router flag) | Workers maintain a local indexer and publish KV events via ZMQ PUB sockets; the router recovers state by querying live workers. This is the default event plane for all backends |
-| **NATS Core (local indexer)** | `--event-plane nats` (or `DYN_EVENT_PLANE=nats`) | Same local-indexer model, but events flow over NATS Core instead of ZMQ. |
-| **Approximate (no events)** | `--no-router-kv-events` | No events consumed; router predicts cache state from its own routing decisions with TTL-based expiration |
+| **Event-driven** | Router default plus backend `--kv-events-config` | The engine emits raw events to its Dynamo worker. The worker normalizes the events and updates its worker-local indexer. The worker republishes the updates over Dynamo's event plane. The router can query the worker-local indexer to recover worker-to-router event gaps. |
+| **Approximate (no events)** | `--no-router-kv-events` | The router consumes no events. It predicts cache state from its routing decisions and uses time-based expiration. |
+
+The backend `--kv-events-config` and Dynamo's event-plane configuration control different hops.
+One configuration does not change the other. See [Router Design](router-design.md#event-flow-and-recovery)
+for the data path. See [Configuration and Tuning](configuration-and-tuning.md) for event-plane
+selection.
 
 ### Aggregated vs. Disaggregated Topology
 
