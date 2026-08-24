@@ -30,9 +30,12 @@
 # which must stay on @ai-dynamo/autobots (bypass actor on "Required PR Checks").
 # Commits use `git commit -s` so DCO passes when the bypass is exercised.
 #
-# Runs land at most once a day in practice: the only always-moving field is
-# GENERATED_ON in the docs-site component, a Pacific date, so the other three
-# runs are usually no-ops and exit without committing.
+# Most runs are no-ops. The docs-site component's only always-moving field is
+# GENERATED_ON, a Pacific date, so that file changes once a day. README.md
+# changes on that rollover and additionally whenever an event starts or ends,
+# because update-events.js recomputes the upcoming/past split from the current
+# time on every run. Expect roughly one commit a day plus one near each event
+# boundary.
 
 name: Community Events Refresh
 
