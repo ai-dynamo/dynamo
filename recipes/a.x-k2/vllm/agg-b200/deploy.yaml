@@ -19,6 +19,7 @@ spec:
               imagePullPolicy: IfNotPresent
               command:
                 - python3
+              args:
                 - -m
                 - dynamo.frontend
               env:
