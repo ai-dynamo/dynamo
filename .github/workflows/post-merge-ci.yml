@@ -8,6 +8,19 @@ on:
     branches:
       - main
       - 'release/*.*.*'
+    # Docs-only pushes cannot change what this pipeline builds or tests, and
+    # they are already covered by the pre-merge Fern checks and fern-docs.yml.
+    # Same exclusion trigger_ci.yml carries, for the same reason.
+    #
+    # Today a docs merge still runs the full ~110-minute image build: 4 of the
+    # last 30 runs on main were docs-only. It also matters for any scheduled job
+    # that commits generated docs to main -- the community events refresh being
+    # the first -- which would otherwise wake this pipeline once a day.
+    paths-ignore:
+      - 'docs/**'
+      - 'fern/**'
+      - '**.md'
+      - '**.rst'
   workflow_dispatch:
     inputs:
       framework:

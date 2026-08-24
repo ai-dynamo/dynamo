@@ -150,6 +150,45 @@ jobs:
           echo "Source commit SHA: ${COMMIT_SHA}"
           echo "Nightly: ${NIGHTLY}"
 
+      # Every image this pipeline republishes is tagged ${COMMIT_SHA}-*, and
+      # post-merge CI is what builds them. post-merge CI skips docs-only pushes,
+      # so a commit that touched only docs has no images -- and the failure would
+      # otherwise surface much later, mid-release, as an opaque "manifest
+      # unknown" from the first image copy. Fail here instead, while nothing has
+      # been tagged or published, and say what to do about it.
+      - name: Verify post-merge CI built images for this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT_SHA: ${{ steps.extract.outputs.commit_sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Existence, not success. post-merge CI is a ~50-job pipeline whose
+          # image builds routinely succeed while a downstream test fails, so
+          # gating on overall success would block releases that do have images.
+          # Zero runs is the unambiguous signal: the workflow never fired for
+          # this SHA, so nothing was ever built for it.
+          COUNT=$(gh api \
+            "repos/${REPO}/actions/workflows/post-merge-ci.yml/runs?head_sha=${COMMIT_SHA}" \
+            --jq '.total_count' 2>/dev/null || echo "unknown")
+
+          # Never block a release on a flaky API call: warn and let the image
+          # copy be the judge, which is the behaviour before this check existed.
+          if [ "${COUNT}" = "unknown" ]; then
+            echo "::warning::Could not query post-merge CI runs for ${COMMIT_SHA}; continuing."
+            exit 0
+          fi
+
+          if [ "${COUNT}" -eq 0 ]; then
+            echo "::error::No post-merge CI run exists for ${COMMIT_SHA}, so its ${COMMIT_SHA}-* images were never built."
+            echo "post-merge CI skips docs-only pushes, so a documentation-only commit has no images."
+            echo "Re-run this release against the most recent commit with a successful post-merge CI run."
+            exit 1
+          fi
+
+          echo "Found ${COUNT} post-merge CI run(s) for ${COMMIT_SHA}."
+
       # Checkout at the source commit with full tags so the RC-number step can
       # enumerate existing v<VERSION>-rc<N> tags and auto-increment. Also lets
       # downstream jobs (release-publish, stage-wheels-artifactory) consume the
