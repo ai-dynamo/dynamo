@@ -52,6 +52,15 @@ python -m dynamo.kv_dc_relay \
 `DYN_NAMESPACE` controls the namespace used for the Relay's own runtime endpoints and defaults to
 `dynamo`.
 
+## Naming invariant
+
+Request-facing model and adapter names must be unique across every namespace one Relay watches.
+WAN consumers address published state by model name, so the Relay cannot scope name ownership to a
+namespace the way a local frontend can. When one name resolves to conflicting targets anywhere in
+the watch scope, the Relay omits that name from every endpoint (fail-closed) instead of picking an
+owner; the omission is recorded as a per-endpoint serving conflict. Deployments that reuse one
+model name for different targets must split them across separate Relay watch scopes.
+
 ## Runtime endpoints
 
 The component always exposes a health endpoint. Builds with the Rust `ckf-diagnostics` feature

@@ -160,12 +160,12 @@ spec:
       resources:
         limits:
           custom:
-            vpc.amazonaws.com/efa: "8"
+            vpc.amazonaws.com/efa: "4"
           gpu: "4"
         requests:
           custom:
             ephemeral-storage: 2Gi
-            vpc.amazonaws.com/efa: "8"
+            vpc.amazonaws.com/efa: "4"
           gpu: "4"
       # TensorRT-LLM workers need a large shared-memory volume for runtime state.
       sharedMemory:
@@ -274,12 +274,12 @@ spec:
       resources:
         limits:
           custom:
-            vpc.amazonaws.com/efa: "8"
+            vpc.amazonaws.com/efa: "2"
           gpu: "2"
         requests:
           custom:
             ephemeral-storage: 2Gi
-            vpc.amazonaws.com/efa: "8"
+            vpc.amazonaws.com/efa: "2"
           gpu: "2"
       # TensorRT-LLM workers need a large shared-memory volume for runtime state.
       sharedMemory:

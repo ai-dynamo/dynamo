@@ -57,7 +57,7 @@ runs:
         echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig" >> $GITHUB_ENV
 
     - name: Install vCluster CLI
-      uses: ./.github/actions/install-vcluster-cli
+      uses: $/.github/actions/install-vcluster-cli
 
     - name: Delete vCluster
       shell: bash

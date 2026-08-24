@@ -7,15 +7,12 @@ use dynamo_kv_router::{protocols::WorkerWithDpRank, selector::WorkerSelector};
 use dynamo_runtime::{
     error::DynamoError,
     metrics::frontend_perf::{STAGE_DISPATCH, StageGuard},
-    pipeline::Error,
+    pipeline::OccupancyReservation,
     protocols::annotated::Annotated,
 };
 
 use crate::{
-    kv_router::{
-        KvRouter, metrics::RouterRequestMetrics, push_router::load::RoutingLoadReservation,
-        scheduler::DefaultWorkerSelector,
-    },
+    kv_router::{KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector},
     local_model::runtime_config::ModelRuntimeConfig,
     lora::LoadEstimator,
     preprocessor::PreprocessedRequest,
@@ -145,9 +142,9 @@ where
     Stateless {
         worker_id: u64,
     },
-    Load {
+    Occupancy {
         worker_id: u64,
-        reservation: Option<RoutingLoadReservation>,
+        reservation: Option<OccupancyReservation>,
     },
 }
 
@@ -159,30 +156,29 @@ where
         match self {
             Self::Kv(cleanup) => cleanup.worker.worker_id,
             Self::Stateless { worker_id } => *worker_id,
-            Self::Load { worker_id, .. } => *worker_id,
+            Self::Occupancy { worker_id, .. } => *worker_id,
         }
     }
 
-    fn retarget_worker(&mut self, worker_id: u64) -> Result<Option<WorkerWithDpRank>, Error> {
+    fn retarget_worker(&mut self, worker_id: u64) -> Option<u64> {
         match self {
             Self::Kv(_) => {
                 debug_assert!(false, "KV cleanup target cannot be retargeted");
-                Ok(None)
+                None
             }
             Self::Stateless { worker_id: current } => {
                 *current = worker_id;
-                Ok(None)
+                None
             }
-            Self::Load {
+            Self::Occupancy {
                 worker_id: current,
                 reservation,
             } => {
-                let worker = reservation
+                let occupancy = reservation
                     .as_mut()
-                    .map(|reservation| reservation.retarget(worker_id))
-                    .transpose()?;
+                    .map(|reservation| reservation.retarget(worker_id));
                 *current = worker_id;
-                Ok(worker)
+                occupancy
             }
         }
     }
@@ -190,7 +186,7 @@ where
     async fn finish(&mut self) {
         match self {
             Self::Kv(cleanup) => cleanup.finish().await,
-            Self::Load { reservation, .. } => drop(reservation.take()),
+            Self::Occupancy { reservation, .. } => drop(reservation.take()),
             Self::Stateless { .. } => {}
         }
     }
@@ -429,43 +425,31 @@ where
     pub(super) fn new_builtin(
         request_metrics: Arc<RouterRequestMetrics>,
         worker_id: u64,
-        load_reservation: Option<RoutingLoadReservation>,
+        occupancy_reservation: Option<OccupancyReservation>,
         lora_load: Option<LoraLoadGuard>,
         request: &PreprocessedRequest,
     ) -> Self {
-        let (track_output_blocks, block_size) = load_reservation
-            .as_ref()
-            .map_or((false, 1), |r| (r.track_output_blocks(), r.block_size()));
         request_metrics.requests_started_total().inc();
         Self {
-            cleanup: match load_reservation {
-                Some(reservation) => RequestCleanup::Load {
+            cleanup: match occupancy_reservation {
+                Some(reservation) => RequestCleanup::Occupancy {
                     worker_id,
                     reservation: Some(reservation),
                 },
                 None => RequestCleanup::Stateless { worker_id },
             },
             observability: RequestObservability::new(request.tracker.clone(), request_metrics),
-            output_blocks: OutputBlockTracker::new(
-                track_output_blocks,
-                request.token_ids.len(),
-                block_size,
-                request
-                    .routing
-                    .as_ref()
-                    .and_then(|routing| routing.expected_output_tokens),
-            ),
-            record_itl_at_completion: !track_output_blocks,
+            // Builtin policies do not track scheduler blocks. Emit one final ITL sample
+            // when the request completes rather than observing every streamed token.
+            output_blocks: OutputBlockTracker::new(false, request.token_ids.len(), 1, None),
+            record_itl_at_completion: true,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
             _lora_load: lora_load,
         }
     }
 
-    pub(super) fn retarget_worker(
-        &mut self,
-        worker_id: u64,
-    ) -> Result<Option<WorkerWithDpRank>, Error> {
+    pub(super) fn retarget_worker(&mut self, worker_id: u64) -> Option<u64> {
         self.cleanup.retarget_worker(worker_id)
     }
 
@@ -500,33 +484,18 @@ where
                 .as_ref()
                 .is_some_and(|data| !data.token_ids.is_empty());
             if has_tokens {
-                match &self.cleanup {
-                    RequestCleanup::Kv(cleanup) if cleanup.scheduler_tracked => {
-                        if let Err(error) = cleanup
-                            .chooser
-                            .mark_prefill_completed(&cleanup.context_id)
-                            .await
-                        {
-                            tracing::warn!(
-                                request_id = %cleanup.context_id,
-                                %error,
-                                "Failed to mark prefill completed"
-                            );
-                        }
-                    }
-                    RequestCleanup::Load {
-                        reservation: Some(reservation),
-                        ..
-                    } => {
-                        if let Err(error) = reservation.mark_prefill_completed() {
-                            tracing::warn!(%error, "Failed to mark routing load prefill completed");
-                        }
-                    }
-                    RequestCleanup::Kv(_)
-                    | RequestCleanup::Load {
-                        reservation: None, ..
-                    }
-                    | RequestCleanup::Stateless { .. } => {}
+                if let RequestCleanup::Kv(cleanup) = &self.cleanup
+                    && cleanup.scheduler_tracked
+                    && let Err(error) = cleanup
+                        .chooser
+                        .mark_prefill_completed(&cleanup.context_id)
+                        .await
+                {
+                    tracing::warn!(
+                        request_id = %cleanup.context_id,
+                        %error,
+                        "Failed to mark prefill completed"
+                    );
                 }
                 self.prefill_marked = true;
             }
@@ -539,31 +508,16 @@ where
             return;
         };
 
-        match &self.cleanup {
-            RequestCleanup::Kv(cleanup) => {
-                if let Err(error) = cleanup
-                    .chooser
-                    .add_output_block(&cleanup.context_id, update.decay_fraction)
-                {
-                    tracing::warn!(
-                        request_id = %cleanup.context_id,
-                        %error,
-                        "Failed to add output block"
-                    );
-                }
-            }
-            RequestCleanup::Load {
-                reservation: Some(reservation),
-                ..
-            } => {
-                if let Err(error) = reservation.add_output_block(update.decay_fraction) {
-                    tracing::warn!(%error, "Failed to add routing load output block");
-                }
-            }
-            RequestCleanup::Load {
-                reservation: None, ..
-            }
-            | RequestCleanup::Stateless { .. } => {}
+        if let RequestCleanup::Kv(cleanup) = &self.cleanup
+            && let Err(error) = cleanup
+                .chooser
+                .add_output_block(&cleanup.context_id, update.decay_fraction)
+        {
+            tracing::warn!(
+                request_id = %cleanup.context_id,
+                %error,
+                "Failed to add output block"
+            );
         }
 
         self.observability.observe_output_block_boundary();

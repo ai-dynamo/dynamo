@@ -4,10 +4,7 @@
 use super::{AsyncEngineContextProvider, ResponseStream};
 use crate::error::{BackendError, DynamoError, ErrorType, match_error_chain};
 use crate::{
-    component::{
-        Client, DeviceType, Endpoint, Instance, RoutingInstances, RoutingOccupancyState,
-        get_or_create_routing_occupancy_state,
-    },
+    component::{Client, DeviceType, Endpoint, Instance, RoutingInstances},
     discovery::EndpointInstanceId,
     dynamo_nvtx_range,
     engine::{AsyncEngine, AsyncEngineContext, Data},
@@ -18,8 +15,9 @@ use crate::{
     },
     protocols::{EndpointId, maybe_error::MaybeError},
     routing_policy::{
-        CandidateView, RouteCandidate, RouteContext, RouteDevice, RoutePicker, RoutePolicy,
-        RouteTarget,
+        CandidateView, OccupancyReservation, RouteCandidate, RouteContext, RouteDevice,
+        RoutePicker, RoutePolicy, RouteTarget, RoutingOccupancyState,
+        get_or_create_routing_occupancy_state,
     },
     traits::DistributedRuntimeProvider,
 };
@@ -30,10 +28,7 @@ use std::{
     collections::{HashMap, HashSet},
     marker::PhantomData,
     pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, atomic::AtomicU64},
     task::Poll,
     time::Instant,
 };
@@ -72,16 +67,14 @@ fn response_inactivity_timeout() -> Option<std::time::Duration> {
 /// [`RoutingOccupancyState`]. The counter is incremented at construction; the
 /// matching decrement is emitted on drop (or by [`Self::into_tracked_stream`]).
 struct OccupancyPermit {
-    state: Arc<RoutingOccupancyState>,
-    instance_id: u64,
-    counter: Arc<AtomicU64>,
-    armed: bool,
+    reservation: Option<OccupancyReservation>,
 }
 
 impl OccupancyPermit {
     fn acquire(state: Arc<RoutingOccupancyState>, instance_id: u64) -> Self {
-        let counter = state.increment(instance_id);
-        Self::from_counter(state, instance_id, counter)
+        Self {
+            reservation: Some(state.reserve(instance_id)),
+        }
     }
 
     fn from_counter(
@@ -90,43 +83,30 @@ impl OccupancyPermit {
         counter: Arc<AtomicU64>,
     ) -> Self {
         Self {
-            state,
-            instance_id,
-            counter,
-            armed: true,
+            reservation: Some(OccupancyReservation::from_counter(
+                state,
+                instance_id,
+                counter,
+            )),
         }
     }
 
     fn retarget(&mut self, instance_id: u64) {
-        if self.instance_id == instance_id {
-            return;
-        }
-        let counter = self.state.increment(instance_id);
-        RoutingOccupancyState::decrement_counter(self.counter.as_ref());
-        self.instance_id = instance_id;
-        self.counter = counter;
+        self.reservation
+            .as_mut()
+            .expect("occupancy permit must be armed before stream tracking")
+            .retarget(instance_id);
     }
 
     fn into_tracked_stream<U: Data + MaybeError>(mut self, stream: ManyOut<U>) -> ManyOut<U> {
-        self.armed = false;
         let engine_ctx = stream.context();
         ResponseStream::new(
             Box::pin(OccupancyTrackedStream {
                 inner: stream,
-                instance_id: self.instance_id,
-                counter: self.counter.clone(),
-                released: false,
+                reservation: self.reservation.take(),
             }),
             engine_ctx,
         )
-    }
-}
-
-impl Drop for OccupancyPermit {
-    fn drop(&mut self) {
-        if self.armed {
-            RoutingOccupancyState::decrement_counter(self.counter.as_ref());
-        }
     }
 }
 
@@ -223,7 +203,6 @@ enum TransportFallback<'a> {
     Allow,
     Deny,
     Within(&'a HashSet<u64>),
-    Matching(&'a (dyn Fn(u64) -> bool + Sync)),
 }
 
 struct DeviceAwareCandidates {
@@ -233,48 +212,45 @@ struct DeviceAwareCandidates {
     request_cache_keys: usize,
 }
 
-/// Request-specific DeviceAware data prepared before caller-owned admission.
-///
-/// The LLM routing host serializes selection and slot reservation. Building this snapshot can
-/// call request-provided cache-key extraction and cache indexing, so it must happen before that
-/// host-level lock. The selector still rebuilds the candidate list from the latest routable set.
-pub struct DeviceAwareSelectionMetadata {
-    device_by_worker: HashMap<u64, RouteDevice>,
-    cache_hits_by_worker: HashMap<u64, usize>,
-    cache_matched_workers: HashSet<u64>,
-    context: RouteContext,
+/// A DeviceAware policy decision whose optional occupancy booking is owned by
+/// the caller's request lifecycle.
+pub struct DeviceAwareSelection {
+    worker_id: u64,
+    candidate_count: usize,
+    load: u64,
+    is_cpu: bool,
+    embedding_cache_hit: bool,
     request_cache_keys: usize,
+    reservation: Option<OccupancyReservation>,
 }
 
-impl DeviceAwareSelectionMetadata {
-    fn candidates(&self, instance_ids: &[u64]) -> DeviceAwareCandidates {
-        let candidates = instance_ids
-            .iter()
-            .map(|worker_id| RouteCandidate {
-                target: RouteTarget::worker(*worker_id),
-                device: self
-                    .device_by_worker
-                    .get(worker_id)
-                    .copied()
-                    .unwrap_or_default(),
-                cache_hits: self
-                    .cache_hits_by_worker
-                    .get(worker_id)
-                    .copied()
-                    .unwrap_or_default(),
-            })
-            .collect::<Vec<_>>();
-        let embedding_cache_hit = candidates.iter().any(|candidate| {
-            self.cache_matched_workers
-                .contains(&candidate.target.worker_id)
-        });
+impl DeviceAwareSelection {
+    pub fn worker_id(&self) -> u64 {
+        self.worker_id
+    }
 
-        DeviceAwareCandidates {
-            candidates,
-            context: self.context,
-            embedding_cache_hit,
-            request_cache_keys: self.request_cache_keys,
-        }
+    pub fn candidate_count(&self) -> usize {
+        self.candidate_count
+    }
+
+    pub fn load(&self) -> u64 {
+        self.load
+    }
+
+    pub fn is_cpu(&self) -> bool {
+        self.is_cpu
+    }
+
+    pub fn embedding_cache_hit(&self) -> bool {
+        self.embedding_cache_hit
+    }
+
+    pub fn request_cache_keys(&self) -> usize {
+        self.request_cache_keys
+    }
+
+    pub fn into_reservation(self) -> Option<OccupancyReservation> {
+        self.reservation
     }
 }
 
@@ -285,6 +261,14 @@ impl RouterMode {
 
     pub fn is_direct_routing(&self) -> bool {
         *self == RouterMode::Direct
+    }
+
+    /// Whether this mode admits requests against host-owned occupancy counters.
+    pub const fn requires_occupancy(self) -> bool {
+        matches!(
+            self,
+            Self::PowerOfTwoChoices | Self::LeastLoaded | Self::DeviceAwareWeighted
+        )
     }
 
     fn route_policy(self) -> Option<RoutePolicy> {
@@ -581,12 +565,7 @@ where
     ) -> anyhow::Result<Self> {
         let addressed = addressed_router(&client.endpoint).await?;
 
-        let occupancy_state = if matches!(
-            router_mode,
-            RouterMode::PowerOfTwoChoices
-                | RouterMode::LeastLoaded
-                | RouterMode::DeviceAwareWeighted
-        ) {
+        let occupancy_state = if router_mode.requires_occupancy() {
             Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
         } else {
             None
@@ -646,12 +625,7 @@ where
             monitor.start_monitoring().await?;
         }
 
-        let occupancy_state = if matches!(
-            router_mode,
-            RouterMode::PowerOfTwoChoices
-                | RouterMode::LeastLoaded
-                | RouterMode::DeviceAwareWeighted
-        ) {
+        let occupancy_state = if router_mode.requires_occupancy() {
             Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
         } else {
             None
@@ -705,12 +679,7 @@ where
         router_mode: RouterMode,
         dispatch: Arc<dyn StreamingDispatch<T, U>>,
     ) -> anyhow::Result<Self> {
-        let occupancy_state = if matches!(
-            router_mode,
-            RouterMode::PowerOfTwoChoices
-                | RouterMode::LeastLoaded
-                | RouterMode::DeviceAwareWeighted
-        ) {
+        let occupancy_state = if router_mode.requires_occupancy() {
             Some(get_or_create_routing_occupancy_state(&client.endpoint).await)
         } else {
             None
@@ -785,18 +754,95 @@ where
         Ok((decision.target.worker_id, candidates.len()))
     }
 
-    /// Select a cache-free builtin worker while preserving empty-pool error semantics.
-    pub fn select_stateless_worker(&self) -> anyhow::Result<u64> {
-        let picker = match self.router_mode {
-            RouterMode::RoundRobin => &self.round_robin_picker,
-            RouterMode::Random => &self.random_picker,
-            _ => anyhow::bail!(
-                "{:?} routing does not use stateless worker selection",
-                self.router_mode
-            ),
-        };
-        self.select_untracked_worker(picker)
-            .map(|(worker_id, _)| worker_id)
+    /// Snapshot workers currently eligible for a new routing decision.
+    ///
+    /// Selection stays outside `PushRouter`; this is the discovery/admission
+    /// boundary used by routing hosts that own their policy lifecycle.
+    pub fn selectable_worker_ids(&self) -> anyhow::Result<Vec<u64>> {
+        self.with_selectable_worker_ids(<[u64]>::to_vec)
+    }
+
+    /// Borrow workers currently eligible for a new routing decision.
+    pub fn with_selectable_worker_ids<R>(
+        &self,
+        select: impl FnOnce(&[u64]) -> R,
+    ) -> anyhow::Result<R> {
+        let routing_instances = self.client.routing_instances();
+        if routing_instances.free_ids().is_empty() {
+            return Err(self.empty_free_pool_error(&routing_instances));
+        }
+        Ok(select(routing_instances.free_ids()))
+    }
+
+    /// Shared O(1) occupancy capability for load-aware routing hosts.
+    pub fn routing_occupancy_state(&self) -> Option<Arc<RoutingOccupancyState>> {
+        self.occupancy_state.clone()
+    }
+
+    /// Select a DeviceAware worker while leaving request-lifecycle cleanup to
+    /// the routing host. Request and device metadata is prepared before the
+    /// occupancy admission lock is acquired.
+    pub fn select_device_aware_and_reserve(
+        &self,
+        request: &T,
+        pinned_worker: Option<u64>,
+    ) -> anyhow::Result<DeviceAwareSelection> {
+        anyhow::ensure!(
+            self.router_mode == RouterMode::DeviceAwareWeighted,
+            "{:?} routing is not DeviceAwareWeighted",
+            self.router_mode
+        );
+
+        let state = self.occupancy_state()?;
+        if let Some(worker_id) = pinned_worker {
+            self.ensure_routable(worker_id)?;
+            let selection = self.device_aware_candidates(request, &[worker_id]);
+            let is_cpu = selection
+                .candidates
+                .first()
+                .is_some_and(|candidate| candidate.device == RouteDevice::Cpu);
+            let reservation = state.reserve(worker_id);
+            let load = reservation.load();
+            return Ok(DeviceAwareSelection {
+                worker_id,
+                candidate_count: 1,
+                load,
+                is_cpu,
+                embedding_cache_hit: selection.embedding_cache_hit,
+                request_cache_keys: selection.request_cache_keys,
+                reservation: Some(reservation),
+            });
+        }
+
+        let routing_instances = self.client.routing_instances();
+        let instance_ids = routing_instances.free_ids();
+        if instance_ids.is_empty() {
+            return Err(self.empty_free_pool_error(&routing_instances));
+        }
+        let selection = self.device_aware_candidates(request, instance_ids);
+        let (decision, counter) = state
+            .select_and_admit(
+                self.picker()?,
+                CandidateView::DeviceAware(&selection.candidates),
+                selection.context,
+            )
+            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
+        let worker_id = decision.target.worker_id;
+        let is_cpu = selection.candidates.iter().any(|candidate| {
+            candidate.target.worker_id == worker_id && candidate.device == RouteDevice::Cpu
+        });
+        let reservation = counter
+            .map(|counter| OccupancyReservation::from_counter(state.clone(), worker_id, counter));
+
+        Ok(DeviceAwareSelection {
+            worker_id,
+            candidate_count: selection.candidates.len(),
+            load: state.load(worker_id),
+            is_cpu,
+            embedding_cache_hit: selection.embedding_cache_hit,
+            request_cache_keys: selection.request_cache_keys,
+            reservation,
+        })
     }
 
     /// Reject an exact target that local fault detection has removed from routing.
@@ -813,6 +859,20 @@ where
             "instance_id={instance_id} not found for endpoint {}",
             self.client.endpoint.id()
         )
+    }
+
+    fn ensure_discovered_for_dispatch(&self, instance_id: u64) -> anyhow::Result<()> {
+        if self.client.instance_ids().contains(&instance_id) {
+            return Ok(());
+        }
+        Err(DynamoError::builder()
+            .error_type(ErrorType::CannotConnect)
+            .message(format!(
+                "instance_id={instance_id} not found for endpoint {}",
+                self.client.endpoint.id()
+            ))
+            .build()
+            .into())
     }
 
     /// Issue a request to the next available instance in a round-robin fashion
@@ -967,25 +1027,24 @@ where
             .await
     }
 
-    /// Like [`Self::direct_within_prepared`], but filters transport fallbacks with a predicate.
+    /// Dispatch a worker already selected by a routing host.
     ///
-    /// The predicate is evaluated only when the originally selected instance disappears before
-    /// dispatch. This lets callers retain their own, potentially live eligibility view.
-    pub async fn direct_matching_prepared<M, F, P>(
+    /// `PushRouter` may still resolve transport fallback if the selected worker
+    /// disappears before dispatch. The callback receives that final worker so
+    /// the caller can retarget its own reservation and telemetry.
+    pub async fn dispatch_preselected_prepared<M, F>(
         &self,
         request: SingleIn<T>,
         instance_id: u64,
-        is_fallback_allowed: P,
         prepare: F,
     ) -> anyhow::Result<(M, ManyOut<U>)>
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
-        P: Fn(u64) -> bool + Sync,
     {
-        self.direct_prepared_with_fallback(
+        self.dispatch_preselected_with_fallback(
             instance_id,
             request,
-            TransportFallback::Matching(&is_fallback_allowed),
+            TransportFallback::Allow,
             prepare,
         )
         .await
@@ -1001,14 +1060,57 @@ where
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
-        // `resolve_transport` owns the unavailable-target decision. In particular, callers
-        // using a fallback policy must reach it when discovery has already dropped the selected
-        // worker; `TransportFallback::Deny` remains an exact-target error there.
+        // Fallback resolution owns the unavailable-target decision. Allowing it
+        // to see a worker already absent from discovery preserves Direct's
+        // historical standalone fallback; `Deny` remains exact-target behavior.
+        let selected_is_discovered = self
+            .client
+            .instances()
+            .iter()
+            .any(|instance| instance.instance_id == instance_id);
+        if !selected_is_discovered {
+            let fallback_is_available = self
+                .client
+                .routing_instances()
+                .free_ids()
+                .iter()
+                .copied()
+                .any(|candidate| {
+                    candidate != instance_id
+                        && match fallback {
+                            TransportFallback::Allow => true,
+                            TransportFallback::Deny => false,
+                            TransportFallback::Within(allowed) => allowed.contains(&candidate),
+                        }
+                });
+            if !fallback_is_available {
+                self.ensure_discovered_for_dispatch(instance_id)?;
+            }
+        }
         tracing::info!(
             router_mode = "direct",
             worker_id = instance_id,
             "Selected worker"
         );
+        self.generate_with_fault_detection_prepared(instance_id, request, fallback, prepare)
+            .await
+    }
+
+    async fn dispatch_preselected_with_fallback<M, F>(
+        &self,
+        instance_id: u64,
+        request: SingleIn<T>,
+        fallback: TransportFallback<'_>,
+        prepare: F,
+    ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        // Fallback-enabled dispatch still honors a selected worker while it remains in
+        // discovery. Local inhibition only filters worker selection owned by this router;
+        // fallback is considered only if the selected worker disappears after this check.
+        self.ensure_discovered_for_dispatch(instance_id)?;
+
         self.generate_with_fault_detection_prepared(instance_id, request, fallback, prepare)
             .await
     }
@@ -1139,10 +1241,7 @@ where
         // Apply a unified policy for all endpoints.
         let endpoint_id = self.client.endpoint.id();
 
-        let metadata = self
-            .prepare_device_aware_selection(Some(request.content()))
-            .expect("device-aware dispatch requires DeviceAwareWeighted routing");
-        let selection = metadata.candidates(instance_ids);
+        let selection = self.device_aware_candidates(request.content(), instance_ids);
 
         // Only full cache hits bypass weighted accounting; partial hits still follow the
         // device-aware ratio because some image encoding remains for this request.
@@ -1175,21 +1274,8 @@ where
             .await
     }
 
-    /// Prepare request-specific DeviceAware data before any caller-owned selection lock.
-    ///
-    /// `select_target_with_prepared_load` still reads the current routable workers and load
-    /// under that lock. This snapshot contains only cache and device metadata that is safe to
-    /// compute before that admission boundary.
-    pub fn prepare_device_aware_selection(
-        &self,
-        request: Option<&T>,
-    ) -> Option<DeviceAwareSelectionMetadata> {
-        (self.router_mode == RouterMode::DeviceAwareWeighted)
-            .then(|| self.device_aware_selection_metadata(request))
-    }
-
-    fn device_aware_selection_metadata(&self, request: Option<&T>) -> DeviceAwareSelectionMetadata {
-        let device_by_worker = self
+    fn device_aware_candidates(&self, request: &T, instance_ids: &[u64]) -> DeviceAwareCandidates {
+        let device_type_map = self
             .client
             .instances()
             .iter()
@@ -1208,44 +1294,48 @@ where
             .filter(|value| *value >= 1)
             .unwrap_or(8);
 
-        let (request_cache_keys, cache_matched_workers, cache_hits_by_worker) =
-            if let (Some(request), Some(indexer), Some(extractor)) = (
-                request,
+        let (request_cache_keys, cache_matched_candidates) =
+            if let (Some(indexer), Some(extractor)) = (
                 self.multimodal_cache_indexer.as_ref(),
                 self.multimodal_cache_key_extractor.as_ref(),
             ) {
                 let request_cache_keys = extractor(request);
-                let cache_matches = if request_cache_keys.is_empty() {
+                let matched = if request_cache_keys.is_empty() {
                     Vec::new()
                 } else {
-                    indexer.workers_with_cache_key_hits(&request_cache_keys)
+                    let mut matched = indexer.workers_with_cache_key_hits(&request_cache_keys);
+                    matched.retain(|(id, _)| instance_ids.contains(id));
+                    matched
                 };
-                let cache_matched_workers = cache_matches
-                    .iter()
-                    .map(|(worker_id, _)| *worker_id)
-                    .collect::<HashSet<_>>();
-                let cache_hits_by_worker = cache_matches.into_iter().collect::<HashMap<_, _>>();
-                (
-                    request_cache_keys,
-                    cache_matched_workers,
-                    cache_hits_by_worker,
-                )
+                (request_cache_keys, matched)
             } else {
-                (Vec::new(), HashSet::new(), HashMap::new())
+                (Vec::new(), Vec::new())
             };
 
+        let embedding_cache_hit = !cache_matched_candidates.is_empty();
+        let cache_hits = cache_matched_candidates
+            .into_iter()
+            .collect::<HashMap<_, _>>();
         let request_cache_key_count = request_cache_keys
             .iter()
             .collect::<std::collections::HashSet<_>>()
             .len();
-        DeviceAwareSelectionMetadata {
-            device_by_worker,
-            cache_hits_by_worker,
-            cache_matched_workers,
+        let candidates = instance_ids
+            .iter()
+            .map(|worker_id| RouteCandidate {
+                target: RouteTarget::worker(*worker_id),
+                device: device_type_map.get(worker_id).copied().unwrap_or_default(),
+                cache_hits: cache_hits.get(worker_id).copied().unwrap_or_default(),
+            })
+            .collect::<Vec<_>>();
+
+        DeviceAwareCandidates {
+            candidates,
             context: RouteContext {
                 required_cache_hits: request_cache_key_count,
                 non_cpu_to_cpu_ratio: cuda_to_cpu_ratio,
             },
+            embedding_cache_hit,
             request_cache_keys: request_cache_keys.len(),
         }
     }
@@ -1319,29 +1409,6 @@ where
                 )
             }
         }
-    }
-
-    /// Select from a caller-constrained candidate set with this router's
-    /// round-robin or random picker.
-    pub fn select_from_candidates(&self, candidates: &[u64]) -> anyhow::Result<u64> {
-        let picker = match self.router_mode {
-            RouterMode::RoundRobin => self.round_robin_picker.as_ref(),
-            RouterMode::Random => self.random_picker.as_ref(),
-            _ => {
-                anyhow::bail!(
-                    "{:?} routing does not support untracked candidate selection",
-                    self.router_mode
-                )
-            }
-        };
-        picker
-            .select(
-                CandidateView::Workers(candidates),
-                RouteContext::default(),
-                |_| 0,
-            )
-            .map(|decision| decision.target.worker_id)
-            .ok_or_else(|| anyhow::anyhow!("no eligible worker in constrained candidate set"))
     }
 
     /// Peek the next worker according to the routing mode without incrementing the counter.
@@ -1435,130 +1502,6 @@ where
             .unwrap_or(0)
     }
 
-    /// Select one worker using this router's existing load-aware policy and caller-owned load.
-    ///
-    /// The caller remains responsible for admission and request-lifecycle accounting. A missing
-    /// request disables request-specific cache affinity for advisory selection.
-    pub fn select_target_with_load(
-        &self,
-        request: Option<&T>,
-        pinned_worker: Option<u64>,
-        is_load_eligible: impl Fn(u64) -> bool,
-        load: impl Fn(u64) -> u64,
-    ) -> anyhow::Result<u64> {
-        let device_aware = self.prepare_device_aware_selection(request);
-        self.select_target_with_prepared_load(
-            device_aware.as_ref(),
-            pinned_worker,
-            is_load_eligible,
-            load,
-        )
-    }
-
-    /// Select one worker using caller-owned load and precomputed DeviceAware metadata.
-    ///
-    /// Call [`Self::prepare_device_aware_selection`] before a caller-owned selection lock. This
-    /// method keeps only current worker eligibility, policy choice, and load selection in that
-    /// critical section.
-    pub fn select_target_with_prepared_load(
-        &self,
-        device_aware: Option<&DeviceAwareSelectionMetadata>,
-        pinned_worker: Option<u64>,
-        is_load_eligible: impl Fn(u64) -> bool,
-        load: impl Fn(u64) -> u64,
-    ) -> anyhow::Result<u64> {
-        if !matches!(
-            self.router_mode,
-            RouterMode::PowerOfTwoChoices
-                | RouterMode::LeastLoaded
-                | RouterMode::DeviceAwareWeighted
-        ) {
-            anyhow::bail!("{:?} routing does not consume LOAD", self.router_mode);
-        }
-
-        let routing_instances = self.client.routing_instances();
-        if let Some(worker_id) = pinned_worker {
-            if !is_load_eligible(worker_id) {
-                anyhow::bail!(
-                    "instance_id={worker_id} has no caller-owned load configuration for endpoint {}",
-                    self.client.endpoint.id()
-                );
-            }
-            if !routing_instances.routable_ids().contains(&worker_id) {
-                anyhow::bail!(
-                    "instance_id={worker_id} is not routable for endpoint {}",
-                    self.client.endpoint.id()
-                );
-            }
-            return Ok(worker_id);
-        }
-
-        let candidates = routing_instances
-            .free_ids()
-            .iter()
-            .copied()
-            .filter(|worker_id| is_load_eligible(*worker_id))
-            .collect::<Vec<_>>();
-        if candidates.is_empty() {
-            return Err(self.empty_free_pool_error(&routing_instances));
-        }
-
-        let decision = match self.router_mode {
-            RouterMode::PowerOfTwoChoices | RouterMode::LeastLoaded => self.picker()?.select(
-                CandidateView::Workers(&candidates),
-                RouteContext::default(),
-                load,
-            ),
-            RouterMode::DeviceAwareWeighted => {
-                let metadata = device_aware.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "DeviceAwareWeighted routing requires prepared request metadata"
-                    )
-                })?;
-                let selection = metadata.candidates(&candidates);
-                self.picker()?.select(
-                    CandidateView::DeviceAware(&selection.candidates),
-                    selection.context,
-                    load,
-                )
-            }
-            _ => unreachable!(),
-        };
-        decision
-            .map(|decision| decision.target.worker_id)
-            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))
-    }
-
-    /// Select a stateless first-party policy target while leaving dispatch to the caller.
-    pub fn select_policy_target(&self, pinned_worker: Option<u64>) -> anyhow::Result<u64> {
-        if let Some(instance_id) = pinned_worker {
-            let routing_instances = self.client.routing_instances();
-            if !routing_instances.routable_ids().contains(&instance_id) {
-                anyhow::bail!(
-                    "instance_id={instance_id} not found for endpoint {}",
-                    self.client.endpoint.id()
-                );
-            }
-            return Ok(instance_id);
-        }
-
-        match self.router_mode {
-            RouterMode::RoundRobin => self
-                .select_untracked_worker(self.round_robin_picker.as_ref())
-                .map(|(instance_id, _)| instance_id),
-            RouterMode::Random => self
-                .select_untracked_worker(self.random_picker.as_ref())
-                .map(|(instance_id, _)| instance_id),
-            RouterMode::Direct => anyhow::bail!("Direct routing requires an exact target"),
-            RouterMode::PowerOfTwoChoices
-            | RouterMode::LeastLoaded
-            | RouterMode::DeviceAwareWeighted => {
-                anyhow::bail!("{:?} routing requires caller-owned LOAD", self.router_mode)
-            }
-            RouterMode::KV => anyhow::bail!("KV routing requires KV-aware selection"),
-        }
-    }
-
     async fn select_exact_target(
         &self,
         request: &T,
@@ -1607,10 +1550,7 @@ where
                         )
                         .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?,
                     RouterMode::DeviceAwareWeighted => {
-                        let metadata = self
-                            .prepare_device_aware_selection(Some(request))
-                            .expect("device-aware selection requires DeviceAwareWeighted routing");
-                        let selection = metadata.candidates(instance_ids);
+                        let selection = self.device_aware_candidates(request, instance_ids);
                         state
                             .select_and_admit(
                                 self.picker()?,
@@ -1789,28 +1729,25 @@ where
         if let Some((addr, kind, inst)) = lookup(instance_id) {
             return Ok((instance_id, addr, kind, inst));
         }
-        if matches!(fallback, TransportFallback::Deny) {
-            return Err(DynamoError::builder()
-                .error_type(ErrorType::CannotConnect)
-                .message(format!(
-                    "instance_id={instance_id} not found for endpoint {}",
-                    self.client.endpoint.id()
-                ))
-                .build()
-                .into());
-        }
+        let allowed_fallback = match fallback {
+            TransportFallback::Allow => None,
+            TransportFallback::Deny => {
+                return Err(DynamoError::builder()
+                    .error_type(ErrorType::CannotConnect)
+                    .message(format!(
+                        "instance_id={instance_id} not found for endpoint {}",
+                        self.client.endpoint.id()
+                    ))
+                    .build()
+                    .into());
+            }
+            TransportFallback::Within(allowed) => Some(allowed),
+        };
 
         let routing_instances = self.client.routing_instances();
-        let fallback_id = routing_instances
-            .free_ids()
-            .iter()
-            .copied()
-            .find(|&id| match fallback {
-                TransportFallback::Allow => id != instance_id,
-                TransportFallback::Deny => false,
-                TransportFallback::Within(allowed) => id != instance_id && allowed.contains(&id),
-                TransportFallback::Matching(is_allowed) => id != instance_id && is_allowed(id),
-            });
+        let fallback_id = routing_instances.free_ids().iter().copied().find(|&id| {
+            id != instance_id && allowed_fallback.is_none_or(|allowed| allowed.contains(&id))
+        });
         match fallback_id {
             Some(id) => {
                 tracing::warn!(
@@ -1948,7 +1885,9 @@ where
                 anyhow::bail!("KV routing should not call generate on PushRouter");
             }
             RouterMode::Direct => {
-                anyhow::bail!("Direct routing requires a host-selected exact target");
+                anyhow::bail!(
+                    "Direct routing should not call generate on PushRouter directly; use DirectRoutingRouter wrapper"
+                );
             }
             RouterMode::LeastLoaded => self.least_loaded(request).await,
             RouterMode::DeviceAwareWeighted => self.device_aware_weighted(request).await,
@@ -2019,7 +1958,9 @@ where
                 anyhow::bail!("KV routing should not call generate on PushRouter");
             }
             RouterMode::Direct => {
-                anyhow::bail!("Direct routing requires a host-selected exact target");
+                anyhow::bail!(
+                    "Direct routing should not call generate on PushRouter directly; use DirectRoutingRouter wrapper"
+                );
             }
             // These modes drive `select_next_worker()` to `None` — they rely on
             // the occupancy/load-aware selection the bidirectional path does not
@@ -2048,18 +1989,12 @@ where
 
 struct OccupancyTrackedStream<U: Data + MaybeError> {
     inner: ManyOut<U>,
-    instance_id: u64,
-    counter: Arc<AtomicU64>,
-    released: bool,
+    reservation: Option<OccupancyReservation>,
 }
 
 impl<U: Data + MaybeError> OccupancyTrackedStream<U> {
     fn release(&mut self) {
-        if self.released {
-            return;
-        }
-        RoutingOccupancyState::decrement_counter(self.counter.as_ref());
-        self.released = true;
+        drop(self.reservation.take());
     }
 }
 
@@ -2072,7 +2007,13 @@ impl<U: Data + MaybeError> Drop for OccupancyTrackedStream<U> {
 impl<U: Data + MaybeError> std::fmt::Debug for OccupancyTrackedStream<U> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OccupancyTrackedStream")
-            .field("instance_id", &self.instance_id)
+            .field(
+                "instance_id",
+                &self
+                    .reservation
+                    .as_ref()
+                    .map(OccupancyReservation::worker_id),
+            )
             .finish()
     }
 }
@@ -2105,6 +2046,8 @@ impl<U: Data + MaybeError> crate::engine::AsyncEngineStream<U> for OccupancyTrac
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
+
     use crate::{
         DistributedRuntime, Runtime,
         distributed::DistributedConfig,
@@ -2302,22 +2245,25 @@ mod tests {
     }
 
     #[test]
-    fn old_reservation_cannot_decrement_readded_worker_counter() {
+    fn same_id_readd_keeps_existing_permit_accounting() {
         let state = Arc::new(RoutingOccupancyState::default());
+        state.retain(&[7]);
         let old_counter = state.increment(7);
         let old_permit = OccupancyPermit::from_counter(state.clone(), 7, old_counter);
 
         state.retain(&[]);
-        let new_counter = state.increment(7);
         assert_eq!(state.load(7), 1);
+        state.retain(&[7]);
+        let new_permit = OccupancyPermit::acquire(state.clone(), 7);
+        assert_eq!(state.load(7), 2);
 
         drop(old_permit);
         assert_eq!(
             state.load(7),
             1,
-            "dropping an old incarnation must not touch the replacement counter"
+            "re-added worker must retain the still-live request"
         );
-        RoutingOccupancyState::decrement_counter(new_counter.as_ref());
+        drop(new_permit);
         assert_eq!(state.load(7), 0);
     }
 
@@ -2574,74 +2520,6 @@ mod tests {
             "LeastLoaded peek must return the available worker for disagg bootstrap"
         );
 
-        rt.shutdown();
-    }
-
-    #[tokio::test]
-    async fn caller_owned_load_drives_existing_picker_without_runtime_admission() {
-        let rt = Runtime::from_current().unwrap();
-        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
-            .await
-            .unwrap();
-        let endpoint = drt
-            .namespace("test_caller_owned_load".to_string())
-            .unwrap()
-            .component("test_component".to_string())
-            .unwrap()
-            .endpoint("test_endpoint".to_string());
-        let client = endpoint.client().await.unwrap();
-        let router =
-            PushRouter::<u64, TestResponse>::from_client(client.clone(), RouterMode::LeastLoaded)
-                .await
-                .unwrap();
-        client.override_instance_avail(vec![1, 2, 3]);
-        let selected = router
-            .select_target_with_load(
-                Some(&0),
-                None,
-                |_| true,
-                |worker_id| match worker_id {
-                    1 => 8,
-                    2 => 1,
-                    3 => 4,
-                    _ => unreachable!(),
-                },
-            )
-            .unwrap();
-
-        assert_eq!(selected, 2);
-        assert_eq!(router.occupancy_for_test(2), 0);
-        assert_eq!(
-            router
-                .select_target_with_load(Some(&0), Some(3), |_| true, |_| 0)
-                .unwrap(),
-            3
-        );
-        assert_eq!(
-            router
-                .select_target_with_load(
-                    Some(&0),
-                    None,
-                    |worker_id| worker_id != 2,
-                    |worker_id| {
-                        match worker_id {
-                            1 => 8,
-                            3 => 4,
-                            _ => unreachable!(),
-                        }
-                    }
-                )
-                .unwrap(),
-            3
-        );
-        let error = router
-            .select_target_with_load(Some(&0), None, |_| false, |_| 0)
-            .unwrap_err();
-        assert!(match_error_chain(
-            error.as_ref(),
-            &[ErrorType::ResourceExhausted],
-            &[]
-        ));
         rt.shutdown();
     }
 
@@ -3004,10 +2882,10 @@ mod tests {
         .await
         .unwrap();
 
-        let (worker_id, permit) = router.select_exact_target(&42, None).await.unwrap();
-        assert_eq!(worker_id, cache_worker);
+        let selection = router.select_device_aware_and_reserve(&42, None).unwrap();
+        assert_eq!(selection.worker_id(), cache_worker);
         assert!(
-            permit.is_none(),
+            selection.into_reservation().is_none(),
             "full cache hits bypass occupancy charging"
         );
 
@@ -3244,20 +3122,6 @@ mod tests {
                 .resolve_transport(stale_id, TransportFallback::Within(&allowed))
                 .is_ok(),
             "constrained dispatch should fall back within the allowed worker set"
-        );
-        let is_allowed = |id| id == real_id;
-        assert!(
-            router
-                .resolve_transport(stale_id, TransportFallback::Matching(&is_allowed))
-                .is_ok(),
-            "predicate-constrained dispatch should fall back to an eligible worker"
-        );
-        let is_rejected = |_| false;
-        assert!(
-            router
-                .resolve_transport(stale_id, TransportFallback::Matching(&is_rejected))
-                .is_err(),
-            "predicate-constrained dispatch should not fall back outside its eligible workers"
         );
         let disallowed = HashSet::new();
         let disallowed_error = router

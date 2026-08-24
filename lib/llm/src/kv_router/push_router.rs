@@ -43,13 +43,15 @@ use crate::{
     },
 };
 
+mod builtin;
 mod cancellation;
-mod load;
+mod occupancy;
 mod request_guard;
 mod selection;
 
+use builtin::BuiltinWorkerSelector;
 use cancellation::cancel_on_stop;
-pub(crate) use load::RoutingLoadState;
+use occupancy::HostedOccupancy;
 use request_guard::{LoraLoadGuard, RequestGuard};
 use selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 
@@ -140,51 +142,20 @@ where
     ResponseStream::new(wrapped_stream, stream_context)
 }
 
-/// First-party policies selected without a KV-cache index.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BuiltinRoutingPolicy {
-    Direct,
-    RoundRobin,
-    Random,
-    PowerOfTwoChoices,
-    LeastLoaded,
-    DeviceAwareWeighted,
-}
-
-impl BuiltinRoutingPolicy {
-    pub fn from_router_mode(mode: RouterMode) -> Option<Self> {
-        match mode {
-            RouterMode::Direct => Some(Self::Direct),
-            RouterMode::RoundRobin => Some(Self::RoundRobin),
-            RouterMode::Random => Some(Self::Random),
-            RouterMode::PowerOfTwoChoices => Some(Self::PowerOfTwoChoices),
-            RouterMode::LeastLoaded => Some(Self::LeastLoaded),
-            RouterMode::DeviceAwareWeighted => Some(Self::DeviceAwareWeighted),
-            RouterMode::KV => None,
-        }
-    }
-
-    pub const fn required_worker_inputs(self) -> WorkerInputs {
-        match self {
-            Self::Direct | Self::RoundRobin | Self::Random => WorkerInputs::NONE,
-            Self::PowerOfTwoChoices | Self::LeastLoaded | Self::DeviceAwareWeighted => {
-                WorkerInputs::LOAD
-            }
-        }
-    }
-}
-
-enum RoutingPlane<Sel>
+enum RoutingPolicy<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     Kv(Arc<KvRouter<Sel>>),
-    Builtin(BuiltinRoutingPolicy),
+    Builtin(BuiltinWorkerSelector),
+    Direct,
+    DeviceAwareWeighted,
 }
 
 struct LoraRouting {
     filter: Arc<LoraFilter>,
     load_estimator: Arc<LoadEstimator>,
+    selector: BuiltinWorkerSelector,
 }
 
 struct LoraSelection {
@@ -193,16 +164,19 @@ struct LoraSelection {
     load_guard: LoraLoadGuard,
 }
 
-/// The policy-owned result of selecting a builtin worker.
-///
-/// `target_constraint` carries the worker/rank scope imposed by session affinity or an explicit
-/// request hint. `dispatch_target` is the concrete target selected for this request, including a
-/// rank chosen by a load reservation under a worker-only constraint.
-struct BuiltinSelection {
+struct HostedSelection {
     initial_worker: u64,
     target_constraint: Option<AffinityTarget>,
-    dispatch_target: Option<AffinityTarget>,
-    load_reservation: Option<load::RoutingLoadReservation>,
+    occupancy_reservation: Option<dynamo_runtime::pipeline::OccupancyReservation>,
+    candidate_count: usize,
+    selected_occupancy: Option<u64>,
+    device_aware_telemetry: Option<DeviceAwareTelemetry>,
+}
+
+struct DeviceAwareTelemetry {
+    is_cpu: bool,
+    embedding_cache_hit: bool,
+    request_cache_keys: usize,
 }
 
 /// Owns request routing from worker selection through response cleanup.
@@ -215,14 +189,17 @@ where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-    plane: RoutingPlane<Sel>,
+    policy: RoutingPolicy<Sel>,
     request_metrics: Arc<RouterRequestMetrics>,
     affinity: Option<AffinityCoordinator>,
-    load_state: Option<Arc<RoutingLoadState>>,
+    hosted_occupancy: Option<HostedOccupancy>,
     lora: Option<LoraRouting>,
 }
 
 /// Compatibility name for the KV-only host used by existing callers.
+///
+/// This alias remains supported through the Dynamo 1.x series. It may be
+/// removed only in a 2.0.0 (or later) breaking release.
 pub type KvPushRouter<Sel = DefaultWorkerSelector> = RoutingHost<Sel>;
 
 impl<Sel> RoutingHost<Sel>
@@ -254,70 +231,95 @@ where
 
         RoutingHost {
             inner,
-            plane: RoutingPlane::Kv(kv_router),
+            policy: RoutingPolicy::Kv(kv_router),
             request_metrics,
             affinity,
-            load_state: None,
+            hosted_occupancy: None,
             lora: None,
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_builtin(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+    ) -> Result<Self, Error> {
+        Self::new_builtin_with_capabilities(inner, None, None)
+    }
+
     pub(crate) fn new_builtin_with_coordinator(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        load_state: Option<Arc<RoutingLoadState>>,
         affinity: Option<AffinityCoordinator>,
     ) -> Result<Self, Error> {
-        Self::new_builtin_with_capabilities(inner, load_state, affinity, None)
+        Self::new_builtin_with_capabilities(inner, affinity, None)
     }
 
     pub(crate) fn new_builtin_with_capabilities(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        load_state: Option<Arc<RoutingLoadState>>,
         affinity: Option<AffinityCoordinator>,
         lora: Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>,
     ) -> Result<Self, Error> {
         if affinity.is_some() && lora.is_some() {
             anyhow::bail!("session affinity and LoRA filtering cannot both be enabled");
         }
-        let policy =
-            BuiltinRoutingPolicy::from_router_mode(inner.router_mode()).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "{:?} routing is not a first-party builtin policy",
-                    inner.router_mode()
-                )
-            })?;
-        let needs_load = policy.required_worker_inputs().contains(WorkerInputs::LOAD);
-        anyhow::ensure!(
-            needs_load == load_state.is_some(),
-            "{policy:?} routing requires LOAD capability: {needs_load}"
-        );
+        let policy = match inner.router_mode() {
+            RouterMode::Direct => RoutingPolicy::Direct,
+            RouterMode::DeviceAwareWeighted => RoutingPolicy::DeviceAwareWeighted,
+            mode => {
+                RoutingPolicy::Builtin(BuiltinWorkerSelector::new(mode).ok_or_else(|| {
+                    anyhow::anyhow!("{mode:?} routing is not a first-party policy")
+                })?)
+            }
+        };
+        let required_worker_inputs = match &policy {
+            RoutingPolicy::Builtin(selector) => selector.required_worker_inputs(),
+            RoutingPolicy::DeviceAwareWeighted => WorkerInputs::OCCUPANCY,
+            RoutingPolicy::Direct => WorkerInputs::NONE,
+            RoutingPolicy::Kv(_) => unreachable!(),
+        };
+        let hosted_occupancy = matches!(&policy, RoutingPolicy::Builtin(_))
+            .then_some(required_worker_inputs.contains(WorkerInputs::OCCUPANCY))
+            .unwrap_or(false)
+            .then(|| HostedOccupancy::new(&inner))
+            .transpose()?;
         if lora.is_some()
             && !matches!(
-                policy,
-                BuiltinRoutingPolicy::RoundRobin | BuiltinRoutingPolicy::Random
+                inner.router_mode(),
+                RouterMode::RoundRobin | RouterMode::Random
             )
         {
-            anyhow::bail!("LoRA filtering is unsupported with {policy:?} routing");
+            anyhow::bail!(
+                "LoRA filtering is unsupported with {:?} routing",
+                inner.router_mode()
+            );
         }
+        let lora_selector = lora.as_ref().map(|_| {
+            BuiltinWorkerSelector::new(inner.router_mode())
+                .expect("LoRA routing mode was validated above")
+        });
         let request_metrics =
             RouterRequestMetrics::from_component(inner.client.endpoint.component());
         Ok(Self {
             inner,
-            plane: RoutingPlane::Builtin(policy),
+            policy,
             request_metrics,
             affinity,
-            load_state,
-            lora: lora.map(|(filter, load_estimator)| LoraRouting {
-                filter,
-                load_estimator,
-            }),
+            hosted_occupancy,
+            lora: lora
+                .zip(lora_selector)
+                .map(|((filter, load_estimator), selector)| LoraRouting {
+                    filter,
+                    load_estimator,
+                    selector,
+                }),
         })
     }
 
     pub fn required_worker_inputs(&self) -> WorkerInputs {
-        match &self.plane {
-            RoutingPlane::Kv(chooser) => chooser.required_worker_inputs(),
-            RoutingPlane::Builtin(policy) => policy.required_worker_inputs(),
+        match &self.policy {
+            RoutingPolicy::Kv(chooser) => chooser.required_worker_inputs(),
+            RoutingPolicy::Builtin(selector) => selector.required_worker_inputs(),
+            RoutingPolicy::Direct => WorkerInputs::NONE,
+            RoutingPolicy::DeviceAwareWeighted => WorkerInputs::OCCUPANCY,
         }
     }
 
@@ -328,19 +330,31 @@ where
     }
 
     pub(crate) fn kv_router_if_enabled(&self) -> Option<&Arc<KvRouter<Sel>>> {
-        match &self.plane {
-            RoutingPlane::Kv(chooser) => Some(chooser),
-            RoutingPlane::Builtin(_) => None,
+        match &self.policy {
+            RoutingPolicy::Kv(chooser) => Some(chooser),
+            RoutingPolicy::Builtin(_)
+            | RoutingPolicy::Direct
+            | RoutingPolicy::DeviceAwareWeighted => None,
         }
     }
 
-    pub(crate) fn peek_next_worker(&self) -> Result<Option<AffinityTarget>, Error> {
-        match &self.plane {
-            RoutingPlane::Builtin(_) => match &self.load_state {
-                Some(load_state) => Ok(Some(route_target(load_state.peek(&self.inner)?))),
-                None => Ok(self.inner.peek_next_worker().map(AffinityTarget::worker)),
+    pub(crate) fn peek_next_worker(&self) -> Option<u64> {
+        match &self.policy {
+            RoutingPolicy::Builtin(selector) => match &self.hosted_occupancy {
+                Some(occupancy) => occupancy.peek(&self.inner, selector),
+                None => self
+                    .inner
+                    .with_selectable_worker_ids(|ids| {
+                        selector.peek_worker(
+                            dynamo_kv_router::selector::WorkerSelectionInput::hosted(ids, None),
+                        )
+                    })
+                    .ok()
+                    .and_then(Result::ok),
             },
-            RoutingPlane::Kv(_) => Ok(None),
+            RoutingPolicy::DeviceAwareWeighted => self.inner.peek_next_worker(),
+            RoutingPolicy::Direct => None,
+            RoutingPolicy::Kv(_) => None,
         }
     }
 
@@ -392,12 +406,6 @@ where
         cancel_on_stop(request_context.as_ref(), selection_future).await?
     }
 
-    /// Run policy selection under the shared session-affinity lifecycle.
-    ///
-    /// The selector receives only an existing session binding. Request-level explicit targets
-    /// remain the caller's hard constraint, so a recovery retry can safely reacquire with no
-    /// affinity target. This keeps affinity recovery independent from the KV and builtin policy
-    /// implementations while preserving `AffinityAcquire` until dispatch commits the result.
     async fn select_with_session_affinity<T, Select, SelectionFuture>(
         &self,
         request: &SingleIn<PreprocessedRequest>,
@@ -704,7 +712,14 @@ where
                     .build()
             ));
         }
-        let target = self.inner.select_from_candidates(&candidates)?;
+        let target = lora
+            .selector
+            .select_worker(dynamo_kv_router::selector::WorkerSelectionInput::hosted(
+                &candidates,
+                None,
+            ))?
+            .worker
+            .worker_id;
         tracing::debug!(
             lora = %lora_name,
             worker_id = target,
@@ -720,43 +735,99 @@ where
         }))
     }
 
-    fn select_builtin_worker(
+    fn select_hosted_worker(
         &self,
         request: &SingleIn<PreprocessedRequest>,
         target_constraint: Option<AffinityTarget>,
-    ) -> Result<BuiltinSelection, Error> {
-        let RoutingPlane::Builtin(policy) = &self.plane else {
-            unreachable!("builtin worker selection called for KV routing")
-        };
-
-        if policy.required_worker_inputs().contains(WorkerInputs::LOAD) {
-            let load_state = self
-                .load_state
-                .as_ref()
-                .expect("LOAD policy must have routing load state");
-            let reservation = load_state.select_and_reserve(
-                &self.inner,
-                request.context().id(),
-                request.content(),
-                target_constraint.map(|target| (target.worker_id, target.dp_rank)),
-            )?;
-            let worker = reservation.worker();
-            Ok(BuiltinSelection {
-                initial_worker: worker.worker_id,
-                target_constraint,
-                dispatch_target: Some(route_target(worker)),
-                load_reservation: Some(reservation),
-            })
-        } else {
-            let worker = self
-                .inner
-                .select_policy_target(target_constraint.map(|target| target.worker_id))?;
-            Ok(BuiltinSelection {
-                initial_worker: worker,
-                target_constraint,
-                dispatch_target: None,
-                load_reservation: None,
-            })
+    ) -> Result<HostedSelection, Error> {
+        match &self.policy {
+            RoutingPolicy::Kv(_) => unreachable!("hosted selection called for KV routing"),
+            RoutingPolicy::Direct => {
+                let target = target_constraint
+                    .ok_or_else(|| anyhow::anyhow!("Direct routing requires an exact target"))?;
+                self.inner.ensure_routable(target.worker_id)?;
+                Ok(HostedSelection {
+                    initial_worker: target.worker_id,
+                    target_constraint: Some(target),
+                    occupancy_reservation: None,
+                    candidate_count: 1,
+                    selected_occupancy: None,
+                    device_aware_telemetry: None,
+                })
+            }
+            RoutingPolicy::Builtin(selector) => {
+                if selector
+                    .required_worker_inputs()
+                    .contains(WorkerInputs::OCCUPANCY)
+                {
+                    let occupancy = self
+                        .hosted_occupancy
+                        .as_ref()
+                        .expect("OCCUPANCY policy must have hosted occupancy state");
+                    let selection = occupancy.select_and_reserve(
+                        &self.inner,
+                        selector,
+                        target_constraint.map(|target| target.worker_id),
+                    )?;
+                    Ok(HostedSelection {
+                        initial_worker: selection.worker_id,
+                        target_constraint,
+                        occupancy_reservation: Some(selection.reservation),
+                        candidate_count: selection.candidate_count,
+                        selected_occupancy: Some(selection.occupancy),
+                        device_aware_telemetry: None,
+                    })
+                } else {
+                    let worker_id = match target_constraint {
+                        Some(target) => {
+                            self.inner.ensure_routable(target.worker_id)?;
+                            target.worker_id
+                        }
+                        None => {
+                            self.inner
+                                .with_selectable_worker_ids(|ids| {
+                                    selector.select_worker(
+                                        dynamo_kv_router::selector::WorkerSelectionInput::hosted(
+                                            ids, None,
+                                        ),
+                                    )
+                                })??
+                                .worker
+                                .worker_id
+                        }
+                    };
+                    Ok(HostedSelection {
+                        initial_worker: worker_id,
+                        target_constraint,
+                        occupancy_reservation: None,
+                        candidate_count: 0,
+                        selected_occupancy: None,
+                        device_aware_telemetry: None,
+                    })
+                }
+            }
+            RoutingPolicy::DeviceAwareWeighted => {
+                let selection = self.inner.select_device_aware_and_reserve(
+                    request.content(),
+                    target_constraint.map(|target| target.worker_id),
+                )?;
+                let initial_worker = selection.worker_id();
+                let candidate_count = selection.candidate_count();
+                let selected_occupancy = Some(selection.load());
+                let device_aware_telemetry = Some(DeviceAwareTelemetry {
+                    is_cpu: selection.is_cpu(),
+                    embedding_cache_hit: selection.embedding_cache_hit(),
+                    request_cache_keys: selection.request_cache_keys(),
+                });
+                Ok(HostedSelection {
+                    initial_worker,
+                    target_constraint,
+                    occupancy_reservation: selection.into_reservation(),
+                    candidate_count,
+                    selected_occupancy,
+                    device_aware_telemetry,
+                })
+            }
         }
     }
 
@@ -769,19 +840,16 @@ where
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
-        let RoutingPlane::Builtin(policy) = &self.plane else {
-            unreachable!("builtin dispatch called for KV routing")
-        };
-        let policy = *policy;
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let explicit = explicit_target(&request, phase)?;
-        let has_affinity_session = self.affinity.is_some() && affinity_id(&request)?.is_some();
-        if policy == BuiltinRoutingPolicy::Direct && explicit.is_none() {
+        let is_direct = matches!(&self.policy, RoutingPolicy::Direct);
+        if is_direct && explicit.is_none() {
             return Err(invalid_argument(format!(
                 "worker ID required for {phase} request in Direct routing mode"
             )));
         }
+        let has_affinity_session = self.affinity.is_some() && affinity_id(&request)?.is_some();
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
         let (lora_target, lora_fallback, lora_load) =
             match self.select_lora_target(request.content())? {
@@ -794,30 +862,37 @@ where
             };
         let (selection, mut operation) = if let Some(target) = lora_target {
             (
-                BuiltinSelection {
+                HostedSelection {
                     initial_worker: target,
                     target_constraint: None,
-                    dispatch_target: None,
-                    load_reservation: None,
+                    occupancy_reservation: None,
+                    candidate_count: 0,
+                    selected_occupancy: None,
+                    device_aware_telemetry: None,
                 },
                 None,
             )
         } else {
             self.select_with_session_affinity(&request, phase, is_query_only, |target| {
-                ready(self.select_builtin_worker(&request, target.or(explicit)))
+                ready(self.select_hosted_worker(&request, target.or(explicit)))
             })
             .await?
         };
-        let BuiltinSelection {
+        let HostedSelection {
             initial_worker,
             target_constraint,
-            dispatch_target,
-            load_reservation,
+            occupancy_reservation,
+            candidate_count,
+            selected_occupancy,
+            device_aware_telemetry,
         } = selection;
+        let uses_occupancy = self
+            .required_worker_inputs()
+            .contains(WorkerInputs::OCCUPANCY);
         let mut guard: RequestGuard<Sel> = RequestGuard::new_builtin(
             self.request_metrics.clone(),
             initial_worker,
-            load_reservation,
+            occupancy_reservation,
             lora_load,
             &request,
         );
@@ -830,10 +905,7 @@ where
 
         guard.start_dispatch(&phase_label);
         guard.record_prefill_start();
-        let dispatch_result = if policy == BuiltinRoutingPolicy::Direct && !has_affinity_session {
-            // Preserve the old Direct adapter's transport fallback. This is intentionally only
-            // for a standalone Direct request: an active affinity session owns a hard binding
-            // and must not silently move to a different worker.
+        let dispatch_result = if is_direct && !has_affinity_session {
             let target = target_constraint.expect("Direct routing requires an explicit target");
             cancel_on_stop(
                 request_context.as_ref(),
@@ -842,21 +914,20 @@ where
                     target.worker_id,
                     None,
                     |request, worker_id| {
-                        guard.retarget_worker(worker_id)?;
+                        let occupancy = guard.retarget_worker(worker_id);
                         let target = AffinityTarget::new(
                             worker_id,
                             target.dp_rank.filter(|_| worker_id == target.worker_id),
                         );
                         request.routing_mut().dp_rank = target.dp_rank;
-                        prepare(request, target).map(|metadata| (metadata, target))
+                        prepare(request, target).map(|metadata| (metadata, target, occupancy))
                     },
                 ),
             )
             .await
             .and_then(|result| result)
-            .map(|((metadata, target), stream)| (metadata, target, stream))
+            .map(|((metadata, target, occupancy), stream)| (metadata, target, occupancy, stream))
         } else if let Some(target) = target_constraint {
-            let target = dispatch_target.unwrap_or(target);
             request.routing_mut().dp_rank = target.dp_rank;
             let metadata = match prepare(&mut request, target) {
                 Ok(metadata) => metadata,
@@ -872,31 +943,25 @@ where
             )
             .await
             .and_then(|result| result)
-            .map(|stream| (metadata, target, stream))
-        } else if let Some(load_state) = self.load_state.as_ref() {
+            .map(|stream| (metadata, target, selected_occupancy, stream))
+        } else if uses_occupancy {
             cancel_on_stop(
                 request_context.as_ref(),
-                self.inner.direct_matching_prepared(
+                self.inner.dispatch_preselected_prepared(
                     request,
                     initial_worker,
-                    |worker_id| load_state.is_configured_worker(worker_id),
                     |request, worker_id| {
-                        let worker = guard.retarget_worker(worker_id)?.ok_or_else(|| {
-                            anyhow::anyhow!("load-aware builtin request lost its reservation")
-                        })?;
-                        let target = route_target(worker);
-                        request.routing_mut().dp_rank = target.dp_rank;
-                        prepare(request, target).map(|metadata| (metadata, target))
+                        let occupancy = guard.retarget_worker(worker_id);
+                        let target = AffinityTarget::worker(worker_id);
+                        request.routing_mut().dp_rank = None;
+                        prepare(request, target).map(|metadata| (metadata, target, occupancy))
                     },
                 ),
             )
             .await
             .and_then(|result| result)
-            .map(|((metadata, target), stream)| (metadata, target, stream))
+            .map(|((metadata, target, occupancy), stream)| (metadata, target, occupancy, stream))
         } else {
-            // Stateless selection supplies a preferred worker. Keep the normal transport
-            // recovery path: LoRA requests constrain a fallback to their replica set, while
-            // base-model requests may use any ready worker.
             cancel_on_stop(
                 request_context.as_ref(),
                 self.inner.direct_within_prepared(
@@ -904,19 +969,19 @@ where
                     initial_worker,
                     lora_fallback.as_ref(),
                     |request, worker_id| {
-                        guard.retarget_worker(worker_id)?;
-                        let target = AffinityTarget::new(worker_id, None);
+                        let occupancy = guard.retarget_worker(worker_id);
+                        let target = AffinityTarget::worker(worker_id);
                         request.routing_mut().dp_rank = None;
-                        prepare(request, target).map(|metadata| (metadata, target))
+                        prepare(request, target).map(|metadata| (metadata, target, occupancy))
                     },
                 ),
             )
             .await
             .and_then(|result| result)
-            .map(|((metadata, target), stream)| (metadata, target, stream))
+            .map(|((metadata, target, occupancy), stream)| (metadata, target, occupancy, stream))
         };
 
-        let (metadata, target, response_stream) = match dispatch_result {
+        let (metadata, target, final_occupancy, response_stream) = match dispatch_result {
             Ok(result) => result,
             Err(error) => {
                 let typed_error = error
@@ -928,7 +993,32 @@ where
                 return Err(error);
             }
         };
-        guard.retarget_worker(target.worker_id)?;
+        guard.retarget_worker(target.worker_id);
+        if let Some(telemetry) = device_aware_telemetry {
+            let selection_survived_transport = target.worker_id == initial_worker;
+            tracing::info!(
+                router_mode = "device-aware-weighted",
+                worker_id = target.worker_id,
+                candidate_count,
+                occupancy = ?final_occupancy,
+                endpoint = %self.inner.client.endpoint.id(),
+                is_cpu = ?selection_survived_transport.then_some(telemetry.is_cpu),
+                embedding_cache_hit = ?selection_survived_transport
+                    .then_some(telemetry.embedding_cache_hit),
+                request_cache_keys = telemetry.request_cache_keys,
+                transport_fallback = !selection_survived_transport,
+                "Selected worker"
+            );
+        } else if uses_occupancy {
+            tracing::info!(
+                router_mode = ?self.inner.router_mode(),
+                worker_id = target.worker_id,
+                candidate_count,
+                occupancy = ?final_occupancy,
+                transport_fallback = target.worker_id != initial_worker,
+                "Selected worker"
+            );
+        }
         if let Some(tracker) = tracker {
             let worker_type = if tracker.phase() == RequestPhase::Prefill {
                 WORKER_TYPE_PREFILL
@@ -939,10 +1029,10 @@ where
         }
         guard.mark_dispatched();
         let stream = into_monitored_response(response_stream, guard);
-        let Some(operation) = operation else {
-            return Ok((metadata, stream));
-        };
-        Ok((metadata, operation.into_stream(target, stream)?))
+        match operation {
+            Some(operation) => Ok((metadata, operation.into_stream(target, stream)?)),
+            None => Ok((metadata, stream)),
+        }
     }
 
     async fn select_and_dispatch_kv_prefill<M, F>(
@@ -1004,9 +1094,11 @@ where
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
-        match &self.plane {
-            RoutingPlane::Kv(_) => self.select_and_dispatch_kv_prefill(request, prepare).await,
-            RoutingPlane::Builtin(_) => {
+        match &self.policy {
+            RoutingPolicy::Kv(_) => self.select_and_dispatch_kv_prefill(request, prepare).await,
+            RoutingPolicy::Builtin(_)
+            | RoutingPolicy::Direct
+            | RoutingPolicy::DeviceAwareWeighted => {
                 self.select_and_dispatch_builtin(request, RequestPhase::Prefill, prepare)
                     .await
             }
@@ -1047,7 +1139,7 @@ where
         &self,
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        if matches!(&self.plane, RoutingPlane::Builtin(_)) {
+        if !matches!(&self.policy, RoutingPolicy::Kv(_)) {
             let phase = request
                 .tracker
                 .as_ref()
@@ -1271,30 +1363,14 @@ mod tests {
 
     #[test]
     fn builtin_policies_declare_capabilities() {
-        assert_eq!(
-            BuiltinRoutingPolicy::RoundRobin.required_worker_inputs(),
-            WorkerInputs::NONE
-        );
-        assert_eq!(
-            BuiltinRoutingPolicy::PowerOfTwoChoices.required_worker_inputs(),
-            WorkerInputs::LOAD
-        );
-        assert_eq!(
-            BuiltinRoutingPolicy::LeastLoaded.required_worker_inputs(),
-            WorkerInputs::LOAD
-        );
-        assert_eq!(
-            BuiltinRoutingPolicy::Random.required_worker_inputs(),
-            WorkerInputs::NONE
-        );
-        assert_eq!(
-            BuiltinRoutingPolicy::Direct.required_worker_inputs(),
-            WorkerInputs::NONE
-        );
-        assert_eq!(
-            BuiltinRoutingPolicy::DeviceAwareWeighted.required_worker_inputs(),
-            WorkerInputs::LOAD
-        );
+        for mode in [RouterMode::RoundRobin, RouterMode::Random] {
+            let selector = BuiltinWorkerSelector::new(mode).unwrap();
+            assert_eq!(selector.required_worker_inputs(), WorkerInputs::NONE);
+        }
+        for mode in [RouterMode::PowerOfTwoChoices, RouterMode::LeastLoaded] {
+            let selector = BuiltinWorkerSelector::new(mode).unwrap();
+            assert_eq!(selector.required_worker_inputs(), WorkerInputs::OCCUPANCY);
+        }
     }
 
     #[tokio::test]
@@ -1314,71 +1390,86 @@ mod tests {
         let inner = PushRouter::from_client(client.clone(), RouterMode::RoundRobin)
             .await
             .unwrap();
-        let host =
-            RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(inner, None, None)
-                .unwrap();
+        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner).unwrap();
 
         assert_eq!(host.required_worker_inputs(), WorkerInputs::NONE);
+        assert!(host.hosted_occupancy.is_none());
 
         drop(host);
 
+        client.override_discovered_instances(vec![1, 2]);
         client.override_instance_avail(vec![1, 2]);
         let inner = PushRouter::from_client(client, RouterMode::PowerOfTwoChoices)
             .await
             .unwrap();
-        let config = ModelRuntimeConfig {
-            data_parallel_start_rank: 3,
-            data_parallel_size: 2,
-            ..Default::default()
+        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner).unwrap();
+        let RoutingPolicy::Builtin(selector) = &host.policy else {
+            unreachable!()
         };
-        let (_workers_tx, workers) =
-            watch::channel(HashMap::from([(1, config.clone()), (2, config)]));
-        let load_state = RoutingLoadState::start(
-            endpoint,
-            16,
-            workers,
-            KvRouterConfig::default(),
-            WORKER_TYPE_DECODE,
-        )
-        .await
-        .unwrap();
-        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
-            inner,
-            Some(load_state.clone()),
-            None,
-        )
-        .unwrap();
-        assert_eq!(host.required_worker_inputs(), WorkerInputs::LOAD);
-        let request = PreprocessedRequest::builder()
-            .model("test".to_string())
-            .token_ids((0..32).collect())
-            .stop_conditions(Default::default())
-            .sampling_options(Default::default())
-            .output_options(Default::default())
-            .build()
+        assert_eq!(host.required_worker_inputs(), WorkerInputs::OCCUPANCY);
+        assert!(host.hosted_occupancy.is_some());
+        let selection = host
+            .hosted_occupancy
+            .as_ref()
+            .unwrap()
+            .select_and_reserve(&host.inner, selector, Some(1))
             .unwrap();
-        let reservation = load_state
-            .select_and_reserve(&host.inner, "request-1", &request, None)
-            .unwrap();
-        let worker = reservation.worker();
-        assert_eq!(worker.dp_rank, 3);
-        assert_eq!(load_state.active_request_count_for_test(worker), 1);
-        assert_eq!(load_state.active_blocks_for_test(worker), 2);
-        assert_eq!(load_state.active_tokens_for_test(worker), 32);
+        assert_eq!(selection.worker_id, 1);
+        assert_eq!(selection.occupancy, 1);
+        assert_eq!(host.inner.occupancy_for_test(1), 1);
         let mut guard: RequestGuard<DefaultWorkerSelector> = RequestGuard::new_builtin(
             Arc::clone(&host.request_metrics),
-            worker.worker_id,
-            Some(reservation),
+            selection.worker_id,
+            Some(selection.reservation),
             None,
-            &request,
+            &request(),
         );
-        assert_eq!(
-            guard.retarget_worker(worker.worker_id).unwrap(),
-            Some(worker)
-        );
+        assert_eq!(guard.retarget_worker(1), Some(1));
         guard.abort().await;
-        assert_eq!(load_state.active_request_count_for_test(worker), 0);
+        assert_eq!(host.inner.occupancy_for_test(1), 0);
 
+        drop(host);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn builtin_occupancy_selection_uses_all_selectable_workers() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("builtin-occupancy-workers".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let client = endpoint.client().await.unwrap();
+        let inner = PushRouter::from_client(client.clone(), RouterMode::LeastLoaded)
+            .await
+            .unwrap();
+        client.override_discovered_instances(vec![1, 2]);
+        client.override_instance_avail(vec![1, 2]);
+        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner).unwrap();
+        let RoutingPolicy::Builtin(selector) = &host.policy else {
+            unreachable!()
+        };
+        let occupancy = host.hosted_occupancy.as_ref().unwrap();
+        let first = occupancy
+            .select_and_reserve(&host.inner, selector, Some(1))
+            .unwrap();
+        let second = occupancy
+            .select_and_reserve(&host.inner, selector, None)
+            .unwrap();
+
+        assert_eq!(first.worker_id, 1);
+        assert_eq!(second.worker_id, 2);
+        assert_eq!(second.candidate_count, 2);
+        assert_eq!(second.occupancy, 1);
+
+        drop(second);
+        drop(first);
         drop(host);
         runtime.shutdown();
     }
@@ -1400,9 +1491,8 @@ mod tests {
         let inner = PushRouter::from_client(client, RouterMode::Direct)
             .await
             .unwrap();
-        let host =
-            RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(inner, None, None)
-                .unwrap();
+        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(inner, None)
+            .unwrap();
 
         let error = host.generate(Context::new(request())).await.unwrap_err();
         assert!(match_error_chain(
@@ -1410,148 +1500,6 @@ mod tests {
             &[ErrorType::InvalidArgument],
             &[]
         ));
-
-        drop(host);
-        runtime.shutdown();
-    }
-
-    #[tokio::test]
-    async fn builtin_load_selection_and_peek_ignore_routable_workers_without_configs() {
-        let runtime = Runtime::from_current().unwrap();
-        let distributed =
-            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
-                .await
-                .unwrap();
-        let endpoint = distributed
-            .namespace("builtin-load-configured-workers".to_string())
-            .unwrap()
-            .component("workers".to_string())
-            .unwrap()
-            .endpoint("generate".to_string());
-        let client = endpoint.client().await.unwrap();
-        let inner = PushRouter::from_client(client.clone(), RouterMode::LeastLoaded)
-            .await
-            .unwrap();
-        client.override_discovered_instances(vec![1, 2]);
-        client.override_instance_avail(vec![1, 2]);
-        let config = ModelRuntimeConfig {
-            data_parallel_start_rank: 3,
-            ..Default::default()
-        };
-        let (_workers_tx, workers) = watch::channel(HashMap::from([(2, config)]));
-        let load_state = RoutingLoadState::start(
-            endpoint,
-            16,
-            workers,
-            KvRouterConfig::default(),
-            WORKER_TYPE_DECODE,
-        )
-        .await
-        .unwrap();
-        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
-            inner,
-            Some(load_state.clone()),
-            None,
-        )
-        .unwrap();
-        let request = request();
-        let first = load_state
-            .select_and_reserve(&host.inner, "request-1", &request, Some((2, None)))
-            .unwrap();
-        let second = load_state
-            .select_and_reserve(&host.inner, "request-2", &request, None)
-            .unwrap();
-
-        assert_eq!(first.worker().worker_id, 2);
-        assert_eq!(second.worker().worker_id, 2);
-        assert_eq!(
-            host.peek_next_worker().unwrap(),
-            Some(AffinityTarget::new(2, Some(3)))
-        );
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn builtin_lora_base_model_falls_back_and_adapter_filters_candidates() {
-        let runtime = Runtime::from_current().unwrap();
-        let distributed =
-            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
-                .await
-                .unwrap();
-        let endpoint = distributed
-            .namespace("builtin-lora-capability".to_string())
-            .unwrap()
-            .component("workers".to_string())
-            .unwrap()
-            .endpoint("generate".to_string());
-        let client = endpoint.client().await.unwrap();
-        endpoint.register_endpoint_instance().await.unwrap();
-        let worker_id = client.wait_for_instances().await.unwrap()[0].id();
-        let stale_worker = worker_id.wrapping_add(1);
-        client.override_instance_avail(vec![stale_worker, worker_id]);
-        let dispatch = Arc::new(CompletedBuiltinDispatch::default());
-        let inner = PushRouter::from_client_with_dispatch(
-            client,
-            RouterMode::RoundRobin,
-            Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
-        )
-        .await
-        .unwrap();
-        let routing_table = LoraRoutingTable::new();
-        routing_table.update_allocation(
-            "adapter".to_string(),
-            LoraReplicaConfig {
-                lora_name: "adapter".to_string(),
-                replica_factor: 1,
-                replica_set: vec![WorkerWithDpRank::new(worker_id, 0)],
-                updated_at: Instant::now(),
-                is_active: true,
-            },
-        );
-        let filter = Arc::new(LoraFilter::new(routing_table, LoraStateTracker::new()));
-        let estimator = Arc::new(LoadEstimator::new());
-        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_capabilities(
-            inner,
-            None,
-            None,
-            Some((filter, Arc::clone(&estimator))),
-        )
-        .unwrap();
-
-        // Advance RoundRobin once so the base-model request selects the stale worker.
-        assert_eq!(
-            host.peek_next_worker().unwrap(),
-            Some(AffinityTarget::new(worker_id, None))
-        );
-        let mut first_stream = host.generate(Context::new(request())).await.unwrap();
-        while first_stream.next().await.is_some() {}
-        assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[worker_id]);
-
-        // Base-model traffic keeps normal RoundRobin recovery: the selected worker can vanish,
-        // but fallback must not inherit the adapter replica-set filter.
-        assert_eq!(
-            host.peek_next_worker().unwrap(),
-            Some(AffinityTarget::new(stale_worker, None))
-        );
-        let mut base_stream = host.generate(Context::new(request())).await.unwrap();
-        while base_stream.next().await.is_some() {}
-        assert_eq!(
-            dispatch.worker_ids.lock().unwrap().as_slice(),
-            &[worker_id, worker_id]
-        );
-        assert!(estimator.get_inflight_counts().is_empty());
-
-        let mut request = request();
-        request.routing_mut().lora_name = Some("adapter".to_string());
-
-        let mut stream = host.generate(Context::new(request)).await.unwrap();
-        assert_eq!(estimator.get_inflight_counts().get("adapter"), Some(&1));
-        assert_eq!(
-            dispatch.worker_ids.lock().unwrap().as_slice(),
-            &[worker_id, worker_id, worker_id]
-        );
-        while stream.next().await.is_some() {}
-        assert!(!estimator.get_inflight_counts().contains_key("adapter"));
 
         drop(host);
         runtime.shutdown();
@@ -1596,6 +1544,70 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn builtin_lora_keeps_separate_selection_and_cleanup() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("builtin-lora-capability".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+        let stale_worker = worker_id.wrapping_add(1);
+        client.override_instance_avail(vec![stale_worker, worker_id]);
+        let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+        let inner = PushRouter::from_client_with_dispatch(
+            client,
+            RouterMode::RoundRobin,
+            Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+        )
+        .await
+        .unwrap();
+        let routing_table = LoraRoutingTable::new();
+        routing_table.update_allocation(
+            "adapter".to_string(),
+            LoraReplicaConfig {
+                lora_name: "adapter".to_string(),
+                replica_factor: 1,
+                replica_set: vec![WorkerWithDpRank::new(worker_id, 0)],
+                updated_at: Instant::now(),
+                is_active: true,
+            },
+        );
+        let filter = Arc::new(LoraFilter::new(routing_table, LoraStateTracker::new()));
+        let estimator = Arc::new(LoadEstimator::new());
+        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_capabilities(
+            inner,
+            None,
+            Some((filter, Arc::clone(&estimator))),
+        )
+        .unwrap();
+
+        let mut base_stream = host.generate(Context::new(request())).await.unwrap();
+        while base_stream.next().await.is_some() {}
+
+        let mut adapter_request = request();
+        adapter_request.routing_mut().lora_name = Some("adapter".to_string());
+        let mut adapter_stream = host.generate(Context::new(adapter_request)).await.unwrap();
+        assert_eq!(estimator.get_inflight_counts().get("adapter"), Some(&1));
+        while adapter_stream.next().await.is_some() {}
+
+        assert_eq!(dispatch.worker_ids.lock().unwrap().len(), 2);
+        assert_eq!(dispatch.worker_ids.lock().unwrap()[1], worker_id);
+        assert!(!estimator.get_inflight_counts().contains_key("adapter"));
+
+        drop(host);
+        runtime.shutdown();
+    }
+
     fn affinity_request(
         session_id: &str,
         explicit_worker: Option<u64>,
@@ -1612,7 +1624,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn builtin_affinity_uses_shared_dispatch_and_cleanup_lifecycle() {
+    async fn builtin_affinity_uses_common_host_for_every_policy() {
         let runtime = Runtime::from_current().unwrap();
         let distributed =
             DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -1647,57 +1659,24 @@ mod tests {
             )
             .await
             .unwrap();
-            let load_state = if BuiltinRoutingPolicy::from_router_mode(mode)
-                .is_some_and(|policy| policy.required_worker_inputs().contains(WorkerInputs::LOAD))
-            {
-                let (_workers_tx, workers) =
-                    watch::channel(HashMap::from([(worker_id, ModelRuntimeConfig::default())]));
-                Some(
-                    RoutingLoadState::start(
-                        endpoint,
-                        16,
-                        workers,
-                        KvRouterConfig::default(),
-                        WORKER_TYPE_DECODE,
-                    )
-                    .await
-                    .unwrap(),
-                )
-            } else {
-                None
-            };
             let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
             let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
                 inner,
-                load_state.clone(),
                 Some(affinity.clone()),
             )
             .unwrap();
             let session_id = format!("session-{index}");
             let affinity_id = SessionAffinityId::new(session_id.clone());
-            let expected_target = AffinityTarget::new(worker_id, load_state.as_ref().map(|_| 0));
             let explicit_worker = (mode == RouterMode::Direct).then_some(worker_id);
 
             let mut first = host
                 .generate(affinity_request(&session_id, explicit_worker))
                 .await
                 .unwrap();
-            if let Some(load_state) = load_state.as_ref() {
-                assert_eq!(
-                    load_state.active_request_count_for_test(WorkerWithDpRank::new(worker_id, 0)),
-                    1
-                );
-            }
             while first.next().await.is_some() {}
-            if let Some(load_state) = load_state.as_ref() {
-                assert_eq!(
-                    load_state.active_request_count_for_test(WorkerWithDpRank::new(worker_id, 0)),
-                    0
-                );
-            }
             assert_eq!(
                 affinity.query_target(&affinity_id, None).unwrap(),
-                Some(expected_target)
+                Some(AffinityTarget::worker(worker_id))
             );
 
             let mut second = host
@@ -1705,64 +1684,10 @@ mod tests {
                 .await
                 .unwrap();
             while second.next().await.is_some() {}
-            if let Some(load_state) = load_state.as_ref() {
-                assert_eq!(
-                    load_state.active_request_count_for_test(WorkerWithDpRank::new(worker_id, 0)),
-                    0
-                );
-            }
-
-            if mode != RouterMode::Direct {
-                let stale_session = format!("stale-{index}");
-                let stale_affinity_id = SessionAffinityId::new(stale_session.clone());
-                let AffinityAcquire::Initialize(initializer) =
-                    affinity.acquire(&stale_affinity_id, None).await.unwrap()
-                else {
-                    panic!("new stale session must initialize");
-                };
-                drop(
-                    initializer
-                        .commit(AffinityTarget::new(worker_id.wrapping_add(1), None))
-                        .unwrap(),
-                );
-                let mut rebound = host
-                    .generate(affinity_request(&stale_session, None))
-                    .await
-                    .unwrap();
-                while rebound.next().await.is_some() {}
-                assert_eq!(
-                    affinity.query_target(&stale_affinity_id, None).unwrap(),
-                    Some(expected_target)
-                );
-            }
-
-            let controller = Controller::new(format!("cancelled-{index}"));
-            controller.stop();
-            let mut cancelled_content = request();
-            cancelled_content.routing_mut().backend_instance_id = explicit_worker;
-            let mut cancelled = Context::with_controller(cancelled_content, controller);
-            cancelled.insert(SESSION_AFFINITY_CONTEXT_KEY, affinity_id.clone());
-            let dispatches_before_cancellation = dispatch.worker_ids.lock().unwrap().len();
-            let mut cancelled_stream = host.generate(cancelled).await.unwrap();
-            assert!(cancelled_stream.next().await.is_none());
             assert_eq!(
-                dispatch.worker_ids.lock().unwrap().len(),
-                dispatches_before_cancellation + 1
+                dispatch.worker_ids.lock().unwrap().as_slice(),
+                &[worker_id; 2]
             );
-            if let Some(load_state) = load_state.as_ref() {
-                assert_eq!(
-                    load_state.active_request_count_for_test(WorkerWithDpRank::new(worker_id, 0)),
-                    0
-                );
-            }
-            assert_eq!(
-                affinity.query_target(&affinity_id, None).unwrap(),
-                Some(expected_target)
-            );
-
-            let worker_ids = dispatch.worker_ids.lock().unwrap();
-            let expected_dispatches = if mode == RouterMode::Direct { 3 } else { 4 };
-            assert_eq!(worker_ids.as_slice(), vec![worker_id; expected_dispatches]);
         }
 
         runtime.shutdown();
@@ -1770,7 +1695,7 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn builtin_direct_falls_back_on_worker_loss_without_affinity() {
+    async fn builtin_direct_fallback_stays_disabled_for_affinity() {
         let runtime = Runtime::from_current().unwrap();
         let distributed =
             DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -1786,10 +1711,6 @@ mod tests {
         endpoint.register_endpoint_instance().await.unwrap();
         let real_worker = client.wait_for_instances().await.unwrap()[0].id();
         let stale_worker = real_worker.wrapping_add(1);
-
-        // Model the discovery race: selection still sees the old worker as routable, but its
-        // transport registration has already disappeared. The remaining worker is available
-        // for standalone Direct fallback.
         client.override_instance_avail(vec![stale_worker, real_worker]);
         let dispatch = Arc::new(CompletedBuiltinDispatch::default());
         let inner = PushRouter::from_client_with_dispatch(
@@ -1802,7 +1723,6 @@ mod tests {
         let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
         let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
             inner,
-            None,
             Some(affinity.clone()),
         )
         .unwrap();
@@ -1816,9 +1736,7 @@ mod tests {
             &[real_worker]
         );
 
-        // A session binding is a hard pin. It must not take the standalone Direct fallback,
-        // even when another worker is free.
-        let session_id = SessionAffinityId::new("builtin-direct-worker-loss-affinity");
+        let session_id = SessionAffinityId::new("direct-affinity");
         let AffinityAcquire::Initialize(initializer) =
             affinity.acquire(&session_id, None).await.unwrap()
         else {
@@ -1826,120 +1744,19 @@ mod tests {
         };
         drop(
             initializer
-                .commit(AffinityTarget::new(stale_worker, None))
+                .commit(AffinityTarget::worker(stale_worker))
                 .unwrap(),
         );
         assert!(
-            host.generate(affinity_request(
-                "builtin-direct-worker-loss-affinity",
-                Some(stale_worker),
-            ))
-            .await
-            .is_err()
+            host.generate(affinity_request("direct-affinity", Some(stale_worker)))
+                .await
+                .is_err()
         );
         assert_eq!(
             dispatch.worker_ids.lock().unwrap().as_slice(),
             &[real_worker]
         );
         assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
-
-        drop(host);
-        runtime.shutdown();
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn builtin_load_affinity_rebinds_stale_rank_but_not_explicit_pin() {
-        let runtime = Runtime::from_current().unwrap();
-        let distributed =
-            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
-                .await
-                .unwrap();
-        let endpoint = distributed
-            .namespace("builtin-load-affinity-rank".to_string())
-            .unwrap()
-            .component("workers".to_string())
-            .unwrap()
-            .endpoint("generate".to_string());
-        let client = endpoint.client().await.unwrap();
-        endpoint.register_endpoint_instance().await.unwrap();
-        let worker_id = client.wait_for_instances().await.unwrap()[0].id();
-        let dispatch = Arc::new(CompletedBuiltinDispatch::default());
-        let inner = PushRouter::from_client_with_dispatch(
-            client,
-            RouterMode::LeastLoaded,
-            Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
-        )
-        .await
-        .unwrap();
-        let (_workers_tx, workers) =
-            watch::channel(HashMap::from([(worker_id, ModelRuntimeConfig::default())]));
-        let load_state = RoutingLoadState::start(
-            endpoint,
-            16,
-            workers,
-            KvRouterConfig::default(),
-            WORKER_TYPE_DECODE,
-        )
-        .await
-        .unwrap();
-        let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
-        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
-            inner,
-            Some(load_state.clone()),
-            Some(affinity.clone()),
-        )
-        .unwrap();
-        let stale_target = AffinityTarget::new(worker_id, Some(1));
-        let expected_target = AffinityTarget::new(worker_id, Some(0));
-
-        let implicit_session = SessionAffinityId::new("builtin-stale-implicit-rank");
-        let AffinityAcquire::Initialize(initializer) =
-            affinity.acquire(&implicit_session, None).await.unwrap()
-        else {
-            panic!("new implicit session must initialize");
-        };
-        drop(initializer.commit(stale_target).unwrap());
-
-        let mut rebound = host
-            .generate(affinity_request("builtin-stale-implicit-rank", None))
-            .await
-            .unwrap();
-        while rebound.next().await.is_some() {}
-        assert_eq!(
-            affinity.query_target(&implicit_session, None).unwrap(),
-            Some(expected_target)
-        );
-        assert_eq!(dispatch.worker_ids.lock().unwrap().as_slice(), &[worker_id]);
-        assert_eq!(
-            load_state.active_request_count_for_test(WorkerWithDpRank::new(worker_id, 0)),
-            0
-        );
-
-        let explicit_session = SessionAffinityId::new("builtin-stale-explicit-rank");
-        let AffinityAcquire::Initialize(initializer) =
-            affinity.acquire(&explicit_session, None).await.unwrap()
-        else {
-            panic!("new explicit session must initialize");
-        };
-        drop(initializer.commit(stale_target).unwrap());
-        let mut explicit_request = affinity_request("builtin-stale-explicit-rank", Some(worker_id));
-        explicit_request.routing_mut().dp_rank = Some(1);
-        let dispatches_before_error = dispatch.worker_ids.lock().unwrap().len();
-
-        assert!(host.generate(explicit_request).await.is_err());
-        assert_eq!(
-            dispatch.worker_ids.lock().unwrap().len(),
-            dispatches_before_error
-        );
-        assert_eq!(
-            affinity.query_target(&explicit_session, None).unwrap(),
-            None
-        );
-        assert_eq!(
-            load_state.active_request_count_for_test(WorkerWithDpRank::new(worker_id, 0)),
-            0
-        );
 
         drop(host);
         runtime.shutdown();
@@ -2202,6 +2019,18 @@ mod tests {
         assert_eq!(metrics.requests_started_total().get(), started_before + 3);
         assert_eq!(metrics.requests_total.get(), completed_before + 1);
 
+        let mut builtin_guard = RequestGuard::<DefaultWorkerSelector>::new_builtin(
+            Arc::clone(&metrics),
+            7,
+            None,
+            None,
+            &request(),
+        );
+        assert_eq!(metrics.requests_started_total().get(), started_before + 4);
+        builtin_guard.abort().await;
+        drop(builtin_guard);
+        assert_eq!(metrics.requests_total.get(), completed_before + 1);
+
         drop(router);
         runtime.shutdown();
     }
@@ -2311,7 +2140,7 @@ mod tests {
         let session_id = SessionAffinityId::new("query-existing-binding");
         let target = AffinityTarget {
             worker_id: 7,
-            dp_rank: None,
+            dp_rank: Some(0),
         };
         let AffinityAcquire::Initialize(initializer) = router
             .affinity
@@ -2342,73 +2171,6 @@ mod tests {
                 .query_target(&session_id, None)
                 .unwrap(),
             Some(target)
-        );
-
-        drop(router);
-        runtime.shutdown();
-    }
-
-    #[tokio::test]
-    async fn worker_only_affinity_constrains_kv_query_selection() {
-        let bound_worker = 7;
-        let other_worker = 8;
-        let bound_config = ModelRuntimeConfig {
-            data_parallel_start_rank: 3,
-            data_parallel_size: 2,
-            ..Default::default()
-        };
-        let workers = HashMap::from([
-            (bound_worker, bound_config),
-            (other_worker, ModelRuntimeConfig::default()),
-        ]);
-        let (router, runtime) =
-            router_with_worker_configs(Some(Duration::from_secs(10)), workers).await;
-        let session_id = SessionAffinityId::new("worker-only-kv-selection");
-        let binding = AffinityTarget::new(bound_worker, None);
-        let AffinityAcquire::Initialize(initializer) = router
-            .affinity
-            .as_ref()
-            .unwrap()
-            .acquire(&session_id, None)
-            .await
-            .unwrap()
-        else {
-            panic!("first request must initialize");
-        };
-        drop(initializer.commit(binding).unwrap());
-
-        let mut constrained_input = request();
-        constrained_input.routing_mut().allowed_worker_ids =
-            Some(HashSet::from([bound_worker, other_worker]));
-        let mut constrained_request = Context::new(constrained_input);
-        constrained_request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
-        let (selection, operation) = router
-            .select_with_affinity(&constrained_request, RequestPhase::Aggregated, true)
-            .await
-            .unwrap();
-        assert_eq!(selection.worker.worker_id, bound_worker);
-        assert!(matches!(selection.worker.dp_rank, 3 | 4));
-        assert!(operation.is_none());
-
-        let mut conflicting_input = request();
-        conflicting_input.routing_mut().allowed_worker_ids = Some(HashSet::from([other_worker]));
-        let mut conflicting_request = Context::new(conflicting_input);
-        conflicting_request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
-        assert!(
-            router
-                .select_with_affinity(&conflicting_request, RequestPhase::Aggregated, true)
-                .await
-                .is_err()
-        );
-
-        assert_eq!(
-            router
-                .affinity
-                .as_ref()
-                .unwrap()
-                .query_target(&SessionAffinityId::new("worker-only-kv-selection"), None)
-                .unwrap(),
-            Some(binding)
         );
 
         drop(router);

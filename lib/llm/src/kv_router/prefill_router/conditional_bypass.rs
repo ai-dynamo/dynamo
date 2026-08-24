@@ -76,7 +76,10 @@ where
         session_affinity: Option<&SessionAffinityId>,
         decode_affinity_target: Option<AffinityTarget>,
     ) -> Result<Option<ConditionalDisaggDecodeDecision>> {
-        if !self.router_mode.is_kv_routing() {
+        // Conditional disagg peeks the decode router to find the cache-hot
+        // decode worker, so it needs the *decode* set in KV mode. A KV prefill
+        // hop in front of a non-KV decode set cannot make this decision.
+        if !self.decode_router_mode.is_kv_routing() {
             return Ok(None);
         }
 
