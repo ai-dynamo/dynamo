@@ -209,8 +209,11 @@ def test_cuda_version_consistency() -> None:
         if len(lines) > MAX_REPORTED_LINES:
             report.append(f"        ... ({len(lines) - MAX_REPORTED_LINES} more lines)")
 
-    if not detected and not excused:
-        pytest.skip("No CUDA version detected from any signal.")
+    # Excused packages are tolerated noise, not evidence that the scan worked:
+    # an image whose only CUDA signal is an exception entry has told us nothing
+    # about the major it ships, so treat it as unevaluable rather than green.
+    if not detected:
+        pytest.skip("No non-excused CUDA version detected from any signal.")
 
     violations: list[str] = []
     for label, line, (major, minor) in detected:
