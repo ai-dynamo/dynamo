@@ -26,7 +26,10 @@ use std::{
 use rustc_hash::FxHashMap;
 use tokio::sync::oneshot;
 
-use super::{KvRouterError, pruning::PruneConfig};
+use super::{
+    KvRouterError,
+    pruning::{BlockEntry, PruneConfig, WorkerPruneManager},
+};
 use crate::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash, RouterEvent, WorkerWithDpRank,
@@ -121,6 +124,7 @@ pub struct ApproximateLruTask {
     pub(crate) response: Option<oneshot::Sender<Result<ApproximateLruReply, KvRouterError>>>,
     pub(crate) enqueued_at: Instant,
     pub(crate) queue_depth_at_enqueue: usize,
+    pub(crate) fallback_prune_manager: Option<WorkerPruneManager>,
 }
 
 impl ApproximateLruTask {
@@ -137,6 +141,7 @@ impl ApproximateLruTask {
                 response: Some(response),
                 enqueued_at: Instant::now(),
                 queue_depth_at_enqueue: 0,
+                fallback_prune_manager: None,
             },
             receiver,
         )
@@ -148,6 +153,7 @@ impl ApproximateLruTask {
             response: None,
             enqueued_at: Instant::now(),
             queue_depth_at_enqueue: 0,
+            fallback_prune_manager: None,
         }
     }
 
@@ -159,6 +165,10 @@ impl ApproximateLruTask {
 
     pub(crate) fn observe_enqueue_depth(&mut self, queue_depth: usize) {
         self.queue_depth_at_enqueue = queue_depth;
+    }
+
+    pub(crate) fn set_fallback_prune_manager(&mut self, manager: WorkerPruneManager) {
+        self.fallback_prune_manager = Some(manager);
     }
 }
 
@@ -709,6 +719,21 @@ pub(crate) struct ApproximateLruLane {
 pub(crate) struct ApproximateLruApplyOutput {
     pub events: Vec<RouterEvent>,
     pub reply: ApproximateLruReply,
+    pub ttl_update: Option<ApproximateTtlUpdate>,
+}
+
+pub(crate) enum ApproximateTtlUpdate {
+    Refresh(Vec<BlockEntry>),
+    Reset(WorkerWithDpRank),
+}
+
+impl ApproximateTtlUpdate {
+    pub(crate) fn apply(self, manager: &WorkerPruneManager) {
+        match self {
+            Self::Refresh(entries) => manager.insert_block_entries(entries),
+            Self::Reset(worker) => manager.remove_worker_dp_rank(worker),
+        }
+    }
 }
 
 impl ApproximateLruLane {
@@ -736,6 +761,7 @@ impl ApproximateLruLane {
         command: ApproximateLruCommand,
     ) -> Result<ApproximateLruApplyOutput, KvRouterError> {
         let mut events = Vec::new();
+        let mut ttl_update = None;
         let reply = match command {
             ApproximateLruCommand::SetCapacity {
                 worker,
@@ -749,6 +775,7 @@ impl ApproximateLruLane {
                 {
                     self.push_clear_event(&mut events, worker);
                     self.ranks.remove(&worker);
+                    ttl_update = Some(ApproximateTtlUpdate::Reset(worker));
                 }
                 if let Some(capacity) = capacity.filter(|capacity| *capacity > 0) {
                     let (removed, evicted) = match self.ranks.get_mut(&worker) {
@@ -795,6 +822,7 @@ impl ApproximateLruLane {
             ApproximateLruCommand::ResetRank { worker } => {
                 self.ranks.remove(&worker);
                 self.push_clear_event(&mut events, worker);
+                ttl_update = Some(ApproximateTtlUpdate::Reset(worker));
                 ApproximateLruReply::Applied
             }
             ApproximateLruCommand::Acquire {
@@ -806,23 +834,40 @@ impl ApproximateLruLane {
             } => {
                 self.requests = self.requests.saturating_add(1);
                 self.request_messages = self.request_messages.saturating_add(1);
-                let Some(state) = self.ranks.get_mut(&worker) else {
+                let Some(state) = self.ranks.get(&worker) else {
                     return Ok(ApproximateLruApplyOutput {
                         events,
                         reply: ApproximateLruReply::Acquired(ApproximateAcquireMode::Ignored),
+                        ttl_update,
                     });
                 };
                 if state.incarnation() != incarnation {
                     return Ok(ApproximateLruApplyOutput {
                         events,
                         reply: ApproximateLruReply::Acquired(ApproximateAcquireMode::Ignored),
+                        ttl_update,
                     });
                 }
-                let WorkerRetentionState::Lru { state, .. } = state else {
+                if matches!(state, WorkerRetentionState::TtlFallback { .. }) {
+                    let entries = blocks
+                        .iter()
+                        .enumerate()
+                        .map(|(seq_position, block)| BlockEntry {
+                            key: ExternalSequenceBlockHash(block.sequence_hash),
+                            worker,
+                            seq_position,
+                        })
+                        .collect();
+                    self.push_store_event(&mut events, worker, None, blocks);
                     return Ok(ApproximateLruApplyOutput {
                         events,
                         reply: ApproximateLruReply::Acquired(ApproximateAcquireMode::TtlFallback),
+                        ttl_update: Some(ApproximateTtlUpdate::Refresh(entries)),
                     });
+                }
+                let Some(WorkerRetentionState::Lru { state, .. }) = self.ranks.get_mut(&worker)
+                else {
+                    unreachable!("retention state was checked above");
                 };
                 let before = state.evicted_blocks;
                 let removed = state.acquire(attempt_id, &blocks, private_blocks)?;
@@ -885,7 +930,11 @@ impl ApproximateLruLane {
             }
             ApproximateLruCommand::Stats => ApproximateLruReply::Stats(self.stats()),
         };
-        Ok(ApproximateLruApplyOutput { events, reply })
+        Ok(ApproximateLruApplyOutput {
+            events,
+            reply,
+            ttl_update,
+        })
     }
 
     fn next_event_id(&mut self) -> u64 {
@@ -1415,6 +1464,27 @@ mod tests {
             output.reply,
             ApproximateLruReply::Acquired(ApproximateAcquireMode::TtlFallback)
         ));
+        assert!(matches!(
+            output.events.as_slice(),
+            [RouterEvent {
+                event: KvCacheEvent {
+                    data: KvCacheEventData::Stored(_),
+                    ..
+                },
+                ..
+            }]
+        ));
+        let Some(ApproximateTtlUpdate::Refresh(entries)) = output.ttl_update else {
+            panic!("TTL fallback acquire must refresh pruning in the same lane operation");
+        };
+        assert_eq!(
+            entries,
+            vec![BlockEntry {
+                key: ExternalSequenceBlockHash(1),
+                worker: worker(),
+                seq_position: 0,
+            }]
+        );
         apply(
             &mut lane,
             ApproximateLruCommand::SetCapacity {
@@ -1424,10 +1494,13 @@ mod tests {
             },
         );
         assert_eq!(lane.stats().fallback_ranks, 1);
-        apply(
-            &mut lane,
-            ApproximateLruCommand::ResetRank { worker: worker() },
-        );
+        let reset = lane
+            .apply(ApproximateLruCommand::ResetRank { worker: worker() })
+            .unwrap();
+        assert!(matches!(
+            reset.ttl_update,
+            Some(ApproximateTtlUpdate::Reset(reset_worker)) if reset_worker == worker()
+        ));
         apply(
             &mut lane,
             ApproximateLruCommand::SetCapacity {

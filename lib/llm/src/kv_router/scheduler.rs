@@ -9,9 +9,10 @@ pub(crate) use dynamo_kv_router::scheduling::queue::{
     SchedulerBookingCleanup, SchedulerBookingDescriptor,
 };
 pub use dynamo_kv_router::scheduling::{
-    AdmittedSchedulingResponse, AdvisorySchedulingResponse, KvSchedulerError, LocalScheduler,
-    NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad, ScheduleRequest,
-    SchedulingRequest, SchedulingResponse, TierOverlapBlocks, WorkerAvailabilityProvider,
+    AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId, KvSchedulerError,
+    LocalScheduler, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad,
+    ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
+    WorkerAvailabilityProvider,
 };
 pub use dynamo_kv_router::selector::DefaultWorkerSelector;
 use dynamo_kv_router::selector::WorkerSelector as WorkerSelectorTrait;
@@ -386,6 +387,13 @@ where
 
     pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
         self.inner.add_request(req).await
+    }
+
+    pub async fn add_request_admitted(
+        &self,
+        req: SequenceRequest,
+    ) -> Result<AttemptId, SequenceError> {
+        self.inner.add_request_admitted(req).await
     }
 
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {

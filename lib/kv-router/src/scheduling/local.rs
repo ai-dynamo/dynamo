@@ -20,7 +20,7 @@ use super::queue::{
 };
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
-    AdmittedSchedulingResponse, AdvisorySchedulingResponse, KvSchedulerError,
+    AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId, KvSchedulerError,
     NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad, ScheduleMode,
     ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
     WorkerAvailabilityProvider,
@@ -530,6 +530,15 @@ where
 
     pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
         self.slots.add_request(req, Instant::now())
+    }
+
+    /// Book a request and return the router-internal attempt identity.
+    #[doc(hidden)]
+    pub async fn add_request_admitted(
+        &self,
+        req: SequenceRequest,
+    ) -> Result<AttemptId, SequenceError> {
+        self.slots.add_request_admitted(req, Instant::now())
     }
 
     /// Book a request only when its worker is already registered, so a request

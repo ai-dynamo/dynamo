@@ -100,11 +100,13 @@ pub struct ThreadPoolIndexer<T: SyncIndexer> {
 
 struct ThreadPoolLruSink {
     sender: flume::Sender<WorkerTask>,
+    fallback_prune_manager: WorkerPruneManager,
 }
 
 impl ApproximateLruCommandSink for ThreadPoolLruSink {
     fn send(&self, mut task: ApproximateLruTask) -> Result<(), KvRouterError> {
         task.observe_enqueue_depth(self.sender.len());
+        task.set_fallback_prune_manager(self.fallback_prune_manager.clone());
         self.sender
             .send(WorkerTask::ApproximateLru(task))
             .map_err(|_| KvRouterError::IndexerOffline)
@@ -348,6 +350,11 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         );
         Some(ApproximateLruClient::new(Arc::new(ThreadPoolLruSink {
             sender: self.worker_event_channels[thread_idx].clone(),
+            fallback_prune_manager: self
+                .prune_manager
+                .as_ref()
+                .expect("LRU fallback TTL requires a prune manager")
+                .clone(),
         })))
     }
 
@@ -393,6 +400,11 @@ impl<T: SyncIndexer> ThreadPoolIndexer<T> {
         for sender in &self.worker_event_channels {
             let client = ApproximateLruClient::new(Arc::new(ThreadPoolLruSink {
                 sender: sender.clone(),
+                fallback_prune_manager: self
+                    .prune_manager
+                    .as_ref()
+                    .expect("LRU fallback TTL requires a prune manager")
+                    .clone(),
             }));
             let stats = client.stats().await?;
             total.ranks += stats.ranks;
@@ -1253,10 +1265,6 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
     }
 
     async fn remove_worker_dp_rank(&self, worker_id: WorkerId, dp_rank: DpRank) {
-        if let Some(prune_manager) = &self.prune_manager {
-            prune_manager.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
-        }
-
         if self.approximate_lru_enabled {
             if let Err(error) = self
                 .approximate_lru_client_for_worker(WorkerWithDpRank::new(worker_id, dp_rank))
@@ -1267,6 +1275,10 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
                 tracing::error!(worker_id, dp_rank, %error, "Failed to reset approximate LRU rank");
             }
             return;
+        }
+
+        if let Some(prune_manager) = &self.prune_manager {
+            prune_manager.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
         }
 
         let worker = WorkerWithDpRank::new(worker_id, dp_rank);
@@ -1285,16 +1297,16 @@ impl<T: SyncIndexer> KvIndexerInterface for ThreadPoolIndexer<T> {
         worker_id: WorkerId,
         dp_rank: DpRank,
     ) -> Result<(), KvRouterError> {
-        if let Some(prune_manager) = &self.prune_manager {
-            prune_manager.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
-        }
-
         if self.approximate_lru_enabled {
             return self
                 .approximate_lru_client_for_worker(WorkerWithDpRank::new(worker_id, dp_rank))
                 .expect("LRU client is available when LRU is enabled")
                 .reset_rank(WorkerWithDpRank::new(worker_id, dp_rank))
                 .await;
+        }
+
+        if let Some(prune_manager) = &self.prune_manager {
+            prune_manager.remove_worker_dp_rank(WorkerWithDpRank::new(worker_id, dp_rank));
         }
 
         let worker = WorkerWithDpRank::new(worker_id, dp_rank);

@@ -171,18 +171,26 @@ fn apply_approximate_lru_task(
     let ApproximateLruTask {
         command, response, ..
     } = task;
-    if let super::ApproximateLruCommand::ResetRank { worker } = &command
-        && let Some(prune_manager) = prune_manager
-    {
-        prune_manager.remove_worker_dp_rank(*worker);
-    }
     let result = lane.apply(command).and_then(|output| {
-        for event in output.events {
+        let super::ApproximateLruApplyOutput {
+            events,
+            reply,
+            ttl_update,
+        } = output;
+        for event in events {
             if !apply_event_with_counters(trie, event, counters) {
                 return Err(KvRouterError::IndexerDroppedRequest);
             }
         }
-        Ok(output.reply)
+        if let Some(update) = ttl_update {
+            let manager = prune_manager.as_ref().ok_or_else(|| {
+                KvRouterError::Unsupported(
+                    "approximate LRU TTL fallback requires a prune manager".to_string(),
+                )
+            })?;
+            update.apply(manager);
+        }
+        Ok(reply)
     });
     if let Some(response) = response {
         let _ = response.send(result);

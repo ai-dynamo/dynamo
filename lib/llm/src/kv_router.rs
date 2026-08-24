@@ -1697,9 +1697,9 @@ where
         let prefill_load_hint =
             self.prefill_load_hint_for(isl_tokens, cached_tokens, track_prefill_tokens);
 
-        if let Err(e) = self
+        let admission = self
             .scheduler
-            .add_request(SequenceRequest {
+            .add_request_admitted(SequenceRequest {
                 request_id: request_id.clone(),
                 token_sequence: maybe_seq_hashes,
                 track_prefill_tokens,
@@ -1708,10 +1708,22 @@ where
                 worker,
                 lora_name,
             })
-            .await
-        {
-            tracing::warn!("Failed to add request {request_id}: {e}");
-        }
+            .await;
+        let attempt_id = match admission {
+            Ok(attempt_id) => attempt_id,
+            Err(error) => {
+                tracing::warn!("Failed to add request {request_id}: {error}");
+                return;
+            }
+        };
+        self.request_leases.register_detached(
+            scheduler::SchedulerBookingDescriptor {
+                request_id,
+                worker,
+                attempt_id,
+            },
+            None,
+        );
     }
 
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {

@@ -22,8 +22,6 @@ use super::{Indexer, SideIndexer, remote::RemoteIndexer};
 #[derive(Clone)]
 pub(crate) struct ApproximateRequestLease {
     lease: ApproximateLruLease,
-    indexer: Indexer,
-    worker: WorkerWithDpRank,
     mode: Arc<AtomicU8>,
 }
 
@@ -57,9 +55,6 @@ impl ApproximateRequestLease {
         if mode == ApproximateAcquireMode::Ignored {
             return Ok(mode);
         }
-        self.indexer
-            .record_ttl_fallback_hashes(self.worker, hashes)
-            .await?;
         Ok(mode)
     }
 
@@ -117,34 +112,8 @@ impl Indexer {
         };
         Some(ApproximateRequestLease {
             lease,
-            indexer: self.clone(),
-            worker,
             mode: Arc::new(AtomicU8::new(0)),
         })
-    }
-
-    async fn record_ttl_fallback_hashes(
-        &self,
-        worker: WorkerWithDpRank,
-        hashes: RoutingDecisionHashes,
-    ) -> Result<(), KvRouterError> {
-        match self {
-            Self::KvIndexer { primary, .. } => {
-                primary
-                    .record_ttl_fallback_hashes(worker, hashes.local_hashes, hashes.sequence_hashes)
-                    .await
-            }
-            Self::Concurrent { primary, .. } => {
-                primary
-                    .record_ttl_fallback_hashes(
-                        worker,
-                        &hashes.local_hashes,
-                        &hashes.sequence_hashes,
-                    )
-                    .await
-            }
-            Self::Remote { .. } | Self::None => Ok(()),
-        }
     }
 
     pub(crate) fn records_routing_decisions(&self) -> bool {

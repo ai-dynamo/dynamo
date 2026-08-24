@@ -50,10 +50,18 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                 WorkerTask::ApproximateLru(task) => {
                     approximate_lru.observe_task(&task);
                     let ApproximateLruTask {
-                        command, response, ..
+                        command,
+                        response,
+                        fallback_prune_manager,
+                        ..
                     } = task;
                     let result = approximate_lru.apply(command).and_then(|output| {
-                        for event in output.events {
+                        let crate::indexer::ApproximateLruApplyOutput {
+                            events,
+                            reply,
+                            ttl_update,
+                        } = output;
+                        for event in events {
                             let kind = EventKind::of(&event.event.data);
                             let applied = self.apply_event(&mut lookup, event, counters.as_ref());
                             if let Some(ref counters) = counters {
@@ -63,7 +71,16 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                                 return Err(KvRouterError::IndexerDroppedRequest);
                             }
                         }
-                        Ok(output.reply)
+                        if let Some(update) = ttl_update {
+                            let manager = fallback_prune_manager.as_ref().ok_or_else(|| {
+                                KvRouterError::Unsupported(
+                                    "approximate LRU TTL fallback requires a prune manager"
+                                        .to_string(),
+                                )
+                            })?;
+                            update.apply(manager);
+                        }
+                        Ok(reply)
                     });
                     if let Some(response) = response {
                         let _ = response.send(result);
