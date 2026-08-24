@@ -31,6 +31,12 @@ These are the vLLM-Omni orchestration flags. The omni worker also accepts the sa
 <ParamField path="--default-video-fps" type="int" default="16">
   Default frames per second for generated videos.
 </ParamField>
+<ParamField path="--task-type" type="string">
+  Model-defined startup task or checkpoint partition.
+</ParamField>
+<ParamField path="--diffusion-attention-backend" type="string">
+  Default diffusion attention backend, such as `TRTLLM_ATTN` or `FLASH_ATTN`.
+</ParamField>
 
 ## Memory & Performance
 
@@ -52,7 +58,6 @@ These are the vLLM-Omni orchestration flags. The omni worker also accepts the sa
 <ParamField path="--enable-cpu-offload" type="flag">
   Enable CPU offloading for diffusion models.
 </ParamField>
-
 ## Diffusion Cache
 
 <ParamField path="--cache-backend" type="cache_dit | tea_cache">
@@ -75,6 +80,12 @@ These are the vLLM-Omni orchestration flags. The omni worker also accepts the sa
 </ParamField>
 <ParamField path="--cfg-parallel-size" type="int" default="1">
   GPUs for classifier-free guidance parallelism (1 or 2).
+</ParamField>
+<ParamField path="--vae-patch-parallel-size" type="int" default="1">
+  Ranks used for VAE patch or tile parallelism.
+</ParamField>
+<ParamField path="--text-encoder-tp-size" type="int" default="1">
+  Tensor-parallel ranks used by the diffusion text encoder.
 </ParamField>
 
 ## Disaggregated Mode
