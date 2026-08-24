@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Dynamo 1.3.0 and the A.X K2 fork both use vLLM 0.23.0. The fork changes only
+# Python files, so overlay its package on the precompiled Dynamo runtime.
+ARG DYNAMO_VLLM_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
+ARG AXK2_VLLM_REPOSITORY=https://github.com/SKT-AI/vllm.git
+ARG AXK2_VLLM_REF=9cca6f06f4b9d0b4247f9446252ed81cf197aaf4
+
+FROM ${DYNAMO_VLLM_IMAGE} AS axk2_source
+
+ARG AXK2_VLLM_REPOSITORY
+ARG AXK2_VLLM_REF
+
+USER root
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --filter=blob:none "${AXK2_VLLM_REPOSITORY}" /opt/axk2-vllm \
+    && git -C /opt/axk2-vllm fetch --depth=1 origin "${AXK2_VLLM_REF}" \
+    && git -C /opt/axk2-vllm checkout --detach "${AXK2_VLLM_REF}"
+
+FROM ${DYNAMO_VLLM_IMAGE} AS runtime
+
+USER root
+COPY --from=axk2_source /opt/axk2-vllm/vllm /opt/axk2-vllm/vllm
+
+# Preserve the base image's version-matched compiled extensions and dependency
+# solve while replacing the vLLM Python package with the fork implementation.
+RUN VLLM_PACKAGE="$(python3 -c 'import pathlib, vllm; print(pathlib.Path(vllm.__file__).parent)')" \
+    && cp -a /opt/axk2-vllm/vllm/. "${VLLM_PACKAGE}/" \
+    && rm -rf /opt/axk2-vllm \
+    && python3 -c "import importlib.metadata as md; import vllm._C; from vllm.transformers_utils.configs.axk2 import AXK2Config; assert md.version('vllm').startswith('0.23.0'); assert AXK2Config.model_type == 'axk2'" \
+    && python3 -c "import ctypes, dynamo.vllm, nixl; from dynamo._core import get_reasoning_parser_names, get_tool_parser_names; ctypes.CDLL('libnixl.so'); assert 'deepseek_v3' in get_reasoning_parser_names(); assert 'hermes' in get_tool_parser_names()"
+
+USER dynamo
+WORKDIR /workspace
+
+ENTRYPOINT []
+CMD ["bash"]
