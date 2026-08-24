@@ -9510,7 +9510,6 @@ spec:
                     type: string
                   minItems: 1
                   type: array
-                  uniqueItems: true
                 hardware:
                   description: Hardware bounds the accelerator configurations evaluated by the search.
                   properties:
@@ -9614,7 +9613,6 @@ spec:
                         type: string
                       minItems: 2
                       type: array
-                      uniqueItems: true
                     mode:
                       description: Mode is optimize or pareto.
                       enum:
@@ -9649,6 +9647,8 @@ spec:
                   x-kubernetes-validations:
                     - message: optimize requires metric; pareto accepts only metrics
                       rule: (self.mode == 'optimize' && has(self.metric) && !has(self.metrics)) || (self.mode == 'pareto' && !has(self.metric))
+                    - message: metrics must be unique
+                      rule: '!has(self.metrics) || self.metrics.all(m, self.metrics.filter(x, x == m).size() == 1)'
                 overrides:
                   description: Overrides customizes the generated Job and DGD without changing modeled search semantics.
                   properties:
@@ -18307,6 +18307,9 @@ spec:
                 - search
                 - workload
               type: object
+              x-kubernetes-validations:
+                - message: backends must be unique
+                  rule: self.backends.all(b, self.backends.filter(x, x == b).size() == 1)
             status:
               description: DynamoGraphDeploymentRequestStatus represents reconciliation of persistent search intent.
               properties:

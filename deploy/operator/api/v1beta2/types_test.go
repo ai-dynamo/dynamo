@@ -74,4 +74,5 @@ func TestCandidateSpecUsesV1Beta1DGDContract(t *testing.T) {
 	if candidateType != dgdType {
 		t.Fatalf("candidate spec type %v differs from v1beta1 DGD spec type %v", candidateType, dgdType)
 	}
+
 }
