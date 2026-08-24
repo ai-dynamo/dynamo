@@ -1672,9 +1672,9 @@ async fn apply_live_events(
     else {
         return false;
     };
-    let was_ready = state.ready;
+    let was_published = (state.ready, state.hint_ready);
     apply_events_for_owner(indexer, *owner, publisher_id, events, state).await;
-    was_ready != state.ready
+    was_published != (state.ready, state.hint_ready)
 }
 
 async fn apply_events_for_owner(
@@ -1727,6 +1727,7 @@ async fn apply_events_for_owner(
                 "Ignoring incorrectly attributed KV state event"
             );
             state.ready = false;
+            state.hint_ready = false;
             state.recovery_required = true;
             break;
         }
@@ -1735,6 +1736,7 @@ async fn apply_events_for_owner(
             tracing::warn!(publisher_id, event_id, %error, "Failed to apply advisory KV state event");
             if is_clear {
                 state.ready = false;
+                state.hint_ready = false;
                 state.recovery_required = true;
                 break;
             }
@@ -2324,7 +2326,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn incorrectly_attributed_live_event_withdraws_projection_eligibility() {
+    async fn incorrectly_attributed_live_event_withdraws_detached_hint_eligibility() {
         let selected = owner(4);
         let other = owner(5);
         let worker = WorkerWithDpRank::new(17, 3);
@@ -2333,12 +2335,12 @@ mod tests {
             OwnerRuntime {
                 publisher_id: Some(41),
                 recovered_cursor: 0,
-                attachment_generation: Some(2),
+                attachment_generation: None,
                 last_worker: Some(worker),
-                ready: true,
-                attached_worker: Some(worker),
+                ready: false,
+                attached_worker: None,
                 router_hint_source: None,
-                hint_ready: false,
+                hint_ready: true,
                 recovery_required: false,
             },
         )]);
@@ -2358,6 +2360,7 @@ mod tests {
         assert!(apply_live_events(&Indexer::None, 41, vec![event], &mut runtime).await);
         let state = runtime.get(&selected).unwrap();
         assert!(!state.ready);
+        assert!(!state.hint_ready);
         assert!(state.recovery_required);
         assert_eq!(state.recovered_cursor, 0);
     }
