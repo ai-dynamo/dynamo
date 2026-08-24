@@ -1140,6 +1140,157 @@ mod tests {
     }
 
     #[test]
+    fn vllm_prefix_cache_lifecycle_reuses_and_evicts_by_release_order() {
+        let mut lane = ApproximateLruLane::default();
+        apply(
+            &mut lane,
+            ApproximateLruCommand::SetCapacity {
+                worker: worker(),
+                incarnation: 1,
+                capacity: Some(10),
+            },
+        );
+
+        // Time 1 in vLLM's prefix-caching example: three complete prompt
+        // blocks plus one partial tail occupy four physical blocks.
+        apply(
+            &mut lane,
+            ApproximateLruCommand::Acquire {
+                worker: worker(),
+                incarnation: 1,
+                attempt_id: attempt(1),
+                blocks: vec![block(10), block(11), block(12)],
+                private_blocks: 1,
+            },
+        );
+        let stats = lane.stats();
+        assert_eq!(stats.resident_blocks, 4);
+        assert_eq!(stats.active_blocks, 4);
+        assert_eq!(stats.private_blocks, 1);
+
+        // Time 2: output completes the partial block and starts another
+        // partial tail. The completed block becomes reusable; the new tail is
+        // physical occupancy only.
+        apply(
+            &mut lane,
+            ApproximateLruCommand::Materialize {
+                worker: worker(),
+                incarnation: 1,
+                attempt_id: attempt(1),
+                parent_hash: Some(12),
+                blocks: vec![block(13)],
+                start_position: 3,
+                private_blocks: 1,
+            },
+        );
+        let stats = lane.stats();
+        assert_eq!(stats.resident_blocks, 5);
+        assert_eq!(stats.active_blocks, 5);
+        assert_eq!(stats.private_blocks, 1);
+
+        // Time 3: another request shares ten prompt tokens. Only its first
+        // two complete blocks hit; its divergent complete block and partial
+        // tail consume two additional physical blocks.
+        apply(
+            &mut lane,
+            ApproximateLruCommand::Acquire {
+                worker: worker(),
+                incarnation: 1,
+                attempt_id: attempt(2),
+                blocks: vec![block(10), block(11), block(20)],
+                private_blocks: 1,
+            },
+        );
+        let stats = lane.stats();
+        assert_eq!(stats.resident_blocks, 7);
+        assert_eq!(stats.active_blocks, 7);
+        assert_eq!(stats.private_blocks, 2);
+        assert_eq!(stats.leases, 2);
+
+        // Time 4: finishing the first request leaves its unique suffix
+        // inactive, while the two shared prefix blocks remain referenced.
+        apply(
+            &mut lane,
+            ApproximateLruCommand::Release {
+                worker: worker(),
+                incarnation: 1,
+                attempt_id: attempt(1),
+            },
+        );
+        let stats = lane.stats();
+        assert_eq!(stats.resident_blocks, 6);
+        assert_eq!(stats.active_blocks, 4);
+        assert_eq!(stats.inactive_blocks, 2);
+        assert_eq!(stats.private_blocks, 1);
+        assert_eq!(stats.leases, 1);
+
+        // Time 5: finishing the second request drops its partial tail and
+        // makes every complete block inactive. Request 0's suffix is the
+        // oldest release batch; suffixes precede prefixes within each batch.
+        apply(
+            &mut lane,
+            ApproximateLruCommand::Release {
+                worker: worker(),
+                incarnation: 1,
+                attempt_id: attempt(2),
+            },
+        );
+        let stats = lane.stats();
+        assert_eq!(stats.resident_blocks, 5);
+        assert_eq!(stats.active_blocks, 0);
+        assert_eq!(stats.inactive_blocks, 5);
+        assert_eq!(stats.private_blocks, 0);
+        assert_eq!(stats.leases, 0);
+
+        // Five genuinely unused slots satisfy the next request first. Its
+        // remaining four blocks evict the oldest released blocks in order.
+        let pressure = lane
+            .apply(ApproximateLruCommand::Acquire {
+                worker: worker(),
+                incarnation: 1,
+                attempt_id: attempt(3),
+                blocks: (30..39).map(block).collect(),
+                private_blocks: 0,
+            })
+            .unwrap();
+        let removed = pressure
+            .events
+            .iter()
+            .find_map(|event| match &event.event.data {
+                KvCacheEventData::Removed(removed) => Some(&removed.block_hashes),
+                _ => None,
+            })
+            .expect("capacity pressure must evict inactive blocks");
+        assert_eq!(
+            removed,
+            &vec![
+                ExternalSequenceBlockHash(13),
+                ExternalSequenceBlockHash(12),
+                ExternalSequenceBlockHash(20),
+                ExternalSequenceBlockHash(11),
+            ]
+        );
+        let stats = lane.stats();
+        assert_eq!(stats.resident_blocks, 10);
+        assert_eq!(stats.active_blocks, 9);
+        assert_eq!(stats.inactive_blocks, 1);
+        assert_eq!(stats.overcapacity_blocks, 0);
+        apply(
+            &mut lane,
+            ApproximateLruCommand::Release {
+                worker: worker(),
+                incarnation: 1,
+                attempt_id: attempt(3),
+            },
+        );
+        let stats = lane.stats();
+        assert_eq!(stats.resident_blocks, 10);
+        assert_eq!(stats.active_blocks, 0);
+        assert_eq!(stats.inactive_blocks, 10);
+        assert_eq!(stats.leases, 0);
+    }
+
+    #[test]
     fn shared_copy_uses_final_release_epoch() {
         let mut lane = ApproximateLruLane::default();
         apply(
