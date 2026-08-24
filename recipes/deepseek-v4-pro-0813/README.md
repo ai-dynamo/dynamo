@@ -103,6 +103,12 @@ exceed the 1M context window.
 - **Pipeline parallelism is unavailable.** This model does not implement vLLM's `SupportsPP`
   interface, so `--pipeline-parallel-size > 1` fails at startup. TP, DP and EP are the only
   parallelism axes.
+- **GB200 multinode needs an IMEX channel.** TP across nodes uses MNNVL, which requires a
+  `ComputeDomain` plus a `resourceClaims` entry on the worker (both shipped in
+  `deploy.yaml`). Without them the workers hang in a Gloo barrier during `torch.distributed`
+  init and fail with `RuntimeError: Application timeout caused pair closure` *before* loading
+  any weights — so a longer startup probe does not help. This needs the NVIDIA DRA driver for
+  compute domains installed on the cluster.
 - **`/dev/shm` must be Memory-backed and large at TP8.** The Kubernetes 64 MB default causes
   `shm_broadcast.acquire_read` timeouts that surface as `EngineDeadError`. This recipe mounts
   200Gi.

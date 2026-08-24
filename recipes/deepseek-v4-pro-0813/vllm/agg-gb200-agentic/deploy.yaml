@@ -14,6 +14,22 @@
 #     real text), for benchmarking only. Do NOT ship it.
 # Measured: synthetic acceptance overstates per-user throughput by ~36.5% because it skips
 # the draft-model compute. See perf/README.md.
+# GB200 cross-node NVLink (MNNVL) requires an IMEX channel, provided by a ComputeDomain plus
+# a matching `resourceClaims` entry on the multinode component. Without it the workers hang in
+# a Gloo barrier during torch.distributed init and die with
+# `RuntimeError: Application timeout caused pair closure` BEFORE any weights are loaded -- so a
+# generous startupProbe does not help. This is required for any component with nodeCount > 1.
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: dsv4-pro-0813-agg-gb200-agentic-compute-domain
+spec:
+  # 0 = on-demand allocation; nodes are assigned when pods request them via resourceClaims.
+  numNodes: 0
+  channel:
+    resourceClaimTemplate:
+      name: dsv4-pro-0813-agg-gb200-agentic-compute-domain-channel
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -73,6 +89,11 @@ spec:
               operator: Equal
               value: arm64
               effect: NoSchedule
+          # Binds this pod to the ComputeDomain's IMEX channel. Required for TP across
+          # nodes on GB200; see the ComputeDomain at the top of this file.
+          resourceClaims:
+            - name: compute-domain-channel
+              resourceClaimTemplateName: dsv4-pro-0813-agg-gb200-agentic-compute-domain-channel
           volumes:
             - name: model-cache
               persistentVolumeClaim:
@@ -144,6 +165,8 @@ spec:
                     --enable-chunked-prefill \
                     --no-enable-flashinfer-autotune
               resources:
+                claims:
+                  - name: compute-domain-channel
                 requests:
                   nvidia.com/gpu: "4"
                 limits:
