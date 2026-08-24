@@ -38,7 +38,8 @@ while [[ $# -gt 0 ]]; do
             echo "  VLLM_WORKER1_GPU            First GPU assignment (default: 0)"
             echo "  VLLM_WORKER2_GPU            Second GPU assignment (default: 1)"
             echo "  DYN_HTTP_PORT               Dynamo frontend port (default: 8000)"
-            echo "  DYN_SYSTEM_PORT1            First sidecar system port (default: 8081)"
+            echo "  DYN_SYSTEM_PORT             First sidecar system port fallback (default: 8081)"
+            echo "  DYN_SYSTEM_PORT1            First sidecar system port override (default: DYN_SYSTEM_PORT)"
             echo "  DYN_SYSTEM_PORT2            Second sidecar system port (default: 8082)"
             echo "  VLLM_WORKER1_HTTP_PORT      First vLLM HTTP port (default: 8100)"
             echo "  VLLM_WORKER1_GRPC_PORT      First vLLM gRPC port (default: 50051)"
@@ -75,6 +76,8 @@ VLLM_WORKER2_KV_EVENT_PORT="${VLLM_WORKER2_KV_EVENT_PORT:-20081}"
 VLLM_BLOCK_SIZE="${VLLM_BLOCK_SIZE:-64}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
+SYSTEM_PORT1="${DYN_SYSTEM_PORT1:-${DYN_SYSTEM_PORT:-8081}}"
+SYSTEM_PORT2="${DYN_SYSTEM_PORT2:-8082}"
 
 # Default KV cache cap from profiling (2x safety over min=560 MiB); ~3.8 GiB peak VRAM.
 # The profiler/test framework takes precedence through _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES.
@@ -127,12 +130,12 @@ vllm-rs serve "$MODEL" \
     "${EXTRA_ARGS[@]}" &
 
 OTEL_SERVICE_NAME=dynamo-worker-1 \
-DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
+DYN_SYSTEM_PORT="$SYSTEM_PORT1" \
     dynamo-vllm-sidecar \
     --vllm-endpoint "${VLLM_HOST}:${VLLM_WORKER1_GRPC_PORT}" &
 
 OTEL_SERVICE_NAME=dynamo-worker-2 \
-DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
+DYN_SYSTEM_PORT="$SYSTEM_PORT2" \
     dynamo-vllm-sidecar \
     --vllm-endpoint "${VLLM_HOST}:${VLLM_WORKER2_GRPC_PORT}" &
 
