@@ -46,6 +46,7 @@ class AudioStreamState:
     emitted_chunks: int = 0
     sample_rate: int | None = None
     num_channels: int | None = None
+    channel_axis: int | None = None
 
 
 @dataclass
@@ -56,6 +57,7 @@ class AudioAggregateState:
     sample_rate: int | None = None
     emitted_chunks: int = 0
     num_channels: int | None = None
+    channel_axis: int | None = None
 
 
 class TextFormatter:
@@ -412,8 +414,12 @@ class AudioFormatter:
         audio_np: np.ndarray,
         sample_rate: int,
     ) -> None:
-        audio_np, num_channels = self._channel_first_audio(audio_np)
-        self._validate_audio_metadata(state, sample_rate, num_channels)
+        audio_np, num_channels, channel_axis = self._channel_first_audio(
+            audio_np,
+            expected_channels=state.num_channels,
+            expected_channel_axis=state.channel_axis,
+        )
+        self._validate_audio_metadata(state, sample_rate, num_channels, channel_axis)
         state.chunks.append(audio_np)
 
     @staticmethod
@@ -421,6 +427,7 @@ class AudioFormatter:
         state: AudioStreamState | AudioAggregateState,
         sample_rate: int,
         num_channels: int,
+        channel_axis: int | None,
     ) -> None:
         if state.sample_rate is not None and state.sample_rate != sample_rate:
             raise ValueError(
@@ -428,9 +435,16 @@ class AudioFormatter:
             )
         if state.num_channels is not None and state.num_channels != num_channels:
             raise ValueError("Audio channel count changed while generating")
-
+        if (
+            state.channel_axis is not None
+            and channel_axis is not None
+            and state.channel_axis != channel_axis
+        ):
+            raise ValueError("Audio channel layout changed while generating")
         state.sample_rate = sample_rate
         state.num_channels = num_channels
+        if channel_axis is not None:
+            state.channel_axis = channel_axis
 
     def _extract_audio_tensor(
         self,
@@ -477,17 +491,33 @@ class AudioFormatter:
         fmt: str,
         stream_state: AudioStreamState,
     ) -> tuple[bytes, str]:
-        audio_np, num_channels = self._normalize_audio_layout(audio_np)
+        audio_np, num_channels, channel_axis = self._normalize_audio_layout(
+            audio_np,
+            expected_channels=stream_state.num_channels,
+            expected_channel_axis=stream_state.channel_axis,
+        )
         first_chunk = stream_state.sample_rate is None
-        self._validate_audio_metadata(stream_state, sample_rate, num_channels)
+        self._validate_audio_metadata(
+            stream_state, sample_rate, num_channels, channel_axis
+        )
         pcm_bytes, _ = self._write_audio(audio_np, sample_rate, "pcm")
         if fmt == "wav" and first_chunk:
             pcm_bytes = self._wav_stream_header(sample_rate, num_channels) + pcm_bytes
         return pcm_bytes, "audio/wav" if fmt == "wav" else "audio/pcm"
 
     @staticmethod
-    def _channel_first_audio(audio_np: np.ndarray) -> tuple[np.ndarray, int]:
-        """Normalize mono or stereo audio to vLLM-Omni's channel-first layout."""
+    def _channel_first_audio(
+        audio_np: np.ndarray,
+        *,
+        expected_channels: int | None = None,
+        expected_channel_axis: int | None = None,
+    ) -> tuple[np.ndarray, int, int | None]:
+        """Normalize mono or stereo audio to vLLM-Omni's channel-first layout.
+
+        An established channel axis determines the layout, including for square
+        chunks. Otherwise, channel count can disambiguate the axes. Shapes that
+        remain ambiguous follow vLLM-Omni's channel-first contract.
+        """
         if audio_np.ndim == 3:
             if audio_np.shape[0] != 1:
                 raise ValueError(
@@ -496,27 +526,76 @@ class AudioFormatter:
             audio_np = audio_np[0]
 
         if audio_np.ndim == 1:
-            return audio_np, 1
+            return audio_np, 1, None
 
         if audio_np.ndim != 2:
             raise ValueError(f"Unexpected audio shape {audio_np.shape}")
 
-        # Prefer vLLM-Omni's channel-first contract for ambiguous small shapes,
-        # while retaining compatibility with soundfile-style frame-major output.
-        if audio_np.shape[0] in (1, 2):
-            return audio_np, int(audio_np.shape[0])
-        if audio_np.shape[1] in (1, 2):
-            return audio_np.T, int(audio_np.shape[1])
+        if expected_channel_axis is not None:
+            if expected_channel_axis not in (0, 1):
+                raise ValueError(f"Invalid audio channel axis {expected_channel_axis}")
+            num_channels = int(audio_np.shape[expected_channel_axis])
+            if num_channels not in (1, 2):
+                raise ValueError(
+                    "Audio channel layout changed while generating: "
+                    f"expected channel axis {expected_channel_axis}, "
+                    f"got shape {audio_np.shape}"
+                )
+            if expected_channel_axis == 0:
+                return audio_np, num_channels, 0
+            return audio_np.T, num_channels, 1
 
-        raise ValueError(f"Expected mono or stereo audio, got shape {audio_np.shape}")
+        channel_first_possible = audio_np.shape[0] in (1, 2)
+        frame_major_possible = audio_np.shape[1] in (1, 2)
+        channel_axis = None
+
+        if expected_channels is not None:
+            channel_first_matches = audio_np.shape[0] == expected_channels
+            frame_major_matches = audio_np.shape[1] == expected_channels
+            if channel_first_matches and not frame_major_matches:
+                channel_axis = 0
+            elif frame_major_matches and not channel_first_matches:
+                channel_axis = 1
+
+        if channel_axis is None:
+            if channel_first_possible and frame_major_possible:
+                logger.warning(
+                    "Ambiguous audio shape %s without an established channel layout; "
+                    "assuming vLLM-Omni's channel-first layout",
+                    audio_np.shape,
+                )
+                channel_axis = 0
+            elif channel_first_possible:
+                channel_axis = 0
+            elif frame_major_possible:
+                channel_axis = 1
+            else:
+                raise ValueError(
+                    f"Expected mono or stereo audio, got shape {audio_np.shape}"
+                )
+
+        num_channels = int(audio_np.shape[channel_axis])
+        if channel_axis == 0:
+            return audio_np, num_channels, channel_axis
+        return audio_np.T, num_channels, channel_axis
 
     @classmethod
-    def _normalize_audio_layout(cls, audio_np: np.ndarray) -> tuple[np.ndarray, int]:
+    def _normalize_audio_layout(
+        cls,
+        audio_np: np.ndarray,
+        *,
+        expected_channels: int | None = None,
+        expected_channel_axis: int | None = None,
+    ) -> tuple[np.ndarray, int, int | None]:
         """Convert supported audio layouts to soundfile's frame-major layout."""
-        audio_np, num_channels = cls._channel_first_audio(audio_np)
+        audio_np, num_channels, channel_axis = cls._channel_first_audio(
+            audio_np,
+            expected_channels=expected_channels,
+            expected_channel_axis=expected_channel_axis,
+        )
         if audio_np.ndim == 2:
             audio_np = audio_np.T
-        return audio_np, num_channels
+        return audio_np, num_channels, channel_axis
 
     @staticmethod
     def _wav_stream_header(
@@ -547,7 +626,7 @@ class AudioFormatter:
     def _encode_audio(
         self, audio_np: Any, sample_rate: int, fmt: str = "wav", speed: float = 1.0
     ) -> tuple[bytes, str]:
-        audio_np, _ = self._channel_first_audio(audio_np)
+        audio_np, _, _ = self._channel_first_audio(audio_np)
         if speed != 1.0:
             try:
                 import librosa
