@@ -827,6 +827,19 @@ fn has_image_token_processor_override(value: Option<&serde_json::Value>) -> bool
 }
 
 #[cfg(feature = "mm-routing")]
+fn exact_mm_routing_preconditions_met(
+    has_user_uuid: bool,
+    resolved_image_count: usize,
+    total_image_count: usize,
+    has_processor_override: bool,
+) -> bool {
+    // Processor kwargs participate in backend feature hashing and can change
+    // prompt expansion. Until the frontend reproduces those transformations,
+    // exact routing must fail closed so router and worker cache keys agree.
+    !has_user_uuid && !has_processor_override && resolved_image_count == total_image_count
+}
+
+#[cfg(feature = "mm-routing")]
 fn aggregate_image_tokens(
     image_tokens: Option<usize>,
     resolved_image_count: usize,
@@ -2734,6 +2747,10 @@ impl OpenAIPreprocessor {
             }
         }
 
+        #[cfg(feature = "mm-routing")]
+        let has_processor_override =
+            has_image_token_processor_override(request.mm_processor_kwargs());
+
         if !media_map.is_empty() {
             builder.multi_modal_data(Some(media_map));
             if has_user_uuid {
@@ -2786,13 +2803,19 @@ impl OpenAIPreprocessor {
             }
 
             // Build and install routing info + worker hashes atomically. If
-            // dimensions are incomplete, a placeholder precondition misses,
-            // or K3 dimension text cannot be encoded, neither side receives
-            // image-aware keys and the request cleanly uses text-prefix
-            // routing. Hashes use the canonical 16-char u64 form; SGLang reads
-            // it directly and vLLM pads it to its 64-char BlockStored form.
+            // dimensions are incomplete, processor kwargs can change feature
+            // hashing/prompt expansion, a placeholder precondition misses, or
+            // K3 dimension text cannot be encoded, neither side receives
+            // image-aware keys and the request cleanly uses text-prefix routing.
+            // Hashes use the canonical 16-char u64 form; SGLang reads it directly
+            // and vLLM pads it to its 64-char BlockStored form.
             #[cfg(feature = "mm-routing")]
-            let mm_routing_info = if !has_user_uuid && mm_image_entries.len() == total_image_count {
+            let mm_routing_info = if exact_mm_routing_preconditions_met(
+                has_user_uuid,
+                mm_image_entries.len(),
+                total_image_count,
+                has_processor_override,
+            ) {
                 self.build_mm_exact_routing_info(&mm_image_entries, token_ids)
             } else {
                 None
@@ -2805,6 +2828,11 @@ impl OpenAIPreprocessor {
                     .collect();
                 extra_args["mm_hashes"] = serde_json::Value::Array(hexes);
                 builder.mm_routing_info(Some(mm_routing_info));
+            } else if has_processor_override && total_image_count > 0 {
+                tracing::debug!(
+                    target: "mm_routing",
+                    "mm-routing: exact MM routing disabled because mm_processor_kwargs is non-empty"
+                );
             } else if !mm_image_entries.is_empty() && self.routing_image_token_id.is_some() {
                 tracing::warn!(
                     target: "mm_routing",
@@ -2817,9 +2845,6 @@ impl OpenAIPreprocessor {
             builder.extra_args(Some(extra_args));
         }
 
-        #[cfg(feature = "mm-routing")]
-        let has_processor_override =
-            has_image_token_processor_override(request.mm_processor_kwargs());
         #[cfg(feature = "mm-routing")]
         let image_tokens = aggregate_image_tokens(
             image_tokens,
@@ -6616,6 +6641,15 @@ mod tests {
         assert!(has_image_token_processor_override(Some(
             &serde_json::json!({"min_pixels": 64})
         )));
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn processor_kwargs_disable_exact_mm_routing() {
+        assert!(exact_mm_routing_preconditions_met(false, 1, 1, false));
+        assert!(!exact_mm_routing_preconditions_met(false, 1, 1, true));
+        assert!(!exact_mm_routing_preconditions_met(true, 1, 1, false));
+        assert!(!exact_mm_routing_preconditions_met(false, 0, 1, false));
     }
 
     #[test]

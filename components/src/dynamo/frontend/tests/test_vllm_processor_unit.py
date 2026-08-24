@@ -809,6 +809,61 @@ async def test_prepare_mm_routing_does_not_forward_hashes_without_exact_routing(
 
 
 @pytest.mark.asyncio
+async def test_prepare_mm_routing_processor_kwargs_keep_transfer_but_skip_exact_routing(
+    vllm_processor_module,
+    monkeypatch,
+):
+    def fail_routing(*args, **kwargs):
+        raise AssertionError("processor kwargs must disable exact MM routing")
+
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "build_mm_routing_info_from_features",
+        fail_routing,
+    )
+
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+    processor.block_size = 16
+    processor.nixl_mm_enabled = True
+    processor.use_shm_transfer = True
+    processor._sender = SimpleNamespace(
+        prepare=AsyncMock(
+            return_value=({"mm_kwargs_shm": {"modality": "image"}}, ["cleanup"])
+        )
+    )
+
+    vllm_preproc = SimpleNamespace(
+        prompt_token_ids=list(range(16)),
+        mm_features=[
+            SimpleNamespace(
+                modality="image",
+                mm_hash="a" * 64,
+                data=object(),
+                mm_position=SimpleNamespace(offset=0, length=16),
+            )
+        ],
+    )
+    dynamo_preproc = {}
+
+    mm_routing_info, cleanup_items, transferred = await processor._prepare_mm_routing(
+        vllm_preproc,
+        dynamo_preproc,
+        mm_processor_kwargs={"max_pixels": 4096},
+    )
+
+    assert mm_routing_info is None
+    assert cleanup_items == ["cleanup"]
+    assert transferred is True
+    assert "mm_hashes" not in dynamo_preproc["extra_args"]
+    assert "mm_hashes_by_modality" not in dynamo_preproc["extra_args"]
+    assert dynamo_preproc["extra_args"]["mm_kwargs_shm"] == {"modality": "image"}
+    assert dynamo_preproc["extra_args"]["mm_placeholders"] == [(0, 16)]
+    assert dynamo_preproc["extra_args"]["expanded_token_ids"] == list(range(16))
+
+
+@pytest.mark.asyncio
 @pytest.mark.multimodal
 async def test_prepare_mm_routing_opaque_uuid_skips_routing_and_transfer(
     vllm_processor_module,

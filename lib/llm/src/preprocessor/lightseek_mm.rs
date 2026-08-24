@@ -134,9 +134,10 @@ impl LightseekMmCounter {
 /// Resolve the image-placeholder token id by delegating to a per-model
 /// `ModelProcessorSpec` from the registry. Each registered model (Qwen3-Omni,
 /// Qwen3-VL, Qwen2.5-VL, Qwen2-VL, LLaVA-NeXT, LLaVA-1.5, Llama-4,
-/// Kimi-K2.5, Kimi-K3) reads the right field of `config.json` (`image_token_id`,
-/// `image_token_index`, `media_placeholder_token_id`) and falls back to the
-/// tokenizer's vocab when only the placeholder string is known.
+/// Kimi-K2.5, Kimi-K3, Inkling) reads the right field of `config.json`
+/// (`image_token_id`, `image_token_index`, `media_placeholder_token_id`) and
+/// falls back to the tokenizer's vocab when only the placeholder string is
+/// known.
 ///
 /// `model_id` is the HF id or local path; `model_dir` is the directory
 /// containing `tokenizer.json` and `config.json`.
@@ -174,8 +175,8 @@ impl LightseekMmCounter {
     pub fn routing_prompt_kind(&self) -> Option<ImagePromptKind> {
         match self.processor.model_name() {
             "kimi-k3" => Some(ImagePromptKind::KimiK3),
-            "kimi-k2.5" | "llama4-vision" | "llava" | "llava-next" | "phi3-vision" | "qwen2-vl"
-            | "qwen3-omni" | "qwen3-vl" => Some(ImagePromptKind::RepeatedPad),
+            "inkling" | "kimi-k2.5" | "llama4-vision" | "llava" | "llava-next" | "phi3-vision"
+            | "qwen2-vl" | "qwen3-omni" | "qwen3-vl" => Some(ImagePromptKind::RepeatedPad),
             _ => None,
         }
     }
@@ -595,6 +596,24 @@ mod tests {
     }
 
     #[test]
+    fn routing_prompt_classifies_inkling_as_repeated_pad() {
+        let model_dir = tempfile::tempdir().unwrap();
+        std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}").unwrap();
+
+        let counter = LightseekMmCounter::try_new(
+            "/models/internal-checkpoint",
+            Some("inkling_mm_model"),
+            model_dir.path(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            counter.routing_prompt_kind(),
+            Some(ImagePromptKind::RepeatedPad)
+        );
+    }
+
+    #[test]
     fn explicit_placeholder_keeps_repeated_pad_for_generic_qwen_aliases() {
         for model_type in ["qwen2_5_vl", "qwen3_6"] {
             let model_dir = tempfile::tempdir().unwrap();
@@ -698,6 +717,7 @@ mod tests {
             ("Qwen3.5", "Qwen/Qwen3.5-0.8B", "qwen3_5"),
             ("Qwen3.6", "Qwen/Qwen3.6-35B-A3B", "qwen3_6"),
             ("Kimi-K3", "moonshotai/Kimi-K3", "kimi_k3"),
+            ("Inkling", "/models/inkling", "inkling_mm_model"),
         ];
 
         let mut missing: Vec<&str> = Vec::new();
