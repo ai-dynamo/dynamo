@@ -709,7 +709,7 @@ func (r *disaggregatedSetWorkloadsReconciler) reconcileDisaggregatedSetSideResou
 			}
 			setDesiredDisaggregatedSetServiceSelector(service, existing, existingErr == nil, disaggregatedSetName(dgd), roleName, targetRevision, targetReady)
 		}
-		if _, err := r.syncDGDStableService(ctx, dgd, service); err != nil {
+		if err := r.syncDGDStableService(ctx, dgd, service); err != nil {
 			return nil, fmt.Errorf("failed to reconcile component service for %q: %w", componentName, err)
 		}
 		desiredServiceNames[service.Name] = struct{}{}
@@ -730,7 +730,7 @@ func (r *disaggregatedSetWorkloadsReconciler) reconcileDisaggregatedSetSideResou
 	for _, modelName := range modelNamesSorted {
 		annotations := maps.Clone(dgd.Spec.Annotations)
 		service := dynamo.GenerateModelServiceForModel(dgd.Namespace, modelName, annotations)
-		if _, err := r.syncDGDStableService(ctx, dgd, service); err != nil {
+		if err := r.syncDGDStableService(ctx, dgd, service); err != nil {
 			return nil, fmt.Errorf("failed to reconcile model service for %q: %w", modelName, err)
 		}
 		desiredServiceNames[service.Name] = struct{}{}
@@ -745,36 +745,36 @@ func (r *disaggregatedSetWorkloadsReconciler) syncDGDStableService(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	desired *corev1.Service,
-) (*corev1.Service, error) {
+) error {
 	key := types.NamespacedName{Name: desired.Name, Namespace: desired.Namespace}
 	existing := &corev1.Service{}
 	if err := r.Get(ctx, key, existing); err != nil {
 		if !apierrors.IsNotFound(err) {
-			return nil, err
+			return err
 		}
 		setDGDControllerOwnerReference(dgd, desired)
 		if err := r.Create(ctx, desired); err != nil {
-			return nil, err
+			return err
 		}
-		return desired, nil
+		return nil
 	}
 
 	if owner := metav1.GetControllerOf(existing); owner != nil && !ownerReferenceMatchesDGD(owner, dgd) {
 		if owner.APIVersion != nvidiacomv1beta1.GroupVersion.String() || owner.Kind != dynamoComponentDeploymentKind {
-			return nil, fmt.Errorf("Service %s/%s is controlled by %s/%s %q", existing.Namespace, existing.Name, owner.APIVersion, owner.Kind, owner.Name)
+			return fmt.Errorf("Service %s/%s is controlled by %s/%s %q", existing.Namespace, existing.Name, owner.APIVersion, owner.Kind, owner.Name)
 		}
 		currentOwner := &nvidiacomv1beta1.DynamoComponentDeployment{}
 		if err := r.Get(ctx, types.NamespacedName{Name: owner.Name, Namespace: existing.Namespace}, currentOwner); err != nil {
-			return nil, fmt.Errorf("failed to get current Service owner %s/%s: %w", existing.Namespace, owner.Name, err)
+			return fmt.Errorf("failed to get current Service owner %s/%s: %w", existing.Namespace, owner.Name, err)
 		}
 		if !isControlledByBetaDGD(currentOwner, dgd) {
-			return nil, fmt.Errorf("Service %s/%s is controlled by unrelated DynamoComponentDeployment %s", existing.Namespace, existing.Name, currentOwner.Name)
+			return fmt.Errorf("Service %s/%s is controlled by unrelated DynamoComponentDeployment %s", existing.Namespace, existing.Name, currentOwner.Name)
 		}
 	}
 
 	updated := existing.DeepCopy()
 	if err := commoncontroller.CopySpec(desired, updated); err != nil {
-		return nil, err
+		return err
 	}
 	updated.Labels = maps.Clone(existing.Labels)
 	if updated.Labels == nil {
@@ -800,12 +800,12 @@ func (r *disaggregatedSetWorkloadsReconciler) syncDGDStableService(
 		equality.Semantic.DeepEqual(existing.Labels, updated.Labels) &&
 		equality.Semantic.DeepEqual(existing.Annotations, updated.Annotations) &&
 		equality.Semantic.DeepEqual(existing.OwnerReferences, updated.OwnerReferences) {
-		return existing, nil
+		return nil
 	}
 	if err := r.Update(ctx, updated); err != nil {
-		return nil, err
+		return err
 	}
-	return updated, nil
+	return nil
 }
 
 func sortedDCDKeys(dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment) []string {
