@@ -84,11 +84,6 @@ impl Drop for TurboJpegHandle<'_> {
     }
 }
 
-// The resolved symbols are immutable C entry points. The Library is retained
-// for the process lifetime by OnceLock.
-unsafe impl Send for TurboJpeg {}
-unsafe impl Sync for TurboJpeg {}
-
 #[derive(Debug)]
 pub(crate) struct DecodedJpeg {
     pub(crate) width: u32,
