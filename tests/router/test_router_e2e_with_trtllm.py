@@ -21,6 +21,7 @@ from tests.router.e2e_harness import (
 from tests.router.helper import generate_random_suffix
 from tests.utils.constants import DynamoPortRange
 from tests.utils.gpu_args import build_trtllm_override_args, map_cuda_visible_devices
+from tests.utils.health_checks import check_health_ready
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import allocate_ports, deallocate_ports
 
@@ -55,14 +56,6 @@ TRTLLM_ARGS: Dict[str, Any] = {
     "free_gpu_memory_fraction": 0.4,  # Limit VRAM allocation per worker
     "max_seq_len": 1024,  # Limit context length to reduce KV cache size
 }
-
-
-def _trtllm_worker_ready(response) -> bool:
-    """Return whether a TRT-LLM worker has finished engine initialization."""
-    try:
-        return response.status_code == 200 and response.json().get("status") == "ready"
-    except ValueError:
-        return False
 
 
 class TRTLLMProcess(ManagedEngineProcessMixin):
@@ -229,7 +222,7 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
                 health_check_urls=[
                     (
                         f"http://localhost:{system_port}/health",
-                        _trtllm_worker_ready,
+                        check_health_ready,
                     )
                 ],
                 log_dir=request.node.name,
