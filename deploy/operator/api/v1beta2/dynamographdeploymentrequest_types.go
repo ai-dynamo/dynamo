@@ -260,6 +260,7 @@ type ObjectiveSpec struct {
 	// its default pair when omitted.
 	// +optional
 	// +kubebuilder:validation:MinItems=2
+	// +kubebuilder:validation:MaxItems=6
 	Metrics []ObjectiveMetric `json:"metrics,omitempty"`
 
 	// SLA defines per-request latency bounds used to calculate goodput.
@@ -338,6 +339,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 
 	// Backends lists one or more inference backends searched by Sweeper and used by generated candidates.
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=3
 	Backends []Backend `json:"backends"`
 
 	// Image is the versioned container image used by the controller-generated search Job.
