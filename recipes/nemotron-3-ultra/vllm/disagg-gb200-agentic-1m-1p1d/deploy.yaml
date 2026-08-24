@@ -83,8 +83,6 @@ spec:
             nemotron-ultra-refresh.nvidia.com/role: frontend
             nemotron-ultra-refresh.nvidia.com/topology: 1p1d-tp4-tp4
         spec:
-          imagePullSecrets:
-            - name: nvcr-secret
           containers:
             - name: main
               image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
@@ -136,8 +134,6 @@ spec:
             networking.gke.io/default-interface: eth0
             networking.gke.io/interfaces: '[{"interfaceName":"eth0","network":"default"},{"interfaceName":"rdma0","network":"rdma-0"},{"interfaceName":"rdma1","network":"rdma-1"},{"interfaceName":"rdma2","network":"rdma-2"},{"interfaceName":"rdma3","network":"rdma-3"}]'
         spec:
-          imagePullSecrets:
-            - name: nvcr-secret
           nodeSelector:
             nvidia.com/gpu.product: NVIDIA-GB200
             kubernetes.io/arch: arm64
@@ -300,8 +296,6 @@ spec:
             networking.gke.io/default-interface: eth0
             networking.gke.io/interfaces: '[{"interfaceName":"eth0","network":"default"},{"interfaceName":"rdma0","network":"rdma-0"},{"interfaceName":"rdma1","network":"rdma-1"},{"interfaceName":"rdma2","network":"rdma-2"},{"interfaceName":"rdma3","network":"rdma-3"}]'
         spec:
-          imagePullSecrets:
-            - name: nvcr-secret
           nodeSelector:
             nvidia.com/gpu.product: NVIDIA-GB200
             kubernetes.io/arch: arm64

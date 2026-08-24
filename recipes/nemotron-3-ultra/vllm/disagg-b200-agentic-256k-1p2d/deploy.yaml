@@ -79,8 +79,6 @@ spec:
           nemotron-ultra-refresh.nvidia.com/topology: 1p2d-tp4
           nemotron-ultra-refresh.nvidia.com/recipe: ultra-disagg-b200-256k-1p2d
       spec:
-        imagePullSecrets:
-        - name: nvcr-secret
         containers:
         - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
@@ -140,8 +138,6 @@ spec:
           nemotron-ultra-refresh.nvidia.com/topology: 1p2d-tp4
           nemotron-ultra-refresh.nvidia.com/recipe: ultra-disagg-b200-256k-1p2d
       spec:
-        imagePullSecrets:
-        - name: nvcr-secret
         runtimeClassName: nvidia
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-B200
@@ -288,8 +284,6 @@ spec:
           nemotron-ultra-refresh.nvidia.com/topology: 1p2d-tp4
           nemotron-ultra-refresh.nvidia.com/recipe: ultra-disagg-b200-256k-1p2d
       spec:
-        imagePullSecrets:
-        - name: nvcr-secret
         runtimeClassName: nvidia
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-B200

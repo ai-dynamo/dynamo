@@ -31,8 +31,6 @@ spec:
         nemotron-ultra-refresh.nvidia.com/routing: kv-aware
     spec:
       restartPolicy: Never
-      imagePullSecrets:
-      - name: nvcr-secret
       containers:
       - name: perf
         image: nvcr.io/nvidia/ai-dynamo/aiperf:0.12.0
