@@ -231,6 +231,11 @@ spec:
             # runtime, no separate selection-service Deployment).
             - name: DYN_EPP_MODE
               value: standalone
+            # This on-ramp uses agentgateway, which streams request bodies
+            # without waiting even though it omits the matching ext_proc flag.
+            # Do not enable this for gateways whose behavior is not verified.
+            - name: DYN_EPP_ALLOW_MISSING_SEND_BODY_WITHOUT_WAITING
+              value: "true"
             # Pod discovery: read the InferencePool this EPP backs. Its selector
             # and target port are the single source of truth (same object the
             # gateway routes to). Pool namespace defaults to POD_NAMESPACE.
