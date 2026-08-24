@@ -61,6 +61,7 @@ use crate::protocols::common::input_trigger::{
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
+    ParsingOptions,
     audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
     chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
@@ -2849,7 +2850,12 @@ async fn chat_completions(
     // Request policy controls whether parser-produced tool calls may be exposed.
     // Assistant response/guided constraints are handled separately during
     // preprocessing and do not revoke an auto request's tool-call permission.
-    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request);
+    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request)
+        .map_err(|e| {
+            let err_response = ErrorMessage::from_anyhow(e.into(), "Invalid tool_choice");
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
 
     // When parallel_tool_calls is false, limit the response to a single tool call.
     let parsing_options =
@@ -2868,10 +2874,7 @@ async fn chat_completions(
     // Computed before `request` moves into `generate`. Only a stream that can
     // withhold every data frame needs forced keep-alive frames.
     let stream_can_defer_all_output =
-        crate::preprocessor::OpenAIPreprocessor::stream_can_defer_all_output(
-            parsing_options.reasoning_parser.as_deref(),
-            request.chat_template_args.as_ref(),
-        );
+        request_stream_can_defer_all_output(&parsing_options, request.chat_template_args.as_ref());
 
     let mut response_collector = state
         .metrics_clone()
@@ -3131,6 +3134,17 @@ fn normalize_chat_reasoning_template_args(
             message: VALIDATION_PREFIX.to_string() + &e.to_string(),
         })
     })
+}
+
+fn request_stream_can_defer_all_output(
+    parsing_options: &ParsingOptions,
+    chat_template_args: Option<&HashMap<String, serde_json::Value>>,
+) -> bool {
+    crate::preprocessor::OpenAIPreprocessor::stream_can_defer_all_output(
+        parsing_options.tool_call_parser.as_deref(),
+        parsing_options.reasoning_parser.as_deref(),
+        chat_template_args,
+    )
 }
 
 /// Validates that required fields are present and valid in the chat completion request
@@ -3451,7 +3465,12 @@ async fn responses(
 
     // The Responses API is converted to the same chat request contract. Narrow
     // the model parser before unary aggregation just as the streaming path does.
-    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request);
+    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request)
+        .map_err(|e| {
+            let err_response = ErrorMessage::from_anyhow(e.into(), "Invalid tool_choice");
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
 
     // Responses requests share the chat-completions aggregator for the unary
     // path. Thread this option through so its post-parse fallback also caps a
@@ -3478,6 +3497,12 @@ async fn responses(
         );
     let parsing_options = parsing_options
         .with_move_reasoning_to_content_when_empty(move_reasoning_to_content_when_empty);
+
+    // Computed before `request` moves into `generate`. Responses streams use
+    // the same force-nonempty deferral as chat completions and therefore need
+    // the same fallback keep-alive when every data frame may be withheld.
+    let stream_can_defer_all_output =
+        request_stream_can_defer_all_output(&parsing_options, request.chat_template_args.as_ref());
 
     let mut response_collector = state
         .metrics_clone()
@@ -3580,7 +3605,7 @@ async fn responses(
         let stream = monitor_for_disconnects(full_stream, ctx, inflight_guard, stream_handle);
 
         let mut sse_stream = Sse::new(stream);
-        if let Some(keep_alive) = state.sse_keep_alive() {
+        if let Some(keep_alive) = state.sse_keep_alive_for_response(stream_can_defer_all_output) {
             sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
         }
 
@@ -5103,6 +5128,38 @@ mod tests {
             nvext: None,
             chat_template_args: None,
         }
+    }
+
+    #[test]
+    fn responses_force_nonempty_request_requires_fallback_keep_alive() {
+        let parsing_options = ParsingOptions::new(Some("qwen3_coder".into()), Some("qwen3".into()));
+        let mut chat_template_args = HashMap::new();
+
+        assert!(!request_stream_can_defer_all_output(&parsing_options, None));
+
+        chat_template_args.insert(
+            "force_nonempty_content".to_string(),
+            serde_json::Value::Bool(false),
+        );
+        assert!(!request_stream_can_defer_all_output(
+            &parsing_options,
+            Some(&chat_template_args)
+        ));
+
+        chat_template_args.insert(
+            "force_nonempty_content".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        assert!(request_stream_can_defer_all_output(
+            &parsing_options,
+            Some(&chat_template_args)
+        ));
+
+        let muse_tool_parser_only = ParsingOptions::new(Some("muse_glimmer".into()), None);
+        assert!(request_stream_can_defer_all_output(
+            &muse_tool_parser_only,
+            Some(&chat_template_args)
+        ));
     }
 
     #[test]
