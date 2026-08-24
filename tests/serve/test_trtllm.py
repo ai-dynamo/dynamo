@@ -824,7 +824,8 @@ def test_chat_only_aggregated_with_test_logits_processor(
 @pytest.mark.trtllm
 @pytest.mark.core
 @pytest.mark.nightly
-# Keep this startup-sensitive test in the sequential GPU stage.
+# Concurrent TRT-LLM MPI engine startups can stall before endpoint registration;
+# keep this startup-sensitive test in the sequential GPU stage.
 # @pytest.mark.profiled_vram_gib(3.9)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.timeout(300)
@@ -842,15 +843,17 @@ def test_aggregated_health_check_priority(
 
     Starts the engine with DYN_HEALTH_CHECK_ENABLED=true and
     health_check_workers=True (1 system port). The test passes only if:
-    1. The worker /health endpoint reports ready (canary with priority=1.0
-       was accepted by generate_async and returned a valid response)
-    2. A normal chat request succeeds alongside the canary
+    1. The worker /health endpoint reports ready after a successful canary.
+    2. The handler logs that the canary reached generate_async with priority=1.0.
+    3. A normal chat request succeeds alongside the canary.
     """
     base = trtllm_configs["aggregated"]
     config = TRTLLMConfig(
         name="aggregated_health_check",
         directory=base.directory,
-        script_name=base.script_name,
+        # This test does not inspect metrics; avoid the extra publisher setup in
+        # agg_metrics.sh so it exercises only the aggregated serving path.
+        script_name="agg.sh",
         marks=[],
         model="Qwen/Qwen3-0.6B",
         frontend_port=dynamo_dynamic_ports.frontend_port,
@@ -862,11 +865,17 @@ def test_aggregated_health_check_priority(
         env={
             "DYN_HEALTH_CHECK_ENABLED": "true",
             "DYN_CANARY_WAIT_TIME": "2",
+            "DYN_LOG": "info,handler_base=debug",
             "MODEL_PATH": "Qwen/Qwen3-0.6B",
             "SERVED_MODEL_NAME": "Qwen/Qwen3-0.6B",
         },
         request_payloads=[
-            chat_payload_default(),
+            chat_payload(
+                "Reply with one token.",
+                max_tokens=1,
+                temperature=0.0,
+                expected_log=[r"TRT-LLM health check request priority=1\.0"],
+            ),
         ],
     )
     run_serve_deployment(config, request, ports=dynamo_dynamic_ports)

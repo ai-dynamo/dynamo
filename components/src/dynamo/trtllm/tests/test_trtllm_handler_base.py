@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import logging
 import re as re_mod
 from copy import deepcopy
 from dataclasses import dataclass
@@ -819,7 +820,7 @@ class TestGenerateLocally:
         return context
 
     @pytest.mark.asyncio
-    async def test_health_check_gets_priority_1(self):
+    async def test_health_check_gets_priority_1(self, caplog):
         """TrtllmHealthCheckPayload → generate_locally → generate_async priority=1.0."""
         handler = self._make_handler()
         generation_result = self._make_mock_generation_result()
@@ -830,8 +831,10 @@ class TestGenerateLocally:
         ).to_dict()
 
         context = self._make_context()
-        chunks = [c async for c in handler.generate_locally(request, context)]
+        with caplog.at_level(logging.DEBUG):
+            chunks = [c async for c in handler.generate_locally(request, context)]
         assert len(chunks) > 0
+        assert "TRT-LLM health check request priority=1.0" in caplog.text
 
         handler.engine.llm.generate_async.assert_called_once()
         _, kwargs = handler.engine.llm.generate_async.call_args

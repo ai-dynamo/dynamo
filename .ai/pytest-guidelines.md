@@ -582,5 +582,9 @@ vllm_configs = {
 }
 ```
 
+Startup-sensitive GPU tests whose concurrent initialization cost is not captured
+by steady-state VRAM should omit `profiled_vram_gib` and document why they must
+remain in the sequential GPU stage.
+
 Configs are parametrized into test functions via `params_with_model_mark()`, which
 auto-applies the `model` marker from the config's model field.
