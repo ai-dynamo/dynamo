@@ -40,7 +40,7 @@ Each target below is a Dynamo + SGLang deployment of Z.AI's [GLM-5.2](https://hu
 <div className="dynamo-target-picker-summary" data-sku="b200" data-engine="sglang" data-usecase="agentic" data-variant="agg">
 <span><b>Checkpoint</b> nvidia/GLM-5.2-NVFP4</span>
 <span><b>Precision</b> NVFP4 + FP8 KV cache</span>
-<span><b>GPUs</b> 4x B200 per worker, 4 workers</span>
+<span><b>GPUs</b> 4x B200 per worker (4 workers), 16 total</span>
 <span><b>Parallelism</b> DTP4</span>
 <span><b>Routing</b> KV-aware</span>
 <span><b>KV offload</b> HiCache CPU</span>
@@ -49,7 +49,7 @@ Each target below is a Dynamo + SGLang deployment of Z.AI's [GLM-5.2](https://hu
 <div className="dynamo-target-picker-summary" data-sku="b200" data-engine="sglang" data-usecase="agentic" data-variant="disagg">
 <span><b>Checkpoint</b> nvidia/GLM-5.2-NVFP4</span>
 <span><b>Precision</b> NVFP4 + FP8 KV cache</span>
-<span><b>GPUs</b> 4x B200 prefill + 8x B200 decode</span>
+<span><b>GPUs</b> 4x B200 per prefill worker (3 workers) + 8x B200 decode (1 worker), 20 total</span>
 <span><b>Parallelism</b> DEP4 prefill / DTP8 decode</span>
 <span><b>Routing</b> KV-aware, NIXL/UCX over IB</span>
 <span><b>KV offload</b> HiCache CPU</span>
@@ -58,7 +58,7 @@ Each target below is a Dynamo + SGLang deployment of Z.AI's [GLM-5.2](https://hu
 <div className="dynamo-target-picker-summary" data-sku="h200" data-engine="sglang" data-usecase="agentic" data-variant="agg">
 <span><b>Checkpoint</b> zai-org/GLM-5.2-FP8</span>
 <span><b>Precision</b> FP8 + FP8 KV cache</span>
-<span><b>GPUs</b> 8x H200 per worker, 3 workers</span>
+<span><b>GPUs</b> 8x H200 per worker (3 workers), 24 total</span>
 <span><b>Parallelism</b> TP8/EP8</span>
 <span><b>Routing</b> KV-aware</span>
 <span><b>KV offload</b> None</span>
@@ -67,7 +67,7 @@ Each target below is a Dynamo + SGLang deployment of Z.AI's [GLM-5.2](https://hu
 <div className="dynamo-target-picker-summary" data-sku="h200" data-engine="sglang" data-usecase="agentic" data-variant="disagg">
 <span><b>Checkpoint</b> zai-org/GLM-5.2-FP8</span>
 <span><b>Precision</b> FP8 + FP8 KV cache</span>
-<span><b>GPUs</b> 8x H200 prefill + 8x H200 decode</span>
+<span><b>GPUs</b> 8x H200 prefill (1 worker) + 8x H200 decode (1 worker), 16 total</span>
 <span><b>Parallelism</b> TP8/EP8 prefill / TP8/DP8/EP1 decode</span>
 <span><b>Routing</b> KV-aware, NIXL/UCX over IB</span>
 <span><b>KV offload</b> None</span>

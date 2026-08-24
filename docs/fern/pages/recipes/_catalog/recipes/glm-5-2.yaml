@@ -24,7 +24,7 @@ targets:
   recommended: false
   hardware:
     gpu: B200
-    count: 4
+    count: 16
   runtime:
     framework: sglang
   topology: aggregated
@@ -49,7 +49,7 @@ targets:
   recommended: false
   hardware:
     gpu: B200
-    count: 12
+    count: 20
   runtime:
     framework: sglang
   topology: disaggregated
@@ -76,7 +76,7 @@ targets:
   recommended: false
   hardware:
     gpu: H200
-    count: 8
+    count: 24
   runtime:
     framework: sglang
   topology: aggregated
@@ -125,6 +125,5 @@ targets:
 related_benchmarks: []
 maintainer: milesial
 gaps:
-- Source recipe tree (recipes/glm-5.2/) lands in PR #11448; source links and asset-path validation resolve once that PR merges to main
 - Full 1M context not supported out of the box (B200 capped at 500K, H200 at 250K)
 - n>1 requests unsupported on the disaggregated targets

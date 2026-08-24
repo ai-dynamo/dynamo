@@ -2172,22 +2172,12 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 }
 
 /* A hidden conditional option must also leave the tab order: the radio itself is
-   only visually hidden (position:absolute;opacity:0), so without this a keyboard
-   user could Tab onto an option whose label is not shown and land the page on a
-   combination that ships no recipe. :has(+ label) keys the input off the very
-   label the rules below hide.                                                   */
-.dynamo-target-picker input[type="radio"]:has(+ label[data-needs-sku]),
-.dynamo-target-picker input[type="radio"]:has(+ label[data-needs-usecase]),
-.dynamo-target-picker input[type="radio"]:has(+ label[data-needs-engine]),
-.dynamo-target-picker input[type="radio"]:has(+ label[data-needs-variant]) {
-    /* re-enabled below whenever its label is actually visible */
-}
-.dynamo-target-picker label[data-needs-sku],
-.dynamo-target-picker label[data-needs-usecase],
-.dynamo-target-picker label[data-needs-engine],
-.dynamo-target-picker label[data-needs-variant] {
-    /* marker class only; visibility is decided by the body:has() rules below */
-}
+   only visually hidden (position:absolute;opacity:0), so a keyboard user could
+   otherwise Tab onto an option whose label is not shown and land the page on a
+   combination that ships no recipe. The "Conditional picker options" rules below
+   hide the label; the companion block after them drops the matching radio, keyed
+   off that same label via :has(+ label). A label with no data-needs-* attribute
+   is always visible and always tabbable, so it needs no rule.                   */
 
 /* ---- Conditional picker options -------------------------------------------
    A recipe may offer a target only for some selections (e.g. Nemotron-3-Ultra
@@ -2243,7 +2233,12 @@ body:has(input[name="recipe-engine"][value="vllm"]:checked) .dynamo-target-picke
 body:has(input[name="recipe-engine"][value="sglang"]:checked) .dynamo-target-picker input:has(+ label[data-needs-engine]:not([data-needs-engine~="sglang"])),
 body:has(input[name="recipe-engine"][value="trtllm"]:checked) .dynamo-target-picker input:has(+ label[data-needs-engine]:not([data-needs-engine~="trtllm"])),
 body:has(input[name="recipe-variant"][value="agg"]:checked) .dynamo-target-picker input:has(+ label[data-needs-variant]:not([data-needs-variant~="agg"])),
-body:has(input[name="recipe-variant"][value="disagg"]:checked) .dynamo-target-picker input:has(+ label[data-needs-variant]:not([data-needs-variant~="disagg"])) {
+body:has(input[name="recipe-variant"][value="disagg"]:checked) .dynamo-target-picker input:has(+ label[data-needs-variant]:not([data-needs-variant~="disagg"])),
+body:has(input[name="recipe-variant"][value="disagg-single-node"]:checked) .dynamo-target-picker input:has(+ label[data-needs-variant]:not([data-needs-variant~="disagg-single-node"])),
+body:has(input[name="recipe-variant"][value="disagg-multi-node"]:checked) .dynamo-target-picker input:has(+ label[data-needs-variant]:not([data-needs-variant~="disagg-multi-node"])),
+body:has(input[name="recipe-variant"][value="efa"]:checked) .dynamo-target-picker input:has(+ label[data-needs-variant]:not([data-needs-variant~="efa"])),
+body:has(input[name="recipe-variant"][value="standard"]:checked) .dynamo-target-picker input:has(+ label[data-needs-variant]:not([data-needs-variant~="standard"])),
+body:has(input[name="recipe-variant"][value="kvbm"]:checked) .dynamo-target-picker input:has(+ label[data-needs-variant]:not([data-needs-variant~="kvbm"])) {
     display: none;
 }
 

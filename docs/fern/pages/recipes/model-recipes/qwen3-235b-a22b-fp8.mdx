@@ -139,7 +139,7 @@ Choose the manifest matching your cluster interconnect, or the provider-neutral 
 ```bash
 # Provider-neutral baseline
 kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-generic.yaml -n ${NAMESPACE}
-# OR AWS EFA on p6-b200.48xlarge (8 EFA per worker)
+# OR AWS EFA on p6-b200.48xlarge (1 EFA per GPU: 4 per decode worker, 2 per prefill worker)
 kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-aws-p6-b200.48xlarge.yaml -n ${NAMESPACE}
 # OR GKE RoCE
 kubectl apply -f recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-gcp-roce.yaml -n ${NAMESPACE}
@@ -177,10 +177,10 @@ Applying a checked-in `deploy-*.yaml` and applying its public overlay with `kube
 kubectl apply -k recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/kustomize/overlays/gcp-roce -n ${NAMESPACE}
 ```
 
-Kustomize is both the authoring model and the documentation for these variants: the base and Components explain the provider settings, and each public overlay documents the composition it selects. The shared deployment lives in `trtllm/disagg/blackwell/kustomize/base/deploy.yaml`, provider-specific deltas live in Kustomize Components, and `trtllm/disagg/blackwell/.kustomize-matrix.yaml` selects the composition behind each rendered manifest. Shared building blocks belong under `recipes/kustomize/components/`, and the disaggregated provider Components target the backend-neutral `PrefillWorker` and `DecodeWorker` service keys. Each manifest's patch source:
+Kustomize is both the authoring model and the documentation for these variants: the base and Components explain the provider settings, and each public overlay documents the composition it selects. The shared deployment lives in `trtllm/disagg/blackwell/kustomize/base/deploy.yaml`, provider-specific deltas live in Kustomize Components and template bundles, and `trtllm/disagg/blackwell/.kustomize-matrix.yaml` selects the composition behind each rendered manifest. AWS instance types inherit the shared `recipes/kustomize/templates/aws-efa/` bundle and supply only their hardware-specific values, unless their Kustomize structure also differs. Shared building blocks belong under `recipes/kustomize/components/`, and the disaggregated provider Components target the backend-neutral `PrefillWorker` and `DecodeWorker` service keys. Each manifest's patch source:
 
 - `deploy-generic.yaml` (provider-neutral baseline) — `trtllm/disagg/blackwell/kustomize/overlays/generic/`
-- `deploy-aws-p6-b200.48xlarge.yaml` (AWS EFA on `p6-b200.48xlarge`, 8 EFA per worker) — `recipes/kustomize/components/aws-efa-p8d8/`
+- `deploy-aws-p6-b200.48xlarge.yaml` (AWS EFA on `p6-b200.48xlarge`, one EFA per GPU: 4 on the decode worker, 2 on each prefill worker) — `recipes/kustomize/templates/aws-efa/p6-b200.48xlarge/`
 - `deploy-gcp-roce.yaml` (GKE RoCE) — `recipes/kustomize/components/disagg-workers/gke-roce/`
 - `deploy-nscale-ib.yaml` (Nscale InfiniBand) — `recipes/kustomize/components/disagg-workers/nscale-ib/`
 
@@ -193,7 +193,7 @@ scripts/kustomize-matrix.py compose \
   | kubectl apply -f - -n ${NAMESPACE}
 ```
 
-Only recipe contributors update the checked-in derived artifacts. The source of truth is the matrix, `kustomize/base/`, and the recipe-local plus referenced shared Components; the public overlay `kustomization.yaml` files and the `deploy-*.yaml` manifests are generated — commit them for review, but do not edit them by hand. After editing the matrix, base, or Components, regenerate from the repository root:
+Only recipe contributors update the checked-in derived artifacts. The source of truth is the matrix, `kustomize/base/`, the recipe-local Components, the shared template sources, and any referenced shared Components under `recipes/kustomize/components/`; the public overlay `kustomization.yaml` files, the generated template Components, and the `deploy-*.yaml` manifests are generated — commit them for review, but do not edit them by hand. After editing the matrix, base, Components, or templates, regenerate from the repository root:
 
 ```bash
 scripts/kustomize-matrix.py unfold recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/.kustomize-matrix.yaml

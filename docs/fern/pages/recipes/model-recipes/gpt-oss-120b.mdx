@@ -233,12 +233,16 @@ kubectl create secret generic hf-token-secret \
 Edit `model-cache/model-cache.yaml` first and update `storageClassName` to match your cluster (`kubectl get storageclass`). Also update the container image tag in `deploy.yaml` to match your Dynamo release, and edit the namespace, node selectors, and any other cluster-specific placement before deploying.
 </Warning>
 
+```bash
+kubectl apply -f recipes/gpt-oss-120b/model-cache/model-cache.yaml -n ${NAMESPACE}
+```
+
 ### 3. Download model + EAGLE3 head
 
 Prepare the model cache (shared by all targets; the download Job pulls both `openai/gpt-oss-120b` and the `nvidia/gpt-oss-120b-Eagle3-v3` head):
 
 ```bash
-kubectl apply -f recipes/gpt-oss-120b/model-cache/ -n ${NAMESPACE}
+kubectl apply -f recipes/gpt-oss-120b/model-cache/model-download.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=3600s
 ```
 

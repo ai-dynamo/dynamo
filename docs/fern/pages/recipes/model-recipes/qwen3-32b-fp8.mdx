@@ -26,15 +26,15 @@ Each target below is a validated FP8 deployment of Qwen3-32B — from a 2-GPU Te
 <div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">Backend</span>
 <input type="radio" id="recipe-engine-trtllm" name="recipe-engine" value="trtllm" defaultChecked />
-<label htmlFor="recipe-engine-trtllm">TensorRT-LLM <span className="dynamo-target-picker-hint">Recommended</span></label>
+<label htmlFor="recipe-engine-trtllm">TensorRT-LLM</label>
 <input type="radio" id="recipe-engine-vllm" name="recipe-engine" value="vllm" />
 <label htmlFor="recipe-engine-vllm" data-needs-variant="disagg">vLLM</label>
 </div>
 <div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">Topology</span>
-<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" />
-<label htmlFor="recipe-variant-agg" data-needs-engine="trtllm">Aggregated</label>
-<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" defaultChecked />
+<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
+<label htmlFor="recipe-variant-agg" data-needs-engine="trtllm">Aggregated <span className="dynamo-target-picker-hint">Recommended</span></label>
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
 <label htmlFor="recipe-variant-disagg">Disaggregated</label>
 </div>
 <div className="dynamo-target-picker-summary" data-sku="hopper" data-usecase="static" data-engine="trtllm" data-variant="agg">
