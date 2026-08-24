@@ -13,6 +13,7 @@ pub mod discovery;
 pub mod endpoint_type;
 pub mod engines;
 pub mod entrypoint;
+pub mod first_token;
 pub mod fpm_publisher;
 pub mod fpm_trace;
 pub mod frontend_config;

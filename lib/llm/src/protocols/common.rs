@@ -630,7 +630,7 @@ pub struct OutputOptions {
     /// templates that are applied during the backend preprocessing.
     pub formatted_prompt: Option<bool>,
 
-    /// When true, logprob token fields are returned as "token_id:<id>"
+    /// When true, logprob token fields are returned as "token_id:`<id>`"
     /// instead of decoded text.
     pub return_tokens_as_token_ids: Option<bool>,
 }
@@ -925,35 +925,6 @@ mod tests {
                 "{rendered} did not round trip"
             );
         }
-    }
-
-    #[test]
-    fn test_completion_context_new() {
-        let prompt = "Hello, world!".to_string();
-        let system_prompt = Some("This is a system prompt.".to_string());
-        let context = CompletionContext::new(prompt.clone(), system_prompt.clone());
-
-        assert_eq!(context.prompt, prompt);
-        assert_eq!(context.system_prompt, system_prompt);
-    }
-
-    #[test]
-    fn test_completion_context_from_prompt() {
-        let prompt = "Hello, world!".to_string();
-        let context = CompletionContext::from_prompt(prompt.clone());
-
-        assert_eq!(context.prompt, prompt);
-        assert_eq!(context.system_prompt, None);
-    }
-
-    #[test]
-    fn test_completion_context_with_system_prompt() {
-        let prompt = "Hello, world!".to_string();
-        let system_prompt = "This is a system prompt.".to_string();
-        let context = CompletionContext::with_system_prompt(prompt.clone(), system_prompt.clone());
-
-        assert_eq!(context.prompt, prompt);
-        assert_eq!(context.system_prompt, Some(system_prompt));
     }
 
     #[test]

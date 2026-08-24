@@ -197,14 +197,10 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
-    m.add(
-        "MOCKER_KVBM_OFFLOAD_ENABLED",
-        cfg!(feature = "mocker-kvbm-offload"),
-    )?;
-
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<llm::replay::OfflineReplayResult>()?;
     m.add_class::<Endpoint>()?;
+    m.add_class::<PyFirstTokenSource>()?;
     m.add_class::<ModelCardInstanceId>()?;
     m.add_class::<Client>()?;
     m.add_class::<Instance>()?;
@@ -252,6 +248,8 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<WorkerType>()?;
     m.add_class::<llm::kv::KvRouter>()?;
     m.add_class::<llm::kv_dc_relay::KvDcRelay>()?;
+    m.add_class::<llm::kv_state_agent::KvStateAgentHost>()?;
+    m.add_class::<llm::kv_state_agent::KvStateAttachmentOwner>()?;
     m.add_class::<llm::routed_engine::RoutedEngine>()?;
     m.add_class::<RouterMode>()?;
     m.add_class::<kserve_grpc::KserveGrpcService>()?;
@@ -879,6 +877,20 @@ struct Endpoint {
     event_loop: PyObject,
 }
 
+#[pyclass(name = "FirstTokenSource")]
+#[derive(Clone)]
+struct PyFirstTokenSource {
+    inner: llm_rs::first_token::FirstTokenSource,
+}
+
+#[pymethods]
+impl PyFirstTokenSource {
+    #[pyo3(signature = (context, dp_rank=None))]
+    fn bind(&self, mut context: PyRefMut<'_, context::Context>, dp_rank: Option<u32>) {
+        context.bind_first_token_source(&self.inner, dp_rank);
+    }
+}
+
 #[pyclass]
 #[derive(Clone)]
 struct ModelCardInstanceId {
@@ -1399,6 +1411,22 @@ impl DistributedRuntime {
 
 #[pymethods]
 impl Endpoint {
+    /// Create one fail-open completion source for this serving endpoint.
+    fn first_token_source<'p>(
+        &self,
+        py: Python<'p>,
+        worker_type: WorkerType,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let endpoint = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            Ok(
+                llm_rs::first_token::FirstTokenSource::for_endpoint(&endpoint, worker_type.into())
+                    .await
+                    .map(|inner| PyFirstTokenSource { inner }),
+            )
+        })
+    }
+
     #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None))]
     fn serve_endpoint<'p>(
         &self,

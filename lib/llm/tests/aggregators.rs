@@ -257,3 +257,170 @@ async fn test_nvext_none_when_absent() {
 
     assert_eq!(result.nvext, None);
 }
+
+// ===================================
+// Muse unified batch finalize (topology B)
+// ===================================
+
+/// Topology B: raw muse markup reaches the aggregator un-split (the frontend
+/// holds the tool_call_parser, but the worker did not run the streaming hook, so
+/// the deltas carry raw text). The finalize block must route muse through the
+/// UNIFIED parser and populate reasoning_content + content + tool_calls on the
+/// final message — the reasoning channel is the one thing the v2 tool-only
+/// `parse_complete` cannot recover.
+#[tokio::test]
+async fn test_muse_unified_batch_finalize_splits_all_channels() {
+    let deltas = vec![
+        make_stream_delta(
+            Some("<|start|>assistant to=self<|message|>Look it up.<|eom|>"),
+            None,
+        ),
+        make_stream_delta(
+            Some(
+                "<|start|>assistant to=get_weather<|message|><atem:invoke name=\"get_weather\"><atem:parameter name=\"location\">Paris</atem:parameter></atem:invoke><|eom|>",
+            ),
+            None,
+        ),
+        make_stream_delta(
+            Some("<|start|>assistant to=user<|message|>It's 18C.<|eot|>"),
+            None,
+        ),
+    ];
+
+    let stream = futures::stream::iter(deltas);
+    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+        stream,
+        // The HTTP handlers derive this from the request's tool_choice via
+        // `batch_tool_choice_eligible`, which admits unset/auto. Setting it here is
+        // what an auto request really carries; leaving it default-false would be
+        // asserting against a shape no served request has.
+        ParsingOptions::new(Some("muse_glimmer".to_string()), None)
+            .with_experimental_v2_batch_eligible(true),
+    )
+    .await
+    .unwrap();
+
+    let choice = result.inner.choices.first().expect("one choice");
+    assert_eq!(
+        choice.message.reasoning_content.as_deref(),
+        Some("Look it up."),
+        "reasoning_content must come from the unified batch finalize"
+    );
+    assert_eq!(
+        get_text(choice.message.content.as_ref().expect("content")),
+        "It's 18C."
+    );
+    let tool_calls = choice.message.tool_calls.as_ref().expect("tool_calls");
+    assert_eq!(tool_calls.len(), 1, "expected one tool call");
+    assert_eq!(tool_calls[0].function.name, "get_weather");
+    let args: serde_json::Value = serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
+    assert_eq!(args, serde_json::json!({"location": "Paris"}));
+}
+
+/// Reasoning-only card (topology B): `reasoning_parser=muse_glimmer`, NO
+/// `tool_call_parser` — the card shape the streaming guard, `unified_family`, and
+/// `parser_requires_special_tokens` all support on either name. The batch finalize
+/// must key on the reasoning name too, so raw channel markup never survives into the
+/// non-streaming response.
+#[tokio::test]
+async fn test_muse_unified_batch_finalize_routes_on_reasoning_name_only() {
+    let deltas = vec![
+        make_stream_delta(
+            Some("<|start|>assistant to=self<|message|>Look it up.<|eom|>"),
+            None,
+        ),
+        make_stream_delta(
+            Some(
+                "<|start|>assistant to=get_weather<|message|><atem:invoke name=\"get_weather\"><atem:parameter name=\"location\">Paris</atem:parameter></atem:invoke><|eom|>",
+            ),
+            None,
+        ),
+        make_stream_delta(
+            Some("<|start|>assistant to=user<|message|>It's 18C.<|eot|>"),
+            None,
+        ),
+    ];
+
+    let stream = futures::stream::iter(deltas);
+    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+        stream,
+        ParsingOptions::new(None, Some("muse_glimmer".to_string()))
+            .with_experimental_v2_batch_eligible(true),
+    )
+    .await
+    .unwrap();
+
+    let choice = result.inner.choices.first().expect("one choice");
+    let content = get_text(choice.message.content.as_ref().expect("content"));
+    assert!(
+        !content.contains("<|start|>") && !content.contains("<atem:invoke"),
+        "raw markup leaked into content: {content:?}"
+    );
+    assert_eq!(content, "It's 18C.");
+    assert_eq!(
+        choice.message.reasoning_content.as_deref(),
+        Some("Look it up."),
+        "reasoning_content must be split even when only the reasoning name is set"
+    );
+    let tool_calls = choice.message.tool_calls.as_ref().expect("tool_calls");
+    assert_eq!(tool_calls.len(), 1, "expected one tool call");
+    assert_eq!(tool_calls[0].function.name, "get_weather");
+}
+
+/// Batch counterpart of the streaming `none` pin. A caller that disabled tool calling
+/// still needs the reasoning/content split and the marker stripping — muse has no v1
+/// reasoning parser to fall back on — but must not receive `tool_calls`. The handlers
+/// express that by deriving `experimental_v2_batch_eligible` from the request, which
+/// `batch_tool_choice_eligible` sets false for an explicit `none`.
+#[tokio::test]
+async fn test_muse_unified_batch_finalize_suppresses_calls_when_not_eligible() {
+    let deltas = vec![
+        make_stream_delta(
+            Some("<|start|>assistant to=self<|message|>Look it up.<|eom|>"),
+            None,
+        ),
+        make_stream_delta(
+            Some(
+                "<|start|>assistant to=get_weather<|message|><atem:invoke name=\"get_weather\"><atem:parameter name=\"location\">Paris</atem:parameter></atem:invoke><|eom|>",
+            ),
+            None,
+        ),
+        make_stream_delta(
+            Some("<|start|>assistant to=user<|message|>It's 18C.<|eot|>"),
+            None,
+        ),
+    ];
+
+    let stream = futures::stream::iter(deltas);
+    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+        stream,
+        ParsingOptions::new(Some("muse_glimmer".to_string()), None)
+            .with_experimental_v2_batch_eligible(false),
+    )
+    .await
+    .unwrap();
+
+    let choice = result.inner.choices.first().expect("one choice");
+    assert!(
+        choice
+            .message
+            .tool_calls
+            .as_ref()
+            .is_none_or(|calls| calls.is_empty()),
+        "an ineligible tool_choice must not return tool_calls: {:?}",
+        choice.message.tool_calls
+    );
+    // The split and the stripping still have to happen.
+    let content = get_text(choice.message.content.as_ref().expect("content"));
+    assert_eq!(content, "It's 18C.");
+    assert_eq!(
+        choice.message.reasoning_content.as_deref(),
+        Some("Look it up.")
+    );
+    for marker in ["<|start|>", "<|message|>", "<atem:invoke"] {
+        assert!(
+            !content.contains(marker),
+            "marker {marker:?} leaked: {content:?}"
+        );
+    }
+}
