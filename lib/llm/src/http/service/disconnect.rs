@@ -31,6 +31,7 @@
 use axum::response::sse::Event;
 use dynamo_runtime::engine::AsyncEngineContext;
 use futures::{Stream, StreamExt};
+use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -70,8 +71,8 @@ pub struct ConnectionHandle {
 /// One-shot application error reported by an SSE producer.
 ///
 /// The producer writes only when it emits a terminal protocol failure. The
-/// disconnect monitor reads once when the source stream ends, avoiding
-/// synchronization on successful per-token events.
+/// disconnect monitor reads only when the source stream ends or its guard is
+/// dropped, avoiding synchronization on successful per-token events.
 #[derive(Clone, Default)]
 pub(super) struct StreamErrorSignal {
     error_type: Arc<OnceLock<ErrorType>>,
@@ -84,6 +85,51 @@ impl StreamErrorSignal {
 
     fn get(&self) -> Option<&ErrorType> {
         self.error_type.get()
+    }
+}
+
+struct SignaledInflightGuard {
+    guard: InflightGuard,
+    error_signal: Option<StreamErrorSignal>,
+}
+
+impl SignaledInflightGuard {
+    fn new(guard: InflightGuard, error_signal: Option<StreamErrorSignal>) -> Self {
+        Self {
+            guard,
+            error_signal,
+        }
+    }
+
+    fn signaled_error_type(&self) -> Option<ErrorType> {
+        self.error_signal
+            .as_ref()
+            .and_then(StreamErrorSignal::get)
+            .cloned()
+    }
+}
+
+impl Deref for SignaledInflightGuard {
+    type Target = InflightGuard;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl DerefMut for SignaledInflightGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+impl Drop for SignaledInflightGuard {
+    fn drop(&mut self) {
+        if self.guard.error_type() == &ErrorType::Cancelled
+            && let Some(error_type) = self.signaled_error_type()
+        {
+            self.guard.mark_error(error_type);
+        }
     }
 }
 
@@ -351,6 +397,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
     // disconnect causing a broken-pipe on the SSE write), the guard will report
     // "cancelled" instead of "internal". The happy path overrides this via mark_ok().
     inflight_guard.mark_error(ErrorType::Cancelled);
+    let mut inflight_guard = SignaledInflightGuard::new(inflight_guard, error_signal);
 
     async_stream::try_stream! {
         tokio::pin!(stream);
@@ -390,10 +437,8 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                             break;
                         }
                         None => {
-                            if let Some(error_type) =
-                                error_signal.as_ref().and_then(StreamErrorSignal::get)
-                            {
-                                inflight_guard.mark_error(error_type.clone());
+                            if let Some(error_type) = inflight_guard.signaled_error_type() {
+                                inflight_guard.mark_error(error_type);
                             } else {
                                 inflight_guard.mark_ok();
                             }
@@ -594,6 +639,68 @@ mod tests {
             context.stopped_polls.load(Ordering::Relaxed),
             1,
             "the same stopped future should remain pending across all response events"
+        );
+    }
+
+    #[tokio::test]
+    async fn signaled_error_survives_drop_after_terminal_event() {
+        let model = "drop-after-response-failed";
+        let metrics = Arc::new(Metrics::new());
+        let guard = metrics.clone().create_inflight_guard(
+            model,
+            Endpoint::Responses,
+            true,
+            "req-drop-after-response-failed",
+        );
+        let context: Arc<dyn AsyncEngineContext> = Arc::new(MockContext::new());
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let handle = ConnectionHandle::create_disabled(tx);
+        let error_signal = StreamErrorSignal::default();
+        let producer_error_signal = error_signal.clone();
+        let stream = futures::stream::once(async move {
+            producer_error_signal.set(ErrorType::Internal);
+            Ok::<_, axum::Error>(
+                Event::default()
+                    .event("response.failed")
+                    .data(r#"{"type":"response.failed"}"#),
+            )
+        })
+        .chain(futures::stream::pending());
+
+        let mut monitored = Box::pin(monitor_for_disconnects_with_timeout_error_and_keep_alive(
+            stream,
+            context,
+            guard,
+            handle,
+            None,
+            openai_stream_error,
+            StreamMonitorOptions {
+                error_signal: Some(error_signal),
+                ..Default::default()
+            },
+        ));
+        assert!(monitored.next().await.is_some());
+        drop(monitored);
+
+        assert_eq!(
+            metrics.get_request_counter(
+                model,
+                &Endpoint::Responses,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Internal,
+            ),
+            1
+        );
+        assert_eq!(
+            metrics.get_request_counter(
+                model,
+                &Endpoint::Responses,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Cancelled,
+            ),
+            0
         );
     }
 
