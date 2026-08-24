@@ -750,7 +750,16 @@ def test_gang_reservation_admits_backfill_that_still_leaves_its_headroom():
 # --------------------------------------------------------------------------- #
 # cross-pass progress -- the property a single-pass assertion cannot see
 # --------------------------------------------------------------------------- #
-def _drive_passes(gpus, seeded, *, backfill, passes, num_slots=8, queue_depth=4):
+def _drive_passes(
+    gpus,
+    seeded,
+    *,
+    backfill,
+    passes,
+    num_slots=8,
+    queue_depth=4,
+    external_hold=None,
+):
     """Drive repeated `_select_launches` passes against live `gpu_states`.
 
     Mirrors ``run_parallel``'s loop -- retire what finished, select, commit --
@@ -764,7 +773,14 @@ def _drive_passes(gpus, seeded, *, backfill, passes, num_slots=8, queue_depth=4)
     only place the suite can see that.
 
     ``run_time`` is in passes. Returns ``{name: pass index it launched on}``.
+
+    ``external_hold`` maps a GPU index to GiB held by a process OUTSIDE this run
+    (another container on the node, a leaked engine). It is subtracted from that
+    card's live free reading and is never released, so it models the one thing
+    the scheduler's own accounting cannot see. Default ``None`` keeps the
+    historical behaviour exactly.
     """
+    external_hold = external_hold or {}
     pending = sorted(seeded, key=_priority_key, reverse=True)
     running: dict[str, tuple[_TestEntry, int]] = {}
     started: dict[str, int] = {}
@@ -785,7 +801,11 @@ def _drive_passes(gpus, seeded, *, backfill, passes, num_slots=8, queue_depth=4)
             )
             for gi in gpus
         }
-        actual_free = {gi: gs.total_gib - resident[gi] for gi, gs in gpus.items()}
+        held = external_hold(now) if callable(external_hold) else external_hold
+        actual_free = {
+            gi: gs.total_gib - resident[gi] - held.get(gi, 0.0)
+            for gi, gs in gpus.items()
+        }
         if len(running) >= num_slots:
             continue
         launches = _select_launches(
@@ -2050,3 +2070,551 @@ def test_non_vllm_tests_are_not_staggered(monkeypatch, tmp_path):
 
     assert rc == 0
     assert _staggered(harness.sleeps) == []
+
+
+# --------------------------------------------------------------------------- #
+# reservation eligibility -- a gang may only reserve GPUs it could run on
+#
+# Found by clean-room review of the first gang implementation. The blocked-gang
+# reservation ranked candidate devices by headroom magnitude but never applied
+# the eligibility THRESHOLD the launch scan applies, so a device that can never
+# host the gang -- too small, or holding memory from outside this run -- scored
+# maximum headroom precisely BECAUSE it was idle, won a protector slot, and left
+# a genuinely usable device unprotected to saturate. Reserving R outside the
+# eligible set E is fictitious protection: it spends one of the `k` all-or-none
+# slots and buys no path to launch.
+# --------------------------------------------------------------------------- #
+def test_gang_does_not_reserve_a_card_that_is_too_small_to_ever_host_it():
+    """The tightest statement of the invariant, in a single pass.
+
+    GPU0 (10 GiB, 6.0 committed to one process) can host the gang once it
+    drains. GPU1 (10 GiB, idle) can host it now. GPU2 (5 GiB) can NEVER: 5.0 is
+    below the gang's 6.0 per-device requirement.
+
+    The gang needs two devices and only GPU1 qualifies, so it blocks and
+    reserves. Ranking by headroom alone puts GPU2 (5.0 free) above GPU0 (2.5
+    free), so the hold lands on {1, 2} and leaves GPU0 -- the only other card
+    that could ever run the gang -- open for backfill.
+
+    Observable consequence: the 2.0 GiB filler. If GPU0 is left unprotected the
+    filler lands there and pushes the card further from hosting the gang. Under
+    a correct reservation the hold is {0, 1}, the filler is refused on both, and
+    it goes to GPU2, which is where work belongs -- GPU2 is useless to the gang
+    but perfectly good for a filler.
+    """
+    gpus = {
+        0: _gpu(0, 10.0, budget_used=6.0, running_count=1),
+        1: _gpu(1, 10.0),
+        2: _gpu(2, 5.0),
+    }
+    gang = _t("gang", 6.0, timeout=1800, gpus=2)
+    filler = _t("filler", 3.0, timeout=15.0)
+    assert _unschedulable_reason(gang, gpus) is None, "gang must be feasible"
+
+    launches = _select_checked([gang, filler], gpus, num_slots=8, running_count=1)
+
+    # Ranked by headroom, GPU2 (5.0 idle) outranks GPU0 (8.5 - 6.0 = 2.5), so an
+    # unfiltered reservation takes {1, 2} and leaves GPU0 open. The filler is
+    # 3.0: too big for what GPU0 has left, and refused on both held cards, so
+    # under the unfiltered rule nothing launches at all and the gang's hold is
+    # sitting on a card it can never use. Filtered, the hold is {0, 1} and GPU2
+    # -- useless to the gang, fine for a filler -- takes the work.
+    assert launches == [(1, (2,))], (
+        "the gang must hold the two cards that can actually host it (0 and 1), "
+        "leaving the 5 GiB card free for backfill; instead the hold landed on "
+        "the card that can never host the gang"
+    )
+
+
+def test_gang_is_not_starved_by_a_card_too_small_to_ever_host_it():
+    """Cross-pass form of the same defect: the gang must still launch.
+
+    Identical to test_blocked_gang_is_not_starved_by_endless_lower_priority_backfill
+    except for a third card of 5.9 GiB -- below the gang's 6.0 requirement, so it
+    can never host it -- and a filler lifetime long enough that the unprotected
+    card never drains between passes.
+    """
+    gpus = {0: _gpu(0, 10.0), 1: _gpu(1, 10.0), 2: _gpu(2, 5.9)}
+    hog = _t("hog", 3.0, timeout=120)  # est 40 passes
+    gang = _t("gang", 6.0, timeout=90, gpus=2)
+    assert _unschedulable_reason(gang, gpus) is None
+
+    started = _drive_passes(
+        gpus,
+        [hog, gang],
+        backfill=lambda i: _t(f"fill{i}", 2.0, timeout=21.0),
+        passes=400,
+    )
+
+    assert "gang" in started, (
+        "feasible gpu_2 gang never launched in 400 passes on a node with two "
+        "cards big enough for it -- starved by a reservation placed on the card "
+        "that is too small to ever host it"
+    )
+    assert started["gang"] <= 41, started["gang"]
+
+
+@pytest.mark.parametrize("third", [5.0, 5.5, 5.9, 6.0, 10.0])
+def test_gang_progress_does_not_depend_on_an_unusable_third_card(third):
+    """Sweep the third card across the feasibility boundary (requirement 6.0).
+
+    Below 6.0 the card cannot host the gang; at or above it, it can. Either way
+    two 10 GiB cards are present, so the gang is feasible throughout and must
+    launch as soon as the hog retires. Progress must not depend on the size of a
+    card the gang does not need.
+    """
+    gpus = {0: _gpu(0, 10.0), 1: _gpu(1, 10.0), 2: _gpu(2, third)}
+    hog = _t("hog", 3.0, timeout=120)
+    gang = _t("gang", 6.0, timeout=90, gpus=2)
+    assert _unschedulable_reason(gang, gpus) is None
+
+    started = _drive_passes(
+        gpus,
+        [hog, gang],
+        backfill=lambda i: _t(f"fill{i}", 2.0, timeout=21.0),
+        passes=400,
+    )
+
+    assert "gang" in started, f"starved with third card = {third} GiB"
+    assert started["gang"] <= 41, (third, started["gang"])
+
+
+def test_making_a_gpu_larger_never_delays_a_gang():
+    """Monotonicity: growing a card must not make scheduling worse.
+
+    A physically nonsensical result -- enlarging GPU2 from 5.0 to 5.9 turning a
+    launching gang into a starving one -- is exactly what the unfiltered
+    reservation ranking produced, because a larger idle card outranks a smaller
+    one for a protector slot it can still never honour.
+    """
+
+    def start_pass(third):
+        gpus = {0: _gpu(0, 10.0), 1: _gpu(1, 10.0), 2: _gpu(2, third)}
+        started = _drive_passes(
+            gpus,
+            [_t("hog", 3.0, timeout=120), _t("gang", 6.0, timeout=90, gpus=2)],
+            backfill=lambda i: _t(f"fill{i}", 2.0, timeout=21.0),
+            passes=400,
+        )
+        return started.get("gang")
+
+    sizes = [5.0, 5.5, 5.9, 6.0, 10.0]
+    starts = [start_pass(s) for s in sizes]
+
+    assert all(s is not None for s in starts), dict(zip(sizes, starts))
+    for (small, a), (large, b) in zip(zip(sizes, starts), list(zip(sizes, starts))[1:]):
+        assert b <= a, (
+            f"growing GPU2 from {small} to {large} GiB delayed the gang "
+            f"from pass {a} to pass {b}"
+        )
+
+
+@pytest.mark.parametrize("frees_at", [None, 40, 80])
+def test_progress_under_foreign_memory_is_conditional_on_it_being_released(frees_at):
+    """The stated limit of the progress property, pinned in both directions.
+
+    Reservation placement looks only at card size, never at live free memory,
+    because ``(total - free) - budget`` cannot separate a neighbour's allocation
+    -- which may never be released -- from our own test overshooting its profile
+    or still ramping, which always is. Consulting it would reject cards that
+    recover while admitting cards that do not.
+
+    So a gang needing a card that a neighbour is holding waits, and that is the
+    honest guarantee: three 10 GiB cards, a gang wanting 6.0 on two of them, and
+    4.5 GiB held on GPU2 by something outside this run.
+
+    - held forever: the gang never launches. This is regime D -- outside the
+      claimed domain, and stated rather than papered over.
+    - released at pass 40 or 80: the gang launches on exactly that pass, so
+      nothing the scheduler did in the meantime cost it its place.
+    """
+    gpus = {0: _gpu(0, 10.0), 1: _gpu(1, 10.0), 2: _gpu(2, 10.0)}
+    started = _drive_passes(
+        gpus,
+        [_t("hog", 3.0, timeout=120), _t("gang", 6.0, timeout=90, gpus=2)],
+        backfill=lambda i: _t(f"fill{i}", 2.0, timeout=21.0),
+        passes=400,
+        external_hold=(
+            lambda now: {2: 4.5} if (frees_at is None or now < frees_at) else {}
+        ),
+    )
+
+    if frees_at is None:
+        assert "gang" not in started, (
+            "documented limitation changed: the gang launched despite a card it "
+            "needs being held by a process outside this run"
+        )
+    else:
+        assert started.get("gang") == frees_at, (
+            f"gang should launch the pass the foreign memory is released "
+            f"({frees_at}), got {started.get('gang')}"
+        )
+
+
+def test_gpu1_control_is_unaffected_by_an_unusable_card():
+    """Control: the same topology must not regress single-GPU scheduling.
+
+    A gpu_1 test only ever needs one card to come free and any card will do, so
+    the unfiltered reservation never cost it progress. This pins that the repair
+    is about gangs and that gpu_1 behaviour is unchanged by it.
+    """
+    gpus = {0: _gpu(0, 10.0), 1: _gpu(1, 10.0), 2: _gpu(2, 5.9)}
+    started = _drive_passes(
+        gpus,
+        [_t("hog", 3.0, timeout=120), _t("blocked", 6.0, timeout=90)],
+        backfill=lambda i: _t(f"fill{i}", 2.0, timeout=21.0),
+        passes=400,
+    )
+
+    assert "blocked" in started
+    assert started["blocked"] <= 41, started["blocked"]
+
+
+def test_gang_still_holds_its_cards_while_every_card_is_transiently_blocked():
+    """The filter must not be able to REMOVE protection a gang already needed.
+
+    Two 16 GiB cards (budget_multi 13.6) and a gang wanting 12.0 on each. Until
+    pass 40 a neighbour holds 5.0 GiB on both, so neither card can host the gang
+    yet -- 5.0 + 12.0 > 16.0 -- and no card passes an eligibility filter. The
+    neighbours then leave and both cards become usable.
+
+    Treating the filter as an admission test drops the reservation entirely on
+    exactly the passes it is needed: the cards fill with 3.0 GiB backfill that
+    outlives the neighbours, and the gang -- which the pre-repair code launched
+    the moment they left -- waits for the backfill to drain instead. A hold is
+    protection against the future; it must not be revoked because of one live
+    reading of the present.
+    """
+    gpus = {0: _gpu(0, 16.0), 1: _gpu(1, 16.0)}
+    gang = _t("gang", 12.0, timeout=1800, gpus=2)
+    assert _unschedulable_reason(gang, gpus) is None
+
+    started = _drive_passes(
+        gpus,
+        [gang],
+        backfill=lambda i: _t(f"fill{i}", 3.0, timeout=600.0),
+        passes=400,
+        external_hold=lambda now: {0: 5.0, 1: 5.0} if now < 40 else {},
+    )
+
+    assert "gang" in started, "gang never launched after its blockers left"
+    assert started["gang"] <= 60, (
+        f"gang launched on pass {started['gang']}, long after the neighbours "
+        "left on pass 40 -- its cards were given away while it was unprotected"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# the assignment has to survive into the WORKERS, not just be derived
+#
+# The tests above execute the script's device-derivation block. They cannot see
+# what the two worker launches actually do with it: pinning both workers to the
+# same device, or dropping the pin entirely, leaves the derivation untouched and
+# every one of them green. That is the whole bug this script was changed to fix,
+# so it gets an end-to-end check -- the real script, unmodified, with a stand-in
+# for the engine.
+# --------------------------------------------------------------------------- #
+def _bash_with_wait_n() -> str | None:
+    """A bash new enough for ``wait -n``, which launch_utils.sh requires (4.3+).
+
+    macOS ships bash 3.2, so this is a skip locally unless a newer bash is on
+    PATH; CI containers run bash 5.
+    """
+    seen = []
+    for cand in ("bash", "/opt/homebrew/bin/bash", "/usr/local/bin/bash"):
+        path = shutil.which(cand) if "/" not in cand else cand
+        if not path or path in seen or not Path(path).exists():
+            continue
+        seen.append(path)
+        out = subprocess.run(
+            [path, "-c", 'echo "${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}"'],
+            capture_output=True,
+            text=True,
+        )
+        if out.returncode != 0:
+            continue
+        try:
+            major, minor = (int(x) for x in out.stdout.split())
+        except ValueError:
+            continue
+        if (major, minor) >= (4, 3):
+            return path
+    return None
+
+
+_BASH43 = _bash_with_wait_n()
+
+_STUB_GPU_UTILS = """\
+build_vllm_gpu_mem_args() { echo ""; }
+"""
+_STUB_LAUNCH_UTILS = """\
+print_launch_banner() { :; }
+print_curl_footer() { cat > /dev/null; }
+wait_any_exit() { wait; }
+"""
+_STUB_PYTHON3 = """\
+#!/bin/sh
+echo "CVD=${CUDA_VISIBLE_DEVICES-<unset>} ARGS=$*" >> "$DYN_TEST_LAUNCH_LOG"
+exit 0
+"""
+
+
+def _run_launcher(tmp_path, visible_devices):
+    """Run the REAL launch script with a stand-in engine; return its launches."""
+    root = tmp_path / "tree"
+    launch_dir = root / "examples/backends/vllm/launch"
+    common_dir = root / "examples/common"
+    bin_dir = tmp_path / "bin"
+    for d in (launch_dir, common_dir, bin_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    shutil.copy(_GANG_LAUNCH_SCRIPT, launch_dir / _GANG_LAUNCH_SCRIPT.name)
+    (common_dir / "gpu_utils.sh").write_text(_STUB_GPU_UTILS)
+    (common_dir / "launch_utils.sh").write_text(_STUB_LAUNCH_UTILS)
+    stub = bin_dir / "python3"
+    stub.write_text(_STUB_PYTHON3)
+    stub.chmod(0o755)
+
+    log = tmp_path / "launches.log"
+    log.write_text("")
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["DYN_TEST_LAUNCH_LOG"] = str(log)
+    if visible_devices is None:
+        env.pop("CUDA_VISIBLE_DEVICES", None)
+    else:
+        env["CUDA_VISIBLE_DEVICES"] = visible_devices
+
+    proc = subprocess.run(
+        [_BASH43, str(launch_dir / _GANG_LAUNCH_SCRIPT.name), "model-a", "model-b"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+        # `trap 'kill 0' EXIT` in the script would otherwise signal the whole
+        # pytest process group.
+        start_new_session=True,
+    )
+    workers = {}
+    for line in log.read_text().splitlines():
+        if "dynamo.vllm" not in line:
+            continue
+        cvd = line.split("CVD=", 1)[1].split(" ARGS=", 1)[0]
+        if "embed-worker-1" in line:
+            workers["w1"] = cvd
+        elif "embed-worker-2" in line:
+            workers["w2"] = cvd
+    return proc, workers
+
+
+@pytest.mark.skipif(
+    _BASH43 is None, reason="launch_utils.sh needs bash >= 4.3 for `wait -n`"
+)
+def test_each_worker_is_pinned_to_its_own_device_of_the_assigned_gang(tmp_path):
+    """Handed the gang (2,3), the two workers must land on 2 and 3 -- not both
+    on 2, not both inheriting the whole set."""
+    proc, workers = _run_launcher(tmp_path, "2,3")
+
+    assert workers.get("w1") == "2", (proc.stderr, workers)
+    assert workers.get("w2") == "3", (proc.stderr, workers)
+    assert workers["w1"] != workers["w2"], (
+        "both vLLM workers were pinned to the same device -- the scheduler "
+        "reserved two GPUs and charged VRAM on both, so one of them is now "
+        "double-booked and the other is idle"
+    )
+
+
+@pytest.mark.skipif(
+    _BASH43 is None, reason="launch_utils.sh needs bash >= 4.3 for `wait -n`"
+)
+def test_workers_follow_a_reordered_assignment_rather_than_sorting_it(tmp_path):
+    """The launcher must not re-sort what it inherits.
+
+    The scheduler always emits an ascending gang, so it cannot itself produce
+    (3,2); this pins the launcher's half of the contract for a hand-run
+    invocation, and stops a future "tidy the list" change from silently
+    reintroducing a fixed device order.
+    """
+    _, workers = _run_launcher(tmp_path, "3,2")
+    assert (workers.get("w1"), workers.get("w2")) == ("3", "2"), workers
+
+
+@pytest.mark.skipif(
+    _BASH43 is None, reason="launch_utils.sh needs bash >= 4.3 for `wait -n`"
+)
+def test_launcher_starts_no_worker_when_it_is_handed_one_device(tmp_path):
+    """Fail closed: a single visible device must not run both workers on it."""
+    proc, workers = _run_launcher(tmp_path, "4")
+    assert proc.returncode != 0, proc.stdout
+    assert workers == {}, f"workers started despite an unusable device set: {workers}"
+
+
+def test_no_card_is_committed_past_its_multi_process_budget(monkeypatch):
+    """Once two VRAM-bearing tests share a card, the margin must hold.
+
+    The cap in force is the whole card while at most one VRAM-bearing test lives
+    there, and ``budget_multi`` once a second joins -- so a sole occupant above
+    ``budget_multi`` is correct, and only co-residency is a violation. Zero-VRAM
+    fillers raise ``running_count`` without consuming budget and are excluded by
+    design.
+
+    The regime matters. Every other sweep here derives ``actual_free`` from the
+    scheduler's own accounting, which makes the live-usage gate shadow the
+    budget gate exactly and hides any error in the intra-pass tentative charge.
+    This one reports the whole card as free, so only the budget arithmetic is
+    load bearing: dividing a gang's tentative charge across its members instead
+    of charging each one in full over-commits a card here, and is invisible in
+    the derived regime.
+    """
+    rnd = random.Random(20260823)
+    for _ in range(400):
+        n_gpus = rnd.choice([1, 2, 3, 4])
+        gpus = {
+            gi: _gpu(gi, rnd.choice([8.0, 10.0, 16.0, 24.0])) for gi in range(n_gpus)
+        }
+        running: list[list] = []
+        for _pass in range(25):
+            pending = sorted(
+                (
+                    _t(
+                        f"t{i}",
+                        rnd.choice([0.0, 1.0, 2.5, 5.0, 9.0]),
+                        timeout=rnd.choice([30.0, 300.0]),
+                        gpus=rnd.choice([1, 1, 2]),
+                    )
+                    for i in range(rnd.randint(1, 4))
+                ),
+                key=_priority_key,
+                reverse=True,
+            )
+            launches = _select_launches(
+                pending=pending,
+                gpu_states=gpus,
+                # the whole card reads free, so the live gate never substitutes
+                # for the budget gate
+                actual_free={gi: gs.total_gib for gi, gs in gpus.items()},
+                num_slots=8,
+                running_count=len(running),
+            )
+            for idx, devices in launches:
+                _reserve_gpus(pending[idx], devices, gpus)
+                running.append([pending[idx], rnd.randint(1, 3)])
+
+            for gi, gs in gpus.items():
+                bearing = sum(
+                    1
+                    for entry, _ in running
+                    if gi in entry.assigned_gpus and entry.profiled_gib > 0
+                )
+                if bearing >= 2:
+                    assert gs.budget_used <= gs.budget_multi + 1e-9, (
+                        f"GPU{gi} holds {bearing} VRAM-bearing tests totalling "
+                        f"{gs.budget_used:.2f} GiB, past its multi-process "
+                        f"budget of {gs.budget_multi:.2f} GiB"
+                    )
+
+            survivors = []
+            for record in running:
+                record[1] -= 1
+                if record[1] <= 0:
+                    _release_gpus(record[0], gpus)
+                else:
+                    survivors.append(record)
+            running = survivors
+
+
+def test_a_card_too_small_is_rejected_even_when_its_foreign_memory_reads_negative():
+    """The capacity half of the reservation filter, isolated.
+
+    ``exogenous`` is ``(total - live_free) - committed_budget``, so a test that
+    holds budget it has not finished allocating drives it NEGATIVE -- here GPU2
+    has 2.0 GiB committed but only 0.3 GiB resident, giving -1.7. The
+    foreign-memory term then reads ``-1.7 + 6.0 <= 5.9`` and would happily admit
+    a 5.9 GiB card to a gang needing 6.0 on each device. Only the hard-capacity
+    term rejects it.
+
+    Without that term the hold lands on {1, 2}, GPU0 -- the one other card that
+    could ever run this gang -- is left open, and the 3.0 GiB filler cannot fit
+    in what remains of it, so nothing launches at all.
+    """
+    gpus = {
+        0: _gpu(0, 10.0, budget_used=6.0, running_count=1),
+        1: _gpu(1, 10.0),
+        2: _gpu(2, 5.9, budget_used=2.0, running_count=1),
+    }
+    actual_free = {0: 4.0, 1: 10.0, 2: 5.6}  # GPU2 has only 0.3 GiB resident
+    gang = _t("gang", 6.0, timeout=1800, gpus=2)
+    filler = _t("filler", 3.0, timeout=15.0)
+    assert _unschedulable_reason(gang, gpus) is None
+
+    launches = _select_checked(
+        [gang, filler], gpus, num_slots=8, running_count=2, actual_free=actual_free
+    )
+
+    assert launches == [(1, (2,))], (
+        "the 5.9 GiB card cannot host a 6.0 GiB gang no matter what its live "
+        "free reading says; it must not take a reservation slot from GPU0"
+    )
+
+
+def test_gang_falls_back_to_a_full_hold_when_only_some_cards_look_usable():
+    """The fallback must trigger on ANY shortfall, not only on a total wipeout.
+
+    Three 16 GiB cards, a gang wanting 12.0 on two of them, and neighbours
+    holding 5.0 GiB on GPU0 and GPU1 until pass 40. Only GPU2 passes the
+    eligibility filter, so the preferred list has one entry for a gang that
+    needs two.
+
+    One survivor is still a shortfall: the gang must fall back to the unfiltered
+    list and hold two cards. A fallback that only fires when the filtered list is
+    completely empty leaves the gang unprotected here, and the backfill takes the
+    cards while it waits.
+    """
+    gpus = {0: _gpu(0, 16.0), 1: _gpu(1, 16.0), 2: _gpu(2, 16.0)}
+    gang = _t("gang", 12.0, timeout=1800, gpus=2)
+    assert _unschedulable_reason(gang, gpus) is None
+
+    started = _drive_passes(
+        gpus,
+        [gang],
+        backfill=lambda i: _t(f"fill{i}", 3.0, timeout=600.0),
+        passes=400,
+        external_hold=lambda now: {0: 5.0, 1: 5.0} if now < 40 else {},
+    )
+
+    assert "gang" in started, "gang never launched after its blockers left"
+    assert started["gang"] <= 60, (
+        f"gang launched on pass {started['gang']}: with only one card passing "
+        "the filter it went unprotected instead of falling back to a full hold"
+    )
+
+
+def test_a_card_exactly_the_size_of_the_requirement_can_still_be_reserved():
+    """The boundary must agree with ``_unschedulable_reason``.
+
+    Pre-flight counts a card as able to host the test when ``total_gib >=
+    profiled_gib``, so a 6.0 GiB card is feasible for a 6.0 GiB gang -- as its
+    sole occupant, since an idle card's cap is the whole card. A reservation
+    filter using a strict ``>`` would disagree with that, and on a node whose
+    only large-enough cards are exact fits it would refuse to protect a gang
+    pre-flight had just declared schedulable.
+
+    Here GPU1 and GPU2 are exact fits and GPU0 is busy and too small, so the
+    hold has to land on {1, 2} and refuse the filler both places; the only card
+    left for it is GPU0.
+    """
+    gpus = {
+        0: _gpu(0, 5.0, budget_used=2.0, running_count=1),
+        1: _gpu(1, 6.0, budget_used=1.0, running_count=1),
+        2: _gpu(2, 6.0, budget_used=1.0, running_count=1),
+    }
+    gang = _t("gang", 6.0, timeout=1800, gpus=2)
+    filler = _t("filler", 1.5, timeout=15.0)
+    assert _unschedulable_reason(gang, gpus) is None, "pre-flight must accept it"
+
+    launches = _select_checked([gang, filler], gpus, num_slots=8, running_count=3)
+
+    assert launches == [(1, (0,))], (
+        "a card whose capacity exactly equals the requirement is feasible per "
+        "_unschedulable_reason and must remain reservable"
+    )

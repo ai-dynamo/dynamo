@@ -507,12 +507,35 @@ def _select_launches(
         therefore still be held off by fillers. That is pre-existing upstream
         behaviour for ``gpu_1`` and is not addressed here.
 
-    Gang progress guarantee: if a gang passes ``_unschedulable_reason`` and
-    every running test terminates, the gang launches in finite time. Each
-    reserved member's committed budget can only fall to ``budget_multi -
-    required`` and never rise back above it, the pre-reservation occupants all
-    finish, and the gang is scanned before every lower-priority test -- so the
-    ``gpu_count`` members eventually satisfy the gate simultaneously.
+    Gang progress, conditional. Clearing ``_unschedulable_reason`` is NOT
+    sufficient -- that check sees only hardware, and an earlier revision of this
+    code claimed finite-time progress from it alone, which was false. A gang
+    ``J`` needing ``r`` GiB on each of ``k`` devices launches in finite time when
+    all of the following hold for as long as it is queued:
+
+      1. at least ``k`` devices have ``r <= budget_multi``, so ``J`` can share a
+         card rather than needing one to itself;
+      2. at least ``k`` of those are not blocked by memory held outside this
+         run -- reservation placement cannot detect that, so such a gang waits
+         until the neighbour releases it;
+      3. the competing work is VRAM-bearing -- a zero-VRAM filler bypasses the
+         budget gates yet still raises ``running_count``, and can hold off a
+         gang profiled above ``budget_multi`` for its lifetime;
+      4. ``J`` outranks that competing work under ``_priority_key``; a test that
+         is simply lowest-priority against an unbounded stream of higher-priority
+         arrivals is not being starved by backfill, and no reservation applies;
+      5. every test this run launches terminates.
+
+    Given those: each held member's committed budget can only fall to
+    ``budget_multi - required`` and never rise back above it, holds are placed
+    only on devices ``J`` could actually occupy, the pre-hold occupants all
+    finish, and ``J`` is scanned before every lower-priority test -- so the ``k``
+    members eventually satisfy the gate simultaneously.
+
+    Conditions 1-4 are properties of the workload and the hardware, not of this
+    scheduler. Nothing here assumes memory held outside the run ever frees; if it
+    blocks more than ``len(gpu_states) - k`` devices, ``J`` waits, which is
+    correct because it cannot run.
     """
     tentative = {
         gi: _TentativeGpu(
@@ -544,6 +567,27 @@ def _select_launches(
         # reserve the multi-process margin for CUDA context overhead.
         gs = gpu_states[gi]
         return gs.total_gib if tentative[gi].count < 1 else gs.budget_multi
+
+    def _can_ever_host(gi: int, required: float) -> bool:
+        """Could a test needing ``required`` GiB per device ever run on ``gi``?
+
+        Deliberately asks only about the card's physical size, which is exact and
+        permanent: a card smaller than the requirement cannot host the test in
+        any future state, so a hold placed on it is protection that can never be
+        collected. The comparison matches ``_unschedulable_reason`` exactly, so a
+        test that clears pre-flight is never rejected here by a rounding
+        difference.
+
+        Live free memory is deliberately NOT consulted. It would have to
+        distinguish memory held by a neighbour on the box, which may never free,
+        from our own test overshooting its profile or still ramping, which always
+        does -- and ``(total - free) - budget`` cannot tell those apart in either
+        direction. Using it would reject a card that recovers while admitting one
+        that does not, which is worse than not filtering at all. A gang blocked
+        by memory outside this run therefore waits; see the progress conditions
+        on ``_select_launches``.
+        """
+        return gpu_states[gi].total_gib >= required
 
     for idx, test in enumerate(pending):
         if running_count + len(to_launch) >= num_slots:
@@ -636,6 +680,31 @@ def _select_launches(
         # Keep scanning -- smaller tests may still fit elsewhere or backfill
         # under the reservation, and fillers keep filling slots.
         unreserved = [gi for gi in gpu_states if gi not in reserved_req]
+        if need > 1:
+            # A hold is only protection if the gang could actually run there.
+            # Ranked by headroom alone, an IDLE card scores its whole capacity --
+            # often the best score on the node -- even when that capacity is
+            # below what the gang needs, or is already spoken for by a process
+            # outside this run. Such a card wins one of the `need` slots, offers
+            # no path to a launch, and costs the gang a hold on a card that
+            # would have been one; the unprotected card then saturates under the
+            # very backfill this reservation exists to bound.
+            #
+            # There is no fallback to the unfiltered list on purpose. The test
+            # is on physical size, so a card that fails it fails permanently --
+            # holding it could never turn into a launch, which is the whole
+            # defect. Reserving nothing beats reserving something useless, and
+            # `_unschedulable_reason` has already established that the node has
+            # `need` cards large enough; a shortfall here means a
+            # higher-priority test is holding them, which is correct.
+            #
+            # gpu_1 keeps the unfiltered rule: its reservation is a hint, not a
+            # liveness mechanism -- it needs one card to come free and any card
+            # will do -- so filtering there would change upstream behaviour for
+            # no correctness gain.
+            unreserved = [
+                gi for gi in unreserved if _can_ever_host(gi, test.profiled_gib)
+            ]
         if len(unreserved) >= need:
             unreserved.sort(
                 key=lambda gi: (-(_cap(gi) - tentative[gi].budget), rank[gi])
