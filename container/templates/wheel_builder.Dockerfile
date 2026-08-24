@@ -597,8 +597,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --auditwheel skip --out target/wheels && \
         auditwheel repair \
             --exclude 'libavcodec.so.*' \
+            --exclude 'libavdevice.so.*' \
+            --exclude 'libavfilter.so.*' \
             --exclude 'libavformat.so.*' \
             --exclude 'libavutil.so.*' \
+            --exclude 'libswresample.so.*' \
             --exclude 'libswscale.so.*' \
             --plat manylinux_2_28_${ARCH_ALT} \
             --wheel-dir /opt/dynamo/dist \
