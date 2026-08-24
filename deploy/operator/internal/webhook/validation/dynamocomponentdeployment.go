@@ -136,8 +136,10 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 	allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 		&spec.DynamoComponentDeploymentSharedSpec,
 		fldPath,
-		grovePathway,
-		validateInferencePoolAvailability,
+		dynamoComponentDeploymentSharedSpecValidationOptions{
+			grovePathway:                      grovePathway,
+			validateInferencePoolAvailability: validateInferencePoolAvailability,
+		},
 	)...)
 	return allErrs
 }

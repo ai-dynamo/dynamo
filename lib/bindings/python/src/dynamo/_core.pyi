@@ -148,6 +148,8 @@ class Endpoint:
 
     ...
 
+    async def first_token_source(self, worker_type: WorkerType) -> Optional[FirstTokenSource]: ...
+
     async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None) -> None:
         """
         Serve an endpoint discoverable by all connected clients at
@@ -456,6 +458,12 @@ class ContextMetadata:
     def items(self) -> List[Tuple[str, str]]: ...
     def clear(self) -> None: ...
     def copy(self) -> Dict[str, str]: ...
+
+class FirstTokenSource:
+    """Endpoint-scoped worker prefill-completion source."""
+
+    def bind(self, context: Context, dp_rank: Optional[int] = None) -> None: ...
+
 
 class Context:
     """
@@ -2279,10 +2287,10 @@ def lora_name_to_id(lora_name: str) -> int:
     ...
 
 def resolve_routing_image_token_id(model_id: str, model_dir: str) -> Optional[int]:
-    """Routing-side image-placeholder token id for a model, resolved with the
-    same per-family logic the frontend's MM-aware KV routing uses. Returns None
-    when the model isn't in the MM-routing registry or its config can't be read.
-    Only present when the bindings are built with the ``mm-routing`` feature.
+    """Routing-side image-placeholder token id resolved with the frontend's static
+    checks. Returns None when its model prerequisites are unavailable. Request-time
+    gates require a frontend-issued canonical MM UUID in worker KV events. Only
+    present when the bindings are built with the ``mm-routing`` feature.
     """
     ...
 
@@ -2807,6 +2815,10 @@ class KvDcRelay:
     async def shutdown(self) -> None:
         ...
 
+    async def wait_for_shutdown(self) -> None:
+        """Resolve once the relay has stopped, whether by shutdown() or a terminal host failure."""
+        ...
+
 class KvStateAgentHost:
     def __init__(self, endpoint: Endpoint, max_slots: int = 8) -> None:
         ...
@@ -2830,11 +2842,6 @@ class KvStateAttachmentOwner:
         ...
 
     async def start(self) -> None:
-        ...
-
-    async def set_cache_readable(
-        self, global_dp_rank: int, readable: bool
-    ) -> None:
         ...
 
     async def close(self) -> None:
