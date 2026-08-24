@@ -1267,13 +1267,6 @@ async fn mixed_multimodal_media_is_forwarded_with_image_uuid_only() {
         .disaggregated_params
         .clone()
         .expect("multimodal handoff");
-    assert_eq!(
-        handoff["_dynamo_sidecar_multimodal_prompt_token_ids"]
-            .as_array()
-            .expect("expanded prompt token IDs")
-            .len(),
-        601
-    );
 
     let mut decode_request = multimodal_request;
     decode_request.prefill_result = Some(PrefillResult {
@@ -1294,31 +1287,21 @@ async fn mixed_multimodal_media_is_forwarded_with_image_uuid_only() {
     let prefill_wire = &requests[requests.len() - 2];
     let decode_wire = &requests[requests.len() - 1];
     assert_eq!(prefill_wire.media.len(), 3);
-    assert!(
-        prefill_wire
-            .response
-            .as_ref()
-            .expect("prefill response options")
-            .prompt_token_ids
-    );
-    assert!(decode_wire.media.is_empty());
+    assert_eq!(decode_wire.media.len(), 3);
     assert_eq!(
         decode_wire.prompt.as_ref(),
         Some(&pb::generate_request::Prompt::TokenIds(pb::TokenIds {
-            ids: (0..601).collect(),
+            ids: vec![11, 22, 33],
         }))
     );
-    let decode_kv = struct_to_json(
-        decode_wire
-            .kv
-            .as_ref()
-            .and_then(|kv| kv.kv_transfer_params.clone())
-            .expect("decode KV handoff"),
-    )
-    .expect("decode KV JSON");
-    assert!(
-        decode_kv["_dynamo_sidecar_multimodal_prompt_token_ids"].is_null(),
-        "sidecar metadata must not reach vLLM"
+    let decode_image = decode_wire
+        .media
+        .iter()
+        .find(|item| item.modality() == pb::Modality::Image)
+        .expect("decode image media");
+    assert_eq!(
+        decode_image.uuid,
+        "0123456789abcdef000000000000000000000000000000000000000000000000"
     );
 }
 

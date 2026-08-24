@@ -11,7 +11,6 @@ use crate::json::{json_to_struct, struct_to_json};
 use crate::proto as pb;
 
 const VLLM_LOGPROB_FLOOR: f64 = -9999.0;
-const MULTIMODAL_PROMPT_TOKEN_IDS_KEY: &str = "_dynamo_sidecar_multimodal_prompt_token_ids";
 const MM_HASHES_KEY: &str = "mm_hashes";
 const IMAGE_URL_KEY: &str = "image_url";
 const VIDEO_URL_KEY: &str = "video_url";
@@ -36,22 +35,16 @@ pub(crate) fn build_generate_request(
         .as_ref()
         .and_then(|media| media.get(IMAGE_URL_KEY))
         .is_some_and(|items| !items.is_empty());
-    // Decode reuses the prefill-expanded tokens without reprocessing media.
-    let forwarded_image_uuids = if has_images && !mode.is_decode() {
+    // Each engine must prepare multimodal inputs independently so model-specific
+    // position metadata matches the transferred KV state.
+    let forwarded_image_uuids = if has_images {
         forwarded_image_uuids(&request)?
     } else {
         None
     };
-    let media = if mode.is_decode() {
-        Vec::new()
-    } else {
-        build_media(&request, forwarded_image_uuids.as_deref())?
-    };
-    let mut prefill_result = request.prefill_result;
-    let mut token_ids = request.token_ids;
-    if mode.is_decode() && has_media {
-        token_ids = take_multimodal_prompt_token_ids(&mut prefill_result)?;
-    }
+    let media = build_media(&request, forwarded_image_uuids.as_deref())?;
+    let prefill_result = request.prefill_result;
+    let token_ids = request.token_ids;
     let prompt_logprobs = request.output_options.prompt_logprobs;
     let output_logprobs = request.output_options.logprobs;
     let max_new_tokens = if mode.is_prefill() {
@@ -119,7 +112,7 @@ pub(crate) fn build_generate_request(
             ignore_eos: stop_conditions.ignore_eos.unwrap_or(false),
         }),
         response: Some(pb::ResponseOptions {
-            prompt_token_ids: prompt_logprobs.is_some() || (has_media && mode.is_prefill()),
+            prompt_token_ids: prompt_logprobs.is_some(),
             prompt_logprobs: prompt_logprobs.is_some(),
             prompt_candidates: prompt_logprobs.map(top_n_candidates).transpose()?,
             output_text: Some(true),
@@ -195,34 +188,6 @@ fn consume_redundant_nvext(
         extra.remove("nvext");
     }
     Ok(())
-}
-
-fn take_multimodal_prompt_token_ids(
-    prefill_result: &mut Option<PrefillResult>,
-) -> Result<Vec<u32>, DynamoError> {
-    let params = &mut prefill_result
-        .as_mut()
-        .ok_or_else(|| {
-            client::invalid_argument("multimodal decode request is missing the prefill result")
-        })?
-        .disaggregated_params;
-    let value = params
-        .as_object_mut()
-        .and_then(|params| params.remove(MULTIMODAL_PROMPT_TOKEN_IDS_KEY))
-        .ok_or_else(|| {
-            client::invalid_argument(
-                "multimodal decode request is missing expanded prefill token IDs",
-            )
-        })?;
-    let token_ids: Vec<u32> = serde_json::from_value(value).map_err(|error| {
-        client::invalid_argument(format!("multimodal prefill token IDs are invalid: {error}"))
-    })?;
-    if token_ids.is_empty() {
-        return Err(client::invalid_argument(
-            "multimodal prefill token IDs must not be empty",
-        ));
-    }
-    Ok(token_ids)
 }
 
 fn media_source(modality: &str, source: &str) -> Result<pb::media_item::Source, DynamoError> {
@@ -672,7 +637,6 @@ fn validate_request(
 pub(crate) struct ResponseState {
     prompt_tokens: u32,
     has_media: bool,
-    multimodal_prompt_token_ids: Option<Vec<u32>>,
     completion_tokens: u32,
     is_prefill: bool,
     output_logprobs: Option<u32>,
@@ -688,7 +652,6 @@ impl ResponseState {
                 .multi_modal_data
                 .as_ref()
                 .is_some_and(|media| media.values().any(|items| !items.is_empty())),
-            multimodal_prompt_token_ids: None,
             completion_tokens: 0,
             is_prefill: mode.is_prefill(),
             output_logprobs: request.output_options.logprobs,
@@ -811,28 +774,6 @@ impl ResponseState {
                 "prefill terminal is missing kv_transfer_params",
             ));
         }
-        if self.is_prefill && self.has_media {
-            let token_ids = self.multimodal_prompt_token_ids.take().ok_or_else(|| {
-                client::protocol_error(
-                    "multimodal prefill did not return expanded prompt token IDs",
-                )
-            })?;
-            let params = mapped
-                .disaggregated_params
-                .as_mut()
-                .and_then(serde_json::Value::as_object_mut)
-                .ok_or_else(|| {
-                    client::protocol_error("prefill kv_transfer_params is not a JSON object")
-                })?;
-            params.insert(
-                MULTIMODAL_PROMPT_TOKEN_IDS_KEY.to_string(),
-                serde_json::to_value(token_ids).map_err(|error| {
-                    client::protocol_error(format!(
-                        "failed to encode multimodal prefill token IDs: {error}"
-                    ))
-                })?,
-            );
-        }
         self.attach_prompt_data(&mut mapped);
         Ok(Some(mapped))
     }
@@ -853,16 +794,6 @@ impl ResponseState {
             }
             // vLLM's count includes expanded media tokens.
             self.prompt_tokens = prompt.num_prompt_tokens;
-        }
-        if self.is_prefill && self.has_media {
-            if prompt.token_ids.len() != prompt.num_prompt_tokens as usize {
-                return Err(client::protocol_error(format!(
-                    "multimodal prefill returned {} prompt token IDs for {} prompt tokens",
-                    prompt.token_ids.len(),
-                    prompt.num_prompt_tokens
-                )));
-            }
-            self.multimodal_prompt_token_ids = Some(prompt.token_ids.clone());
         }
         if !self.expect_prompt_logprobs {
             return Ok(());
