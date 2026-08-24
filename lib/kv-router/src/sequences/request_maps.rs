@@ -32,6 +32,7 @@ impl RequestIndex {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn set_request(
         &self,
         request_id: RequestId,
@@ -63,6 +64,23 @@ impl RequestIndex {
             .map(|(_request_id, worker)| worker);
         self.request_to_lora.remove(request_id);
         worker
+    }
+
+    /// Drop the mapping for `request_id` only if it still points at `worker`.
+    /// Returns whether the entry was removed.
+    pub(super) fn remove_request_if_worker(
+        &self,
+        request_id: &RequestId,
+        worker: WorkerWithDpRank,
+    ) -> bool {
+        let removed = self
+            .request_to_worker
+            .remove_if(request_id, |_, mapped| *mapped == worker)
+            .is_some();
+        if removed {
+            self.request_to_lora.remove(request_id);
+        }
+        removed
     }
 
     pub(super) fn remove_requests<'a>(&self, request_ids: impl IntoIterator<Item = &'a RequestId>) {

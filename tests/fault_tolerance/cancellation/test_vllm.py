@@ -38,7 +38,8 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 
 logger = logging.getLogger(__name__)
 
-CANCELLATION_MAX_TOKENS = 16384
+CANCELLATION_MAX_TOKENS = 2048
+PREFILL_CANCELLATION_MAX_TOKENS = 128
 XPU_CANCELLATION_MAX_TOKENS = 2096
 
 
@@ -141,10 +142,6 @@ class DynamoWorkerProcess(ManagedProcess):
         env["DYN_SYSTEM_PORT"] = str(self.system_port)
         env["DYN_HTTP_PORT"] = str(frontend_port)
 
-        if mode != WorkerMode.AGGREGATED:
-            self.fpm_port = allocate_port(DynamoPortRange.FPM.value)
-            env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
-
         # Set KV events config and NIXL side channel port only for prefill worker
         # to avoid conflicts with decode worker
         if mode == WorkerMode.PREFILL:
@@ -204,7 +201,6 @@ class DynamoWorkerProcess(ManagedProcess):
         cleanup_errors = []
         for port_attr in (
             "system_port",
-            "fpm_port",
             "kv_event_port",
             "nixl_side_channel_port",
         ):
@@ -344,6 +340,9 @@ def test_request_cancellation_vllm_aggregated(
                     pattern="Decode Request ID: ",
                     log_offset=worker_log_offset,
                     match_type="contains",
+                    max_wait_ms=10000,
+                    poll_interval_ms=50,
+                    cancellable_request=cancellable_req,
                 )
 
                 # For streaming, read 5 responses before cancelling
@@ -424,7 +423,9 @@ def test_request_cancellation_vllm_decode_cancel(
 
                 # Send streaming request (non-blocking)
                 cancellable_req = send_cancellable_request(
-                    frontend.frontend_port, "chat_completion_stream"
+                    frontend.frontend_port,
+                    "chat_completion_stream",
+                    max_tokens=CANCELLATION_MAX_TOKENS,
                 )
 
                 # Poll for "Decode Request ID" pattern in decode worker (vLLM v2 pattern)
@@ -434,6 +435,7 @@ def test_request_cancellation_vllm_decode_cancel(
                     match_type="contains",
                     max_wait_ms=10000,
                     poll_interval_ms=50,
+                    cancellable_request=cancellable_req,
                 )
 
                 # Verify same request ID reached prefill worker (as "Prefill Request ID")
@@ -531,13 +533,17 @@ def test_request_cancellation_vllm_prefill_cancel(
 
                 # Send request with long prompt (non-blocking)
                 cancellable_req = send_cancellable_request(
-                    frontend.frontend_port, "completion", use_long_prompt=True
+                    frontend.frontend_port,
+                    "completion",
+                    use_long_prompt=True,
+                    max_tokens=PREFILL_CANCELLATION_MAX_TOKENS,
                 )
 
                 request_id, prefill_log_offset = poll_for_pattern(
                     process=prefill_worker,
                     pattern="Prefill Request ID: ",
                     match_type="contains",
+                    cancellable_request=cancellable_req,
                 )
 
                 # Cancel during prefill phase

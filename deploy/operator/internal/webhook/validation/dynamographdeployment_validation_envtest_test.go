@@ -27,6 +27,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
@@ -39,6 +40,7 @@ import (
 const (
 	dgdAdmissionWorkerName      = "worker"
 	dgdAdmissionUpperWorkerName = "WORKER"
+	dgdAdmissionPriorityClass   = "high-priority"
 )
 
 const sglangBackendFramework = "sglang"
@@ -52,6 +54,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		name               string
 		deployment         runtime.Object
 		oldDeployment      runtime.Object
+		oldBeforeUpdate    runtime.Object
 		mutateRequest      func(*testing.T, map[string]any) // mutates the source-version request map
 		withoutTopology    bool                             // omits the default cluster topology fixture
 		groveDisabled      bool                             // disables the configured Grove pathway
@@ -66,6 +69,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		wantWarnings       []string
 		notWantErr         string
 		wantPodAnnotations map[string]string
+		wantProvider       string
 	}{
 		// Baseline create-path rules.
 		{
@@ -215,7 +219,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				enableBetaInterPodGMS(betaWorkerComponent(dgd))
 			}),
-			wantWebhookErrs: []string{"spec.components[1].experimental.gpuMemoryService.mode: Forbidden: requires the Grove pathway, but Grove is disabled in the operator configuration"},
+			wantWebhookErrs: []string{`spec.components[1].experimental.gpuMemoryService.mode: Forbidden: requires the Grove pathway, but workload provider "component" is selected`},
 		},
 		{
 			name: "inter-pod GMS requires vLLM backend",
@@ -952,7 +956,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					KvTransferPolicy: &nvidiacomv1beta1.KvTransferPolicy{ClusterTopologyName: "grove-topology", Domain: "zone"},
 				}
 			}),
-			wantWebhookErrs: []string{`spec.experimental.kvTransferPolicy.clusterTopologyName: Forbidden: requires the Grove pathway; remove or unset annotation "nvidia.com/enable-grove" (currently "false")`},
+			wantWebhookErrs: []string{`spec.experimental.kvTransferPolicy.clusterTopologyName: Forbidden: requires the Grove pathway, but workload provider "component" is selected`},
 		},
 		{
 			name: "KV-transfer domain is required by the schema",
@@ -1172,13 +1176,26 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name: "GMS snapshot combination requires gate",
+			name: "ordinary GMS snapshot combination is accepted",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
 				enableBetaIntraPodGMS(worker)
 				worker.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}
 			}),
-			wantWebhookErrs: []string{"spec.components[1].experimental.checkpoint: Forbidden: GMS + Snapshot is temporarily disabled; disable gpuMemoryService or enable the internal GMS + Snapshot gate"},
+		},
+		{
+			name: "checkpoint compatibility is revalidated on update",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				enableBetaInterPodGMS(betaWorkerComponent(dgd))
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				enableBetaInterPodGMS(worker)
+				worker.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[1].experimental.checkpoint: Forbidden: Snapshot with gpuMemoryService.mode=InterPod is unsupported",
+			},
 		},
 
 		// Source-version compatibility rules.
@@ -1423,14 +1440,14 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name:          "priority class requires Grove",
 			groveDisabled: true,
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.PriorityClassName = "high-priority"
+				dgd.Spec.PriorityClassName = dgdAdmissionPriorityClass
 			}),
-			wantWebhookErrs: []string{"spec.priorityClassName: Forbidden: requires the Grove pathway, but Grove is disabled in the operator configuration"},
+			wantWebhookErrs: []string{`spec.priorityClassName: Forbidden: requires the Grove pathway, but workload provider "component" is selected`},
 		},
 		{
 			name: "priority class is allowed with Grove",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.PriorityClassName = "high-priority"
+				dgd.Spec.PriorityClassName = dgdAdmissionPriorityClass
 			}),
 		},
 		{
@@ -1586,7 +1603,288 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`spec.components[1].topologyConstraint.packDomain: Invalid value: "zone": must be equal to or narrower than the deployment-level domain "rack"`},
 		},
 
+		// Provider-native override rules.
+		{
+			name: "valid Grove root provider override is admitted and defaulted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					"",
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+		},
+		{
+			name: "v1alpha1 Grove root provider override converts and defaults",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = alphaGroveProviderOverride(
+					"",
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+		},
+		{
+			name:          "first provider override can be added without lifecycle history",
+			oldDeployment: betaDGDForAdmission(nil),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+		},
+		{
+			name: "provider override can be removed without lifecycle status",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+			deployment: betaDGDForAdmission(nil),
+		},
+		{
+			name: "valid Grove component and multinode role overrides are admitted and defaulted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				frontend := dgd.GetComponentByName("frontend")
+				frontend.ProviderOverride = groveProviderOverride(
+					"",
+					`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+				)
+				worker := betaWorkerComponent(dgd)
+				worker.ProviderOverride = groveProviderOverride(
+					"",
+					`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}`,
+				)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{
+					NodeCount: 2,
+					Leader: &nvidiacomv1beta1.MultinodeRoleSpec{ProviderOverride: groveProviderOverride(
+						"",
+						`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+					)},
+					Worker: &nvidiacomv1beta1.MultinodeRoleSpec{ProviderOverride: groveProviderOverride(
+						"",
+						`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+					)},
+				}
+			}),
+		},
+		{
+			name:               "provider override requires a materialized workload provider on legacy update",
+			seedWithoutWebhook: true,
+			oldBeforeUpdate: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove,
+				}
+			}),
+			oldDeployment: betaDGDForAdmission(nil),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+			wantWebhookErrs: []string{`spec.providerOverride: Forbidden: requires controller-owned annotation "nvidia.com/workload-provider" to be materialized; wait for controller adoption and retry`},
+		},
+		{
+			name: "provider override target must match its DGD context",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueTemplateSpec,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+			wantWebhookErrs: []string{`spec.providerOverride.target: Invalid value: "PodCliqueTemplateSpec": must match the provider-context target "PodCliqueSet"`},
+		},
+		{
+			name: "provider override rejects Dynamo-owned fields",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"replicas":3,"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+			wantWebhookErrs: []string{`spec.providerOverride.value.spec.replicas: Forbidden: is Dynamo-owned or not enabled for provider override`},
+		},
+		{
+			name: "malformed provider override field is invalid without echoing its value",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"template":{"topologyConstraint":{"pack":"rack"}}}}`,
+				)
+			}),
+			wantWebhookErrs: []string{`spec.providerOverride.value: Invalid value: null: does not match the registered PodCliqueSet schema: json: cannot unmarshal string into Go struct field TopologyConstraint.spec.template.topologyConstraint.pack of type v1alpha1.TopologyPackConstraint`},
+		},
+		{
+			name: "typed and provider-native Grove topology cannot be combined",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+				dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{
+					ClusterTopologyName: "grove-topology",
+					PackDomain:          "rack",
+				}
+			}),
+			wantWebhookErrs: []string{`spec.providerOverride.value: Forbidden: cannot be combined with spec.topologyConstraint or components[].topologyConstraint; use either the typed topology API or provider-native Grove topology overrides`},
+		},
+		{
+			name: "component workload provider rejects provider overrides",
+			deployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+			wantWebhookErrs: []string{`spec.providerOverride: Forbidden: requires workload provider "grove", but "component" is selected`},
+		},
+		{
+			name:               "legacy provider override schema identity is immutable during repair",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueTemplateSpec,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+				dgd.Spec.ProviderOverride.APIVersion = "grove.io/v2"
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+			wantWebhookErrs: []string{
+				`spec.providerOverride.apiVersion: Invalid value: "grove.io/v1alpha1": ` + apivalidation.FieldImmutableErrorMsg,
+				`spec.providerOverride.target: Invalid value: "PodCliqueSet": ` + apivalidation.FieldImmutableErrorMsg,
+			},
+		},
+		{
+			name:               "legacy multinode role provider identity is immutable during repair",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{
+					NodeCount: 2,
+					Leader: &nvidiacomv1beta1.MultinodeRoleSpec{ProviderOverride: groveProviderOverride(
+						provideroverride.TargetPodCliqueSet,
+						`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+					)},
+				}
+				worker.Multinode.Leader.ProviderOverride.APIVersion = "grove.io/v2"
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{
+					NodeCount: 2,
+					Leader: &nvidiacomv1beta1.MultinodeRoleSpec{ProviderOverride: groveProviderOverride(
+						provideroverride.TargetPodCliqueTemplateSpec,
+						`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+					)},
+				}
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[1].multinode.leader.providerOverride.apiVersion: Invalid value: "grove.io/v1alpha1": ` + apivalidation.FieldImmutableErrorMsg,
+				`spec.components[1].multinode.leader.providerOverride.target: Invalid value: "PodCliqueTemplateSpec": ` + apivalidation.FieldImmutableErrorMsg,
+			},
+		},
+
 		// Metadata annotation rules.
+		{
+			name: "workload provider input is normalized from routing intent on create",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderComponent,
+				}
+			}),
+			wantProvider: consts.WorkloadProviderGrove,
+		},
+		{
+			name:               "unsupported stored workload provider is rejected",
+			seedWithoutWebhook: true,
+			oldBeforeUpdate:    betaComponentDGDForAdmission(nil),
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: "unknown",
+				}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: "unknown",
+				}
+				dgd.Labels = map[string]string{"updated": "true"}
+			}),
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/workload-provider]: Unsupported value: "unknown": supported values: "component", "grove"`},
+		},
+		{
+			name:               "user cannot materialize a legacy workload provider",
+			seedWithoutWebhook: true,
+			oldBeforeUpdate:    betaComponentDGDForAdmission(nil),
+			oldDeployment:      betaDGDForAdmission(nil),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderComponent,
+				}
+			}),
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/workload-provider]: Forbidden: may only be materialized by the Dynamo operator`},
+		},
+		{
+			name:               "operator can materialize a legacy workload provider",
+			seedWithoutWebhook: true,
+			username:           admissionOperatorPrincipal,
+			oldBeforeUpdate:    betaComponentDGDForAdmission(nil),
+			oldDeployment:      betaDGDForAdmission(nil),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderComponent,
+				}
+			}),
+		},
+		{
+			name:               "workload provider cannot change",
+			seedWithoutWebhook: true,
+			oldDeployment:      betaComponentDGDForAdmission(nil),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove,
+				}
+			}),
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/workload-provider]: Invalid value: "grove": ` + apivalidation.FieldImmutableErrorMsg},
+		},
+		{
+			name:               "Grove provider retains Grove admission semantics when the gate is disabled",
+			seedWithoutWebhook: true,
+			groveDisabled:      true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove,
+				}
+				dgd.Spec.PriorityClassName = dgdAdmissionPriorityClass
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove,
+				}
+				dgd.Spec.PriorityClassName = dgdAdmissionPriorityClass
+				dgd.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name:               "component provider retains component admission semantics when Grove is enabled",
+			seedWithoutWebhook: true,
+			oldDeployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.PriorityClassName = dgdAdmissionPriorityClass
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderComponent,
+				}
+				dgd.Spec.PriorityClassName = dgdAdmissionPriorityClass
+				dgd.Labels = map[string]string{"updated": "true"}
+			}),
+			wantWebhookErrs: []string{`spec.priorityClassName: Forbidden: requires the Grove pathway, but workload provider "component" is selected`},
+		},
 		{
 			name: "origin version accepts semver",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
@@ -2171,10 +2469,12 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Assemble the admission scenario from the table entry")
 			gates := features.Gates{Checkpoint: !tt.checkpointOff, Grove: !tt.groveDisabled}
 			test := admissionTestCase{
 				object:             tt.deployment,
 				oldObject:          tt.oldDeployment,
+				oldBeforeUpdate:    tt.oldBeforeUpdate,
 				mutateObject:       tt.mutateRequest,
 				gates:              gates,
 				withoutTopology:    tt.withoutTopology,
@@ -2188,7 +2488,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				notWantError:       tt.notWantErr,
 			}
 			if tt.oldDeployment != nil {
-				test.oldBeforeUpdate = dgdBeforeRestart(t, tt.oldDeployment)
+				if test.oldBeforeUpdate == nil {
+					test.oldBeforeUpdate = dgdBeforeRestart(t, tt.oldDeployment)
+				}
 				if tt.checkpointOff || tt.groveDisabled {
 					seedGates := gates
 					seedGates.Checkpoint = true
@@ -2197,12 +2499,23 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 			}
 			actual := runAdmissionTest(t, test)
-			if tt.wantPodAnnotations != nil {
-				t.Log("Verify the API server preserved embedded component pod-template annotations")
+			if tt.wantPodAnnotations != nil || tt.wantProvider != "" {
+				t.Log("Convert the admitted DGD for result assertions")
 				var actualDGD nvidiacomv1beta1.DynamoGraphDeployment
 				if err := runtime.DefaultUnstructuredConverter.FromUnstructured(actual.Object, &actualDGD); err != nil {
 					t.Fatalf("convert admitted DGD: %v", err)
 				}
+				if tt.wantProvider != "" {
+					t.Log("Verify creation-time routing intent determined the admitted workload provider")
+					if got := actualDGD.Annotations[consts.KubeAnnotationWorkloadProvider]; got != tt.wantProvider {
+						t.Fatalf("workload provider = %q, want %q", got, tt.wantProvider)
+					}
+				}
+				if tt.wantPodAnnotations == nil {
+					return
+				}
+
+				t.Log("Verify the API server preserved embedded component pod-template annotations")
 				component := actualDGD.GetComponentByName(dgdAdmissionWorkerName)
 				if component == nil || component.PodTemplate == nil {
 					t.Fatalf("admitted DGD has no pod template for component %q", dgdAdmissionWorkerName)
@@ -2257,6 +2570,20 @@ func betaDGDForAdmission(
 		mutate(dgd)
 	}
 	return dgd
+}
+
+func betaComponentDGDForAdmission(
+	mutate func(*nvidiacomv1beta1.DynamoGraphDeployment),
+) *nvidiacomv1beta1.DynamoGraphDeployment {
+	return betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		dgd.Annotations = map[string]string{
+			consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderComponent,
+			consts.KubeAnnotationEnableGrove:      consts.KubeLabelValueFalse,
+		}
+		if mutate != nil {
+			mutate(dgd)
+		}
+	})
 }
 
 func alphaDGDForAdmission(

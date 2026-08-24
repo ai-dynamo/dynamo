@@ -18,10 +18,10 @@ use crate::protocols::{
     WorkerWithDpRank,
 };
 use crate::scheduling::config::RouterConfigOverride;
-use crate::scheduling::selector::{DefaultWorkerSelector, WorkerSelector};
+use crate::scheduling::selector::WorkerSelectionPolicy;
 use crate::scheduling::{
     KvSchedulerError, LocalScheduler, OverlapAnalysis, OverlapSignals, PotentialLoad, ScheduleMode,
-    ScheduleRequest, TieredOverlapRefresher, WorkerEligibilityError, effective_prefill_tokens,
+    ScheduleRequest, SessionContext, TieredOverlapRefresher, effective_prefill_tokens,
     prefill_load_hint_from_effective_tokens,
 };
 use crate::sequences::{
@@ -46,87 +46,13 @@ use super::types::{
     SelectResponse, SelectionWorkerConfig, WORKER_TYPE, WorkerCatalogRecord, WorkerLifecycle,
     WorkerPatchRequest, WorkerRequest,
 };
-
-pub(crate) type SelectionWorkerSelectorFactory = Box<
-    dyn Fn() -> Box<dyn WorkerSelector<SelectionWorkerConfig> + Send + 'static>
-        + Send
-        + Sync
-        + 'static,
->;
-
-// Keep the default selector inline so the default path does not add an allocation.
-#[allow(clippy::large_enum_variant)]
-enum SelectionWorkerSelector {
-    Default(DefaultWorkerSelector),
-    Custom(Box<dyn WorkerSelector<SelectionWorkerConfig> + Send + 'static>),
-}
-
-impl WorkerSelector<SelectionWorkerConfig> for SelectionWorkerSelector {
-    fn select_worker(
-        &self,
-        workers: &HashMap<WorkerId, SelectionWorkerConfig>,
-        request: &crate::scheduling::SchedulingRequest,
-        eligibility: crate::scheduling::RoutingEligibility<'_>,
-        block_size: u32,
-    ) -> Result<crate::protocols::WorkerSelectionResult, KvSchedulerError> {
-        match self {
-            Self::Default(selector) => {
-                selector.select_worker(workers, request, eligibility, block_size)
-            }
-            Self::Custom(selector) => {
-                eligibility.validate_pinned_worker_allowed()?;
-                if let Some(pinned_worker) = eligibility.pinned_worker() {
-                    match eligibility.validate_worker_rank(workers, pinned_worker) {
-                        Ok(_) => {}
-                        Err(WorkerEligibilityError::WorkerOverloaded { .. }) => {
-                            return Err(KvSchedulerError::PinnedWorkerOverloaded {
-                                worker_id: pinned_worker.worker_id,
-                            });
-                        }
-                        Err(_) => return Err(KvSchedulerError::NoEndpoints),
-                    }
-                } else if !eligibility.has_eligible_worker(
-                    workers
-                        .iter()
-                        .map(|(&worker_id, config)| (worker_id, config)),
-                ) {
-                    if eligibility.has_eligible_worker_ignoring_overload(
-                        workers
-                            .iter()
-                            .map(|(&worker_id, config)| (worker_id, config)),
-                    ) {
-                        return Err(KvSchedulerError::AllEligibleWorkersOverloaded);
-                    }
-                    return Err(KvSchedulerError::NoEndpoints);
-                }
-
-                let worker = selector
-                    .select_worker(workers, request, eligibility, block_size)?
-                    .worker;
-                if eligibility
-                    .pinned_worker()
-                    .is_some_and(|pinned| pinned != worker)
-                    || eligibility.validate_worker_rank(workers, worker).is_err()
-                {
-                    return Err(KvSchedulerError::NoEndpoints);
-                }
-                Ok(crate::protocols::WorkerSelectionResult {
-                    worker,
-                    required_blocks: request.request_blocks(block_size),
-                    effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
-                    cached_tokens: request.effective_cached_tokens_for(worker),
-                    potential_decode_blocks: request
-                        .potential_decode_blocks_after_admission(worker, block_size),
-                })
-            }
-        }
-    }
-}
+use crate::WorkerSelectionPolicyFactory;
+use crate::WorkerType;
 
 type SelectionScheduler = LocalScheduler<
     ScopedSequencePublisher,
     SelectionWorkerConfig,
-    SelectionWorkerSelector,
+    WorkerSelectionPolicy,
     TieredOverlapRefresher<Indexer>,
 >;
 
@@ -191,7 +117,7 @@ pub struct SelectionCore {
     entries: RwLock<HashMap<RoutingPartitionId, Arc<OnceCell<Arc<SelectionEntry>>>>>,
     indexer_registry: Arc<WorkerRegistry>,
     kv_router_config: crate::config::KvRouterConfig,
-    worker_selector_factory: Option<SelectionWorkerSelectorFactory>,
+    worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
     cancel_token: CancellationToken,
     replica_config: Option<ReplicaSyncConfig>,
     /// Booking inputs captured by `select`, keyed by `selection_id`, so a later
@@ -214,6 +140,13 @@ impl SelectionCore {
             .values()
             .filter_map(|entry| entry.get().cloned())
             .collect()
+    }
+
+    pub(super) fn queueing_enabled(
+        &self,
+        model_name: &str,
+    ) -> Result<bool, crate::scheduling::RouterPolicyConfigError> {
+        self.kv_router_config.queueing_enabled(Some(model_name))
     }
 
     /// Create an intentionally local selector without replica synchronization
@@ -266,7 +199,7 @@ impl SelectionCore {
         indexer_threads: usize,
         cancel_token: CancellationToken,
         replica_config: Option<ReplicaSyncConfig>,
-        worker_selector_factory: Option<SelectionWorkerSelectorFactory>,
+        worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
         cache_config: SelectionCacheConfig,
         tracking_hash: Arc<TrackingHashContext>,
     ) -> Self {
@@ -275,7 +208,7 @@ impl SelectionCore {
             indexer_threads,
             cancel_token,
             replica_config,
-            worker_selector_factory,
+            worker_selection_policy_factory,
             false,
             cache_config,
             tracking_hash,
@@ -288,7 +221,7 @@ impl SelectionCore {
         indexer_threads: usize,
         cancel_token: CancellationToken,
         replica_config: Option<ReplicaSyncConfig>,
-        worker_selector_factory: Option<SelectionWorkerSelectorFactory>,
+        worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
         signal_indexer_ready: bool,
         cache_config: SelectionCacheConfig,
         tracking_hash: Arc<TrackingHashContext>,
@@ -306,7 +239,7 @@ impl SelectionCore {
             entries: RwLock::new(HashMap::new()),
             indexer_registry,
             kv_router_config,
-            worker_selector_factory,
+            worker_selection_policy_factory,
             cancel_token,
             replica_config,
             selection_cache: SelectionCache::new(&cache_config),
@@ -570,14 +503,9 @@ impl SelectionCore {
                     self.kv_router_config.clone(),
                     block_size,
                 ));
-                let selector = self.worker_selector_factory.as_ref().map_or_else(
-                    || {
-                        SelectionWorkerSelector::Default(DefaultWorkerSelector::new(
-                            Some(self.kv_router_config.clone()),
-                            WORKER_TYPE,
-                        ))
-                    },
-                    |factory| SelectionWorkerSelector::Custom(factory()),
+                let selector = self.worker_selection_policy_factory.as_ref().map_or_else(
+                    || WorkerSelectionPolicy::default(self.kv_router_config.clone(), WORKER_TYPE),
+                    |factory| factory(&self.kv_router_config, WorkerType::Aggregated, key.as_ref()),
                 );
                 let profile = self
                     .kv_router_config
@@ -591,6 +519,8 @@ impl SelectionCore {
                     selector,
                     None,
                     Some(overlap_refresh),
+                    None,
+                    // Standalone selection has no router Client snapshot.
                     None,
                     self.kv_router_config.router_queue_recheck_interval(),
                     self.kv_router_config.router_track_prefill_tokens,
@@ -858,12 +788,15 @@ impl SelectionCore {
             block_hashes: Some(block_hashes),
             isl_tokens,
             overlap,
+            router_hint_candidates: None,
+            retain_router_hint_chain: false,
             router_config_override,
             lora_name: prompt.lora_name,
             priority_jump,
             strict_priority,
             policy_class,
-            session_id,
+            session_context: session_id
+                .map(|session_id| SessionContext::new(session_id, None, None, None, None)),
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,
@@ -1649,6 +1582,64 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn lifecycle_operations_find_reservation_in_later_entry() {
+        let mut config = test_config(false);
+        config.router_track_prefill_tokens = true;
+        let core = SelectionCore::new_local(
+            config,
+            1,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        );
+
+        for (worker_id, routing_group) in [(1, "group-a"), (2, "group-b")] {
+            let mut request = worker(worker_id);
+            request.routing_group = routing_group.to_string();
+            core.upsert_worker(request).await.expect("worker upsert");
+        }
+
+        let entries = core.initialized_entries();
+        assert_eq!(entries.len(), 2);
+        let target = &entries[1];
+        let target_group = target.key.routing_group.clone();
+        let target_worker = *target
+            .workers_tx
+            .borrow()
+            .keys()
+            .next()
+            .expect("target worker");
+
+        let mut request = reserve_request("later-entry-reservation");
+        request.routing_group = target_group.clone();
+        core.select_and_reserve(request)
+            .await
+            .expect("reserve in later entry");
+
+        let load = || {
+            core.loads(Some("model"), Some(&target_group))[0]
+                .loads
+                .iter()
+                .find(|load| load.worker_id == target_worker)
+                .expect("target load")
+                .potential_prefill_tokens
+        };
+        assert_eq!(load(), 4);
+
+        core.prefill_complete("later-entry-reservation")
+            .await
+            .expect("complete prefill in later entry");
+        assert_eq!(load(), 0);
+
+        core.free_reservation("later-entry-reservation")
+            .await
+            .expect("free reservation in later entry");
+        assert!(matches!(
+            core.add_output_block("later-entry-reservation", None),
+            Err(SelectionError::NotFound(_))
+        ));
+    }
+
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn queued_selection_returns_refreshed_overlap_snapshot() {
         let mut config = test_config(false);
@@ -1670,7 +1661,8 @@ mod tests {
         entry
             .indexer
             .apply_event_routed(store_event(1, 0, 1, &[], &[11], StorageTier::Device))
-            .await;
+            .await
+            .unwrap();
         entry.indexer.dump_events().await.expect("flush indexer");
 
         for worker_id in [1, 2] {
@@ -1734,7 +1726,8 @@ mod tests {
         entry
             .indexer
             .apply_event_routed(store_event(2, 0, 1, &[], &[11, 12], StorageTier::Device))
-            .await;
+            .await
+            .unwrap();
         entry.indexer.dump_events().await.expect("flush indexer");
         tokio::time::advance(Duration::from_secs(11)).await;
         core.free_reservation("occupy-2")

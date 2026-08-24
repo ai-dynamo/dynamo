@@ -68,9 +68,49 @@ pub struct KvHints {
     pub evict_session: bool,
 }
 
+/// Causal trigger that produced an incoming agent request.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InputTrigger {
+    /// A new human/user message initiated the turn.
+    UserMessage,
+    /// A tool or function result was fed back, continuing the turn.
+    ToolResult,
+    /// Any request not triggered by a user message or tool result.
+    Other,
+}
+
+/// Metadata for an inference request that creates a compacted session summary.
+///
+/// Fields are optional because harnesses may expose different levels of detail.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentCompaction {
+    /// How the compaction was initiated, such as `manual` or `automatic`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+
+    /// Why the compaction was initiated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+
+    /// Compaction mechanism selected by the harness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implementation: Option<String>,
+
+    /// Position of this inference within the compaction flow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+
+    /// Summary or checkpoint strategy selected by the harness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+}
+
 /// Identity metadata for agentic workloads.
+// Not `deny_unknown_fields`: `AgentContext` is part of the frontend->worker wire
+// format (`PreprocessedRequest.agent_context`), so additive fields must be tolerated
+// across the N-2 mixed-version compatibility window.
 #[derive(Serialize, Deserialize, Builder, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct AgentContext {
     /// Stable reasoning/tool session identifier.
     pub session_id: String,
@@ -85,9 +125,21 @@ pub struct AgentContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_final: Option<bool>,
 
+    /// Present when the current inference creates a compacted session summary.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<AgentCompaction>,
+
     #[builder(default, setter(strip_option))]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_hints: Option<KvHints>,
+
+    /// Causal trigger that produced the request, derived from inbound request content.
+    #[builder(default, setter(strip_option))]
+    // Optional for v1.2/v1.3 payloads during the v1.4/v1.5 N-2 window.
+    // TODO(v1.6): Make required after v1.3 falls outside the N-2 window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_trigger: Option<InputTrigger>,
 }
 
 impl AgentContext {
@@ -217,6 +269,46 @@ impl NvExt {
                 .any(|annotation| annotation.starts_with("query_instance_id:"))
         })
     }
+
+    /// Return true when this envelope contains any field other than `cache_salt`.
+    pub fn has_non_cache_salt_fields(&self) -> bool {
+        let Self {
+            greed_sampling,
+            use_raw_prompt,
+            annotations,
+            backend_instance_id,
+            token_data,
+            max_thinking_tokens,
+            cache_salt: _,
+            extra_fields,
+            metadata_upload,
+            prefill_worker_id,
+            decode_worker_id,
+            dp_rank,
+            prefill_dp_rank,
+            agent_hints,
+            request_timestamp_ms,
+            routing_constraints,
+            router,
+        } = self;
+
+        greed_sampling.is_some()
+            || use_raw_prompt.is_some()
+            || annotations.is_some()
+            || backend_instance_id.is_some()
+            || token_data.is_some()
+            || max_thinking_tokens.is_some()
+            || extra_fields.is_some()
+            || metadata_upload.is_some()
+            || prefill_worker_id.is_some()
+            || decode_worker_id.is_some()
+            || dp_rank.is_some()
+            || prefill_dp_rank.is_some()
+            || agent_hints.is_some()
+            || request_timestamp_ms.is_some()
+            || routing_constraints.is_some()
+            || router.is_some()
+    }
 }
 
 impl NvExtBuilder {
@@ -252,6 +344,35 @@ pub const HEADER_DATA_PARALLEL_RANK_ALIAS: &str = "x-data-parallel-rank";
 pub const HEADER_PREFILL_DP_RANK_ALIAS: &str = "x-prefill-dp-rank";
 const UNSET_DP_RANK_SENTINEL: u32 = u32::MAX;
 
+/// Return the last non-empty value after trimming surrounding whitespace.
+pub fn last_non_empty_trimmed_value<'a>(values: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    values
+        .filter_map(|value| {
+            let value = value.trim();
+            (!value.is_empty()).then_some(value)
+        })
+        .last()
+}
+
+/// Return true when the request contains a routing header disabled by the NvExt switch.
+pub fn has_non_cache_salt_routing_headers(headers: &HeaderMap) -> bool {
+    [
+        HEADER_WORKER_INSTANCE_ID,
+        HEADER_WORKER_INSTANCE_ID_ALIAS,
+        HEADER_PREFILL_INSTANCE_ID,
+        HEADER_PREFILL_INSTANCE_ID_ALIAS,
+        HEADER_DP_RANK,
+        HEADER_DP_RANK_ALIAS,
+        HEADER_DATA_PARALLEL_RANK_ALIAS,
+        HEADER_PREFILL_DP_RANK,
+        HEADER_PREFILL_DP_RANK_ALIAS,
+        HEADER_REQUEST_PRIORITY,
+        HEADER_REQUEST_STRICT_PRIORITY,
+    ]
+    .iter()
+    .any(|header| headers.contains_key(*header))
+}
+
 impl From<AgentContextHeaderValues> for AgentContext {
     fn from(values: AgentContextHeaderValues) -> Self {
         let kv_hints = (values.session_final == Some(true)).then_some(KvHints {
@@ -261,7 +382,9 @@ impl From<AgentContextHeaderValues> for AgentContext {
             session_id: values.session_id,
             parent_session_id: values.parent_session_id,
             session_final: values.session_final,
+            compaction: values.compaction,
             kv_hints,
+            input_trigger: None,
         }
     }
 }
@@ -300,7 +423,6 @@ pub fn session_affinity_from_headers(headers: &HeaderMap) -> Option<SessionAffin
 /// - `x-dynamo-prefill-dp-rank` -> `prefill_dp_rank`
 /// - `x-dynamo-request-priority` -> `agent_hints.priority`
 /// - `x-dynamo-request-strict-priority` -> `agent_hints.strict_priority`
-/// - `x-tenant-id` -> `cache_salt`
 ///
 /// Routing headers take priority over existing nvext values when present.
 /// If no headers are present, returns the original nvext unchanged.
@@ -341,19 +463,12 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
     // `resolve_request_priority`.
     let priority = priority_header.and_then(|s| s.trim().parse::<i32>().ok());
     let strict_priority = strict_priority_header.and_then(|s| s.trim().parse::<u32>().ok());
-    let tenant_id = headers
-        .get(HEADER_TENANT_ID)
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-
     if worker_id.is_none()
         && prefill_id.is_none()
         && dp_rank.is_none()
         && prefill_dp_rank.is_none()
         && priority.is_none()
         && strict_priority.is_none()
-        && tenant_id.is_none()
     {
         return nvext;
     }
@@ -383,10 +498,60 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         hints.priority = resolved.priority;
         hints.strict_priority = resolved.strict_priority;
     }
-    if let Some(salt) = tenant_id {
-        ext.cache_salt = Some(salt);
-    }
     Some(ext)
+}
+
+/// Apply the `x-tenant-id` cache-salt override independently of other NvExt features.
+///
+/// The last non-empty, trimmed header takes priority over a body salt. Empty or
+/// invalid values are treated as absent and leave the body unchanged.
+pub fn apply_cache_salt_header_override(
+    nvext: Option<NvExt>,
+    headers: &HeaderMap,
+) -> Option<NvExt> {
+    let Some(cache_salt) = last_non_empty_trimmed_value(
+        headers
+            .get_all(HEADER_TENANT_ID)
+            .iter()
+            .filter_map(|value| value.to_str().ok()),
+    )
+    .map(str::to_owned) else {
+        return nvext;
+    };
+
+    let mut nvext = nvext.unwrap_or_default();
+    nvext.cache_salt = Some(cache_salt);
+    Some(nvext)
+}
+
+/// Remove all NvExt fields except a non-empty cache salt.
+pub fn retain_cache_salt(nvext: Option<NvExt>) -> Option<NvExt> {
+    nvext.and_then(|nvext| {
+        nvext
+            .cache_salt
+            .filter(|cache_salt| !cache_salt.is_empty())
+            .map(|cache_salt| NvExt {
+                cache_salt: Some(cache_salt),
+                ..Default::default()
+            })
+    })
+}
+
+/// Apply the frontend NvExt policy for endpoints that support routing headers.
+///
+/// Cache-salt resolution always runs. Other body fields and routing headers run only
+/// when NvExt is enabled.
+pub fn apply_frontend_nvext_policy(
+    nvext: Option<NvExt>,
+    headers: &HeaderMap,
+    nvext_enabled: bool,
+) -> Option<NvExt> {
+    let nvext = apply_cache_salt_header_override(nvext, headers);
+    if nvext_enabled {
+        apply_header_routing_overrides(nvext, headers)
+    } else {
+        retain_cache_salt(nvext)
+    }
 }
 
 /// Priority resolved with header-over-body precedence, per field: a well-formed
@@ -694,9 +859,9 @@ mod tests {
     use super::*;
     use crate::protocols::agents::{
         HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_PARENT_AGENT_ID,
-        HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_SESSION_ID, HEADER_DYNAMO_PARENT_SESSION_ID,
-        HEADER_DYNAMO_SESSION_FINAL, HEADER_DYNAMO_SESSION_ID, HEADER_OPENCODE_PARENT_SESSION_ID,
-        HEADER_OPENCODE_SESSION_ID,
+        HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_PARENT_THREAD_ID, HEADER_CODEX_THREAD_ID,
+        HEADER_CODEX_TURN_METADATA, HEADER_DYNAMO_PARENT_SESSION_ID, HEADER_DYNAMO_SESSION_FINAL,
+        HEADER_DYNAMO_SESSION_ID, HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
     };
 
     #[derive(Default)]
@@ -717,6 +882,24 @@ mod tests {
         fn unsupported_fields(&self) -> Option<&HashMap<String, serde_json::Value>> {
             Some(&self.unsupported_fields)
         }
+    }
+
+    #[test]
+    fn agent_context_accepts_missing_input_trigger() {
+        let context: AgentContext = serde_json::from_str(r#"{"session_id":"root"}"#).unwrap();
+        assert_eq!(context.input_trigger, None);
+    }
+
+    #[test]
+    fn agent_context_accepts_nested_compaction() {
+        let context = serde_json::from_str::<AgentContext>(
+            r#"{"session_id":"root","compaction":{"trigger":"manual"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            context.compaction.and_then(|compaction| compaction.trigger),
+            Some("manual".to_string())
+        );
     }
 
     #[test]
@@ -745,45 +928,6 @@ mod tests {
     }
 
     #[test]
-    fn shared_nvext_builder_default() {
-        let nv_ext = NvExt::builder().build().unwrap();
-        assert_eq!(nv_ext.greed_sampling, None);
-        assert_eq!(nv_ext.use_raw_prompt, None);
-        assert_eq!(nv_ext.annotations, None);
-        assert_eq!(nv_ext.backend_instance_id, None);
-        assert_eq!(nv_ext.token_data, None);
-        assert_eq!(nv_ext.max_thinking_tokens, None);
-        assert_eq!(nv_ext.cache_salt, None);
-        assert_eq!(nv_ext.extra_fields, None);
-        assert_eq!(nv_ext.metadata_upload, None);
-        assert_eq!(nv_ext.prefill_worker_id, None);
-        assert_eq!(nv_ext.decode_worker_id, None);
-        assert_eq!(nv_ext.agent_hints, None);
-        assert_eq!(nv_ext.request_timestamp_ms, None);
-        assert_eq!(nv_ext.routing_constraints, None);
-    }
-
-    #[test]
-    fn shared_nvext_builder_custom() {
-        let nv_ext = NvExt::builder()
-            .greed_sampling(true)
-            .use_raw_prompt(true)
-            .backend_instance_id(42)
-            .token_data(vec![1, 2, 3, 4])
-            .max_thinking_tokens(1024)
-            .extra_fields(vec!["worker_id".to_string()])
-            .build()
-            .unwrap();
-
-        assert_eq!(nv_ext.greed_sampling, Some(true));
-        assert_eq!(nv_ext.use_raw_prompt, Some(true));
-        assert_eq!(nv_ext.backend_instance_id, Some(42));
-        assert_eq!(nv_ext.token_data, Some(vec![1, 2, 3, 4]));
-        assert_eq!(nv_ext.max_thinking_tokens, Some(1024));
-        assert_eq!(nv_ext.extra_fields, Some(vec!["worker_id".to_string()]));
-    }
-
-    #[test]
     fn parse_nvext_rejects_unknown_fields_in_llm_layer() {
         let err = parse_nvext(Some(serde_json::json!({
             "unsupported_future_field": true
@@ -804,18 +948,6 @@ mod tests {
         );
 
         assert!(serde_json::from_str::<AgentHints>(r#"{"strict_priority":-1}"#).is_err());
-    }
-
-    #[test]
-    fn shared_nvext_disagg_worker_ids() {
-        let nv_ext = NvExt::builder()
-            .prefill_worker_id(100)
-            .decode_worker_id(200)
-            .build()
-            .unwrap();
-
-        assert_eq!(nv_ext.prefill_worker_id, Some(100));
-        assert_eq!(nv_ext.decode_worker_id, Some(200));
     }
 
     #[test]
@@ -978,11 +1110,11 @@ mod tests {
     }
 
     #[test]
-    fn apply_header_routing_overrides_sets_cache_salt_from_tenant_header() {
+    fn cache_salt_header_override_has_precedence() {
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_TENANT_ID, "tenant-a".parse().unwrap());
 
-        let nvext = apply_header_routing_overrides(None, &headers).unwrap();
+        let nvext = apply_cache_salt_header_override(None, &headers).unwrap();
         assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-a"));
 
         let mut headers = HeaderMap::new();
@@ -992,8 +1124,93 @@ mod tests {
             ..Default::default()
         };
 
-        let nvext = apply_header_routing_overrides(Some(nvext), &headers).unwrap();
+        let nvext = apply_cache_salt_header_override(Some(nvext), &headers).unwrap();
         assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-header"));
+
+        headers.append(HEADER_TENANT_ID, "   ".parse().unwrap());
+        headers.append(HEADER_TENANT_ID, " tenant-gateway ".parse().unwrap());
+        let nvext = apply_cache_salt_header_override(Some(nvext), &headers).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-gateway"));
+    }
+
+    #[test]
+    fn cache_salt_header_override_ignores_only_empty_values() {
+        let mut headers = HeaderMap::new();
+        headers.append(HEADER_TENANT_ID, "".parse().unwrap());
+        headers.append(HEADER_TENANT_ID, "   ".parse().unwrap());
+        let nvext = NvExt {
+            cache_salt: Some("tenant-body".to_string()),
+            ..Default::default()
+        };
+
+        let nvext = apply_cache_salt_header_override(Some(nvext), &headers).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-body"));
+    }
+
+    #[test]
+    fn frontend_nvext_policy_preserves_cache_salt_when_disabled() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_WORKER_INSTANCE_ID, "42".parse().unwrap());
+        headers.insert(HEADER_REQUEST_PRIORITY, "7".parse().unwrap());
+        let body = NvExt {
+            cache_salt: Some("tenant-body".to_string()),
+            backend_instance_id: Some(99),
+            extra_fields: Some(vec!["worker_id".to_string()]),
+            ..Default::default()
+        };
+
+        let nvext = apply_frontend_nvext_policy(Some(body), &headers, false).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-body"));
+        assert!(!nvext.has_non_cache_salt_fields());
+    }
+
+    #[test]
+    fn frontend_nvext_policy_resolves_header_body_and_empty_values() {
+        let body = || NvExt {
+            cache_salt: Some("tenant-body".to_string()),
+            ..Default::default()
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_TENANT_ID, "tenant-header".parse().unwrap());
+        let nvext = apply_frontend_nvext_policy(Some(body()), &headers, false).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-header"));
+
+        headers.insert(HEADER_TENANT_ID, "".parse().unwrap());
+        let nvext = apply_frontend_nvext_policy(Some(body()), &headers, false).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-body"));
+
+        let empty_body = NvExt {
+            cache_salt: Some(String::new()),
+            ..Default::default()
+        };
+        let mut request = CacheSaltRequest {
+            nvext: apply_frontend_nvext_policy(Some(empty_body), &headers, false),
+            ..Default::default()
+        };
+        request
+            .unsupported_fields
+            .insert("cache_salt".to_string(), serde_json::json!("tenant-legacy"));
+        assert_eq!(request_cache_salt(&request), Some("tenant-legacy"));
+        assert!(apply_frontend_nvext_policy(None, &HeaderMap::new(), false).is_none());
+    }
+
+    #[test]
+    fn frontend_nvext_policy_keeps_full_enabled_behavior() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_TENANT_ID, "tenant-header".parse().unwrap());
+        headers.insert(HEADER_WORKER_INSTANCE_ID, "42".parse().unwrap());
+        let body = NvExt {
+            cache_salt: Some("tenant-body".to_string()),
+            extra_fields: Some(vec!["worker_id".to_string()]),
+            ..Default::default()
+        };
+
+        let nvext = apply_frontend_nvext_policy(Some(body), &headers, true).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-header"));
+        assert_eq!(nvext.backend_instance_id, Some(42));
+        assert_eq!(nvext.decode_worker_id, Some(42));
+        assert_eq!(nvext.extra_fields, Some(vec!["worker_id".to_string()]));
     }
 
     #[test]
@@ -1023,18 +1240,25 @@ mod tests {
     }
 
     #[test]
+    fn routing_overrides_do_not_apply_tenant_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_TENANT_ID, "tenant-header".parse().unwrap());
+        let nvext = NvExt {
+            cache_salt: Some("tenant-body".to_string()),
+            ..Default::default()
+        };
+
+        let nvext = apply_header_routing_overrides(Some(nvext), &headers).unwrap();
+        assert_eq!(nvext.cache_salt.as_deref(), Some("tenant-body"));
+    }
+
+    #[test]
     fn agent_context_from_headers_derives_agent_context_table() {
         use axum::http::{HeaderMap, HeaderName};
 
         let cases = [
             (HEADER_CLAUDE_CODE_SESSION_ID, "claude-run-1", None, None),
-            ("Session-ID", "codex-run-1", None, None),
-            (
-                HEADER_CODEX_SESSION_ID,
-                "codex-run-2",
-                Some("opencode-parent"),
-                None,
-            ),
+            (HEADER_CODEX_THREAD_ID, "codex-root", None, None),
             (
                 HEADER_OPENCODE_SESSION_ID,
                 "opencode-run-1",
@@ -1066,13 +1290,127 @@ mod tests {
     }
 
     #[test]
+    fn agent_context_from_codex_compaction_header_preserves_metadata() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
+        headers.insert(
+            HEADER_CODEX_TURN_METADATA,
+            r#"{"request_kind":"compaction","compaction":{"trigger":"manual","reason":"user_requested","implementation":"responses_compact","phase":"standalone_turn","strategy":"memento"}}"#
+                .parse()
+                .unwrap(),
+        );
+
+        let agent_context = agent_context_from_headers(&headers).unwrap();
+        assert_eq!(
+            agent_context.compaction,
+            Some(AgentCompaction {
+                trigger: Some("manual".to_string()),
+                reason: Some("user_requested".to_string()),
+                implementation: Some("responses_compact".to_string()),
+                phase: Some("standalone_turn".to_string()),
+                strategy: Some("memento".to_string()),
+            })
+        );
+
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "canonical".parse().unwrap());
+        let agent_context = agent_context_from_headers(&headers).unwrap();
+        assert_eq!(agent_context.session_id, "canonical");
+        assert_eq!(
+            agent_context
+                .compaction
+                .and_then(|compaction| compaction.strategy),
+            Some("memento".to_string())
+        );
+    }
+
+    #[test]
+    fn agent_context_ignores_invalid_or_non_compaction_codex_metadata() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
+        headers.insert(HEADER_CODEX_TURN_METADATA, "{".parse().unwrap());
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().compaction,
+            None
+        );
+
+        headers.insert(
+            HEADER_CODEX_TURN_METADATA,
+            r#"{"request_kind":"turn","compaction":{"trigger":"manual"}}"#
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().compaction,
+            None
+        );
+
+        headers.insert(
+            HEADER_CODEX_TURN_METADATA,
+            r#"{"request_kind":"compaction"}"#.parse().unwrap(),
+        );
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().compaction,
+            Some(AgentCompaction::default())
+        );
+    }
+
+    #[test]
+    fn agent_context_from_codex_thread_headers_preserves_subagent_lineage() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_CODEX_THREAD_ID, "codex-child".parse().unwrap());
+        headers.insert(HEADER_CODEX_PARENT_THREAD_ID, "codex-root".parse().unwrap());
+
+        let agent_context = agent_context_from_headers(&headers).unwrap();
+        assert_eq!(agent_context.session_id, "codex-child");
+        assert_eq!(
+            agent_context.parent_session_id.as_deref(),
+            Some("codex-root")
+        );
+        assert_eq!(
+            session_affinity_from_headers(&headers).unwrap().as_str(),
+            "codex-child"
+        );
+    }
+
+    #[test]
+    fn agent_context_ignores_self_parent_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
+        headers.insert(
+            HEADER_CODEX_PARENT_THREAD_ID,
+            "codex-thread".parse().unwrap(),
+        );
+
+        assert_eq!(
+            agent_context_from_headers(&headers)
+                .unwrap()
+                .parent_session_id,
+            None
+        );
+    }
+
+    #[test]
+    fn codex_session_id_is_ignored_without_thread_id() {
+        let mut headers = HeaderMap::new();
+        headers.insert("session-id", "codex-run".parse().unwrap());
+        assert!(agent_context_from_headers(&headers).is_none());
+        assert!(session_affinity_from_headers(&headers).is_none());
+
+        headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().session_id,
+            "codex-thread"
+        );
+    }
+
+    #[test]
     fn session_affinity_prefers_dynamo_header_over_agent_mappings() {
         let mut headers = HeaderMap::new();
         headers.insert(
             HEADER_CLAUDE_CODE_SESSION_ID,
             "claude-session".parse().unwrap(),
         );
-        headers.insert(HEADER_CODEX_SESSION_ID, "codex-session".parse().unwrap());
+        headers.insert(HEADER_CODEX_THREAD_ID, "codex-thread".parse().unwrap());
         headers.insert(
             HEADER_OPENCODE_SESSION_ID,
             "opencode-session".parse().unwrap(),

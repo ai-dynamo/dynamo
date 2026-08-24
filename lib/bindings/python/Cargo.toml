@@ -7,7 +7,7 @@
 
 [package]
 name = "dynamo-py3"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2024"
 authors = ["NVIDIA"]
 license = "Apache-2.0"
@@ -23,6 +23,12 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
+# Links a policy catalog selected by the dependency alias below. Private images replace
+# that dependency with their catalog crate; the stock image does not enable this feature.
+custom-policy = [
+  "dep:dynamo-worker-selection-policy-catalog",
+  "dynamo-kv-router/standalone-selection",
+]
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
 kv-indexer = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-indexer"]
 kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
@@ -30,7 +36,6 @@ kv-indexer-metrics = ["kv-indexer", "dynamo-kv-router/metrics"]
 ckf-diagnostics = ["dynamo-llm/ckf-diagnostics"]
 slot-tracker = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-slot-tracker"]
 select-service = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-selection"]
-mocker-kvbm-offload = ["dynamo-mocker/kvbm-offload"]
 # Stable request identities and deterministic replay tie-breaking for parity builds.
 replay-bench = ["dynamo-mocker/replay-bench"]
 aic-forward-pass = ["dep:aiconfigurator-core"]
@@ -42,8 +47,7 @@ nvtx = ["dynamo-runtime/nvtx"]
 # recipes pass this flag explicitly; the dev container's
 # `.devcontainer/post-create.sh` also enables it for local workflows.
 mm-routing = ["dynamo-llm/mm-routing"]
-# Enable the native S3 destination for the request-trace sink. Pulls in
-# aws-sdk-s3 + aws-config so the default wheel stays lean; production wheel
+# Enable the native S3 destination for the request-trace sink. Production wheel
 # builds enable this flag in container/templates/wheel_builder.Dockerfile so
 # `DYN_REQUEST_TRACE_SINKS=s3` works on shipped artifacts.
 request-trace-s3 = ["dynamo-llm/request-trace-s3"]
@@ -58,7 +62,7 @@ request-trace-s3 = ["dynamo-llm/request-trace-s3"]
 aiconfigurator-core = { version = "=0.11.0-dev20260728", optional = true }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
-dynamo-parsers = { version = "7.0.1" }
+dynamo-parsers = { version = "8.0.0" }
 dynamo-backend-common = { path = "../../backend-common" }
 dynamo-sglang-sidecar = { path = "../../sidecar/sglang" }
 
@@ -90,6 +94,7 @@ uuid = { version = "1.18.1" }
 
 # kv-indexer / slot-tracker / shared kv-router types
 dynamo-kv-router = { path = "../../kv-router" }
+dynamo-worker-selection-policy-catalog = { path = "../../router-plugins/catalog", optional = true }
 clap = { version = "4.5", features = ["derive"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 

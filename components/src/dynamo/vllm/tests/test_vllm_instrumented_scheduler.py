@@ -1600,7 +1600,7 @@ def test_benchmark_grid_tracks_each_requested_empty_phase(
     mode, prefill_points, decode_points, expected_missing_phases
 ):
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._bench_config = SimpleNamespace(mode=mode)
+    stub._bench_config = BenchmarkConfig(mode=mode)
     stub._bench_explicit_points = None
     stub._bench_grid = deque()
     stub._bench_grid_built = False
@@ -1628,7 +1628,7 @@ def test_benchmark_grid_tracks_each_requested_empty_phase(
 
 def test_benchmark_grid_has_no_point_cap():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._bench_config = SimpleNamespace(mode="prefill")
+    stub._bench_config = BenchmarkConfig(mode="prefill")
     stub._bench_explicit_points = None
     stub._bench_grid = deque()
     stub._bench_grid_built = False
@@ -1654,7 +1654,7 @@ def test_benchmark_grid_has_no_point_cap():
 
 def test_benchmark_grid_assigns_stable_contiguous_ids_and_digest():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
-    stub._bench_config = SimpleNamespace(mode="prefill")
+    stub._bench_config = BenchmarkConfig(mode="prefill")
     stub._bench_explicit_points = None
     stub._bench_grid = deque()
     stub._bench_grid_built = False
@@ -2449,13 +2449,37 @@ def test_prefill_kv_read_grid_accounts_for_eagle_cache_block_drop():
     stub = _prefill_grid_stub(block_size=8)
     stub.kv_cache_manager = SimpleNamespace(use_eagle=True)
 
+    assert InstrumentedScheduler._bench_prefill_kv_read_points(stub, 8, 1) == [0]
+
     points = InstrumentedScheduler._bench_prefill_kv_read_points(stub, 40, 1)
     assert points[0] == 0
     assert all(point % 8 == 0 for point in points)
     assert InstrumentedScheduler._bench_seed_prompt_len(stub, 16) == 24
 
     # The extra seed block must also fit under max_model_len.
-    assert InstrumentedScheduler._bench_prefill_kv_read_points(stub, 1, 1)[-1] == 112
+    assert InstrumentedScheduler._bench_prefill_kv_read_points(stub, 9, 1)[-1] == 112
+
+
+def test_prefill_eagle_kv_read_requires_more_than_one_drop_block_per_request():
+    stub = _prefill_grid_stub(block_size=8)
+    stub.kv_cache_manager = SimpleNamespace(use_eagle=True)
+
+    assert not InstrumentedScheduler._bench_prefill_point_feasible(stub, 17, 2, 16)
+    assert InstrumentedScheduler._bench_prefill_point_feasible(stub, 18, 2, 16)
+
+
+def test_prefill_eagle_partial_hash_hit_uses_hash_drop_granularity():
+    stub = _prefill_grid_stub(block_size=16)
+    stub._bench_hash_block_size = 8
+    stub.kv_cache_manager = SimpleNamespace(
+        use_eagle=True,
+        coordinator=SimpleNamespace(enable_partial_hash_hits=True),
+    )
+
+    assert InstrumentedScheduler._bench_eagle_cache_drop_tokens(stub) == 8
+    assert InstrumentedScheduler._bench_seed_prompt_len(stub, 16) == 24
+    assert not InstrumentedScheduler._bench_prefill_point_feasible(stub, 8, 1, 8)
+    assert InstrumentedScheduler._bench_prefill_point_feasible(stub, 9, 1, 8)
 
 
 def test_prefill_fake_seed_feasibility_uses_uncapped_allocation():

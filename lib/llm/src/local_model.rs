@@ -7,8 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use dynamo_runtime::component::Endpoint;
-use dynamo_runtime::discovery::DiscoveryInstance;
-use dynamo_runtime::discovery::DiscoverySpec;
+use dynamo_runtime::discovery::{DiscoveryInstance, DiscoverySpec, ModelCardInstanceId};
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -471,15 +470,38 @@ pub async fn register_model_card(
     let model_suffix = derive_lora_suffix(lora_name);
 
     let discovery = endpoint.drt().discovery();
+    let wire_card = card.for_mdc_wire();
     let spec = DiscoverySpec::from_model_with_suffix(
         endpoint.component().namespace().name().to_string(),
         endpoint.component().name().to_string(),
         endpoint.name().to_string(),
-        card,
+        &wire_card,
         model_suffix,
     )?;
     let _instance = discovery.register(spec).await?;
     Ok(())
+}
+
+/// Replace the caller-managed taints on this worker's existing model card.
+pub async fn update_model_taints(
+    endpoint: &Endpoint,
+    taints: HashSet<String>,
+) -> anyhow::Result<()> {
+    let endpoint_id = endpoint.id();
+    let instance_id = endpoint.drt().connection_id();
+    let discovery = endpoint.drt().discovery();
+    discovery
+        .update_model_taints(
+            ModelCardInstanceId {
+                namespace: endpoint_id.namespace,
+                component: endpoint_id.component,
+                endpoint: endpoint_id.name,
+                instance_id,
+                model_suffix: None,
+            },
+            taints,
+        )
+        .await
 }
 
 impl LocalModel {

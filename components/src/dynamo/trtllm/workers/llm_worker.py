@@ -38,6 +38,8 @@ from transformers import AutoConfig
 import dynamo.nixl_connect as nixl_connect
 from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
+from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
@@ -67,7 +69,11 @@ from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
 )
-from dynamo.trtllm.utils.trtllm_utils import deep_update, get_spec_decode_runtime_data
+from dynamo.trtllm.utils.trtllm_utils import (
+    deep_update,
+    get_spec_decode_runtime_data,
+    publish_trtllm_token_budget,
+)
 
 try:
     # Available only when the bindings include the `mm-routing` feature.
@@ -657,6 +663,7 @@ async def init_llm_worker(
         runtime_config = ModelRuntimeConfig()
         runtime_config.kv_state_endpoint = config.kv_state_endpoint
         runtime_config.context_length = config.max_seq_len
+        publish_trtllm_token_budget(runtime_config, config.max_seq_len)
 
         kv_cache_block_size = config.kv_block_size
         if config.disaggregation_mode != DisaggregationMode.ENCODE:
@@ -856,6 +863,10 @@ async def init_llm_worker(
         else:
             needs = [needs_set] if needs_set else []
 
+        handler_config.first_token_source = await endpoint.first_token_source(
+            worker_type
+        )
+
         await register_model(
             model_input,
             model_type,
@@ -869,7 +880,13 @@ async def init_llm_worker(
             media_fetcher=media_fetcher,
             worker_type=worker_type,
             needs=needs,
+            # Advertise this worker set's own routing strategy when --router-mode
+            # is set; None inherits the frontend's global mode. Combined with
+            # worker_type, this is what lets a disaggregated deployment route to
+            # its prefill and decode tiers differently.
+            router_config=build_router_config(config.router_advertisement),
         )
+        register_model_taint_route(runtime, endpoint)
 
         health_check_payload = TrtllmHealthCheckPayload(
             tokenizer=tokenizer,

@@ -37,14 +37,22 @@ pytestmark = [
     pytest.mark.router,
     pytest.mark.sglang,
 ]
-PAGE_SIZE = 16  # SGLang uses "page_size" instead of "block_size"
+# SGLang uses "page_size" instead of "block_size". 64 (not 16) because the
+# TRT-LLM MLA attention backend only supports page sizes 32/64, and
+# dynamo.sglang coerces page_size up to 64 on GPUs where that backend is
+# selected (overrides._mla_backend_page_constraints). A 16-token page here
+# then desyncs the router radix (16) from the worker KV events (64) and every
+# device_blocks assertion sees 0. 64 is honored on every backend, so the
+# router and workers always agree.
+PAGE_SIZE = 64
 
-# Shared SGLang configuration for all tests
-# mem_fraction_static limits actual VRAM allocation (required for multi-worker on same GPU)
+# Shared SGLang configuration for all tests.
+# Memory is budgeted with the token-cap form (--max-total-tokens +
+# --mem-fraction-static 0.9, see tests/README.md "SGLang KV tokens").
 SGLANG_ARGS: Dict[str, Any] = {
     "page_size": PAGE_SIZE,
     "model": MODEL_NAME,
-    "mem_fraction_static": 0.4,  # Limit VRAM allocation per worker (equivalent to vLLM's gpu_memory_utilization)
+    "max_total_tokens": 2048,  # matches the requested_sglang_kv_tokens(2048) markers
     "context_length": 1024,  # Limit context length to reduce KV cache size (equivalent to vLLM's max_model_len)
     "disable_cuda_graph": True,  # Disable CUDA graphs for faster startup & lower memory (equivalent to vLLM's enforce_eager)
 }
@@ -81,6 +89,9 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 - page_size: KV cache page size (default: 16)
                 - model: Model name/path (default: TinyLlama-1.1B)
                 - mem_fraction_static: Fraction of GPU memory to allocate (optional)
+                - max_total_tokens: Max KV cache tokens; takes precedence over
+                  mem_fraction_static and is emitted with --mem-fraction-static 0.9
+                  (see tests/README.md "SGLang KV tokens")
                 - context_length: Maximum sequence length (optional)
                 - disable_cuda_graph: Disable CUDA graphs (default: False)
             num_workers: Number of SGLang worker processes
@@ -125,8 +136,15 @@ class SGLangProcess(ManagedEngineProcessMixin):
         page_size = sglang_args.get("page_size", PAGE_SIZE)
         model = sglang_args.get("model", MODEL_NAME)
         mem_fraction_static = sglang_args.get("mem_fraction_static")
+        max_total_tokens = sglang_args.get("max_total_tokens")
         context_length = sglang_args.get("context_length")
         disable_cuda_graph = sglang_args.get("disable_cuda_graph", False)
+        # Resolved memory budget, for startup logs (mirrors the command flags).
+        mem_budget = (
+            f"max_total_tokens={max_total_tokens}, mem_frac=0.9"
+            if max_total_tokens is not None
+            else f"mem_frac={mem_fraction_static}"
+        )
 
         self.model_name = model
 
@@ -166,8 +184,18 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 command.append("--disable-cuda-graph")
                 command.append("--disable-piecewise-cuda-graph")
 
-            # Limit VRAM allocation (required for multi-worker on same GPU)
-            if mem_fraction_static is not None:
+            # Limit VRAM allocation (required for multi-worker on same GPU).
+            # Prefer the token-cap form; see the SGLANG_ARGS comment.
+            if max_total_tokens is not None:
+                command.extend(
+                    [
+                        "--max-total-tokens",
+                        str(max_total_tokens),
+                        "--mem-fraction-static",
+                        "0.9",
+                    ]
+                )
+            elif mem_fraction_static is not None:
                 command.extend(["--mem-fraction-static", str(mem_fraction_static)])
 
             # Add optional context_length if specified
@@ -234,13 +262,13 @@ class SGLangProcess(ManagedEngineProcessMixin):
             if data_parallel_size is not None:
                 logger.info(
                     f"Created {data_parallel_size} DP ranks per worker on GPU(s) {gpu_device} "
-                    f"(mem_frac={mem_fraction_static}, system_port={system_port}, kv_port={kv_events_port}) "
+                    f"({mem_budget}, system_port={system_port}, kv_port={kv_events_port}) "
                     f"with endpoint: {self.endpoint}"
                 )
             else:
                 logger.info(
                     f"Created SGLang worker {worker_idx} on GPU {gpu_device} "
-                    f"(mem_frac={mem_fraction_static}, system_port={system_port}, kv_port={kv_events_port}) "
+                    f"({mem_budget}, system_port={system_port}, kv_port={kv_events_port}) "
                     f"with endpoint: {self.endpoint}"
                 )
 
@@ -308,9 +336,9 @@ def test_router_decisions_sglang_multiple_workers(
 
 @pytest.mark.e2e
 @pytest.mark.model(MODEL_NAME)
+@pytest.mark.h100
 @pytest.mark.gpu_2
 @pytest.mark.nightly
-@pytest.mark.profiled_vram_gib(3.7)
 @pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)

@@ -211,6 +211,41 @@ class TestTokenInSamplingDefaults:
         assert sp.top_p == pytest.approx(1.0)
 
 
+class TestLogprobTokenIds:
+    """Explicit `logprob_token_ids` must null the top-k width, as vLLM's own
+    OpenAI adapters do, so `SamplingParams.verify()` accepts the pair."""
+
+    @staticmethod
+    def _build(output_options, sampling_options=None):
+        from dynamo.vllm.handlers import build_sampling_params
+
+        return build_sampling_params(
+            {
+                "token_ids": [1, 2, 3],
+                "sampling_options": sampling_options or {},
+                "stop_conditions": {},
+                "output_options": output_options,
+            },
+            {},
+        )
+
+    def test_explicit_ids_null_requested_width(self):
+        sp = self._build(
+            {"logprobs": 5}, sampling_options={"logprob_token_ids": [5000]}
+        )
+        assert sp.logprob_token_ids == [5000]
+        assert sp.logprobs is None
+        assert sp.num_logprobs == 1
+
+    def test_requested_width_kept_without_explicit_ids(self):
+        sp = self._build({"logprobs": 5})
+        assert sp.logprobs == 5
+
+    def test_empty_id_list_falls_through_to_top_k(self):
+        sp = self._build({"logprobs": 5}, sampling_options={"logprob_token_ids": []})
+        assert sp.logprobs == 5
+
+
 class TestFlattenLogprobs:
     def test_nested_lists_are_fully_flattened(self):
         from dynamo.vllm.handlers import _flatten_logprobs

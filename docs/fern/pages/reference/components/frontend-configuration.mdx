@@ -52,8 +52,9 @@ The Rust HTTP server also reads these environment variables, which are not expos
 
 <ParamField path="DYN_HTTP_OVERLOAD_STATUS_CODE" type="integer" default="529">
   HTTP status returned for overload and admission-control rejection. Use `503` only for clients that
-  cannot handle 529. Invalid or out-of-range values fall back to 529. The value is read once and
-  cached when the HTTP service initializes.
+  cannot handle 529. Values from 200 through 999 are accepted. Informational values from 100 through
+  199, invalid values, and out-of-range values fall back to 529. The value is read and cached on
+  first use.
 </ParamField>
 
 <ParamField path="DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS" type="integer" default="0">
@@ -294,11 +295,28 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-policy-config" type="string" default="null">
-  Startup-only policy-family and cache-bucket YAML. When omitted, `--router-queue-threshold` and
-  `--router-queue-policy` define one synthetic policy class. Queueing remains disabled until a
-  threshold is configured. See [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues).
+  Startup-only YAML for policy-class queues and custom worker-selection instances. When omitted,
+  `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class.
+  Queueing remains disabled until a threshold is configured. See [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) and [Write Custom Routing Strategies](../../developer-guide/advanced-customizations/custom-worker-selection.mdx).
 
   Environment variable: `DYN_ROUTER_POLICY_CONFIG`
+</ParamField>
+
+<ParamField path="--router-prefill-policy" type="string" default="null">
+  Worker-selection instance for disaggregated prefill workers in the current router process. This
+  option overrides `worker_selection.prefill` from `--router-policy-config`. It is not included in
+  worker model cards. Set it to `default` to use Dynamo's built-in worker selector.
+
+  Environment variable: `DYN_ROUTER_PREFILL_POLICY`
+</ParamField>
+
+<ParamField path="--router-decode-policy" type="string" default="null">
+  Worker-selection instance for decode workers in the current router process. This option
+  overrides `worker_selection.decode` from `--router-policy-config`. It is not included in worker
+  model cards. Set it to `default` to use Dynamo's built-in worker selector. Configure an aggregated
+  pool with `worker_selection.aggregated` or `DYN_ROUTER_WORKER_SELECTION_POLICY`.
+
+  Environment variable: `DYN_ROUTER_DECODE_POLICY`
 </ParamField>
 
 ## AIC prefill load model
@@ -505,6 +523,19 @@ See the [Frontend Guide](../../developer-guide/knowledge-base/modular-components
   Environment variable: `DYN_TOKENIZER`
 </ParamField>
 
+<ParamField path="--tokenizer-fallback / --no-tokenizer-fallback" type="boolean" default="true">
+  Fall back to HuggingFace when `fastokens` or `basetenkenizer` cannot load the model tokenizer. Use
+  `--no-tokenizer-fallback` to fail model initialization instead. In dynamic mode, discovery retries
+  the load while the frontend continues running.
+
+  <Warning>
+    Automatic tokenizer fallback is deprecated and will be disabled by default in a future release.
+    Set `--no-tokenizer-fallback` to adopt the future behavior now.
+  </Warning>
+
+  Environment variable: `DYN_TOKENIZER_FALLBACK`
+</ParamField>
+
 ## Experimental
 
 ### Python route extensions
@@ -655,12 +686,16 @@ Environment variables controlling frontend extensions. Extensions are enabled by
 truthy value (`1`, `true`, `yes`, or `on`, case-insensitive) to disable the corresponding surface.
 
 <ParamField path="DYN_DISABLE_FRONTEND_NVEXT" type="boolean" default="false">
-  When truthy, the frontend drops `request.nvext` on `/v1/chat/completions`, `/v1/completions`,
-  `/v1/responses`, `/v1/embeddings`, and `/v1/messages`; ignores the
+  When truthy, the frontend drops all request NvExt fields except `cache_salt` on
+  `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, and `/v1/messages`; ignores the
   `x-dynamo-worker-instance-id`, `x-dynamo-prefill-instance-id`, `x-dynamo-dp-rank`,
   `x-dynamo-prefill-dp-rank`, `x-dynamo-request-priority`, and
   `x-dynamo-request-strict-priority` routing headers and their compatibility aliases; and ignores
-  the response-side `nvext.extra_fields` opt-in.
+  the response-side `nvext.extra_fields` opt-in. Cache isolation remains active. The frontend
+  continues to use non-empty `nvext.cache_salt` and `x-tenant-id` values on these four endpoint
+  groups. Top-level cache salts remain active on chat completions, completions, classify, and
+  pooling. On embeddings, classify, and pooling, the switch only drops legacy NvExt annotations;
+  these endpoints do not use `x-tenant-id` or `x-dynamo-*` routing headers in either mode.
 </ParamField>
 
 <ParamField path="DYN_DISABLE_FRONTEND_ADMIN_API" type="boolean" default="false">

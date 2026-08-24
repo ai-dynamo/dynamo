@@ -38,35 +38,10 @@ def _warn_require_reasoning_unsupported() -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# Top-level sglang exports: Engine, ServerArgs
-#
-# Some SGLang dev builds (including 0.5.x snapshots) do not re-export these
-# from sglang/__init__.py, while Dynamo historically uses `import sglang as sgl`
-# followed by `sgl.Engine(...)` throughout this backend.
-# ---------------------------------------------------------------------------
-def ensure_sglang_top_level_exports() -> None:
-    """Restore top-level SGLang exports omitted by some install flavors."""
-    import sglang as sgl
-
-    if not hasattr(sgl, "Engine"):
-        from sglang.srt.entrypoints.engine import Engine
-
-        sgl.Engine = Engine
-
-    if not hasattr(sgl, "ServerArgs"):
-        from sglang.srt.server_args import ServerArgs
-
-        sgl.ServerArgs = ServerArgs
-
-
-ensure_sglang_top_level_exports()
-
-
 def ensure_sglang_tensor_image_size() -> None:
     """Allow SGLang's image-token resolver to handle decoded image tensors.
 
-    SGLang 0.5.13 through 0.5.16 assume every decoded image exposes the PIL
+    SGLang 0.5.13 through 0.5.17 assume every decoded image exposes the PIL
     ``height``/``width`` attributes. Its CUDA JPEG decoder instead returns a
     CHW tensor, causing multimodal requests to fall back to retokenization.
 
@@ -106,6 +81,27 @@ def ensure_sglang_tensor_image_size() -> None:
     BaseMultimodalProcessor.resolve_image_token_counts = resolve_image_token_counts
 
 
+def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
+    """Apply a post-resolution SGLang configuration update.
+
+    SGLang 0.5.17 makes ``ServerArgs`` unconditionally read-only after
+    resolution. Both supported CUDA releases expose ``ServerArgs.override`` as
+    the audited mutation API, so Dynamo must use it instead of assigning fields.
+    The separately pinned XPU image still uses SGLang 0.5.11, which predates
+    that API; preserve its legacy assignment behavior until its engine pin is
+    upgraded.
+    """
+    override = getattr(server_args, "override", None)
+    if callable(override):
+        override(source, **fields)
+        return
+
+    # XPU compatibility for SGLang 0.5.11. Remove when the XPU SGLang pin is
+    # upgraded to 0.5.16+.
+    for name, value in fields.items():
+        setattr(server_args, name, value)
+
+
 @lru_cache(maxsize=32)
 def _get_async_generate_supported_kwarg_names(
     async_generate: Any,
@@ -138,10 +134,12 @@ def filter_supported_async_generate_kwargs(
 ) -> dict[str, Any]:
     """Return only async_generate kwargs accepted by this SGLang engine.
 
-    SGLang occasionally adds optional Engine.async_generate kwargs before every
-    supported install flavor has them. Keep the compatibility boundary narrow:
-    callers decide which kwargs are optional, and this helper only drops those
-    optional kwargs when the installed engine cannot accept them.
+    Both supported CUDA releases accept Dynamo's optional kwargs. The separately
+    pinned XPU image still uses SGLang 0.5.11, which predates ``mm_hashes`` and
+    ``require_reasoning``. Keep the compatibility boundary narrow: callers
+    decide which kwargs are optional, and this helper only drops those optional
+    kwargs when the installed engine cannot accept them. Remove this filtering
+    when the XPU SGLang pin is upgraded to 0.5.16+.
     """
     async_generate = engine.async_generate
     signature_source = getattr(async_generate, "__func__", async_generate)
@@ -175,7 +173,7 @@ def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[st
 
 __all__ = [
     "ensure_sglang_tensor_image_size",
-    "ensure_sglang_top_level_exports",
     "filter_supported_async_generate_kwargs",
+    "override_server_args",
     "require_reasoning_kwargs",
 ]

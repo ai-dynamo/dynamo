@@ -33,8 +33,15 @@ func TestDGDRDefaulter_defaultImageFor(t *testing.T) {
 	tests := []struct {
 		name            string
 		operatorVersion string
+		defaultImage    string
 		expectedImage   string
 	}{
+		{
+			name:            "explicit default image bypasses version derivation",
+			operatorVersion: "1.4.0-dev.20260810.ga3a3c24",
+			defaultImage:    "nvcr.io/nvidia/ai-dynamo/dynamo-planner-nightly:20260810-a3a3c24",
+			expectedImage:   "nvcr.io/nvidia/ai-dynamo/dynamo-planner-nightly:20260810-a3a3c24",
+		},
 		{
 			name:            "known version produces default image",
 			operatorVersion: "1.1.0",
@@ -69,7 +76,7 @@ func TestDGDRDefaulter_defaultImageFor(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := NewDGDRDefaulter(tt.operatorVersion)
+			d := NewDGDRDefaulter(tt.operatorVersion, tt.defaultImage)
 			got := d.defaultImageFor()
 			if got != tt.expectedImage {
 				t.Errorf("defaultImageFor() = %q, want %q", got, tt.expectedImage)
@@ -125,7 +132,7 @@ func TestDGDRDefaulter_Default(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := NewDGDRDefaulter(tt.version)
+			d := NewDGDRDefaulter(tt.version, "")
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Spec:       nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{Image: tt.initialImage},

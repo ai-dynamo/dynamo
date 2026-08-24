@@ -15,6 +15,8 @@ from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.protocol.messages import (
     AllocateRequest,
     AllocateResponse,
+    CommitLayoutRequest,
+    CommitLayoutResponse,
     CommitRequest,
     CommitResponse,
     ExportAllocationRequest,
@@ -110,6 +112,7 @@ class GMS:
             is_ready=session.is_ready,
             allocation_count=self._allocations.allocation_count,
             memory_layout_hash=self._memory_layout_hash,
+            layout_committed=session.layout_committed,
         )
 
     def get_event_history(self) -> GetEventHistoryResponse:
@@ -197,6 +200,8 @@ class GMS:
         return self._allocations.clear_all()
 
     def on_connect(self, conn: Connection) -> None:
+        # RW means "replace": clear whatever is here. RW_DATA means "adopt": that mode
+        # is only granted when a committed layout exists.
         if conn.mode == GrantedLockType.RW:
             had_committed_layout = self._sessions.snapshot().committed
             cleared = self._clear_layout_state()
@@ -207,21 +212,39 @@ class GMS:
                         allocation_count=cleared,
                     )
                 )
+        elif conn.mode == GrantedLockType.RW_DATA:
+            logger.info(
+                "RW_DATA connect: adopting committed layout (%d allocations)",
+                self._allocations.allocation_count,
+            )
 
         self._sessions.on_connect(conn)
-        if conn.mode == GrantedLockType.RW:
+        if conn.mode in (GrantedLockType.RW, GrantedLockType.RW_DATA):
             self._events.append(GMSRuntimeEvent(kind="rw_connected"))
 
     async def cleanup_connection(self, conn: Connection | None) -> None:
         event = self._sessions.begin_cleanup(conn)
         if event == StateEvent.RW_ABORT:
-            logger.warning("RW aborted; clearing active layout")
+            logger.warning("RW aborted; clearing uncommitted layout")
             cleared = self._clear_layout_state()
             self._events.append(GMSRuntimeEvent(kind="rw_aborted"))
             self._events.append(
                 GMSRuntimeEvent(
                     kind="allocations_cleared",
                     allocation_count=cleared,
+                )
+            )
+        elif event == StateEvent.RW_DISCONNECT:
+            # A crash cannot withdraw a promise the writer already made: the layout was
+            # sealed, so the pages outlive the session for a standby to adopt.
+            logger.info(
+                "Writer disconnected; layout is committed, keeping %d allocations",
+                self._allocations.allocation_count,
+            )
+            self._events.append(
+                GMSRuntimeEvent(
+                    kind="rw_disconnected",
+                    allocation_count=self._allocations.allocation_count,
                 )
             )
         await self._sessions.finish_cleanup(conn)
@@ -251,6 +274,41 @@ class GMS:
             self._sessions.on_commit(conn)
             self._events.append(GMSRuntimeEvent(kind="committed"))
             return CommitResponse(success=True), -1, True
+
+        if msg_type is CommitLayoutRequest:
+            if self.state != ServerState.RW:
+                raise AssertionError("RW state is not active")
+
+            # Seal the shape, not the bytes. Unlike CommitRequest this keeps the session
+            # and the caller's mappings. The layout hash only becomes meaningful here,
+            # now that the geometry can no longer change.
+            allocations = self._allocations.list_allocations()
+            allocations_by_id = {info.allocation_id: info for info in allocations}
+            self._validate_metadata_integrity(allocations_by_id)
+            self._memory_layout_hash = self._compute_memory_layout_hash(allocations)
+
+            self._sessions.on_layout_commit(conn)
+            logger.info(
+                "Committed layout shape: %d allocations, hash %s... "
+                "(writer downgraded to RW_DATA; pages now outlive this session)",
+                len(allocations),
+                self._memory_layout_hash[:16],
+            )
+            self._events.append(
+                GMSRuntimeEvent(
+                    kind="layout_committed",
+                    allocation_count=len(allocations),
+                )
+            )
+            return (
+                CommitLayoutResponse(
+                    success=True,
+                    memory_layout_hash=self._memory_layout_hash,
+                    granted_lock_type=conn.mode,
+                ),
+                -1,
+                False,
+            )
 
         if msg_type is AllocateRequest:
             if self.state != ServerState.RW:
@@ -288,6 +346,7 @@ class GMS:
                     waiting_writers=snapshot.waiting_writers,
                     committed=snapshot.committed,
                     is_ready=snapshot.is_ready,
+                    layout_committed=snapshot.layout_committed,
                 ),
                 -1,
                 False,

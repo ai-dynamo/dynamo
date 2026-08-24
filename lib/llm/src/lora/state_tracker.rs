@@ -3,81 +3,130 @@
 
 //! LoRA State Tracker
 //!
-//! Tracks the runtime state of LoRA adapters across workers by watching MDC discovery
-//! events. Maintains which LoRAs are loaded on which workers and per-worker LoRA capacity.
-//!
-//! ## MDC Event Model
-//!
-//! Each MDC entry corresponds to a single `(worker, lora_name)` pair carrying one
-//! `LoraInfo`. The tracker handles three discrete event types:
-//!
-//! - `handle_mdc_addition`: a worker registered (or re-published) a LoRA adapter.
-//! - `handle_mdc_removal`: a worker unregistered one specific LoRA adapter.
-//! - `handle_worker_removal`: a worker left the cluster (drops all of its LoRAs).
-//!
-//! `handle_mdc_addition` is purely additive and idempotent — re-publishing the same
-//! `(worker, lora_name)` updates the stored `LoraInfo` in place. State reconciliation
-//! when a worker drops an adapter is the responsibility of the corresponding removal
-//! event, not the addition handler.
-//!
-//! ## Worker Capacity Invariant
-//!
-//! `LoraInfo::max_gpu_lora_count` is a *worker-level* property (the engine's
-//! `--max-loras` setting; see `docs/dev/dep/000N-lora-placement/lora-allocation-v2.md`),
-//! but is duplicated into every `LoraInfo` a
-//! worker publishes for convenience. All `LoraInfo` values coming from the same
-//! worker MUST carry the same `max_gpu_lora_count`. If a mismatch is observed
-//! across updates, we log a warning and adopt the latest value — but this should
-//! never happen with a correctly-configured worker.
+//! Publishes a coherent, immutable view of loaded LoRA adapters and worker capacity.
+//! Discovery replaces the complete committed projection for an endpoint; legacy
+//! event-style mutation methods remain for in-process callers. Readers pin one
+//! [`LoraObservedSnapshot`] so a routing decision cannot mix indexes from different
+//! discovery generations.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use dashmap::DashMap;
+use arc_swap::ArcSwap;
 
 use crate::kv_router::protocols::WorkerWithDpRank;
 use crate::model_card::LoraInfo;
 
 const DEFAULT_MAX_GPU_LORA_COUNT: u32 = 4;
 
-/// Tracks the loaded state of LoRAs across workers and per-worker capacity.
+#[derive(Clone, Debug, Default)]
+pub struct LoraObservedSnapshot {
+    incarnation: u64,
+    loaded_locations: HashMap<String, HashSet<WorkerWithDpRank>>,
+    lora_info: HashMap<(String, WorkerWithDpRank), LoraInfo>,
+    worker_to_loras: HashMap<WorkerWithDpRank, HashSet<String>>,
+    worker_capacity: HashMap<WorkerWithDpRank, u32>,
+}
+
+impl LoraObservedSnapshot {
+    pub fn incarnation(&self) -> u64 {
+        self.incarnation
+    }
+
+    pub fn get_loaded_workers(&self, lora_name: &str) -> HashSet<WorkerWithDpRank> {
+        self.loaded_locations
+            .get(lora_name)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn is_loaded(&self, lora_name: &str, worker: &WorkerWithDpRank) -> bool {
+        self.loaded_locations
+            .get(lora_name)
+            .is_some_and(|workers| workers.contains(worker))
+    }
+
+    pub fn list_loras(&self) -> Vec<String> {
+        self.loaded_locations.keys().cloned().collect()
+    }
+
+    pub fn list_workers(&self) -> Vec<WorkerWithDpRank> {
+        self.worker_capacity.keys().copied().collect()
+    }
+
+    fn slot_info(&self, worker: &WorkerWithDpRank) -> (u32, u32) {
+        let capacity = self.worker_capacity.get(worker).copied().unwrap_or(0);
+        let loaded = self
+            .worker_to_loras
+            .get(worker)
+            .map(|loras| loras.len() as u32)
+            .unwrap_or(0);
+        (loaded, capacity)
+    }
+
+    pub fn free_slots(&self, worker: &WorkerWithDpRank) -> u32 {
+        let (loaded, capacity) = self.slot_info(worker);
+        capacity.saturating_sub(loaded)
+    }
+
+    pub fn total_lora_slots(&self) -> u32 {
+        self.worker_capacity.values().sum()
+    }
+
+    pub fn get_worker_capacities(&self) -> HashMap<WorkerWithDpRank, u32> {
+        self.worker_capacity.clone()
+    }
+
+    pub fn get_worker_slot_usage(&self) -> HashMap<WorkerWithDpRank, (usize, usize)> {
+        self.worker_capacity
+            .iter()
+            .map(|(worker, capacity)| (*worker, (self.loaded_count(worker), *capacity as usize)))
+            .collect()
+    }
+
+    pub fn workers_with_free_slots(&self) -> Vec<WorkerWithDpRank> {
+        self.worker_capacity
+            .iter()
+            .filter_map(|(worker, capacity)| {
+                ((self.loaded_count(worker) as u32) < *capacity).then_some(*worker)
+            })
+            .collect()
+    }
+
+    pub fn loaded_count(&self, worker: &WorkerWithDpRank) -> usize {
+        self.worker_to_loras
+            .get(worker)
+            .map(HashSet::len)
+            .unwrap_or(0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.worker_capacity.is_empty()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LoraWorkerProjection {
+    pub(crate) capacity: u32,
+    pub(crate) loras: Vec<LoraInfo>,
+}
+
+/// Tracks one endpoint's complete observed LoRA state.
 ///
-/// Concurrent data structure updated from MDC discovery events and read from
-/// the allocation controller and filter.
-///
-/// ## Cross-map consistency
-///
-/// State is spread across four `DashMap`s that must stay mutually consistent
-/// (e.g. `loaded_locations` and `worker_to_loras` are inverse indexes of the
-/// same fact). Per-map atomicity is not enough: a concurrent addition and
-/// removal touching the same `(worker, lora)` could interleave their
-/// individual map writes and leave the indexes disagreeing. All three mutating
-/// handlers therefore serialize on `write_lock` for the duration of their
-/// multi-map update, so writers observe a consistent snapshot relative to one
-/// another. Readers stay lock-free on the individual `DashMap`s.
+/// Writers build a new immutable generation under `write_lock` and publish it
+/// with one pointer swap. A request or allocation tick can therefore pin one
+/// [`LoraObservedSnapshot`] and never combine indexes from different discovery
+/// generations.
 #[derive(Clone)]
 pub struct LoraStateTracker {
-    /// LoRA name -> set of workers where it is loaded
-    loaded_locations: Arc<DashMap<String, HashSet<WorkerWithDpRank>>>,
-    /// LoRA name, worker -> LoraInfo from MDC
-    lora_info: Arc<DashMap<(String, WorkerWithDpRank), LoraInfo>>,
-    /// Worker -> set of LoRA names loaded on that worker
-    worker_to_loras: Arc<DashMap<WorkerWithDpRank, HashSet<String>>>,
-    /// Worker -> max_gpu_lora_count capacity
-    worker_capacity: Arc<DashMap<WorkerWithDpRank, u32>>,
-    /// Serializes the multi-map mutations in the `handle_*` methods so the four
-    /// indexes above can never be left mutually inconsistent by interleaved
-    /// writers. Reads do not take this lock.
+    observed: Arc<ArcSwap<LoraObservedSnapshot>>,
     write_lock: Arc<Mutex<()>>,
 }
 
 impl LoraStateTracker {
     pub fn new() -> Self {
         Self {
-            loaded_locations: Arc::new(DashMap::new()),
-            lora_info: Arc::new(DashMap::new()),
-            worker_to_loras: Arc::new(DashMap::new()),
-            worker_capacity: Arc::new(DashMap::new()),
+            observed: Arc::new(ArcSwap::from_pointee(LoraObservedSnapshot::default())),
             write_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -86,6 +135,22 @@ impl LoraStateTracker {
     /// writer panic must not wedge all future updates).
     fn lock_writes(&self) -> std::sync::MutexGuard<'_, ()> {
         self.write_lock.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn snapshot(&self) -> Arc<LoraObservedSnapshot> {
+        self.observed.load_full()
+    }
+
+    fn mutate(&self, update: impl FnOnce(&mut LoraObservedSnapshot)) {
+        let _guard = self.lock_writes();
+        let current = self.observed.load_full();
+        let was_empty = current.is_empty();
+        let mut next = (*current).clone();
+        update(&mut next);
+        if was_empty && !next.is_empty() {
+            next.incarnation = next.incarnation.wrapping_add(1).max(1);
+        }
+        self.observed.store(Arc::new(next));
     }
 
     /// Handle an MDC addition event: a worker registered (or re-published) a LoRA adapter.
@@ -101,22 +166,6 @@ impl LoraStateTracker {
     /// previously-recorded capacity for the same worker is logged at warn level
     /// and the latest value is adopted.
     pub fn handle_mdc_addition(&self, worker: WorkerWithDpRank, lora: &LoraInfo) {
-        let _guard = self.lock_writes();
-        let lora_name = lora.name.clone();
-
-        self.loaded_locations
-            .entry(lora_name.clone())
-            .or_default()
-            .insert(worker);
-
-        self.lora_info
-            .insert((lora_name.clone(), worker), lora.clone());
-
-        self.worker_to_loras
-            .entry(worker)
-            .or_default()
-            .insert(lora_name);
-
         let capacity = lora.max_gpu_lora_count.unwrap_or_else(|| {
             tracing::warn!(
                 worker_id = worker.worker_id,
@@ -129,9 +178,20 @@ impl LoraStateTracker {
             );
             DEFAULT_MAX_GPU_LORA_COUNT
         });
-        // record_worker_capacity warns on a same-worker capacity change (shared with the
-        // base-card path in set_worker_capacity so both registration paths honor the invariant).
-        self.record_worker_capacity(worker, capacity);
+        self.mutate(|next| {
+            let lora_name = lora.name.clone();
+            next.loaded_locations
+                .entry(lora_name.clone())
+                .or_default()
+                .insert(worker);
+            next.lora_info
+                .insert((lora_name.clone(), worker), lora.clone());
+            next.worker_to_loras
+                .entry(worker)
+                .or_default()
+                .insert(lora_name);
+            record_worker_capacity(next, worker, capacity);
+        });
 
         tracing::debug!(
             worker_id = worker.worker_id,
@@ -144,66 +204,55 @@ impl LoraStateTracker {
 
     /// Set a worker's LoRA slot capacity directly, without registering any adapter on it.
     ///
-    /// Capacity-only counterpart to [`handle_mdc_addition`] (which records a loaded adapter AND
-    /// sets capacity). Makes the worker appear in [`list_workers`] with the given capacity and no
+    /// Capacity-only counterpart to `handle_mdc_addition` (which records a loaded adapter AND
+    /// sets capacity). Makes the worker appear in `list_workers` with the given capacity and no
     /// loaded LoRAs, so callers can establish cluster topology / per-worker `max_gpu_lora_count`
     /// without consuming a slot with a phantom adapter.
     pub fn set_worker_capacity(&self, worker: WorkerWithDpRank, capacity: u32) {
-        let _guard = self.lock_writes();
-        self.record_worker_capacity(worker, capacity);
+        self.mutate(|next| record_worker_capacity(next, worker, capacity));
     }
 
-    /// Record a worker's LoRA slot capacity, warning if it changes a previously-recorded value.
-    /// The caller must hold the write lock. Shared by
-    /// [`handle_mdc_addition`](Self::handle_mdc_addition) (adapter cards) and
-    /// [`set_worker_capacity`](Self::set_worker_capacity) (base-card capacity seeding) so a
-    /// same-worker capacity change is logged regardless of which path set it.
-    fn record_worker_capacity(&self, worker: WorkerWithDpRank, capacity: u32) {
-        if let Some(prev) = self.worker_capacity.get(&worker)
-            && *prev != capacity
-        {
-            tracing::warn!(
-                worker_id = worker.worker_id,
-                dp_rank = worker.dp_rank,
-                previous_capacity = *prev,
-                new_capacity = capacity,
-                "Worker LoRA capacity changed across registrations"
-            );
+    /// Replace one retained worker's complete committed LoRA projection.
+    ///
+    /// Desired entries are installed before obsolete entries are withdrawn, so lock-free
+    /// routing readers never observe an unchanged adapter as temporarily unloaded.
+    #[cfg(test)]
+    pub(crate) fn replace_worker_projection(
+        &self,
+        worker: WorkerWithDpRank,
+        base_capacity: Option<u32>,
+        loras: &[LoraInfo],
+    ) {
+        let capacity = effective_capacity(worker, base_capacity, loras);
+        let projection = capacity.map(|capacity| LoraWorkerProjection {
+            capacity,
+            loras: loras.to_vec(),
+        });
+        self.mutate(|next| replace_worker(next, worker, projection));
+    }
+
+    pub(crate) fn replace_endpoint_projection(
+        &self,
+        projections: HashMap<WorkerWithDpRank, LoraWorkerProjection>,
+    ) {
+        let _guard = self.lock_writes();
+        let current = self.observed.load_full();
+        let mut next = LoraObservedSnapshot {
+            incarnation: current.incarnation,
+            ..Default::default()
+        };
+        for (worker, projection) in projections {
+            replace_worker(&mut next, worker, Some(projection));
         }
-        self.worker_capacity.insert(worker, capacity);
+        if current.is_empty() && !next.is_empty() {
+            next.incarnation = next.incarnation.wrapping_add(1).max(1);
+        }
+        self.observed.store(Arc::new(next));
     }
 
     /// Handle an MDC removal event: a worker unregistered a LoRA adapter.
     pub fn handle_mdc_removal(&self, worker: WorkerWithDpRank, lora_name: &str) {
-        let _guard = self.lock_writes();
-        let became_empty = if let Some(mut workers) = self.loaded_locations.get_mut(lora_name) {
-            workers.remove(&worker);
-            workers.is_empty()
-        } else {
-            false
-        };
-        if became_empty {
-            // remove_if re-checks the predicate under the shard lock, so a
-            // concurrent handle_mdc_addition that races between the is_empty
-            // check above and this call cannot have its entry silently deleted.
-            self.loaded_locations
-                .remove_if(lora_name, |_, v| v.is_empty());
-        }
-
-        self.lora_info.remove(&(lora_name.to_string(), worker));
-
-        let became_empty = if let Some(mut loras) = self.worker_to_loras.get_mut(&worker) {
-            loras.remove(lora_name);
-            loras.is_empty()
-        } else {
-            false
-        };
-        if became_empty {
-            // remove_if re-checks the predicate under the shard lock, so a
-            // concurrent handle_mdc_addition that races between the drop above
-            // and this call cannot have its newly inserted entry deleted.
-            self.worker_to_loras.remove_if(&worker, |_, v| v.is_empty());
-        }
+        self.mutate(|next| remove_lora(next, worker, lora_name));
 
         tracing::debug!(
             worker_id = worker.worker_id,
@@ -215,33 +264,7 @@ impl LoraStateTracker {
 
     /// Handle a worker being completely removed.
     pub fn handle_worker_removal(&self, worker: WorkerWithDpRank) {
-        let _guard = self.lock_writes();
-
-        // Remove the capacity entry FIRST. `worker_capacity` is the enumeration
-        // spine for every slot/capacity reader (`workers_with_free_slots`,
-        // `list_workers`, `get_worker_slot_usage`, `slot_info`), so dropping it
-        // first makes the worker vanish from those snapshots atomically. If we
-        // cleared `worker_to_loras` first instead, a concurrent reader could
-        // momentarily see the worker as capacity-present with zero loaded LoRAs
-        // and wrongly report it as having free slots.
-        self.worker_capacity.remove(&worker);
-
-        if let Some((_, loras)) = self.worker_to_loras.remove(&worker) {
-            for lora_name in &loras {
-                let became_empty =
-                    if let Some(mut workers) = self.loaded_locations.get_mut(lora_name) {
-                        workers.remove(&worker);
-                        workers.is_empty()
-                    } else {
-                        false
-                    };
-                if became_empty {
-                    self.loaded_locations
-                        .remove_if(lora_name, |_, v| v.is_empty());
-                }
-                self.lora_info.remove(&(lora_name.clone(), worker));
-            }
-        }
+        self.mutate(|next| replace_worker(next, worker, None));
 
         tracing::debug!(
             worker_id = worker.worker_id,
@@ -251,116 +274,163 @@ impl LoraStateTracker {
     }
 
     pub fn get_loaded_workers(&self, lora_name: &str) -> HashSet<WorkerWithDpRank> {
-        self.loaded_locations
-            .get(lora_name)
-            .map(|entry| entry.value().clone())
-            .unwrap_or_default()
+        self.snapshot().get_loaded_workers(lora_name)
     }
 
     pub fn is_loaded(&self, lora_name: &str, worker: &WorkerWithDpRank) -> bool {
-        self.loaded_locations
-            .get(lora_name)
-            .map(|entry| entry.contains(worker))
-            .unwrap_or(false)
+        self.snapshot().is_loaded(lora_name, worker)
     }
 
     pub fn list_loras(&self) -> Vec<String> {
-        self.loaded_locations
-            .iter()
-            .map(|entry| entry.key().clone())
-            .collect()
+        self.snapshot().list_loras()
     }
 
     pub fn list_workers(&self) -> Vec<WorkerWithDpRank> {
-        self.worker_capacity
-            .iter()
-            .map(|entry| *entry.key())
-            .collect()
-    }
-
-    fn slot_info(&self, worker: &WorkerWithDpRank) -> (u32, u32) {
-        let capacity = self.worker_capacity.get(worker).map(|v| *v).unwrap_or(0);
-        let loaded = self
-            .worker_to_loras
-            .get(worker)
-            .map(|v| v.len() as u32)
-            .unwrap_or(0);
-        (loaded, capacity)
+        self.snapshot().list_workers()
     }
 
     pub fn free_slots(&self, worker: &WorkerWithDpRank) -> u32 {
-        let (loaded, capacity) = self.slot_info(worker);
-        capacity.saturating_sub(loaded)
+        self.snapshot().free_slots(worker)
     }
 
     pub fn total_lora_slots(&self) -> u32 {
-        self.worker_capacity
-            .iter()
-            .map(|entry| *entry.value())
-            .sum()
+        self.snapshot().total_lora_slots()
     }
 
     pub fn get_worker_capacities(&self) -> HashMap<WorkerWithDpRank, u32> {
-        self.worker_capacity
-            .iter()
-            .map(|entry| (*entry.key(), *entry.value()))
-            .collect()
+        self.snapshot().get_worker_capacities()
     }
 
     pub fn get_worker_slot_usage(&self) -> HashMap<WorkerWithDpRank, (usize, usize)> {
-        // Snapshot capacities first, releasing all worker_capacity shard guards
-        // before touching worker_to_loras. Reading a second DashMap while
-        // holding an iterator guard risks a lock-order deadlock against a
-        // writer that locks the two maps in the opposite order.
-        let caps: Vec<(WorkerWithDpRank, u32)> = self
-            .worker_capacity
-            .iter()
-            .map(|entry| (*entry.key(), *entry.value()))
-            .collect();
-        caps.into_iter()
-            .filter_map(|(worker, cap)| {
-                let loaded = self.loaded_count(&worker);
-                // Drop workers removed since the snapshot. handle_worker_removal
-                // clears worker_capacity before worker_to_loras, so if loaded
-                // dropped to 0 due to a concurrent removal, the capacity entry
-                // is already gone and this recheck filters out the stale row.
-                self.worker_capacity
-                    .contains_key(&worker)
-                    .then_some((worker, (loaded, cap as usize)))
-            })
-            .collect()
+        self.snapshot().get_worker_slot_usage()
     }
 
     pub fn workers_with_free_slots(&self) -> Vec<WorkerWithDpRank> {
-        // Snapshot first (see get_worker_slot_usage) to avoid holding a
-        // worker_capacity iterator guard while reading worker_to_loras.
-        let caps: Vec<(WorkerWithDpRank, u32)> = self
-            .worker_capacity
-            .iter()
-            .map(|entry| (*entry.key(), *entry.value()))
-            .collect();
-        caps.into_iter()
-            .filter(|(worker, capacity)| {
-                // loaded_count first, then re-confirm the worker still exists:
-                // a worker removed since the snapshot has its capacity cleared
-                // before worker_to_loras, so a transient loaded==0 cannot make
-                // a removed worker look free.
-                (self.loaded_count(worker) as u32) < *capacity
-                    && self.worker_capacity.contains_key(worker)
-            })
-            .map(|(worker, _)| worker)
-            .collect()
+        self.snapshot().workers_with_free_slots()
     }
 
     pub fn loaded_count(&self, worker: &WorkerWithDpRank) -> usize {
-        self.worker_to_loras
-            .get(worker)
-            .map(|v| v.len())
-            .unwrap_or(0)
+        self.snapshot().loaded_count(worker)
     }
 
     pub fn is_empty(&self) -> bool {
-        self.worker_capacity.is_empty()
+        self.snapshot().is_empty()
+    }
+}
+
+#[cfg(test)]
+fn effective_capacity(
+    worker: WorkerWithDpRank,
+    base_capacity: Option<u32>,
+    loras: &[LoraInfo],
+) -> Option<u32> {
+    if let Some(capacity) = base_capacity {
+        return Some(capacity);
+    }
+    let mut assertions = loras
+        .iter()
+        .filter_map(|lora| lora.max_gpu_lora_count)
+        .collect::<Vec<_>>();
+    assertions.sort_unstable();
+    assertions.dedup();
+    if assertions.len() > 1 {
+        tracing::warn!(
+            worker_id = worker.worker_id,
+            dp_rank = worker.dp_rank,
+            capacities = ?assertions,
+            "LoRA adapter cards disagree on worker capacity; using the conservative minimum"
+        );
+    }
+    assertions.first().copied().or_else(|| {
+        (!loras.is_empty()).then(|| {
+            tracing::warn!(
+                worker_id = worker.worker_id,
+                dp_rank = worker.dp_rank,
+                default = DEFAULT_MAX_GPU_LORA_COUNT,
+                "LoRA MDC carries no max_gpu_lora_count; using compatibility default"
+            );
+            DEFAULT_MAX_GPU_LORA_COUNT
+        })
+    })
+}
+
+fn record_worker_capacity(
+    snapshot: &mut LoraObservedSnapshot,
+    worker: WorkerWithDpRank,
+    capacity: u32,
+) {
+    if let Some(previous) = snapshot.worker_capacity.get(&worker)
+        && *previous != capacity
+    {
+        tracing::warn!(
+            worker_id = worker.worker_id,
+            dp_rank = worker.dp_rank,
+            previous_capacity = *previous,
+            new_capacity = capacity,
+            "Worker LoRA capacity changed across registrations"
+        );
+    }
+    snapshot.worker_capacity.insert(worker, capacity);
+}
+
+fn remove_lora(snapshot: &mut LoraObservedSnapshot, worker: WorkerWithDpRank, lora_name: &str) {
+    if let Some(workers) = snapshot.loaded_locations.get_mut(lora_name) {
+        workers.remove(&worker);
+        if workers.is_empty() {
+            snapshot.loaded_locations.remove(lora_name);
+        }
+    }
+    snapshot.lora_info.remove(&(lora_name.to_string(), worker));
+    if let Some(loras) = snapshot.worker_to_loras.get_mut(&worker) {
+        loras.remove(lora_name);
+        if loras.is_empty() {
+            snapshot.worker_to_loras.remove(&worker);
+        }
+    }
+}
+
+fn replace_worker(
+    snapshot: &mut LoraObservedSnapshot,
+    worker: WorkerWithDpRank,
+    projection: Option<LoraWorkerProjection>,
+) {
+    let previous = snapshot
+        .worker_to_loras
+        .get(&worker)
+        .cloned()
+        .unwrap_or_default();
+    let Some(projection) = projection else {
+        snapshot.worker_capacity.remove(&worker);
+        for name in previous {
+            remove_lora(snapshot, worker, &name);
+        }
+        return;
+    };
+
+    snapshot.worker_capacity.insert(worker, projection.capacity);
+    let desired = projection
+        .loras
+        .into_iter()
+        .map(|lora| (lora.name.clone(), lora))
+        .collect::<HashMap<_, _>>();
+    let desired_names = desired.keys().cloned().collect::<HashSet<_>>();
+    for (name, lora) in desired {
+        snapshot
+            .loaded_locations
+            .entry(name.clone())
+            .or_default()
+            .insert(worker);
+        snapshot.lora_info.insert((name, worker), lora);
+    }
+    if desired_names.is_empty() {
+        snapshot.worker_to_loras.remove(&worker);
+    } else {
+        snapshot
+            .worker_to_loras
+            .insert(worker, desired_names.clone());
+    }
+    for name in previous.difference(&desired_names) {
+        remove_lora(snapshot, worker, name);
     }
 }
 
@@ -400,6 +470,44 @@ mod tests {
         assert!(tracker.is_loaded("lora-math", &w1));
         assert_eq!(tracker.total_lora_slots(), 8);
         assert_eq!(tracker.free_slots(&w1), 7);
+    }
+
+    #[test]
+    fn replace_worker_projection_reconciles_adapters_and_capacity() {
+        let tracker = LoraStateTracker::new();
+        let worker = make_worker(1);
+        let retained = make_lora_info("retained", Some(4));
+        let obsolete = make_lora_info("obsolete", Some(4));
+        tracker.handle_mdc_addition(worker, &retained);
+        tracker.handle_mdc_addition(worker, &obsolete);
+
+        let retained = make_lora_info("retained", Some(6));
+        let added = make_lora_info("added", Some(6));
+        tracker.replace_worker_projection(worker, Some(6), &[retained, added]);
+
+        assert!(tracker.is_loaded("retained", &worker));
+        assert!(tracker.is_loaded("added", &worker));
+        assert!(!tracker.is_loaded("obsolete", &worker));
+        assert_eq!(tracker.loaded_count(&worker), 2);
+        assert_eq!(tracker.free_slots(&worker), 4);
+    }
+
+    #[test]
+    fn pinned_snapshot_survives_atomic_projection_replacement() {
+        let tracker = LoraStateTracker::new();
+        let worker = make_worker(1);
+        tracker.replace_worker_projection(worker, Some(4), &[make_lora_info("old", Some(4))]);
+        let pinned = tracker.snapshot();
+
+        tracker.replace_worker_projection(worker, Some(8), &[make_lora_info("new", Some(8))]);
+
+        assert!(pinned.is_loaded("old", &worker));
+        assert!(!pinned.is_loaded("new", &worker));
+        assert_eq!(pinned.total_lora_slots(), 4);
+        let current = tracker.snapshot();
+        assert!(!current.is_loaded("old", &worker));
+        assert!(current.is_loaded("new", &worker));
+        assert_eq!(current.total_lora_slots(), 8);
     }
 
     #[test]
@@ -520,11 +628,12 @@ mod tests {
             h.join().expect("worker thread panicked");
         }
 
+        let snapshot = tracker.snapshot();
         // Invariant: every (lora -> worker) entry in loaded_locations has a
         // matching (worker -> lora) entry in worker_to_loras, and vice versa.
-        for lora in tracker.list_loras() {
-            for w in tracker.get_loaded_workers(&lora) {
-                let loras_on_w = tracker
+        for lora in snapshot.list_loras() {
+            for w in snapshot.get_loaded_workers(&lora) {
+                let loras_on_w = snapshot
                     .worker_to_loras
                     .get(&w)
                     .map(|s| s.contains(&lora))
@@ -535,11 +644,10 @@ mod tests {
                 );
             }
         }
-        for entry in tracker.worker_to_loras.iter() {
-            let w = *entry.key();
-            for lora in entry.value() {
+        for (w, loras) in &snapshot.worker_to_loras {
+            for lora in loras {
                 assert!(
-                    tracker.is_loaded(lora, &w),
+                    snapshot.is_loaded(lora, w),
                     "worker_to_loras says {lora} on {w:?} but loaded_locations disagrees"
                 );
             }

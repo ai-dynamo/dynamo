@@ -7,8 +7,6 @@
 //! `message_start` -> `content_block_start` -> N x `content_block_delta` ->
 //! `content_block_stop` -> `message_delta` -> `message_stop`
 
-use std::collections::HashSet;
-
 use axum::response::sse::Event;
 use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk, CompletionUsage,
@@ -18,7 +16,7 @@ use uuid::Uuid;
 use super::types::{
     AnthropicDelta, AnthropicErrorBody, AnthropicMessageDeltaBody, AnthropicMessageResponse,
     AnthropicResponseContentBlock, AnthropicStopReason, AnthropicStreamEvent, AnthropicUsage,
-    completion_usage_to_anthropic,
+    completion_usage_to_anthropic, new_tool_use_id,
 };
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use crate::protocols::unified::AnthropicContext;
@@ -55,7 +53,9 @@ pub struct AnthropicStreamConverter {
 }
 
 struct ToolCallState {
-    id: String,
+    /// The backend's original tool call ID (e.g. `call_abc123`). Never emitted
+    /// to the client; used only to determine that a real call has arrived.
+    backend_id: String,
     name: String,
     /// Each buffered argument fragment paired with the cumulative usage snapshot
     /// taken when its backend chunk was processed. Tool-call blocks are flushed
@@ -71,7 +71,7 @@ impl ToolCallState {
     /// present. Arguments are optional: a tool call with no parameters still
     /// emits, so `argument_fragments` is deliberately not part of this check.
     fn is_emit_ready(&self) -> bool {
-        !self.id.is_empty() && !self.name.is_empty()
+        !self.backend_id.is_empty() && !self.name.is_empty()
     }
 }
 
@@ -89,6 +89,8 @@ impl AnthropicStreamConverter {
             text_block_index: 0,
             usage: AnthropicUsage {
                 input_tokens: estimated_input_tokens,
+                // Keep the field present when the backend does not report usage.
+                cache_creation_input_tokens: Some(0),
                 ..Default::default()
             },
             saw_backend_usage: false,
@@ -117,11 +119,12 @@ impl AnthropicStreamConverter {
     /// Two distinct orderings matter here, and only the first is something a
     /// current backend actually produces:
     ///
-    /// - Within a single call, the id/name and the argument fragments may arrive
-    ///   in either order — arguments can begin before the chunk carrying the id
-    ///   and name. We therefore record whichever fields are present on each chunk
-    ///   and defer emitting the block until the identity is complete (see
-    ///   `is_emit_ready`). This is the case the fixtures exercise.
+    /// - Within a single call, the `backend_id`/`name` and the argument
+    ///   fragments may arrive in either order — arguments can begin before the
+    ///   chunk carrying the backend id and name. We therefore record whichever
+    ///   fields are present on each chunk and defer emitting the block until the
+    ///   identity is complete (see `is_emit_ready`). This is the case the
+    ///   fixtures exercise.
     /// - Across parallel calls, the in-tree `dynamo-parsers-v2` parsers emit one
     ///   call at a time with a monotonically increasing `index` (call 0's chunks
     ///   all precede call 1's), so indices are never interleaved today. Indexing
@@ -136,7 +139,7 @@ impl AnthropicStreamConverter {
         let tool_call_index = tool_call.index as usize;
         while self.tool_call_states.len() <= tool_call_index {
             self.tool_call_states.push(ToolCallState {
-                id: String::new(),
+                backend_id: String::new(),
                 name: String::new(),
                 argument_fragments: Vec::new(),
             });
@@ -144,7 +147,7 @@ impl AnthropicStreamConverter {
 
         let state = &mut self.tool_call_states[tool_call_index];
         if let Some(id) = &tool_call.id {
-            state.id = id.clone();
+            state.backend_id = id.clone();
         }
         if let Some(function) = &tool_call.function {
             if let Some(name) = &function.name {
@@ -173,20 +176,25 @@ impl AnthropicStreamConverter {
         self.tool_blocks_flushed = true;
 
         let mut events = Vec::new();
-        let mut sent_tool_call_ids = HashSet::new();
         let mut block_index = self.next_block_index;
 
         for tool_call in &self.tool_call_states {
-            if !tool_call.is_emit_ready() || !sent_tool_call_ids.insert(tool_call.id.clone()) {
+            if !tool_call.is_emit_ready() {
                 continue;
             }
 
+            let emitted_id = new_tool_use_id();
+            tracing::debug!(
+                backend_id = %tool_call.backend_id,
+                emitted_id = %emitted_id,
+                "minting Anthropic tool_use id"
+            );
             events.push((
                 "content_block_start",
                 AnthropicStreamEvent::ContentBlockStart {
                     index: block_index,
                     content_block: AnthropicResponseContentBlock::ToolUse {
-                        id: tool_call.id.clone(),
+                        id: emitted_id,
                         name: tool_call.name.clone(),
                         input: serde_json::json!({}),
                     },
@@ -1058,6 +1066,7 @@ mod tests {
         assert!(events.is_empty(), "usage-only chunk emits no SSE events");
         assert_eq!(conv.usage.input_tokens, 1);
         assert_eq!(conv.usage.cache_read_input_tokens, Some(11));
+        assert_eq!(conv.usage.cache_creation_input_tokens, Some(0));
         assert_eq!(conv.usage.output_tokens, 5);
 
         let delta = conv.emit_end_events_tagged();
@@ -1069,6 +1078,7 @@ mod tests {
             AnthropicStreamEvent::MessageDelta { usage, .. } => {
                 assert_eq!(usage.input_tokens, 1);
                 assert_eq!(usage.cache_read_input_tokens, Some(11));
+                assert_eq!(usage.cache_creation_input_tokens, Some(0));
                 assert_eq!(usage.output_tokens, 5);
             }
             other => panic!("expected MessageDelta, got {other:?}"),
@@ -1083,6 +1093,7 @@ mod tests {
     fn test_fallback_counter_advances_before_each_token_chunk() {
         let mut conv = AnthropicStreamConverter::new("test-model".into(), 7);
         let mut events = Vec::new();
+        assert_eq!(conv.usage.cache_creation_input_tokens, Some(0));
 
         // First content chunk: content_block_start + content_block_delta. The
         // fallback advances output_tokens to 1 before the delta is serialized.
@@ -1332,7 +1343,10 @@ mod tests {
             AnthropicStreamEvent::ContentBlockStart {
                 content_block: AnthropicResponseContentBlock::ToolUse { id, name, input },
                 ..
-            } if id == "call-1" && name == "Read" && input == &serde_json::json!({})
+            } if id.starts_with("toolu_")
+                && id.len() > "toolu_".len()
+                && name == "Read"
+                && input == &serde_json::json!({})
         ));
         assert_eq!(
             event_types(&conv.emit_end_events_tagged()),
@@ -1655,8 +1669,13 @@ mod tests {
         );
     }
 
+    /// Two tool calls that share a backend ID (different indices) must both be
+    /// emitted. The old dedup keyed on backend ID, which was safe when the
+    /// emitted ID also came from the backend — both blocks would have been
+    /// identical and unroutable. Now that each block gets a freshly minted
+    /// `toolu_` ID, collapsing them discards a distinct, routable call.
     #[test]
-    fn test_duplicate_tool_call_id_is_emitted_once() {
+    fn test_shared_backend_id_emits_both_calls() {
         let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
 
         conv.process_chunk_tagged(&tool_call_chunk(
@@ -1679,8 +1698,38 @@ mod tests {
                 "content_block_start",
                 "content_block_delta",
                 "content_block_stop",
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
             ]
         );
+        // Both emitted IDs must be Anthropic-native and distinct.
+        let starts: Vec<_> = finish_events
+            .iter()
+            .filter(|e| e.event_type == "content_block_start")
+            .collect();
+        assert_eq!(starts.len(), 2);
+        let ids: Vec<_> = starts
+            .iter()
+            .filter_map(|e| {
+                if let AnthropicStreamEvent::ContentBlockStart {
+                    content_block: AnthropicResponseContentBlock::ToolUse { id, .. },
+                    ..
+                } = &e.data
+                {
+                    Some(id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for id in &ids {
+            assert!(
+                id.starts_with("toolu_") && id.len() > "toolu_".len(),
+                "emitted id must be Anthropic-native, got {id:?}"
+            );
+        }
+        assert_ne!(ids[0], ids[1], "parallel calls must receive distinct ids");
         assert_eq!(
             event_types(&conv.emit_end_events_tagged()),
             vec!["message_delta", "message_stop"]

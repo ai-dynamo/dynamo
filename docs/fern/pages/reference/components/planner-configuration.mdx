@@ -172,8 +172,18 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
 </ParamField>
 
 <ParamField path="min_endpoint" type="integer" default="1">
-  Minimum number of engine endpoints (replicas) to maintain per worker type.
+  Minimum engine endpoints (replicas) for aggregated deployments. In disaggregated deployments, this value applies to both prefill and decode unless a role-specific value is set. In prefill-only or decode-only deployments, it supplies the active role when the corresponding role-specific value is unset. Must be nonnegative; use `0` for scale-to-zero compatibility.
 </ParamField>
+
+<ParamField path="prefill_min_endpoint" type="integer" default="null">
+  Minimum prefill endpoints in `disagg` and `prefill` modes. When set, replaces the prefill value supplied by `min_endpoint`. Must be at least `1`.
+</ParamField>
+
+<ParamField path="decode_min_endpoint" type="integer" default="null">
+  Minimum decode endpoints in `disagg` and `decode` modes. When set, replaces the decode value supplied by `min_endpoint`. Must be at least `1`.
+</ParamField>
+
+The Planner does not have per-component maximum endpoint fields. `max_gpu_budget`, the power budget when enabled, Global Planner allocation, and cluster capacity continue to bound scale-up. At startup and for runtime updates, the Planner rejects minimum endpoint combinations that cannot fit the configured GPU or power budget.
 
 <ParamField path="decode_engine_num_gpu" type="integer" default="null">
   GPUs per decode engine replica. Auto-detected from the deployment when unset.
@@ -301,6 +311,10 @@ These fields default from environment variables and are excluded from serialized
   Path to a CA bundle for verifying the upstream Prometheus TLS certificate. When set, the bundle is used for verification regardless of `metric_pulling_prometheus_ssl_verify`. Must point to an existing file.
 </ParamField>
 
+<ParamField path="metric_pulling_prometheus_request_timeout_seconds" type="number" default="10.0">
+  Connection and read inactivity timeout in seconds for each Prometheus API request. Defaults from `DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS` and must be greater than `0`. This is not a total wall-clock deadline: a response that continues delivering data can run longer. The Planner does not retry failed requests within the same collection cycle.
+</ParamField>
+
 <ParamField path="metric_reporting_prometheus_port" type="integer" default="0">
   Port on which the Planner exposes its own `dynamo_planner_*` metrics. Defaults from `PLANNER_PROMETHEUS_PORT`. `0` disables.
 </ParamField>
@@ -332,6 +346,35 @@ These fields default from environment variables and are excluded from serialized
 <ParamField path="live_dashboard_port" type="integer" default="8080">
   Port for the live diagnostics dashboard HTTP server. `0` disables. When enabled, visit `http://host:port/` for a real-time Plotly report.
 </ParamField>
+
+## Runtime configuration
+
+<ParamField path="control_api_port" type="integer" default="9086">
+  Port for the runtime minimum-endpoint API. The server listens only on `127.0.0.1`; `0` disables it. Updates are process-local, are not persisted to the Planner ConfigMap, and take effect on the next planner tick.
+</ParamField>
+
+### Runtime minimum endpoint API
+
+The Planner exposes `GET /v1/min-endpoints` and partial `PATCH /v1/min-endpoints`. The request and response fields depend on the active mode:
+
+| Mode | Runtime fields |
+| --- | --- |
+| `disagg` | `prefill_min_endpoint`, `decode_min_endpoint` |
+| `prefill` | `prefill_min_endpoint` |
+| `decode` | `decode_min_endpoint` |
+| `agg` | `min_endpoint` |
+
+The API has no authentication and is not exposed by a Kubernetes Service. For Kubernetes deployments, port-forward directly to the Planner pod:
+
+```bash
+kubectl port-forward pod/<planner-pod> 9086:9086
+curl http://127.0.0.1:9086/v1/min-endpoints
+curl --request PATCH http://127.0.0.1:9086/v1/min-endpoints \
+  --header 'Content-Type: application/json' \
+  --data '{"prefill_min_endpoint": 2}'
+```
+
+PATCH is atomic. Malformed JSON, unknown fields, and empty patches return HTTP `400`. `null`, a negative `min_endpoint`, component-specific minimums below `1`, fields that are inactive for the current mode, and minimums that exceed the configured GPU or power budget return HTTP `422` without changing the active configuration.
 
 ## Scheduling and plugin pipeline
 
@@ -584,6 +627,7 @@ The Planner reads these environment variables. The Prometheus and namespace vari
 | `PROMETHEUS_SSL_VERIFY` | Default for `metric_pulling_prometheus_ssl_verify` (`1`/`true`/`yes`). | `false` |
 | `PROMETHEUS_EXTRA_QUERY_PARAMS` | Default for `metric_pulling_prometheus_extra_query_params` (URL query string). | unset |
 | `PROMETHEUS_CA_BUNDLE` | Default for `metric_pulling_prometheus_ca_bundle`. | unset |
+| `DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS` | Default for `metric_pulling_prometheus_request_timeout_seconds`. | `10.0` |
 | `PLANNER_PROMETHEUS_PORT` | Default for `metric_reporting_prometheus_port`. | `0` |
 | `DYN_PARENT_DGD_K8S_NAME` | Parent DGD name for the GlobalPlanner connector (`environment: global-planner`). | required |
 | `POD_NAMESPACE` | Kubernetes namespace for the GlobalPlanner connector. | required |

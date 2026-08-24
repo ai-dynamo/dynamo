@@ -24,20 +24,24 @@ use crate::kv_router::{
     metrics::KvPublisherMetrics,
 };
 
+mod attachment_owner;
 mod batching;
 mod dedup;
 mod event_processor;
 mod multimodal_embedding_cache;
 mod sinks;
+mod state_agent;
+mod state_agent_host;
 #[cfg(test)]
 mod tests;
 mod worker_metrics;
 mod zmq_listener;
 
+pub use attachment_owner::{KvStateAttachmentDescriptor, KvStateAttachmentOwner};
+
+pub use crate::discovery::kv_state_agent::KvStateIngressProtocol;
 #[cfg(test)]
-use batching::BatchingState;
-#[cfg(test)]
-use dedup::EventDedupFilter;
+use dedup::{EventDedupFilter, EventDedupPolicy};
 #[cfg(test)]
 use event_processor::run_event_processor_loop;
 use event_processor::start_event_processor;
@@ -46,6 +50,13 @@ pub use multimodal_embedding_cache::{
     MultimodalEmbeddingCacheUpdate,
 };
 use sinks::EventPlanePublisher;
+pub use state_agent::{
+    KvStateAgent, KvStateAgentAttachmentConfig, KvStateAgentConfig, KvStateAgentSlotConfig,
+    KvStateAgentVllmSource, resolve_stable_dp_slot_id,
+};
+pub use state_agent_host::{
+    DEFAULT_KV_STATE_AGENT_MAX_SLOTS, KvStateAgentHost, KvStateAgentHostConfig,
+};
 pub use worker_metrics::WorkerMetricsPublisher;
 use zmq_listener::start_zmq_listener;
 

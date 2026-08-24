@@ -10,6 +10,7 @@
 // unified [`SpanProxy`] handle whose `set_attribute` / `add_event` /
 // `set_status` operations mirror the OTel `Span` API.
 
+use dynamo_backend_common::FirstTokenNotifier;
 use dynamo_runtime::logging::DistributedTraceContext;
 pub use dynamo_runtime::pipeline::AsyncEngineContext;
 use dynamo_runtime::pipeline::context::Controller;
@@ -20,12 +21,11 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-use tokio::sync::watch;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Process-wide guard: once-per-process WARN when telemetry calls hit a
 /// parent `engine.generate` span that has no OTel context (i.e., the
-/// `tracing-opentelemetry` layer isn't installed — non-JSONL deployments).
+/// `tracing-opentelemetry` layer isn't installed).
 /// One log line is enough to surface the configuration issue; rate-limiting
 /// to once avoids flooding logs in high-QPS workers.
 ///
@@ -40,7 +40,8 @@ fn warn_bridge_missing_once(method: &str) {
         tracing::warn!(
             method,
             "telemetry call is a no-op: OTel bridge layer not installed \
-             (needs DYN_LOGGING_JSONL=1 + OTEL_EXPORT_ENABLED=1). \
+             (enable OTEL_EXPORT_ENABLED=1, DYN_LOGGING_CONSOLE_FORMAT=jsonl, \
+             or the legacy DYN_LOGGING_JSONL=1 switch). \
              Engine telemetry attributes / events / child spans are NOT \
              being recorded. Further no-ops in this process are silent."
         );
@@ -60,9 +61,7 @@ fn warn_bridge_missing_once(method: &str) {
 pub struct Context {
     inner: Arc<dyn AsyncEngineContext>,
     trace_context: Option<DistributedTraceContext>,
-    /// First-token signal for decode-mode disagg. `None` on aggregated /
-    /// prefill requests.
-    first_token: Option<watch::Sender<bool>>,
+    first_token: Option<FirstTokenNotifier>,
     metadata: Arc<Mutex<BTreeMap<String, String>>>,
     /// Captured `engine.generate` span. `None` for Python-instantiated test
     /// contexts (where no parent span was plumbed in) — `current_span` /
@@ -175,7 +174,7 @@ impl Context {
     pub fn new(
         inner: Arc<dyn AsyncEngineContext>,
         trace_context: Option<DistributedTraceContext>,
-        first_token: Option<watch::Sender<bool>>,
+        first_token: Option<FirstTokenNotifier>,
         metadata: BTreeMap<String, String>,
     ) -> Self {
         Self {
@@ -208,6 +207,22 @@ impl Context {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    pub(crate) fn bind_first_token_source(
+        &mut self,
+        source: &dynamo_llm::first_token::FirstTokenSource,
+        dp_rank: Option<u32>,
+    ) {
+        let Some(dp_rank) = dp_rank else {
+            return;
+        };
+        if let Some(notifier) = &self.first_token {
+            let _ = notifier.attach_completion(source, self.inner.id(), dp_rank);
+            return;
+        }
+        self.first_token =
+            FirstTokenNotifier::for_request(None, Some(source), self.inner.id(), Some(dp_rank));
     }
 
     /// Build the `traceparent` header value. Prefers the engine.generate
@@ -309,13 +324,12 @@ impl Context {
         })
     }
 
-    /// Fire the first-token signal so the framework can release any
-    /// deferred `engine.abort()`. Idempotent; no-op on non-decode
-    /// requests. Engines normally don't need this — the framework
-    /// auto-fires on the first non-empty chunk in the response stream.
+    /// Fire the shared first-token notifier. This releases deferred decode abort and publishes
+    /// worker-side prefill completion when configured. The framework normally auto-fires it on
+    /// the first non-empty response chunk.
     fn notify_first_token(&self) {
-        if let Some(tx) = &self.first_token {
-            let _ = tx.send(true);
+        if let Some(notifier) = &self.first_token {
+            notifier.notify();
         }
     }
 
@@ -425,8 +439,8 @@ impl Context {
     /// bridge is installed, so downstream engine internals (vLLM scheduler,
     /// TRT-LLM forward, SGLang KV transfer) nest UNDER `engine.generate`.
     /// Falls back to the inbound `DistributedTraceContext` for legacy
-    /// callers, Python-instantiated test contexts, and non-JSONL deployments
-    /// without the bridge.
+    /// callers, Python-instantiated test contexts, and deployments without
+    /// the bridge.
     ///
     /// Always emits `traceparent`. Also emits `tracestate`, `x-request-id`,
     /// and `request-id` when the upstream propagated them.

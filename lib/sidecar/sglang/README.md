@@ -11,6 +11,8 @@ out-of-process SGLang engine through SGLang's native gRPC service. It is a
 standalone Rust executable and is also compiled into `ai-dynamo-runtime` for
 the importable `dynamo.sglang.sidecar` launcher.
 
+## Run
+
 Build and run it directly from the Dynamo workspace:
 
 ```bash
@@ -21,6 +23,16 @@ cargo build --release -p dynamo-sglang-sidecar
 
 There is no published image yet; the "Deploy on Kubernetes" section below builds
 a minimal one from `Dockerfile`. Official packaging is deferred to a follow-up.
+
+Use `SGLANG_GRPC_ENDPOINT` instead of `--sglang-endpoint` when the endpoint is provided through the environment.
+
+The sidecar discovers the model and tokenizer paths, served model name, parser defaults, worker role, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through SGLang's native discovery RPCs. Explicit Dynamo parser options override parser names discovered from SGLang.
+
+SGLang remains the source of truth for the worker's aggregated, prefill, or decode role. The inherited `--disaggregation-mode` option and `DYN_DISAGGREGATION_MODE` environment variable have no effect in this sidecar. The SGLang sidecar rejects `--route-to-encoder` because its native protocol does not support encoder workers. Disaggregated workers continue to register under their fixed role components; aggregated workers honor `--component` or `DYN_COMPONENT`.
+
+The sidecar opens eight gRPC connections by default. Override the pool size with `--grpc-connections` or `DYN_SIDECAR_GRPC_CONNECTIONS`.
+
+Connection startup uses a 30-second timeout per attempt, a one-second retry and readiness interval, and a five-minute deadline for establishing the full connection pool. Override them with `--grpc-connect-attempt-timeout-secs`, `--grpc-retry-interval-secs`, and `--grpc-startup-deadline-secs`, or with the corresponding `DYN_SIDECAR_GRPC_*` environment variables.
 
 ## SGLang-managed module contract
 
@@ -49,8 +61,8 @@ There is no published sidecar image yet, so you build and push your own from
 
 > [!NOTE]
 > The engine image must be a stock SGLang **v0.5.16+** build: the native gRPC
-> server (`--grpc-port`) landed there, and Dynamo's `sglang-runtime` pins an
-> older SGLang without it. `deploy/agg.yaml` uses `lmsysorg/sglang:v0.5.16`.
+> server (`--grpc-port`) landed there. The deployment examples use
+> `lmsysorg/sglang:v0.5.17`, matching Dynamo main's SGLang pin.
 
 ### Prerequisites
 

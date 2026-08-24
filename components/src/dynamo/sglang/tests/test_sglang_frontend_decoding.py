@@ -19,6 +19,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.common.multimodal import TransferRequest
+from dynamo.llm import HttpError
 from dynamo.sglang.backend_args import DynamoSGLangConfig
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
@@ -151,6 +152,7 @@ async def test_encode_worker_caches_frontend_decoded_image(caplog):
     handler._embedding_cache = MultimodalEmbeddingCacheManager(1024 * 1024)
     handler.image_token_id = 42
     handler.video_token_id = None
+    handler._max_input_token_id = 41
 
     content_hash = "7a9bbcb11a898630"
     decoded_metadata = {
@@ -231,6 +233,27 @@ async def test_encode_worker_caches_frontend_decoded_image(caplog):
     assert pd_request["multimodal_inputs"][0]["image_grid_thw"] == [1, 2, 2]
     assert pd_request["multimodal_inputs"][0]["num_mm_tokens"] == 4
     assert "Decoded" not in json.dumps(pd_request)
+
+
+@pytest.mark.asyncio
+async def test_encode_worker_rejects_unknown_oov_token_before_loading_media():
+    handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
+    handler.image_token_id = 32000
+    handler.video_token_id = None
+    handler._max_input_token_id = 31999
+    handler._prepare_image_inputs = AsyncMock()
+    raw_request = {
+        "token_ids": [1, 32000, 2**32 - 1],
+        "stop_conditions": {"max_tokens": 8},
+        "sampling_options": {"temperature": 0.0},
+        "multi_modal_data": {"image_url": [{"Url": "https://example.com/image.png"}]},
+    }
+
+    with pytest.raises(HttpError, match="4294967295"):
+        async for _ in handler.generate(raw_request, context=None):
+            pass
+
+    handler._prepare_image_inputs.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -315,6 +338,7 @@ async def test_encode_worker_releases_decoded_image_before_streaming():
     handler._embedding_cache = None
     handler.image_token_id = 42
     handler.video_token_id = None
+    handler._max_input_token_id = 41
 
     class _ImageLoader:
         image_ref = None
@@ -414,6 +438,7 @@ def _new_decode_handler(*, enable_frontend_decoding: bool):
     )
     handler._routed_experts_kwargs = {}
     handler._enable_frontend_decoding = enable_frontend_decoding
+    handler._first_token_source = None
     handler._image_loader = None
     handler._mm_hashes_supported = False
 

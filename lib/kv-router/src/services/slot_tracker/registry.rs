@@ -309,9 +309,15 @@ impl SlotTrackerRegistry {
         request_id: &str,
     ) -> Result<(), ServiceError> {
         let entry = self.entry(key)?;
-        entry
+        let request_id = request_id.to_string();
+        let worker = entry.tracker.request_worker(&request_id);
+        let outcome = entry
             .tracker
-            .mark_prefill_completed(&request_id.to_string(), Instant::now())?;
+            .mark_prefill_completed(&request_id, Instant::now())?;
+        if worker.is_none() && !outcome.is_applied() {
+            return Err(SequenceError::RequestNotFound { request_id }.into());
+        }
+        entry.tracker.publish_prefill_completed(&request_id);
         Ok(())
     }
 
@@ -720,6 +726,46 @@ mod tests {
         registry.register(key("a"), 1, 16, 0, 1).unwrap();
         registry.register(key("b"), 1, 16, 0, 1).unwrap();
         assert_eq!(registry.list_workers(None, None).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn duplicate_add_conflicts_across_workers() {
+        let registry = registry();
+        let key = key("default");
+        registry.register(key.clone(), 1, 16, 0, 1).unwrap();
+        registry.register(key.clone(), 2, 16, 0, 1).unwrap();
+
+        let worker_a = WorkerWithDpRank::new(1, 0);
+        let worker_b = WorkerWithDpRank::new(2, 0);
+        let add = |worker| registry.add_request(&key, "req-1".to_string(), worker, vec![1, 2], 8);
+
+        add(worker_a).unwrap();
+        assert!(
+            matches!(
+                add(worker_b),
+                Err(ServiceError::Sequence(
+                    SequenceError::DuplicateRequest { .. }
+                ))
+            ),
+            "a request ID already booked on another worker must conflict"
+        );
+
+        let blocks_on = |worker_id| {
+            registry
+                .list_loads(None, None)
+                .into_iter()
+                .find(|load| load.worker_id == worker_id)
+                .map(|load| load.active_decode_blocks)
+                .unwrap_or(0)
+        };
+        let booked = blocks_on(1);
+        assert!(booked > 0, "the first add must book worker 1");
+
+        assert_eq!(blocks_on(1), booked, "the original booking is unchanged");
+        assert_eq!(blocks_on(2), 0, "the duplicate creates no booking");
+
+        registry.free(&key, "req-1").unwrap();
+        assert_eq!(blocks_on(1), 0);
     }
 
     #[tokio::test]
