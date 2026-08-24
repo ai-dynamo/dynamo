@@ -29,7 +29,9 @@ use dynamo_protocols::types::{
     ChatCompletionToolChoiceOption, EncodingFormat,
 };
 use dynamo_renderer::{OAIPromptFormatter, PromptRenderError, RenderedPrompt};
-use dynamo_runtime::config::{is_truthy, parse_bool_opt};
+use dynamo_runtime::config::{
+    env_is_falsey, environment_names::llm as env_llm, is_truthy, parse_bool_opt,
+};
 use dynamo_runtime::error::{DynamoError, ErrorType};
 use either::Either;
 use futures::Stream;
@@ -3567,12 +3569,16 @@ impl OpenAIPreprocessor {
                 // calls as they arrive instead of buffering to the closing brace. The
                 // jail keeps its own native fallback, so a backend that ignores the
                 // grammar (MiniMax M2 emits XML under `required`) still parses normally.
+                let incremental_release = Self::guided_tool_streaming_release(
+                    guided.installs_guided_json(),
+                    env_is_falsey(env_llm::DYN_ENABLE_GUIDED_TOOL_STREAMING),
+                );
                 Box::pin(Self::apply_tool_calling_jail(
                     effective_tool_call_parser,
                     request.inner.tool_choice.clone(),
                     tool_definitions,
                     uses_tool_call_structural_tag,
-                    guided.installs_guided_json(),
+                    incremental_release,
                     stream,
                 ))
             } else {
@@ -4068,6 +4074,18 @@ impl OpenAIPreprocessor {
         }
     }
 
+    /// Whether a forced tool_choice's installed JSON grammar should release
+    /// jailed calls incrementally, or fall back to buffer-to-completion.
+    ///
+    /// Rollback lever: the grammar-constrained decoding itself lives in the
+    /// published `dynamo-parsers` dependency, not in this repo, so a backend
+    /// that misbehaves under guided decoding in production has no same-release
+    /// fix other than `DYN_ENABLE_GUIDED_TOOL_STREAMING`. On by default; set it
+    /// to a falsy value (`0`/`false`) to fall back to buffer-to-completion.
+    fn guided_tool_streaming_release(installs_guided_json: bool, rollback_disabled: bool) -> bool {
+        installs_guided_json && !rollback_disabled
+    }
+
     /// Apply tool calling jail to the stream if needed.
     ///
     /// The jail itself now lives in `dynamo-parsers`
@@ -4148,6 +4166,34 @@ impl OpenAIPreprocessor {
         let choice_recovery_in = Arc::clone(&choice_recovery);
         let glm47_start_jail = glm47_start.clone();
 
+        // The jail's own (vendored, out-of-scope) finalize logic cannot tell an
+        // error-terminated input stream from one that genuinely completed — it
+        // sees a plain EOF either way — so on a natural EOF it can synthesize a
+        // `tool_calls` finish chunk from whatever partial arguments it had
+        // buffered, even though the request actually failed upstream. Both
+        // unified adapters (`unified_parser::apply_stream_with_constraint`,
+        // `tool_parser_v2::apply_stream`/`apply_unified_stream`) already give a
+        // terminal upstream error this exact contract: `yield response; return;`,
+        // dropping everything after. Give the jail wrapper the same contract:
+        // `terminal_error` latches the first error `Annotated` observed on the
+        // way in, `take_while` below stops it from ever reaching the jail (so
+        // the jail's finalize never runs on an error-caused EOF at all), and the
+        // matching `take_while`/`chain` on the way out (below) drops anything
+        // the jail still emits after that point and substitutes the error
+        // instead — never letting a synthesized completion reach the caller.
+        let terminal_error: Arc<Mutex<Option<Annotated<NvCreateChatCompletionStreamResponse>>>> =
+            Arc::new(Mutex::new(None));
+        let terminal_error_in = Arc::clone(&terminal_error);
+        let stream = stream.take_while(move |a| {
+            let is_error = a.is_error();
+            if is_error {
+                *terminal_error_in
+                    .lock()
+                    .expect("jail terminal error poisoned") = Some(a.clone());
+            }
+            std::future::ready(!is_error)
+        });
+
         // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer llm_metrics)
         let jail_input = stream.map(move |mut a| {
             if let Some(metrics) = a.data.as_mut().and_then(|nv| nv.llm_metrics.take()) {
@@ -4224,168 +4270,196 @@ impl OpenAIPreprocessor {
                 jail_input,
             ))
         };
-        jailed.flat_map(move |a| {
-            // Stamp the accumulated metrics onto the next emitted data chunk;
-            // data-less/synthesized chunks carry it forward (or `None`).
-            let llm_metrics = a.data.as_ref().and_then(|_| {
-                let mut p = pending.lock().expect("jail metrics buffer poisoned");
-                let chunk_tokens = p.chunk_tokens;
-                p.chunk_tokens = 0;
-                p.template.take().map(|mut metrics| {
-                    metrics.chunk_tokens = chunk_tokens;
-                    metrics
-                })
-            });
-            let mut nv_chunk = Annotated {
-                data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
-                    inner,
-                    nvext: None,
-                    llm_metrics,
-                }),
-                id: a.id,
-                event: a.event,
-                comment: a.comment,
-                error: a.error.map(DynamoError::msg),
-            };
-
-            // glm47: on finish_reason=length, recover the last incomplete
-            // <tool_call> block. rfind skips complete blocks so earlier parsed
-            // calls are never duplicated. Recovered content WILL contain raw
-            // markup — callers that require "no tool tags in content" must
-            // filter on finish_reason=length.
-            //
-            // TODO: this recovery runs inside apply_tool_calling_jail, which
-            // the v2 path bypasses (use_parsers_v2 branch above). Adding
-            // "glm47" to V2_FAMILIES in tool_parser_v2.rs silently disables
-            // streaming recovery while aggregator.rs keeps running. At that
-            // point hoist this above the jail/v2 branch — it only needs
-            // buffered input text + finish_reason, both available there.
-            // Pass 1 (immutable): compute the recovery tail per choice and
-            // whether the jail already released it as content on this chunk.
-            // We collect into a Vec so we can release the immutable borrow on
-            // nv_chunk before mutating it in pass 2.
-            let recoveries: Vec<PendingRecovery> = if is_glm47 {
-                let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
-                nv_chunk
-                    .data
-                    .iter()
-                    .flat_map(|data| data.inner.choices.iter())
-                    .filter_map(|choice| {
-                        let state = cr.entry(choice.index).or_default();
-                        if !state.recovered
-                            && let Some(ChatCompletionMessageContent::Text(t)) =
-                                &choice.delta.content
-                        {
-                            state.emitted_text.push_str(t);
-                            // Bound like input_text: retain only the suffix from
-                            // the last marker onward — all the contains(&tail)
-                            // check needs.
-                            let mut keep_from = match state.emitted_text.rfind(glm47_start.as_str())
-                            {
-                                Some(pos) => pos,
-                                None => state
-                                    .emitted_text
-                                    .len()
-                                    .saturating_sub(glm47_start.len() - 1),
-                            };
-                            while keep_from > 0 && !state.emitted_text.is_char_boundary(keep_from) {
-                                keep_from -= 1;
-                            }
-                            state.emitted_text.drain(..keep_from);
-                        }
-                        if state.recovered
-                            || !matches!(
-                                choice.finish_reason,
-                                Some(dynamo_protocols::types::FinishReason::Length)
-                            )
-                        {
-                            return None;
-                        }
-                        let tail =
-                            state
-                                .input_text
-                                .rfind(glm47_start.as_str())
-                                .and_then(|pos| {
-                                    let t = &state.input_text[pos..];
-                                    if !t.contains(glm47_end.as_str()) {
-                                        Some(t.to_string())
-                                    } else {
-                                        None
-                                    }
-                                })?;
-                        let tail_already_emitted = state.emitted_text.contains(&tail);
-                        state.recovered = true;
-                        Some(PendingRecovery {
-                            choice_idx: choice.index,
-                            tail,
-                            tail_already_emitted,
-                        })
+        let terminal_error_out = Arc::clone(&terminal_error);
+        jailed
+            .flat_map(move |a| {
+                // Stamp the accumulated metrics onto the next emitted data chunk;
+                // data-less/synthesized chunks carry it forward (or `None`).
+                let llm_metrics = a.data.as_ref().and_then(|_| {
+                    let mut p = pending.lock().expect("jail metrics buffer poisoned");
+                    let chunk_tokens = p.chunk_tokens;
+                    p.chunk_tokens = 0;
+                    p.template.take().map(|mut metrics| {
+                        metrics.chunk_tokens = chunk_tokens;
+                        metrics
                     })
-                    .collect()
-            } else {
-                vec![]
-            };
+                });
+                let mut nv_chunk = Annotated {
+                    data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
+                        inner,
+                        nvext: None,
+                        llm_metrics,
+                    }),
+                    id: a.id,
+                    event: a.event,
+                    comment: a.comment,
+                    error: a.error.map(DynamoError::msg),
+                };
 
-            // Pass 2 (mutable): when the jail already released the tail verbatim,
-            // suppress the finish chunk's content entirely. The recovery chunk
-            // carries just the marker-onwards tail, matching the non-streaming
-            // path (rfind result only, no post-call prose).
-            for pr in &recoveries {
-                if !pr.tail_already_emitted {
-                    continue;
-                }
-                if let Some(ref mut data) = nv_chunk.data {
-                    for rc in data
-                        .inner
-                        .choices
-                        .iter_mut()
-                        .filter(|c| c.index == pr.choice_idx)
-                    {
-                        // The jail released the truncated block verbatim as content
-                        // on this chunk, potentially preceded by post-call prose.
-                        // glm47's parser drops post-call prose deliberately, so
-                        // suppress the whole content here and let the recovery
-                        // chunk carry just the marker-onwards tail — matching batch.
-                        rc.delta.content = None;
+                // glm47: on finish_reason=length, recover the last incomplete
+                // <tool_call> block. rfind skips complete blocks so earlier parsed
+                // calls are never duplicated. Recovered content WILL contain raw
+                // markup — callers that require "no tool tags in content" must
+                // filter on finish_reason=length.
+                //
+                // TODO: this recovery runs inside apply_tool_calling_jail, which
+                // the v2 path bypasses (use_parsers_v2 branch above). Adding
+                // "glm47" to V2_FAMILIES in tool_parser_v2.rs silently disables
+                // streaming recovery while aggregator.rs keeps running. At that
+                // point hoist this above the jail/v2 branch — it only needs
+                // buffered input text + finish_reason, both available there.
+                // Pass 1 (immutable): compute the recovery tail per choice and
+                // whether the jail already released it as content on this chunk.
+                // We collect into a Vec so we can release the immutable borrow on
+                // nv_chunk before mutating it in pass 2.
+                let recoveries: Vec<PendingRecovery> =
+                    if is_glm47 {
+                        let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
+                        nv_chunk
+                            .data
+                            .iter()
+                            .flat_map(|data| data.inner.choices.iter())
+                            .filter_map(|choice| {
+                                let state = cr.entry(choice.index).or_default();
+                                if !state.recovered
+                                    && let Some(ChatCompletionMessageContent::Text(t)) =
+                                        &choice.delta.content
+                                {
+                                    state.emitted_text.push_str(t);
+                                    // Bound like input_text: retain only the suffix from
+                                    // the last marker onward — all the contains(&tail)
+                                    // check needs.
+                                    let mut keep_from =
+                                        match state.emitted_text.rfind(glm47_start.as_str()) {
+                                            Some(pos) => pos,
+                                            None => state
+                                                .emitted_text
+                                                .len()
+                                                .saturating_sub(glm47_start.len() - 1),
+                                        };
+                                    while keep_from > 0
+                                        && !state.emitted_text.is_char_boundary(keep_from)
+                                    {
+                                        keep_from -= 1;
+                                    }
+                                    state.emitted_text.drain(..keep_from);
+                                }
+                                if state.recovered
+                                    || !matches!(
+                                        choice.finish_reason,
+                                        Some(dynamo_protocols::types::FinishReason::Length)
+                                    )
+                                {
+                                    return None;
+                                }
+                                let tail = state.input_text.rfind(glm47_start.as_str()).and_then(
+                                    |pos| {
+                                        let t = &state.input_text[pos..];
+                                        if !t.contains(glm47_end.as_str()) {
+                                            Some(t.to_string())
+                                        } else {
+                                            None
+                                        }
+                                    },
+                                )?;
+                                let tail_already_emitted = state.emitted_text.contains(&tail);
+                                state.recovered = true;
+                                Some(PendingRecovery {
+                                    choice_idx: choice.index,
+                                    tail,
+                                    tail_already_emitted,
+                                })
+                            })
+                            .collect()
+                    } else {
+                        vec![]
+                    };
+
+                // Pass 2 (mutable): when the jail already released the tail verbatim,
+                // suppress the finish chunk's content entirely. The recovery chunk
+                // carries just the marker-onwards tail, matching the non-streaming
+                // path (rfind result only, no post-call prose).
+                for pr in &recoveries {
+                    if !pr.tail_already_emitted {
+                        continue;
+                    }
+                    if let Some(ref mut data) = nv_chunk.data {
+                        for rc in data
+                            .inner
+                            .choices
+                            .iter_mut()
+                            .filter(|c| c.index == pr.choice_idx)
+                        {
+                            // The jail released the truncated block verbatim as content
+                            // on this chunk, potentially preceded by post-call prose.
+                            // glm47's parser drops post-call prose deliberately, so
+                            // suppress the whole content here and let the recovery
+                            // chunk carry just the marker-onwards tail — matching batch.
+                            rc.delta.content = None;
+                        }
                     }
                 }
-            }
 
-            // Pass 3: emit a recovery chunk per affected choice carrying just
-            // the truncated tail (marker onwards, no post-call prose).
-            let recovery_chunks: Vec<_> = recoveries
-                .into_iter()
-                .filter_map(|pr| {
-                    let PendingRecovery {
-                        choice_idx, tail, ..
-                    } = pr;
-                    tracing::warn!(
-                        choice_index = choice_idx,
-                        recovered_bytes = tail.len(),
-                        "glm47 streaming: partial <tool_call> emitted as content \
+                // Pass 3: emit a recovery chunk per affected choice carrying just
+                // the truncated tail (marker onwards, no post-call prose).
+                let recovery_chunks: Vec<_> = recoveries
+                    .into_iter()
+                    .filter_map(|pr| {
+                        let PendingRecovery {
+                            choice_idx, tail, ..
+                        } = pr;
+                        tracing::warn!(
+                            choice_index = choice_idx,
+                            recovered_bytes = tail.len(),
+                            "glm47 streaming: partial <tool_call> emitted as content \
                          on length finish"
-                    );
-                    let mut rec = nv_chunk.clone();
-                    rec.id = None;
-                    rec.event = None;
-                    rec.comment = None;
-                    rec.error = None;
-                    let rd = rec.data.as_mut()?;
-                    rd.inner.usage = None;
-                    rd.llm_metrics = None;
-                    rd.inner.choices.retain(|c| c.index == choice_idx);
-                    for rc in &mut rd.inner.choices {
-                        rc.delta.content = Some(ChatCompletionMessageContent::Text(tail.clone()));
-                        rc.delta.tool_calls = None;
-                        rc.finish_reason = None;
-                        rc.logprobs = None;
-                    }
-                    Some(rec)
-                })
-                .collect();
+                        );
+                        let mut rec = nv_chunk.clone();
+                        rec.id = None;
+                        rec.event = None;
+                        rec.comment = None;
+                        rec.error = None;
+                        let rd = rec.data.as_mut()?;
+                        rd.inner.usage = None;
+                        rd.llm_metrics = None;
+                        rd.inner.choices.retain(|c| c.index == choice_idx);
+                        for rc in &mut rd.inner.choices {
+                            rc.delta.content =
+                                Some(ChatCompletionMessageContent::Text(tail.clone()));
+                            rc.delta.tool_calls = None;
+                            rc.finish_reason = None;
+                            rc.logprobs = None;
+                        }
+                        Some(rec)
+                    })
+                    .collect();
 
-            futures::stream::iter(recovery_chunks.into_iter().chain(std::iter::once(nv_chunk)))
-        })
+                futures::stream::iter(recovery_chunks.into_iter().chain(std::iter::once(nv_chunk)))
+            })
+            // See the `terminal_error` comment above: once the upstream error was
+            // latched, `take_while` drops everything the jail still emits from that
+            // point on (its finalize output has no way to know the request already
+            // failed), and `chain` substitutes the latched error as the stream's
+            // final and only item from there. When no error occurred, `terminal_error`
+            // is never populated, `take_while` never stops early, and `chain`'s
+            // `filter_map` drops the `None` it reads back — this stage is then a
+            // no-op passthrough.
+            .take_while(move |_| {
+                let stop = terminal_error_out
+                    .lock()
+                    .expect("jail terminal error poisoned")
+                    .is_some();
+                std::future::ready(!stop)
+            })
+            .chain(
+                stream::once(async move {
+                    terminal_error
+                        .lock()
+                        .expect("jail terminal error poisoned")
+                        .take()
+                })
+                .filter_map(std::future::ready),
+            )
     }
 
     /// Whether the selected tool-call or reasoning parser depends on the
@@ -5915,6 +5989,27 @@ mod tests {
         ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
         FinishReason, Role,
     };
+
+    #[test]
+    fn guided_tool_streaming_release_only_when_guided_json_and_not_rolled_back() {
+        assert!(
+            OpenAIPreprocessor::guided_tool_streaming_release(true, false),
+            "a forced tool_choice with an installed grammar releases incrementally by default"
+        );
+        assert!(
+            !OpenAIPreprocessor::guided_tool_streaming_release(true, true),
+            "DYN_ENABLE_GUIDED_TOOL_STREAMING=false must fall back to buffer-to-completion \
+             even when guided JSON is installed"
+        );
+        assert!(
+            !OpenAIPreprocessor::guided_tool_streaming_release(false, false),
+            "no installed grammar means nothing to release incrementally, rollback or not"
+        );
+        assert!(
+            !OpenAIPreprocessor::guided_tool_streaming_release(false, true),
+            "no installed grammar means nothing to release incrementally, rollback or not"
+        );
+    }
 
     fn chat_stream_chunk(
         index: u32,

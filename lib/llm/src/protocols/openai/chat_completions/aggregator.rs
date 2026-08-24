@@ -54,6 +54,33 @@ fn contains_native_tool_call_marker(content: &str, parser: &str) -> bool {
         })
 }
 
+/// Drops any recovered native-fallback calls that don't match the forced
+/// `tool_name` from a `GuidedJsonNamed` constraint. Guided-JSON failure only
+/// tells us the *shape* was wrong; it says nothing about which tool the
+/// native markup named, so a malformed guided output that happens to embed
+/// native markup for a different tool must never be handed back to a client
+/// that pinned `tool_choice` to one specific function.
+fn filter_calls_to_forced_tool_name(
+    calls: Vec<dynamo_parsers::tool_calling::ToolCallResponse>,
+    constraint: &crate::protocols::openai::GuidedToolConstraint,
+) -> Vec<dynamo_parsers::tool_calling::ToolCallResponse> {
+    let crate::protocols::openai::GuidedToolConstraint::GuidedJsonNamed { tool_name } = constraint
+    else {
+        return calls;
+    };
+    let (matched, dropped): (Vec<_>, Vec<_>) = calls
+        .into_iter()
+        .partition(|call| &call.function.name == tool_name);
+    if !dropped.is_empty() {
+        tracing::warn!(
+            tool_name,
+            dropped = dropped.len(),
+            "dropped native-fallback tool call(s) whose name did not match the tool_choice-forced tool_name"
+        );
+    }
+    matched
+}
+
 async fn parse_complete_tool_output(
     content: &str,
     parser: &str,
@@ -79,12 +106,31 @@ async fn parse_complete_tool_output(
         }
     }
 
-    if super::tool_parser_v2::enabled() && super::tool_parser_v2::supports_family(parser) {
-        super::tool_parser_v2::parse_complete(content, None, parser)
-            .map(|(calls, normal)| (calls, Some(normal)))
-    } else {
-        try_tool_call_parse_aggregate_finalize(content, Some(parser), None).await
-    }
+    let result =
+        if super::tool_parser_v2::enabled() && super::tool_parser_v2::supports_family(parser) {
+            super::tool_parser_v2::parse_complete(content, None, parser)
+                .map(|(calls, normal)| (calls, Some(normal)))
+        } else {
+            try_tool_call_parse_aggregate_finalize(content, Some(parser), None).await
+        };
+
+    result.and_then(|(calls, normal)| {
+        let filtered = filter_calls_to_forced_tool_name(calls, constraint);
+        if filtered.is_empty()
+            && matches!(
+                constraint,
+                crate::protocols::openai::GuidedToolConstraint::GuidedJsonNamed { .. }
+            )
+        {
+            // Mirror the "no native markup found" behavior above: a fallback
+            // that recovered nothing usable for the forced tool is treated
+            // the same as a fallback that found nothing at all.
+            return Err(anyhow::anyhow!(
+                "native tool-call fallback recovered no call matching the tool_choice-forced tool name"
+            ));
+        }
+        Ok((filtered, normal))
+    })
 }
 
 /// Aggregates a stream of [`NvCreateChatCompletionStreamResponse`]s into a single
@@ -459,6 +505,7 @@ impl DeltaAggregator {
                     family,
                     &choice.text,
                     &parsing_options.guided_tool_constraint,
+                    &parsing_options.tools,
                 ) {
                     Ok(parsed) => {
                         choice.text = parsed.text;
@@ -548,20 +595,31 @@ impl DeltaAggregator {
                                     None,
                                     family,
                                 ) {
-                                    Ok((calls, reasoning, content))
+                                    Ok((calls, reasoning, content)) => {
+                                        // A GuidedJsonNamed constraint pins one tool
+                                        // name; the native fallback must never hand
+                                        // back a call for a different tool just
+                                        // because it happened to find markup naming
+                                        // one in the malformed guided output.
+                                        let calls = filter_calls_to_forced_tool_name(
+                                            calls,
+                                            &parsing_options.guided_tool_constraint,
+                                        );
                                         if !calls.is_empty()
                                             || !reasoning.is_empty()
-                                            || content != choice.text =>
-                                    {
-                                        tracing::warn!(
-                                            family,
-                                            why = "guided_json_reconstructed_but_native_markup_observed",
-                                            recovered_bytes = choice.text.len(),
-                                            "falling back to the configured unified parser"
-                                        );
-                                        Ok((calls, reasoning, content))
+                                            || content != choice.text
+                                        {
+                                            tracing::warn!(
+                                                family,
+                                                why = "guided_json_reconstructed_but_native_markup_observed",
+                                                recovered_bytes = choice.text.len(),
+                                                "falling back to the configured unified parser"
+                                            );
+                                            Ok((calls, reasoning, content))
+                                        } else {
+                                            Err(guided_error)
+                                        }
                                     }
-                                    Ok(_) => Err(guided_error),
                                     Err(native_error) => Err(native_error.context(format!(
                                         "guided JSON parse also failed: {guided_error:#}"
                                     ))),

@@ -81,7 +81,8 @@ fn apply_request_tool_call_parsing_options(
     )?;
     Ok(parsing_options
         .with_guided_tool_constraint(guided_tool_constraint)
-        .with_tool_call_parsing_enabled(tool_call_parsing_enabled))
+        .with_tool_call_parsing_enabled(tool_call_parsing_enabled)
+        .with_tools(converted_tools))
 }
 
 #[cfg(test)]

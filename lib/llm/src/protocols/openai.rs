@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
+use dynamo_parsers::tool_calling::ToolDefinition;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -417,6 +418,17 @@ pub struct ParsingOptions {
         default = "crate::local_model::runtime_config::default_exclude_tools_when_tool_choice_none"
     )]
     pub exclude_tools_when_tool_choice_none: bool,
+
+    /// The request's declared tool schemas. Threaded through so batch-path
+    /// argument parsing (`unified_parser::parse_complete`) can type-coerce
+    /// arguments against the same schema the streaming path already uses via
+    /// `apply_stream_with_constraint`'s `tool_definitions`. Empty for requests
+    /// that declare no tools, matching prior (correct) behavior for those.
+    /// `ToolDefinition` does not implement `Serialize`/`Deserialize`, and this
+    /// field is always populated fresh from the live request rather than
+    /// round-tripped, so it is skipped rather than wired into the wire format.
+    #[serde(skip)]
+    pub tools: Vec<ToolDefinition>,
 }
 
 impl Default for ParsingOptions {
@@ -438,11 +450,19 @@ impl ParsingOptions {
             structural_tag_scope: crate::local_model::runtime_config::StructuralTagScope::default(),
             exclude_tools_when_tool_choice_none:
                 crate::local_model::runtime_config::default_exclude_tools_when_tool_choice_none(),
+            tools: Vec::new(),
         }
     }
 
     pub fn with_guided_tool_constraint(mut self, constraint: GuidedToolConstraint) -> Self {
         self.guided_tool_constraint = constraint;
+        self
+    }
+
+    /// Thread the request's declared tool schemas through for batch-path
+    /// argument type coercion. See the `tools` field doc comment.
+    pub fn with_tools(mut self, tools: Vec<ToolDefinition>) -> Self {
+        self.tools = tools;
         self
     }
 

@@ -521,6 +521,43 @@ async fn test_qwen_unified_batch_recovers_native_structural_tag_output() {
     assert_guided_batch_call(&result);
 }
 
+/// Regression for a `GuidedJsonNamed` fallback that recovers a DIFFERENT tool than the
+/// one `tool_choice` pinned, on the qwen3 unified-batch path. Site 3:
+/// `unified_parser::batch_tool_output_mode`/`parse_complete`'s native-fallback filter.
+#[tokio::test]
+async fn test_qwen_unified_batch_drops_native_tool_markup_naming_a_different_tool() {
+    if !env_is_truthy(env_llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2) {
+        return;
+    }
+
+    let raw = concat!(
+        "<think>Look it up.</think>",
+        "<tool_call>\n<function=get_stock_price>\n",
+        "<parameter=symbol>NVDA</parameter>\n</function>\n</tool_call>"
+    );
+    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+        futures::stream::iter([make_stream_delta(Some(raw), None)]),
+        ParsingOptions::new(Some("qwen3_coder".to_string()), Some("qwen3".to_string()))
+            .with_guided_tool_constraint(GuidedToolConstraint::GuidedJsonNamed {
+                tool_name: "get_weather".to_string(),
+            }),
+    )
+    .await
+    .unwrap();
+
+    let choice = result.inner.choices.first().expect("one choice");
+    assert!(
+        choice
+            .message
+            .tool_calls
+            .as_ref()
+            .is_none_or(|calls| calls.is_empty()),
+        "client pinned tool_choice to get_weather but received a call for a different tool \
+         (get_stock_price) recovered from the native fallback: {:?}",
+        choice.message.tool_calls,
+    );
+}
+
 #[tokio::test]
 async fn test_forced_batch_recovers_observed_native_tool_markup() {
     let native_cases = [
@@ -574,6 +611,49 @@ async fn test_forced_batch_recovers_observed_native_tool_markup() {
                 choice.message.content,
             );
         }
+    }
+}
+
+/// Regression for a `GuidedJsonNamed` fallback that recovers a DIFFERENT tool than the
+/// one `tool_choice` pinned: a malformed guided-JSON output that happens to embed native
+/// markup naming another tool must not be handed back to the client as if it were the
+/// forced tool. Site 1: `aggregator::parse_complete_tool_output`'s native-fallback path.
+#[tokio::test]
+async fn test_forced_batch_drops_native_tool_markup_naming_a_different_tool() {
+    let native_cases = [
+        (
+            "minimax_m2",
+            "<minimax:tool_call><invoke name=\"get_stock_price\"><parameter name=\"symbol\">NVDA</parameter></invoke></minimax:tool_call>",
+        ),
+        (
+            "kimi_k2",
+            "<|tool_calls_section_begin|><|tool_call_begin|>functions.get_stock_price:0<|tool_call_argument_begin|>{\"symbol\":\"NVDA\"}<|tool_call_end|><|tool_calls_section_end|>",
+        ),
+    ];
+
+    for (parser, raw) in native_cases {
+        let result = NvCreateChatCompletionResponse::from_annotated_stream(
+            futures::stream::iter([make_stream_delta(Some(raw), None)]),
+            ParsingOptions::new(Some(parser.to_string()), None).with_guided_tool_constraint(
+                GuidedToolConstraint::GuidedJsonNamed {
+                    tool_name: "get_weather".to_string(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        let choice = result.inner.choices.first().expect("one choice");
+
+        assert!(
+            choice
+                .message
+                .tool_calls
+                .as_ref()
+                .is_none_or(|calls| calls.is_empty()),
+            "{parser}: client pinned tool_choice to get_weather but received a call for a \
+             different tool recovered from the native fallback: {:?}",
+            choice.message.tool_calls,
+        );
     }
 }
 
@@ -640,6 +720,35 @@ async fn test_forced_muse_batch_recovers_observed_native_markup() {
             "{constraint:?}",
         );
     }
+}
+
+/// Regression for a `GuidedJsonNamed` fallback that recovers a DIFFERENT tool than the
+/// one `tool_choice` pinned, on the muse unified-batch path. Site 2:
+/// `aggregator`'s muse unified-batch guided-JSON-error fallback branch.
+#[tokio::test]
+async fn test_forced_muse_batch_drops_native_markup_naming_a_different_tool() {
+    let result = NvCreateChatCompletionResponse::from_annotated_stream(
+        futures::stream::iter(muse_raw_batch_deltas()),
+        ParsingOptions::new(Some("muse_glimmer".to_string()), None).with_guided_tool_constraint(
+            GuidedToolConstraint::GuidedJsonNamed {
+                tool_name: "get_stock_price".to_string(),
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    let choice = result.inner.choices.first().expect("one choice");
+
+    assert!(
+        choice
+            .message
+            .tool_calls
+            .as_ref()
+            .is_none_or(|calls| calls.is_empty()),
+        "client pinned tool_choice to get_stock_price but received a call for a different \
+         tool (get_weather) recovered from the native fallback: {:?}",
+        choice.message.tool_calls,
+    );
 }
 
 /// Topology B: raw muse markup reaches the aggregator un-split (the frontend

@@ -182,6 +182,47 @@ pub(crate) fn stream_prefill(
     }
 }
 
+/// Resolve a `Reasoning`-prefill choice's ACTUAL starting state when guided JSON is
+/// installed, from the shape of that choice's first content-bearing chunk.
+///
+/// Guided decoding forbids the model from emitting the reasoning closer, so a request
+/// whose rendered prompt already opened reasoning (`prompt_injected_reasoning`) would,
+/// if started unconditionally at `Reasoning`, have its ENTIRE guided JSON payload
+/// swallowed as `reasoning_content` with zero tool calls ever extracted — the parser
+/// waits forever for a closer guided decoding will never produce. But committing to
+/// `None` unconditionally instead is equally wrong: a turn that genuinely reasons before
+/// its guided JSON (`reasoning</think>JSON`) would then be misread as pure content, and
+/// the legitimate `reasoning_content`/`content` split would be lost.
+///
+/// Mirrors `bypass_bare_guided_json`'s shape check in
+/// `Preprocessor::parse_reasoning_content_from_stream_inner` (preprocessor.rs), which
+/// makes the identical call for the non-unified reasoning-parser path: a payload whose
+/// first non-whitespace byte is `[` or `{` is bare guided JSON with no reasoning to
+/// split out (start at `None`, so the whole payload reaches the tool/response path
+/// untouched); anything else is ordinary text, meaning this really is a reasoning block
+/// that will close normally (start at `Reasoning`).
+///
+/// An empty or whitespace-only first chunk (e.g. a role-only opening delta) is
+/// inconclusive by this single-chunk check — unlike the legacy path, which re-evaluates
+/// per subsequent chunk, the unified parser commits to a starting state once at
+/// `ChoiceState` creation, so an inconclusive first chunk conservatively keeps the
+/// `Reasoning` default rather than risking a genuine reasoning turn being misclassified.
+fn bare_guided_json_prefill(
+    first_content: Option<&ChatCompletionMessageContent>,
+) -> UnifiedParserStartingState {
+    let Some(ChatCompletionMessageContent::Text(text)) = first_content else {
+        return UnifiedParserStartingState::Reasoning;
+    };
+    let trimmed = text.trim_start();
+    if trimmed.is_empty() {
+        return UnifiedParserStartingState::Reasoning;
+    }
+    match trimmed.as_bytes()[0] {
+        b'[' | b'{' => UnifiedParserStartingState::None,
+        _ => UnifiedParserStartingState::Reasoning,
+    }
+}
+
 /// Which channel the prompt opened, inferred from complete output text.
 ///
 /// The batch path has no prompt in hand, only what the model produced, so the channel
@@ -190,19 +231,41 @@ pub(crate) fn stream_prefill(
 /// neither marker means reasoning never ran for this turn.
 fn detect_prefill(family: &str, content: &str) -> anyhow::Result<UnifiedParserStartingState> {
     match family {
-        QWEN3_UNIFIED_FAMILY => Ok(if contains_unquoted_marker(content, "<think>") {
-            UnifiedParserStartingState::None
-        } else if contains_unquoted_marker(content, "</think>") {
-            UnifiedParserStartingState::Reasoning
-        } else {
-            UnifiedParserStartingState::Response
-        }),
+        QWEN3_UNIFIED_FAMILY => {
+            // Compare FIRST-occurrence positions, not mere presence: a prompt that
+            // pre-opened reasoning produces a leading `</think>` with no opener before
+            // it, but a later `<think>...</think>` pair from the model can still follow
+            // in the same output (e.g. after a tool-call gap). Testing "does an opener
+            // exist anywhere" before "does a closer exist anywhere" would misclassify
+            // that case as `None` instead of `Reasoning`.
+            let opener = first_unquoted_marker_position(content, "<think>");
+            let closer = first_unquoted_marker_position(content, "</think>");
+            Ok(match (opener, closer) {
+                // No opener before it (or no opener at all): the prompt opened reasoning.
+                (None, Some(_)) => UnifiedParserStartingState::Reasoning,
+                (Some(open_at), Some(close_at)) if close_at < open_at => {
+                    UnifiedParserStartingState::Reasoning
+                }
+                // An opener exists (and any closer does not precede it): the model will
+                // open reasoning itself later, currently visible as ordinary text.
+                (Some(_), _) => UnifiedParserStartingState::None,
+                (None, None) => UnifiedParserStartingState::Response,
+            })
+        }
         other => anyhow::bail!("no prefill detector for unified parser family '{other}'"),
     }
 }
 
 /// Marker-looking text quoted as prose is visible content, not parser control syntax.
 pub(crate) fn contains_unquoted_marker(content: &str, marker: &str) -> bool {
+    first_unquoted_marker_position(content, marker).is_some()
+}
+
+/// The byte offset of the first unquoted occurrence of `marker` in `content`, or `None`
+/// if it never appears outside a quoted span. Shared scanner behind
+/// [`contains_unquoted_marker`] and [`detect_prefill`], which needs the position (not
+/// just presence) to compare two markers' first occurrences.
+fn first_unquoted_marker_position(content: &str, marker: &str) -> Option<usize> {
     let chars: Vec<(usize, char)> = content.char_indices().collect();
     // Whether an unescaped `"`, `'`, or `` ` `` appears anywhere at or after each
     // position, precomputed once in O(n) so the scan below doesn't rescan the
@@ -223,15 +286,21 @@ pub(crate) fn contains_unquoted_marker(content: &str, marker: &str) -> bool {
             }
             continue;
         }
+        // A contraction/possessive apostrophe is exempt from quote-opening whenever
+        // EITHER side is alphanumeric (`James'`, `isn't`, `'twas`) — only an apostrophe
+        // with non-alphanumeric on both sides (`' quoted text '`) is a real quote-open.
+        // Requiring alphanumeric on both sides would treat a word-final possessive like
+        // `James'` as opening a quote, and a later contraction's apostrophe would then
+        // wrongly close that phantom span, hiding every real marker in between.
         let apostrophe = character == '\''
-            && content[..offset]
+            && (content[..offset]
                 .chars()
                 .next_back()
                 .is_some_and(char::is_alphanumeric)
-            && content[offset + character.len_utf8()..]
-                .chars()
-                .next()
-                .is_some_and(char::is_alphanumeric);
+                || content[offset + character.len_utf8()..]
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_alphanumeric));
         // A quote that never closes before end-of-string was never really quoting
         // anything; treating it as an open span would blind the rest of the scan to
         // a real marker that follows (e.g. a stray `"` before a genuine `</think>`).
@@ -243,10 +312,10 @@ pub(crate) fn contains_unquoted_marker(content: &str, marker: &str) -> bool {
             continue;
         }
         if content[offset..].starts_with(marker) {
-            return true;
+            return Some(offset);
         }
     }
-    false
+    None
 }
 
 /// Index into the fixed-size "which quote characters close later" arrays used by
@@ -683,14 +752,29 @@ pub(crate) fn parse_complete(
     family: &str,
     content: &str,
     guided_tool_constraint: &GuidedToolConstraint,
+    tool_definitions: &[ToolDefinition],
 ) -> anyhow::Result<CompleteOutput> {
-    let mut parser = create_unified_parser_for_family(family, &[])?;
+    let tools = to_v2_tools(Some(tool_definitions));
+    let mut parser = create_unified_parser_for_family(family, &tools)?;
     // Batch replays already-generated output. Prefer its observable native marker when
     // topology B could not carry the worker's installed structural tag to the frontend;
     // otherwise use the reconstructed guided-JSON constraint.
+    let effective_mode = batch_tool_output_mode(content, guided_tool_constraint);
+    // `batch_tool_output_mode` drops to `Native` on observed markup even when the
+    // constraint reconstructed a `GuidedJsonNamed` pin. That native fallback recovers
+    // whatever tool name the markup happens to contain, so it must be checked against
+    // the forced name below instead of trusted unfiltered — a malformed guided output
+    // that embeds a *different* tool's markup must not be handed back as the pinned
+    // tool's call.
+    let forced_tool_name = match (guided_tool_constraint, &effective_mode) {
+        (GuidedToolConstraint::GuidedJsonNamed { tool_name }, UnifiedToolOutputMode::Native) => {
+            Some(tool_name.as_str())
+        }
+        _ => None,
+    };
     parser.initialize_request(UnifiedParserInit {
         starting_state: detect_prefill(family, content)?,
-        tool_output_mode: batch_tool_output_mode(content, guided_tool_constraint),
+        tool_output_mode: effective_mode,
         ..UnifiedParserInit::default()
     })?;
 
@@ -702,6 +786,14 @@ pub(crate) fn parse_complete(
             UnifiedEvent::Text { text: chunk } => text.push_str(&chunk),
             UnifiedEvent::Reasoning { text: chunk } => reasoning.push_str(&chunk),
             UnifiedEvent::ToolCall { name, arguments } => {
+                if forced_tool_name.is_some_and(|forced| forced != name) {
+                    tracing::warn!(
+                        forced_tool_name = forced_tool_name,
+                        recovered_tool_name = %name,
+                        "dropped native-fallback tool call whose name did not match the tool_choice-forced tool_name"
+                    );
+                    continue;
+                }
                 tool_calls.push(ChatCompletionMessageToolCall {
                     id: format!("call-{}", Uuid::new_v4()),
                     r#type: FunctionType::Function,
@@ -732,6 +824,15 @@ pub(crate) fn parse_complete(
 struct ChoiceRecord {
     tool_emitted: bool,
     finished: bool,
+    /// Whether an already-parsed chunk has EVER interrupted this choice. An
+    /// already-parsed chunk implies the model has already emitted structured output
+    /// (reasoning_content / tool_calls / function_call / `Parts` content), which per
+    /// `already_parsed`'s own trigger set only happens after any reasoning phase would
+    /// have concluded. So a raw run resuming after such a detour must rebuild its
+    /// `ChoiceState` starting at `Response`, never at the outer request-level `prefill`
+    /// (which only describes what the PROMPT opened, before this choice ever ran) — see
+    /// the `Vacant` arm in the main loop below.
+    detoured: bool,
 }
 
 /// Finish every choice that never received a terminating chunk, in index order.
@@ -933,6 +1034,10 @@ where
                     // built for it (e.g. its first-ever chunk is already-parsed),
                     // so it is not invisible to `finish_unterminated_choices`.
                     let record = records.entry(original.index).or_default();
+                    // Any raw run resuming this choice after this point must rebuild
+                    // starting at `Response`, not the outer request-level `prefill` —
+                    // see the `Vacant` arm below and the field doc on `ChoiceRecord`.
+                    record.detoured = true;
                     // An already-parsed chunk carries its tool calls verbatim in its
                     // own delta rather than through a `ChoiceState`, so that history
                     // has to be observed here directly — a state may never exist for
@@ -991,7 +1096,26 @@ where
                     std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
                     std::collections::hash_map::Entry::Vacant(entry) => {
                         let mode = tool_output_mode(&guided_tool_constraint);
-                        match ChoiceState::new(family, &tools, prefill, mode) {
+                        // `Vacant` covers both a brand-new choice AND one whose
+                        // `ChoiceState` was just dropped by an already-parsed detour.
+                        // Only the former may start at the request-level `prefill`
+                        // (what the PROMPT opened); a choice that has already been
+                        // through a detour has, by definition, already emitted
+                        // structured output, so its reasoning phase (if any) already
+                        // concluded and a resumed raw run must start at `Response`.
+                        let choice_prefill = if records
+                            .get(&original.index)
+                            .is_some_and(|record| record.detoured)
+                        {
+                            UnifiedParserStartingState::Response
+                        } else if prefill == UnifiedParserStartingState::Reasoning
+                            && guided_tool_constraint.installs_guided_json()
+                        {
+                            bare_guided_json_prefill(original.delta.content.as_ref())
+                        } else {
+                            prefill
+                        };
+                        match ChoiceState::new(family, &tools, choice_prefill, mode) {
                             Ok(mut state) => {
                                 // A raw run resuming after an already-parsed detour
                                 // gets a brand-new parser instance; seed it with any
@@ -1475,6 +1599,49 @@ mod tests {
         assert!(detect_prefill("kimi_k3", "answer").is_err());
     }
 
+    #[test]
+    fn detect_prefill_compares_first_marker_positions_not_mere_presence() {
+        // A prompt-opened reasoning span that the model closes, followed by the model
+        // opening (and closing) a SECOND thought later in the same output. The leading
+        // `</think>` has no opener before it, so the prompt pre-opened reasoning: this
+        // must return `Reasoning`, not `None`. Presence-only testing ("does <think>
+        // exist anywhere") wrongly answers `None` because a `<think>` exists somewhere
+        // in the string, even though it comes AFTER the first `</think>`.
+        assert_eq!(
+            detect_prefill(
+                QWEN3_UNIFIED_FAMILY,
+                "secret</think>answer<think>second thought</think>tail"
+            )
+            .unwrap(),
+            UnifiedParserStartingState::Reasoning,
+            "a leading closer with no prior opener means the prompt pre-opened reasoning, \
+             regardless of a later model-opened thought"
+        );
+    }
+
+    #[test]
+    fn apostrophe_exemption_needs_only_one_alphanumeric_side() {
+        // A possessive apostrophe that ends a word (`James'`) has non-alphanumeric on
+        // the RIGHT. Requiring alphanumeric on both sides treats it as a real
+        // quote-open, and the later contraction apostrophe in `isn't` then closes that
+        // phantom span, hiding the real `</think>` marker in between.
+        assert_eq!(
+            detect_prefill(
+                QWEN3_UNIFIED_FAMILY,
+                "James' secret </think>answer isn't final"
+            )
+            .unwrap(),
+            UnifiedParserStartingState::Reasoning,
+            "a trailing possessive apostrophe must not be treated as a real quote-open"
+        );
+        // Mirror case: a leading contraction (`'twas`) has non-alphanumeric on the LEFT
+        // and alphanumeric only on the right — the OR-based fix must exempt this too.
+        assert!(
+            contains_unquoted_marker("'twas </think> hidden", "</think>"),
+            "a leading-apostrophe contraction must not be treated as a real quote-open"
+        );
+    }
+
     // --- delta -> chunk conversion -----------------------------------------------
 
     fn call_delta(tool_index: usize, name: Option<&str>, arguments: &str) -> UnifiedParserEvent {
@@ -1828,6 +1995,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bare_guided_json_under_prompt_injected_reasoning_still_becomes_a_tool_call() {
+        // Regression for the guided-JSON-swallowed-as-reasoning bug: a Qwen3-Thinking
+        // style template appends `<think>` to the generation prompt
+        // (`prompt_injected_reasoning`, modeled here by starting the parser at
+        // `Reasoning`), and guided decoding forbids the model from ever emitting
+        // `</think>`. Unconditionally honoring the `Reasoning` prefill would make the
+        // parser wait forever for a closer that will never arrive, classifying the
+        // ENTIRE guided JSON payload as `reasoning_content` with zero tool calls
+        // extracted. The payload here has no `reason</think>` prefix at all — its first
+        // byte is `[` — so `bare_guided_json_prefill` must reclassify this choice's
+        // starting state to `None` and let the array parse as a tool call instead.
+        let responses = apply_stream(
+            stream::iter([chunk(
+                r#"[{"name":"get_weather","parameters":{"city":"Paris"}}]"#,
+                true,
+            )]),
+            Some(weather_tools()),
+            Some(ChatCompletionToolChoiceOption::Required),
+            false,
+            UnifiedParserStartingState::Reasoning,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let choices = collect_choices(&responses);
+        assert!(
+            choices.iter().all(|c| c.delta.reasoning_content.is_none()),
+            "a bare guided JSON payload with no reasoning prefix must not be classified \
+             as reasoning_content: {choices:?}"
+        );
+        let calls: Vec<_> = choices
+            .iter()
+            .filter_map(|choice| choice.delta.tool_calls.as_ref())
+            .flatten()
+            .collect();
+        assert_eq!(
+            calls
+                .iter()
+                .find_map(|call| call.function.as_ref()?.name.as_deref()),
+            Some("get_weather"),
+            "the guided JSON payload must still be recovered as a tool call: {choices:?}"
+        );
+        let arguments: String = calls
+            .iter()
+            .filter_map(|call| call.function.as_ref()?.arguments.as_deref())
+            .collect();
+        assert_eq!(arguments, r#"{"city":"Paris"}"#);
+    }
+
+    #[tokio::test]
     async fn required_guided_json_becomes_a_tool_call() {
         let responses = apply_stream(
             stream::iter([chunk(
@@ -2155,6 +2373,54 @@ mod tests {
                 ("content", " after"),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn raw_preparsed_raw_resumes_at_response_not_original_prefill() {
+        // Request-level prefill is `Reasoning` (prompt-injected reasoning): the first
+        // raw run closes reasoning mid-run. An already-parsed chunk then detours the
+        // choice, dropping its live `ChoiceState`. The next raw chunk must NOT rebuild
+        // starting at `Reasoning` again — an already-parsed chunk implies the model has
+        // already emitted structured output, which only happens after any reasoning
+        // phase concluded, so the resumed run's text belongs to `content`.
+        let mut pre_parsed = chunk("", false);
+        let choice = &mut pre_parsed.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = None;
+        choice.delta.reasoning_content = Some("already parsed".to_string());
+
+        let responses = apply_stream(
+            stream::iter([
+                chunk("secret</think>visible-before-gap ", false),
+                pre_parsed,
+                chunk("visible-after-gap", true),
+            ]),
+            None,
+            None,
+            false,
+            UnifiedParserStartingState::Reasoning,
+            QWEN3_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let choices = collect_choices(&responses);
+
+        let reasoning: String = choices
+            .iter()
+            .filter_map(|choice| choice.delta.reasoning_content.as_deref())
+            .collect();
+        let visible: String = choices
+            .iter()
+            .filter_map(|choice| match &choice.delta.content {
+                Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            visible, "visible-before-gap visible-after-gap",
+            "text after the already-parsed gap must resume as content, not reasoning"
+        );
+        assert_eq!(reasoning, "secretalready parsed");
     }
 
     #[tokio::test]
@@ -2979,6 +3245,7 @@ mod tests {
                 "<parameter=city>Tokyo</parameter>\n</function>\n</tool_call>"
             ),
             &GuidedToolConstraint::None,
+            &[],
         )
         .unwrap();
 
@@ -2999,6 +3266,7 @@ mod tests {
             QWEN3_UNIFIED_FAMILY,
             "hidden</think>visible",
             &GuidedToolConstraint::None,
+            &[],
         )
         .unwrap();
         assert_eq!(parsed.reasoning, "hidden");
@@ -3012,6 +3280,7 @@ mod tests {
             QWEN3_UNIFIED_FAMILY,
             r#"hidden "unfinished</think>visible"#,
             &GuidedToolConstraint::None,
+            &[],
         )
         .unwrap();
 
@@ -3027,6 +3296,7 @@ mod tests {
             QWEN3_UNIFIED_FAMILY,
             "hidden 'unfinished</think>visible",
             &GuidedToolConstraint::None,
+            &[],
         )
         .unwrap();
 
@@ -3040,6 +3310,7 @@ mod tests {
             QWEN3_UNIFIED_FAMILY,
             "hidden `unfinished</think>visible",
             &GuidedToolConstraint::None,
+            &[],
         )
         .unwrap();
 
@@ -3071,14 +3342,24 @@ mod tests {
     #[test]
     fn marker_looking_visible_text_stays_visible_in_batch() {
         let literal = "The literal \"</think>\" closes reasoning.";
-        let parsed =
-            parse_complete(QWEN3_UNIFIED_FAMILY, literal, &GuidedToolConstraint::None).unwrap();
+        let parsed = parse_complete(
+            QWEN3_UNIFIED_FAMILY,
+            literal,
+            &GuidedToolConstraint::None,
+            &[],
+        )
+        .unwrap();
         assert_eq!(parsed.text, literal);
         assert!(parsed.reasoning.is_empty());
 
         let embedded = "The string \"a </think> token\" stays visible.";
-        let parsed =
-            parse_complete(QWEN3_UNIFIED_FAMILY, embedded, &GuidedToolConstraint::None).unwrap();
+        let parsed = parse_complete(
+            QWEN3_UNIFIED_FAMILY,
+            embedded,
+            &GuidedToolConstraint::None,
+            &[],
+        )
+        .unwrap();
         assert_eq!(parsed.text, embedded);
         assert!(parsed.reasoning.is_empty());
     }
@@ -3089,10 +3370,48 @@ mod tests {
             QWEN3_UNIFIED_FAMILY,
             "just an answer",
             &GuidedToolConstraint::None,
+            &[],
         )
         .unwrap();
         assert_eq!(parsed.text, "just an answer");
         assert!(parsed.reasoning.is_empty());
         assert!(parsed.tool_calls.is_empty());
+    }
+
+    // Regression for a batch/streaming argument-type divergence: `parse_complete`
+    // used to hardcode an empty tool slice, so it had no schema to type-coerce
+    // arguments against and always emitted them as JSON strings. The streaming
+    // path (`apply_stream_with_constraint`) builds its parser from the request's
+    // real `tool_definitions` and correctly coerces `count` to an integer for the
+    // same input. Passing the real tool schema through here must match that.
+    #[test]
+    fn batch_path_coerces_argument_types_from_the_real_tool_schema() {
+        let tool_definitions = vec![ToolDefinition {
+            name: "set_count".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"count": {"type": "integer"}},
+                "required": ["count"],
+            })),
+            strict: None,
+        }];
+
+        let parsed = parse_complete(
+            QWEN3_UNIFIED_FAMILY,
+            concat!(
+                "<tool_call>\n<function=set_count>\n",
+                "<parameter=count>42</parameter>\n</function>\n</tool_call>"
+            ),
+            &GuidedToolConstraint::None,
+            &tool_definitions,
+        )
+        .unwrap();
+
+        assert_eq!(
+            parsed.tool_calls[0].function.arguments, r#"{"count":42}"#,
+            "batch path must type-coerce `count` to an integer using the real tool \
+             schema, matching what the streaming path already produces for the same \
+             input"
+        );
     }
 }
