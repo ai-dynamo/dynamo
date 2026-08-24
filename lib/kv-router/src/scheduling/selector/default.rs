@@ -11,8 +11,8 @@ use parking_lot::Mutex;
 use super::policy::WorkerSelectionPolicyStateRef;
 use super::{
     LogitWeights, MaterializedSelectionInput, ScoredWorkerCandidate, WorkerCandidate,
-    WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext,
-    WorkerSelectionInput, WorkerSelector, select_worker_with_policy,
+    WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionInput,
+    WorkerSelector, select_worker_with_policy,
 };
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use crate::scheduling::config::KvRouterConfig;
@@ -255,7 +255,7 @@ impl DefaultScoringContext {
 }
 
 fn default_row(
-    input: &WorkerSelectionInput<'_>,
+    input: &MaterializedSelectionInput<'_>,
     context: DefaultScoringContext,
     worker: WorkerWithDpRank,
     preferred_taint_multiplier: Option<f64>,
@@ -263,7 +263,7 @@ fn default_row(
     input.row_with_device_overlap(
         worker,
         preferred_taint_multiplier,
-        WorkerInputs::ALL_SIGNALS,
+        WorkerInputs::ALL,
         |effective_overlap_blocks, device_overlap_blocks| {
             context.device_overlap(effective_overlap_blocks, device_overlap_blocks)
         },
