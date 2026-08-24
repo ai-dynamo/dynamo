@@ -876,6 +876,24 @@ def unfold_matrix(
         )
 
     stale: list[Path] = []
+
+    # Remove stale parents before writing expected descendants they would delete.
+    expected_overlays = {overlay_path(config, variant) for variant in variants}
+    generated_overlays = generated_overlay_paths(config)
+    for path in sorted(generated_overlays):
+        can_clean = clean or is_current_generated_overlay(config, path)
+        kustomizations = generated_template_kustomizations(path)
+        for kustomization in sorted(
+            kustomizations,
+            key=lambda item: (len(item.parts), str(item)),
+            reverse=True,
+        ):
+            if kustomization in expected_template_kustomizations:
+                continue
+            stale.append(kustomization)
+            if not check and can_clean:
+                remove_generated_template_kustomization(kustomization)
+
     for path, content in expected.items():
         if not generated_content_matches(path, content):
             stale.append(path)
@@ -893,17 +911,7 @@ def unfold_matrix(
             if not check:
                 source_path.unlink()
 
-    expected_overlays = {overlay_path(config, variant) for variant in variants}
-    for path in generated_overlay_paths(config):
-        can_clean = clean or is_current_generated_overlay(config, path)
-        for kustomization in generated_template_kustomizations(path):
-            if kustomization in expected_template_kustomizations:
-                continue
-            stale.append(kustomization)
-            if not check and can_clean:
-                remove_generated_template_kustomization(kustomization)
-
-    for path in generated_overlay_paths(config) - expected_overlays:
+    for path in generated_overlays - expected_overlays:
         kustomization = path / KUSTOMIZATION_FILE
         stale.append(kustomization)
         if not check and (clean or is_current_generated_overlay(config, path)):

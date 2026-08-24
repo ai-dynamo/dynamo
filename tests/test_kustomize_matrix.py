@@ -601,6 +601,63 @@ def test_unfold_rebases_external_template_references(tmp_path, monkeypatch):
     assert parsed_component["resources"] == ["../../../../../external.yaml"]
 
 
+def test_unfold_preserves_component_moved_below_its_previous_path(
+    tmp_path, monkeypatch
+):
+    recipe = tmp_path / "recipe"
+    base = recipe / "kustomize/base"
+    write_kustomization(base, "resources:\n  - config-map.yaml\n")
+    (base / "config-map.yaml").write_text(
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: app\n",
+        encoding="utf-8",
+    )
+    template_root = recipe / "templates/provider"
+    write_template(
+        template_root,
+        "apiVersion: kustomize.config.k8s.io/v1alpha1\nkind: Component\n",
+    )
+    template = template_root / "instance"
+    template.mkdir()
+    matrix = recipe / ".kustomize-matrix.yaml"
+    matrix.write_text(
+        "source: kustomize/base\n"
+        'nameTemplate: "${variant}"\n'
+        "matrix:\n"
+        "  variant:\n"
+        "    - name: instance\n"
+        "      templates:\n"
+        "        - source: templates/provider/instance\n"
+        "          path: components/fabric\n",
+        encoding="utf-8",
+    )
+
+    kustomize_matrix = load_matrix_module()
+    mock_kustomize_base_build(
+        kustomize_matrix,
+        monkeypatch,
+        base,
+        (base / "config-map.yaml").read_text(encoding="utf-8"),
+    )
+
+    config = kustomize_matrix.load_matrix(str(matrix))
+    kustomize_matrix.unfold_matrix(config, check=False)
+    component = recipe / "kustomize/overlays/instance/components/fabric"
+    assert (component / "kustomization.yaml").exists()
+
+    matrix.write_text(
+        matrix.read_text(encoding="utf-8").replace(
+            "path: components/fabric", "path: components/fabric/efa"
+        ),
+        encoding="utf-8",
+    )
+    config = kustomize_matrix.load_matrix(str(matrix))
+    kustomize_matrix.unfold_matrix(config, check=False)
+
+    assert not (component / "kustomization.yaml").exists()
+    assert (component / "efa/kustomization.yaml").exists()
+    assert kustomize_matrix.unfold_matrix(config, check=True) == []
+
+
 def test_render_uses_leaf_component_and_preserves_source_comments(
     tmp_path, monkeypatch
 ):
