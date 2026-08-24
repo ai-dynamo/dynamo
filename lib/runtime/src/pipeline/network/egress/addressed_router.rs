@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
 use super::unified_client::RequestPlaneClient;
@@ -40,15 +40,35 @@ use crate::traits::DistributedRuntimeProvider;
 
 use anyhow::{Error, Result};
 use futures::stream::Stream;
+use parking_lot::Mutex;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_stream::{StreamExt, StreamNotifyClose, wrappers::ReceiverStream};
 use tracing::Instrument;
 
 const FIRST_RESPONSE_GUARD_CONTEXT_KEY: &str = "dynamo.request_plane.first_response_guard";
+// A timeout cannot safely release registered memory while a remote read may
+// still be active. Bound the detached pre-first-response phase process-wide.
+const MAX_RETAINED_FIRST_RESPONSE_DISPATCHES: usize = 1024;
+static RETAINED_FIRST_RESPONSE_DISPATCH_PERMITS: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(MAX_RETAINED_FIRST_RESPONSE_DISPATCHES)));
 
+#[derive(Clone)]
 struct FirstResponseGuard {
-    guard: EngineContextGuard,
+    guard: Arc<Mutex<Option<EngineContextGuard>>>,
+}
+
+impl FirstResponseGuard {
+    fn new(guard: EngineContextGuard) -> Self {
+        Self {
+            guard: Arc::new(Mutex::new(Some(guard))),
+        }
+    }
+
+    fn take(&self) -> Option<EngineContextGuard> {
+        self.guard.lock().take()
+    }
 }
 
 /// Keep a frontend-owned resource alive until the addressed worker produces
@@ -59,11 +79,11 @@ pub fn attach_first_response_guard<T: Data>(
 ) {
     context.insert(
         FIRST_RESPONSE_GUARD_CONTEXT_KEY,
-        FirstResponseGuard { guard },
+        FirstResponseGuard::new(guard),
     );
 }
 
-/// Copy a first-response guard to a derived request context.
+/// Share a take-once first-response guard with a derived request context.
 pub fn propagate_first_response_guard<S: Data, T: Data>(
     source: &context::Context<S>,
     target: &mut context::Context<T>,
@@ -72,20 +92,33 @@ pub fn propagate_first_response_guard<S: Data, T: Data>(
         .get_optional::<FirstResponseGuard>(FIRST_RESPONSE_GUARD_CONTEXT_KEY)
         .map_err(Error::msg)?
     {
-        attach_first_response_guard(target, guard.guard.clone());
+        target.insert(FIRST_RESPONSE_GUARD_CONTEXT_KEY, guard.as_ref().clone());
     }
     Ok(())
 }
 
-// Dispatch independently of the caller, then relay responses. This keeps the
-// guard alive if the caller cancels before the worker has consumed it.
+fn try_acquire_retained_dispatch_permit(
+    permits: &Arc<Semaphore>,
+) -> Result<OwnedSemaphorePermit, Error> {
+    permits.clone().try_acquire_owned().map_err(|_| {
+        DynamoError::builder()
+            .error_type(ErrorType::ResourceExhausted)
+            .message("retained request dispatch limit reached")
+            .build()
+            .into()
+    })
+}
+
+// Only dispatch and the first response are detached from the caller. The tail
+// is handed back so normal stream polling and cancellation stay on the caller.
 async fn dispatch_with_first_response_guard<F, U>(
     dispatch: F,
-    guard: Arc<FirstResponseGuard>,
+    guard: EngineContextGuard,
+    permit: OwnedSemaphorePermit,
 ) -> Result<ManyOut<U>, Error>
 where
     F: Future<Output = Result<ManyOut<U>, Error>> + Send + 'static,
-    U: Data,
+    U: Data + MaybeError,
 {
     let (dispatch_tx, dispatch_rx) = tokio::sync::oneshot::channel();
 
@@ -100,25 +133,31 @@ where
             };
 
             let response_context = response.context();
-            let (response_tx, response_rx) = tokio::sync::mpsc::channel(1);
-            let relayed: ManyOut<U> =
-                ResponseStream::new(Box::pin(ReceiverStream::new(response_rx)), response_context);
-            let _ = dispatch_tx.send(Ok(relayed));
+            let (first_tx, first_rx) = tokio::sync::oneshot::channel::<(Option<U>, ManyOut<U>)>();
+            let stream = async_stream::stream! {
+                match first_rx.await {
+                    Ok((first, mut tail)) => {
+                        if let Some(first) = first {
+                            yield first;
+                        }
+                        while let Some(item) = tail.next().await {
+                            yield item;
+                        }
+                    }
+                    Err(_) => {
+                        yield U::from_err(DynamoError::msg(
+                            "retained request dispatch ended before first response handoff",
+                        ));
+                    }
+                }
+            };
+            let handoff: ManyOut<U> = ResponseStream::new(Box::pin(stream), response_context);
+            let _ = dispatch_tx.send(Ok(handoff));
 
             let first = response.next().await;
             drop(guard);
-
-            let Some(first) = first else {
-                return;
-            };
-            if response_tx.send(first).await.is_err() {
-                return;
-            }
-            while let Some(item) = response.next().await {
-                if response_tx.send(item).await.is_err() {
-                    return;
-                }
-            }
+            drop(permit);
+            let _ = first_tx.send((first, response));
         }
         .in_current_span(),
     );
@@ -854,7 +893,9 @@ where
             .get_optional::<FirstResponseGuard>(FIRST_RESPONSE_GUARD_CONTEXT_KEY)
             .map_err(Error::msg)?;
 
-        if let Some(guard) = first_response_guard {
+        if let Some(guard) = first_response_guard.and_then(|guard| guard.take()) {
+            let permit =
+                try_acquire_retained_dispatch_permit(&RETAINED_FIRST_RESPONSE_DISPATCH_PERMITS)?;
             let router = self.clone();
             let dispatch = async move {
                 router
@@ -867,7 +908,7 @@ where
                     )
                     .await
             };
-            return dispatch_with_first_response_guard(dispatch, guard).await;
+            return dispatch_with_first_response_guard(dispatch, guard, permit).await;
         }
 
         self.dispatch_and_finalize::<T, U>(
@@ -974,15 +1015,18 @@ mod tests {
         ResponseType, TwoPartCodec, attach_first_response_guard, build_request_envelope,
         dispatch_with_first_response_guard, payload_codec_for_worker,
         propagate_first_response_guard, serialize_control_message,
+        try_acquire_retained_dispatch_permit,
     };
     use crate::{
         component::{Instance, TransportType},
+        error::{ErrorType, match_error_chain},
         pipeline::{AsyncEngineContextProvider, Context, ManyOut, ResponseStream},
+        protocols::annotated::Annotated,
     };
     use serde::{Deserialize, Serialize};
     use std::{collections::BTreeMap, sync::Arc, time::Duration};
-    use tokio::sync::{oneshot, oneshot::error::TryRecvError};
-    use tokio_stream::wrappers::ReceiverStream;
+    use tokio::sync::{Semaphore, oneshot, oneshot::error::TryRecvError};
+    use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 
     struct DropSignal(Option<oneshot::Sender<()>>);
 
@@ -1078,6 +1122,30 @@ mod tests {
         assert!(err.contains(&CONTROL_MESSAGE_MAX_BYTES.to_string()));
     }
 
+    #[test]
+    fn propagated_first_response_guard_is_taken_once() {
+        let (guard_dropped_tx, mut guard_dropped_rx) = oneshot::channel();
+        let mut source_context = Context::new(());
+        attach_first_response_guard(
+            &mut source_context,
+            Arc::new(DropSignal(Some(guard_dropped_tx))),
+        );
+        let mut derived_context = Context::new(());
+        propagate_first_response_guard(&source_context, &mut derived_context).unwrap();
+
+        let source_guard = source_context
+            .get::<FirstResponseGuard>(FIRST_RESPONSE_GUARD_CONTEXT_KEY)
+            .unwrap();
+        let derived_guard = derived_context
+            .get::<FirstResponseGuard>(FIRST_RESPONSE_GUARD_CONTEXT_KEY)
+            .unwrap();
+        let retained = derived_guard.take().expect("derived context should win");
+        assert!(source_guard.take().is_none());
+
+        drop(retained);
+        assert_eq!(guard_dropped_rx.try_recv(), Ok(()));
+    }
+
     #[tokio::test]
     async fn first_response_guard_outlives_cancelled_dispatch_waiter() {
         let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(1);
@@ -1094,31 +1162,85 @@ mod tests {
         propagate_first_response_guard(&source_context, &mut derived_context).unwrap();
         let guard = derived_context
             .get::<FirstResponseGuard>(FIRST_RESPONSE_GUARD_CONTEXT_KEY)
+            .unwrap()
+            .take()
             .unwrap();
         drop(source_context);
         drop(derived_context);
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = try_acquire_retained_dispatch_permit(&permits).unwrap();
 
         let waiter = tokio::spawn(dispatch_with_first_response_guard(
             async move {
                 let _ = dispatch_started_tx.send(());
                 let _ = release_dispatch_rx.await;
-                let response: ManyOut<u64> =
+                let response: ManyOut<Annotated<u64>> =
                     ResponseStream::new(Box::pin(ReceiverStream::new(raw_rx)), response_context);
                 Ok(response)
             },
             guard,
+            permit,
         ));
 
         dispatch_started_rx.await.unwrap();
         waiter.abort();
         let _ = waiter.await;
         assert_eq!(guard_dropped_rx.try_recv(), Err(TryRecvError::Empty));
+        let error = try_acquire_retained_dispatch_permit(&permits).unwrap_err();
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::ResourceExhausted],
+            &[],
+        ));
 
         release_dispatch_tx.send(()).unwrap();
-        raw_tx.send(1_u64).await.unwrap();
+        raw_tx.send(Annotated::from_data(1_u64)).await.unwrap();
         tokio::time::timeout(Duration::from_secs(1), guard_dropped_rx)
             .await
             .expect("source guard was not released after the first worker response")
             .unwrap();
+        let released_permit = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(permit) = try_acquire_retained_dispatch_permit(&permits) {
+                    break permit;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retained dispatch permit was not released");
+        drop(released_permit);
+    }
+
+    #[tokio::test]
+    async fn dropping_handed_off_tail_closes_upstream() {
+        let (raw_tx, raw_rx) = tokio::sync::mpsc::channel(1);
+        let response_context = Context::new(()).context();
+        let (guard_dropped_tx, guard_dropped_rx) = oneshot::channel();
+        let permits = Arc::new(Semaphore::new(1));
+        let permit = try_acquire_retained_dispatch_permit(&permits).unwrap();
+        let mut response = dispatch_with_first_response_guard(
+            async move {
+                let response: ManyOut<Annotated<u64>> =
+                    ResponseStream::new(Box::pin(ReceiverStream::new(raw_rx)), response_context);
+                Ok(response)
+            },
+            Arc::new(DropSignal(Some(guard_dropped_tx))),
+            permit,
+        )
+        .await
+        .unwrap();
+
+        raw_tx.send(Annotated::from_data(1_u64)).await.unwrap();
+        assert_eq!(response.next().await.unwrap().data, Some(1));
+        tokio::time::timeout(Duration::from_secs(1), guard_dropped_rx)
+            .await
+            .expect("source guard was not released after the first worker response")
+            .unwrap();
+
+        drop(response);
+        tokio::time::timeout(Duration::from_secs(1), raw_tx.closed())
+            .await
+            .expect("dropping the caller stream did not close the upstream tail");
     }
 }
