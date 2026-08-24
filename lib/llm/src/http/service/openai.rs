@@ -4645,8 +4645,14 @@ async fn handler_audio_speech(
     check_ready(&state)?;
 
     let returns_audio_bytes = request.data_source.as_deref() != Some("url");
+    let streams_audio_chunks = returns_audio_bytes
+        && matches!(
+            request.response_format.as_deref().unwrap_or("wav"),
+            "pcm" | "wav"
+        )
+        && request.speed.is_none_or(|speed| speed == 1.0);
     let request_id = get_or_create_request_id(&headers);
-    if returns_audio_bytes {
+    if streams_audio_chunks {
         // Advertise that this frontend can concatenate incremental worker
         // responses. Older frontends omit the signal, so new workers aggregate.
         // TODO(v1.7): Remove when v1.4 falls outside the N-2 window.
@@ -4680,7 +4686,7 @@ async fn handler_audio_speech(
         CancellationLabels {
             model: model.clone(),
             endpoint: Endpoint::Audios.to_string(),
-            request_type: if returns_audio_bytes {
+            request_type: if streams_audio_chunks {
                 "stream"
             } else {
                 "unary"
@@ -4691,7 +4697,15 @@ async fn handler_audio_speech(
     .await;
 
     let response = tokio::spawn(
-        audio_speech(state, request, model, returns_audio_bytes, stream_handle).in_current_span(),
+        audio_speech(
+            state,
+            request,
+            model,
+            returns_audio_bytes,
+            streams_audio_chunks,
+            stream_handle,
+        )
+        .in_current_span(),
     )
     .await
     .map_err(|e| {
@@ -4710,6 +4724,7 @@ async fn audio_speech(
     request: Context<NvCreateAudioSpeechRequest>,
     model: String,
     returns_audio_bytes: bool,
+    streams_audio_chunks: bool,
     mut stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
     let request_id = request.id().to_string();
@@ -4725,7 +4740,7 @@ async fn audio_speech(
     let mut inflight = state.metrics_clone().create_inflight_guard(
         &model,
         Endpoint::Audios,
-        returns_audio_bytes,
+        streams_audio_chunks,
         &request_id,
     );
 
@@ -4765,7 +4780,7 @@ async fn audio_speech(
         );
     });
 
-    if returns_audio_bytes {
+    if streams_audio_chunks {
         let mut stream = Box::pin(stream);
         let first_response = loop {
             let Some(annotated) = stream.next().await else {
@@ -4902,6 +4917,48 @@ async fn audio_speech(
         // internal error.
         inflight.mark_error(ErrorType::Validation);
         return Ok((axum::http::StatusCode::BAD_REQUEST, Json(response)).into_response());
+    }
+
+    if returns_audio_bytes {
+        let content_type = response
+            .data
+            .first()
+            .map(|audio| audio_content_type(&audio.output_format))
+            .unwrap_or("audio/wav");
+        let chunks = decode_audio_chunks(&response).map_err(|e| {
+            let err_response = ErrorMessage::internal_server_error_with_details(
+                "Failed to decode audio response",
+                e,
+            );
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+        if chunks.is_empty() {
+            let err_response =
+                ErrorMessage::internal_server_error("Audio response did not contain data");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            return Err(err_response);
+        }
+
+        let content_length = chunks.iter().map(Bytes::len).sum();
+        let mut audio_bytes = Vec::with_capacity(content_length);
+        for chunk in chunks {
+            audio_bytes.extend_from_slice(&chunk);
+        }
+        let response = Response::builder()
+            .header("content-type", content_type)
+            .header("content-length", content_length.to_string())
+            .body(Body::from(audio_bytes))
+            .map_err(|e| {
+                let err_response = ErrorMessage::internal_server_error_with_details(
+                    "Failed to build audio response",
+                    e.to_string(),
+                );
+                inflight.mark_error(extract_error_type_from_response(&err_response));
+                err_response
+            })?;
+        inflight.mark_ok();
+        return Ok(response);
     }
 
     inflight.mark_ok();
