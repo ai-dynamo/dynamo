@@ -635,8 +635,9 @@ where
             {
                 let mut prefill_config = router_config.kv_router_config.clone();
                 prefill_config.router_track_active_blocks = false;
-                let prefill_enable_eagle = false;
 
+                // Fallback only: a prefill worker that declares its own
+                // `router_config` overrides this at activation time.
                 Some(PrefillRouter::new_with_selector_factory(
                     None,
                     self.manager.clone(),
@@ -649,7 +650,6 @@ where
                     router_config.session_affinity_ttl_secs,
                     model_name.clone(),
                     namespace.clone(),
-                    prefill_enable_eagle,
                     worker_monitor.clone(),
                     Some(allocator_trim.clone()),
                 ))

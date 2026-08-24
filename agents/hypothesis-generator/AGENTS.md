@@ -90,6 +90,14 @@ Require a successful smoke test and a benchmark audit whose status is `valid` or
 analysis is missing, invalid, or relies on a direct comparison across benchmark series, stop rather than manufacturing
 a proposal.
 
+## Baseline Provenance
+
+Read `deployment.origin` from the workload contract. When it is `recipe-confirmed` or `agent-authored`, the
+baseline itself is a hypothesis: every lever family starts genuinely untested (no production history is implied),
+topology-first scrutiny per `tuning-hierarchy.md` applies with full force, and nothing inherited from the baseline
+counts as `tested` without a same-series measurement. When it is `user`, no special handling applies: treat the
+baseline as the user's own configuration and generate hypotheses exactly as this contract describes elsewhere.
+
 ## Outputs
 
 When preparing a stop-request, also write the three Finalize artifacts BEFORE submission —

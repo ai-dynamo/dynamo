@@ -1328,6 +1328,10 @@ class WorkerFactory:
             needs_set.append(WorkerType.Encode)
         needs: list[list[WorkerType]] = [needs_set] if needs_set else []
 
+        handler._first_token_source = await generate_endpoint.first_token_source(
+            worker_type
+        )
+
         await self.register_vllm_model(
             model_input,
             model_type,
