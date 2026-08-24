@@ -11,7 +11,7 @@ use parking_lot::Mutex;
 use super::policy::WorkerSelectionPolicyStateRef;
 use super::{
     LogitWeights, ScoredWorkerCandidate, WorkerCandidate, WorkerInputView, WorkerInputs,
-    WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionInput, WorkerSelector,
+    WorkerPicker, WorkerSelectionContext, WorkerSelectionInput, WorkerSelector,
     select_worker_with_policy,
 };
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
@@ -99,6 +99,12 @@ pub struct DefaultWorkerSelector {
 pub(super) struct DefaultWorkerScorer<C = KvRouterConfig> {
     pub(super) kv_router_config: C,
     pub(super) worker_type: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DefaultScoringContext {
+    min_active_prefill_tokens: usize,
+    has_tier_overlap_blocks: bool,
 }
 
 pub(super) struct DefaultWorkerPicker {
@@ -213,10 +219,62 @@ pub(super) fn selection_weights(
     }
 }
 
+impl DefaultScoringContext {
+    fn new<C: WorkerConfigLike>(
+        workers: &HashMap<WorkerId, C>,
+        request: &SchedulingRequest,
+        eligibility: RoutingEligibility<'_>,
+        weights: LogitWeights,
+    ) -> Self {
+        let min_active_prefill_tokens =
+            if request.track_prefill_tokens && weights.overlap_score_credit_decay > 0.0 {
+                let mut minimum = usize::MAX;
+                eligibility.for_each_eligible_worker_rank(workers, |worker, _| {
+                    minimum = minimum.min(request.worker_load_for(worker).active_prefill_tokens);
+                });
+                if minimum == usize::MAX { 0 } else { minimum }
+            } else {
+                0
+            };
+        let has_tier_overlap_blocks = !request.overlap.tier_overlap_blocks.device.is_empty()
+            || !request.overlap.tier_overlap_blocks.host_pinned.is_empty()
+            || !request.overlap.tier_overlap_blocks.disk.is_empty();
+        Self {
+            min_active_prefill_tokens,
+            has_tier_overlap_blocks,
+        }
+    }
+
+    fn device_overlap(self, effective_overlap_blocks: f64, device_overlap_blocks: f64) -> f64 {
+        if self.has_tier_overlap_blocks {
+            device_overlap_blocks
+        } else {
+            effective_overlap_blocks
+        }
+    }
+}
+
+fn default_row(
+    input: &WorkerSelectionInput<'_>,
+    context: DefaultScoringContext,
+    worker: WorkerWithDpRank,
+    preferred_taint_multiplier: Option<f64>,
+) -> WorkerCandidate {
+    input.row_with_device_overlap(
+        worker,
+        preferred_taint_multiplier,
+        WorkerInputs::ALL_SIGNALS,
+        |effective_overlap_blocks, device_overlap_blocks| {
+            context.device_overlap(effective_overlap_blocks, device_overlap_blocks)
+        },
+    )
+}
+
 impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
     fn worker_logit(
         &self,
         context: &WorkerSelectionContext<'_>,
+        default_context: DefaultScoringContext,
         row: &WorkerCandidate,
         formula_name: &'static str,
     ) -> f64 {
@@ -226,27 +284,28 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         let cache = &row.cache;
         let load = &row.load;
         let effective_overlap_blocks = cache.effective_overlap_blocks;
+        let device_overlap_blocks = cache.device_overlap_blocks;
+        let shared_beyond_device_blocks = cache.shared_beyond_device_blocks;
         let shared_overlap_blocks =
-            weights.shared_cache_multiplier * cache.default_shared_beyond_device_blocks as f64;
+            weights.shared_cache_multiplier * shared_beyond_device_blocks as f64;
         // Normalize backlog above the least-loaded eligible worker by this request's
         // size. The rational decay softly trades cache locality for prefill balance,
         // while leaving workers at the load floor with their full device credit.
-        let overlap_credit_decay = if context.track_prefill_tokens
-            && weights.overlap_score_credit_decay > 0.0
-        {
-            let excess_active_prefill_blocks =
-                load.active_prefill_tokens
-                    .saturating_sub(context.min_active_prefill_tokens) as f64
+        let overlap_credit_decay =
+            if context.track_prefill_tokens && weights.overlap_score_credit_decay > 0.0 {
+                let excess_active_prefill_blocks = load
+                    .active_prefill_tokens
+                    .saturating_sub(default_context.min_active_prefill_tokens)
+                    as f64
                     / context.block_size as f64;
-            let normalized_prefill_load =
-                excess_active_prefill_blocks / context.request_blocks as f64;
-            1.0 / (1.0 + weights.overlap_score_credit_decay * normalized_prefill_load)
-        } else {
-            1.0
-        };
+                let normalized_prefill_load =
+                    excess_active_prefill_blocks / context.request_blocks as f64;
+                1.0 / (1.0 + weights.overlap_score_credit_decay * normalized_prefill_load)
+            } else {
+                1.0
+            };
         let effective_overlap_score_credit = weights.overlap_score_credit * overlap_credit_decay;
-        let overlap_credit_blocks = effective_overlap_score_credit
-            * cache.default_device_overlap_blocks
+        let overlap_credit_blocks = effective_overlap_score_credit * device_overlap_blocks
             + kv_router_config.host_cache_hit_weight * cache.host_overlap_blocks
             + kv_router_config.disk_cache_hit_weight * cache.disk_overlap_blocks
             + shared_overlap_blocks;
@@ -293,7 +352,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         // `request_id` is the same value `[ROUTING] Best` logs, and `worker_type` separates the
         // prefill-pool and decode-pool decisions that interleave into one log. Both are evaluated
         // inside the macro so they cost nothing when DEBUG is disabled.
-        if cache.default_shared_beyond_device_blocks > 0 {
+        if shared_beyond_device_blocks > 0 {
             tracing::debug!(
                 request_id = context.request_id,
                 worker_type = self.worker_type,
@@ -305,7 +364,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
                  overlap_credit_decay: {overlap_credit_decay:.3})",
                 worker.worker_id,
                 worker.dp_rank,
-                cache.default_shared_beyond_device_blocks,
+                shared_beyond_device_blocks,
                 load.raw_prefill_blocks,
                 shared_cache_multiplier = weights.shared_cache_multiplier,
                 prefill_load_scale = weights.prefill_load_scale
@@ -330,8 +389,13 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
     }
 
     #[inline]
-    fn worker_cost(&self, context: &WorkerSelectionContext<'_>, row: &WorkerCandidate) -> f64 {
-        let base_score = self.worker_logit(context, row, "Formula");
+    fn worker_cost(
+        &self,
+        context: &WorkerSelectionContext<'_>,
+        default_context: DefaultScoringContext,
+        row: &WorkerCandidate,
+    ) -> f64 {
+        let base_score = self.worker_logit(context, default_context, row, "Formula");
         match row.preferred_taint_multiplier {
             // NOTE: This multiplicative bias assumes a non-negative score. Negative
             // overlap scores expose its pre-existing sign sensitivity; keep it for now.
@@ -348,25 +412,6 @@ impl DefaultWorkerPicker {
             #[cfg(any(test, feature = "bench"))]
             None,
         )
-    }
-}
-
-impl<C> WorkerScorer for DefaultWorkerScorer<C>
-where
-    C: Borrow<KvRouterConfig> + Send,
-{
-    fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::ALL
-            | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS
-            | WorkerInputs::DEFAULT_POLICY_CACHE
-    }
-
-    fn score(
-        &mut self,
-        context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        Ok(self.worker_cost(context, candidate))
     }
 }
 
@@ -402,17 +447,13 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
     request: &SchedulingRequest,
     eligibility: RoutingEligibility<'_>,
 ) -> Option<(WorkerWithDpRank, f64)> {
-    debug_assert_eq!(
-        scorer.required_worker_inputs(),
-        WorkerInputs::ALL
-            | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS
-            | WorkerInputs::DEFAULT_POLICY_CACHE
-    );
+    let default_context =
+        DefaultScoringContext::new(workers, request, eligibility, input.context.weights);
     if let Some(worker) = eligibility.pinned_worker() {
-        let row = input.row(worker, None, WorkerInputs::ALL);
+        let row = default_row(input, default_context, worker, None);
         return Some((
             worker,
-            scorer.worker_logit(&input.context, &row, "Pinned formula"),
+            scorer.worker_logit(&input.context, default_context, &row, "Pinned formula"),
         ));
     }
 
@@ -426,7 +467,8 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
             .preferred_taint_multiplier(config.taints());
         scorer.worker_cost(
             &input.context,
-            &input.row(worker, preferred_taint_multiplier, WorkerInputs::ALL),
+            default_context,
+            &default_row(input, default_context, worker, preferred_taint_multiplier),
         )
     };
 
@@ -611,24 +653,20 @@ mod tests {
         weights: LogitWeights,
     ) -> f64 {
         let workers = HashMap::from([(worker.worker_id, TaintedWorkerConfig::default())]);
-        let input = WorkerSelectionInput::new(
-            &workers,
-            request,
-            request.eligibility(),
-            block_size,
-            weights,
-            WorkerInputs::ALL | WorkerInputs::DEFAULT_POLICY_CACHE,
-        );
+        let input = WorkerSelectionInput::new(request, block_size, weights);
+        let default_context =
+            DefaultScoringContext::new(&workers, request, request.eligibility(), weights);
         DefaultWorkerScorer::new(selector.kv_router_config.clone(), selector.worker_type)
             .worker_logit(
                 &input.context,
-                &input.row(worker, None, WorkerInputs::ALL),
+                default_context,
+                &default_row(&input, default_context, worker, None),
                 "test",
             )
     }
 
     #[test]
-    fn minimum_prefill_load_is_only_computed_when_requested() {
+    fn default_scoring_context_only_computes_minimum_when_decay_uses_it() {
         let workers = HashMap::from([
             (0, TaintedWorkerConfig::default()),
             (1, TaintedWorkerConfig::default()),
@@ -655,29 +693,23 @@ mod tests {
             shared_cache_multiplier: 0.0,
         };
 
-        let input = |inputs| {
-            WorkerSelectionInput::new(
+        let default_context =
+            DefaultScoringContext::new(&workers, &request, request.eligibility(), weights);
+        assert_eq!(default_context.min_active_prefill_tokens, 7);
+
+        let weights_without_decay = LogitWeights {
+            overlap_score_credit_decay: 0.0,
+            ..weights
+        };
+        assert_eq!(
+            DefaultScoringContext::new(
                 &workers,
                 &request,
                 request.eligibility(),
-                16,
-                weights,
-                inputs,
+                weights_without_decay,
             )
-        };
-        assert_eq!(
-            input(WorkerInputs::CACHE).context.min_active_prefill_tokens,
+            .min_active_prefill_tokens,
             0
-        );
-        assert_eq!(
-            input(WorkerInputs::LOAD).context.min_active_prefill_tokens,
-            0
-        );
-        assert_eq!(
-            input(WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS)
-                .context
-                .min_active_prefill_tokens,
-            7
         );
     }
 
@@ -1743,40 +1775,22 @@ mod tests {
         #[allow(clippy::single_range_in_vec_init)]
         let shared_hits = SharedCacheHits::from_ranges(vec![0..4]);
         request.shared_cache_hits = Some(shared_hits);
-        let default_input = WorkerSelectionInput::new(
-            &workers,
-            &request,
-            request.eligibility(),
-            16,
-            LogitWeights {
-                overlap_score_credit: 1.0,
-                overlap_score_credit_decay: 0.0,
-                prefill_load_scale: 1.0,
-                shared_cache_multiplier: 1.0,
-            },
-            WorkerInputs::CACHE | WorkerInputs::DEFAULT_POLICY_CACHE,
-        );
-        let custom_input = WorkerSelectionInput::new(
-            &workers,
-            &request,
-            request.eligibility(),
-            16,
-            LogitWeights {
-                overlap_score_credit: 1.0,
-                overlap_score_credit_decay: 0.0,
-                prefill_load_scale: 1.0,
-                shared_cache_multiplier: 1.0,
-            },
-            WorkerInputs::CACHE,
-        );
-
-        let default_row = default_input.row(worker, None, WorkerInputs::CACHE);
-        let custom_row = custom_input.row(worker, None, WorkerInputs::CACHE);
+        let weights = LogitWeights {
+            overlap_score_credit: 1.0,
+            overlap_score_credit_decay: 0.0,
+            prefill_load_scale: 1.0,
+            shared_cache_multiplier: 1.0,
+        };
+        let input = WorkerSelectionInput::new(&request, 16, weights);
+        let default_context =
+            DefaultScoringContext::new(&workers, &request, request.eligibility(), weights);
+        let custom_row = input.row(worker, None, WorkerInputs::CACHE);
+        let default_row = default_row(&input, default_context, worker, None);
 
         assert_eq!(custom_row.cache.device_overlap_blocks, 0.0);
         assert_eq!(custom_row.cache.shared_beyond_device_blocks, 4);
-        assert_eq!(default_row.cache.default_device_overlap_blocks, 2.0);
-        assert_eq!(default_row.cache.default_shared_beyond_device_blocks, 2);
+        assert_eq!(default_row.cache.device_overlap_blocks, 2.0);
+        assert_eq!(default_row.cache.shared_beyond_device_blocks, 2);
     }
 
     /// Without shared cache hits, the scoring should be unchanged.
