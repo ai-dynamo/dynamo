@@ -9,7 +9,7 @@ use std::{
 };
 
 use dynamo_kv_router::{
-    protocols::{TokensWithHashes, WorkerWithDpRank},
+    protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank},
     selector::{WorkerInputs, WorkerSelector},
 };
 use dynamo_runtime::{
@@ -373,6 +373,41 @@ where
         affinity.query_target(&session_id, explicit)
     }
 
+    fn affinity_target_requires_rebind(
+        &self,
+        request: &PreprocessedRequest,
+        target: AffinityTarget,
+    ) -> bool {
+        if request
+            .migration_state
+            .as_ref()
+            .is_some_and(|state| state.excluded_worker_ids().contains(&target.worker_id))
+        {
+            return true;
+        }
+        if !self
+            .inner
+            .client
+            .instance_ids_avail()
+            .contains(&target.worker_id)
+        {
+            return true;
+        }
+        let Some(kv_router) = self.kv_router_if_enabled() else {
+            return false;
+        };
+        let workers = kv_router.workers_with_configs.borrow();
+        let Some(config) = workers.get(&target.worker_id) else {
+            return true;
+        };
+        let Some(dp_rank) = target.dp_rank else {
+            return false;
+        };
+        let start = config.data_parallel_start_rank();
+        let end = start.saturating_add(config.data_parallel_size());
+        !(start..end).contains(&dp_rank)
+    }
+
     async fn select_request(
         &self,
         request: &SingleIn<PreprocessedRequest>,
@@ -433,26 +468,26 @@ where
         let operation = affinity
             .acquire_with_context(&session_id, explicit, request_context.as_ref())
             .await?;
-        match select(operation.target()).await {
+        let target = operation.target();
+        match select(target).await {
             Ok(selection) => Ok((selection, Some(operation))),
             Err(error) if is_cancelled(&error) => Err(error),
-            Err(_) if operation.target().is_some() && explicit.is_none() => {
+            Err(_)
+                if explicit.is_none()
+                    && target.is_some_and(|target| {
+                        self.affinity_target_requires_rebind(request.content(), target)
+                    }) =>
+            {
                 operation.invalidate();
                 let retry = affinity
                     .acquire_with_context(&session_id, None, request_context.as_ref())
                     .await?;
                 match select(retry.target()).await {
                     Ok(selection) => Ok((selection, Some(retry))),
-                    Err(retry_error) => {
-                        retry.invalidate();
-                        Err(retry_error)
-                    }
+                    Err(retry_error) => Err(retry_error),
                 }
             }
-            Err(error) => {
-                operation.invalidate();
-                Err(error)
-            }
+            Err(error) => Err(error),
         }
     }
 
@@ -1892,6 +1927,7 @@ mod tests {
             .unwrap();
         let endpoint = component.endpoint("generate");
         let client = endpoint.client().await.unwrap();
+        let worker_ids = workers.keys().copied().collect::<Vec<_>>();
         let (_tx, workers) = watch::channel(workers);
         let config = KvRouterConfig {
             skip_initial_worker_wait: true,
@@ -1920,6 +1956,11 @@ mod tests {
             .await
             .unwrap();
         let router = RoutingHost::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
+        router
+            .inner
+            .client
+            .override_discovered_instances(worker_ids.clone());
+        router.inner.client.override_instance_avail(worker_ids);
         (router, runtime)
     }
 
@@ -2173,6 +2214,105 @@ mod tests {
             Some(target)
         );
 
+        drop(router);
+        runtime.shutdown();
+    }
+
+    async fn bind_affinity_target(
+        router: &RoutingHost,
+        session_id: &SessionAffinityId,
+        target: AffinityTarget,
+    ) {
+        let AffinityAcquire::Initialize(initializer) = router
+            .affinity
+            .as_ref()
+            .unwrap()
+            .acquire(session_id, None)
+            .await
+            .unwrap()
+        else {
+            panic!("first request must initialize");
+        };
+        drop(initializer.commit(target).unwrap());
+    }
+
+    #[tokio::test]
+    async fn request_constraints_preserve_worker_only_affinity() {
+        let mut request_worker = ModelRuntimeConfig::default();
+        request_worker.taints.insert("request-pool".to_string());
+        let workers = HashMap::from([(7, ModelRuntimeConfig::default()), (8, request_worker)]);
+        let (router, runtime) =
+            router_with_worker_configs(Some(Duration::from_secs(10)), workers).await;
+        let target = AffinityTarget::worker(7);
+
+        let allowlist_session = SessionAffinityId::new("affinity-allowlist-conflict");
+        bind_affinity_target(&router, &allowlist_session, target).await;
+        let mut allowlist_input = request();
+        allowlist_input.routing_mut().allowed_worker_ids = Some(HashSet::from([8]));
+        let mut allowlist_request = Context::new(allowlist_input);
+        allowlist_request.insert(SESSION_AFFINITY_CONTEXT_KEY, allowlist_session.clone());
+        assert!(
+            router
+                .select_with_affinity(&allowlist_request, RequestPhase::Aggregated, false)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            router
+                .affinity
+                .as_ref()
+                .unwrap()
+                .query_target(&allowlist_session, None)
+                .unwrap(),
+            Some(target)
+        );
+
+        let taint_session = SessionAffinityId::new("affinity-taint-conflict");
+        bind_affinity_target(&router, &taint_session, target).await;
+        let mut taint_input = request();
+        taint_input.routing_mut().routing_constraints = Some(RoutingConstraints {
+            required_taints: HashSet::from(["request-pool".to_string()]),
+            ..Default::default()
+        });
+        let mut taint_request = Context::new(taint_input);
+        taint_request.insert(SESSION_AFFINITY_CONTEXT_KEY, taint_session.clone());
+        assert!(
+            router
+                .select_with_affinity(&taint_request, RequestPhase::Aggregated, false)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            router
+                .affinity
+                .as_ref()
+                .unwrap()
+                .query_target(&taint_session, None)
+                .unwrap(),
+            Some(target)
+        );
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn stale_affinity_rank_rebinds_once() {
+        let (router, runtime) = router(Some(Duration::from_secs(10))).await;
+        let session_id = SessionAffinityId::new("stale-affinity-rank");
+        bind_affinity_target(&router, &session_id, AffinityTarget::new(7, Some(1))).await;
+        let mut request = Context::new(request());
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
+
+        let (selection, operation) = router
+            .select_with_affinity(&request, RequestPhase::Aggregated, false)
+            .await
+            .unwrap();
+        assert_eq!(selection.worker, WorkerWithDpRank::new(7, 0));
+        assert!(matches!(operation, Some(AffinityAcquire::Initialize(_))));
+        router.kv_router().free(request.id()).await.unwrap();
+
+        drop(operation);
         drop(router);
         runtime.shutdown();
     }
