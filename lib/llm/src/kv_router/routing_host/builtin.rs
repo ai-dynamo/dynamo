@@ -16,6 +16,9 @@ pub(super) struct BuiltinWorkerSelector {
     picker: BuiltinRoutePicker,
 }
 
+#[cfg(all(test, feature = "bench"))]
+mod benchmarks;
+
 impl BuiltinWorkerSelector {
     pub(super) fn new(mode: RouterMode) -> Option<Self> {
         let picker = match mode {
