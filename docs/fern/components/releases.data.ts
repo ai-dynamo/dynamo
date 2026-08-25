@@ -1370,20 +1370,19 @@ export const RELEASE_STATS: Record<string, ReleaseStats> = {
 
 export const NIGHTLY_BUILDS: NightlyBuild[] = [
   {
-    version: "1.5.0.dev20260820",
-    date: "Aug 20, 2026",
+    version: "1.5.0.dev20260825",
+    date: "Aug 25, 2026",
     packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"],
   },
   {
-    version: "1.5.0.dev20260819",
-    date: "Aug 19, 2026",
+    version: "1.5.0.dev20260823",
+    date: "Aug 23, 2026",
     packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"],
   },
   {
-    version: "1.5.0.dev20260817",
-    date: "Aug 17, 2026",
-    packages: ["ai-dynamo", "ai-dynamo-runtime"],
-    note: "kvbm was not published for this nightly.",
+    version: "1.5.0.dev20260821",
+    date: "Aug 21, 2026",
+    packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"],
   },
 ];
 

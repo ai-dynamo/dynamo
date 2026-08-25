@@ -57,7 +57,7 @@ uv pip install --pre --extra-index-url https://pypi.nvidia.com/ ai-dynamo
 pip install --pre --extra-index-url https://pypi.nvidia.com/ ai-dynamo
 
 # Pin a specific nightly wheel
-uv pip install --pre --extra-index-url https://pypi.nvidia.com/ "ai-dynamo[vllm]==1.5.0.dev20260820"
+uv pip install --pre --extra-index-url https://pypi.nvidia.com/ "ai-dynamo[vllm]==1.5.0.dev20260825"
 ```
 
 Backend extras such as `ai-dynamo[vllm]` and `ai-dynamo[sglang]` use the same flags. For TensorRT-LLM, use the nightly container rather than a PyPI extra.
