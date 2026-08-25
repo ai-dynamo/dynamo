@@ -11,7 +11,12 @@ from typing import Mapping, Optional, Union
 
 from dynamo.experimental.workflow.builder import Workflow
 from dynamo.experimental.workflow.ir import WorkflowIR
-from dynamo.experimental.workflow.plan import Binding, ExecutionPlan, InlineBinding, RemoteBinding
+from dynamo.experimental.workflow.plan import (
+    Binding,
+    ExecutionPlan,
+    InlineBinding,
+    RemoteBinding,
+)
 from dynamo.experimental.workflow.types import WorkflowValidationError, validate_name
 
 
@@ -34,24 +39,24 @@ class DeploymentSpec:
             bindings[stage_id] = binding
         object.__setattr__(self, "bindings", MappingProxyType(bindings))
 
-    @classmethod
-    def inline(cls, **runner_keys: str) -> "DeploymentSpec":
+    @staticmethod
+    def inline(**runner_keys: str) -> "DeploymentSpec":
         """Build bindings to runners in the orchestrator process."""
 
-        return cls(
+        return DeploymentSpec(
             bindings={
                 stage_id: InlineBinding(runner_key)
                 for stage_id, runner_key in runner_keys.items()
             }
         )
 
-    @classmethod
+    @staticmethod
     def remote(
-        cls, *, tensor_carrier: str | None = None, **endpoint_ids: str
+        *, tensor_carrier: str | None = None, **endpoint_ids: str
     ) -> "DeploymentSpec":
         """Build round-robin bindings to discovered Dynamo endpoints."""
 
-        return cls(
+        return DeploymentSpec(
             bindings={
                 stage_id: RemoteBinding(endpoint_id, tensor_carrier=tensor_carrier)
                 for stage_id, endpoint_id in endpoint_ids.items()

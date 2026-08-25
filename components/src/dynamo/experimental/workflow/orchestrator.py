@@ -13,12 +13,15 @@ from typing import Any
 
 from dynamo.experimental.workflow.dispatcher import StageDispatcher
 from dynamo.experimental.workflow.plan import ExecutionPlan
-from dynamo.experimental.workflow.runtime import StageRunner, WorkflowAttempt, WorkflowExecutionError
+from dynamo.experimental.workflow.runtime import StageRunner, WorkflowExecutionError
 from dynamo.experimental.workflow.scheduler import GraphScheduler
 
 
 class WorkflowOrchestrator:
     """Own one compiled workflow's request and result lifecycle."""
+
+    # Declarative workflows execute through GraphScheduler.
+    # TODO: Support imperative authoring through WorkflowHandler.
 
     def __init__(self, plan: ExecutionPlan, dispatcher: StageDispatcher) -> None:
         self._plan = plan
@@ -67,29 +70,22 @@ class WorkflowOrchestrator:
                 f"missing={sorted(expected_inputs - actual_inputs)}, "
                 f"extra={sorted(actual_inputs - expected_inputs)}"
             )
-        loop = asyncio.get_running_loop()
-        attempt = WorkflowAttempt(
-            attempt_id=attempt_id or uuid.uuid4().hex,
-            deadline=None if timeout is None else loop.time() + timeout,
-            cancelled=asyncio.Event(),
-            request_context=request_context,
-        )
+        resolved_attempt_id = attempt_id or uuid.uuid4().hex
 
         async def execute() -> dict[str, Any]:
             result = await GraphScheduler(workflow, self._dispatcher).run(
-                MappingProxyType(input_values), attempt
+                MappingProxyType(input_values), resolved_attempt_id, request_context
             )
             return _validate_result(set(workflow.outputs), result)
 
         execution = asyncio.create_task(
-            execute(), name=f"workflow-attempt:{attempt.attempt_id}"
+            execute(), name=f"workflow-attempt:{resolved_attempt_id}"
         )
         try:
             if timeout is None:
                 return await asyncio.shield(execution)
             return await asyncio.wait_for(asyncio.shield(execution), timeout=timeout)
         except BaseException:
-            attempt.cancelled.set()
             if not execution.done():
                 execution.cancel()
             await asyncio.gather(execution, return_exceptions=True)

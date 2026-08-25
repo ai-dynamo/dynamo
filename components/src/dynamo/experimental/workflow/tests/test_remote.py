@@ -45,15 +45,11 @@ CONTRACT = StageContract(
 )
 
 
-def _context(request_context=None):
+def _context():
     return StageContext(
         workflow_name="remote-wire",
         stage_id="normalize",
         attempt_id="request-1",
-        invocation_id="request-1:normalize",
-        deadline=None,
-        _cancelled=asyncio.Event(),
-        request_context=request_context,
     )
 
 
@@ -185,8 +181,9 @@ async def test_remote_client_creates_invocation_scoped_transport_context() -> No
         "normalize",
         CONTRACT,
         {"text": "HELLO"},
-        _context(request_context=parent),
+        _context(),
         {},
+        request_context=parent,
     )
 
     assert [child.context_id for child in parent.children] == ["request-1:normalize"]
@@ -206,8 +203,9 @@ async def test_remote_client_enforces_one_response_mapping() -> None:
             "normalize",
             CONTRACT,
             {"text": "HELLO"},
-            _context(request_context=parent),
+            _context(),
             {},
+            request_context=parent,
         )
     assert parent.children[0].is_stopped()
 
@@ -288,7 +286,6 @@ async def test_remote_server_cancels_runner_when_transport_stops() -> None:
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
-                assert context.cancelled
                 self.cancelled.set()
                 raise
 

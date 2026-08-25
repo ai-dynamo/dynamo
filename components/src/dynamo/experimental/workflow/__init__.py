@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Authoring, compilation, and execution for Dynamo inference workflows."""
+"""Experimental inference workflow APIs."""
 
 from dynamo.experimental.workflow.builder import StageHandle, Workflow
 from dynamo.experimental.workflow.compiler import DeploymentSpec, compile_workflow
-from dynamo.experimental.workflow.frontend import WorkflowTokenEngine, load_workflow_orchestrator
+from dynamo.experimental.workflow.endpoint import WorkflowEndpointHandler
 from dynamo.experimental.workflow.ir import StageIR, WorkflowIR
 from dynamo.experimental.workflow.nixl import (
     NixlLeaseRegistry,
@@ -27,7 +27,11 @@ from dynamo.experimental.workflow.runtime import (
     TensorCarrier,
     WorkflowExecutionError,
 )
-from dynamo.experimental.workflow.types import StageContract, ValueRef, WorkflowValidationError
+from dynamo.experimental.workflow.types import (
+    StageContract,
+    ValueRef,
+    WorkflowValidationError,
+)
 
 __all__ = [
     "DeploymentSpec",
@@ -40,9 +44,9 @@ __all__ = [
     "ValueRef",
     "Workflow",
     "WorkflowIR",
+    "WorkflowEndpointHandler",
     "WorkflowExecutionError",
     "WorkflowOrchestrator",
-    "WorkflowTokenEngine",
     "WorkflowValidationError",
     "ExecutionPlan",
     "GenerateEndpointBinding",
@@ -55,5 +59,4 @@ __all__ = [
     "RemoteStageClient",
     "RemoteStageServer",
     "compile_workflow",
-    "load_workflow_orchestrator",
 ]
