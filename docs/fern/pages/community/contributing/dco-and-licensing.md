@@ -89,6 +89,31 @@ git push --force-with-lease
 For additional recovery options, see the repository's
 [DCO troubleshooting guide](https://github.com/ai-dynamo/dynamo/blob/main/DCO.md).
 
+## Verified Commit Signatures for Fork Pull Requests
+
+DCO sign-off alone is not enough to get automatic trusted-CI approval on a pull request from a
+fork. The
+[fork CI approval workflow](https://github.com/ai-dynamo/dynamo/blob/main/.github/workflows/trigger-ci-approval-flow.yml)
+posts `/ok to test` for a fork PR's head commit only when every commit in the PR also carries a
+cryptographic signature that GitHub reports as `Verified`. This is a separate requirement from the
+DCO `Signed-off-by` trailer: DCO sign-off is a text trailer you add yourself, while a verified
+signature is cryptographic proof, checked by GitHub, that the commit was made by the key owner.
+
+This requirement applies only to the automatic trusted-CI approval path for fork PRs. It does not
+apply to branches pushed directly to this repository, which use the normal internal-contributor CI
+path.
+
+If any commit in a fork PR is unsigned or its signature does not show as `Verified` on GitHub, the
+workflow does not post `/ok to test`. A maintainer can still approve the PR manually, but signing
+your commits lets trusted CI start automatically.
+
+To have your commits verified, configure commit signing (GPG, SSH, or S/MIME) and add the
+corresponding public key to your GitHub account, then commit as usual. See GitHub's
+[Signing commits](https://docs.github.com/en/authentication/managing-commit-signature-verification/signing-commits)
+guide for setup instructions and
+[Checking your commit and tag signature verification status](https://docs.github.com/en/authentication/managing-commit-signature-verification/checking-your-commit-and-tag-signature-verification-status)
+to confirm a commit will show as `Verified`.
+
 ## Licensing
 
 By contributing, you agree that your contribution is licensed under the
