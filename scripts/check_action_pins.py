@@ -49,10 +49,9 @@ DEFAULT_GLOBS = (
 # pin is still a real SHA; only the comment is relaxed. Keep this list short and
 # justified - each entry is a check that is not being performed.
 MAJOR_ONLY_UPSTREAMS = {
-    # Tags are v5 ... v24; no patch-level tags exist.
+    # Tags v4 and later are major-only (v4 ... v24); patch-level tags exist
+    # only up to v3.1.4, so no v8.Y.Z exists for the pinned major.
     "dawidd6/action-download-artifact",
-    # Tags omit the leading v (1.5.2), so the comment says v1.3.0 by convention.
-    "ytanikin/pr-conventional-commits",
 }
 
 USES = re.compile(
@@ -75,6 +74,12 @@ def check_line(line: str) -> str | None:
     if not m:
         return None
     ref, rest = m.group("ref"), m.group("rest")
+
+    # A quoted YAML scalar keeps its quotes inside \S+, which would fall through the
+    # ACTION match below and read as "not an external reference" - letting a quoted
+    # mutable tag pass the check this script exists to enforce.
+    if len(ref) > 1 and ref[0] in "\"'" and ref[-1] == ref[0]:
+        ref = ref[1:-1]
 
     # Local composite actions and expression refs are not external tags.
     if ref.startswith("./") or ref.startswith("$") or "${{" in ref or "${{" in rest:
@@ -151,6 +156,13 @@ CASES: list[tuple[str, bool]] = [
     ("    uses: $/.github/workflows/shared-test.yml", False),
     ("      - uses: $/.github/actions/pytest", False),
     ("        run: echo 'uses: actions/checkout@v4 in a string'", False),
+    # Quoted YAML scalars are still external references.
+    ('      uses: "actions/checkout@v4"', True),
+    ("      uses: 'actions/checkout@main'", True),
+    (
+        '      uses: "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd"  # v6.0.2',
+        False,
+    ),
     # Mutable refs.
     ("      - uses: actions/checkout@v4", True),
     ("      uses: actions/setup-node@v4.4.0", True),
