@@ -9,6 +9,7 @@ import signal
 import socket
 import subprocess
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
@@ -22,13 +23,15 @@ from tests.utils.test_output import resolve_test_output_path
 
 def check_health_ready(response: requests.Response) -> bool:
     """Return whether an HTTP health response reports a ready component."""
+    if response.status_code != 200:
+        return False
+
     try:
-        return (
-            response.status_code == 200
-            and (response.json() or {}).get("status") == "ready"
-        )
+        payload = response.json()
     except ValueError:
         return False
+
+    return isinstance(payload, Mapping) and payload.get("status") == "ready"
 
 
 def terminate_process(process, logger=logging.getLogger(), immediate_kill=False):
