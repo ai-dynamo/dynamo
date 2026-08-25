@@ -2159,7 +2159,7 @@ class SGLangDisaggMetricsPayload(SGLangMetricsPayload):
 
 
 @dataclass
-class SGLangDisaggRouterMetricsPayload(SGLangDisaggMetricsPayload):
+class SGLangDisaggRouterMetricsPayload(MetricsPayload):
     """Validate request accounting across disaggregated prefill workers."""
 
     def _get_common_metric_checks(self) -> list[MetricCheck]:
@@ -2174,8 +2174,9 @@ class SGLangDisaggRouterMetricsPayload(SGLangDisaggMetricsPayload):
         ]
 
     def validate(self, response: Any, content: str) -> None:
-        # Validate the full metrics surface on the primary prefill worker, but
-        # account for routed requests across every configured prefill worker.
+        # Preserve the existing common metrics checks on the primary prefill
+        # worker, but account for routed requests across every configured
+        # prefill worker.
         super().validate(response, content)
 
         assert self.system_ports, "No prefill worker metrics ports were configured"
