@@ -3,6 +3,33 @@
 
 use super::*;
 
+fn percentile_99(values: &[usize]) -> usize {
+    if values.is_empty() {
+        return 0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    sorted[((sorted.len() - 1) * 99) / 100]
+}
+
+fn percentile_50_ms(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    sorted[(sorted.len() - 1) / 2]
+}
+
+fn percentile_99_ms(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    sorted[((sorted.len() - 1) * 99) / 100]
+}
+
 // ============================================================================
 // CSV Export for Visualization
 // ============================================================================
@@ -24,6 +51,22 @@ fn test_export_csv() {
     let out_dir =
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/lora_sim_csv");
     fs::create_dir_all(&out_dir).expect("create output dir");
+    let v2_out_dir = out_dir.join("v2");
+    fs::create_dir_all(&v2_out_dir).expect("create v2 output dir");
+    let mut timeseries =
+        fs::File::create(v2_out_dir.join("timeseries.csv")).expect("create v2 timeseries csv");
+    writeln!(
+        timeseries,
+        "scenario,algorithm,seed,tick,adapter_loads,adapter_unloads,adapter_churn,route_churn,requests,hits,hit_rate,active_loras,routing_entries,cold_start_entries,mean_occupancy,max_occupancy,worker_load_cov,solve_ms,overflow_count"
+    )
+    .unwrap();
+    let mut summary =
+        fs::File::create(v2_out_dir.join("summary.csv")).expect("create v2 summary csv");
+    writeln!(
+        summary,
+        "scenario,algorithm,seed,total_adapter_churn,total_route_churn,churn_free_ticks,churn_free_pct,peak_churn_per_tick,p99_churn_per_tick,overall_hit_rate,mean_worker_load_cov,mean_occupancy_pct,solve_ms_p50,solve_ms_p99,total_overflow,est_swap_ms"
+    )
+    .unwrap();
 
     // Fixed cluster: N=8 backends, K=4 resident LoRA slots → 32 total slots. Replica sets are
     // controller route targets; under pressure they can exceed resident capacity and trigger lazy
@@ -179,6 +222,91 @@ fn test_export_csv() {
             name, config.num_backends, config.slots_per_backend, config.total_loras
         );
         print_comparison(&hrw, &random, &mcf);
+
+        for metrics in [&hrw, &random, &mcf] {
+            for tick in 0..config.total_ticks {
+                let adapter_loads = metrics.per_tick_adapter_loads[tick];
+                let adapter_unloads = metrics.per_tick_adapter_unloads[tick];
+                let requests = metrics.per_tick_requests[tick];
+                let hits = metrics.per_tick_hits[tick];
+                let hit_rate = if requests == 0 {
+                    0.0
+                } else {
+                    hits as f64 / requests as f64
+                };
+                writeln!(
+                    timeseries,
+                    "{},{},{},{},{},{},{},{},{},{},{:.6},{},{},{},{:.6},{},{:.6},{:.6},{}",
+                    name,
+                    metrics.algorithm,
+                    config.seed,
+                    tick,
+                    adapter_loads,
+                    adapter_unloads,
+                    adapter_loads + adapter_unloads,
+                    metrics.per_tick_churn[tick],
+                    requests,
+                    hits,
+                    hit_rate,
+                    metrics.per_tick_active_loras[tick],
+                    metrics.per_tick_routing_entries[tick],
+                    metrics.per_tick_cold_start_entries[tick],
+                    metrics.per_tick_mean_occupancy[tick],
+                    metrics.per_tick_max_occupancy[tick],
+                    metrics.per_tick_worker_load_cov[tick],
+                    metrics.per_tick_solve_ms[tick],
+                    metrics.per_tick_overflow_count[tick],
+                )
+                .unwrap();
+            }
+
+            let total_loads: usize = metrics.per_tick_adapter_loads.iter().sum();
+            let total_unloads: usize = metrics.per_tick_adapter_unloads.iter().sum();
+            let total_requests: usize = metrics.per_tick_requests.iter().sum();
+            let total_hits: usize = metrics.per_tick_hits.iter().sum();
+            let mean_cov = metrics.per_tick_worker_load_cov.iter().sum::<f64>()
+                / metrics.per_tick_worker_load_cov.len() as f64;
+            let mean_occupancy_pct = metrics.per_tick_mean_occupancy.iter().sum::<f64>()
+                / metrics.per_tick_mean_occupancy.len() as f64
+                / config.slots_per_backend as f64
+                * 100.0;
+            let total_overflow: usize = metrics.per_tick_overflow_count.iter().sum();
+            let adapter_churn_per_tick: Vec<usize> = metrics
+                .per_tick_adapter_loads
+                .iter()
+                .zip(&metrics.per_tick_adapter_unloads)
+                .map(|(loads, unloads)| loads + unloads)
+                .collect();
+            let churn_free_ticks = adapter_churn_per_tick
+                .iter()
+                .filter(|&&churn| churn == 0)
+                .count();
+            writeln!(
+                summary,
+                "{},{},{},{},{},{},{:.6},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{},{}",
+                name,
+                metrics.algorithm,
+                config.seed,
+                total_loads + total_unloads,
+                metrics.total_churn,
+                churn_free_ticks,
+                churn_free_ticks as f64 / config.total_ticks as f64 * 100.0,
+                adapter_churn_per_tick.iter().copied().max().unwrap_or(0),
+                percentile_99(&adapter_churn_per_tick),
+                if total_requests == 0 {
+                    0.0
+                } else {
+                    total_hits as f64 / total_requests as f64
+                },
+                mean_cov,
+                mean_occupancy_pct,
+                percentile_50_ms(&metrics.per_tick_solve_ms),
+                percentile_99_ms(&metrics.per_tick_solve_ms),
+                total_overflow,
+                total_loads * 50,
+            )
+            .unwrap();
+        }
 
         // ── Write churn CSV (with LoRA adds/removes) ────────────────────────
         let churn_path = out_dir.join(format!("{}_churn.csv", name));
@@ -432,5 +560,12 @@ fn test_export_csv() {
     }
 
     println!("\nAll CSVs written to: {}", out_dir.display());
+    let mut meta = fs::File::create(v2_out_dir.join("meta.csv")).expect("create v2 meta csv");
+    writeln!(meta, "key,value").unwrap();
+    writeln!(meta, "timestep_secs,3").unwrap();
+    writeln!(meta, "rate_window_secs,90").unwrap();
+    writeln!(meta, "scale_down_cooldown_ticks,3").unwrap();
+    writeln!(meta, "adapter_load_cost_ms,50").unwrap();
+    writeln!(meta, "seed_count,1").unwrap();
     println!("Run: python lib/llm/tests/lora_simulation/plot_lora_churn.py");
 }

@@ -107,6 +107,9 @@ struct RequestMetrics {
     adapter_unloads: usize,
     requests: usize,
     hits: usize,
+    mean_occupancy: f64,
+    max_occupancy: usize,
+    worker_load_cov: f64,
 }
 
 /// Deterministic, capacity-bounded LRU residency model for simulated workers.
@@ -143,6 +146,8 @@ impl ResidencyModel {
             .map(|worker| (worker.worker_id, worker))
             .collect();
         let mut metrics = RequestMetrics::default();
+        let mut requests_per_worker: HashMap<WorkerWithDpRank, usize> =
+            workers.iter().copied().map(|worker| (worker, 0)).collect();
 
         for schedule in schedules {
             for _ in 0..schedule.load_at_tick(tick) {
@@ -159,6 +164,7 @@ impl ResidencyModel {
                     .expect("simulation requires at least one available worker");
                 *cursor += 1;
                 let worker = worker_by_id[&candidate];
+                *requests_per_worker.entry(worker).or_default() += 1;
                 let resident = self.adapters.entry(worker).or_default();
 
                 if state_tracker.is_loaded(&schedule.lora_name, &worker) {
@@ -191,6 +197,26 @@ impl ResidencyModel {
             }
         }
 
+        let occupancy: Vec<usize> = workers
+            .iter()
+            .map(|worker| self.adapters.get(worker).map_or(0, VecDeque::len))
+            .collect();
+        metrics.mean_occupancy = occupancy.iter().sum::<usize>() as f64 / workers.len() as f64;
+        metrics.max_occupancy = occupancy.iter().copied().max().unwrap_or(0);
+        let worker_loads: Vec<f64> = workers
+            .iter()
+            .map(|worker| requests_per_worker[worker] as f64)
+            .collect();
+        let mean_load = worker_loads.iter().sum::<f64>() / worker_loads.len() as f64;
+        if mean_load > 0.0 {
+            let variance = worker_loads
+                .iter()
+                .map(|load| (load - mean_load).powi(2))
+                .sum::<f64>()
+                / worker_loads.len() as f64;
+            metrics.worker_load_cov = variance.sqrt() / mean_load;
+        }
+
         metrics
     }
 }
@@ -204,6 +230,38 @@ fn record_request_metrics(metrics: &mut ChurnMetrics, request_metrics: RequestMe
         .push(request_metrics.adapter_unloads);
     metrics.per_tick_requests.push(request_metrics.requests);
     metrics.per_tick_hits.push(request_metrics.hits);
+    metrics
+        .per_tick_mean_occupancy
+        .push(request_metrics.mean_occupancy);
+    metrics
+        .per_tick_max_occupancy
+        .push(request_metrics.max_occupancy);
+    metrics
+        .per_tick_worker_load_cov
+        .push(request_metrics.worker_load_cov);
+}
+
+fn record_routing_metrics(
+    metrics: &mut ChurnMetrics,
+    routing_table: &LoraRoutingTable,
+    solve_ms: f64,
+) {
+    let configs = routing_table.snapshot_configs();
+    metrics.per_tick_active_loras.push(
+        configs
+            .iter()
+            .filter(|(_, config)| config.is_active)
+            .count(),
+    );
+    metrics.per_tick_routing_entries.push(configs.len());
+    metrics.per_tick_cold_start_entries.push(
+        configs
+            .iter()
+            .filter(|(_, config)| !config.is_active)
+            .count(),
+    );
+    metrics.per_tick_solve_ms.push(solve_ms);
+    metrics.per_tick_overflow_count.push(0);
 }
 
 /// Compute churn between two allocation snapshots
@@ -425,7 +483,9 @@ fn run_hrw_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
             }
         }
 
+        let solve_start = Instant::now();
         controller.recompute_now_at(now);
+        let solve_ms = solve_start.elapsed().as_secs_f64() * 1_000.0;
 
         // Snapshot current allocation
         let mut curr_snapshot: AllocationSnapshot = HashMap::new();
@@ -457,6 +517,7 @@ fn run_hrw_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
             *replica_dist.entry(replica_set.len()).or_insert(0) += 1;
         }
         metrics.per_tick_replica_dist.push(replica_dist);
+        record_routing_metrics(&mut metrics, &routing_table, solve_ms);
         let request_metrics = residency.serve_tick(
             schedules,
             tick,
@@ -533,6 +594,7 @@ fn run_random_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> 
                 },
             );
         }
+        record_routing_metrics(&mut metrics, &routing_table, 0.0);
         // Compute churn
         let (loads, unloads) = compute_churn(&prev_snapshot, &curr_snapshot);
         let tick_churn = loads + unloads;
@@ -624,7 +686,9 @@ fn run_mcf_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
             }
         }
 
+        let solve_start = Instant::now();
         controller.recompute_now_at(now);
+        let solve_ms = solve_start.elapsed().as_secs_f64() * 1_000.0;
 
         let mut curr_snapshot: AllocationSnapshot = HashMap::new();
         for lora_name in routing_table.list_loras() {
@@ -652,6 +716,7 @@ fn run_mcf_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
             *replica_dist.entry(replica_set.len()).or_insert(0) += 1;
         }
         metrics.per_tick_replica_dist.push(replica_dist);
+        record_routing_metrics(&mut metrics, &routing_table, solve_ms);
         let request_metrics = residency.serve_tick(
             schedules,
             tick,
