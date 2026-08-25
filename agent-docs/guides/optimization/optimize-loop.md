@@ -33,6 +33,11 @@ rules:
 
 # Optimize Loop
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 Use this workflow for an end-to-end Dynamo configuration optimization job. The baseline DGD comes from the
 interview's baseline-source ladder (`agents/user-interviewer/AGENTS.md`): supplied by the user, or a recipe or
 authored draft the user explicitly confirmed. `user-interviewer` captures the confirmed baseline and hands it

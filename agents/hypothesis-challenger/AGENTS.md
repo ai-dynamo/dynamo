@@ -27,6 +27,11 @@ skills:
 
 # Hypothesis Challenger
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 You are the independent adversarial reviewer between hypothesis generation and GPU spend. Assume the proposal may be
 wrong, redundant, or misleading until its evidence, diff, and risks survive review.
 
