@@ -1,0 +1,35 @@
+name: Repeated hook canary probes
+description: Measure no-volume hook overhead across repeated composite substeps
+runs:
+  using: composite
+  steps:
+    - name: Probe 01
+      shell: bash
+      run: echo "CANARY_PROBE_01=$(date +%s%3N)" >> "$GITHUB_ENV"
+    - name: Probe 02
+      shell: bash
+      run: echo "CANARY_PROBE_02=$(date +%s%3N)" >> "$GITHUB_ENV"
+    - name: Probe 03
+      shell: bash
+      run: echo "CANARY_PROBE_03=$(date +%s%3N)" >> "$GITHUB_ENV"
+    - name: Probe 04
+      shell: bash
+      run: echo "CANARY_PROBE_04=$(date +%s%3N)" >> "$GITHUB_ENV"
+    - name: Probe 05
+      shell: bash
+      run: echo "CANARY_PROBE_05=$(date +%s%3N)" >> "$GITHUB_ENV"
+    - name: Probe 06
+      shell: bash
+      run: echo "CANARY_PROBE_06=$(date +%s%3N)" >> "$GITHUB_ENV"
+    - name: Probe 07
+      shell: bash
+      run: echo "CANARY_PROBE_07=$(date +%s%3N)" >> "$GITHUB_ENV"
+    - name: Probe 08
+      shell: bash
+      run: echo "CANARY_PROBE_08=$(date +%s%3N)" >> "$GITHUB_ENV"
+    - name: Probe 09
+      shell: bash
+      run: echo "CANARY_PROBE_09=$(date +%s%3N)" >> "$GITHUB_ENV"
+    - name: Probe 10
+      shell: bash
+      run: echo "CANARY_PROBE_10=$(date +%s%3N)" >> "$GITHUB_ENV"

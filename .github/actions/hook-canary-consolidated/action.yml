@@ -1,0 +1,12 @@
+name: Consolidated hook canary probes
+description: Measure no-volume hook overhead for one consolidated composite substep
+runs:
+  using: composite
+  steps:
+    - name: Probes 01-10
+      shell: bash
+      run: |
+        set -euo pipefail
+        for probe in $(seq -w 1 10); do
+          echo "CANARY_PROBE_${probe}=$(date +%s%3N)" >> "$GITHUB_ENV"
+        done

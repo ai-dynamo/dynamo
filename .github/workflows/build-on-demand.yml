@@ -59,44 +59,12 @@ jobs:
           echo "shape=${{ matrix.shape }} runner=${{ runner.name }} job_pod=$(hostname)"
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - name: Repeated probe 01
+      - name: Run repeated composite probes
         if: matrix.shape == 'repeated'
-        run: date +%s%3N
-      - name: Repeated probe 02
-        if: matrix.shape == 'repeated'
-        run: date +%s%3N
-      - name: Repeated probe 03
-        if: matrix.shape == 'repeated'
-        run: date +%s%3N
-      - name: Repeated probe 04
-        if: matrix.shape == 'repeated'
-        run: date +%s%3N
-      - name: Repeated probe 05
-        if: matrix.shape == 'repeated'
-        run: date +%s%3N
-      - name: Repeated probe 06
-        if: matrix.shape == 'repeated'
-        run: date +%s%3N
-      - name: Repeated probe 07
-        if: matrix.shape == 'repeated'
-        run: date +%s%3N
-      - name: Repeated probe 08
-        if: matrix.shape == 'repeated'
-        run: date +%s%3N
-      - name: Repeated probe 09
-        if: matrix.shape == 'repeated'
-        run: date +%s%3N
-      - name: Repeated probe 10
-        if: matrix.shape == 'repeated'
-        run: date +%s%3N
-      - name: Consolidated probes 01-10
+        uses: ./.github/actions/hook-canary-repeated
+      - name: Run consolidated composite probes
         if: matrix.shape == 'consolidated'
-        shell: bash
-        run: |
-          set -euo pipefail
-          for probe in $(seq -w 1 10); do
-            echo "probe=${probe} timestamp=$(date +%s%3N)"
-          done
+        uses: ./.github/actions/hook-canary-consolidated
 
   standard-hook-latency:
     if: inputs.standard_hook_canary == 'latency'
