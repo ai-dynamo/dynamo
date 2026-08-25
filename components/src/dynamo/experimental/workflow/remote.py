@@ -10,8 +10,16 @@ import uuid
 from types import MappingProxyType
 from typing import Any, AsyncIterator, Mapping, Protocol
 
-from dynamo.experimental.workflow.runtime import StageContext, StageRunner, WorkflowExecutionError
-from dynamo.experimental.workflow.types import StageContract, WorkflowValidationError, validate_name
+from dynamo.experimental.workflow.runtime import (
+    StageContext,
+    StageRunner,
+    WorkflowExecutionError,
+)
+from dynamo.experimental.workflow.types import (
+    StageContract,
+    WorkflowValidationError,
+    validate_name,
+)
 
 
 class _DynamoClient(Protocol):
