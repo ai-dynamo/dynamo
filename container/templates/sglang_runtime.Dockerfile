@@ -271,21 +271,11 @@ ENV IMAGEIO_FFMPEG_EXE=
 # module lookup. The wheel's auditwheel dependency directory is deliberately
 # placed first for every process; it contains only hash-mangled dependencies
 # plus the two generic UCX aliases. No existing wheel file or ELF metadata is
-# modified.
+# modified. The same script registers NIXL's C API directory with the runtime
+# linker so the Rust bindings can dlopen it.
 RUN --mount=type=bind,source=./container/deps/sglang/install_nixl_ucx_compat.sh,target=/tmp/install_nixl_ucx_compat.sh,readonly \
     --mount=type=bind,source=./container/deps/sglang/discover_nixl_ucx_layout.py,target=/tmp/discover_nixl_ucx_layout.py,readonly \
-    bash /tmp/install_nixl_ucx_compat.sh /opt/dynamo/nixl-ucx-compat && \
-    # nixl-sys resolves the C API with a bare dlopen("libnixl_capi.so") and the
-    # Dynamo runtime extension carries no RPATH, so the Rust bindings run in
-    # stub mode unless the wheel's meson-python directory is on the loader path.
-    # ld.so.cache is searched after LD_LIBRARY_PATH, so the UCX compat directory
-    # below keeps its priority for libucp/libucs.
-    NIXL_CAPI_DIR="$(python3 /tmp/discover_nixl_ucx_layout.py | awk -F'\t' '$1 == "capidir" { print $2 }')" && \
-    if [ ! -f "${NIXL_CAPI_DIR}/libnixl_capi.so" ]; then \
-        echo "missing ${NIXL_CAPI_DIR}/libnixl_capi.so; NIXL wheel layout changed" >&2; exit 1; \
-    fi && \
-    echo "${NIXL_CAPI_DIR}" > /etc/ld.so.conf.d/nixl.conf && \
-    ldconfig
+    bash /tmp/install_nixl_ucx_compat.sh /opt/dynamo/nixl-ucx-compat
 ENV LD_LIBRARY_PATH=/opt/dynamo/nixl-ucx-compat${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 {% endif %}
 

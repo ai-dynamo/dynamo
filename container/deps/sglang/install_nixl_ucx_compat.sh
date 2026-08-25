@@ -39,7 +39,7 @@ validate_ucx_dependencies() {
 [[ "${OUTPUT_DIR}" == /* && "${OUTPUT_DIR}" != "/" ]] || \
     die "output directory must be an absolute non-root path"
 
-for tool in dirname env grep ldd ln mkdir python3 readlink; do
+for tool in dirname env grep ldconfig ldd ln mkdir python3 readlink; do
     command -v "${tool}" >/dev/null || die "required tool not found: ${tool}"
 done
 
@@ -57,6 +57,7 @@ declare -a PLUGINS=()
 declare -A ALIASES=()
 NIXL_PACKAGE=""
 NIXL_LIB_DIR=""
+NIXL_CAPI_DIR=""
 UCX_VERSION=""
 for record in "${LAYOUT[@]}"; do
     IFS=$'\t' read -r kind first second <<<"${record}"
@@ -64,8 +65,7 @@ for record in "${LAYOUT[@]}"; do
         nixl) NIXL_PACKAGE="${first}" ;;
         ucx) UCX_VERSION="${first}" ;;
         libdir) NIXL_LIB_DIR="${first}" ;;
-        # Consumed by the image build to put NIXL's C API on the loader path.
-        capidir) ;;
+        capidir) NIXL_CAPI_DIR="${first}" ;;
         plugin) PLUGINS+=("${first}") ;;
         alias) ALIASES["${first}"]="${second}" ;;
         *) die "unexpected layout record: ${record}" ;;
@@ -75,6 +75,7 @@ done
 [[ -n "${NIXL_PACKAGE}" ]] || die "failed to identify the NIXL CUDA wheel"
 [[ -n "${UCX_VERSION}" ]] || die "failed to identify the NIXL UCX version"
 [[ -d "${NIXL_LIB_DIR}" ]] || die "failed to locate the NIXL private library directory"
+[[ -d "${NIXL_CAPI_DIR}" ]] || die "failed to locate the NIXL C API directory"
 # The NVSHMEM transport directly needs generic libucp and libucs only. Their
 # libuct and libucm dependencies use auditwheel-mangled names resolved by
 # $ORIGIN, so adding generic aliases for those libraries would be unnecessary.
@@ -141,3 +142,24 @@ if [[ "${#PLUGINS[@]}" -eq 0 ]]; then
 fi
 echo "nixl-ucx-compat: installed ${#ALIASES[@]} aliases for" \
     "${NIXL_PACKAGE} UCX ${UCX_VERSION} in ${NIXL_LIB_DIR}"
+
+# nixl-sys resolves the C API with a bare dlopen("libnixl_capi.so") and the
+# Dynamo runtime extension carries no RPATH, so the Rust bindings fall back to
+# stub mode unless this directory is on the loader path. NIXL finds its backend
+# plugins beside the library on its own, so NIXL_PLUGIN_DIR stays unset.
+# ld.so.cache is searched after LD_LIBRARY_PATH, so the compatibility directory
+# keeps its priority for libucp and libucs.
+[[ -f "${NIXL_CAPI_DIR}/libnixl_capi.so" ]] || \
+    die "missing ${NIXL_CAPI_DIR}/libnixl_capi.so; NIXL wheel layout changed"
+[[ -d "${NIXL_CAPI_DIR}/plugins" ]] || \
+    die "missing ${NIXL_CAPI_DIR}/plugins; NIXL wheel layout changed"
+echo "${NIXL_CAPI_DIR}" > /etc/ld.so.conf.d/nixl.conf
+ldconfig
+
+# ld.so.cache is keyed by DT_SONAME. A soversioned rebuild would leave the
+# dlopen name uncached while the unversioned development symlink still exists,
+# so assert the name resolves rather than that the file is present.
+ldconfig -p | grep -qE '^[[:space:]]*libnixl_capi[.]so[[:space:]]' || \
+    die "libnixl_capi.so is not resolvable by SONAME after ldconfig"
+
+echo "nixl-ucx-compat: registered ${NIXL_CAPI_DIR} with the runtime linker"
