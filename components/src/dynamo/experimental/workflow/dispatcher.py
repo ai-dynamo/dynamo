@@ -9,9 +9,17 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
-from dynamo.experimental.workflow.plan import ExecutionPlan, InlineBinding, RemoteBinding
+from dynamo.experimental.workflow.plan import (
+    ExecutionPlan,
+    InlineBinding,
+    RemoteBinding,
+)
 from dynamo.experimental.workflow.remote import RemoteStageClient
-from dynamo.experimental.workflow.runtime import StageContext, StageRunner, WorkflowExecutionError
+from dynamo.experimental.workflow.runtime import (
+    StageContext,
+    StageRunner,
+    WorkflowExecutionError,
+)
 from dynamo.experimental.workflow.types import StageContract, WorkflowValidationError
 
 
