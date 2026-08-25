@@ -15,8 +15,8 @@ use crate::proto::envoy::service::ext_proc::v3::{
 };
 use crate::proto::envoy::r#type::v3::{HttpStatus, StatusCode};
 
-/// EPP protocol constants from proposal 004-endpoint-picker-protocol.
-/// These match both the full EPP and the LW-EPP from GAIE (issue #2834 <https://github.com/kubernetes-sigs/gateway-api-inference-extension/issues/2834>).
+/// EPP protocol constants from GAIE proposal 004-endpoint-picker-protocol
+/// (<https://github.com/kubernetes-sigs/gateway-api-inference-extension>).
 pub mod metadata {
     pub const SUBSET_FILTER_NAMESPACE: &str = "envoy.lb.subset_hint";
     pub const SUBSET_FILTER_KEY: &str = "x-gateway-destination-endpoint-subset";

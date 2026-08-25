@@ -3,12 +3,11 @@
 
 //! Standard Rust EPP process bootstrap.
 //!
-//! Replaces the Go EPP + CGO bridge with a single native Rust binary that
-//! implements the Envoy ext_proc gRPC service and uses Dynamo's KV-aware
-//! router for endpoint selection.
+//! A native Rust binary implementing the Envoy ext_proc gRPC service, using
+//! Dynamo's KV-aware router for endpoint selection.
 //!
-//! The ext-proc port (9002) serves TLS (self-signed cert, matching the Go EPP).
-//! The health port (9003) is plaintext (K8s probes don't need TLS).
+//! The ext-proc port (9002) serves TLS (self-signed cert). The health port
+//! (9003) is plaintext (K8s probes don't need TLS).
 
 use std::sync::Arc;
 
@@ -348,10 +347,10 @@ async fn serve<P: crate::EndpointPicker>(
     }
 
     let server = ExtProcServer::new(picker);
-    // Default to TLS to match the Go EPP behavior. Verified working with
-    // kGateway (`appProtocol: http2` upstreams negotiate h2 over TLS via ALPN
-    // when the cert is presented). Set DYN_SECURE_SERVING=false to fall back
-    // to plaintext h2c, e.g. for local debugging or non-TLS gateways.
+    // Default to TLS. Verified working with kGateway (`appProtocol: http2`
+    // upstreams negotiate h2 over TLS via ALPN when the cert is presented).
+    // Set DYN_SECURE_SERVING=false to fall back to plaintext h2c, e.g. for
+    // local debugging or non-TLS gateways.
     let secure_serving = parse_env("DYN_SECURE_SERVING", true);
     let addr: std::net::SocketAddr = format!("0.0.0.0:{GRPC_PORT}").parse()?;
 

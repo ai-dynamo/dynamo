@@ -736,15 +736,40 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Beta1) {
 		newImage, imagePath := runtimeVersionImageAndPath(newComponent, fldPath)
 		oldImage, _ := runtimeVersionImageAndPath(oldComponent, fldPath)
+		newHasEPPConfig := newComponent.EPPConfig != nil
+		oldHasEPPConfig := oldComponent.EPPConfig != nil
+		overrideChanged := newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride
+		tupleChanged := newImage != oldImage || overrideChanged || newHasEPPConfig != oldHasEPPConfig
+
 		if newImage == "" && oldImage != "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
 		} else if !v.allowMissingRuntimeVersionOverride &&
 			runtimeVersionOverrideRequired(newImage, newComponent.RuntimeVersionOverride) &&
-			(newImage != oldImage || newComponent.RuntimeVersionOverride != oldComponent.RuntimeVersionOverride) {
+			(newImage != oldImage || overrideChanged) {
 			allErrs = append(allErrs, field.Required(
 				fldPath.Child("runtimeVersionOverride"),
 				runtimeVersionOverrideRequiredMessage,
 			))
+		}
+
+		// Only re-validate the image/eppConfig pairing when this update
+		// actually touches image, runtimeVersionOverride, or eppConfig
+		// presence -- an already-existing tuple that this update leaves
+		// untouched must not start failing on unrelated field changes. When
+		// it is touched, validate the new tuple (not a diff against the
+		// old): this accepts an unchanged compliant pair, accepts an atomic
+		// migration or rollback that changes image and eppConfig together,
+		// and rejects a split update that leaves image and eppConfig
+		// mismatched (see eppRuntimeCompatibilityError).
+		if newComponent.ComponentType == nvidiacomv1beta1.ComponentTypeEPP && tupleChanged {
+			if err := eppRuntimeCompatibilityError(
+				newImage,
+				newComponent.RuntimeVersionOverride,
+				newHasEPPConfig,
+				fldPath.Child("eppConfig"),
+			); err != nil {
+				allErrs = append(allErrs, err)
+			}
 		}
 	}
 	return allErrs

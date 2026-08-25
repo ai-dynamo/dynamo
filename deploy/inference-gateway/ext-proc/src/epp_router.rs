@@ -203,7 +203,13 @@ fn compute_ready(pod_ready: bool, peer_ready: Option<bool>) -> bool {
 
 /// True if a scheme-less `ip:port` endpoint is covered by an Envoy subset,
 /// matching either the full `ip:port` or the bare `ip`.
-fn endpoint_in_subset(
+///
+/// Matches the bare-IP case via `IpAddr`, never `endpoint.split(':')`: a
+/// bracketed IPv6 endpoint (`[fd00::2]:8000`) splits into garbage on `:`,
+/// silently never matching a bare `fd00::2` candidate. Shared with
+/// [`crate::epp::Router::subset_to_worker_ids`], the other Envoy
+/// candidate_subset matcher in this crate.
+pub(crate) fn endpoint_in_subset(
     endpoint: &str,
     candidates: &HashSet<&str>,
     candidate_ips: &HashSet<IpAddr>,

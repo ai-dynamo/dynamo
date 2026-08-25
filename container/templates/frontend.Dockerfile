@@ -51,6 +51,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         # required for EPP
         ca-certificates \
         libstdc++6 \
+        # required by EPP's embedded ZMQ KV-event/replica-sync subscriber
+        # (dynamo-kv-router's standalone-selection feature); matches the
+        # runtime dep installed in deploy/inference-gateway/ext-proc/Dockerfile
+        libzmq5 \
         # required for verification of GPG keys
         gnupg2 \
         # required for installing dependencies from git repositories

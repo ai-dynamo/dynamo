@@ -7,9 +7,10 @@
 //! `lib/bindings/c/src/lib.rs`. Instead of crossing a C FFI boundary, the
 //! ext_proc server calls these types directly as async Rust.
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -32,14 +33,23 @@ use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
 use crate::envoy_helpers::find_header;
+use crate::epp_router::endpoint_in_subset;
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo, ResponseUsage};
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
 
-/// `(token_ids, cache_namespace, priority_jump, strict_priority, routing_constraints)`,
-/// as returned by [`Router::tokenize`] and its chat/completion helpers.
-type TokenizeResult = (Vec<u32>, Option<String>, f64, u32, RoutingConstraints);
+/// `(token_ids, cache_namespace, priority_jump, strict_priority,
+/// routing_constraints, tokens_safe_to_inject)`, as returned by
+/// [`Router::tokenize`] and its chat/completion helpers.
+///
+/// `tokens_safe_to_inject` is `false` when `token_ids` were computed from
+/// only one prompt of a multi-prompt text batch (routing-only, matching
+/// [`OpenAIPreprocessor::gather_tokens`]'s own refusal to trust `token_data`
+/// for a `TextInput::Batch` of more than one prompt) — injecting them as
+/// `nvext.token_data` would apply prompt 1's tokens to every split of the
+/// batch. Chat and single/pre-tokenized completion requests are always safe.
+type TokenizeResult = (Vec<u32>, Option<String>, f64, u32, RoutingConstraints, bool);
 
 fn validate_kube_discovery_mode() -> Result<()> {
     match std::env::var(DYN_KUBE_DISCOVERY_MODE) {
@@ -80,12 +90,6 @@ fn cache_namespace_with_header_override(
 }
 
 /// Name of the inference-serving HTTP port on a Dynamo worker pod.
-///
-/// Mirrors `commonconsts.DynamoContainerPortName` in
-/// `deploy/operator/internal/consts/consts.go`. Worker pods may have multiple
-/// containers (e.g. a `main` worker exposing metrics ports plus a
-/// `sidecar-frontend` exposing the HTTP inference port); we route to frontend sidecar
-/// container which exposes a port named `http`.
 const DYNAMO_CONTAINER_PORT_NAME: &str = "http";
 
 /// Holds all router state needed for request routing.
@@ -97,7 +101,7 @@ pub struct Router {
     decode_router: Arc<KvRouter>,
     preprocessor: Arc<OpenAIPreprocessor>,
     runtime: Runtime,
-    pod_store: kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>,
+    worker_index: Arc<RwLock<WorkerEndpointIndex>>,
     pod_store_ready: Arc<AtomicBool>,
     served_model: String,
 }
@@ -196,7 +200,7 @@ impl Router {
         // `nvidia.com/dynamo-namespace` is always set to the base
         // ("atchernych-qwen") by the operator. Using the suffixed name here
         // would silently match zero pods during/after a DGD rolling update.
-        let (pod_store, pod_store_ready) = spawn_pod_reflector(namespace).await?;
+        let (worker_index, pod_store_ready) = spawn_pod_reflector(namespace).await?;
 
         // `model_manager` and `drt` are intentionally not stored on the
         // Router. The KV chooser, prefill router, prefill discovery watcher,
@@ -208,7 +212,7 @@ impl Router {
             decode_router,
             preprocessor: bootstrap.preprocessor,
             runtime,
-            pod_store,
+            worker_index,
             pod_store_ready,
             served_model: model_name,
         })
@@ -229,8 +233,7 @@ impl Router {
     /// routing_constraints)`. Priorities default to zero and constraints
     /// default to empty when absent. Supports both `/v1/chat/completions` and
     /// `/v1/completions` bodies; the request kind is discriminated by a
-    /// non-empty `messages` array (chat) versus a `prompt` (completions),
-    /// mirroring the removed Go EPP `BuildOpenAIRequest`.
+    /// non-empty `messages` array (chat) versus a `prompt` (completions).
     pub async fn tokenize(&self, request_json: &str) -> Result<TokenizeResult> {
         let value: serde_json::Value = serde_json::from_str(request_json)?;
         let has_messages = value
@@ -238,25 +241,28 @@ impl Router {
             .and_then(|m| m.as_array())
             .is_some_and(|messages| !messages.is_empty());
         if !has_messages && value.get("prompt").is_some() {
-            return self.tokenize_completion(request_json).await;
+            let request: NvCreateCompletionRequest = serde_json::from_value(value)?;
+            return self.tokenize_completion(request).await;
         }
-        self.tokenize_chat(request_json)
+        let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+            serde_json::from_value(value)?;
+        self.tokenize_chat(&request)
     }
 
     /// Tokenize a `/v1/chat/completions` body via the chat template.
-    fn tokenize_chat(&self, request_json: &str) -> Result<TokenizeResult> {
+    fn tokenize_chat(
+        &self,
+        request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
+    ) -> Result<TokenizeResult> {
         // TODO(epp-request-routing): Reuse shared preprocessing so expected output
         // length, LoRA, pins, sessions, topology constraints, additional protocols,
         // and multimodal routing hashes are preserved.
-        let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
-            serde_json::from_str(request_json)?;
-
         let priority_jump = extract_priority_jump(request.nvext.as_ref());
         let strict_priority = extract_strict_priority(request.nvext.as_ref());
         let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
-        let cache_namespace = request_cache_salt(&request).map(str::to_owned);
+        let cache_namespace = request_cache_salt(request).map(str::to_owned);
 
-        let encoding = match self.preprocessor.apply_template(&request)? {
+        let encoding = match self.preprocessor.apply_template(request)? {
             Some(prompt) => self.preprocessor.tokenize_rendered_prompt(&prompt)?,
             None => self.preprocessor.tokenize("")?,
         };
@@ -266,36 +272,42 @@ impl Router {
             priority_jump,
             strict_priority,
             routing_constraints,
+            true,
         ))
     }
 
     /// Tokenize a `/v1/completions` body.
     ///
-    /// Mirrors the removed Go EPP `addCompletionPrompt`: pre-tokenized
-    /// (integer) prompts route directly on their token IDs, while text prompts
+    /// Pre-tokenized (integer) prompts route directly on their token IDs, while text prompts
     /// are tokenized as a raw completion prompt (no chat template) via the
     /// same [`OpenAIPreprocessor::gather_tokens`] path the backend uses for a
     /// live `/v1/completions` request, so the tokens computed here for
     /// routing/injection are identical to what the backend would compute on
     /// its own. Batched prompts route on the first entry, since KV prefix
-    /// locality is computed per prompt.
-    async fn tokenize_completion(&self, request_json: &str) -> Result<TokenizeResult> {
-        let request: NvCreateCompletionRequest = serde_json::from_str(request_json)?;
-
+    /// locality is computed per prompt — but for a multi-prompt text batch
+    /// those tokens cover only prompt 1, so they are not safe to inject as
+    /// `nvext.token_data` (see [`TokenizeResult`]); this matches
+    /// `gather_tokens`'s own refusal to trust `token_data` for a
+    /// `TextInput::Batch` of more than one prompt.
+    async fn tokenize_completion(
+        &self,
+        request: NvCreateCompletionRequest,
+    ) -> Result<TokenizeResult> {
         let priority_jump = extract_priority_jump(request.nvext.as_ref());
         let strict_priority = extract_strict_priority(request.nvext.as_ref());
         let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
         let cache_namespace = request_cache_salt(&request).map(str::to_owned);
 
-        let tokens = match completion_prompt_token_ids(&request.inner.prompt) {
-            Some(ids) => ids,
-            None => {
-                self.tokenize_completion_text(&completion_prompt_routing_text(
-                    &request.inner.prompt,
-                ))
-                .await?
-            }
-        };
+        let (tokens, tokens_safe_to_inject) =
+            match completion_prompt_token_ids(&request.inner.prompt) {
+                Some(ids) => (ids, true),
+                None => {
+                    let text = completion_prompt_routing_text(&request.inner.prompt);
+                    let tokens = self.tokenize_completion_text(&request, &text).await?;
+                    let safe = completion_text_tokens_safe_to_inject(&request.inner.prompt);
+                    (tokens, safe)
+                }
+            };
 
         Ok((
             tokens,
@@ -303,6 +315,7 @@ impl Router {
             priority_jump,
             strict_priority,
             routing_constraints,
+            tokens_safe_to_inject,
         ))
     }
 
@@ -312,13 +325,17 @@ impl Router {
     /// `nvext.token_data` injected downstream identical to what the backend
     /// would have tokenized itself, so preempting backend tokenization does
     /// not change the generated output.
-    async fn tokenize_completion_text(&self, text: &str) -> Result<Vec<u32>> {
-        let completion_json = serde_json::json!({
-            "model": "default",
-            "prompt": text,
-        })
-        .to_string();
-        let request: NvCreateCompletionRequest = serde_json::from_str(&completion_json)?;
+    ///
+    /// Reuses `request` (already parsed from the client body) with `prompt`
+    /// overwritten to the routing text, instead of serializing a synthetic
+    /// body and re-parsing it.
+    async fn tokenize_completion_text(
+        &self,
+        request: &NvCreateCompletionRequest,
+        text: &str,
+    ) -> Result<Vec<u32>> {
+        let mut request = request.clone();
+        request.inner.prompt = Prompt::String(text.to_string());
         let (tokens, _annotations) = self
             .preprocessor
             .gather_tokens(&request, None, None)
@@ -327,38 +344,38 @@ impl Router {
     }
 
     /// Resolve a worker_id to a pod endpoint address (ip:port).
-    /// Lock-free read from the in-memory reflector store — no K8s API calls.
-    /// Port is read from the pod's Dynamo HTTP container port.
+    /// Lock-free-on-the-writer-side read from the incrementally maintained
+    /// worker index — O(1), no K8s API calls, no pod scan, no worker-ID
+    /// rehashing (see [`WorkerEndpointIndex`]).
     pub fn resolve_worker_endpoint(&self, worker_id: u64) -> Option<String> {
-        for pod in self.pod_store.state() {
-            if pod_worker_ids(&pod).any(|id| id == worker_id) {
-                return pod_endpoint_address(&pod);
-            }
-        }
-        None
+        self.worker_index
+            .read()
+            .unwrap()
+            .endpoints
+            .get(&worker_id)
+            .cloned()
     }
 
     /// Resolve any available worker to its endpoint address (ip:port).
     /// Used for body-less requests (GET /v1/models) where we just need any backend.
     pub fn resolve_any_worker_endpoint(&self) -> Option<String> {
-        self.pod_store
-            .state()
-            .iter()
-            .find_map(|pod| pod_endpoint_address(pod))
+        self.worker_index
+            .read()
+            .unwrap()
+            .endpoints
+            .values()
+            .next()
+            .cloned()
     }
 
     /// Resolve any reflected worker whose worker_id is in `allowed`.
     /// Used for body-less requests that still carry an Envoy subset hint, so
     /// we never resolve a backend outside the requested subset.
     fn resolve_any_worker_endpoint_in_subset(&self, allowed: &HashSet<u64>) -> Option<String> {
-        for pod in self.pod_store.state() {
-            if pod_worker_ids(&pod).any(|id| allowed.contains(&id))
-                && let Some(addr) = pod_endpoint_address(&pod)
-            {
-                return Some(addr);
-            }
-        }
-        None
+        let index = self.worker_index.read().unwrap();
+        allowed
+            .iter()
+            .find_map(|id| index.endpoints.get(id).cloned())
     }
 
     /// Map an Envoy `candidate_subset` (endpoint addresses, "ip:port" or bare
@@ -367,21 +384,26 @@ impl Router {
     /// This is how the InferencePool subset hint is honored on the hot path:
     /// the ext_proc server always calls `pick()` with an empty external
     /// endpoint list, so the subset must be intersected against the in-memory
-    /// pod reflector rather than a caller-supplied slice. An empty result for
+    /// worker index rather than a caller-supplied slice. An empty result for
     /// a non-empty subset means no reflected pod matched the hint.
+    ///
+    /// Matches a bare-IP candidate via [`endpoint_in_subset`] (`IpAddr`), not
+    /// `addr_port.split(':')`: a bracketed IPv6 endpoint (`[fd00::2]:8000`)
+    /// splits into garbage on `:`, silently never matching a bare `fd00::2`
+    /// candidate.
     fn subset_to_worker_ids(&self, candidate_subset: &[String]) -> HashSet<u64> {
         let candidates: HashSet<&str> = candidate_subset.iter().map(|s| s.as_str()).collect();
-        let mut ids = HashSet::new();
-        for pod in self.pod_store.state() {
-            let Some(addr_port) = pod_endpoint_address(&pod) else {
-                continue;
-            };
-            let ip = addr_port.split(':').next().unwrap_or("");
-            if candidates.contains(addr_port.as_str()) || candidates.contains(ip) {
-                ids.extend(pod_worker_ids(&pod));
-            }
-        }
-        ids
+        let candidate_ips: HashSet<IpAddr> = candidate_subset
+            .iter()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        let index = self.worker_index.read().unwrap();
+        index
+            .endpoints
+            .iter()
+            .filter(|(_, addr_port)| endpoint_in_subset(addr_port, &candidates, &candidate_ips))
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     /// Route a prefill request. Returns (worker_id, dp_rank).
@@ -614,7 +636,7 @@ fn extract_routing_constraints(nvext: Option<&NvExt>) -> RoutingConstraints {
 
 /// Token IDs for a pre-tokenized completion prompt.
 ///
-/// Mirrors the Go EPP `addCompletionPrompt`: integer prompts route directly on
+/// Integer prompts route directly on
 /// their token IDs. Batched token prompts route on the first non-empty entry,
 /// since KV prefix locality is computed per prompt. Returns `None` for text
 /// prompts, which must go through the tokenizer instead.
@@ -641,6 +663,16 @@ fn completion_prompt_routing_text(prompt: &Prompt) -> String {
         Prompt::StringArray(texts) => texts.first().cloned().unwrap_or_default(),
         Prompt::IntegerArray(_) | Prompt::ArrayOfIntegerArray(_) => String::new(),
     }
+}
+
+/// Whether tokens computed via [`completion_prompt_routing_text`] are safe to
+/// inject as `nvext.token_data`.
+///
+/// They cover only prompt 1, so injecting them is only safe when the request
+/// is not a multi-prompt text batch — otherwise the backend applies prompt
+/// 1's tokens to every split of the batch (see [`TokenizeResult`]).
+fn completion_text_tokens_safe_to_inject(prompt: &Prompt) -> bool {
+    !matches!(prompt, Prompt::StringArray(texts) if texts.len() > 1)
 }
 
 struct DiscoveredModelBootstrap {
@@ -786,11 +818,17 @@ async fn fetch_preprocessor_from_discovery(
 /// instead scan all containers for the port named `http`, mirroring how
 /// Kubernetes resolves a string `targetPort`.
 ///
-/// Returns `None` if the pod has no IP or no container exposes a port named
-/// `http` — we never silently route to a guessed port.
+/// Returns `None` if the pod has no IP, its IP doesn't parse, no container
+/// exposes a port named `http`, or that port is out of `u16` range — we
+/// never silently route to a guessed or malformed address.
+///
+/// Formats via `SocketAddr`, not `format!("{ip}:{port}")`: `pod_ip` is a bare
+/// (unbracketed) address, so an IPv6 pod would otherwise produce an
+/// ambiguous, unparseable string like `fd00::2:8000`. `SocketAddr`'s
+/// `Display` brackets IPv6 for us.
 fn pod_endpoint_address(pod: &k8s_openapi::api::core::v1::Pod) -> Option<String> {
-    let ip = pod.status.as_ref()?.pod_ip.as_ref()?;
-    let port = pod
+    let ip: IpAddr = pod.status.as_ref()?.pod_ip.as_ref()?.parse().ok()?;
+    let port: u16 = pod
         .spec
         .as_ref()?
         .containers
@@ -798,8 +836,10 @@ fn pod_endpoint_address(pod: &k8s_openapi::api::core::v1::Pod) -> Option<String>
         .filter_map(|c| c.ports.as_ref())
         .flatten()
         .find(|p| p.name.as_deref() == Some(DYNAMO_CONTAINER_PORT_NAME))
-        .map(|p| p.container_port)?;
-    Some(format!("{ip}:{port}"))
+        .map(|p| p.container_port)?
+        .try_into()
+        .ok()?;
+    Some(SocketAddr::new(ip, port).to_string())
 }
 
 /// All worker instance IDs `pod` is currently known under: its pod-level
@@ -830,15 +870,92 @@ fn pod_worker_ids(pod: &k8s_openapi::api::core::v1::Pod) -> impl Iterator<Item =
     pod_id.into_iter().chain(container_ids)
 }
 
+/// Derived index mapping each worker ID (pod-level and, under container
+/// discovery mode, per-ready-container — see [`pod_worker_ids`]) to its pod's
+/// `ip:port` HTTP endpoint.
+///
+/// Incrementally maintained from the pod reflector's per-object
+/// `Apply`/`Delete` events (see [`spawn_pod_reflector`]) so request-path
+/// lookups (`resolve_worker_endpoint` and friends) are O(1) map reads that
+/// never rescan the pod set or re-derive worker IDs — `pod_worker_ids`
+/// allocates per hashed container name, so recomputing it per request scaled
+/// with pod/container count and allocated on every miss.
+#[derive(Default)]
+struct WorkerEndpointIndex {
+    /// worker_id -> endpoint.
+    endpoints: HashMap<u64, String>,
+    /// pod name -> worker_ids currently registered for that pod, so a later
+    /// `Apply`/`Delete` for the same pod retracts exactly the ids it
+    /// previously added instead of requiring a full rebuild.
+    by_pod: HashMap<String, Vec<u64>>,
+}
+
+impl WorkerEndpointIndex {
+    /// Apply one pod's current state: drop any ids it previously registered,
+    /// then add its current worker IDs mapped to its endpoint. A pod with no
+    /// worker IDs (unnamed, matching [`pod_worker_ids`]) or no resolvable
+    /// HTTP endpoint contributes no entries — matching the pre-index
+    /// `resolve_worker_endpoint`'s behavior of returning `None` for a
+    /// worker_id whose pod lacks one.
+    fn upsert(&mut self, pod: &k8s_openapi::api::core::v1::Pod) {
+        let pod_name = pod.metadata.name.clone().unwrap_or_default();
+        self.retract(&pod_name);
+        let Some(endpoint) = pod_endpoint_address(pod) else {
+            return;
+        };
+        let ids: Vec<u64> = pod_worker_ids(pod).collect();
+        if ids.is_empty() {
+            return;
+        }
+        for &id in &ids {
+            self.endpoints.insert(id, endpoint.clone());
+        }
+        self.by_pod.insert(pod_name, ids);
+    }
+
+    /// Drop a pod's worker IDs entirely (deletion).
+    fn remove(&mut self, pod: &k8s_openapi::api::core::v1::Pod) {
+        let pod_name = pod.metadata.name.as_deref().unwrap_or_default();
+        self.retract(pod_name);
+    }
+
+    fn retract(&mut self, pod_name: &str) {
+        if let Some(ids) = self.by_pod.remove(pod_name) {
+            for id in ids {
+                self.endpoints.remove(&id);
+            }
+        }
+    }
+
+    /// Drop every entry — used when the reflector stream ends, since a frozen
+    /// snapshot must not keep answering lookups as if it were still live.
+    fn clear(&mut self) {
+        self.endpoints.clear();
+        self.by_pod.clear();
+    }
+
+    /// Full recompute from the reflector's current pod set. Only called once,
+    /// at `InitDone` (see guardrail on incremental vs. recompute) — steady
+    /// state applies each pod's delta via `upsert`/`remove` instead.
+    fn rebuild(
+        &mut self,
+        store: &kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>,
+    ) {
+        self.endpoints.clear();
+        self.by_pod.clear();
+        for pod in store.state() {
+            self.upsert(&pod);
+        }
+    }
+}
+
 /// Start a background pod reflector that watches worker pods matching the
-/// InferencePool selector. The returned `Store` provides lock-free reads
-/// of the current pod state — no K8s API calls on the hot path.
+/// InferencePool selector and incrementally maintains a [`WorkerEndpointIndex`]
+/// from its per-object events — O(1) request-path lookups, no K8s API calls
+/// and no pod rescans on the hot path.
 async fn spawn_pod_reflector(
     dynamo_namespace: &str,
-) -> Result<(
-    kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>,
-    Arc<AtomicBool>,
-)> {
+) -> Result<(Arc<RwLock<WorkerEndpointIndex>>, Arc<AtomicBool>)> {
     use futures::StreamExt;
     use k8s_openapi::api::core::v1::Pod;
     use kube::{Api, Client, runtime::reflector, runtime::watcher};
@@ -865,6 +982,8 @@ async fn spawn_pod_reflector(
     let ready = Arc::new(AtomicBool::new(false));
     let watcher_config = watcher::Config::default().labels(&selector);
     let reflect = reflector::reflector(writer, watcher(pods, watcher_config));
+    let index: Arc<RwLock<WorkerEndpointIndex>> =
+        Arc::new(RwLock::new(WorkerEndpointIndex::default()));
 
     tracing::info!(
         namespace = k8s_namespace,
@@ -873,10 +992,35 @@ async fn spawn_pod_reflector(
     );
 
     let store_for_wait = store.clone();
+    let store_for_task = store;
+    let index_for_task = index.clone();
     tokio::spawn(async move {
         tokio::pin!(reflect);
-        while reflect.next().await.is_some() {}
-        tracing::warn!("Pod reflector stream ended unexpectedly");
+        loop {
+            match reflect.next().await {
+                None => {
+                    tracing::warn!("Pod reflector stream ended unexpectedly");
+                    index_for_task.write().unwrap().clear();
+                    break;
+                }
+                // During a relist the reflector emits Init + one InitApply per
+                // pod + InitDone; rebuild once from the completed store
+                // instead of applying per-object deltas mid-relist.
+                Some(Ok(watcher::Event::Init | watcher::Event::InitApply(_))) => continue,
+                Some(Ok(watcher::Event::InitDone)) => {
+                    index_for_task.write().unwrap().rebuild(&store_for_task);
+                }
+                Some(Ok(watcher::Event::Apply(pod))) => {
+                    index_for_task.write().unwrap().upsert(&pod);
+                }
+                Some(Ok(watcher::Event::Delete(pod))) => {
+                    index_for_task.write().unwrap().remove(&pod);
+                }
+                Some(Err(e)) => {
+                    tracing::warn!(error = %e, "Pod reflector watch error; retrying");
+                }
+            }
+        }
     });
 
     // Wait for the initial LIST to populate the store so the first inference
@@ -898,7 +1042,7 @@ async fn spawn_pod_reflector(
             tracing::warn!(
                 "Pod reflector initial LIST sync timed out after 30s; returning 503 until ready"
             );
-            let store_for_background_wait = store.clone();
+            let store_for_background_wait = store_for_wait.clone();
             let ready_for_background_wait = ready.clone();
             tokio::spawn(async move {
                 match store_for_background_wait.wait_until_ready().await {
@@ -918,7 +1062,7 @@ async fn spawn_pod_reflector(
         }
     }
 
-    Ok((store, ready))
+    Ok((index, ready))
 }
 
 fn spawn_prefill_discovery_watcher(
@@ -984,7 +1128,7 @@ fn spawn_prefill_discovery_watcher(
 }
 
 // ---------------------------------------------------------------------------
-// EndpointPicker trait implementation (mirrors Go LW-EPP from GAIE #2834)
+// EndpointPicker trait implementation
 // ---------------------------------------------------------------------------
 
 /// Narrow `endpoints` down to only those whose address (or address:port)
@@ -1088,10 +1232,17 @@ impl EndpointPicker for Router {
         let body_str = std::str::from_utf8(&req.body)
             .map_err(|e| PickError::TokenizationFailed(format!("Invalid UTF-8: {e}")))?;
 
-        let (tokens, body_cache_namespace, priority_jump, strict_priority, routing_constraints) =
-            self.tokenize(body_str)
-                .await
-                .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
+        let (
+            tokens,
+            body_cache_namespace,
+            priority_jump,
+            strict_priority,
+            routing_constraints,
+            tokens_safe_to_inject,
+        ) = self
+            .tokenize(body_str)
+            .await
+            .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
         let cache_namespace =
             cache_namespace_with_header_override(&req.headers, body_cache_namespace);
 
@@ -1164,7 +1315,6 @@ impl EndpointPicker for Router {
         };
 
         // Register the request with the router for bookkeeping (load tracking).
-        // Mirrors Go EPP's PreRequest() → CallAddRequest(requestID, tokenData, workerID, dpRank).
         if !req.request_id.is_empty()
             && let Err(e) = self
                 .add_request(
@@ -1184,8 +1334,7 @@ impl EndpointPicker for Router {
             );
         }
 
-        // Build routing headers matching the Go EPP's disagg plugin:
-        // x-dynamo-worker-instance-id, x-dynamo-dp-rank,
+        // Build routing headers: x-dynamo-worker-instance-id, x-dynamo-dp-rank,
         // x-dynamo-prefill-instance-id, x-dynamo-prefill-dp-rank, x-dynamo-routing-mode
         let mut headers = vec![
             (
@@ -1233,11 +1382,18 @@ impl EndpointPicker for Router {
             tracing::debug!(key = %k, value = %v, "Routing header set in PickResult");
         }
 
+        // Only inject token_data when it covers the whole request; a
+        // multi-prompt text batch's tokens cover prompt 1 alone and the
+        // backend applies nvext.token_data to every split (see
+        // `TokenizeResult`), so omit it and let the backend tokenize each
+        // prompt itself.
+        let token_ids = tokens_safe_to_inject.then_some(tokens);
+
         Ok(PickResult {
             endpoint,
             fallbacks: vec![],
             headers,
-            token_ids: Some(tokens),
+            token_ids,
             reservation_id: None,
         })
     }
@@ -1450,8 +1606,8 @@ mod tests {
 
         let text = "The capital of France is";
 
-        // Mirrors the minimal request `Router::tokenize_completion_text` builds
-        // internally before calling `gather_tokens`.
+        // Mirrors what `Router::tokenize_completion_text` sends to
+        // `gather_tokens`: the client's own request with `prompt` overwritten.
         let ext_proc_request: NvCreateCompletionRequest = serde_json::from_str(
             &serde_json::json!({"model": "default", "prompt": text}).to_string(),
         )
@@ -1515,8 +1671,86 @@ mod tests {
         );
     }
 
-    /// Pre-tokenized `/v1/completions` prompts route directly on their token
-    /// IDs, matching the Go EPP `addCompletionPrompt` token path.
+    /// A multi-prompt text batch routes on prompt 1's tokens, but those
+    /// tokens must never be injected as `nvext.token_data`: the backend
+    /// applies injected `token_data` to every split of the batch, so
+    /// injecting prompt 1's tokens would silently run prompt 2 (and beyond)
+    /// on prompt 1's tokens instead of its own. This exercises the same
+    /// `completion_prompt_routing_text` -> `gather_tokens` ->
+    /// `completion_text_tokens_safe_to_inject` -> `token_ids` gating chain
+    /// that `Router::tokenize_completion` and `Router::pick` run, end to end.
+    #[tokio::test]
+    async fn multi_prompt_text_batch_tokens_are_not_injected_as_token_data() {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../../lib/llm/tests/data/sample-models/TinyLlama_v1.1"
+            ),
+            None,
+        )
+        .expect("load fixture model card");
+        let preprocessor =
+            OpenAIPreprocessor::new(mdc).expect("build preprocessor from fixture card");
+
+        let prompt1 = "The capital of France is";
+        let prompt2 = "The capital of Japan is";
+        let batch_request: NvCreateCompletionRequest = serde_json::from_str(
+            &serde_json::json!({"model": "default", "prompt": [prompt1, prompt2]}).to_string(),
+        )
+        .unwrap();
+
+        // Mirrors `Router::tokenize_completion`: route on prompt 1's tokens.
+        let routing_text = completion_prompt_routing_text(&batch_request.inner.prompt);
+        assert_eq!(routing_text, prompt1);
+        let routing_request: NvCreateCompletionRequest = serde_json::from_str(
+            &serde_json::json!({"model": "default", "prompt": routing_text}).to_string(),
+        )
+        .unwrap();
+        let (routed_tokens, _) = preprocessor
+            .gather_tokens(&routing_request, None, None)
+            .await
+            .expect("gather_tokens on the routing prompt");
+
+        // The multi-entry batch is not safe to inject.
+        assert!(!completion_text_tokens_safe_to_inject(
+            &batch_request.inner.prompt
+        ));
+        let token_ids: Option<Vec<u32>> =
+            completion_text_tokens_safe_to_inject(&batch_request.inner.prompt)
+                .then_some(routed_tokens.clone());
+        assert_eq!(
+            token_ids, None,
+            "token_data must be omitted for a multi-prompt text batch, not prompt 1's tokens"
+        );
+
+        // Prove why: prompt 2 tokenizes to something different from what was
+        // routed on, so injecting `routed_tokens` for the whole batch would
+        // have run prompt 2 on prompt 1's tokens.
+        let prompt2_request: NvCreateCompletionRequest = serde_json::from_str(
+            &serde_json::json!({"model": "default", "prompt": prompt2}).to_string(),
+        )
+        .unwrap();
+        let (prompt2_tokens, _) = preprocessor
+            .gather_tokens(&prompt2_request, None, None)
+            .await
+            .expect("gather_tokens on prompt 2");
+        assert_ne!(
+            routed_tokens, prompt2_tokens,
+            "prompt 2 must tokenize differently from the routed prompt 1 tokens"
+        );
+
+        // A single-entry batch has nothing to split against, so it remains
+        // safe to inject.
+        let single_entry_request: NvCreateCompletionRequest = serde_json::from_str(
+            &serde_json::json!({"model": "default", "prompt": [prompt1]}).to_string(),
+        )
+        .unwrap();
+        assert!(completion_text_tokens_safe_to_inject(
+            &single_entry_request.inner.prompt
+        ));
+    }
+
+    /// Pre-tokenized `/v1/completions` prompts route directly on their token IDs.
     #[test]
     fn completion_token_prompt_uses_token_ids_directly() {
         let single: NvCreateCompletionRequest =
@@ -1645,6 +1879,123 @@ mod tests {
         assert_eq!(ids.len(), 2);
     }
 
+    /// A minimal pod exposing an `http`-named port, for
+    /// [`WorkerEndpointIndex`] tests that don't need failover's
+    /// multi-container shape.
+    fn simple_pod(name: &str, ip: &str) -> Pod {
+        use k8s_openapi::api::core::v1::{Container, ContainerPort, PodSpec, PodStatus};
+        use kube::api::ObjectMeta;
+
+        Pod {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                ..Default::default()
+            },
+            spec: Some(PodSpec {
+                containers: vec![Container {
+                    name: "main".to_string(),
+                    ports: Some(vec![ContainerPort {
+                        name: Some(DYNAMO_CONTAINER_PORT_NAME.to_string()),
+                        container_port: 8000,
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            status: Some(PodStatus {
+                pod_ip: Some(ip.to_string()),
+                ..Default::default()
+            }),
+        }
+    }
+
+    /// Upserting a pod maps every id `pod_worker_ids` reports for it to its
+    /// resolved endpoint.
+    #[test]
+    fn worker_index_upsert_maps_pod_and_container_ids_to_the_pod_endpoint() {
+        let mut index = WorkerEndpointIndex::default();
+        let pod = failover_pod(&[("engine-0", true), ("engine-1", false)], true);
+        index.upsert(&pod);
+
+        assert_eq!(
+            index.endpoints.get(&hash_pod_name("worker-0")),
+            Some(&"10.0.0.1:8000".to_string())
+        );
+        assert_eq!(
+            index
+                .endpoints
+                .get(&hash_container_name("worker-0", "engine-0")),
+            Some(&"10.0.0.1:8000".to_string())
+        );
+        assert!(
+            !index
+                .endpoints
+                .contains_key(&hash_container_name("worker-0", "engine-1")),
+            "the not-ready standby engine must not be indexed"
+        );
+    }
+
+    /// Re-upserting a pod whose ready containers changed must drop ids no
+    /// longer live — a stale index entry would resolve a worker_id to an
+    /// endpoint for a container that stopped being ready.
+    #[test]
+    fn worker_index_upsert_retracts_ids_that_are_no_longer_ready() {
+        let mut index = WorkerEndpointIndex::default();
+        index.upsert(&failover_pod(
+            &[("engine-0", true), ("engine-1", true)],
+            true,
+        ));
+        assert!(
+            index
+                .endpoints
+                .contains_key(&hash_container_name("worker-0", "engine-1"))
+        );
+
+        // engine-1 is demoted between two Apply events for the same pod.
+        index.upsert(&failover_pod(
+            &[("engine-0", true), ("engine-1", false)],
+            true,
+        ));
+        assert!(
+            !index
+                .endpoints
+                .contains_key(&hash_container_name("worker-0", "engine-1")),
+            "demoting engine-1 must retract its stale index entry"
+        );
+        assert!(index.endpoints.contains_key(&hash_pod_name("worker-0")));
+    }
+
+    /// Deleting a pod drops every id it had registered, and only those ids —
+    /// an unrelated pod's entries must survive.
+    #[test]
+    fn worker_index_remove_drops_only_the_deleted_pods_ids() {
+        let mut index = WorkerEndpointIndex::default();
+        index.upsert(&simple_pod("worker-a", "10.0.0.1"));
+        index.upsert(&simple_pod("worker-b", "10.0.0.2"));
+        assert_eq!(index.endpoints.len(), 2);
+
+        index.remove(&simple_pod("worker-a", "10.0.0.1"));
+
+        assert!(!index.endpoints.contains_key(&hash_pod_name("worker-a")));
+        assert_eq!(
+            index.endpoints.get(&hash_pod_name("worker-b")),
+            Some(&"10.0.0.2:8000".to_string())
+        );
+    }
+
+    /// A pod without a resolvable HTTP endpoint contributes no entries,
+    /// matching the pre-index `resolve_worker_endpoint`'s behavior of
+    /// returning `None` for a worker_id whose pod lacks one.
+    #[test]
+    fn worker_index_upsert_skips_pods_without_a_resolvable_endpoint() {
+        let mut index = WorkerEndpointIndex::default();
+        // No sidecar-frontend, so no port is named `http`.
+        index.upsert(&failover_pod(&[("engine-0", true)], false));
+        assert!(index.endpoints.is_empty());
+        assert!(index.by_pod.is_empty());
+    }
+
     /// The pod's HTTP inference endpoint is resolved independently of which
     /// engine container is currently active: it stays pinned to the
     /// sidecar-frontend's `http`-named port, which failover's container
@@ -1667,5 +2018,48 @@ mod tests {
     fn pod_endpoint_address_none_without_an_http_named_port() {
         let pod = failover_pod(&[("engine-0", true), ("engine-1", false)], false);
         assert_eq!(pod_endpoint_address(&pod), None);
+    }
+
+    /// `pod_ip` is a bare (unbracketed) address, so an IPv6 pod's endpoint
+    /// must be formatted via `SocketAddr`, not `format!("{ip}:{port}")` —
+    /// the latter produces an ambiguous, unparseable `fd00::2:8000`.
+    #[test]
+    fn pod_endpoint_address_brackets_ipv6() {
+        let pod = simple_pod("worker-0", "fd00::2");
+        assert_eq!(
+            pod_endpoint_address(&pod),
+            Some("[fd00::2]:8000".to_string())
+        );
+    }
+
+    /// A malformed `pod_ip` must not silently produce a bogus endpoint
+    /// string — it must be rejected up front, same as a missing IP.
+    #[test]
+    fn pod_endpoint_address_none_for_unparseable_ip() {
+        let pod = simple_pod("worker-0", "not-an-ip");
+        assert_eq!(pod_endpoint_address(&pod), None);
+    }
+
+    /// The worker index's subset matcher (`endpoint_in_subset`, shared with
+    /// `epp_router`) must match a bracketed IPv6 endpoint against a bare-IP
+    /// candidate via `IpAddr`, not by splitting on `:` — `[fd00::2]:8000`
+    /// split on `:` never equals the bare candidate `fd00::2`.
+    #[test]
+    fn subset_to_worker_ids_matches_bracketed_ipv6_against_bare_candidate() {
+        let mut index = WorkerEndpointIndex::default();
+        index.upsert(&simple_pod("worker-0", "fd00::2"));
+        let endpoint = index
+            .endpoints
+            .get(&hash_pod_name("worker-0"))
+            .cloned()
+            .expect("worker-0 indexed");
+        assert_eq!(endpoint, "[fd00::2]:8000");
+
+        let candidates: HashSet<&str> = ["fd00::2"].into_iter().collect();
+        let candidate_ips: HashSet<IpAddr> = ["fd00::2".parse().unwrap()].into_iter().collect();
+        assert!(
+            endpoint_in_subset(&endpoint, &candidates, &candidate_ips),
+            "bracketed IPv6 endpoint must match its bare-IP candidate"
+        );
     }
 }

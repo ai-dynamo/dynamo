@@ -908,6 +908,14 @@ jobs:
     # The frontend process hosts the KV router. Validate the experimental
     # --router-prefill-load-model=aic dependency and native prefill predictor in
     # the shipped frontend image on both architectures.
+    #
+    # This job runs as a GitHub Actions job `container:`, which overrides the
+    # image's own ENTRYPOINT (/epp) to keep the container alive and execs each
+    # step via `docker exec` instead — so /epp never actually starts here. The
+    # "Verify /epp shared library links resolve" step below exists specifically
+    # to catch Dockerfile packaging bugs (e.g. a missing runtime .so that /epp
+    # dynamically links against) that would otherwise only surface once /epp
+    # runs for real as the image's entrypoint in a deployed pod.
     strategy:
       fail-fast: false
       matrix:
@@ -919,6 +927,14 @@ jobs:
         HOME: /home/dynamo
         USER: dynamo
     steps:
+      - name: Verify /epp shared library links resolve
+        run: |
+          echo "Linked libraries for /epp:"
+          ldd /epp
+          if ldd /epp | grep -q "not found"; then
+            echo "::error::One or more shared libraries required by /epp are missing from the frontend image (see ldd output above)"
+            exit 1
+          fi
       - name: Validate router-side AIC in the frontend image
         working-directory: /workspace
         run: python tests/frontend/router_aic_image_smoke.py

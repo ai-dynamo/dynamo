@@ -21198,6 +21198,8 @@ spec:
                       - name
                     type: object
                     x-kubernetes-validations:
+                      - message: eppConfig may only be set when type is epp
+                        rule: '!has(self.eppConfig) || (has(self.type) && self.type == ''epp'')'
                       - message: minAvailable must be less than or equal to replicas unless replicas is 0
                         rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                       - message: minAvailable is immutable after creation

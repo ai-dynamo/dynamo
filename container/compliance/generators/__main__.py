@@ -94,9 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help=(
             "Path to a cyclonedx-gomod output (required for go). Repeatable when "
-            "an image combines multiple Go binaries — e.g. frontend pulls in /epp "
-            "from the EPP image and consumes EPP's emitted SBOM alongside any "
-            "Go SBOM produced inside the frontend build itself."
+            "an image combines multiple Go binaries."
         ),
     )
     parser.add_argument(

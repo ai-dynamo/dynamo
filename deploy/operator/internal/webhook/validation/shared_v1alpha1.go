@@ -135,15 +135,36 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdateV1al
 	if v.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
 		newImage, imagePath := runtimeVersionImageAndPathV1Alpha1(newSpec, fldPath)
 		oldImage, _ := runtimeVersionImageAndPathV1Alpha1(oldSpec, fldPath)
+		newHasEPPConfig := newSpec.EPPConfig != nil
+		oldHasEPPConfig := oldSpec.EPPConfig != nil
+		overrideChanged := newSpec.RuntimeVersionOverride != oldSpec.RuntimeVersionOverride
+		tupleChanged := newImage != oldImage || overrideChanged || newHasEPPConfig != oldHasEPPConfig
+
 		if newImage == "" && oldImage != "" {
 			allErrs = append(allErrs, field.Required(imagePath, "is required"))
 		} else if !v.allowMissingRuntimeVersionOverride &&
 			runtimeVersionOverrideRequired(newImage, newSpec.RuntimeVersionOverride) &&
-			(newImage != oldImage || newSpec.RuntimeVersionOverride != oldSpec.RuntimeVersionOverride) {
+			(newImage != oldImage || overrideChanged) {
 			allErrs = append(allErrs, field.Required(
 				fldPath.Child("runtimeVersionOverride"),
 				runtimeVersionOverrideRequiredMessage,
 			))
+		}
+
+		// See the identical comment in validateDynamoComponentDeploymentSharedSpecUpdate
+		// (shared_v1beta1.go): only re-validate the image/eppConfig pairing
+		// when this update actually touches image, runtimeVersionOverride,
+		// or eppConfig presence, and validate the new tuple rather than
+		// diffing against the old one.
+		if newSpec.ComponentType == consts.ComponentTypeEPP && tupleChanged {
+			if err := eppRuntimeCompatibilityError(
+				newImage,
+				newSpec.RuntimeVersionOverride,
+				newHasEPPConfig,
+				fldPath.Child("eppConfig"),
+			); err != nil {
+				allErrs = append(allErrs, err)
+			}
 		}
 	}
 

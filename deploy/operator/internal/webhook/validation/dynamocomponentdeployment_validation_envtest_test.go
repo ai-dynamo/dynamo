@@ -1039,6 +1039,20 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
 		},
+		{
+			// eppConfig is only meaningful for an EPP component; the controller
+			// silently ignores it on any other type, so CEL rejects it at
+			// admission instead of letting it land as dead configuration.
+			name: "v1beta1 rejects eppConfig on a non-epp component",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				}
+			}),
+			wantCELErr: "spec: Invalid value: eppConfig may only be set when type is epp",
+		},
 
 		// Pair shared pod-template validation across both served source versions.
 		{
@@ -1177,6 +1191,176 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.Replicas = &validReplicas
+			}),
+		},
+		{
+			// Unchanged compliant legacy pair: an unrelated field change
+			// (replicas stays 1 here; only exercising the update path) must
+			// not re-trigger the image/eppConfig compatibility check.
+			name: "v1beta1 unchanged legacy image and eppConfig pair remains allowed on update",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				}
+			}),
+		},
+		{
+			// Split update: eppConfig cleared but the image stays at the
+			// legacy 1.4 tag -- the Go EPP binary would start with no
+			// CLI flags/config mount. Must be rejected even though the
+			// image field itself did not change.
+			name: "v1beta1 clearing eppConfig while image stays legacy is rejected on update",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+			}),
+			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
+		},
+		{
+			// Split update: eppConfig added while the image stays at a
+			// native Rust EPP 1.5 tag -- the Rust binary would get handed a
+			// legacy config mount it never reads. Must be rejected even
+			// though the image field itself did not change.
+			name: "v1beta1 adding eppConfig while image stays native Rust is rejected on update",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.eppConfig: Forbidden: must be omitted for native Rust EPP images with runtime version 1.5.0 or later"},
+		},
+		{
+			// Atomic migration: image and eppConfig change together, in the
+			// same update, from a compliant legacy pair to a compliant
+			// native pair. Must be accepted -- only the new tuple matters.
+			name: "v1beta1 atomic migration from legacy image with eppConfig to native image without it is accepted",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+			}),
+		},
+		{
+			// Atomic rollback: the reverse migration, in one update. Must
+			// also be accepted.
+			name: "v1beta1 atomic rollback from native image to legacy image with eppConfig is accepted",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/dynamo-frontend:1.5.0"
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.Replicas = &oneReplica
+				dcd.Spec.RuntimeVersionOverride = ""
+				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				}
+			}),
+		},
+		{
+			// v1alpha1 side of the same split-update rejection.
+			name: "v1alpha1 clearing eppConfig while image stays legacy is rejected on update",
+			oldDeployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeEPP,
+				Replicas:      &oneReplica,
+				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				},
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: "registry.example/epp-image:1.4.0"},
+				},
+			}),
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeEPP,
+				Replicas:      &oneReplica,
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: "registry.example/epp-image:1.4.0"},
+				},
+			}),
+			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
+		},
+		{
+			// v1alpha1 side of the same atomic-migration acceptance.
+			name: "v1alpha1 atomic migration from legacy image with eppConfig to native image without it is accepted",
+			oldDeployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeEPP,
+				Replicas:      &oneReplica,
+				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"},
+					},
+				},
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: "registry.example/epp-image:1.4.0"},
+				},
+			}),
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeEPP,
+				Replicas:      &oneReplica,
+				ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: "registry.example/dynamo-frontend:1.5.0"},
+				},
 			}),
 		},
 		{
