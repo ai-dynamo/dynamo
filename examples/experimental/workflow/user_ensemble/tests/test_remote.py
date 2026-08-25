@@ -27,6 +27,8 @@ from dynamo.experimental.workflow import (  # noqa: E402
 )
 from examples.experimental.workflow.user_ensemble.remote import (  # noqa: E402
     classifier_worker as classifier_worker_module,
+)
+from examples.experimental.workflow.user_ensemble.remote import (  # noqa: E402
     orchestrator_worker as orchestrator_worker_module,
 )
 from examples.experimental.workflow.user_ensemble.remote.bindings import (  # noqa: E402
@@ -48,6 +50,9 @@ pytestmark = [
 class _FakeTensorCarrier:
     def __init__(self) -> None:
         self.close_calls = 0
+
+    def can_export(self, value: Any) -> bool:
+        return False
 
     async def export_tensor(self, tensor: Any, transfer_id: str) -> Any:
         raise NotImplementedError
@@ -151,6 +156,3 @@ async def test_classifier_worker_serves_workflow_protocol_and_closes_carrier():
     assert runtime.endpoint_ids == [CLASSIFIER_ENDPOINT]
     assert runtime.created_endpoint.handler is not None
     assert carrier.close_calls == 1
-
-    def can_export(self, value: Any) -> bool:
-        return False
