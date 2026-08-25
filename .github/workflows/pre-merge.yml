@@ -418,6 +418,15 @@ jobs:
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}
       run: cargo test --locked --features aic-forward-pass -- --nocapture
+    - name: Run NVTX feature tests
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      # The nvtx feature is off in every other job here, so without this step the
+      # annotated code paths — the FFI declarations, the guard, the macro arms —
+      # are never compiled by CI. Scoped to dynamo-runtime rather than the
+      # workspace: a bare --features nvtx at the root also selects kvbm-engine's
+      # nvtx feature, whose markers have no runtime switch.
+      run: "cargo test --locked -p dynamo-runtime --features nvtx --lib nvtx::"
     - name: Compile feature-gated benchmark entrypoints
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}

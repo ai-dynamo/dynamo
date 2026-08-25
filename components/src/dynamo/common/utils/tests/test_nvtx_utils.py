@@ -127,53 +127,49 @@ class TestDisabled:
         monkeypatch.setenv("DYN_NVTX", "0")
         return load_module()
 
-    def test_start_and_end_range_are_noops(self, disabled):
-        rng = disabled.start_range("my:range", color="blue")
-        assert rng is None
-        assert disabled.end_range(rng) is None
-        # The handle is ignored entirely, so an arbitrary one is also accepted.
-        assert disabled.end_range(object()) is None
+    def test_every_entry_point_is_a_transparent_noop(self, disabled):
+        """Off must mean pass-through, not "wrapped in something cheap".
 
-    def test_annotate_as_decorator_returns_function_unchanged(self, disabled):
-        def target(a, b):
+        Asserted as identity (`is target`) rather than behaviour: a wrapper that
+        merely forwards would still pass a call-through check while costing a
+        frame per call on paths that run per token.
+        """
+
+        def sync_target(a, b):
             return a + b
 
-        decorated = disabled.annotate("my:func", color="green")(target)
+        assert disabled.start_range("my:range", color="blue") is None
+        # The handle is ignored entirely, so an arbitrary one is also accepted.
+        assert disabled.end_range(None) is None
+        assert disabled.end_range(object()) is None
 
-        assert decorated is target
-        assert decorated(1, 2) == 3
+        assert disabled.annotate("my:func", color="green")(sync_target) is sync_target
+        # Defaults exist on the no-op path; call sites elsewhere rely on them.
+        assert disabled.annotate()(len) is len
+        assert (
+            disabled.range_decorator("my:sync", color="green")(sync_target)
+            is sync_target
+        )
 
-    def test_annotate_as_context_manager(self, disabled):
         with disabled.annotate("my:block", color="cyan") as ctx:
-            value = 42
+            pass
         assert ctx is not None
-        assert value == 42
 
     def test_annotate_context_manager_does_not_swallow_exceptions(self, disabled):
         with pytest.raises(ValueError, match="boom"):
             with disabled.annotate("my:block"):
                 raise ValueError("boom")
 
-    def test_annotate_accepts_no_arguments(self, disabled):
-        # Defaults exist on the no-op path; call sites elsewhere rely on them.
-        assert disabled.annotate()(len) is len
-
-    def test_range_decorator_returns_sync_function_unchanged(self, disabled):
-        def target(x):
-            return x * 2
-
-        decorated = disabled.range_decorator("my:sync", color="green")(target)
-
-        assert decorated is target
-        assert decorated(3) == 6
-
     def test_range_decorator_returns_async_gen_unchanged(self, disabled):
+        """Kept separate from the sync surface: the async-generator branch is a
+        distinct code path in `range_decorator`, and it is the one that has to
+        keep yielding correctly rather than merely be returned unchanged."""
+
         async def target():
             yield 1
             yield 2
 
         decorated = disabled.range_decorator("my:async_gen")(target)
-
         assert decorated is target
 
         async def collect():
@@ -337,38 +333,33 @@ def enabled(monkeypatch, load_module, stub_nvtx):
 
 
 class TestEnabledWithPackage:
-    def test_enabled_flag_and_domain(self, enabled):
+    def test_ranges_go_to_the_dynamo_domain_with_cached_attributes(self, enabled):
+        """The three properties the enabled path has to get right: markers land in
+        the `dynamo` domain, one EventAttributes object is built per
+        (message, color) and reused, and a handle round-trips to `end_range`."""
         module, domain = enabled
         assert module.ENABLED is True
         assert domain.name == "dynamo"
-
-    def test_start_range_uses_cached_event_attributes(self, enabled):
-        module, domain = enabled
 
         first = module.start_range("my:range", color="blue")
         second = module.start_range("my:range", color="blue")
         module.start_range("my:range", color="red")
         module.start_range("other:range", color="blue")
+        # Color is optional; the default must not create a second attributes entry
+        # for an already-seen (message, white) pair.
+        module.start_range("plain:range")
 
         assert first != second
-        # One EventAttributes object per (message, color), reused thereafter.
         assert domain.created_attributes == [
             ("my:range", "blue"),
             ("my:range", "red"),
             ("other:range", "blue"),
+            ("plain:range", "white"),
         ]
-        assert len(domain.started) == 4
+        assert len(domain.started) == 5
 
-    def test_start_range_defaults_to_white(self, enabled):
-        module, domain = enabled
-        module.start_range("my:range")
-        assert domain.created_attributes == [("my:range", "white")]
-
-    def test_end_range_forwards_the_handle(self, enabled):
-        module, domain = enabled
-        rng = module.start_range("my:range")
-        module.end_range(rng)
-        assert domain.ended == [rng]
+        module.end_range(first)
+        assert domain.ended == [first]
 
     def test_annotate_is_bound_to_the_dynamo_domain(self, enabled):
         module, _domain = enabled
