@@ -84,9 +84,14 @@ def test_restart_with_different_flags(dynamo):
     """Configuration testing, made portable.
 
     Today this class of test restarts a process inside the Dynamo container
-    with different flags. Here the test names the flags and the deployment
-    decides how to apply them -- a container recreate under Docker; a DGD patch
-    once a Kubernetes lifecycle provider exists.
+    with different flags. Here the test names *which component* to restart and
+    the flags to give it; the deployment decides how -- a container recreate
+    under Docker, a DGD patch once a Kubernetes provider exists.
+
+    Both processes share one container in this topology, so recreating it
+    bounces the frontend too; a container-per-component provider would not.
+    The flags are routed to the named component either way, which is what the
+    last two assertions check.
 
     The flags are asserted to have taken effect two independent ways: a value
     the frontend reports (``context_window``) and a capability derived from the
@@ -97,7 +102,7 @@ def test_restart_with_different_flags(dynamo):
     Note this mutates session state: the deployment keeps the new flags for any
     test that runs after it.
     """
-    deployment = dynamo.require_deployment()
+    dynamo.require_deployment()
 
     before = dynamo.frontend.model_info().get("context_window")
     assert before != NARROWED_CONTEXT, (
@@ -106,8 +111,16 @@ def test_restart_with_different_flags(dynamo):
     )
     assert dynamo.check(Capability.REASONING_PARSER).verdict is Verdict.UNSATISFIED
 
-    deployment.restart(max_model_len=NARROWED_CONTEXT, dyn_reasoning_parser="qwen3")
+    # Named component, worker-specific flags. --max-model-len and
+    # --dyn-reasoning-parser configure the inference backend, not the frontend,
+    # and the harness routes them to the worker's argument list alone.
+    dynamo.worker.restart(max_model_len=NARROWED_CONTEXT, dyn_reasoning_parser="qwen3")
     dynamo.wait_until_serving(timeout=900)
+
+    assert "--max-model-len" in dynamo.worker.launch_args()
+    assert (
+        "--max-model-len" not in dynamo.frontend.launch_args()
+    ), "worker flags leaked into the frontend's launch arguments"
 
     after = dynamo.frontend.model_info().get("context_window")
     assert (

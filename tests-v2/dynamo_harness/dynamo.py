@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from .capabilities import Capability, Report, Verdict, all_unknown
-from .components import Frontend
+from .components import Frontend, Worker
 from .deployment import Attached, Deployment, NotControllable
 from .transport import Http
 
@@ -26,6 +26,7 @@ from .transport import Http
 @dataclass
 class Dynamo:
     frontend: Optional[Frontend] = None
+    worker: Optional[Worker] = None
     deployment: Optional[Deployment] = None
     headers: Dict[str, str] = field(default_factory=dict)
 
@@ -36,7 +37,8 @@ class Dynamo:
     ) -> "Dynamo":
         """Point at a Dynamo somebody else deployed. No lifecycle control."""
         http = Http(base_url, **http_kw)
-        return cls(frontend=Frontend(http, model=model), deployment=None)
+        # Attached: no deployment handle, so components cannot be controlled.
+        return cls(frontend=Frontend(http, model=model), worker=None, deployment=None)
 
     @classmethod
     def deploy(
@@ -46,7 +48,13 @@ class Dynamo:
         base_url = deployment.start()
         http = Http(base_url, **http_kw)
         resolved = model or getattr(deployment, "model", None)
-        return cls(frontend=Frontend(http, model=resolved), deployment=deployment)
+        return cls(
+            frontend=Frontend(http, deployment=deployment, model=resolved),
+            worker=Worker(
+                http, deployment=deployment, backend=getattr(deployment, "backend", "")
+            ),
+            deployment=deployment,
+        )
 
     # -- convenience -------------------------------------------------------
     @property

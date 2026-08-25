@@ -54,6 +54,12 @@ class Deployment:
     def logs(self, tail: int = 200) -> str:
         raise NotControllable("no deployment handle; logs are unavailable")
 
+    def restart_component(self, role: str, **flags: str) -> str:
+        raise NotControllable(
+            f"cannot restart {role}: this Dynamo was attached, not deployed by "
+            "the test; construct Dynamo.deploy(...) to control lifecycle"
+        )
+
     def capabilities(self) -> Dict[Capability, Report]:  # pragma: no cover
         raise NotImplementedError
 
@@ -90,6 +96,7 @@ class Docker(Deployment):
     hf_cache: Optional[str] = None
     env: Dict[str, str] = field(default_factory=dict)
     worker_args: List[str] = field(default_factory=list)
+    frontend_args: List[str] = field(default_factory=list)
     _started: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
@@ -114,12 +121,17 @@ class Docker(Deployment):
             "file",
             *self.worker_args,
         ]
-        return (
-            "set -e\n"
-            "python3 -m dynamo.frontend --http-port 8000 "
-            "--discovery-backend file &\n"
-            f"exec {shlex.join(worker)}\n"
-        )
+        frontend = [
+            "python3",
+            "-m",
+            "dynamo.frontend",
+            "--http-port",
+            "8000",
+            "--discovery-backend",
+            "file",
+            *self.frontend_args,
+        ]
+        return f"set -e\n{shlex.join(frontend)} &\nexec {shlex.join(worker)}\n"
 
     def capabilities(self) -> Dict[Capability, Report]:
         """Derived from the flags this deployment was launched with."""
@@ -185,15 +197,27 @@ class Docker(Deployment):
         if self._started:
             self._docker("kill", self.name, check=False)
 
-    def restart(self, **flags: str) -> str:
-        """Recreate the container with different flags.
+    def args_for(self, role: str) -> List[str]:
+        try:
+            return {"frontend": self.frontend_args, "worker": self.worker_args}[role]
+        except KeyError:
+            raise ValueError(
+                f"unknown component role {role!r}; known: frontend, worker"
+            ) from None
 
-        The portable form of what config/topology tests do today by restarting
-        processes inside a container.
+    def restart_component(self, role: str, **flags: str) -> str:
+        """Bring one component back with additional flags.
+
+        Both processes share a container in this topology, so recreating it
+        bounces the other component too. That is a property of the deployment
+        shape, not of the request: a container-per-component or Kubernetes
+        provider would restart only the named one. The flags, however, are
+        always routed to the named component alone.
         """
-        self.stop()
+        target = self.args_for(role)
         for key, value in flags.items():
-            self.worker_args += [f"--{key.replace('_', '-')}", str(value)]
+            target += [f"--{key.replace('_', '-')}", str(value)]
+        self.stop()
         time.sleep(1)
         return self.start()
 

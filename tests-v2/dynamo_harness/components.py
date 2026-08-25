@@ -44,11 +44,49 @@ class StreamResult:
 
 
 @dataclass
-class Frontend:
-    """The OpenAI-compatible HTTP surface."""
+class Component:
+    """Base: a component's wire interface plus its own lifecycle.
+
+    Lifecycle is per component by design -- ``dynamo.worker.restart(...)`` and
+    ``dynamo.frontend.restart(...)`` are different operations with different
+    flags, even where one deployment shape happens to implement both by
+    recreating the same container. The deployment decides *how*; the component
+    decides *which*.
+    """
 
     http: Http
+    deployment: Optional[Any] = None
+    role: str = ""
+
+    def _controllable(self) -> Any:
+        if self.deployment is None:
+            raise RuntimeError(
+                f"cannot control {self.role or 'component'}: no deployment "
+                "handle (this Dynamo was attached, not deployed)"
+            )
+        return self.deployment
+
+    def restart(self, **flags: Any) -> None:
+        """Bring this component back, optionally with additional flags."""
+        self._controllable().restart_component(self.role, **flags)
+
+    def stop(self) -> None:
+        self._controllable().stop()
+
+    def kill(self) -> None:
+        self._controllable().kill()
+
+    def launch_args(self) -> List[str]:
+        """The flags this component was launched with."""
+        return list(self._controllable().args_for(self.role))
+
+
+@dataclass
+class Frontend(Component):
+    """The OpenAI-compatible HTTP surface."""
+
     model: Optional[str] = None
+    role: str = "frontend"
 
     # -- readiness ---------------------------------------------------------
     def wait_until_serving(self, timeout: float = 900.0, interval: float = 5.0) -> str:
@@ -234,3 +272,16 @@ class Frontend:
                 "no model resolved; call wait_until_serving() or pass model=..."
             )
         return self.model
+
+
+@dataclass
+class Worker(Component):
+    """The inference backend (vLLM / SGLang / TensorRT-LLM).
+
+    It has no HTTP surface of its own in this topology -- it is reached through
+    the frontend, and observed through the frontend's responses. What it does
+    own is its launch configuration, which is what configuration tests change.
+    """
+
+    role: str = "worker"
+    backend: str = ""

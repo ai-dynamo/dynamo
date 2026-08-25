@@ -4,7 +4,7 @@
 """Minimal component-oriented test harness (DEP 0017 skeleton)."""
 
 from .capabilities import Capability, Report, Verdict
-from .components import Frontend, StreamResult
+from .components import Component, Frontend, StreamResult, Worker
 from .deployment import (
     BACKENDS,
     DEFAULT_IMAGE,
@@ -27,7 +27,9 @@ __all__ = [
     "Deployment",
     "Docker",
     "Dynamo",
+    "Component",
     "Frontend",
+    "Worker",
     "Http",
     "HttpError",
     "NotControllable",
