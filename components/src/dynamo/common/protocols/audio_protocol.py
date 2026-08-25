@@ -17,6 +17,17 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
+class AudioNvExt(BaseModel):
+    """NVIDIA extensions for audio generation requests."""
+
+    frontend_accepts_audio_chunks: Optional[bool] = None
+    """Internal compatibility signal for frontends that accept audio chunks.
+
+    Workers must aggregate when this is absent or false. Remove after v1.4
+    leaves the N-2 compatibility window in v1.7.
+    """
+
+
 class NvCreateAudioSpeechRequest(BaseModel):
     """Request for audio speech generation (/v1/audio/speech endpoint).
 
@@ -69,6 +80,9 @@ class NvCreateAudioSpeechRequest(BaseModel):
     """Classifier-free guidance strength (Audex). 1.0 disables guidance; 1.5 is
     the recommended TTS quality setting, and 3.0 the official TTA setting
     (applied by default for text-to-audio)."""
+
+    nvext: Optional[AudioNvExt] = None
+    """NVIDIA extensions."""
 
 
 class AudioData(BaseModel):

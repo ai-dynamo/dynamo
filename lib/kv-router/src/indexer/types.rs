@@ -603,6 +603,7 @@ pub enum WorkerTask {
         event: RouterEvent,
         resp: oneshot::Sender<bool>,
     },
+    ApproximateLru(super::ApproximateLruTask),
     #[cfg(feature = "bench")]
     InstallObservation {
         writer: EventCompletionWriter,

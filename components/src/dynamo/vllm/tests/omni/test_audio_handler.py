@@ -9,7 +9,10 @@ from unittest.mock import MagicMock
 import pytest
 
 try:
-    from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
+    from dynamo.common.protocols.audio_protocol import (
+        AudioNvExt,
+        NvCreateAudioSpeechRequest,
+    )
     from dynamo.common.utils.output_modalities import RequestType
     from dynamo.vllm.omni import audio_handler as audio_handler_module
     from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
@@ -35,6 +38,7 @@ requires_audex = pytest.mark.skipif(
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.multimodal,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -251,11 +255,27 @@ class TestEngineInputsFromAudio:
         stage.model_stage = "diffusion"
         handler.engine_client.stage_list = [stage]
 
-        req = NvCreateAudioSpeechRequest(input="Hello world")
+        req = NvCreateAudioSpeechRequest(
+            input="Hello world",
+            nvext=AudioNvExt(frontend_accepts_audio_chunks=True),
+        )
         inputs = await handler.build_engine_inputs(req)
         assert inputs.request_type == RequestType.AUDIO_GENERATION
         assert inputs.prompt["prompt"] == "Hello world"
         assert inputs.sampling_params_list is None
+        assert inputs.stream_audio is True
+
+    @pytest.mark.asyncio
+    async def test_legacy_frontend_gets_complete_response(self):
+        """Workers aggregate audio unless the frontend advertises that it accepts chunks."""
+        handler = _make_audio_handler()
+        handler.engine_client.stage_list = None
+
+        inputs = await handler.build_engine_inputs(
+            NvCreateAudioSpeechRequest(input="hello")
+        )
+
+        assert inputs.stream_audio is False
 
     @pytest.mark.asyncio
     async def test_empty_input_rejected(self):
@@ -269,9 +289,36 @@ class TestEngineInputsFromAudio:
         """Speed from request is stored in EngineInputs."""
         handler = _make_audio_handler()
         handler.engine_client.stage_list = None  # non-TTS path
-        req = NvCreateAudioSpeechRequest(input="hello", speed=2.0)
+        req = NvCreateAudioSpeechRequest(
+            input="hello",
+            speed=2.0,
+            nvext=AudioNvExt(frontend_accepts_audio_chunks=True),
+        )
         inputs = await handler.build_engine_inputs(req)
         assert inputs.speed == 2.0
+        assert inputs.stream_audio is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "request_args",
+        [
+            {"response_format": "mp3"},
+            {"response_format": "pcm", "data_source": "url"},
+        ],
+    )
+    async def test_non_streaming_eligibility(self, request_args):
+        handler = _make_audio_handler()
+        handler.engine_client.stage_list = None
+
+        inputs = await handler.build_engine_inputs(
+            NvCreateAudioSpeechRequest(
+                input="hello",
+                nvext=AudioNvExt(frontend_accepts_audio_chunks=True),
+                **request_args,
+            )
+        )
+
+        assert inputs.stream_audio is False
 
 
 def _make_audex_handler(*stages, **config_overrides):
@@ -529,3 +576,15 @@ class TestAudexValidation:
         req = NvCreateAudioSpeechRequest(input="   ")
         with pytest.raises(ValueError, match="empty"):
             await handler.build_engine_inputs(req, request_id="r1")
+
+    @requires_audex
+    @pytest.mark.asyncio
+    async def test_audex_never_streams_chunks(self):
+        """Cumulative snapshots must be aggregated, never streamed per payload."""
+        handler = _make_audex_handler("audex_thinker", "audex_code2wav")
+        req = NvCreateAudioSpeechRequest(
+            input="hello",
+            nvext=AudioNvExt(frontend_accepts_audio_chunks=True),
+        )
+        inputs = await handler.build_engine_inputs(req, request_id="r1")
+        assert inputs.stream_audio is False

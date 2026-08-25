@@ -47,12 +47,17 @@ from dynamo.llm.exceptions import EngineShutdown
 from dynamo.vllm.handlers import get_lora_manager
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
-from dynamo.vllm.omni.output_formatter import OutputFormatter
+from dynamo.vllm.omni.output_formatter import (
+    AudioAggregateState,
+    AudioStreamState,
+    OutputFormatter,
+)
 from dynamo.vllm.omni.utils import (
     build_image_generation_prompt,
     image_generation_negative_prompt_from_request,
     image_generation_sampling_overrides,
     image_generation_size_from_request,
+    streaming_sampling_params,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,6 +89,7 @@ class EngineInputs:
     response_format: str | None = None
     output_format: str | None = None
     lora_request: LoRARequest | None = None
+    stream_audio: bool = False
 
 
 class OmniHandler(BaseOmniHandler):
@@ -351,6 +357,10 @@ class OmniHandler(BaseOmniHandler):
             "prompt": inputs.prompt,
             "request_id": request_id,
         }
+        if inputs.request_type == RequestType.AUDIO_GENERATION:
+            inputs.sampling_params_list = streaming_sampling_params(
+                self.engine_client, inputs.sampling_params_list
+            )
         if inputs.sampling_params_list is not None:
             generate_kwargs["sampling_params_list"] = inputs.sampling_params_list
             # Note: For diffusion paths, lora_request is embedded in sampling_params_list
@@ -361,6 +371,13 @@ class OmniHandler(BaseOmniHandler):
             generate_kwargs["lora_request"] = inputs.lora_request
 
         previous_text = ""
+        audio_stream_state = AudioStreamState() if inputs.stream_audio else None
+        audio_aggregate_state = (
+            AudioAggregateState(cumulative=self.audio.emits_cumulative_waveforms())
+            if inputs.request_type == RequestType.AUDIO_GENERATION
+            and not inputs.stream_audio
+            else None
+        )
 
         def update_previous_text(stage_output: Any, current: str) -> str:
             if getattr(stage_output, "final_output_type", None) == "text" and getattr(
@@ -394,55 +411,29 @@ class OmniHandler(BaseOmniHandler):
                     # LLM path: set top-level lora_request for text generation
                     per_request_kwargs["lora_request"] = admitted_lora_request
 
-            format_ctx = dict(
-                request_type=inputs.request_type,
-                fps=inputs.fps,
-                response_format=inputs.response_format,
-                output_format=inputs.output_format,
-                speed=inputs.speed,
-            )
-
-            # Scoped to the pipelines whose decoder re-emits the full waveform
-            # each yield; every other audio model keeps its per-payload path.
-            # Aggregated deployments only: the disaggregated stage router reads
-            # one final-stage payload per request (see stage_router
-            # ._format_output), so there is no snapshot stream to buffer.
-            # Gated on the request type as well as the stage set: only an audio
-            # request may answer with an NvAudioSpeechResponse, so the same
-            # engine serving a chat request keeps the per-payload path.
-            buffer_audio = (
-                inputs.request_type == RequestType.AUDIO_GENERATION
-                and self.audio.emits_cumulative_waveforms()
-            )
-
             async for stage_output in self.engine_client.generate(**per_request_kwargs):
-                # Chunk-streaming decoders emit the waveform repeatedly as the
-                # codec decodes, each payload a cumulative snapshot and some of
-                # them empty. Encode once at the end from the complete snapshot,
-                # or the response can carry a partial or silent waveform.
-                if buffer_audio and self.output_formatter.is_audio_output(stage_output):
-                    self.output_formatter.audio.observe_chunk(stage_output, request_id)
-                    continue
-
                 chunk = await self.output_formatter.format(
                     stage_output,
                     request_id,
+                    request_type=inputs.request_type,
+                    fps=inputs.fps,
+                    response_format=inputs.response_format,
+                    output_format=inputs.output_format,
                     previous_text=previous_text,
-                    **format_ctx,
+                    speed=inputs.speed,
+                    audio_stream_state=audio_stream_state,
+                    audio_aggregate_state=audio_aggregate_state,
                 )
                 previous_text = update_previous_text(stage_output, previous_text)
                 yield {"stage_output": stage_output, "formatted_chunk": chunk}
 
-            if buffer_audio:
-                # Always emit, even when no audio payload arrived or none was
-                # usable: format_audio reports a zero-length waveform as a
-                # failure, which is more useful to the client than the empty
-                # stream a buffered request would otherwise end on.
-                audio_np, sample_rate = self.output_formatter.audio.take_pending(
-                    request_id
-                )
-                chunk = await self.output_formatter.audio.format_audio(
-                    audio_np, sample_rate, request_id, **format_ctx
+            if audio_aggregate_state is not None:
+                chunk = await self.output_formatter.finish_audio(
+                    request_id,
+                    audio_aggregate_state,
+                    response_format=inputs.response_format,
+                    output_format=inputs.output_format,
+                    speed=inputs.speed,
                 )
                 yield {"stage_output": None, "formatted_chunk": chunk}
 
@@ -462,10 +453,6 @@ class OmniHandler(BaseOmniHandler):
             except Exception as e:
                 logger.error(f"Error during generation for request {request_id}: {e}")
                 yield self._error_chunk(request_id, str(e), inputs.request_type)
-            finally:
-                # Abort/error/client-disconnect: drop any half-filled audio buffer
-                # so it cannot outlive the request. No-op once take_pending() ran.
-                self.output_formatter.audio.discard_pending(request_id)
 
     async def _generate_with_lora_admission_lock(
         self,
