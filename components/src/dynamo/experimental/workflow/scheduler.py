@@ -14,7 +14,7 @@ from typing import Any, cast
 from dynamo.experimental.workflow.dispatcher import StageDispatcher
 from dynamo.experimental.workflow.ir import StageIR, WorkflowIR
 from dynamo.experimental.workflow.perf import WORKFLOW_PERF_TRACE
-from dynamo.experimental.workflow.runtime import StageContext, WorkflowAttempt
+from dynamo.experimental.workflow.runtime import StageContext
 from dynamo.experimental.workflow.types import ValueRef
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,10 @@ class GraphScheduler:
         self._dispatcher = dispatcher
 
     async def run(
-        self, inputs: Mapping[str, Any], attempt: WorkflowAttempt
+        self,
+        inputs: Mapping[str, Any],
+        attempt_id: str,
+        request_context: Any = None,
     ) -> dict[str, Any]:
         tasks: dict[str, asyncio.Task[dict[str, Any]]] = {}
 
@@ -46,22 +49,18 @@ class GraphScheduler:
             dependencies_ready_ns = time.perf_counter_ns()
             result = await self._dispatcher.call(
                 stage.id,
-                stage.contract,
                 stage_inputs,
                 StageContext(
                     workflow_name=self._workflow.name,
                     stage_id=stage.id,
-                    attempt_id=attempt.attempt_id,
-                    invocation_id=f"{attempt.attempt_id}:{stage.id}",
-                    deadline=attempt.deadline,
-                    _cancelled=attempt.cancelled,
-                    request_context=attempt.request_context,
+                    attempt_id=attempt_id,
                 ),
+                request_context=request_context,
             )
             WORKFLOW_PERF_TRACE.emit(
                 logger,
                 "workflow.stage",
-                attempt.attempt_id,
+                attempt_id,
                 dependency_wait_ms=(dependencies_ready_ns - started_ns) / 1_000_000,
                 elapsed_ms=(time.perf_counter_ns() - started_ns) / 1_000_000,
                 stage=stage.id,
@@ -94,7 +93,6 @@ class GraphScheduler:
             )
             return dict(zip(self._workflow.outputs, output_values))
         except BaseException:
-            attempt.cancelled.set()
             for task in tasks.values():
                 if not task.done():
                     task.cancel()

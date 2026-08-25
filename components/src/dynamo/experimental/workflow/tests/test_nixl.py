@@ -441,7 +441,17 @@ class _RemoteTensorInvoker:
         self.role = role
         self.calls: list[tuple[dict, dict]] = []
 
-    async def run(self, stage_id, contract, inputs, context, output_transfers):
+    async def run(
+        self,
+        stage_id,
+        contract,
+        inputs,
+        context,
+        output_transfers,
+        *,
+        request_context=None,
+    ):
+        del request_context
         self.calls.append((dict(inputs), dict(output_transfers)))
         assert stage_id == self.role
         if self.role == "encoder":

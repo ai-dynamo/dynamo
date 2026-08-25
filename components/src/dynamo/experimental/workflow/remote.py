@@ -13,7 +13,10 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, AsyncIterator, Mapping, Optional, Protocol
 
-from dynamo.experimental.workflow.nixl import NixlTensorFanout, tensor_transfer_ref_from_dict
+from dynamo.experimental.workflow.nixl import (
+    NixlTensorFanout,
+    tensor_transfer_ref_from_dict,
+)
 from dynamo.experimental.workflow.perf import WORKFLOW_PERF_TRACE
 from dynamo.experimental.workflow.plan import NIXL_CARRIER
 from dynamo.experimental.workflow.runtime import (
@@ -23,7 +26,11 @@ from dynamo.experimental.workflow.runtime import (
     TensorCarrier,
     WorkflowExecutionError,
 )
-from dynamo.experimental.workflow.types import StageContract, WorkflowValidationError, validate_name
+from dynamo.experimental.workflow.types import (
+    StageContract,
+    WorkflowValidationError,
+    validate_name,
+)
 
 STAGE_REQUEST_SCHEMA = "dynamo.experimental.workflow.carrier_request"
 STAGE_RESPONSE_SCHEMA = "dynamo.experimental.workflow.carrier_response"
@@ -229,9 +236,10 @@ class RemoteStageClient:
         inputs: Mapping[str, Any],
         context: StageContext,
         output_transfers: Mapping[str, tuple[str, ...]],
+        *,
+        request_context: Any = None,
     ) -> Mapping[str, Any]:
         started_ns = time.perf_counter_ns()
-        context.raise_if_cancelled()
         stage_label = f"remote stage {stage_id!r} with contract {contract.id!r}"
         wire_inputs: dict[str, Any] = {}
         input_carriers: dict[str, str] = {}
@@ -248,13 +256,13 @@ class RemoteStageClient:
         )
 
         transport_context = None
-        if context.request_context is not None:
-            detach = getattr(context.request_context, "detached", None)
+        if request_context is not None:
+            detach = getattr(request_context, "detached", None)
             if not callable(detach):
                 raise WorkflowExecutionError(
                     "request context cannot create a detached child context"
                 )
-            transport_context = detach(context.invocation_id)
+            transport_context = detach(f"{context.attempt_id}:{context.stage_id}")
 
         try:
             stream = await self._client.round_robin(
@@ -358,15 +366,10 @@ class RemoteStageServer:
                 candidate = get_request_id()
                 if isinstance(candidate, str) and candidate:
                     request_id = candidate
-        cancelled = asyncio.Event()
         stage_context = StageContext(
             workflow_name=None,
             stage_id=self._stage_id,
             attempt_id=request_id,
-            invocation_id=request_id,
-            deadline=None,
-            _cancelled=cancelled,
-            request_context=context,
         )
 
         async def invoke() -> tuple[dict[str, Any], dict[str, str]]:
@@ -472,7 +475,6 @@ class RemoteStageServer:
                 else:
                     raise asyncio.CancelledError()
         except BaseException:
-            cancelled.set()
             if not invocation.done():
                 invocation.cancel()
             await asyncio.gather(invocation, return_exceptions=True)
@@ -486,7 +488,6 @@ class RemoteStageServer:
             bool(getattr(context, "is_stopped", lambda: False)())
             or bool(getattr(context, "is_killed", lambda: False)())
         ):
-            cancelled.set()
             raise asyncio.CancelledError()
         yield StageResponseEnvelope(
             outputs=wire_outputs,

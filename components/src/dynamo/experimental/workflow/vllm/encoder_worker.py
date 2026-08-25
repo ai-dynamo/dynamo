@@ -10,14 +10,14 @@ import asyncio
 from typing import Any
 
 from dynamo.common.constants import EmbeddingTransferMode
+from dynamo.experimental.workflow import NixlTensorCarrier, RemoteStageServer
+from dynamo.experimental.workflow.vllm.embedding_transfer import NixlWriteTensorCarrier
+from dynamo.experimental.workflow.vllm.stages import EncoderStage
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.multimodal_utils.custom_encoder import (
     resolve_vision_encoder_backend_class,
 )
-from dynamo.experimental.workflow.vllm.embedding_transfer import NixlWriteTensorCarrier
-from dynamo.experimental.workflow.vllm.stages import EncoderStage
-from dynamo.experimental.workflow import NixlTensorCarrier, RemoteStageServer
 
 
 @dynamo_worker()
@@ -70,7 +70,7 @@ async def encoder_worker(
 
 
 def main() -> None:
-    configure_dynamo_logging(service_name="dynamo.vllm.workflow.encoder")
+    configure_dynamo_logging(service_name="dynamo.experimental.workflow.vllm.encoder")
     parser = argparse.ArgumentParser(
         description="Run a custom vision encoder as a remote workflow stage",
         allow_abbrev=False,

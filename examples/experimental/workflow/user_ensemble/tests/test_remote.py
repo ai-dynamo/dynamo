@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -24,7 +25,10 @@ from dynamo.experimental.workflow import (  # noqa: E402
     RemoteBinding,
     WorkflowOrchestrator,
 )
-from examples.experimental.workflow.user_ensemble.benchmark.encoder_decoder_provider import (  # noqa: E402
+from examples.experimental.workflow.user_ensemble.benchmark import (  # noqa: E402
+    encoder_decoder_orchestrator as benchmark_orchestrator_module,
+)
+from examples.experimental.workflow.user_ensemble.benchmark.encoder_decoder_orchestrator import (  # noqa: E402
     compile_benchmark_workflow,
 )
 from examples.experimental.workflow.user_ensemble.remote import (  # noqa: E402
@@ -38,9 +42,6 @@ from examples.experimental.workflow.user_ensemble.remote.bindings import (  # no
     ENCODER_ENDPOINT,
     GENERATOR_ENDPOINT,
     compile_remote_workflow,
-)
-from examples.experimental.workflow.user_ensemble.remote.provider import (  # noqa: E402
-    provide_workflow,
 )
 
 pytestmark = [
@@ -122,22 +123,52 @@ def test_benchmark_control_and_tensor_plans_isolate_classifier_transport():
     assert not hasattr(tensor_plan, "edges")
 
 
-async def test_frontend_provider_binds_remote_plan_and_inline_response():
+async def test_orchestrator_worker_binds_remote_plan_and_registers_model():
     orchestrator = object.__new__(WorkflowOrchestrator)
     bind = AsyncMock(return_value=orchestrator)
-    runtime = object()
+    register_model = AsyncMock()
+    endpoint = _FakeEndpoint()
+    runtime = SimpleNamespace(endpoint=lambda _: endpoint)
 
-    with patch(
-        "examples.experimental.workflow.user_ensemble.remote.provider.WorkflowOrchestrator.bind",
-        bind,
+    with (
+        patch.object(orchestrator_worker_module.WorkflowOrchestrator, "bind", bind),
+        patch.object(orchestrator_worker_module, "register_model", register_model),
     ):
-        provided = await provide_workflow(runtime)
+        await orchestrator_worker_module.serve_orchestrator(
+            runtime, compile_remote_workflow()
+        )
 
     assert bind.await_args.args == (compile_remote_workflow(),)
     assert bind.await_args.kwargs["runtime"] is runtime
     response = bind.await_args.kwargs["inline_runners"]["response"]
     assert response.contract.id == "ensemble-response"
-    assert provided is orchestrator
+    register_model.assert_awaited_once()
+    assert endpoint.handler is not None
+
+
+async def test_benchmark_orchestrator_selects_classifier_plan():
+    runtime = object()
+    serve_orchestrator = AsyncMock()
+
+    with (
+        patch.object(
+            benchmark_orchestrator_module,
+            "serve_orchestrator",
+            serve_orchestrator,
+        ),
+        patch.dict(
+            benchmark_orchestrator_module.os.environ,
+            {benchmark_orchestrator_module.CLASSIFIER_INPUT_ENV: "tensor"},
+        ),
+    ):
+        await benchmark_orchestrator_module.benchmark_orchestrator_worker.__wrapped__(
+            runtime
+        )
+
+    assert serve_orchestrator.await_args.args == (
+        runtime,
+        compile_benchmark_workflow("tensor"),
+    )
 
 
 async def test_classifier_worker_serves_workflow_protocol_and_closes_carrier():

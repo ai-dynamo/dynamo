@@ -20,11 +20,11 @@ from dynamo.common.multimodal.embedding_transfer import (
     NixlWriteEmbeddingReceiver,
     TransferRequest,
 )
+from dynamo.experimental.workflow.perf import WORKFLOW_PERF_TRACE
 from dynamo.vllm.multimodal_utils.custom_encoder.adapter.linear import (
     build_mixed_embeds,
 )
 from dynamo.vllm.multimodal_utils.model_config import _hidden_size, _is_multimodal_model
-from dynamo.workflow.perf import WORKFLOW_PERF_TRACE
 
 logger = logging.getLogger(__name__)
 

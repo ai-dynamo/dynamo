@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Callable, Deque, Generic, Hashable, List, Optional, TypeVar
 
-from dynamo.workflow.perf import WORKFLOW_PERF_TRACE
+from dynamo.experimental.workflow.perf import WORKFLOW_PERF_TRACE
 
 logger = logging.getLogger(__name__)
 

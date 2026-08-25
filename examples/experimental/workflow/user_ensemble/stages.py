@@ -11,8 +11,8 @@ from typing import Any
 
 import torch
 
-from dynamo.llm.exceptions import InvalidArgument
 from dynamo.experimental.workflow import StageContext, StageContract
+from dynamo.llm.exceptions import InvalidArgument
 
 
 class DummyClassifier:
@@ -57,7 +57,7 @@ class DummyMetadataClassifier:
     async def run(
         self, inputs: Mapping[str, Any], context: StageContext
     ) -> Mapping[str, Any]:
-        context.raise_if_cancelled()
+        del context
         if not isinstance(inputs["encoder_metadata"], Mapping):
             raise InvalidArgument("classifier metadata must be an object")
         return {"scores": {"metadata-control": 1.0}}

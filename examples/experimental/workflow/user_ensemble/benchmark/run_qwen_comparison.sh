@@ -8,7 +8,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(readlink -f "$SCRIPT_DIR/../../../..")"
+REPO_ROOT="$(readlink -f "$SCRIPT_DIR/../../../../..")"
 LAUNCH_ROOT="${DYN_BENCH_LAUNCH_ROOT:-$REPO_ROOT}"
 WORKLOAD_ROOT="${DYN_BENCH_WORKLOAD_ROOT:-/dynamo-tmp/logs/08-05/qwen25-user-ensemble-textisl644-osl7-mixed1000/workload}"
 OUTPUT_ROOT="${DYN_BENCH_OUTPUT_ROOT:?set DYN_BENCH_OUTPUT_ROOT to a new result directory}"
@@ -30,7 +30,7 @@ KV_EVENTS_CONFIG="$(printf \
     "$KV_EVENT_PORT")"
 DEFAULT_CELL_PLAN="1:metadata 2:metadata 3:metadata 1:tensor 2:tensor 3:tensor"
 CELL_PLAN="${DYN_BENCH_CELL_PLAN:-$DEFAULT_CELL_PLAN}"
-WORKFLOW_PROVIDER="${DYN_BENCH_WORKFLOW_PROVIDER:-examples.experimental.workflow.user_ensemble.benchmark.encoder_decoder_provider:provide_workflow}"
+WORKFLOW_ORCHESTRATOR="${DYN_BENCH_WORKFLOW_ORCHESTRATOR:-examples.experimental.workflow.user_ensemble.benchmark.encoder_decoder_orchestrator}"
 
 if [[ "$REQUEST_RATE" != 50 ]]; then
     echo >&2 "DYN_BENCH_REQUEST_RATE must be 50, got: $REQUEST_RATE"
@@ -136,19 +136,19 @@ python -m examples.experimental.workflow.user_ensemble.benchmark.remote_qwen_ben
     --batch-queue-max-wait-ms "$DYN_ENCODER_BATCH_QUEUE_MAX_WAIT_MS" \
     --embedding-transfer-mode "$DYN_VLLM_EMBEDDING_TRANSFER_MODE" \
     --classifier-nixl-buffer-bytes "$DYN_CLASSIFIER_NIXL_BUFFER_BYTES" \
-    --workflow-provider "$WORKFLOW_PROVIDER" \
+    --workflow-orchestrator "$WORKFLOW_ORCHESTRATOR" \
     --perf-trace "$DYN_WORKFLOW_PERF_TRACE" \
     --perf-sample-every "$DYN_WORKFLOW_PERF_SAMPLE_EVERY"
 
 sha256sum \
     "$REPO_ROOT/examples/experimental/workflow/user_ensemble/workflow.py" \
     "$REPO_ROOT/examples/experimental/workflow/user_ensemble/stages.py" \
-    "$REPO_ROOT/examples/experimental/workflow/user_ensemble/benchmark/encoder_decoder_provider.py" \
+    "$REPO_ROOT/examples/experimental/workflow/user_ensemble/benchmark/encoder_decoder_orchestrator.py" \
     "$REPO_ROOT/examples/experimental/workflow/user_ensemble/remote/classifier_worker.py" \
     "$REPO_ROOT/examples/experimental/workflow/user_ensemble/remote/launch.sh" \
     "$REPO_ROOT/components/src/dynamo/common/multimodal/embedding_transfer.py" \
     "$REPO_ROOT/components/src/dynamo/vllm/multimodal_utils/external_encoder.py" \
-    "$REPO_ROOT/components/src/dynamo/vllm/workflow/components/embedding_transfer.py" \
+    "$REPO_ROOT/components/src/dynamo/experimental/workflow/vllm/embedding_transfer.py" \
     "$REPO_ROOT/components/src/dynamo/vllm/multimodal_utils/custom_encoder/batcher.py" \
     "$REPO_ROOT/components/src/dynamo/experimental/workflow/nixl.py" \
     "$REPO_ROOT/components/src/dynamo/experimental/workflow/perf.py" \
@@ -206,7 +206,7 @@ launch_topology() {
         DYN_NAMESPACE="$workflow_namespace" \
         DYN_USER_ENSEMBLE_NAMESPACE="$workflow_namespace" \
         DYN_BENCH_CLASSIFIER_INPUT="$topology" \
-        DYN_BENCH_WORKFLOW_PROVIDER="$WORKFLOW_PROVIDER" \
+        DYN_WORKFLOW_ORCHESTRATOR_MODULE="$WORKFLOW_ORCHESTRATOR" \
         bash "$launch_script" "${launch_args[@]}" \
         > "$output_dir/server.log" 2>&1 &
     SERVER_PID=$!

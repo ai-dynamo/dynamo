@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from dynamo.common.multimodal.embedding_transfer import TransferRequest
-from dynamo.vllm.workflow.components.embedding_transfer import (
+from dynamo.experimental.workflow.vllm.embedding_transfer import (
     NixlWriteTensorCarrier,
     NixlWriteTensorReceiverCarrier,
 )

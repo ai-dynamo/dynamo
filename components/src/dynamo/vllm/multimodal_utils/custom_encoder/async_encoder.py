@@ -33,6 +33,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Generic, List
 
+from dynamo.experimental.workflow.perf import WORKFLOW_PERF_TRACE
 from dynamo.vllm.multimodal_utils.custom_encoder.backend import (
     ArtifactT,
     ItemT,
@@ -41,7 +42,6 @@ from dynamo.vllm.multimodal_utils.custom_encoder.backend import (
     VisionEncoderBackend,
 )
 from dynamo.vllm.multimodal_utils.custom_encoder.batcher import ThreadedMicroBatcher
-from dynamo.workflow.perf import WORKFLOW_PERF_TRACE
 
 logger = logging.getLogger(__name__)
 

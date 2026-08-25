@@ -20,8 +20,16 @@ from dynamo.experimental.workflow.plan import (
     RemoteBinding,
 )
 from dynamo.experimental.workflow.remote import NixlCarriedValue, RemoteStageClient
-from dynamo.experimental.workflow.runtime import StageContext, StageRunner, WorkflowExecutionError
-from dynamo.experimental.workflow.types import StageContract, ValueRef, WorkflowValidationError
+from dynamo.experimental.workflow.runtime import (
+    StageContext,
+    StageRunner,
+    WorkflowExecutionError,
+)
+from dynamo.experimental.workflow.types import (
+    StageContract,
+    ValueRef,
+    WorkflowValidationError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +45,8 @@ class RemoteStageInvoker(Protocol):
         inputs: Mapping[str, Any],
         context: StageContext,
         output_transfers: Mapping[str, tuple[str, ...]],
+        *,
+        request_context: Any = None,
     ) -> Mapping[str, Any]:
         ...
 
@@ -193,13 +203,14 @@ class StageDispatcher:
     async def call(
         self,
         stage_id: str,
-        contract: StageContract,
         inputs: Mapping[str, Any],
         context: StageContext,
+        *,
+        request_context: Any = None,
     ) -> dict[str, Any]:
         """Invoke one stage and validate its complete input/output contract."""
 
-        context.raise_if_cancelled()
+        contract = self._plan.stage_contracts[stage_id]
         expected_inputs = set(contract.inputs)
         actual_inputs = set(inputs)
         if actual_inputs != expected_inputs:
@@ -216,7 +227,11 @@ class StageDispatcher:
             )
         elif isinstance(binding, GenerateEndpointBinding):
             result = await self._remote_clients[binding.endpoint_id].run(
-                stage_id, contract, frozen_inputs, context
+                stage_id,
+                contract,
+                frozen_inputs,
+                context,
+                request_context=request_context,
             )
         else:
             result = await self._remote_clients[binding.endpoint_id].run(
@@ -225,6 +240,7 @@ class StageDispatcher:
                 frozen_inputs,
                 context,
                 self._output_transfers.get(stage_id, MappingProxyType({})),
+                request_context=request_context,
             )
         if not isinstance(result, Mapping):
             raise WorkflowExecutionError(

@@ -21,8 +21,8 @@ from typing import Callable
 
 import pytest
 
+from dynamo.experimental.workflow.perf import WorkflowPerfTracer
 from dynamo.vllm.multimodal_utils.custom_encoder.batcher import ThreadedMicroBatcher
-from dynamo.workflow.perf import WorkflowPerfTracer
 
 pytestmark = [
     pytest.mark.unit,

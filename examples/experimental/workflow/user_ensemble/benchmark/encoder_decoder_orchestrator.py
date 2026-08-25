@@ -1,14 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Benchmark provider for metadata-control and tensor-fanout classifiers."""
+"""Benchmark orchestrator for metadata-control and tensor-fanout classifiers."""
 
 from __future__ import annotations
 
+import asyncio
 import os
-from typing import Any
 
-from dynamo.experimental.workflow.vllm import DynamoVllmStage, EncoderStage
 from dynamo.experimental.workflow import (
     DeploymentSpec,
     ExecutionPlan,
@@ -16,13 +15,17 @@ from dynamo.experimental.workflow import (
     InlineBinding,
     RemoteBinding,
     Workflow,
-    WorkflowOrchestrator,
     compile_workflow,
 )
+from dynamo.experimental.workflow.vllm import DynamoVllmStage, EncoderStage
+from dynamo.runtime import DistributedRuntime, dynamo_worker
 from examples.experimental.workflow.user_ensemble.remote.bindings import (
     CLASSIFIER_ENDPOINT,
     ENCODER_ENDPOINT,
     GENERATOR_ENDPOINT,
+)
+from examples.experimental.workflow.user_ensemble.remote.orchestrator_worker import (
+    serve_orchestrator,
 )
 from examples.experimental.workflow.user_ensemble.stages import (
     DummyMetadataClassifier,
@@ -93,11 +96,19 @@ def compile_benchmark_workflow(classifier_input: str) -> ExecutionPlan:
     )
 
 
-async def provide_workflow(runtime: Any) -> WorkflowOrchestrator:
-    """Bind the selected classifier qualification graph."""
+@dynamo_worker()
+async def benchmark_orchestrator_worker(runtime: DistributedRuntime) -> None:
+    """Serve the selected classifier qualification graph."""
 
-    return await WorkflowOrchestrator.bind(
+    await serve_orchestrator(
+        runtime,
         compile_benchmark_workflow(os.environ.get(CLASSIFIER_INPUT_ENV, "metadata")),
-        runtime=runtime,
-        inline_runners={"response": EnsembleResponseStage()},
     )
+
+
+def main() -> None:
+    asyncio.run(benchmark_orchestrator_worker())
+
+
+if __name__ == "__main__":
+    main()

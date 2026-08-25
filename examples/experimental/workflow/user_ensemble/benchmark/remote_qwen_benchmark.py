@@ -558,7 +558,7 @@ def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
             "embedding_transfer_mode": args.embedding_transfer_mode,
             "nixl_receive_storage": "pre-registered receiver ring buffer",
             "classifier_nixl_buffer_bytes": args.classifier_nixl_buffer_bytes,
-            "workflow_provider": args.workflow_provider,
+            "workflow_orchestrator": args.workflow_orchestrator,
             "perf_trace": bool(args.perf_trace),
             "perf_sample_every": args.perf_sample_every,
             "preprocess_concurrency": 64,
@@ -845,7 +845,7 @@ def _build_parser() -> argparse.ArgumentParser:
     metadata.add_argument("--batch-queue-max-wait-ms", type=float, required=True)
     metadata.add_argument("--embedding-transfer-mode", required=True)
     metadata.add_argument("--classifier-nixl-buffer-bytes", type=int, required=True)
-    metadata.add_argument("--workflow-provider", required=True)
+    metadata.add_argument("--workflow-orchestrator", required=True)
     metadata.add_argument("--perf-trace", type=int, choices=(0, 1), required=True)
     metadata.add_argument("--perf-sample-every", type=int, required=True)
 

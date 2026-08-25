@@ -13,13 +13,13 @@ from typing import Any, cast
 import torch
 
 from dynamo.common.backend import GenerateRequest
+from dynamo.experimental.workflow import StageContext, StageContract
+from dynamo.experimental.workflow.perf import WORKFLOW_PERF_TRACE
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.vllm.multimodal_utils.custom_encoder import (
     AsyncVisionEncoder,
     VisionEncoderBackend,
 )
-from dynamo.experimental.workflow import StageContext, StageContract
-from dynamo.experimental.workflow.perf import WORKFLOW_PERF_TRACE
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +89,6 @@ class EncoderStage:
         self, inputs: Mapping[str, Any], context: StageContext
     ) -> Mapping[str, Any]:
         started_ns = time.perf_counter_ns()
-        context.raise_if_cancelled()
         request_value = inputs["request"]
         if not isinstance(request_value, Mapping):
             raise InvalidArgument("encoder stage request must be an object")
@@ -97,7 +96,6 @@ class EncoderStage:
         artifacts = await self._encoder.encode(
             self._image_urls(request), trace_id=context.attempt_id
         )
-        context.raise_if_cancelled()
         tensors = self._validate_artifacts(artifacts)
 
         row_splits = [0]
