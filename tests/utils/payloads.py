@@ -2179,7 +2179,8 @@ class SGLangDisaggRouterMetricsPayload(MetricsPayload):
         # prefill worker.
         super().validate(response, content)
 
-        assert self.system_ports, "No prefill worker metrics ports were configured"
+        if not self.system_ports:
+            raise AssertionError("No prefill worker metrics ports were configured")
 
         counter_name = (
             f"{prometheus_names.name_prefix.COMPONENT}_"
@@ -2202,20 +2203,23 @@ class SGLangDisaggRouterMetricsPayload(MetricsPayload):
                 worker_content = worker_response.text
 
             samples = find_metric_samples(worker_content, counter_name, labels)
-            assert samples, (
-                f"Metric {counter_name} with labels {labels} was not found "
-                f"on prefill worker metrics port {port}"
-            )
+            if not samples:
+                raise AssertionError(
+                    f"Metric {counter_name} with labels {labels} was not found "
+                    f"on prefill worker metrics port {port}"
+                )
             counts[port] = sum(samples)
 
         total_requests = sum(counts.values())
         per_worker = ", ".join(
             f"port {port}={count:g}" for port, count in counts.items()
         )
-        assert total_requests >= self.min_num_requests, (
-            f"{counter_name} has aggregate count {total_requests:g}, less than "
-            f"required {self.min_num_requests} across prefill workers ({per_worker})"
-        )
+        if total_requests < self.min_num_requests:
+            raise AssertionError(
+                f"{counter_name} has aggregate count {total_requests:g}, less than "
+                f"required {self.min_num_requests} across prefill workers "
+                f"({per_worker})"
+            )
         logger.info(
             "SUCCESS: Found %s with aggregate count %g across prefill workers (%s)",
             counter_name,
