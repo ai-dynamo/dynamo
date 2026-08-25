@@ -164,12 +164,14 @@ def test_public_router_validation_is_owned_by_dynamo_adapter() -> None:
         "prefill_load_model": {"type": "none"},
     }
     plan = adapter.compile_recommendation({}, recommendation_context)
-    configurations = plan.fragment.choices_by_branch["agg"]["configuration"]
-    assert configurations[0] == {
-        "mode": "round_robin",
-        "prefill_load_model_type": "none",
+    assert plan.fragment.choices_by_branch["agg"] == {
+        "mode": ["round_robin", "kv_router"]
     }
-    assert sum(config["mode"] == "round_robin" for config in configurations) == 1
+    conditional = plan.fragment.conditional_by_branch["agg"][0]
+    assert conditional.selector == "mode"
+    assert conditional.values == ["kv_router"]
+    assert conditional.choices["prefill_load_model_type"] == ["none", "aic"]
+    assert conditional.choices["temperature"] == [0.0, 0.2, 0.5, 1.0]
 
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         adapter.compile_prediction({"not_a_router_knob": True}, prediction_context)
@@ -270,6 +272,131 @@ def test_router_public_schema_rejects_internal_fields_and_supports_ranges() -> N
         "prefill_load_scale": (0.25, 32.0),
     }
     assert plan.fragment.log_float_ranges_by_branch["agg"] == ["prefill_load_scale"]
+
+
+def test_mixed_router_policy_preserves_continuous_and_log_ranges() -> None:
+    adapter = create_provider()
+    context = RecommendationAdapterContext(
+        engine={},
+        traffic={},
+        evaluation={},
+        optimization={},
+        sweep=_sweep_context(),
+    )
+    plan = adapter.compile_recommendation(
+        {
+            "policy": {"choices": ["round_robin", "kv_router"]},
+            "temperature": {"range": {"min": 0.1, "max": 1.0}},
+            "prefill_load_scale": {"range": {"min": 0.25, "max": 32.0, "scale": "log"}},
+        },
+        context,
+    )
+
+    conditional = plan.fragment.conditional_by_branch["agg"][0]
+    assert conditional.float_ranges == {
+        "temperature": (0.1, 1.0),
+        "prefill_load_scale": (0.25, 32.0),
+    }
+    assert conditional.log_float_ranges == ["prefill_load_scale"]
+    assert plan.fragment.choices_by_branch["agg"] == {
+        "mode": ["round_robin", "kv_router"]
+    }
+
+    kv_router = adapter.materialize_candidate(
+        plan,
+        {
+            "mode": "kv_router",
+            "prefill_load_model_type": "none",
+            "overlap_score_credit": 0.5,
+            "prefill_load_scale": 3.25,
+            "temperature": 0.75,
+        },
+        _candidate_context(),
+    )
+    assert kv_router.config["policy"] == "kv_router"
+    assert kv_router.config["prefill_load_scale"] == 3.25
+    assert kv_router.config["temperature"] == 0.75
+
+    round_robin = adapter.materialize_candidate(
+        plan,
+        {"mode": "round_robin"},
+        _candidate_context(),
+    )
+    assert round_robin.config == {
+        "policy": "round_robin",
+        "prefill_load_model": {"type": "none"},
+    }
+    assert round_robin.runtime_hooks == ()
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"policy": "kv_router", "overlap_score_credit": None},
+        {"policy": "kv_router", "prefill_load_scale": None},
+        {"policy": "kv_router", "temperature": None},
+    ],
+)
+def test_router_rejects_explicit_null_numeric_knobs(
+    config: dict[str, object],
+) -> None:
+    adapter = create_provider()
+    with pytest.raises(ValueError, match="do not accept null"):
+        adapter.compile_prediction(
+            config,
+            PredictionAdapterContext(engine={}, traffic={}, evaluation={}),
+        )
+    with pytest.raises(ValueError, match="do not accept null"):
+        adapter.compile_recommendation(
+            config,
+            RecommendationAdapterContext(
+                engine={},
+                traffic={},
+                evaluation={},
+                optimization={},
+                sweep=_sweep_context(),
+            ),
+        )
+
+
+def test_router_stepped_float_range_includes_exact_endpoint() -> None:
+    plan = create_provider().compile_recommendation(
+        {
+            "policy": "kv_router",
+            "temperature": {"range": {"min": 0.1, "max": 0.3, "step": 0.1}},
+        },
+        RecommendationAdapterContext(
+            engine={},
+            traffic={},
+            evaluation={},
+            optimization={},
+            sweep=_sweep_context(),
+        ),
+    )
+
+    assert plan.fragment.choices_by_branch["agg"]["temperature"] == [
+        0.1,
+        0.2,
+        0.3,
+    ]
+
+
+def test_singleton_round_robin_policy_domain_uses_conditional_default() -> None:
+    plan = create_provider().compile_recommendation(
+        {"policy": {"choices": ["round_robin"]}},
+        RecommendationAdapterContext(
+            engine={},
+            traffic={},
+            evaluation={},
+            optimization={},
+            sweep=_sweep_context(),
+        ),
+    )
+
+    assert plan.fragment.choices_by_branch == {
+        "agg": {"mode": ["round_robin"]},
+        "disagg": {"mode": ["round_robin"]},
+    }
 
 
 def test_kv_router_prediction_materializes_documented_defaults() -> None:

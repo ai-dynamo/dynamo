@@ -25,6 +25,7 @@ from aisimulate.sweeper.provider import (
     AdapterReplaySpec,
     AdapterSearchPlan,
     CandidateContext,
+    InfeasibleCandidate,
     JSONValue,
     RuntimeHookSpec,
     SearchSpaceFragment,
@@ -33,7 +34,11 @@ from aisimulate.sweeper.provider import (
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from tqdm import tqdm  # type: ignore[import-untyped]
 
-from .config import PlannerPredictionConfig, PlannerRecommendationConfig
+from .config import (
+    PlannerPredictionConfig,
+    PlannerRecommendationConfig,
+    ScalingPolicyMapping,
+)
 from .load_predictor import (
     LOAD_PREDICTOR_PRESETS,
     complete_predictor_preset,
@@ -235,7 +240,8 @@ def _independent_preset_mappings(
         mappings = [
             mapping
             for mapping in mappings
-            if mapping["load_adjustment_interval_seconds"]
+            if not mapping["enable_load_scaling"]
+            or mapping["load_adjustment_interval_seconds"]
             < mapping["throughput_adjustment_interval_seconds"]
         ]
     return mappings
@@ -556,7 +562,11 @@ def _dynamo_trace_is_agentic(traffic: Mapping[str, JSONValue]) -> bool:
                 if not line.strip():
                     continue
                 record = json.loads(line)
-                return record.get("agent_context") is not None
+                event = record.get("event", record)
+                event_type = event.get("event_type", record.get("event_type"))
+                if event_type != "request_end":
+                    continue
+                return event.get("agent_context") is not None
     return False
 
 
@@ -828,7 +838,18 @@ class DynamoPlannerSweepConfigProvider:
                         if mappings and isinstance(mappings[0], dict)
                         else []
                     )
-                    materialized[group] = {key: materialized.pop(key) for key in keys}
+                    group_mapping = {key: materialized.pop(key) for key in keys}
+                    materialized[group] = group_mapping
+                    if group == "scaling_policy" and (
+                        group_mapping["enable_throughput_scaling"]
+                        or group_mapping["enable_load_scaling"]
+                    ):
+                        try:
+                            ScalingPolicyMapping.model_validate(group_mapping)
+                        except ValueError as exc:
+                            raise InfeasibleCandidate(
+                                f"independent Planner scaling-policy selection: {exc}"
+                            ) from exc
         return self.materialize_replay(plan, materialized, context)
 
     def generate_search_space(
@@ -877,12 +898,18 @@ class DynamoPlannerSweepConfigProvider:
 
         trace_path = context.workload.get("trace_path")
         trace_format = context.workload.get("trace_format")
-        if trace_format not in (None, "mooncake", "mooncake-delta"):
-            trace_path = None
+        raw_trace_paths = context.workload.get("trace_paths")
+        trace_paths = (
+            [str(path) for path in raw_trace_paths]
+            if isinstance(raw_trace_paths, list)
+            else None
+        )
         predictor_result = sweep_load_predictor(
             policies=kept,
             candidates=space.load_predictor.preset,
             trace_path=str(trace_path) if trace_path is not None else None,
+            trace_paths=trace_paths,
+            trace_format=str(trace_format) if trace_format is not None else None,
             show_progress=context.show_progress,
         )
         scaling_possible = any(

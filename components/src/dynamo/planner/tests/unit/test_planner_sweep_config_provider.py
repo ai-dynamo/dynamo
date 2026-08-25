@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import warnings
 from dataclasses import replace
 
@@ -641,6 +642,68 @@ def test_planner_custom_preset_values_are_strict_and_concrete() -> None:
         )
 
 
+def test_custom_disabled_scaling_preset_uses_null_inactive_intervals() -> None:
+    context = RecommendationAdapterContext(
+        engine={},
+        traffic={},
+        evaluation={"sla": {"ttft_ms": 2000.0, "itl_ms": 30.0}},
+        optimization={"target": "goodput"},
+        sweep=_sweep_context(target="goodput"),
+    )
+    disabled = {
+        "enable_throughput_scaling": False,
+        "enable_load_scaling": False,
+        "throughput_adjustment_interval_seconds": None,
+        "load_adjustment_interval_seconds": None,
+    }
+    plan = create_provider().compile_recommendation(
+        {"scaling_policy": {"preset": [disabled]}}, context
+    )
+    assert plan.fragment.choices_by_branch["agg"]["scaling_policy"] == [disabled]
+
+    invalid = dict(disabled)
+    invalid["throughput_adjustment_interval_seconds"] = 180
+    invalid["load_adjustment_interval_seconds"] = 5
+    with pytest.raises(ValueError, match="requires null adjustment intervals"):
+        create_provider().compile_recommendation(
+            {"scaling_policy": {"preset": [invalid]}}, context
+        )
+
+
+def test_preset_off_rejects_infeasible_recombined_scaling_intervals() -> None:
+    adapter = create_provider()
+    context = RecommendationAdapterContext(
+        engine={},
+        traffic={},
+        evaluation={"sla": {"ttft_ms": 2000.0, "itl_ms": 30.0}},
+        optimization={"target": "goodput"},
+        sweep=_sweep_context(target="goodput"),
+    )
+    plan = adapter.compile_recommendation(
+        {
+            "scaling_policy": {"preset": False},
+            "enable_throughput_scaling": False,
+            "enable_load_scaling": {"choices": [False, True]},
+            "throughput_adjustment_interval_seconds": {"choices": [20, 40]},
+            "load_adjustment_interval_seconds": {"choices": [10, 30]},
+        },
+        context,
+    )
+    selection = {
+        name: values[0]
+        for name, values in plan.fragment.choices_by_branch["agg"].items()
+    }
+    selection.update(
+        policy="enabled",
+        enable_throughput_scaling=False,
+        enable_load_scaling=True,
+        throughput_adjustment_interval_seconds=20,
+        load_adjustment_interval_seconds=30,
+    )
+    with pytest.raises(ValueError, match="independent Planner scaling-policy"):
+        adapter.materialize_candidate(plan, selection, _candidate_context())
+
+
 def test_enabled_planner_prediction_keeps_public_config_separate_from_hook() -> None:
     context = PredictionAdapterContext(
         engine={
@@ -694,6 +757,40 @@ def test_static_predictor_fallback_stays_within_configured_preset_list() -> None
         ),
     )
     assert plan.state["load_predictor"]["best_by_interval"] == {"180": "arima_raw"}
+
+
+def test_native_dynamo_agentic_trace_is_detected_after_payload_header(tmp_path) -> None:
+    trace = tmp_path / "trace.jsonl"
+    trace.write_text(
+        json.dumps({"event_type": "request_payload"})
+        + "\n"
+        + json.dumps(
+            {
+                "event": {
+                    "event_type": "request_end",
+                    "agent_context": {"session_id": "s"},
+                }
+            }
+        )
+        + "\n"
+    )
+    with pytest.raises(ValueError, match="planner.policy=disabled"):
+        create_provider().compile_recommendation(
+            {"policy": "enabled"},
+            RecommendationAdapterContext(
+                engine={},
+                traffic={
+                    "source": {
+                        "type": "trace",
+                        "format": "dynamo",
+                        "paths": [str(trace)],
+                    }
+                },
+                evaluation={},
+                optimization={"target": "throughput"},
+                sweep=_sweep_context(target="throughput"),
+            ),
+        )
 
 
 def test_policy_pruning_diagnostics_remain_visible(monkeypatch) -> None:

@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 from aisimulate.config.common import Choices, NumericRange
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 MODES = frozenset({"kv_router", "round_robin"})
 OVERLAP_SCORE_CREDITS = frozenset({0.0, 0.5, 1.0})
@@ -20,6 +21,20 @@ LOAD_MODELS = frozenset({"none", "aic"})
 StrictFiniteFloat = Annotated[float, Field(strict=True, ge=0.0, allow_inf_nan=False)]
 Policy = Literal["round_robin", "kv_router"]
 LoadModelType = Literal["none", "aic"]
+
+
+def _stepped_numeric_values(
+    minimum: int | float,
+    maximum: int | float,
+    step: int | float,
+) -> list[float]:
+    """Expand a decimal-facing YAML range without cumulative float drift."""
+
+    start = Decimal(str(minimum))
+    stop = Decimal(str(maximum))
+    increment = Decimal(str(step))
+    step_count = int((stop - start) // increment)
+    return [float(start + increment * index) for index in range(step_count + 1)]
 
 
 class PrefillLoadModel(BaseModel):
@@ -44,6 +59,18 @@ class RouterPredictionConfig(BaseModel):
     overlap_score_credit: StrictFiniteFloat | None = None
     prefill_load_scale: StrictFiniteFloat | None = None
     temperature: StrictFiniteFloat | None = None
+
+    @field_validator(
+        "overlap_score_credit",
+        "prefill_load_scale",
+        "temperature",
+        mode="before",
+    )
+    @classmethod
+    def _reject_explicit_null(cls, value: Any) -> Any:
+        if value is None:
+            raise ValueError("Router numeric knobs do not accept null")
+        return value
 
     @model_validator(mode="after")
     def _validate_policy(self) -> RouterPredictionConfig:
@@ -87,10 +114,30 @@ class RouterRecommendationConfig(BaseModel):
         StrictFiniteFloat | Choices[StrictFiniteFloat] | NumericRange | None
     ) = None
 
+    @field_validator(
+        "overlap_score_credit",
+        "prefill_load_scale",
+        "temperature",
+        mode="before",
+    )
+    @classmethod
+    def _reject_explicit_null(cls, value: Any) -> Any:
+        if value is None:
+            raise ValueError("Router numeric knobs do not accept null")
+        return value
+
     @model_validator(mode="before")
     @classmethod
     def _apply_conditional_defaults(cls, value: Any) -> Any:
-        if isinstance(value, Mapping) and value.get("policy") == "round_robin":
+        if not isinstance(value, Mapping):
+            return value
+        raw_policy = value.get("policy")
+        round_robin_only = raw_policy == "round_robin" or (
+            isinstance(raw_policy, Mapping)
+            and set(raw_policy) == {"choices"}
+            and raw_policy["choices"] == ["round_robin"]
+        )
+        if round_robin_only:
             resolved = dict(value)
             resolved.setdefault("prefill_load_model", {"type": "none"})
             return resolved
@@ -118,6 +165,17 @@ class RouterRecommendationConfig(BaseModel):
                 raise ValueError(
                     "router.policy=round_robin rejects KV-router fields "
                     f"{sorted(conflicts)}"
+                )
+        elif "round_robin" in policies:
+            load_types = (
+                set(self.prefill_load_model.type.choices)
+                if isinstance(self.prefill_load_model.type, Choices)
+                else {self.prefill_load_model.type}
+            )
+            if "none" not in load_types:
+                raise ValueError(
+                    "router policy domain containing round_robin requires "
+                    "prefill_load_model.type to include none"
                 )
         for name in (
             "overlap_score_credit",
@@ -270,12 +328,7 @@ def domain_choices(value: Any, default: list[Any]) -> list[Any]:
             or raw.get("scale", "linear") != "linear"
         ):
             raise ValueError("Router numeric ranges require a stepped linear range")
-        values = []
-        current = minimum
-        while current <= maximum:
-            values.append(current)
-            current += step
-        return values
+        return _stepped_numeric_values(minimum, maximum, step)
     if isinstance(value, Mapping):
         raise ValueError("Router domains must contain exactly choices or range")
     return [value]

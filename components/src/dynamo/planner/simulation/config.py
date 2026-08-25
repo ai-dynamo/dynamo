@@ -24,13 +24,30 @@ class ScalingPolicyMapping(BaseModel):
 
     enable_throughput_scaling: bool
     enable_load_scaling: bool
-    throughput_adjustment_interval_seconds: PositiveInt
-    load_adjustment_interval_seconds: PositiveInt
+    throughput_adjustment_interval_seconds: PositiveInt | None
+    load_adjustment_interval_seconds: PositiveInt | None
 
     @model_validator(mode="after")
     def _validate_intervals(self) -> ScalingPolicyMapping:
+        scaling_enabled = self.enable_throughput_scaling or self.enable_load_scaling
+        intervals = (
+            self.throughput_adjustment_interval_seconds,
+            self.load_adjustment_interval_seconds,
+        )
+        if not scaling_enabled:
+            if any(interval is not None for interval in intervals):
+                raise ValueError(
+                    "disabled scaling policy requires null adjustment intervals"
+                )
+            return self
+        if any(interval is None for interval in intervals):
+            raise ValueError(
+                "enabled scaling policy requires both adjustment intervals"
+            )
         if (
             self.enable_load_scaling
+            and self.load_adjustment_interval_seconds is not None
+            and self.throughput_adjustment_interval_seconds is not None
             and self.load_adjustment_interval_seconds
             >= self.throughput_adjustment_interval_seconds
         ):

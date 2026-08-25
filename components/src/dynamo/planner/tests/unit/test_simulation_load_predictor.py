@@ -5,6 +5,7 @@
 
 """Golden parity tests for the Planner adapter's load-predictor pre-sweep."""
 
+import json
 import math
 
 import pytest
@@ -19,6 +20,7 @@ from dynamo.planner.simulation.load_predictor import (
     Window,
     _entry_label,
     _internal_preset,
+    build_windows_from_trace_paths,
     complete_predictor_preset,
     evaluate_preset,
     predictor_fields,
@@ -61,7 +63,7 @@ def test_static_and_disabled_trigger_paths() -> None:
         trace_path=None,
         show_progress=False,
     )
-    assert static.reason == "static_workload_constant"
+    assert static.reason == "static_workload_configured_fallback"
     assert static.best_by_interval == {
         180: "constant_last",
         600: "constant_last",
@@ -184,5 +186,41 @@ def test_short_trace_falls_back_to_constant_last(monkeypatch) -> None:
     )
 
     assert result.best_by_interval == {180: "constant_last"}
-    assert "no_winner_fallback_constant_last" in result.reason
+    assert "no_winner_configured_fallback" in result.reason
     assert all(math.isinf(value) for value in result.losses[180].values())
+
+
+def test_dynamo_multi_file_trace_builds_one_global_window_series(tmp_path) -> None:
+    def request(request_id: str, timestamp_ms: int, isl: int, osl: int) -> str:
+        return json.dumps(
+            {
+                "schema": "dynamo.request.trace.v1",
+                "event_type": "request_end",
+                "event_time_unix_ms": timestamp_ms + 10,
+                "request": {
+                    "request_id": request_id,
+                    "request_received_ms": timestamp_ms,
+                    "output_tokens": osl,
+                    "replay": {
+                        "trace_block_size": 64,
+                        "input_length": isl,
+                        "input_sequence_hashes": [1],
+                    },
+                },
+            }
+        )
+
+    first = tmp_path / "first.jsonl"
+    second = tmp_path / "second.jsonl"
+    first.write_text(
+        json.dumps({"event_type": "request_payload", "request_id": "first"})
+        + "\n"
+        + request("first", 1_000_000, 100, 10)
+        + "\n"
+    )
+    second.write_text(request("second", 1_180_000, 200, 20) + "\n")
+
+    assert build_windows_from_trace_paths([str(first), str(second)], "dynamo", 180) == [
+        Window(1.0, 100.0, 10.0),
+        Window(1.0, 200.0, 20.0),
+    ]

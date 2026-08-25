@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from statistics import mean
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from tqdm import tqdm  # type: ignore[import-untyped]
 
@@ -224,6 +224,29 @@ def build_windows(trace_path: str, interval_s: int) -> list[Window]:
     ]
 
 
+def build_windows_from_trace_paths(
+    trace_paths: list[str],
+    trace_format: Literal["mooncake", "dynamo"],
+    interval_s: int,
+) -> list[Window]:
+    """Aggregate one resolved public traffic source into predictor windows."""
+
+    from dynamo.planner.offline.trace_data import extract_metrics_from_trace_paths
+
+    return [
+        Window(
+            float(metrics["request_count"]),
+            float(metrics["avg_isl"]),
+            float(metrics["avg_osl"]),
+        )
+        for metrics in extract_metrics_from_trace_paths(
+            trace_paths,
+            trace_format,
+            interval_s,
+        )
+    ]
+
+
 def _error(predicted: float, actual: float) -> float:
     return abs(math.log1p(max(predicted, 0.0)) - math.log1p(max(actual, 0.0)))
 
@@ -330,6 +353,8 @@ def sweep_load_predictor(
     candidates: list[str | dict[str, Any]],
     trace_path: str | None,
     show_progress: bool,
+    trace_paths: list[str] | None = None,
+    trace_format: str | None = None,
 ) -> LoadPredictorResult:
     """Choose the best candidate independently for each scaling interval."""
 
@@ -339,7 +364,11 @@ def sweep_load_predictor(
     if not candidates:
         raise ValueError("load-predictor candidates must be nonempty")
     fallback = candidates[0]
-    if trace_path is None:
+    resolved_paths = list(
+        trace_paths or ([trace_path] if trace_path is not None else [])
+    )
+    temporal_format = trace_format or "mooncake"
+    if not resolved_paths or temporal_format not in {"mooncake", "dynamo"}:
         return LoadPredictorResult(
             best_by_interval=dict.fromkeys(intervals, fallback),
             reason="static_workload_configured_fallback",
@@ -349,7 +378,15 @@ def sweep_load_predictor(
     labels = [_entry_label(entry, index) for index, entry in enumerate(candidates)]
     fallback_intervals: list[int] = []
     for interval_s in intervals:
-        windows = build_windows(trace_path, interval_s)
+        windows = (
+            build_windows(resolved_paths[0], interval_s)
+            if temporal_format == "mooncake" and len(resolved_paths) == 1
+            else build_windows_from_trace_paths(
+                resolved_paths,
+                cast(Literal["mooncake", "dynamo"], temporal_format),
+                interval_s,
+            )
+        )
         warmup = _common_warmup(candidates, interval_s)
         losses: dict[str, float] = {}
         best_entry: str | dict[str, Any] | None = None

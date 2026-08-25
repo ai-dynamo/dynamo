@@ -17,6 +17,7 @@ from aisimulate.sweeper.provider import (
     AdapterReplaySpec,
     AdapterSearchPlan,
     CandidateContext,
+    ConditionalSearchSpace,
     JSONValue,
     RuntimeHookSpec,
     SearchSpaceFragment,
@@ -27,6 +28,7 @@ from .config import (
     RouterPredictionConfig,
     RouterRecommendationConfig,
     RouterSearchSpace,
+    _stepped_numeric_values,
 )
 
 _PROVIDER_API_VERSION = 1
@@ -213,54 +215,45 @@ class DynamoRouterSweepConfigProvider:
 
         if set(policies) == {"round_robin", "kv_router"}:
             expanded: dict[str, list[float]] = {}
+            ranges: dict[str, tuple[float, float]] = {}
+            log_ranges: list[str] = []
             for name, (value, defaults) in numeric_specs.items():
                 if isinstance(value, NumericRange):
                     raw = value.range
-                    if raw.scale != "linear" or raw.step is None:
-                        raise ValueError(
-                            "Router mixed-policy search requires choices or stepped "
-                            f"linear range for {name}; pin policy=kv_router for a "
-                            "continuous/log range"
+                    if raw.min == raw.max:
+                        expanded[name] = [raw.min]
+                        continue
+                    if raw.step is None:
+                        ranges[name] = (raw.min, raw.max)
+                        if raw.scale == "log":
+                            log_ranges.append(name)
+                    else:
+                        expanded[name] = _stepped_numeric_values(
+                            raw.min, raw.max, raw.step
                         )
-                    points = []
-                    current = raw.min
-                    while current <= raw.max:
-                        points.append(current)
-                        current += raw.step
-                    expanded[name] = points
                 elif isinstance(value, Choices):
                     expanded[name] = list(value.choices)
                 elif value is None:
                     expanded[name] = list(defaults)
                 else:
                     expanded[name] = [float(value)]
-            configurations: list[JSONValue] = [
-                {
-                    "mode": "round_robin",
-                    "prefill_load_model_type": "none",
-                }
-            ]
-            for load_type in load_models:
-                for credit in expanded["overlap_score_credit"]:
-                    for scale in expanded["prefill_load_scale"]:
-                        for temperature in expanded["temperature"]:
-                            configurations.append(
-                                {
-                                    "mode": "kv_router",
-                                    "prefill_load_model_type": load_type,
-                                    "overlap_score_credit": credit,
-                                    "prefill_load_scale": scale,
-                                    "temperature": temperature,
-                                }
-                            )
+            conditional = ConditionalSearchSpace(
+                selector="mode",
+                values=["kv_router"],
+                choices={
+                    "prefill_load_model_type": list(load_models),
+                    **{name: list(values) for name, values in expanded.items()},
+                },
+                float_ranges=deepcopy(ranges),
+                log_float_ranges=list(log_ranges),
+            )
             fragment = SearchSpaceFragment(
-                choices_by_branch={
-                    mode: {"configuration": deepcopy(configurations)} for mode in modes
-                }
+                choices_by_branch={mode: {"mode": list(policies)} for mode in modes},
+                conditional_by_branch={mode: [deepcopy(conditional)] for mode in modes},
             )
             return AdapterSearchPlan(
                 fragment=fragment,
-                state={"public_schema": True, "flat_public": True},
+                state={"public_schema": True, "conditional_public": True},
                 potential_runtime_hooks=(_HOOK,),
             )
 
@@ -273,13 +266,10 @@ class DynamoRouterSweepConfigProvider:
         for name, (value, defaults) in numeric_specs.items():
             if isinstance(value, NumericRange):
                 raw = value.range
-                if raw.step is not None:
-                    points = []
-                    current = raw.min
-                    while current <= raw.max:
-                        points.append(current)
-                        current += raw.step
-                    choices[name] = points
+                if raw.min == raw.max:
+                    choices[name] = [raw.min]
+                elif raw.step is not None:
+                    choices[name] = _stepped_numeric_values(raw.min, raw.max, raw.step)
                 else:
                     ranges[name] = (raw.min, raw.max)
                     if raw.scale == "log":
@@ -356,7 +346,7 @@ class DynamoRouterSweepConfigProvider:
 
         configuration = selection.get("configuration")
         if isinstance(configuration, Mapping):
-            selection = configuration
+            selection = {**selection, **configuration}
 
         mode = str(selection["mode"])
         if mode == "round_robin":
