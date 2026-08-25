@@ -74,13 +74,24 @@ impl EppRouter {
     ) -> Result<Self> {
         let selector = Arc::new(Selector::new(&cfg, policy_registry).await?);
         let (renderer, reflector, reflector_ready) = Self::dependencies(&cfg).await?;
-        Ok(Self::from_selector_parts(
-            cfg,
+        let peer_ready = selector.peer_ready();
+        let defaults = RegistrationDefaults::from_config(&cfg);
+        let adapter =
+            TopologyAdapter::spawn(reflector.as_ref().clone(), selector.clone(), defaults);
+
+        // Readiness is driven solely by the live pod+pool signal (see `is_ready`);
+        // we do not block startup on a schedulable worker. A valid, empty pool is
+        // ready immediately and returns 503 per-request until capacity appears.
+        Ok(Self {
             renderer,
             reflector,
-            reflector_ready,
             selector,
-        ))
+            _adapter: adapter,
+            reflector_ready,
+            peer_ready,
+            model_name: cfg.model_name,
+            inflight: Arc::new(Semaphore::new(cfg.max_inflight_requests)),
+        })
     }
 
     async fn dependencies(
@@ -96,34 +107,6 @@ impl EppRouter {
         let reflector = Arc::new(reflector);
 
         Ok((renderer, reflector, reflector_ready))
-    }
-
-    fn from_selector_parts(
-        cfg: EppStandaloneConfig,
-        renderer: VllmRenderClient,
-        reflector: Arc<PodDiscovery>,
-        reflector_ready: Arc<AtomicBool>,
-        selector: Arc<Selector>,
-    ) -> Self {
-        let peer_ready = selector.peer_ready();
-
-        let defaults = RegistrationDefaults::from_config(&cfg);
-        let adapter =
-            TopologyAdapter::spawn(reflector.as_ref().clone(), selector.clone(), defaults);
-
-        // Readiness is driven solely by the live pod+pool signal (see `is_ready`);
-        // we do not block startup on a schedulable worker. A valid, empty pool is
-        // ready immediately and returns 503 per-request until capacity appears.
-        Self {
-            renderer,
-            reflector,
-            selector,
-            _adapter: adapter,
-            reflector_ready,
-            peer_ready,
-            model_name: cfg.model_name,
-            inflight: Arc::new(Semaphore::new(cfg.max_inflight_requests)),
-        }
     }
 
     /// Overall EPP readiness for the gRPC health signal: the pod reflector is
