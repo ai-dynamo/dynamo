@@ -24,7 +24,7 @@
 //! and crediting it for a prefix it never cached would be a fiction.
 
 use anyhow::Result;
-use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel};
 
 use crate::epp_standalone_config::{DISAGGREGATED_TOPOLOGY, EppTopologyMode};
 use crate::worker_role::WorkerRole;
@@ -123,6 +123,36 @@ pub(crate) fn kv_router_config_for_role(base: &KvRouterConfig, role: WorkerRole)
                      a KV-event-fed index, and the decode role consumes no KV events"
                 );
             }
+
+            // Two more settings are cross-field validated against knobs this arm
+            // just turned off: `router_prefill_load_model` requires
+            // `router_track_prefill_tokens`, and `serve_indexer` requires
+            // `overlap_score_credit > 0`. Inheriting either would fail the same
+            // validation and take the EPP down at startup.
+            //
+            // Neither is settable from the EPP's only config source today:
+            // `kv_router_config_from_lookup` starts from `KvRouterConfig::default()`
+            // and applies a fixed list of `DYN_ROUTER_*` overrides that does not
+            // include them, so both hold their disabled defaults. Clear them
+            // anyway — the day one of those env knobs is added, the decode
+            // selector should keep building rather than fail on a setting that
+            // only ever described the prefill leg.
+            if cfg.router_prefill_load_model.is_enabled() {
+                cfg.router_prefill_load_model = RouterPrefillLoadModel::None;
+                tracing::warn!(
+                    role = %WorkerRole::Decode,
+                    "Clearing router_prefill_load_model for the decode selector: it estimates \
+                     prefill load from tracked prefill tokens, which this role does not track"
+                );
+            }
+            if cfg.serve_indexer {
+                cfg.serve_indexer = false;
+                tracing::warn!(
+                    role = %WorkerRole::Decode,
+                    "Clearing serve_indexer for the decode selector: it would publish an index \
+                     that no KV event ever reaches"
+                );
+            }
         }
     }
 
@@ -190,6 +220,35 @@ mod tests {
         // Prefill still consumes events, so its TTL is left alone.
         let prefill = kv_router_config_for_role(&base, WorkerRole::Prefill);
         assert_eq!(prefill.router_predicted_ttl_secs, Some(120.0));
+    }
+
+    #[test]
+    fn decode_clears_the_other_settings_its_own_overrides_would_invalidate() {
+        // `router_prefill_load_model` requires `router_track_prefill_tokens` and
+        // `serve_indexer` requires `overlap_score_credit > 0` -- both of which
+        // the decode arm turns off. A base that sets them is valid on its own,
+        // so the failure would land on the decode selector at startup.
+        let mut base = base();
+        base.router_prefill_load_model = RouterPrefillLoadModel::Aic;
+        base.serve_indexer = true;
+        assert!(
+            base.validate_config().is_ok(),
+            "the base itself must be valid"
+        );
+
+        let cfg = kv_router_config_for_role(&base, WorkerRole::Decode);
+        assert!(!cfg.router_prefill_load_model.is_enabled());
+        assert!(!cfg.serve_indexer);
+        assert!(cfg.validate_config().is_ok(), "decode config must build");
+
+        // Prefill keeps both: it tracks prefill tokens and scores overlap.
+        let prefill = kv_router_config_for_role(&base, WorkerRole::Prefill);
+        assert_eq!(
+            prefill.router_prefill_load_model,
+            RouterPrefillLoadModel::Aic
+        );
+        assert!(prefill.serve_indexer);
+        assert!(prefill.validate_config().is_ok());
     }
 
     #[test]
