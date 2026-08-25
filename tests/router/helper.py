@@ -336,7 +336,9 @@ async def wait_for_frontend_ready(
                             logger.info("Chat completions pipeline ready!")
                             return
                     logger.debug(
-                        f"Chat completions not ready yet, status {response.status} (elapsed: {elapsed:.1f}s)"
+                        "Chat completions not ready yet, status %s (elapsed: %.1fs)",
+                        response.status,
+                        elapsed,
                     )
         except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
             logger.debug(f"Error testing chat completions: {e}")
