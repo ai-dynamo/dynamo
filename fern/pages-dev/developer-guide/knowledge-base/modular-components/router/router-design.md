@@ -157,9 +157,9 @@ The KVIndexer has a method `find_matches_for_request`, which takes in tokens and
 
 The KVIndexer supports two backend implementations, selected via `--router-event-threads`:
 
-- **Single-threaded RadixTree** (`--router-event-threads 1`): Events are processed in a dedicated single-threaded tokio runtime via channel-based dispatch. Also supports TTL-based expiration for `--no-router-kv-events` approximate mode.
+- **Single-threaded RadixTree** (`--router-event-threads 1`): Events are processed in a dedicated single-threaded tokio runtime via channel-based dispatch. Also supports TTL retention and experimental per-rank capacity-bounded LRU retention for `--no-router-kv-events` approximate mode.
 
-- **ConcurrentRadixTree** (default, `--router-event-threads N` where N > 1): A thread-safe radix tree with a pool of N worker threads for event processing and approximate routing-decision writes (default: 4). Uses sticky worker routing (events or synthetic approximate writes for the same worker always go to the same thread) to ensure per-worker serialization. Read operations (`find_matches`) execute concurrently with writes.
+- **ConcurrentRadixTree** (default, `--router-event-threads N` where N > 1): A thread-safe radix tree with a pool of N worker threads for event processing and approximate routing-decision writes (default: 4). Uses sticky worker-rank routing so request acquire, output materialization, release, capacity update, and reset operations share one FIFO. Read operations (`find_matches`) execute concurrently with writes.
 
 ### Inter-Router Communication
 

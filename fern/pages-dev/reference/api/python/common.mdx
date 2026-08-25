@@ -303,7 +303,7 @@ immediately after start().
 4. abort()         -- called when a request is cancelled (optional, default no-op)
 5. cleanup()       -- called once on shutdown, release all resources
 
-[`components/src/dynamo/common/backend/engine.py#L154`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L154)
+[`components/src/dynamo/common/backend/engine.py#L155`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L155)
 
 **Public methods**
 
@@ -325,7 +325,7 @@ Command-line arguments.  ``None`` means ``sys.argv[1:]``.
 
 - `tuple[BaseEngine, WorkerConfig]` — A ``(engine, worker_config)`` pair.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L174)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L175)
 
 <h4 id="api-dynamo-common-backend-engine-baseengine-start">start</h4>
 
@@ -347,7 +347,7 @@ from this value rather than hashing host/pid or asking operators for a
 CLI override. The internal mechanism (discovery instance ID) is not
 part of the contract — engines should treat it as opaque.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L189)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L190)
 
 <h4 id="api-dynamo-common-backend-engine-baseengine-abort">abort</h4>
 
@@ -365,7 +365,7 @@ the request is cancelled.  Override to release engine resources
 propagated request metadata snapshot. Mutations made to
 ``context.metadata`` during `generate` are not visible here.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L207)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L208)
 
 <h4 id="api-dynamo-common-backend-engine-baseengine-is-quiescent">is_quiescent</h4>
 
@@ -383,7 +383,7 @@ Whether in-flight KV transfers are done, so `cleanup` may release GPU memory. Th
 Aggregated/decode workers are never polled. Override only if the engine
 can observe transfer completion.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L219)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L220)
 
 <h4 id="api-dynamo-common-backend-engine-baseengine-cleanup">cleanup</h4>
 
@@ -413,7 +413,7 @@ another ``cleanup()`` — ``Worker``'s state machine serializes
 those transitions. The conformance kit asserts that a second
 ``cleanup()`` call after a successful first is a safe no-op.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L234)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L235)
 
 <h4 id="api-dynamo-common-backend-engine-baseengine-register-prometheus">register_prometheus</h4>
 
@@ -428,7 +428,7 @@ Framework-owned lifecycle + per-rank gauges
 are owned and registered by the framework Rust-side — they do NOT
 require the engine to implement this method.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L260)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L261)
 
 <h4 id="api-dynamo-common-backend-engine-baseengine-component-metrics-dp-ranks">component_metrics_dp_ranks</h4>
 
@@ -448,7 +448,7 @@ thread — event-driven, no polling.
 ``None`` means "no data yet" or "no prefix cache" (gauge
 skipped), ``0.0`` is a legitimate measurement (zero hits).
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L271)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L272)
 
 <h4 id="api-dynamo-common-backend-engine-baseengine-attach-snapshot-publisher">attach_snapshot_publisher</h4>
 
@@ -462,7 +462,7 @@ Only invoked when `component_metrics_dp_ranks` returns
 non-empty. Default is no-op so engines that opt out don't need
 to override.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L286)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L287)
 
 <h4 id="api-dynamo-common-backend-engine-baseengine-health-check-payload">health_check_payload</h4>
 
@@ -472,7 +472,7 @@ health_check_payload() -> Optional[dict[str, Any]]
 
 Canary payload the runtime sends through `generate` when the endpoint is idle. Return ``None`` (default) to disable active probing. ``Worker`` calls this once after `start` and resolves ``DYN_HEALTH_CHECK_PAYLOAD`` / ``--health-check-payload`` overrides on top.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L297)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L298)
 
 <h4 id="api-dynamo-common-backend-engine-baseengine-supported-controls">supported_controls</h4>
 
@@ -485,7 +485,7 @@ Return the set of engine-control capability keys this engine supports.
 Controls are semantic operations on the engine's serving lifecycle.
 Engines advertise the keys they implement.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L305)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L306)
 
 <h4 id="api-dynamo-common-backend-engine-baseengine-engine-control">engine_control</h4>
 
@@ -495,7 +495,7 @@ engine_control(control: str, body: dict[str, Any]) -> dict[str, Any]
 
 Handle one advertised engine-control request.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L313)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L314)
 
 <h4 id="api-dynamo-common-backend-engine-baseengine-supported-updates">supported_updates</h4>
 
@@ -509,7 +509,7 @@ Updates are a sibling surface to `supported_controls` for
 operations that mutate engine-managed assets rather than the engine's
 serving lifecycle. Engines advertise the keys they implement.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L322)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L323)
 
 <h4 id="api-dynamo-common-backend-engine-baseengine-engine-update">engine_update</h4>
 
@@ -519,7 +519,7 @@ engine_update(update: str, body: dict[str, Any]) -> dict[str, Any]
 
 Handle one advertised engine-update request.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L331)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L332)
 
 <h4 id="api-dynamo-common-backend-engine-baseengine-on-endpoint-ready">on_endpoint_ready</h4>
 
@@ -533,7 +533,7 @@ Default no-op. Engines that publish their own discovery records stash
 it for use from `engine_update`. ``Worker`` calls this exactly
 once; a raised exception is fatal to startup.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L338)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L339)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-diffusionengine" title="DiffusionEngine (class)">
@@ -543,7 +543,7 @@ A `RawEngine` for diffusion-family generation (image/video via VisualGen, DiffGe
 from dynamo.common.backend import DiffusionEngine
 ```
 
-[`components/src/dynamo/common/backend/engine.py#L427`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L427)
+[`components/src/dynamo/common/backend/engine.py#L428`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L428)
 </Accordion>
 
 <Accordion id="api-dynamo-common-constants-disaggregationmode" title="DisaggregationMode (class)">
@@ -581,7 +581,7 @@ The neutral fields (``model``, ``served_model_name``, ``model_aliases``,
 ``runtime_data``) apply to every modality; token-pipeline metadata lives in
 the optional `llm` sub-record, which raw media engines leave ``None``.
 
-[`components/src/dynamo/common/backend/engine.py#L135`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L135)
+[`components/src/dynamo/common/backend/engine.py#L136`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L136)
 
 **Public methods**
 
@@ -962,7 +962,7 @@ The token pipeline: the Rust preprocessor tokenizes the prompt and sets
 the Rust postprocessor detokenizes. Registered with
 ``ModelInput.Tokens`` and served through the token request adapter.
 
-[`components/src/dynamo/common/backend/engine.py#L347`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L347)
+[`components/src/dynamo/common/backend/engine.py#L348`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L348)
 
 **Public methods**
 
@@ -980,7 +980,7 @@ Each chunk: ``{"token_ids": [...], "index": 0}``
 Final chunk must include: ``&#123;"token_ids": [...], "index": 0,
 "finish_reason": "...", "completion_usage": &#123;...&#125;&#125;``
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L356)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L357)
 
 <h4 id="api-dynamo-common-backend-engine-llmengine-kv-event-sources">kv_event_sources</h4>
 
@@ -990,7 +990,7 @@ kv_event_sources() -> list[KvEventSource]
 
 KV event sources, one per data-parallel rank. Default opts out of KV-aware routing. ``Worker`` calls once after `start`.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L371)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L372)
 
 <h4 id="api-dynamo-common-backend-engine-llmengine-logits-processor-spec">logits_processor_spec</h4>
 
@@ -1006,7 +1006,7 @@ and caches the specification during startup, then passes it to
 engine integration remains responsible for realizing each entry into
 its inference library's processor type.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L376)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L377)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-llmregistration" title="LlmRegistration (class)">
@@ -1922,7 +1922,7 @@ framework path; one engine may serve several modalities. Yield one
 (terminal) object, or intermediate progress objects ending with a terminal
 one. Subclasses like `DiffusionEngine` add no contract.
 
-[`components/src/dynamo/common/backend/engine.py#L397`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L397)
+[`components/src/dynamo/common/backend/engine.py#L398`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L398)
 
 **Public methods**
 
@@ -1940,7 +1940,7 @@ Yield response object(s) for a single raw-media request.
 one (terminal) object; for streaming modalities yield intermediate
 progress objects ending with the terminal one.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L411)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py#L412)
 </Accordion>
 
 <Accordion id="api-dynamo-common-forward-pass-metrics-scheduledrequestmetrics" title="ScheduledRequestMetrics (class)">
