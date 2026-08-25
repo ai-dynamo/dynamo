@@ -30,6 +30,7 @@ on:
           - latency
           - trtllm
           - novolume-latency
+          - novolume-trtllm-inline
         default: none
 
 env:
@@ -79,6 +80,45 @@ jobs:
           for probe in $(seq -w 1 10); do
             echo "CANARY_PROBE_${probe}=$(date +%s%3N)" >> "$GITHUB_ENV"
           done
+
+  novolume-trtllm-inline:
+    if: inputs.standard_hook_canary == 'novolume-trtllm-inline'
+    name: No-volume TensorRT-LLM inline canary
+    runs-on: prod-tester-amd-gpu-v2
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    container:
+      image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:0d2a46844c7a2627467a8b9d394152218e49ea54-trtllm-runtime-test
+      env:
+        HOME: /__w/dynamo/dynamo
+        USER: dynamo
+        HF_XET_HIGH_PERFORMANCE: '1'
+    services:
+      minio:
+        image: ${{ vars.ECR_REGISTRY }}/quay/minio/minio:latest
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+          MINIO_VOLUMES: /tmp/minio-data
+          MINIO_CONSOLE_ADDRESS: ':9001'
+    steps:
+      - name: Checkout canary driver
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Run sanity and TensorRT-LLM test stages
+        timeout-minutes: 35
+        shell: bash
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/novolume-trtllm-canary.sh"
+      - name: Upload combined test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: test-results-trtllm-inline-${{ github.run_id }}-${{ job.check_run_id }}
+          path: test-results/
+          retention-days: 7
+          if-no-files-found: warn
 
   standard-hook-latency:
     if: inputs.standard_hook_canary == 'latency'
