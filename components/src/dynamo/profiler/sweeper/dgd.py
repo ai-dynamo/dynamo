@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import importlib
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import yaml
 
 _SUPPORTED_BACKENDS = frozenset({"sglang", "trtllm", "vllm"})
+DGDRenderer = Literal["aic", "direct"]
 
 
 class CandidateLike(Protocol):
@@ -34,7 +35,7 @@ class DGDMaterializationOptions:
     dynamo_version: str
     num_gpus_per_node: int
     namespace: str | None = None
-    name_prefix: str = "sweeper-candidate"
+    name_prefix: str = "sweeper-dgd"
 
     def __post_init__(self) -> None:
         if self.backend not in _SUPPORTED_BACKENDS:
@@ -68,6 +69,20 @@ def _load_generator_api() -> tuple[Any, Any]:
         raise RuntimeError(
             "DGD materialization requires an AISimulate release containing "
             "the Sweeper candidate generator bridge (ai-dynamo/aisimulate#11)"
+        ) from exc
+
+
+def _load_direct_renderer_api() -> tuple[type[Exception], Any]:
+    """Load the v1 config-modifier adapter only when explicitly selected."""
+    try:
+        materializer = importlib.import_module("dynamo.profiler.v2.materializer")
+        return (
+            materializer.MaterializationError,
+            materializer.materialize_dgd_from_candidate,
+        )
+    except (AttributeError, ModuleNotFoundError) as exc:
+        raise RuntimeError(
+            "the direct DGD renderer requires a complete Dynamo Python installation"
         ) from exc
 
 
@@ -148,14 +163,20 @@ def materialize_candidate_dgd(
     options: DGDMaterializationOptions,
     *,
     candidate_index: int,
+    renderer: DGDRenderer = "aic",
 ) -> str:
-    """Lower one evaluated Candidate through AISimulate's typed generator bridge.
+    """Lower one evaluated Candidate into a DynamoGraphDeployment.
 
     The Candidate's backend version identifies both its performance data and the
     engine CLI template. ``dynamo_version`` separately describes the Dynamo
     runtime carried by the target image and becomes ``runtimeVersionOverride``.
     """
     _validate_candidate_target(candidate, options)
+    if renderer == "direct":
+        return _materialize_direct(candidate, options, candidate_index=candidate_index)
+    if renderer != "aic":
+        raise CandidateMaterializationError(f"unknown DGD renderer {renderer!r}")
+
     from_sweeper_candidate, generate_from_request = _load_generator_api()
     request = from_sweeper_candidate(
         candidate,
@@ -171,6 +192,31 @@ def materialize_candidate_dgd(
         )
     return _patch_dgd_manifest(
         rendered,
+        options,
+        candidate_index=candidate_index,
+    )
+
+
+def _materialize_direct(
+    candidate: CandidateLike,
+    options: DGDMaterializationOptions,
+    *,
+    candidate_index: int,
+) -> str:
+    """Lower a Candidate directly through Dynamo's v1 config modifiers."""
+    MaterializationError, materialize_dgd_from_candidate = _load_direct_renderer_api()
+
+    try:
+        result = materialize_dgd_from_candidate(
+            candidate.config,
+            image=options.backend_image,
+            num_gpus_per_node=options.num_gpus_per_node,
+        )
+    except MaterializationError as exc:
+        raise CandidateMaterializationError(str(exc)) from exc
+
+    return _patch_dgd_manifest(
+        yaml.safe_dump(result.dgd, sort_keys=False),
         options,
         candidate_index=candidate_index,
     )
