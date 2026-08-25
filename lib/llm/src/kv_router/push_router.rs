@@ -1281,35 +1281,6 @@ where
     }
 }
 
-/// A direct routing wrapper for `RouterMode::Direct`.
-///
-/// This wraps a `PushRouter` and reads worker IDs from each request's routing hints,
-/// then routes directly to the specified worker. Used when an external router
-/// (e.g., EPP) handles worker selection.
-pub struct DirectRoutingRouter {
-    inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-}
-
-impl DirectRoutingRouter {
-    pub fn new(inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>) -> Self {
-        DirectRoutingRouter { inner }
-    }
-
-    /// Extract worker ID from request routing hints.
-    /// Returns an error if no worker ID is found (required in direct routing mode).
-    fn get_worker_id(request: &PreprocessedRequest) -> Result<u64, Error> {
-        let routing = request.routing.as_ref();
-        let worker_id = routing.and_then(|r| r.decode_worker_id.or(r.backend_instance_id));
-
-        worker_id.ok_or_else(|| {
-            anyhow::anyhow!(
-                "Worker ID required (--direct-route) but none found in request. \
-                 Expected decode_worker_id or backend_instance_id to be set by external router (e.g., EPP)."
-            )
-        })
-    }
-}
-
 fn response_item_failed(item: &Annotated<LLMEngineOutput>) -> bool {
     item.error.is_some()
         || item.event.as_deref() == Some("error")
@@ -1320,22 +1291,6 @@ fn response_item_failed(item: &Annotated<LLMEngineOutput>) -> bool {
             .is_some_and(|reason| {
                 matches!(reason, FinishReason::Error(_) | FinishReason::Cancelled)
             })
-}
-
-#[async_trait]
-impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
-    for DirectRoutingRouter
-{
-    async fn generate(
-        &self,
-        request: SingleIn<PreprocessedRequest>,
-    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        let worker_id = Self::get_worker_id(&request)?;
-
-        tracing::debug!(worker_id = worker_id, "Direct routing to specified worker");
-
-        self.inner.direct(request, worker_id).await
-    }
 }
 
 #[cfg(test)]

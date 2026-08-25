@@ -1908,7 +1908,7 @@ where
             }
             RouterMode::Direct => {
                 anyhow::bail!(
-                    "Direct routing should not call generate on PushRouter directly; use DirectRoutingRouter wrapper"
+                    "Direct routing should not call generate on PushRouter directly; use RoutingHost"
                 );
             }
             RouterMode::LeastLoaded => self.least_loaded(request).await,
@@ -1981,7 +1981,7 @@ where
             }
             RouterMode::Direct => {
                 anyhow::bail!(
-                    "Direct routing should not call generate on PushRouter directly; use DirectRoutingRouter wrapper"
+                    "Direct routing should not call generate on PushRouter directly; use RoutingHost"
                 );
             }
             // These modes drive `select_next_worker()` to `None` — they rely on
