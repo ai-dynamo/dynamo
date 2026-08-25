@@ -75,7 +75,10 @@ use crate::protocols::{
     TokenIdType,
     common::{
         OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
-        extensions::{AgentHints, NvExtProvider, request_cache_salt, routing_constraints_to_kv},
+        extensions::{
+            AgentHints, NvExtProvider, merge_response_nvext, request_cache_salt,
+            routing_constraints_to_kv,
+        },
     },
     openai::{
         DeltaGeneratorExt,
@@ -4237,9 +4240,9 @@ impl OpenAIPreprocessor {
     /// `Annotated<CreateChatCompletionStreamResponse>`, runs the moved jail, and
     /// re-wraps the result.
     ///
-    /// `nvext` is not populated on the streaming tool-call path (only the unary
-    /// aggregator/anthropic paths set it), so the jail never needs to preserve
-    /// it and re-wrapped chunks carry `nvext: None`.
+    /// The shared jail type has no slot for Dynamo's `nvext` response metadata.
+    /// Buffer and merge it at this boundary, just like `llm_metrics`, so parser
+    /// buffering cannot drop RL token identity or other requested extensions.
     pub fn apply_tool_calling_jail<S>(
         tool_call_parser: Option<String>,
         tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
@@ -4270,11 +4273,12 @@ impl OpenAIPreprocessor {
         // annotation form on data-less usage chunks rides through untouched via
         // `event`/`comment`.)
         #[derive(Default)]
-        struct PendingMetrics {
-            template: Option<LLMMetricAnnotation>,
+        struct PendingMetadata {
+            metrics: Option<LLMMetricAnnotation>,
             chunk_tokens: usize,
+            nvext: Option<serde_json::Value>,
         }
-        let pending = Arc::new(Mutex::new(PendingMetrics::default()));
+        let pending = Arc::new(Mutex::new(PendingMetadata::default()));
         let pending_in = Arc::clone(&pending);
 
         // Per-choice recovery state — allocated only for glm47 since only that
@@ -4304,12 +4308,19 @@ impl OpenAIPreprocessor {
         let choice_recovery_in = Arc::clone(&choice_recovery);
         let glm47_start_jail = glm47_start.clone();
 
-        // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer llm_metrics)
+        // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer metadata)
         let jail_input = stream.map(move |mut a| {
-            if let Some(metrics) = a.data.as_mut().and_then(|nv| nv.llm_metrics.take()) {
-                let mut p = pending_in.lock().expect("jail metrics buffer poisoned");
-                p.chunk_tokens = p.chunk_tokens.saturating_add(metrics.chunk_tokens);
-                p.template = Some(metrics);
+            if let Some(data) = a.data.as_mut() {
+                let metrics = data.llm_metrics.take();
+                let nvext = data.nvext.take();
+                if metrics.is_some() || nvext.is_some() {
+                    let mut p = pending_in.lock().expect("jail metadata buffer poisoned");
+                    if let Some(metrics) = metrics {
+                        p.chunk_tokens = p.chunk_tokens.saturating_add(metrics.chunk_tokens);
+                        p.metrics = Some(metrics);
+                    }
+                    merge_response_nvext(&mut p.nvext, nvext);
+                }
             }
             // Buffer input content only for glm47 (truncation recovery).
             // Only retain from the last <tool_call> marker onward to bound
@@ -4351,7 +4362,7 @@ impl OpenAIPreprocessor {
             }
         });
 
-        // jail `Annotated<Create>` -> dynamo `Annotated<Nv>` (re-attach llm_metrics)
+        // jail `Annotated<Create>` -> dynamo `Annotated<Nv>` (re-attach metadata)
         jail_apply(
             tool_call_parser,
             tool_choice,
@@ -4360,21 +4371,24 @@ impl OpenAIPreprocessor {
             jail_input,
         )
         .flat_map(move |a| {
-            // Stamp the accumulated metrics onto the next emitted data chunk;
-            // data-less/synthesized chunks carry it forward (or `None`).
-            let llm_metrics = a.data.as_ref().and_then(|_| {
-                let mut p = pending.lock().expect("jail metrics buffer poisoned");
+            // Stamp accumulated metadata onto the next emitted data chunk;
+            // data-less/synthesized chunks carry it forward.
+            let (llm_metrics, nvext) = if a.data.is_some() {
+                let mut p = pending.lock().expect("jail metadata buffer poisoned");
                 let chunk_tokens = p.chunk_tokens;
                 p.chunk_tokens = 0;
-                p.template.take().map(|mut metrics| {
+                let metrics = p.metrics.take().map(|mut metrics| {
                     metrics.chunk_tokens = chunk_tokens;
                     metrics
-                })
-            });
+                });
+                (metrics, p.nvext.take())
+            } else {
+                (None, None)
+            };
             let mut nv_chunk = Annotated {
                 data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
                     inner,
-                    nvext: None,
+                    nvext,
                     llm_metrics,
                 }),
                 id: a.id,
@@ -6079,6 +6093,45 @@ mod tests {
         OpenAIPreprocessor::apply_tool_call_response_policy(jailed, tool_call_parsing_enabled)
             .collect()
             .await
+    }
+
+    #[tokio::test]
+    async fn test_tool_calling_jail_preserves_nvext_metadata() {
+        let mut first = kimi_k3_reasoning_chunk("reasoning");
+        first.data.as_mut().unwrap().nvext = Some(serde_json::json!({
+            "completion_token_ids": [101]
+        }));
+
+        let mut terminal = terminal_chat_stream_chunk();
+        terminal.data.as_mut().unwrap().nvext = Some(serde_json::json!({
+            "completion_token_ids": [102],
+            "prompt_token_ids": [11, 12],
+            "prompt_logprobs": [null, []]
+        }));
+
+        let output: Vec<_> = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("kimi_k3".to_string()),
+            None,
+            None,
+            false,
+            stream::iter(vec![first, terminal]),
+        )
+        .collect()
+        .await;
+
+        let mut merged = None;
+        for response in output {
+            merge_response_nvext(&mut merged, response.data.and_then(|chunk| chunk.nvext));
+        }
+
+        assert_eq!(
+            merged,
+            Some(serde_json::json!({
+                "completion_token_ids": [101, 102],
+                "prompt_token_ids": [11, 12],
+                "prompt_logprobs": [null, []]
+            }))
+        );
     }
 
     #[tokio::test]
