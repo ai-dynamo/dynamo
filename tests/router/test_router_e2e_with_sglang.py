@@ -378,7 +378,12 @@ def test_router_decisions_sglang_dp(
 @pytest.mark.h100
 @pytest.mark.gpu_2
 @pytest.mark.nightly
-@pytest.mark.profiled_vram_gib(12.0)
+# Profiled peak is ~12.0 GiB per GPU, but deliberately NOT declared via
+# profiled_vram_gib: that marker opts a test into the parallel GPU stage, which
+# pins one GPU per test. This test spans GPUs 0 and 1 through explicit
+# CUDA_VISIBLE_DEVICES overrides, so it must stay on the sequential H100 lane.
+# Keep the KV-token marker: it is inert on the sequential lane and documents the
+# budget that SGLANG_ARGS["max_total_tokens"] encodes.
 @pytest.mark.requested_sglang_kv_tokens(2048)
 @pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
 @pytest.mark.timeout(600)
@@ -410,10 +415,20 @@ def test_router_decisions_sglang_disagg(
             "disaggregation_mode": "decode",
         },
         # SGLang disaggregated responses do not yet expose the complete timing
-        # telemetry; this test covers NATS routing and worker separation.
-        # Prefill model loading also performs a disaggregated warmup, so allow
-        # startup contention without consuming the test's full 600s budget.
-        test_kwargs={"verify_timing": False, "frontend_timeout": 300},
+        # telemetry, so this test covers NATS routing and worker separation only.
+        # Note this opts out of the timing path entirely, not just the assertion:
+        # verify_timing=False also drops "timing" from nvext.extra_fields, so
+        # SGLang disagg exercises no timing serialization at all. vLLM and
+        # TensorRT-LLM keep the default and still cover it. TODO(#13570): file and
+        # link a tracking issue for the SGLang gap, then restore verification.
+        #
+        # Prefill model loading also performs a disaggregated warmup, which did not
+        # finish inside the previous 120s readiness budget. frontend_timeout is a
+        # per-phase bound, not a total: discovery spends it once for prefill and
+        # once for decode, then the frontend probes share one more. 180s therefore
+        # caps readiness at 540s, leaving headroom under the 600s pytest timeout so
+        # a slow start still fails diagnosably instead of tripping the test timeout.
+        test_kwargs={"verify_timing": False, "frontend_timeout": 180},
     )
 
 
