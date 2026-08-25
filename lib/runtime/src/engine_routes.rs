@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Once, RwLock};
+use std::sync::{Arc, RwLock};
 
 use crate::config::environment_names::runtime::engine_routes as env_engine_routes;
 
@@ -69,7 +69,7 @@ impl EngineRoutePolicy {
             );
         }
 
-        if disable_all {
+        let policy = if disable_all {
             EngineRoutePolicy::DisableAll
         } else if let Some(allow) = allow {
             EngineRoutePolicy::Allowlist(allow)
@@ -77,7 +77,13 @@ impl EngineRoutePolicy {
             EngineRoutePolicy::Denylist(deny)
         } else {
             EngineRoutePolicy::AllowAll
+        };
+        // Log a restrictive policy so operators can eyeball the parsed set (and spot typos —
+        // an unrecognized name simply never matches a registered route).
+        if policy != EngineRoutePolicy::AllowAll {
+            tracing::info!(?policy, "Engine-route policy in effect");
         }
+        policy
     }
 
     /// Whether `route` (the full route string after `/engine/`) is permitted by this policy.
@@ -87,15 +93,6 @@ impl EngineRoutePolicy {
             EngineRoutePolicy::DisableAll => false,
             EngineRoutePolicy::Allowlist(set) => set.contains(route),
             EngineRoutePolicy::Denylist(set) => !set.contains(route),
-        }
-    }
-
-    /// The set of route names this policy explicitly references (allow/deny entries), if any.
-    /// Used to warn about names that match no registered route.
-    fn configured_routes(&self) -> Option<&HashSet<String>> {
-        match self {
-            EngineRoutePolicy::Allowlist(set) | EngineRoutePolicy::Denylist(set) => Some(set),
-            EngineRoutePolicy::AllowAll | EngineRoutePolicy::DisableAll => None,
         }
     }
 }
@@ -135,11 +132,10 @@ pub type EngineRouteCallback = Arc<
 #[derive(Clone)]
 pub struct EngineRouteRegistry {
     routes: Arc<RwLock<HashMap<String, EngineRouteCallback>>>,
-    /// Operator policy resolved once from the environment at construction.
+    /// Operator policy resolved once from the environment at construction. Behind an `Arc`
+    /// so cloning the registry (it travels with the cheaply-`Clone` `DistributedRuntime`)
+    /// doesn't deep-copy the policy's route set.
     policy: Arc<EngineRoutePolicy>,
-    /// Guards the one-time "unrecognized configured route" warning, which is emitted lazily
-    /// on the first policy check (by which point the registry is populated).
-    warned_unrecognized: Arc<Once>,
 }
 
 impl Default for EngineRouteRegistry {
@@ -159,7 +155,6 @@ impl EngineRouteRegistry {
         Self {
             routes: Arc::new(RwLock::new(HashMap::new())),
             policy: Arc::new(policy),
-            warned_unrecognized: Arc::new(Once::new()),
         }
     }
 
@@ -169,40 +164,8 @@ impl EngineRouteRegistry {
     }
 
     /// Whether `route` is permitted by the resolved policy.
-    ///
-    /// On the first call, emits a one-time warning naming any allow/deny entries that match
-    /// no registered route (usually a typo, and a false sense of hardening). The registry is
-    /// populated by the time the first `/engine/*` request arrives, so the check is accurate.
     pub fn is_allowed(&self, route: &str) -> bool {
-        self.warn_unrecognized_once();
         self.policy.is_allowed(route)
-    }
-
-    /// Emit, at most once, a warning for configured allow/deny names that no registered
-    /// route matches.
-    fn warn_unrecognized_once(&self) {
-        self.warned_unrecognized.call_once(|| {
-            let Some(configured) = self.policy.configured_routes() else {
-                return;
-            };
-            let registered: HashSet<String> = {
-                let routes = self.routes.read().unwrap();
-                routes.keys().cloned().collect()
-            };
-            let mut unrecognized: Vec<&str> = configured
-                .iter()
-                .filter(|r| !registered.contains(*r))
-                .map(String::as_str)
-                .collect();
-            if !unrecognized.is_empty() {
-                unrecognized.sort_unstable();
-                tracing::warn!(
-                    "Engine-route policy references route(s) that are not registered: {} \
-                     (check for typos; these entries have no effect)",
-                    unrecognized.join(", ")
-                );
-            }
-        });
     }
 
     /// Register a callback for a route (e.g., "control/start_profile" for /engine/control/start_profile)
