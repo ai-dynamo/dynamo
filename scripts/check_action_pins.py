@@ -147,6 +147,9 @@ CASES: list[tuple[str, bool]] = [
         False,
     ),
     ("      uses: ./.github/actions/docker-build", False),
+    # The repo's self-repository shorthand; see .github/actionlint.yaml.
+    ("    uses: $/.github/workflows/shared-test.yml", False),
+    ("      - uses: $/.github/actions/pytest", False),
     ("        run: echo 'uses: actions/checkout@v4 in a string'", False),
     # Mutable refs.
     ("      - uses: actions/checkout@v4", True),
