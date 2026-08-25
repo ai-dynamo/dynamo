@@ -5,7 +5,7 @@
 //!
 //! The public body is parsed only far enough to project Dynamo routing controls;
 //! engine-owned fields stay opaque and are forwarded to the SGLang worker.
-//! Only SGLang's incremental SSE mode is currently exposed.
+//! Both SGLang's aggregate JSON and incremental SSE modes are exposed.
 
 use std::sync::Arc;
 
@@ -245,13 +245,7 @@ async fn handler(
     if let Err(message) = request.validate() {
         return error_response(StatusCode::BAD_REQUEST, message);
     }
-    if !request.stream {
-        return error_response(
-            StatusCode::NOT_IMPLEMENTED,
-            "non-streaming SGLang generate requests are not implemented; set stream=true"
-                .to_string(),
-        );
-    }
+    let streaming = request.stream;
 
     let models = canonical_generate_models(
         state.manager(),
@@ -316,7 +310,11 @@ async fn handler(
     let cancellation_labels = CancellationLabels {
         model: state.manager().metric_model_for(&model).to_string(),
         endpoint: super::metrics::Endpoint::Generate.to_string(),
-        request_type: "streaming".to_string(),
+        request_type: if streaming {
+            "streaming".to_string()
+        } else {
+            "unary".to_string()
+        },
     };
     let (mut connection_handle, stream_handle) = create_connection_monitor(
         engine_context,
@@ -338,6 +336,7 @@ async fn handler(
             model,
             state.clone(),
             stream_handle,
+            streaming,
         )
         .instrument(dispatch_span),
     )
@@ -361,11 +360,12 @@ async fn dispatch(
     model: String,
     state: Arc<service_v2::State>,
     stream_handle: ConnectionHandle,
+    streaming: bool,
 ) -> Response {
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
         state.manager().metric_model_for(&model),
         super::metrics::Endpoint::Generate,
-        true,
+        streaming,
         &request_id,
     );
     let request_context = context.context();
@@ -423,23 +423,86 @@ async fn dispatch(
     };
 
     let engine_context = stream.context();
-    let stream = SglangGenerateStream::from_annotated_stream(stream).map(|result| {
-        result
-            .map(|value| Event::default().data(value.to_string()))
-            .map_err(axum::Error::new)
-    });
-    let stream = monitor_for_disconnects_with_error(
-        stream,
-        engine_context,
-        inflight_guard,
-        stream_handle,
-        stream_error,
-    );
-    let mut response = Sse::new(stream);
-    if let Some(keep_alive) = state.sse_keep_alive() {
-        response = response.keep_alive(KeepAlive::default().interval(keep_alive));
+    if streaming {
+        let stream = SglangGenerateStream::from_annotated_stream(stream).map(|result| {
+            result
+                .map(|value| Event::default().data(value.to_string()))
+                .map_err(axum::Error::new)
+        });
+        let stream = monitor_for_disconnects_with_error(
+            stream,
+            engine_context,
+            inflight_guard,
+            stream_handle,
+            stream_error,
+        );
+        let mut response = Sse::new(stream);
+        if let Some(keep_alive) = state.sse_keep_alive() {
+            response = response.keep_alive(KeepAlive::default().interval(keep_alive));
+        }
+        return response.into_response();
     }
-    response.into_response()
+
+    let response_result = match run_until_killed(
+        request_context.as_ref(),
+        SglangGenerateStream::unary_from_annotated_stream(stream),
+    )
+    .await
+    {
+        Some(result) => result,
+        None => {
+            inflight_guard.mark_error(ErrorType::Cancelled);
+            return cancelled_response();
+        }
+    };
+    match response_result {
+        Ok(response) => {
+            if request_context.is_killed() || engine_context.is_killed() {
+                inflight_guard.mark_error(ErrorType::Cancelled);
+                return cancelled_response();
+            }
+            inflight_guard.mark_ok();
+            Json(response).into_response()
+        }
+        Err(error) => {
+            let was_cancelled = request_context.is_killed()
+                || engine_context.is_killed()
+                || super::metrics::request_was_cancelled(&error);
+            let was_rejected = super::metrics::request_was_rejected(&error);
+            let invalid_argument = find_invalid_argument_in_chain(&error);
+            inflight_guard.mark_error(if was_cancelled {
+                ErrorType::Cancelled
+            } else if was_rejected {
+                ErrorType::Unavailable
+            } else if invalid_argument.is_some() {
+                ErrorType::Validation
+            } else {
+                ErrorType::Internal
+            });
+            if was_cancelled {
+                return cancelled_response();
+            }
+            if was_rejected {
+                tracing::warn!(%request_id, error = %error, "engine rejected non-streaming SGLang generate request");
+                state
+                    .metrics_clone()
+                    .inc_rejection(&model, super::metrics::Endpoint::Generate);
+                return error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "engine rejected the request".to_string(),
+                );
+            }
+            if let Some(invalid_argument) = invalid_argument {
+                tracing::warn!(%request_id, error = %error, "engine rejected invalid non-streaming SGLang generate request");
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    invalid_argument.message().to_string(),
+                );
+            }
+            tracing::error!(%request_id, %error, "failed to collect non-streaming SGLang generate response");
+            internal_error_response()
+        }
+    }
 }
 
 #[cfg(test)]

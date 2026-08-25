@@ -53,7 +53,11 @@ def build_native_generate_request(
     payload = dict(native_payload)
     payload["input_ids"] = input_ids
     payload["rid"] = payload.get("rid") or fallback_rid
-    payload["stream"] = True
+    # Preserve the public SGLang request mode. The HTTP adapter owns whether
+    # the native response is returned as SSE or as one aggregate JSON object.
+    # Forcing streaming here makes an otherwise valid non-streaming /generate
+    # request impossible to serve through Dynamo.
+    payload["stream"] = bool(payload.get("stream", False))
     if priority is None:
         payload.pop("priority", None)
     else:

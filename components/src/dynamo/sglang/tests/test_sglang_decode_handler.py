@@ -242,6 +242,7 @@ def test_engine_generate_preserves_native_fields_and_overrides_worker_state():
         "session_id": "session-1",
         "bootstrap_host": "client.example",
         "routed_dp_rank": 7,
+        "stream": False,
     }
 
     native = build_native_generate_request(
@@ -256,7 +257,7 @@ def test_engine_generate_preserves_native_fields_and_overrides_worker_state():
 
     assert native.rid == "resolved-request"
     assert native.input_ids == [7, 8]
-    assert native.stream is True
+    assert native.stream is False
     assert native.priority == 9
     assert native.session_id == "session-1"
     assert native.return_logprob is True
@@ -272,6 +273,14 @@ def test_engine_generate_preserves_native_fields_and_overrides_worker_state():
         "sampling_seed": 17,
         "custom_params": {"future_engine_control": True},
     }
+
+    streaming = build_native_generate_request(
+        {**request, "stream": True},
+        input_ids=[7, 8],
+        fallback_rid="fallback-request",
+        priority=9,
+    )
+    assert streaming.stream is True
 
 
 def test_engine_generate_requires_object_sampling_params_for_prefill_override():

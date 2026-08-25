@@ -38,6 +38,26 @@ impl SglangGenerateStream {
             }
         }
     }
+
+    /// Return the sole native response produced by SGLang's non-streaming
+    /// request mode.
+    pub(crate) async fn unary_from_annotated_stream(
+        stream: impl Stream<Item = Annotated<LLMEngineOutput>>,
+    ) -> Result<Value, DynamoError> {
+        let responses = Self::from_annotated_stream(stream);
+        pin_mut!(responses);
+
+        let response = responses
+            .next()
+            .await
+            .ok_or_else(|| DynamoError::msg("SGLang generate returned no response"))??;
+        if responses.next().await.is_some() {
+            return Err(DynamoError::msg(
+                "non-streaming SGLang generate returned multiple responses",
+            ));
+        }
+        Ok(response)
+    }
 }
 
 #[cfg(test)]
@@ -93,6 +113,47 @@ mod tests {
                 .to_string()
                 .contains("missing opaque SGLang response")
         );
+    }
+
+    #[tokio::test]
+    async fn preserves_one_non_streaming_native_response() {
+        let native_response = serde_json::json!({
+            "text": "complete",
+            "output_ids": [101],
+            "meta_info": {"finish_reason": {"type": "stop"}}
+        });
+        let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+            engine_data: Some(serde_json::json!({
+                "sglang_response": native_response
+            })),
+            ..Default::default()
+        })]);
+
+        let response = SglangGenerateStream::unary_from_annotated_stream(stream)
+            .await
+            .unwrap();
+
+        assert_eq!(response, native_response);
+    }
+
+    #[tokio::test]
+    async fn rejects_multiple_non_streaming_native_responses() {
+        let output = || {
+            Annotated::from_data(LLMEngineOutput {
+                engine_data: Some(serde_json::json!({
+                    "sglang_response": {"text": "chunk"}
+                })),
+                ..Default::default()
+            })
+        };
+        let error = SglangGenerateStream::unary_from_annotated_stream(futures::stream::iter([
+            output(),
+            output(),
+        ]))
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("multiple responses"));
     }
 
     #[tokio::test]
