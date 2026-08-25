@@ -763,10 +763,28 @@ def _select_launches(
                     #     progress until the CI wall-clock kills it. Keeping
                     #     `required` in the line unconditionally is what still
                     #     lets the gang fit the moment the neighbour leaves.
+                    #   * on a device it could NOT take today, the foreign term is
+                    #     dropped -- but the widened line still has to reserve the
+                    #     multi-process margin, because admitting anything at all is
+                    #     what costs the device that margin. With nothing resident,
+                    #     ``_cap`` is the whole card and the device becomes able to
+                    #     host a member as soon as ``foreign <= total_gib - required``.
+                    #     The first admission takes ``running_count`` to 1, ``_cap``
+                    #     falls to ``budget_multi``, and the threshold collapses to
+                    #     ``foreign <= budget_multi - committed - required``. Reserving
+                    #     exactly the forfeited margin floors that at ``total_gib -
+                    #     budget_multi``: the gang can still take the device at any
+                    #     residual foreign hold up to the multi-process margin, which
+                    #     is the guarantee -- and the limit -- of this branch. Dropping
+                    #     the term entirely bought backfill that outlived the device's
+                    #     usefulness; keeping it whole refused every test of every size
+                    #     and stopped the node.
                     committed = ts.budget + test.profiled_gib
                     line = gs.budget_multi - reserved_req[gi]
                     if _usable_now(gi, reserved_req[gi]):
                         line -= _foreign_held(gi)
+                    else:
+                        line -= gs.total_gib - gs.budget_multi
                     if committed > line:
                         continue  # would crowd out the reserved gang
                 elif backfill_added[gi] + test.profiled_gib > cap - reserved_req[gi]:

@@ -2682,6 +2682,76 @@ def test_a_gang_hold_admits_the_same_backfill_however_far_into_the_pass_it_is():
     )
 
 
+@pytest.mark.parametrize("filler_gib", [1.5, 2.0, 3.0])
+def test_a_hold_survives_foreign_memory_retiring_part_way_rather_than_all_at_once(
+    filler_gib,
+):
+    """Backfill admitted on an unusable card must not outlast the card's usefulness.
+
+    Every other test in this file that models foreign memory retiring retires it to
+    exactly ``{}``. Zero is the one value at which admitting up to
+    ``budget_multi - required`` on a card the gang cannot use today stays sufficient,
+    because the gang then needs only ``committed + required <= budget_multi``. For any
+    residual ``F' > 0`` it needs ``F' + committed + required <= budget_multi``, which
+    that bound does not provide.
+
+    The dominant term is not the committed GiB. Admitting *any* VRAM test drives
+    ``running_count`` from 0 to 1, which drops ``_cap`` from ``total_gib`` to
+    ``budget_multi``. The card's feasibility threshold therefore moves from
+    ``F' <= total_gib - required`` to ``F' <= budget_multi - committed - required`` --
+    it loses the multi-process margin *as well as* what was admitted.
+
+    Three 10 GiB cards (``budget_multi`` 8.5) and a gpu_2 gang wanting 6.0 on each.
+    GPU0 is clean; GPU1 and GPU2 carry foreign memory that retires in stages rather
+    than vanishing: 4.5 -> 3.0 -> 1.0 -> 0.0. With one usable card and a gang needing
+    two, the gang is blocked and holds cards.
+
+    The gang first fits at pass 40, when foreign falls to 3.0: an untouched card reads
+    ``3.0 + 6.0 = 9.0`` against the whole-card cap of 10.0. It must launch there. If any
+    test was admitted onto that card while it was unusable, the card instead reads
+    ``3.0 + committed + 6.0`` against 8.5 and the gang waits for it to drain -- which is
+    the regression this pins.
+
+    The filler size is swept because the bound is a specific quantity, not merely a
+    non-zero one. Here ``budget_multi - required - (total_gib - budget_multi)`` is
+    ``8.5 - 6.0 - 1.5 = 1.0``, so every size below refuses. Reserving only *half* the
+    margin would raise the line to 1.75 and admit the 1.5 GiB case, which then delays the
+    gang to pass 60 -- a single fixed size would not tell the two rules apart.
+    """
+    gpus = {gi: _gpu(gi, 10.0) for gi in range(3)}
+    gang = _t("gang", 6.0, timeout=1800, gpus=2)
+    assert _unschedulable_reason(gang, gpus) is None
+
+    def staged(now: int) -> dict[int, float]:
+        if now < 40:
+            held = 4.5
+        elif now < 60:
+            held = 3.0
+        elif now < 80:
+            held = 1.0
+        else:
+            held = 0.0
+        return {1: held, 2: held}
+
+    started = _drive_passes(
+        gpus,
+        [gang],
+        backfill=lambda i: _t(f"fill{i}", filler_gib, timeout=1800.0),
+        passes=400,
+        external_hold=staged,
+    )
+
+    assert (
+        "gang" in started
+    ), "gang never launched, though from pass 40 onward two cards could host a member"
+    assert started["gang"] <= 41, (
+        f"gang launched on pass {started['gang']}, not on pass 40 when foreign memory "
+        "first fell far enough for two cards to take a member. Backfill admitted while "
+        "those cards were unusable both consumed capacity and cost them the "
+        "whole-card cap, so the gang waited for it to drain instead"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # the assignment has to survive into the WORKERS, not just be derived
 #
