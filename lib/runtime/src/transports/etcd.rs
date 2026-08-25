@@ -33,7 +33,7 @@ pub use lock::*;
 use super::utils::build_in_runtime;
 use crate::config::environment_names::etcd as env_etcd;
 
-const STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
 const STARTUP_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const STARTUP_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const WATCH_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
@@ -95,13 +95,15 @@ impl Client {
         })
     }
 
-    /// Connect to etcd during startup, retrying with exponential backoff for up to 2 minutes.
+    /// Connect to etcd during startup, retrying with exponential backoff until the configured
+    /// startup deadline.
     async fn connect_with_startup_retry(
         config: &ClientOptions,
         runtime: Runtime,
     ) -> Result<(Arc<Connector>, u64)> {
         let token = runtime.primary_token();
-        let deadline = Instant::now() + STARTUP_CONNECT_TIMEOUT;
+        let timeout = config.startup_connect_timeout;
+        let deadline = Instant::now() + timeout;
         let mut backoff = STARTUP_CONNECT_INITIAL_BACKOFF;
 
         loop {
@@ -109,7 +111,34 @@ impl Client {
                 anyhow::bail!("etcd startup connection cancelled");
             }
 
-            let attempt = Self::connect_startup_attempt(config, &runtime).await;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                anyhow::bail!(
+                    "etcd startup connection timed out after {} seconds",
+                    timeout.as_secs_f64()
+                );
+            }
+
+            let attempt = tokio::select! {
+                biased;
+
+                _ = token.cancelled() => {
+                    anyhow::bail!("etcd startup connection cancelled");
+                }
+
+                result = tokio::time::timeout(
+                    remaining,
+                    Self::connect_startup_attempt(config, &runtime),
+                ) => {
+                    match result {
+                        Ok(result) => result,
+                        Err(_) => anyhow::bail!(
+                            "etcd startup connection timed out after {} seconds",
+                            timeout.as_secs_f64()
+                        ),
+                    }
+                }
+            };
 
             match attempt {
                 Ok(connection) => return Ok(connection),
@@ -834,6 +863,10 @@ pub struct ClientOptions {
     /// Lease TTL in seconds
     #[builder(default = "default_lease_ttl()")]
     pub lease_ttl: u64,
+
+    /// Maximum duration for the initial connection and lease creation retry loop.
+    #[builder(default = "default_startup_connect_timeout()")]
+    pub startup_connect_timeout: Duration,
 }
 
 impl Default for ClientOptions {
@@ -866,6 +899,7 @@ impl Default for ClientOptions {
             etcd_connect_options: connect_options,
             attach_lease: true,
             lease_ttl: default_lease_ttl(),
+            startup_connect_timeout: default_startup_connect_timeout(),
         }
     }
 }
@@ -902,6 +936,40 @@ fn default_lease_ttl() -> u64 {
         },
         Err(_) => 10,
     }
+}
+
+fn startup_connect_timeout_from_value(value: Option<&str>) -> Duration {
+    match value {
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(seconds) if seconds > 0 => Duration::from_secs(seconds),
+            Ok(_) => {
+                tracing::warn!(
+                    "{} must be >= 1; got 0. Falling back to {}.",
+                    env_etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS,
+                    DEFAULT_STARTUP_CONNECT_TIMEOUT.as_secs()
+                );
+                DEFAULT_STARTUP_CONNECT_TIMEOUT
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "Invalid {}='{}' ({error}). Falling back to {}.",
+                    env_etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS,
+                    raw,
+                    DEFAULT_STARTUP_CONNECT_TIMEOUT.as_secs()
+                );
+                DEFAULT_STARTUP_CONNECT_TIMEOUT
+            }
+        },
+        None => DEFAULT_STARTUP_CONNECT_TIMEOUT,
+    }
+}
+
+fn default_startup_connect_timeout() -> Duration {
+    startup_connect_timeout_from_value(
+        std::env::var(env_etcd::ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS)
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// A cache for etcd key-value pairs that watches for changes
@@ -1058,6 +1126,72 @@ impl KvCache {
 #[cfg(test)]
 mod unit_tests {
     use super::*;
+
+    #[test]
+    fn parses_startup_connect_timeout() {
+        assert_eq!(
+            startup_connect_timeout_from_value(None),
+            DEFAULT_STARTUP_CONNECT_TIMEOUT
+        );
+        assert_eq!(
+            startup_connect_timeout_from_value(Some("45")),
+            Duration::from_secs(45)
+        );
+        assert_eq!(
+            startup_connect_timeout_from_value(Some("0")),
+            DEFAULT_STARTUP_CONNECT_TIMEOUT
+        );
+        assert_eq!(
+            startup_connect_timeout_from_value(Some("invalid")),
+            DEFAULT_STARTUP_CONNECT_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn client_builder_accepts_startup_connect_timeout() {
+        let timeout = Duration::from_secs(45);
+        let options = Client::builder()
+            .etcd_url(vec!["http://localhost:2379".to_string()])
+            .startup_connect_timeout(timeout)
+            .build()
+            .unwrap();
+
+        assert_eq!(options.startup_connect_timeout, timeout);
+    }
+
+    #[test]
+    fn startup_connection_respects_configured_timeout() {
+        let runtime = Runtime::single_threaded().unwrap();
+        let runtime_for_connect = runtime.clone();
+        let options = Client::builder()
+            .etcd_url(vec!["http://127.0.0.1:1".to_string()])
+            .startup_connect_timeout(Duration::from_millis(50))
+            .build()
+            .unwrap();
+
+        let started = Instant::now();
+        let result = runtime
+            .primary()
+            .block_on(Client::connect_with_startup_retry(
+                &options,
+                runtime_for_connect,
+            ));
+        let error = match result {
+            Ok(_) => panic!("etcd startup connection unexpectedly succeeded"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("etcd startup connection timed out after 0.05 seconds"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "configured startup timeout was not respected"
+        );
+    }
 
     #[test]
     fn classifies_etcd_connection_errors() {

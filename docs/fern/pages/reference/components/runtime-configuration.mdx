@@ -103,6 +103,13 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   Environment variable: `DYN_DISCOVERY_BACKEND`
 </ParamField>
 
+<ParamField path="ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS" type="integer" default="120">
+  Maximum number of seconds that an `etcd` discovery client spends establishing its initial
+  connection and primary lease. Dynamo retries with exponential backoff until this deadline. Set a
+  larger value when etcd can take longer to become available during deployment startup or recovery;
+  set a smaller value when the process should fail fast. Values must be greater than `0`.
+</ParamField>
+
 <ParamField path="--request-plane" type="string" default="tcp">
   Transport used to distribute requests from routers to workers. `tcp` provides the lowest latency and is recommended for production. `nats` uses NATS messaging. See [Request Plane](../../developer-guide/knowledge-base/concepts/communication-planes/request-plane.md) for design details.
 
