@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: "identity"
+backend: "identity"
+max_batch_size: 1
+
+input [
+  {
+    name: "INPUT0"
+    data_type: TYPE_INT32
+    dims: [-1]
+  }
+]
+output [
+  {
+    name: "OUTPUT0"
+    data_type: TYPE_INT32
+    dims: [-1]
+  }
+]
