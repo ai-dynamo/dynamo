@@ -419,8 +419,6 @@ def test_scaling_policy_materializes_legacy_planner_payload() -> None:
         "load_adjustment_interval_seconds": 5,
         "max_num_fpm_samples": 128,
         "fpm_sample_bucket_size": 64,
-        "load_scaling_down_sensitivity": 90,
-        "load_min_observations": 8,
         "load_predictor": "constant",
         "load_predictor_log1p": False,
         "max_gpu_budget": 32,
@@ -553,7 +551,7 @@ def test_public_planner_validation_is_owned_by_dynamo_adapter() -> None:
         traffic={},
         evaluation={},
         optimization={},
-        sweep=_sweep_context(target="throughput"),
+        sweep=_sweep_context(target="goodput_per_gpu"),
     )
 
     assert adapter.compile_prediction({}, prediction_context).config == {
@@ -583,6 +581,119 @@ def test_public_planner_prediction_requires_sla_for_throughput_scaling() -> None
             {"policy": "enabled"},
             PredictionAdapterContext(engine={}, traffic={}, evaluation={}),
         )
+
+
+def test_planner_default_preset_conflicts_and_off_exposes_leaf_dimensions() -> None:
+    adapter = create_provider()
+    context = RecommendationAdapterContext(
+        engine={},
+        traffic={},
+        evaluation={"sla": {"ttft_ms": 2000.0, "itl_ms": 30.0}},
+        optimization={"target": "goodput_per_gpu"},
+        sweep=_sweep_context(target="goodput_per_gpu"),
+    )
+    with pytest.raises(ValueError, match="default preset"):
+        adapter.compile_recommendation(
+            {"enable_load_scaling": {"choices": [False, True]}}, context
+        )
+
+    plan = adapter.compile_recommendation(
+        {
+            "scaling_policy": {"preset": False},
+            "enable_throughput_scaling": {"choices": [False, True]},
+            "enable_load_scaling": {"choices": [False, True]},
+            "throughput_adjustment_interval_seconds": {"choices": [180, 600]},
+            "load_adjustment_interval_seconds": {"choices": [5, 10]},
+        },
+        context,
+    )
+    choices = plan.fragment.choices_by_branch["agg"]
+    assert "scaling_policy" not in choices
+    assert {
+        "enable_throughput_scaling",
+        "enable_load_scaling",
+        "throughput_adjustment_interval_seconds",
+        "load_adjustment_interval_seconds",
+    }.issubset(choices)
+
+
+def test_planner_custom_preset_values_are_strict_and_concrete() -> None:
+    context = RecommendationAdapterContext(
+        engine={},
+        traffic={},
+        evaluation={"sla": {"ttft_ms": 2000.0, "itl_ms": 30.0}},
+        optimization={"target": "goodput"},
+        sweep=_sweep_context(target="goodput"),
+    )
+    with pytest.raises(ValueError):
+        create_provider().compile_recommendation(
+            {
+                "fpm_sampling": {
+                    "preset": [
+                        {
+                            "max_num_fpm_samples": 64,
+                            "fpm_sample_bucket_size": 5,
+                        }
+                    ]
+                }
+            },
+            context,
+        )
+
+
+def test_enabled_planner_prediction_keeps_public_config_separate_from_hook() -> None:
+    context = PredictionAdapterContext(
+        engine={
+            "mode": "aggregated",
+            "workers": {"aggregated": {"parallelism": {"tensor": 1}}},
+        },
+        traffic={},
+        evaluation={},
+    )
+    spec = create_provider().compile_prediction(
+        {
+            "policy": "enabled",
+            "target": "load",
+            "enable_throughput_scaling": False,
+            "enable_load_scaling": True,
+        },
+        context,
+    )
+    assert "mode" not in spec.config
+    assert "max_gpu_budget" not in spec.config
+    assert spec.config["policy"] == "enabled"
+    assert spec.runtime_hooks[0].config["planner_config"]["mode"] == "agg"
+
+
+def test_planner_recommendation_target_is_derived_not_user_configurable() -> None:
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        create_provider().compile_recommendation(
+            {"target": "load"},
+            RecommendationAdapterContext(
+                engine={},
+                traffic={},
+                evaluation={},
+                optimization={"target": "throughput"},
+                sweep=_sweep_context(target="throughput"),
+            ),
+        )
+
+
+def test_static_predictor_fallback_stays_within_configured_preset_list() -> None:
+    plan = create_provider().compile_recommendation(
+        {
+            "scaling_policy": {"preset": ["throughput_180_5"]},
+            "load_predictor": {"preset": ["arima_raw"]},
+        },
+        RecommendationAdapterContext(
+            engine={},
+            traffic={},
+            evaluation={"sla": {"ttft_ms": 2000.0, "itl_ms": 30.0}},
+            optimization={"target": "goodput"},
+            sweep=_sweep_context(target="goodput"),
+        ),
+    )
+    assert plan.state["load_predictor"]["best_by_interval"] == {"180": "arima_raw"}
 
 
 def test_policy_pruning_diagnostics_remain_visible(monkeypatch) -> None:

@@ -164,10 +164,12 @@ def test_public_router_validation_is_owned_by_dynamo_adapter() -> None:
         "prefill_load_model": {"type": "none"},
     }
     plan = adapter.compile_recommendation({}, recommendation_context)
-    assert plan.fragment.choices_by_branch["agg"]["mode"] == [
-        "round_robin",
-        "kv_router",
-    ]
+    configurations = plan.fragment.choices_by_branch["agg"]["configuration"]
+    assert configurations[0] == {
+        "mode": "round_robin",
+        "prefill_load_model_type": "none",
+    }
+    assert sum(config["mode"] == "round_robin" for config in configurations) == 1
 
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         adapter.compile_prediction({"not_a_router_knob": True}, prediction_context)
@@ -238,4 +240,47 @@ def test_public_router_prediction_materializes_runtime_hook() -> None:
         "overlap_score_credit": 1.0,
         "prefill_load_scale": 1.0,
         "router_temperature": 0.1,
+    }
+
+
+def test_router_public_schema_rejects_internal_fields_and_supports_ranges() -> None:
+    adapter = create_provider()
+    context = RecommendationAdapterContext(
+        engine={},
+        traffic={},
+        evaluation={},
+        optimization={},
+        sweep=_sweep_context(),
+    )
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        adapter.compile_recommendation(
+            {"policy": "kv_router", "mode": ["round_robin"]}, context
+        )
+
+    plan = adapter.compile_recommendation(
+        {
+            "policy": "kv_router",
+            "temperature": {"range": {"min": 0.1, "max": 1.0}},
+            "prefill_load_scale": {"range": {"min": 0.25, "max": 32.0, "scale": "log"}},
+        },
+        context,
+    )
+    assert plan.fragment.float_ranges_by_branch["agg"] == {
+        "temperature": (0.1, 1.0),
+        "prefill_load_scale": (0.25, 32.0),
+    }
+    assert plan.fragment.log_float_ranges_by_branch["agg"] == ["prefill_load_scale"]
+
+
+def test_kv_router_prediction_materializes_documented_defaults() -> None:
+    spec = create_provider().compile_prediction(
+        {"policy": "kv_router"},
+        PredictionAdapterContext(engine={}, traffic={}, evaluation={}),
+    )
+    assert spec.config == {
+        "policy": "kv_router",
+        "prefill_load_model": {"type": "none"},
+        "overlap_score_credit": 1.0,
+        "prefill_load_scale": 1.0,
+        "temperature": 0.0,
     }

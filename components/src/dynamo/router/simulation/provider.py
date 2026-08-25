@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 
+from aisimulate.config.common import Choices, NumericRange
 from aisimulate.config_adapter import (
     PredictionAdapterContext,
     RecommendationAdapterContext,
@@ -22,7 +23,11 @@ from aisimulate.sweeper.provider import (
     SweepContext,
 )
 
-from .config import RouterPredictionConfig, RouterRecommendationConfig, domain_choices
+from .config import (
+    RouterPredictionConfig,
+    RouterRecommendationConfig,
+    RouterSearchSpace,
+)
 
 _PROVIDER_API_VERSION = 1
 _ROUTER_HOOK_API_VERSION = 1
@@ -172,36 +177,128 @@ class DynamoRouterSweepConfigProvider:
         config: Mapping[str, JSONValue],
         context: RecommendationAdapterContext,
     ) -> AdapterSearchPlan:
-        normalized = deepcopy(dict(config))
-        normalized.setdefault("policy", {"choices": ["round_robin", "kv_router"]})
-        policy_values = domain_choices(
-            normalized.get("policy"), ["round_robin", "kv_router"]
+        public = RouterRecommendationConfig.model_validate(config)
+        return self._compile_public_search(public, context.sweep)
+
+    def _compile_public_search(
+        self,
+        public: RouterRecommendationConfig,
+        context: SweepContext,
+    ) -> AdapterSearchPlan:
+        policies = (
+            list(public.policy.choices)
+            if isinstance(public.policy, Choices)
+            else [public.policy]
         )
-        if set(policy_values) == {"round_robin"}:
-            conflicts = [
-                name
-                for name in (
-                    "overlap_score_credit",
-                    "prefill_load_scale",
-                    "temperature",
-                )
-                if name in normalized
-            ]
-            load_model = normalized.get("prefill_load_model")
-            load_type = (
-                load_model.get("type") if isinstance(load_model, Mapping) else None
+        load_model = public.prefill_load_model.type
+        load_models = (
+            list(load_model.choices)
+            if isinstance(load_model, Choices)
+            else [load_model]
+        )
+        numeric_specs = {
+            "overlap_score_credit": (public.overlap_score_credit, [0.0, 0.5, 1.0]),
+            "prefill_load_scale": (
+                public.prefill_load_scale,
+                [0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0],
+            ),
+            "temperature": (public.temperature, [0.0, 0.2, 0.5, 1.0]),
+        }
+        modes = _deployment_modes(context.core_search_space)
+        if policies == ["round_robin"]:
+            fragment = SearchSpaceFragment(
+                choices_by_branch={mode: {"mode": ["round_robin"]} for mode in modes}
             )
-            if load_type is not None and set(domain_choices(load_type, ["none"])) != {
-                "none"
-            }:
-                conflicts.append("prefill_load_model.type")
-            if conflicts:
-                raise ValueError(
-                    "router.policy=round_robin rejects KV-router fields "
-                    f"{sorted(conflicts)}"
-                )
-        RouterRecommendationConfig.model_validate(normalized)
-        return self.generate_search_space(normalized, context.sweep)
+            return AdapterSearchPlan(fragment=fragment, state={"public_schema": True})
+
+        if set(policies) == {"round_robin", "kv_router"}:
+            expanded: dict[str, list[float]] = {}
+            for name, (value, defaults) in numeric_specs.items():
+                if isinstance(value, NumericRange):
+                    raw = value.range
+                    if raw.scale != "linear" or raw.step is None:
+                        raise ValueError(
+                            "Router mixed-policy search requires choices or stepped "
+                            f"linear range for {name}; pin policy=kv_router for a "
+                            "continuous/log range"
+                        )
+                    points = []
+                    current = raw.min
+                    while current <= raw.max:
+                        points.append(current)
+                        current += raw.step
+                    expanded[name] = points
+                elif isinstance(value, Choices):
+                    expanded[name] = list(value.choices)
+                elif value is None:
+                    expanded[name] = list(defaults)
+                else:
+                    expanded[name] = [float(value)]
+            configurations: list[JSONValue] = [
+                {
+                    "mode": "round_robin",
+                    "prefill_load_model_type": "none",
+                }
+            ]
+            for load_type in load_models:
+                for credit in expanded["overlap_score_credit"]:
+                    for scale in expanded["prefill_load_scale"]:
+                        for temperature in expanded["temperature"]:
+                            configurations.append(
+                                {
+                                    "mode": "kv_router",
+                                    "prefill_load_model_type": load_type,
+                                    "overlap_score_credit": credit,
+                                    "prefill_load_scale": scale,
+                                    "temperature": temperature,
+                                }
+                            )
+            fragment = SearchSpaceFragment(
+                choices_by_branch={
+                    mode: {"configuration": deepcopy(configurations)} for mode in modes
+                }
+            )
+            return AdapterSearchPlan(
+                fragment=fragment,
+                state={"public_schema": True, "flat_public": True},
+                potential_runtime_hooks=(_HOOK,),
+            )
+
+        choices: dict[str, list[JSONValue]] = {
+            "mode": ["kv_router"],
+            "prefill_load_model_type": list(load_models),
+        }
+        ranges: dict[str, tuple[float, float]] = {}
+        log_ranges: list[str] = []
+        for name, (value, defaults) in numeric_specs.items():
+            if isinstance(value, NumericRange):
+                raw = value.range
+                if raw.step is not None:
+                    points = []
+                    current = raw.min
+                    while current <= raw.max:
+                        points.append(current)
+                        current += raw.step
+                    choices[name] = points
+                else:
+                    ranges[name] = (raw.min, raw.max)
+                    if raw.scale == "log":
+                        log_ranges.append(name)
+            elif isinstance(value, Choices):
+                choices[name] = list(value.choices)
+            elif value is None:
+                choices[name] = list(defaults)
+            else:
+                choices[name] = [value]
+        return AdapterSearchPlan(
+            fragment=SearchSpaceFragment(
+                choices_by_branch={mode: deepcopy(choices) for mode in modes},
+                float_ranges_by_branch={mode: deepcopy(ranges) for mode in modes},
+                log_float_ranges_by_branch={mode: list(log_ranges) for mode in modes},
+            ),
+            state={"public_schema": True},
+            potential_runtime_hooks=(_HOOK,),
+        )
 
     def materialize_candidate(
         self,
@@ -217,7 +314,7 @@ class DynamoRouterSweepConfigProvider:
         context: SweepContext,
     ) -> AdapterSearchPlan:
         public_schema = "policy" in search_spec or "prefill_load_model" in search_spec
-        space = RouterRecommendationConfig.model_validate(search_spec)
+        space = RouterSearchSpace.model_validate(search_spec)
         choices: dict[str, list[JSONValue]] = {"mode": list(space.mode)}
         kv_router_possible = "kv_router" in space.mode
         if kv_router_possible:
@@ -250,11 +347,16 @@ class DynamoRouterSweepConfigProvider:
     ) -> AdapterReplaySpec:
         if not isinstance(plan.state, dict):
             raise TypeError("Router adapter search plan state must be a mapping")
-        raw_space = plan.state["search_space"]
-        if not isinstance(raw_space, dict):
-            raise TypeError("Router adapter search-space state must be a mapping")
-        RouterRecommendationConfig.model_validate(raw_space)
+        raw_space = plan.state.get("search_space")
+        if raw_space is not None:
+            if not isinstance(raw_space, dict):
+                raise TypeError("Router adapter search-space state must be a mapping")
+            RouterSearchSpace.model_validate(raw_space)
         public_schema = plan.state.get("public_schema") is True
+
+        configuration = selection.get("configuration")
+        if isinstance(configuration, Mapping):
+            selection = configuration
 
         mode = str(selection["mode"])
         if mode == "round_robin":

@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
+from aisimulate.config.common import Choices, NumericRange
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 MODES = frozenset({"kv_router", "round_robin"})
@@ -16,43 +17,121 @@ OVERLAP_SCORE_CREDITS = frozenset({0.0, 0.5, 1.0})
 PREFILL_LOAD_SCALES = frozenset({0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0})
 TEMPERATURES = frozenset({0.0, 0.2, 0.5, 1.0})
 LOAD_MODELS = frozenset({"none", "aic"})
+StrictFiniteFloat = Annotated[float, Field(strict=True, ge=0.0, allow_inf_nan=False)]
+Policy = Literal["round_robin", "kv_router"]
+LoadModelType = Literal["none", "aic"]
 
 
 class PrefillLoadModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    type: Literal["none", "aic"] = "none"
+    type: LoadModelType = "none"
+
+
+class PrefillLoadRecommendationModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: LoadModelType | Choices[LoadModelType] = Field(
+        default_factory=lambda: Choices[LoadModelType](choices=["none", "aic"])
+    )
 
 
 class RouterPredictionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    policy: Literal["round_robin", "kv_router"] = "round_robin"
+    policy: Policy = "round_robin"
     prefill_load_model: PrefillLoadModel = Field(default_factory=PrefillLoadModel)
-    overlap_score_credit: float | None = Field(default=None, ge=0.0)
-    prefill_load_scale: float | None = Field(default=None, ge=0.0)
-    temperature: float | None = Field(default=None, ge=0.0)
+    overlap_score_credit: StrictFiniteFloat | None = None
+    prefill_load_scale: StrictFiniteFloat | None = None
+    temperature: StrictFiniteFloat | None = None
 
     @model_validator(mode="after")
     def _validate_policy(self) -> RouterPredictionConfig:
-        kv_fields = (
-            self.overlap_score_credit,
-            self.prefill_load_scale,
-            self.temperature,
-        )
-        if self.policy == "round_robin" and (
-            self.prefill_load_model.type != "none"
-            or any(value is not None for value in kv_fields)
-        ):
-            raise ValueError(
-                "round_robin requires prefill_load_model.type='none' and "
-                "rejects KV-router knobs"
-            )
+        if self.policy == "round_robin":
+            conflicts = {
+                "overlap_score_credit",
+                "prefill_load_scale",
+                "temperature",
+            }.intersection(self.model_fields_set)
+            if self.prefill_load_model.type != "none" or conflicts:
+                raise ValueError(
+                    "round_robin requires prefill_load_model.type='none' and "
+                    f"rejects KV-router knobs {sorted(conflicts)}"
+                )
+        else:
+            if self.overlap_score_credit is None:
+                self.overlap_score_credit = 1.0
+            if self.prefill_load_scale is None:
+                self.prefill_load_scale = 1.0
+            if self.temperature is None:
+                self.temperature = 0.0
         return self
 
 
 class RouterRecommendationConfig(BaseModel):
-    """Normalized Router search config; accepts public and legacy provider input."""
+    model_config = ConfigDict(extra="forbid")
+
+    policy: Policy | Choices[Policy] = Field(
+        default_factory=lambda: Choices[Policy](choices=["round_robin", "kv_router"])
+    )
+    prefill_load_model: PrefillLoadRecommendationModel = Field(
+        default_factory=PrefillLoadRecommendationModel
+    )
+    overlap_score_credit: (
+        StrictFiniteFloat | Choices[StrictFiniteFloat] | NumericRange | None
+    ) = None
+    prefill_load_scale: (
+        StrictFiniteFloat | Choices[StrictFiniteFloat] | NumericRange | None
+    ) = None
+    temperature: (
+        StrictFiniteFloat | Choices[StrictFiniteFloat] | NumericRange | None
+    ) = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _apply_conditional_defaults(cls, value: Any) -> Any:
+        if isinstance(value, Mapping) and value.get("policy") == "round_robin":
+            resolved = dict(value)
+            resolved.setdefault("prefill_load_model", {"type": "none"})
+            return resolved
+        return value
+
+    @model_validator(mode="after")
+    def _validate_policy(self) -> RouterRecommendationConfig:
+        policies = (
+            set(self.policy.choices)
+            if isinstance(self.policy, Choices)
+            else {self.policy}
+        )
+        if policies == {"round_robin"}:
+            conflicts = {
+                "overlap_score_credit",
+                "prefill_load_scale",
+                "temperature",
+            }.intersection(self.model_fields_set)
+            load_types = (
+                set(self.prefill_load_model.type.choices)
+                if isinstance(self.prefill_load_model.type, Choices)
+                else {self.prefill_load_model.type}
+            )
+            if load_types != {"none"} or conflicts:
+                raise ValueError(
+                    "router.policy=round_robin rejects KV-router fields "
+                    f"{sorted(conflicts)}"
+                )
+        for name in (
+            "overlap_score_credit",
+            "prefill_load_scale",
+            "temperature",
+        ):
+            domain = getattr(self, name)
+            if isinstance(domain, NumericRange) and domain.range.min < 0:
+                raise ValueError(f"router.{name} range requires min >= 0")
+        return self
+
+
+class RouterSearchSpace(BaseModel):
+    """Normalized legacy Sweeper provider input."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -108,7 +187,7 @@ class RouterRecommendationConfig(BaseModel):
         return normalized
 
     @model_validator(mode="after")
-    def _validate_choices(self) -> RouterRecommendationConfig:
+    def _validate_choices(self) -> RouterSearchSpace:
         for name, values, allowed in (
             ("mode", self.mode, MODES),
             ("prefill_load_model_type", self.prefill_load_model_type, LOAD_MODELS),

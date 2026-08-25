@@ -336,10 +336,13 @@ def sweep_load_predictor(
     intervals = throughput_intervals(policies)
     if not intervals:
         return LoadPredictorResult(reason="no_throughput_scaling_candidate")
+    if not candidates:
+        raise ValueError("load-predictor candidates must be nonempty")
+    fallback = candidates[0]
     if trace_path is None:
         return LoadPredictorResult(
-            best_by_interval=dict.fromkeys(intervals, _DEFAULT_PRESET),
-            reason="static_workload_constant",
+            best_by_interval=dict.fromkeys(intervals, fallback),
+            reason="static_workload_configured_fallback",
         )
 
     result = LoadPredictorResult(reason="swept")
@@ -370,11 +373,9 @@ def sweep_load_predictor(
                 best_entry = entry
         result.losses[interval_s] = losses
         if best_entry is None:
-            best_entry = _DEFAULT_PRESET
+            best_entry = fallback
             fallback_intervals.append(interval_s)
         result.best_by_interval[interval_s] = best_entry
     if fallback_intervals:
-        result.reason = (
-            f"swept; no_winner_fallback_{_DEFAULT_PRESET}@{fallback_intervals}"
-        )
+        result.reason = f"swept; no_winner_configured_fallback@{fallback_intervals}"
     return result
