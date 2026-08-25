@@ -1231,8 +1231,6 @@ class HandlerBase(BaseGenerativeHandler):
 
         # Priority is a float in [0.0, 1.0]; health checks use 1.0. Default is 0.5.
         priority = request.get("priority", DEFAULT_REQUEST_PRIORITY)
-        if request.get(HEALTH_CHECK_KEY):
-            logger.debug("TRT-LLM health check request priority=%s", priority)
         cache_salt = request_cache_salt(request)
 
         try:
