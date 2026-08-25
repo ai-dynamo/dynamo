@@ -12,8 +12,27 @@ deepseek-v4-pro-0813/
 ├── model-cache/
 │   ├── model-cache.yaml       # PVC (1200Gi; checkpoint is ~832 GiB)
 │   └── model-download.yaml    # populates the PVC from HF
-└── vllm/                      # deploy.yaml per SKU x topology (added separately)
+└── vllm/
+    ├── agg-h200-agentic/       # 8x H200,  64K agentic
+    ├── disagg-h200-agentic/    # 16x H200, 64K agentic  (best density)
+    ├── agg-h200-1m/            # 8x H200,  1M context   (batch)
+    └── disagg-h200-1m/         # 16x H200, 1M context   (batch)
 ```
+
+## Config matrix
+
+|                | Aggregated (8x H200)                    | Disaggregated (16x H200)                  |
+|----------------|-----------------------------------------|-------------------------------------------|
+| **Agentic 64K**| `agg-h200-agentic` <br> C=2, E2E 56.40 tok/s/user, 11.85 tok/s/GPU | `disagg-h200-agentic` <br> C~7.95, E2E 50, ~24 tok/s/GPU |
+| **1M context** | `agg-h200-1m` <br> 998,218 tokens, TTFT ~202 s | `disagg-h200-1m` <br> 1,033,872 tokens, TTFT ~146 s |
+
+Agentic workload is 64K ISL / 400 OSL / 90% prefix reuse; the SLA gate is
+E2E >= 50 tok/s/user **and** TTFT p50 < 5 s, jointly, where
+`E2E = OSL / (TTFT + OSL x ITL)`. The 1M configs are a batch capability, not
+interactive -- time-to-first-token is minutes at that length.
+
+Accuracy on the agentic configs: `gpqa_diamond` 88.26 (agg) / 88.38 (disagg),
+`ifeval` 94.48 (agg) / 94.29 (disagg) -- disaggregation does not cost accuracy.
 
 ## Quick start
 
