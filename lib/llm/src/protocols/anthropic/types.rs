@@ -662,8 +662,8 @@ fn recover_completed_members(raw: &str) -> Option<serde_json::Map<String, serde_
 fn ends_on_a_finished_value(trimmed: &str) -> bool {
     let tail = trimmed.trim_end();
     // A closing quote must not itself be escaped, or the string is still open.
-    if tail.ends_with('"') {
-        let backslashes = tail[..tail.len() - 1]
+    if let Some(before_quote) = tail.strip_suffix('"') {
+        let backslashes = before_quote
             .chars()
             .rev()
             .take_while(|ch| *ch == '\\')
