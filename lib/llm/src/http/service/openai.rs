@@ -61,6 +61,7 @@ use crate::protocols::common::input_trigger::{
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
+    ParsingOptions,
     audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
     chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
@@ -2849,7 +2850,12 @@ async fn chat_completions(
     // Request policy controls whether parser-produced tool calls may be exposed.
     // Assistant response/guided constraints are handled separately during
     // preprocessing and do not revoke an auto request's tool-call permission.
-    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request);
+    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request)
+        .map_err(|e| {
+            let err_response = ErrorMessage::from_anyhow(e.into(), "Invalid tool_choice");
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
 
     // When parallel_tool_calls is false, limit the response to a single tool call.
     let parsing_options =
@@ -2868,10 +2874,7 @@ async fn chat_completions(
     // Computed before `request` moves into `generate`. Only a stream that can
     // withhold every data frame needs forced keep-alive frames.
     let stream_can_defer_all_output =
-        crate::preprocessor::OpenAIPreprocessor::stream_can_defer_all_output(
-            parsing_options.reasoning_parser.as_deref(),
-            request.chat_template_args.as_ref(),
-        );
+        request_stream_can_defer_all_output(&parsing_options, request.chat_template_args.as_ref());
 
     let mut response_collector = state
         .metrics_clone()
@@ -3131,6 +3134,17 @@ fn normalize_chat_reasoning_template_args(
             message: VALIDATION_PREFIX.to_string() + &e.to_string(),
         })
     })
+}
+
+fn request_stream_can_defer_all_output(
+    parsing_options: &ParsingOptions,
+    chat_template_args: Option<&HashMap<String, serde_json::Value>>,
+) -> bool {
+    crate::preprocessor::OpenAIPreprocessor::stream_can_defer_all_output(
+        parsing_options.tool_call_parser.as_deref(),
+        parsing_options.reasoning_parser.as_deref(),
+        chat_template_args,
+    )
 }
 
 /// Validates that required fields are present and valid in the chat completion request
@@ -3451,7 +3465,12 @@ async fn responses(
 
     // The Responses API is converted to the same chat request contract. Narrow
     // the model parser before unary aggregation just as the streaming path does.
-    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request);
+    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request)
+        .map_err(|e| {
+            let err_response = ErrorMessage::from_anyhow(e.into(), "Invalid tool_choice");
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
 
     // Responses requests share the chat-completions aggregator for the unary
     // path. Thread this option through so its post-parse fallback also caps a
@@ -3478,6 +3497,12 @@ async fn responses(
         );
     let parsing_options = parsing_options
         .with_move_reasoning_to_content_when_empty(move_reasoning_to_content_when_empty);
+
+    // Computed before `request` moves into `generate`. Responses streams use
+    // the same force-nonempty deferral as chat completions and therefore need
+    // the same fallback keep-alive when every data frame may be withheld.
+    let stream_can_defer_all_output =
+        request_stream_can_defer_all_output(&parsing_options, request.chat_template_args.as_ref());
 
     let mut response_collector = state
         .metrics_clone()
@@ -3580,7 +3605,7 @@ async fn responses(
         let stream = monitor_for_disconnects(full_stream, ctx, inflight_guard, stream_handle);
 
         let mut sse_stream = Sse::new(stream);
-        if let Some(keep_alive) = state.sse_keep_alive() {
+        if let Some(keep_alive) = state.sse_keep_alive_for_response(stream_can_defer_all_output) {
             sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
         }
 
@@ -4606,21 +4631,62 @@ pub fn videos_router(
     (vec![doc, stream_doc], router)
 }
 
-async fn audio_speech(
+fn audio_content_type(format: &str) -> &'static str {
+    match format {
+        "mp3" => "audio/mpeg",
+        "flac" => "audio/flac",
+        "pcm" => "audio/pcm",
+        "aac" => "audio/aac",
+        "opus" => "audio/ogg; codecs=opus",
+        _ => "audio/wav",
+    }
+}
+
+fn decode_audio_chunks(response: &NvAudioSpeechResponse) -> Result<Vec<Bytes>, String> {
+    response
+        .data
+        .iter()
+        .map(|audio| {
+            let encoded = audio
+                .b64_json
+                .as_deref()
+                .ok_or_else(|| "Audio response did not contain base64 data".to_string())?;
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map(Bytes::from)
+                .map_err(|e| format!("Failed to decode audio data: {e}"))
+        })
+        .collect()
+}
+
+async fn handler_audio_speech(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateAudioSpeechRequest>,
+    Json(mut request): Json<NvCreateAudioSpeechRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     // (per-model readiness check is deferred until after we resolve the
     // Option<String> model field; see below)
     check_ready(&state)?;
 
+    let returns_audio_bytes = request.data_source.as_deref() != Some("url");
+    let streams_audio_chunks = returns_audio_bytes
+        && matches!(
+            request.response_format.as_deref().unwrap_or("wav"),
+            "pcm" | "wav"
+        )
+        && request.speed.is_none_or(|speed| speed == 1.0);
     let request_id = get_or_create_request_id(&headers);
+    if streams_audio_chunks {
+        // Advertise that this frontend can concatenate incremental worker
+        // responses. Older frontends omit the signal, so new workers aggregate.
+        // TODO(v1.7): Remove when v1.4 falls outside the N-2 window.
+        request
+            .nvext
+            .get_or_insert_default()
+            .frontend_accepts_audio_chunks = Some(true);
+    }
     let request = context_from_headers(request, request_id, &headers)?;
-    let request_id = request.id().to_string();
-
-    let streaming = false;
 
     // model is optional in the request; fall back to a model that can actually
     // serve right now (complete worker set), not just any displayable one, so
@@ -4634,11 +4700,60 @@ async fn audio_speech(
             .next()
             .unwrap_or_default()
     });
-    let metric_model = state.manager().metric_model_for(&model).to_string();
-
     // Per-model serving readiness gate (now that we have a resolved model
     // name string).
     check_model_serving_ready(&state, &model)?;
+
+    let context = request.context();
+    let (mut connection_handle, stream_handle) = create_connection_monitor(
+        context,
+        Some(state.metrics_clone()),
+        CancellationLabels {
+            model: model.clone(),
+            endpoint: Endpoint::Audios.to_string(),
+            request_type: if streams_audio_chunks {
+                "stream"
+            } else {
+                "unary"
+            }
+            .to_string(),
+        },
+    )
+    .await;
+
+    let response = tokio::spawn(
+        audio_speech(
+            state,
+            request,
+            model,
+            returns_audio_bytes,
+            streams_audio_chunks,
+            stream_handle,
+        )
+        .in_current_span(),
+    )
+    .await
+    .map_err(|e| {
+        ErrorMessage::internal_server_error_with_details(
+            "Failed to await audio speech task",
+            format!("{e:?}"),
+        )
+    })?;
+
+    connection_handle.disarm();
+    response
+}
+
+async fn audio_speech(
+    state: Arc<service_v2::State>,
+    request: Context<NvCreateAudioSpeechRequest>,
+    model: String,
+    returns_audio_bytes: bool,
+    streams_audio_chunks: bool,
+    mut stream_handle: ConnectionHandle,
+) -> Result<Response, ErrorResponse> {
+    let request_id = request.id().to_string();
+    let metric_model = state.manager().metric_model_for(&model).to_string();
 
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
@@ -4650,12 +4765,14 @@ async fn audio_speech(
     let mut inflight = state.metrics_clone().create_inflight_guard(
         &model,
         Endpoint::Audios,
-        streaming,
+        streams_audio_chunks,
         &request_id,
     );
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
+    let ctx = request.context();
+    inflight.mark_error(ErrorType::Cancelled);
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
@@ -4667,6 +4784,18 @@ async fn audio_speech(
         err_response
     })?;
 
+    let stream = check_for_backend_error(stream, None)
+        .await
+        .inspect_err(|error_response| {
+            let error_type = match error_response.0 {
+                // Worker-side InvalidArgument messages are not guaranteed to use
+                // the "Validation:" prefix expected by the shared classifier.
+                StatusCode::BAD_REQUEST => ErrorType::Validation,
+                _ => extract_error_type_from_response(error_response),
+            };
+            inflight.mark_error(error_type);
+        })?;
+
     let mut http_queue_guard = Some(http_queue_guard);
     let stream = stream.inspect(move |response| {
         process_response_and_observe_metrics(
@@ -4675,6 +4804,128 @@ async fn audio_speech(
             &mut http_queue_guard,
         );
     });
+
+    if streams_audio_chunks {
+        let mut stream = Box::pin(stream);
+        let first_response = loop {
+            let Some(annotated) = stream.next().await else {
+                let err_response = ErrorMessage::internal_server_error(
+                    "Audio stream ended without producing data",
+                );
+                inflight.mark_error(extract_error_type_from_response(&err_response));
+                return Err(err_response);
+            };
+            let annotated = annotated.ok().map_err(|e| {
+                let err_response = ErrorMessage::internal_server_error_with_details(
+                    "Audio stream failed before producing data",
+                    e.to_string(),
+                );
+                inflight.mark_error(extract_error_type_from_response(&err_response));
+                err_response
+            })?;
+            let Some(response) = annotated.data else {
+                continue;
+            };
+            if response.status == "failed" {
+                inflight.mark_error(ErrorType::Validation);
+                return Ok((StatusCode::BAD_REQUEST, Json(response)).into_response());
+            }
+            if !response.data.is_empty() {
+                break response;
+            }
+        };
+
+        let content_type = first_response
+            .data
+            .first()
+            .map(|audio| audio_content_type(&audio.output_format))
+            .unwrap_or("audio/wav");
+        let first_chunks = decode_audio_chunks(&first_response).map_err(|e| {
+            let err_response = ErrorMessage::internal_server_error_with_details(
+                "Failed to decode audio stream",
+                e,
+            );
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+        if first_chunks.is_empty() {
+            let err_response =
+                ErrorMessage::internal_server_error("Audio response did not contain data");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            return Err(err_response);
+        }
+
+        stream_handle.arm();
+
+        let body_stream = async_stream::stream! {
+            for chunk in first_chunks {
+                yield Ok::<Bytes, std::io::Error>(chunk);
+            }
+
+            let stopped = ctx.stopped();
+            tokio::pin!(stopped);
+            loop {
+                tokio::select! {
+                    biased;
+                    item = stream.next() => {
+                        let Some(annotated) = item else {
+                            inflight.mark_ok();
+                            stream_handle.disarm();
+                            break;
+                        };
+                        let annotated = match annotated.ok() {
+                            Ok(annotated) => annotated,
+                            Err(e) => {
+                                inflight.mark_error(ErrorType::Internal);
+                                stream_handle.disarm();
+                                yield Err(std::io::Error::other(e.to_string()));
+                                break;
+                            }
+                        };
+                        let Some(response) = annotated.data else {
+                            continue;
+                        };
+                        if response.status == "failed" {
+                            inflight.mark_error(ErrorType::Internal);
+                            stream_handle.disarm();
+                            yield Err(std::io::Error::other(
+                                response.error.unwrap_or_else(|| "Audio generation failed".to_string())
+                            ));
+                            break;
+                        }
+                        match decode_audio_chunks(&response) {
+                            Ok(chunks) => {
+                                for chunk in chunks {
+                                    yield Ok(chunk);
+                                }
+                            }
+                            Err(e) => {
+                                inflight.mark_error(ErrorType::Internal);
+                                stream_handle.disarm();
+                                yield Err(std::io::Error::other(e));
+                                break;
+                            }
+                        }
+                    }
+                    _ = &mut stopped => {
+                        inflight.mark_error(ErrorType::Cancelled);
+                        stream_handle.disarm();
+                        break;
+                    }
+                }
+            }
+        };
+
+        return Response::builder()
+            .header("content-type", content_type)
+            .body(Body::from_stream(body_stream))
+            .map_err(|e| {
+                ErrorMessage::internal_server_error_with_details(
+                    "Failed to build audio response",
+                    e.to_string(),
+                )
+            });
+    }
 
     let response = NvAudioSpeechResponse::from_annotated_stream(stream)
         .await
@@ -4693,30 +4944,49 @@ async fn audio_speech(
         return Ok((axum::http::StatusCode::BAD_REQUEST, Json(response)).into_response());
     }
 
-    inflight.mark_ok();
+    if returns_audio_bytes {
+        let content_type = response
+            .data
+            .first()
+            .map(|audio| audio_content_type(&audio.output_format))
+            .unwrap_or("audio/wav");
+        let chunks = decode_audio_chunks(&response).map_err(|e| {
+            let err_response = ErrorMessage::internal_server_error_with_details(
+                "Failed to decode audio response",
+                e,
+            );
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+        if chunks.is_empty() {
+            let err_response =
+                ErrorMessage::internal_server_error("Audio response did not contain data");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            return Err(err_response);
+        }
 
-    // If b64_json is present (data_source defaulted or explicitly "b64_json"),
-    // decode and return binary with content-type from AudioData.output_format.
-    // (matching OpenAI/vLLM-Omni behavior: curl --output file.wav)
-    if let Some(first) = response.data.first()
-        && let Some(b64) = &first.b64_json
-        && let Ok(audio_bytes) = base64::engine::general_purpose::STANDARD.decode(b64)
-    {
-        let content_type = match first.output_format.as_str() {
-            "mp3" => "audio/mpeg",
-            "flac" => "audio/flac",
-            "pcm" => "audio/pcm",
-            "aac" => "audio/aac",
-            "opus" => "audio/ogg; codecs=opus",
-            _ => "audio/wav",
-        };
-        return Ok(Response::builder()
+        let content_length = chunks.iter().map(Bytes::len).sum();
+        let mut audio_bytes = Vec::with_capacity(content_length);
+        for chunk in chunks {
+            audio_bytes.extend_from_slice(&chunk);
+        }
+        let response = Response::builder()
             .header("content-type", content_type)
-            .body(axum::body::Body::from(audio_bytes))
-            .unwrap());
+            .header("content-length", content_length.to_string())
+            .body(Body::from(audio_bytes))
+            .map_err(|e| {
+                let err_response = ErrorMessage::internal_server_error_with_details(
+                    "Failed to build audio response",
+                    e.to_string(),
+                );
+                inflight.mark_error(extract_error_type_from_response(&err_response));
+                err_response
+            })?;
+        inflight.mark_ok();
+        return Ok(response);
     }
 
-    // Fallback: return JSON (url format responses)
+    inflight.mark_ok();
     Ok(Json(response).into_response())
 }
 
@@ -4729,7 +4999,7 @@ pub fn audios_router(
     let path = path.unwrap_or("/v1/audio/speech".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
-        .route(&path, post(audio_speech))
+        .route(&path, post(handler_audio_speech))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
@@ -5103,6 +5373,38 @@ mod tests {
             nvext: None,
             chat_template_args: None,
         }
+    }
+
+    #[test]
+    fn responses_force_nonempty_request_requires_fallback_keep_alive() {
+        let parsing_options = ParsingOptions::new(Some("qwen3_coder".into()), Some("qwen3".into()));
+        let mut chat_template_args = HashMap::new();
+
+        assert!(!request_stream_can_defer_all_output(&parsing_options, None));
+
+        chat_template_args.insert(
+            "force_nonempty_content".to_string(),
+            serde_json::Value::Bool(false),
+        );
+        assert!(!request_stream_can_defer_all_output(
+            &parsing_options,
+            Some(&chat_template_args)
+        ));
+
+        chat_template_args.insert(
+            "force_nonempty_content".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        assert!(request_stream_can_defer_all_output(
+            &parsing_options,
+            Some(&chat_template_args)
+        ));
+
+        let muse_tool_parser_only = ParsingOptions::new(Some("muse_glimmer".into()), None);
+        assert!(request_stream_can_defer_all_output(
+            &muse_tool_parser_only,
+            Some(&chat_template_args)
+        ));
     }
 
     #[test]
