@@ -6,19 +6,18 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
 
 import yaml
 from pydantic import ValidationError
 
-from dynamo.profiler.sweeper.dgd import (
+from dynamo.profiler.sweeper.output import write_outputs
+from dynamo.profiler.sweeper.renderers import (
     CandidateMaterializationError,
     DGDMaterializationOptions,
-    materialize_candidate_dgd,
+    render_dgd,
 )
 from dynamo.profiler.sweeper.runner import SweepResult, run_sweep
 
@@ -83,52 +82,24 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _write_outputs(
+def _render_dgds(
     result: SweepResult,
-    output_dir: Path,
     options: DGDMaterializationOptions,
     *,
     renderer: str,
-    output: str,
-) -> list[dict[str, Any]]:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    index: list[dict[str, Any]] = []
+) -> list[str]:
+    rendered_dgds: list[str] = []
     for candidate_index, candidate in enumerate(result.candidates):
-        stem = f"dgd-{candidate_index:03d}"
-        dgd_yaml = materialize_candidate_dgd(
-            candidate,
-            result.config.workload,
-            options,
-            candidate_index=candidate_index,
-            renderer=renderer,
-        )
-
-        if output == "dgd":
-            artifact_path = output_dir / f"{stem}.yaml"
-            artifact_path.write_text(dgd_yaml, encoding="utf-8")
-        else:
-            artifact_path = output_dir / stem
-            artifact_path.mkdir(parents=True, exist_ok=True)
-            (artifact_path / "deploy.yaml").write_text(dgd_yaml, encoding="utf-8")
-            (artifact_path / "kustomization.yaml").write_text(
-                "apiVersion: kustomize.config.k8s.io/v1beta1\n"
-                "kind: Kustomization\n"
-                "resources:\n"
-                "  - deploy.yaml\n",
-                encoding="utf-8",
+        rendered_dgds.append(
+            render_dgd(
+                candidate,
+                result.config.workload,
+                options,
+                candidate_index=candidate_index,
+                renderer=renderer,
             )
-        index.append({"path": str(artifact_path.relative_to(output_dir))})
-
-    (output_dir / "index.json").write_text(
-        json.dumps(
-            {"renderer": renderer, "output": output, "artifacts": index},
-            indent=2,
-            sort_keys=True,
         )
-        + "\n",
-        encoding="utf-8",
-    )
-    return index
+    return rendered_dgds
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -149,10 +120,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error(
                 "no feasible candidate found (check backend, workload, SLA, GPU budget, and replay errors)"
             )
-        index = _write_outputs(
+        rendered_dgds = _render_dgds(
             result,
-            Path(args.output_dir),
             options,
+            renderer=args.renderer,
+        )
+        artifacts = write_outputs(
+            rendered_dgds,
+            Path(args.output_dir),
             renderer=args.renderer,
             output=args.output,
         )
@@ -166,7 +141,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"dynamo-profiler-sweeper: error: {exc}", file=sys.stderr)
         return 2
 
-    print(f"wrote {len(index)} {args.output} deployment output(s) to {args.output_dir}")
+    print(
+        f"wrote {len(artifacts)} {args.output} deployment output(s) "
+        f"to {args.output_dir}"
+    )
     return 0
 
 

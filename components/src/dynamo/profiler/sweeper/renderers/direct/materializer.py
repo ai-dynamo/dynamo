@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Lower an AI Simulate Sweeper result directly through Dynamo's v1 DGD templates.
+"""Map a Sweeper result directly onto Dynamo's v1 DGD templates.
 
 The direct renderer consumes the plain ``Candidate.config`` mapping and reuses
 the existing ``CONFIG_MODIFIERS`` implementation without invoking AIC's
