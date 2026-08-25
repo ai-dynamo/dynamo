@@ -100,25 +100,3 @@ offloading, see [perf/README.md](perf/README.md) for details.
 
 | Workload | Recipe | SKU | Concurrency | System output tok/s/gpu | User output tok/s (P50) | TTFT P50 (ms) |
 | -------- | ------ | --- | ----------- | ----------------------- | ----------------------- | ------------- |
-
-> [!NOTE]
-> Not yet populated. No Mooncake trace-replay results have been collected for this checkpoint.
-> The operating points referenced in the deploy configs were measured with AIPerf's **synthetic**
-> agentic profile, which replays a different length distribution and is not directly comparable
-> to the trace numbers other recipes report here. Run `perf/perf.yaml` to populate this table.
-
-## Limitations
-
-- **Text only.** No image or audio input.
-- **Context length is 86,016 by default.** The 1M recipes reach 1,048,576 via CPU KV offload and
-  are a **batch capability, not interactive** — TTFT is ~146–202 s at 1M.
-- **1M requires ~1.4 TB host RAM** per worker for the offload tier.
-- **No speculative decoding.** DSpark measured a large regression on this checkpoint and is not
-  enabled in any recipe.
-- **vLLM 0.27.1 is not supported** for this checkpoint (`CUDA_ERROR_ILLEGAL_ADDRESS` in DeepGEMM
-  `sm90_fp8_mqa_logits`). The recipes pin `vllm-runtime:1.4.0` (vLLM 0.26.0).
-- **DP8+EP is not viable** on 8x H200: the KV cache ceiling is 28,416 tokens, far below the 64K
-  agentic workload.
-- **DeepEP has no effect** at TP8/DP1. vLLM only constructs an all2all manager when
-  `data_parallel_size > 1`, so `--all2all-backend` is inert in these recipes regardless of value.
-- **GB200 profiles are not included** in this directory yet.
