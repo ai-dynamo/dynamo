@@ -792,12 +792,12 @@ fn register_model<'p>(
 ///
 /// This removes an LLM deployment from the discovery system.
 ///
-/// # Arguments
+/// **Arguments**
 ///
 /// * `endpoint` - The endpoint where the model is registered
 /// * `lora_name` - Optional LoRA adapter name (if unregistering a LoRA deployment)
 ///
-/// # MDC Path Format
+/// **MDC Path Format**
 ///
 /// - Base model: `v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}`
 /// - LoRA model: `v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}/{lora_slug}`
