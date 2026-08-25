@@ -757,17 +757,22 @@ jobs:
   efa-deploy-cleanup:
     name: vLLM EFA Deploy Cleanup
     if: always()
-    needs: [resolve-source-sha, efa-deploy-operator, efa-deploy-test-vllm]
+    needs: [efa-deploy-operator, efa-deploy-test-vllm]
     runs-on: prod-deploy-tester-v1
     permissions:
       contents: read
     env:
       KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02
     steps:
+      # No ref: here, matching deploy-cleanup above. Teardown needs only the
+      # vCluster name and namespace, both passed in from efa-deploy-operator's
+      # outputs, so it does not depend on the commit this job checks out. Pinning
+      # the resolved SHA also tripped CodeQL's untrusted-checkout and
+      # cache-poisoning rules -- a false positive on a workflow with no
+      # pull_request trigger, but not worth carrying for no behavioural gain.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           persist-credentials: false
-          ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
 
       - name: Set kubectl context to aws-dev-02
         uses: ./.github/actions/set-kube-context
