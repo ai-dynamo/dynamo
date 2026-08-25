@@ -51,33 +51,21 @@ impl EngineRoutePolicy {
             .filter(|s| !s.is_empty());
 
         // Warn if more than one control is set — only the highest-precedence one applies.
-        let set_count = [disable_all, allow.is_some(), deny.is_some()]
-            .iter()
-            .filter(|b| **b)
-            .count();
-        if set_count > 1 {
-            let winner = if disable_all {
-                env_engine_routes::DYN_DISABLE_ENGINE_ROUTES
-            } else if allow.is_some() {
-                env_engine_routes::DYN_ENGINE_ROUTES_ALLOW
-            } else {
-                env_engine_routes::DYN_ENGINE_ROUTES_DENY
-            };
-            let mut set = Vec::new();
-            if disable_all {
-                set.push(env_engine_routes::DYN_DISABLE_ENGINE_ROUTES);
-            }
-            if allow.is_some() {
-                set.push(env_engine_routes::DYN_ENGINE_ROUTES_ALLOW);
-            }
-            if deny.is_some() {
-                set.push(env_engine_routes::DYN_ENGINE_ROUTES_DENY);
-            }
+        // `set` is built in precedence order, so its first entry is the one that wins.
+        let set: Vec<&str> = [
+            (disable_all, env_engine_routes::DYN_DISABLE_ENGINE_ROUTES),
+            (allow.is_some(), env_engine_routes::DYN_ENGINE_ROUTES_ALLOW),
+            (deny.is_some(), env_engine_routes::DYN_ENGINE_ROUTES_DENY),
+        ]
+        .into_iter()
+        .filter_map(|(is_set, name)| is_set.then_some(name))
+        .collect();
+        if set.len() > 1 {
             tracing::warn!(
                 "Multiple engine-route policy variables set ({}); applying {} (precedence: \
                  DYN_DISABLE_ENGINE_ROUTES > DYN_ENGINE_ROUTES_ALLOW > DYN_ENGINE_ROUTES_DENY)",
                 set.join(", "),
-                winner
+                set[0]
             );
         }
 
@@ -253,61 +241,24 @@ mod tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
-    // ---- Policy: pure is_allowed truth table ----
+    // ---- Policy: is_allowed truth table for each variant ----
 
     #[test]
-    fn test_policy_allow_all() {
-        let p = EngineRoutePolicy::AllowAll;
-        assert!(p.is_allowed("control/start_profile"));
-        assert!(p.is_allowed("update/model_taints"));
-        assert!(p.is_allowed("anything"));
-    }
+    fn test_policy_is_allowed() {
+        assert!(EngineRoutePolicy::AllowAll.is_allowed("anything"));
+        assert!(!EngineRoutePolicy::DisableAll.is_allowed("control/start_profile"));
 
-    #[test]
-    fn test_policy_disable_all() {
-        let p = EngineRoutePolicy::DisableAll;
-        assert!(!p.is_allowed("control/start_profile"));
-        assert!(!p.is_allowed("update/model_taints"));
-    }
+        let allow = EngineRoutePolicy::Allowlist(set(&["control/start_profile"]));
+        assert!(allow.is_allowed("control/start_profile"));
+        assert!(!allow.is_allowed("control/update_weights_from_disk"));
 
-    #[test]
-    fn test_policy_allowlist() {
-        let p =
-            EngineRoutePolicy::Allowlist(set(&["control/start_profile", "update/model_taints"]));
-        assert!(p.is_allowed("control/start_profile"));
-        assert!(p.is_allowed("update/model_taints"));
-        assert!(!p.is_allowed("control/update_weights_from_disk"));
-    }
-
-    #[test]
-    fn test_policy_denylist() {
-        let p = EngineRoutePolicy::Denylist(set(&["control/update_weights_from_disk"]));
-        assert!(!p.is_allowed("control/update_weights_from_disk"));
-        assert!(p.is_allowed("control/start_profile"));
-        assert!(p.is_allowed("update/model_taints"));
-    }
-
-    // ---- parse helpers ----
-
-    #[test]
-    fn test_parse_route_set_trims_and_drops_empties() {
-        assert_eq!(parse_route_set("a,b, c "), set(&["a", "b", "c"]));
-        assert_eq!(parse_route_set(" a ,, ,b,"), set(&["a", "b"]));
-        assert!(parse_route_set("").is_empty());
-        assert!(parse_route_set("  , ,").is_empty());
-    }
-
-    #[test]
-    fn test_is_truthy() {
-        for v in ["1", "true", "TRUE", "Yes", " yes "] {
-            assert!(is_truthy(v), "{v:?} should be truthy");
-        }
-        for v in ["0", "false", "no", "", "2", "on"] {
-            assert!(!is_truthy(v), "{v:?} should not be truthy");
-        }
+        let deny = EngineRoutePolicy::Denylist(set(&["control/update_weights_from_disk"]));
+        assert!(!deny.is_allowed("control/update_weights_from_disk"));
+        assert!(deny.is_allowed("control/start_profile"));
     }
 
     // ---- Policy: from_env resolution & precedence ----
+    // (also exercises truthy parsing and comma-list trim/empty-set handling)
     //
     // These mutate process env, so they share one serialized test to avoid cross-test
     // interference under the default multi-threaded test runner.
@@ -427,40 +378,19 @@ mod tests {
         );
     }
 
-    // ---- Registry: policy enforcement ----
-
-    fn dummy_callback() -> EngineRouteCallback {
-        Arc::new(|_| Box::pin(async { Ok(serde_json::json!({"ok": true})) }))
-    }
+    // ---- Registry: consults policy (not just route presence), defaults from env ----
 
     #[test]
-    fn test_registry_default_policy_allows() {
-        let registry = EngineRouteRegistry::with_policy(EngineRoutePolicy::AllowAll);
-        assert!(registry.is_allowed("control/start_profile"));
-        assert_eq!(registry.policy(), &EngineRoutePolicy::AllowAll);
-    }
-
-    #[test]
-    fn test_registry_disable_all_blocks() {
+    fn test_registry_enforces_policy_and_defaults_from_env() {
+        // A registered route is still blocked when the policy denies it.
+        let callback: EngineRouteCallback =
+            Arc::new(|_| Box::pin(async { Ok(serde_json::json!({"ok": true})) }));
         let registry = EngineRouteRegistry::with_policy(EngineRoutePolicy::DisableAll);
-        registry.register("control/start_profile", dummy_callback());
-        // Route is registered, but policy blocks it.
-        assert!(!registry.is_allowed("control/start_profile"));
+        registry.register("control/start_profile", callback);
         assert!(registry.get("control/start_profile").is_some());
-    }
+        assert!(!registry.is_allowed("control/start_profile"));
 
-    #[test]
-    fn test_registry_allowlist_enforced() {
-        let registry = EngineRouteRegistry::with_policy(EngineRoutePolicy::Allowlist(set(&[
-            "update/model_taints",
-        ])));
-        assert!(registry.is_allowed("update/model_taints"));
-        assert!(!registry.is_allowed("control/update_weights_from_disk"));
-    }
-
-    #[test]
-    fn test_registry_default_is_from_env() {
-        // Default/new resolve from env; with no vars set that is AllowAll.
+        // new()/default() resolve the policy from env; with no vars set that is AllowAll.
         temp_env::with_vars(
             [
                 (env_engine_routes::DYN_DISABLE_ENGINE_ROUTES, None::<&str>),
