@@ -11546,6 +11546,8 @@ spec:
                   rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                 - message: minAvailable is immutable after creation
                   rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
+                - message: componentType is immutable after it is set
+                  rule: '!has(oldSelf.componentType) || (has(self.componentType) && self.componentType == oldSelf.componentType)'
             status:
               description: Status reflects the current observed state of the component deployment.
               properties:
@@ -20502,6 +20504,8 @@ spec:
                   rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                 - message: minAvailable is immutable after creation
                   rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
+                - message: type is immutable after it is set
+                  rule: '!has(oldSelf.type) || (has(self.type) && self.type == oldSelf.type)'
             status:
               description: status reflects the current observed state of the component deployment.
               properties:

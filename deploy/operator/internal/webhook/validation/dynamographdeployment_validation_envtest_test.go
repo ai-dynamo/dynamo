@@ -506,6 +506,22 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantCELErr: "spec.components[1]: Invalid value: minAvailable is immutable after creation",
 		},
 		{
+			name:          "v1alpha1 componentType change is rejected by CEL",
+			oldDeployment: alphaDGDForAdmission(nil),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services[dgdAdmissionWorkerName].ComponentType = consts.ComponentTypeEPP
+			}),
+			wantCELErr: "spec.services[worker]: Invalid value: componentType is immutable after it is set",
+		},
+		{
+			name:          "v1beta1 type change is rejected by CEL",
+			oldDeployment: betaDGDForAdmission(nil),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+			}),
+			wantCELErr: "spec.components[1]: Invalid value: type is immutable after it is set",
+		},
+		{
 			name: "v1beta1 removed minAvailable update is restored by defaulting",
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(1))
