@@ -3,12 +3,14 @@
 
 """Unit tests for SGLang backend components."""
 
+import json
 import logging
 import os
 import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -484,6 +486,47 @@ def test_require_reasoning_kwarg_silently_drops_false(caplog):
         assert require_reasoning_kwargs(OldEngine(), {"require_reasoning": False}) == {}
 
     assert "Dropping require_reasoning=true" not in caplog.text
+
+
+class _ReasoningGateEngine:
+    async def async_generate(self, require_reasoning=False):
+        return None
+
+
+class _LegacyEngine:
+    async def async_generate(self, input_ids=None, sampling_params=None):
+        return None
+
+
+@pytest.mark.parametrize(
+    ("engine", "reasoning_parser", "expected"),
+    [
+        (_ReasoningGateEngine(), "kimi_k2", True),
+        # No engine-side parser: SGLang cannot find the reasoning boundary.
+        (_ReasoningGateEngine(), None, False),
+        # Engine predates the gate, so require_reasoning is dropped silently.
+        (_LegacyEngine(), "kimi_k2", False),
+        # Multimodal encode workers register without an engine.
+        (None, "kimi_k2", False),
+    ],
+)
+def test_sglang_publishes_structural_tag_reasoning_policy(
+    engine, reasoning_parser, expected
+):
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+    server_args = SimpleNamespace(reasoning_parser=reasoning_parser)
+
+    sglang_register.publish_sglang_structural_tag_reasoning_policy(
+        runtime_config, engine, server_args
+    )
+
+    runtime_config.set_engine_specific.assert_called_once_with(
+        sglang_register.TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_WHEN_REQUIRED_RUNTIME_KEY,
+        json.dumps(expected),
+    )
 
 
 def test_routed_experts_kwarg_omitted_when_flag_off():

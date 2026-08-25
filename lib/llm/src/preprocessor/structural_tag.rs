@@ -5,6 +5,7 @@
 
 use crate::local_model::runtime_config::{
     StructuralTagMode, StructuralTagScope, TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+    TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_WHEN_REQUIRED_RUNTIME_KEY,
 };
 use crate::preprocessor::{OpenAIPreprocessor, PreprocessedRequest};
 
@@ -96,23 +97,36 @@ impl OpenAIPreprocessor {
             parallel_tool_calls,
             schema_mode: self.runtime_config.structural_tag_schema,
             starts_in_reasoning: prompt_injected_reasoning
-                && !self.tool_call_structural_tag_excludes_reasoning(),
+                && !self.tool_call_structural_tag_excludes_reasoning(
+                    preprocessed_request.require_reasoning,
+                ),
         };
 
         Self::apply_tool_call_format(parser_name, builder, &ctx, preprocessed_request)
     }
 
-    fn tool_call_structural_tag_excludes_reasoning(&self) -> bool {
-        match self
-            .runtime_config
-            .get_engine_specific::<bool>(TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY)
-        {
+    /// Whether the tool structural tag must leave the reasoning block to the
+    /// backend. A backend either defers grammar activation for every request,
+    /// or only for the requests the frontend gates with `require_reasoning`.
+    /// Sending both the gate and a tag that opens with a reasoning section makes
+    /// the model close reasoning twice before it can emit a call, which burns
+    /// the token budget instead of producing tool calls.
+    fn tool_call_structural_tag_excludes_reasoning(&self, require_reasoning: bool) -> bool {
+        self.structural_tag_reasoning_flag(TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY)
+            || (require_reasoning
+                && self.structural_tag_reasoning_flag(
+                    TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_WHEN_REQUIRED_RUNTIME_KEY,
+                ))
+    }
+
+    fn structural_tag_reasoning_flag(&self, key: &str) -> bool {
+        match self.runtime_config.get_engine_specific::<bool>(key) {
             Ok(Some(excludes_reasoning)) => excludes_reasoning,
             Ok(None) => false,
             Err(error) => {
                 tracing::warn!(
                     %error,
-                    key = TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+                    key,
                     "Ignoring invalid structural-tag reasoning metadata; using the compatibility behavior"
                 );
                 false
@@ -251,7 +265,10 @@ mod tests {
             .unwrap()
     }
 
-    fn kimi_k2_preprocessor(excludes_reasoning: Option<bool>) -> Arc<OpenAIPreprocessor> {
+    fn kimi_k2_preprocessor_with(
+        key: &str,
+        excludes_reasoning: Option<bool>,
+    ) -> Arc<OpenAIPreprocessor> {
         let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
         let mut mdc = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
@@ -259,10 +276,7 @@ mod tests {
         mdc.runtime_config.tool_call_parser = Some("kimi_k2".to_string());
         if let Some(excludes_reasoning) = excludes_reasoning {
             mdc.runtime_config
-                .set_engine_specific(
-                    TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
-                    excludes_reasoning,
-                )
+                .set_engine_specific(key, excludes_reasoning)
                 .unwrap();
         }
 
@@ -270,13 +284,26 @@ mod tests {
     }
 
     fn kimi_k2_required_format(excludes_reasoning: Option<bool>) -> serde_json::Value {
-        let preprocessor = kimi_k2_preprocessor(excludes_reasoning);
+        kimi_k2_required_format_with(
+            TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+            excludes_reasoning,
+            false,
+        )
+    }
+
+    fn kimi_k2_required_format_with(
+        key: &str,
+        excludes_reasoning: Option<bool>,
+        require_reasoning: bool,
+    ) -> serde_json::Value {
+        let preprocessor = kimi_k2_preprocessor_with(key, excludes_reasoning);
         let tools = [ToolDefinition {
             name: "get_weather".to_string(),
             parameters: None,
             strict: None,
         }];
         let mut request = preprocessed_request();
+        request.require_reasoning = require_reasoning;
 
         assert!(
             preprocessor
@@ -315,6 +342,50 @@ mod tests {
             format["elements"][0]["value"],
             "<|tool_calls_section_begin|>"
         );
+    }
+
+    #[test]
+    fn request_gated_reasoning_metadata_follows_require_reasoning() {
+        // SGLang takes the reasoning gate per request, so the tag drops its
+        // reasoning section only on the requests that carry the gate.
+        let format = kimi_k2_required_format_with(
+            TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_WHEN_REQUIRED_RUNTIME_KEY,
+            Some(true),
+            true,
+        );
+        assert_eq!(format["elements"][0]["type"], "const_string");
+        assert_eq!(
+            format["elements"][0]["value"],
+            "<|tool_calls_section_begin|>"
+        );
+
+        // Without the gate the backend enforces the grammar from the first
+        // token, so the tag must still model the open reasoning block.
+        let format = kimi_k2_required_format_with(
+            TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_WHEN_REQUIRED_RUNTIME_KEY,
+            Some(true),
+            false,
+        );
+        assert_eq!(format["elements"][0]["type"], "tag");
+        assert_eq!(format["elements"][0]["end"], "</think>");
+
+        // A backend that never advertises the capability keeps the
+        // compatibility behavior even when the gate is requested.
+        let format = kimi_k2_required_format_with(
+            TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_WHEN_REQUIRED_RUNTIME_KEY,
+            None,
+            true,
+        );
+        assert_eq!(format["elements"][0]["type"], "tag");
+        assert_eq!(format["elements"][0]["end"], "</think>");
+
+        // The unconditional capability stays independent of the gate.
+        let format = kimi_k2_required_format_with(
+            TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+            Some(true),
+            false,
+        );
+        assert_eq!(format["elements"][0]["type"], "const_string");
     }
 
     #[test]

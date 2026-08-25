@@ -37,6 +37,16 @@ pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
 pub const TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY: &str =
     "tool_call_structural_tag_excludes_reasoning";
 
+/// Runtime-data key indicating that a backend defers tool-grammar activation
+/// until reasoning completes, but only for requests that carry
+/// `require_reasoning`. SGLang publishes this: its grammar backend takes the
+/// reasoning gate per request, so the frontend must drop the reasoning section
+/// from the structural tag on exactly those requests and keep it otherwise.
+///
+/// Absence means `false`, which leaves the compatibility behavior in place.
+pub const TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_WHEN_REQUIRED_RUNTIME_KEY: &str =
+    "tool_call_structural_tag_excludes_reasoning_when_required";
+
 /// Describes which request-token overflows the frontend may reject early.
 ///
 /// The combined limit already accounts for engine-reserved tokens. A false
