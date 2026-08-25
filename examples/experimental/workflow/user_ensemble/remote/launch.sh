@@ -5,7 +5,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(readlink -f "$SCRIPT_DIR/../../../..")"
+REPO_ROOT="$(readlink -f "$SCRIPT_DIR/../../../../..")"
 source "$REPO_ROOT/examples/common/gpu_utils.sh"
 source "$REPO_ROOT/examples/common/launch_utils.sh"
 trap dynamo_exit_trap EXIT
@@ -15,6 +15,7 @@ SERVED_MODEL_NAME="${DYN_SERVED_MODEL_NAME:-$MODEL}"
 ENCODER_MODEL="${DYN_ENCODER_MODEL:-$MODEL}"
 ENCODER_CLASS="${DYN_ENCODER_CLASS:-examples.custom_encoder.hitchhikers_vision_encoder.HitchhikersVisionEncoder}"
 CUSTOM_JINJA_TEMPLATE="${DYN_CUSTOM_JINJA_TEMPLATE:-$REPO_ROOT/examples/custom_encoder/templates/qwen_vl.jinja}"
+GENERATOR_MODEL_NAME="${DYN_GENERATOR_SERVED_MODEL_NAME:-user-ensemble-generator}"
 DECODER_GPU="${DYN_DECODER_GPU:-${CUDA_VISIBLE_DEVICES:-0}}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 MAX_MODEL_LEN="${DYN_MAX_MODEL_LEN:-4096}"
@@ -36,28 +37,30 @@ export DYN_MODEL="$MODEL"
 export DYN_CUSTOM_JINJA_TEMPLATE="$CUSTOM_JINJA_TEMPLATE"
 
 python3 -m dynamo.frontend \
-    --http-port "$HTTP_PORT" \
-    --model-path "$MODEL" \
-    --model-name "$SERVED_MODEL_NAME" \
-    --custom-jinja-template "$CUSTOM_JINJA_TEMPLATE" \
-    --workflow-provider \
-    examples.custom_backend.user_ensemble.remote.provider:provide_workflow &
+    --http-port "$HTTP_PORT" &
 
 CUDA_VISIBLE_DEVICES= \
 DYN_SYSTEM_PORT="${DYN_ENCODER_SYSTEM_PORT:-8081}" \
-python3 -m dynamo.vllm.workflow.components.encoder_worker \
+python3 -m dynamo.experimental.workflow.vllm.encoder_worker \
     --endpoint-id user-ensemble.encoder.generate \
     --model "$ENCODER_MODEL" \
     --custom-encoder-class "$ENCODER_CLASS" &
 
 CUDA_VISIBLE_DEVICES= \
 DYN_SYSTEM_PORT="${DYN_CLASSIFIER_SYSTEM_PORT:-8082}" \
-python3 -m examples.custom_backend.user_ensemble.remote.classifier_worker &
+python3 -m examples.experimental.workflow.user_ensemble.remote.classifier_worker &
+
+DYN_MODEL="$MODEL" \
+DYN_SERVED_MODEL_NAME="$SERVED_MODEL_NAME" \
+DYN_CUSTOM_JINJA_TEMPLATE="$CUSTOM_JINJA_TEMPLATE" \
+DYN_SYSTEM_PORT="${DYN_ORCHESTRATOR_SYSTEM_PORT:-8084}" \
+python3 -m examples.experimental.workflow.user_ensemble.remote.orchestrator_worker &
 
 CUDA_VISIBLE_DEVICES="$DECODER_GPU" \
 DYN_SYSTEM_PORT="${DYN_DECODER_SYSTEM_PORT:-8083}" \
 python3 -m dynamo.vllm \
     --model "$MODEL" \
+    --served-model-name "$GENERATOR_MODEL_NAME" \
     --endpoint dyn://user-ensemble.generator.generate \
     --enable-prompt-embeds \
     --max-model-len "$MAX_MODEL_LEN" \

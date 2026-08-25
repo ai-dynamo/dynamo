@@ -8,9 +8,9 @@ from __future__ import annotations
 import asyncio
 
 from dynamo.runtime import DistributedRuntime, dynamo_worker
-from dynamo.workflow import NixlTensorCarrier, RemoteStageServer
-from examples.custom_backend.user_ensemble.remote.bindings import CLASSIFIER_ENDPOINT
-from examples.custom_backend.user_ensemble.stages import DummyClassifier
+from dynamo.experimental.workflow import NixlTensorCarrier, RemoteStageServer
+from examples.experimental.workflow.user_ensemble.remote.bindings import CLASSIFIER_ENDPOINT
+from examples.experimental.workflow.user_ensemble.stages import DummyClassifier
 
 
 @dynamo_worker()

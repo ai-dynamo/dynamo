@@ -8,12 +8,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 
+from dynamo.experimental.workflow import NixlTensorCarrier, RemoteStageServer
+from dynamo.experimental.workflow.vllm.stages import EncoderStage
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.vllm.multimodal_utils.custom_encoder import (
     resolve_vision_encoder_backend_class,
 )
-from dynamo.experimental.workflow.vllm.stages import EncoderStage
-from dynamo.experimental.workflow import NixlTensorCarrier, RemoteStageServer
 
 
 @dynamo_worker()

@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
 pytest.importorskip("torch", reason="the external encoder example requires PyTorch")
@@ -19,12 +17,12 @@ pytest.importorskip(
 
 import torch  # noqa: E402
 
-from dynamo.workflow import ValueRef  # noqa: E402
-from examples.custom_backend.user_ensemble.stages import (  # noqa: E402
+from dynamo.experimental.workflow import StageContext, ValueRef  # noqa: E402
+from examples.experimental.workflow.user_ensemble.stages import (  # noqa: E402
     DummyClassifier,
     EnsembleResponseStage,
 )
-from examples.custom_backend.user_ensemble.workflow import define_workflow  # noqa: E402
+from examples.experimental.workflow.user_ensemble.workflow import define_workflow  # noqa: E402
 
 pytestmark = [
     pytest.mark.unit,
@@ -35,8 +33,12 @@ pytestmark = [
 ]
 
 
-def _context() -> SimpleNamespace:
-    return SimpleNamespace(raise_if_cancelled=lambda: None)
+def _context() -> StageContext:
+    return StageContext(
+        workflow_name="user-ensemble-test",
+        stage_id="test",
+        attempt_id="request-1",
+    )
 
 
 def test_workflow_declares_encoder_fanout_to_classifier_and_stock_generator():

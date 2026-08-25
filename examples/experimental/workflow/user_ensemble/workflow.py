@@ -3,9 +3,9 @@
 
 """One static encoder fan-out workflow, independent of remote placement."""
 
-from dynamo.vllm.workflow.components import DynamoVllmStage, EncoderStage
-from dynamo.workflow import Workflow
-from examples.custom_backend.user_ensemble.stages import (
+from dynamo.experimental.workflow.vllm import DynamoVllmStage, EncoderStage
+from dynamo.experimental.workflow import Workflow
+from examples.experimental.workflow.user_ensemble.stages import (
     DummyClassifier,
     EnsembleResponseStage,
 )

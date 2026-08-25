@@ -1,5 +1,10 @@
 # Remote encoder, classifier, and stock vLLM workflow
 
+> Experimental: This workflow API is under active development and may evolve
+> based on feedback. It is an optional orchestration layer over Dynamo's
+> discoverable workers and endpoints; applications may compose those primitives
+> directly when they prefer to own the orchestration logic.
+
 This example qualifies one static disaggregated workflow:
 
 ```text
@@ -15,8 +20,9 @@ publishes `row_splits` plus `image_token_id` as JSON metadata. The workflow
 runtime schedules the two consumers concurrently. The generator binding calls a
 normal aggregated `dynamo.vllm` Generate endpoint; that worker imports the
 tensor and creates its mixed `EmbedsPrompt` without a workflow-specific decoder.
-The application-owned response stage runs inline in the frontend process, so it
-adds no worker deployment or network hop.
+The application-owned response stage runs inline in the orchestrator process,
+so it adds no worker deployment or network hop. The frontend remains generic
+and discovers the orchestrator as an ordinary model worker.
 
 Dynamo supplies `EncoderStage`, `DynamoVllmStage`, and the remote encoder
 launcher. This application owns the custom encoder selection, classifier,
@@ -29,7 +35,7 @@ and defaults to `DYN_MODEL`.
 From the repository root, run:
 
 ```bash
-examples/custom_backend/user_ensemble/remote/launch.sh
+examples/experimental/workflow/user_ensemble/remote/launch.sh
 ```
 
 Then send an image-bearing chat request:

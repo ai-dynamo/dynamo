@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import asyncio
 from collections.abc import Mapping
 from typing import Any
 
@@ -22,7 +21,10 @@ from dynamo.experimental.workflow import (
     compile_workflow,
 )
 from dynamo.experimental.workflow.dispatcher import StageDispatcher
-from dynamo.experimental.workflow.generate import GenerateEndpointInvoker, collect_generation
+from dynamo.experimental.workflow.generate import (
+    GenerateEndpointInvoker,
+    collect_generation,
+)
 from dynamo.experimental.workflow.remote import NixlCarriedValue
 
 pytestmark = [
@@ -160,15 +162,11 @@ class _Runtime:
         return _Endpoint(self._clients[endpoint_id])
 
 
-def _context(request_context: Any = None) -> StageContext:
+def _context() -> StageContext:
     return StageContext(
         workflow_name="request-generator",
         stage_id="generator",
         attempt_id="request-1",
-        invocation_id="request-1:generator",
-        deadline=None,
-        _cancelled=asyncio.Event(),
-        request_context=request_context,
     )
 
 
@@ -292,7 +290,8 @@ async def test_generate_invoker_cancels_owned_stream_on_collection_error() -> No
             "generator",
             GENERATOR,
             {"request": {"token_ids": [1], "output_options": {}}},
-            _context(parent),
+            _context(),
+            request_context=parent,
         )
 
     assert parent.child.stopped
@@ -317,7 +316,6 @@ async def test_dispatcher_binds_generate_protocol_for_stock_endpoint() -> None:
 
     result = await dispatcher.call(
         "generator",
-        GENERATOR,
         {"request": request},
         _context(),
     )
@@ -362,7 +360,17 @@ async def test_dispatcher_passes_remote_tensor_reference_to_stock_vllm() -> None
     )
 
     class EncoderInvoker:
-        async def run(self, stage_id, contract, inputs, context, output_transfers):
+        async def run(
+            self,
+            stage_id,
+            contract,
+            inputs,
+            context,
+            output_transfers,
+            *,
+            request_context=None,
+        ):
+            del request_context
             transfer_ids = output_transfers["encoder_features"]
             fanout = NixlTensorFanout(
                 {

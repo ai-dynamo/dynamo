@@ -9,12 +9,12 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 import torch
 
+from dynamo.experimental.workflow import GenerateEndpointBinding, StageContext
+from dynamo.experimental.workflow.plan import validate_binding_contract
+from dynamo.experimental.workflow.vllm import DynamoVllmStage, EncoderStage
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.vllm.multimodal_utils.custom_encoder import VisionEncoderBackend
 from dynamo.vllm.multimodal_utils.custom_encoder.backend import loader
-from dynamo.experimental.workflow.vllm import DynamoVllmStage, EncoderStage
-from dynamo.experimental.workflow import GenerateEndpointBinding
-from dynamo.experimental.workflow.plan import validate_binding_contract
 
 pytestmark = [
     pytest.mark.unit,
@@ -35,8 +35,12 @@ class _Backend(VisionEncoderBackend):
         raise NotImplementedError
 
 
-def _context() -> SimpleNamespace:
-    return SimpleNamespace(raise_if_cancelled=Mock())
+def _context() -> StageContext:
+    return StageContext(
+        workflow_name="encoder-test",
+        stage_id="encoder",
+        attempt_id="request-1",
+    )
 
 
 def test_dynamo_vllm_stage_matches_generate_endpoint_contract():
@@ -87,7 +91,6 @@ async def test_encoder_stage_packs_dynamic_image_rows_and_metadata():
     encoder.encode.assert_awaited_once_with(
         ["data:image/png;base64,first", "data:image/png;base64,second"]
     )
-    assert context.raise_if_cancelled.call_count == 2
 
 
 @pytest.mark.parametrize(

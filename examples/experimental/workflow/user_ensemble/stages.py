@@ -12,7 +12,7 @@ from typing import Any
 import torch
 
 from dynamo.llm.exceptions import InvalidArgument
-from dynamo.workflow import StageContext, StageContract
+from dynamo.experimental.workflow import StageContext, StageContract
 
 
 class DummyClassifier:
@@ -27,7 +27,7 @@ class DummyClassifier:
     async def run(
         self, inputs: Mapping[str, Any], context: StageContext
     ) -> Mapping[str, Any]:
-        context.raise_if_cancelled()
+        del context
         features = inputs["encoder_features"]
         if not isinstance(features, torch.Tensor):
             raise InvalidArgument("classifier features must be a torch.Tensor")
@@ -55,7 +55,7 @@ class EnsembleResponseStage:
     async def run(
         self, inputs: Mapping[str, Any], context: StageContext
     ) -> Mapping[str, Any]:
-        context.raise_if_cancelled()
+        del context
         completion = inputs["completion"]
         scores = inputs["scores"]
         if not isinstance(completion, Mapping):

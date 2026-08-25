@@ -11,12 +11,12 @@ from typing import Any, cast
 import torch
 
 from dynamo.common.backend import GenerateRequest
+from dynamo.experimental.workflow import StageContext, StageContract
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.vllm.multimodal_utils.custom_encoder import (
     AsyncVisionEncoder,
     VisionEncoderBackend,
 )
-from dynamo.experimental.workflow import StageContext, StageContract
 
 _IMAGE_URL_PORT = "image_url"
 _URL_VARIANT = "Url"
@@ -78,13 +78,12 @@ class EncoderStage:
     async def run(
         self, inputs: Mapping[str, Any], context: StageContext
     ) -> Mapping[str, Any]:
-        context.raise_if_cancelled()
+        del context
         request_value = inputs["request"]
         if not isinstance(request_value, Mapping):
             raise InvalidArgument("encoder stage request must be an object")
         request = cast(GenerateRequest, request_value)
         artifacts = await self._encoder.encode(self._image_urls(request))
-        context.raise_if_cancelled()
         tensors = self._validate_artifacts(artifacts)
 
         row_splits = [0]

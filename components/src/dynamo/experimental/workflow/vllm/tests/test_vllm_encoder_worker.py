@@ -9,9 +9,9 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from dynamo.experimental.workflow import StageContext
 from dynamo.experimental.workflow.vllm import EncoderStage
 from dynamo.experimental.workflow.vllm import encoder_worker as worker_module
-from dynamo.experimental.workflow import StageContext
 
 pytestmark = [
     pytest.mark.unit,

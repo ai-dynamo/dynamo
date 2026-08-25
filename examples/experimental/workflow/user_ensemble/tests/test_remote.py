@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -18,23 +19,21 @@ pytest.importorskip(
     reason="a full vLLM installation is required by the vision example",
 )
 
-from dynamo.workflow import (  # noqa: E402
+from dynamo.experimental.workflow import (  # noqa: E402
     GenerateEndpointBinding,
     InlineBinding,
     RemoteBinding,
     WorkflowOrchestrator,
 )
-from examples.custom_backend.user_ensemble.remote import (  # noqa: E402
+from examples.experimental.workflow.user_ensemble.remote import (  # noqa: E402
     classifier_worker as classifier_worker_module,
+    orchestrator_worker as orchestrator_worker_module,
 )
-from examples.custom_backend.user_ensemble.remote.bindings import (  # noqa: E402
+from examples.experimental.workflow.user_ensemble.remote.bindings import (  # noqa: E402
     CLASSIFIER_ENDPOINT,
     ENCODER_ENDPOINT,
     GENERATOR_ENDPOINT,
     compile_remote_workflow,
-)
-from examples.custom_backend.user_ensemble.remote.provider import (  # noqa: E402
-    provide_workflow,
 )
 
 pytestmark = [
@@ -99,22 +98,43 @@ def test_remote_plan_uses_nixl_fanout_and_stock_generate_protocol():
     assert not hasattr(plan, "edges")
 
 
-async def test_frontend_provider_binds_remote_plan_and_inline_response():
+async def test_orchestrator_worker_binds_and_registers_remote_workflow():
     orchestrator = object.__new__(WorkflowOrchestrator)
     bind = AsyncMock(return_value=orchestrator)
-    runtime = object()
+    register = AsyncMock()
+    runtime = _FakeRuntime()
+    handler = SimpleNamespace(generate=object())
 
-    with patch(
-        "examples.custom_backend.user_ensemble.remote.provider.WorkflowOrchestrator.bind",
-        bind,
+    with (
+        patch.object(orchestrator_worker_module.WorkflowOrchestrator, "bind", bind),
+        patch.object(orchestrator_worker_module, "register_model", register),
+        patch.object(
+            orchestrator_worker_module,
+            "WorkflowEndpointHandler",
+            return_value=handler,
+        ),
+        patch.dict(
+            orchestrator_worker_module.os.environ,
+            {
+                "DYN_MODEL": "org/model",
+                "DYN_SERVED_MODEL_NAME": "ensemble",
+                "DYN_CUSTOM_JINJA_TEMPLATE": "/tmp/template.jinja",
+            },
+        ),
     ):
-        provided = await provide_workflow(runtime)
+        await orchestrator_worker_module.orchestrator_worker.__wrapped__(runtime)
 
     assert bind.await_args.args == (compile_remote_workflow(),)
     assert bind.await_args.kwargs["runtime"] is runtime
     response = bind.await_args.kwargs["inline_runners"]["response"]
     assert response.contract.id == "ensemble-response"
-    assert provided is orchestrator
+    assert runtime.endpoint_ids == [orchestrator_worker_module.ORCHESTRATOR_ENDPOINT]
+    assert runtime.created_endpoint.handler is handler.generate
+    assert register.await_args.args[2] is runtime.created_endpoint
+    assert register.await_args.args[3] == "org/model"
+    assert register.await_args.kwargs["model_name"] == "ensemble"
+    assert register.await_args.kwargs["custom_template_path"] == "/tmp/template.jinja"
+    assert register.await_args.kwargs["ignore_weights"] is True
 
 
 async def test_classifier_worker_serves_workflow_protocol_and_closes_carrier():
