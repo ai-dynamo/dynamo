@@ -51,23 +51,6 @@ pytestmark = [
 SPEEDUP_RATIO = 10.0
 BLOCK_SIZE = 16
 
-# How long a single vLLM worker gets to appear in the endpoint's instance list after its
-# subprocess is spawned, in `VLLMProcess.launch_workers_with_indexer()`.
-#
-# 180s is the budget every *other* vLLM router e2e test in this suite already grants worker
-# registration: they reach it via `wait_for_frontend_ready` -> `poll_for_worker_instances`
-# with `frontend_timeout: int = 180` (tests/router/e2e_harness.py). The standalone-indexer
-# path was the outlier at 60s, which is what made `test_vllm_indexers_sync` flaky -- a
-# healthy but slow-starting worker (cold weight load, contended GPU) was declared dead
-# before it registered. Note that this file states three times below that vLLM startup
-# "can exceed 150s on contended CI runners", so a smaller ceiling would leave that
-# documented worst case still failing.
-#
-# Raising the ceiling does not slow a healthy run: the wait returns as soon as the worker
-# registers, so only the pathological tail moves. Two sequential registrations at the full
-# budget plus the ~130s of non-registration work still fit inside the test's existing
-# `@pytest.mark.timeout(690)`, which keeps a stall reported as the precise "worker N never
-# registered" error below rather than as an opaque pytest timeout.
 WORKER_REGISTRATION_TIMEOUT_S = 180.0
 WORKER_REGISTRATION_POLL_S = 0.5
 
@@ -455,9 +438,6 @@ class VLLMProcess(ManagedEngineProcessMixin):
                 process.__enter__()
 
                 new_worker_id = None
-                # Deadline wait rather than a fixed iteration count, and the budget is read
-                # from the module-level constant on every call so it can be overridden in
-                # process (e.g. monkeypatched down) without editing this call site.
                 started_at = time.monotonic()
                 deadline = started_at + WORKER_REGISTRATION_TIMEOUT_S
                 while True:
@@ -470,19 +450,11 @@ class VLLMProcess(ManagedEngineProcessMixin):
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         break
-                    # Short the final sleep so the last poll lands on the deadline instead
-                    # of one interval past it, keeping the wait inside the stated budget.
                     await asyncio.sleep(min(WORKER_REGISTRATION_POLL_S, remaining))
 
                 registration_s = time.monotonic() - started_at
 
                 if new_worker_id is None:
-                    # Report enough to triage the next CI occurrence from the failure text
-                    # alone. A worker still running at the deadline means the budget was
-                    # too small; a worker that already exited died during startup (CUDA
-                    # OOM, port collision, ...) and no budget would have saved it. The
-                    # diagnostic is guarded against the errors Popen.poll() can raise, so
-                    # it can never mask the timeout it describes.
                     try:
                         returncode = process.proc.poll() if process.proc else None
                         if process.proc is None:
