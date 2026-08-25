@@ -37,6 +37,7 @@ mm-routing = ["dep:llm-multimodal", "dep:llm-tokenizer"]
 request-trace-bench = []
 # S3 destination for the request-trace sink, reusing the existing object_store client.
 request-trace-s3 = []
+agent-rt-poc = ["dep:dynamo-agent-rt"]
 
 [[bench]]
 name = "tokenizer_simple"
@@ -64,6 +65,7 @@ required-features = ["request-trace-bench"]
 [dependencies]
 # repo
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
+dynamo-agent-rt = { workspace = true, optional = true }
 dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true, features = ["zmq-events"] }
 dynamo-rl = { workspace = true }

@@ -51,6 +51,7 @@ mm-routing = ["dynamo-llm/mm-routing"]
 # builds enable this flag in container/templates/wheel_builder.Dockerfile so
 # `DYN_REQUEST_TRACE_SINKS=s3` works on shipped artifacts.
 request-trace-s3 = ["dynamo-llm/request-trace-s3"]
+agent-rt-poc = ["dynamo-llm/agent-rt-poc"]
 
 [dependencies]
 # AIC perf model: pure-Rust hot-path latency engine. Pinned to the matching

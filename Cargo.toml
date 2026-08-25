@@ -66,9 +66,10 @@ dynamo-truthy = { path = "lib/truthy", version = "1.5.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.5.0" }
 dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.5.0" }
 dynamo-memory = { path = "lib/memory", version = "1.5.0" }
+dynamo-agent-rt = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "b7ba63adc734e8c9b84ae96852afb208e80ec107" }
 dynamo-mocker = { path = "lib/mocker", version = "1.5.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.5.0" }
-dynamo-protocols = { version = "=5.3.1" }
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "b7ba63adc734e8c9b84ae96852afb208e80ec107" }
 dynamo-parsers = { version = "8.0.0" }
 
 # Published on crates.io. To see all available versions:
@@ -194,6 +195,9 @@ rcgen = { version = "0.13" }
 tokio-rustls = { version = "0.26" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = { version = "2" }
+
+[patch.crates-io]
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "b7ba63adc734e8c9b84ae96852afb208e80ec107" }
 
 [profile.dev.package]
 insta.opt-level = 3
