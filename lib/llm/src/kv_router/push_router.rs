@@ -1538,10 +1538,9 @@ mod tests {
         let inner = PushRouter::from_client(client, RouterMode::Direct)
             .await
             .unwrap();
-        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
-            inner, graph, None,
-        )
-        .unwrap();
+        let host =
+            RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(inner, graph, None)
+                .unwrap();
 
         let error = host.generate(Context::new(request())).await.unwrap_err();
         assert!(match_error_chain(

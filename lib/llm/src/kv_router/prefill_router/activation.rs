@@ -412,14 +412,13 @@ where
             )
             .await?;
 
-            let router = InnerPrefillRouter::RoutingHost(Arc::new(
+            InnerPrefillRouter::RoutingHost(Arc::new(
                 RoutingHost::<Sel>::new_builtin_with_coordinator(
                     push_router,
                     graph.clone(),
                     affinity,
                 )?,
-            ));
-            router
+            ))
         };
 
         Ok(PrefillBinding {

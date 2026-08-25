@@ -944,7 +944,7 @@ mod tests {
             HashMap::from([(worker_id, ModelRuntimeConfig::new())]),
             false,
             99,
-            crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             cancel.child_token(),
         )
         .await?;
