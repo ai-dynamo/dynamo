@@ -18,6 +18,8 @@
 //!
 //! The [`service_v2::HttpService`] can be further extended to host any [`axum::Router`] using the [`service_v2::HttpServiceConfigBuilder`].
 
+#[cfg(feature = "agent-rt-poc")]
+mod agent_runtime;
 mod anthropic;
 pub mod metadata;
 mod openai;

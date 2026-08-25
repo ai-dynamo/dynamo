@@ -3135,6 +3135,11 @@ async fn handler_responses(
         None
     };
 
+    #[cfg(feature = "agent-rt-poc")]
+    if super::agent_runtime::enabled() {
+        return super::agent_runtime::handle_responses(state, template, headers, request).await;
+    }
+
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
@@ -3188,7 +3193,7 @@ async fn handler_responses(
 }
 
 #[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id()))]
-async fn responses(
+pub(super) async fn responses(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
     mut request: Context<NvCreateResponse>,

@@ -17,6 +17,8 @@ use axum::response::IntoResponse;
 
 use super::Metrics;
 use super::RouteDoc;
+#[cfg(feature = "agent-rt-poc")]
+use super::agent_runtime::{ResponsesAgentRuntime, new_responses_runtime};
 use super::frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
 };
@@ -143,6 +145,8 @@ pub struct State {
     frontend_api_config: FrontendApiConfig,
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
+    #[cfg(feature = "agent-rt-poc")]
+    responses_agent_runtime: ResponsesAgentRuntime,
 }
 
 /// Typed config needed only to construct HTTP shared state.
@@ -487,12 +491,19 @@ impl State {
             cancel_token,
             frontend_api_config: config.frontend_api_config,
             sse_keep_alive: config.sse_keep_alive,
+            #[cfg(feature = "agent-rt-poc")]
+            responses_agent_runtime: new_responses_runtime(),
         }
     }
 
     /// Get the Prometheus [`Metrics`] object which tracks request counts and inflight requests
     pub fn metrics_clone(&self) -> Arc<Metrics> {
         self.metrics.clone()
+    }
+
+    #[cfg(feature = "agent-rt-poc")]
+    pub(super) fn responses_agent_runtime(&self) -> &ResponsesAgentRuntime {
+        &self.responses_agent_runtime
     }
 
     pub fn manager(&self) -> &ModelManager {
