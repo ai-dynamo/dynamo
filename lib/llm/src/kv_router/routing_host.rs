@@ -324,6 +324,11 @@ where
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn occupancy_for_test(&self, worker_id: u64) -> u64 {
+        self.inner.occupancy_for_test(worker_id)
+    }
+
     /// The active KV-aware data plane.
     pub fn kv_router(&self) -> &Arc<KvRouter<Sel>> {
         self.kv_router_if_enabled()

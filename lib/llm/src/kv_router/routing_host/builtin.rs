@@ -93,81 +93,6 @@ fn selection(worker_id: u64) -> WorkerSelectionResult {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::cell::Cell;
-
-    use super::*;
-
-    fn select(selector: &BuiltinWorkerSelector, worker_ids: &[u64]) -> u64 {
-        selector
-            .select_worker(WorkerSelectionInput::hosted(worker_ids, None))
-            .unwrap()
-            .worker
-            .worker_id
-    }
-
-    #[test]
-    fn round_robin_uses_hosted_selector_input() {
-        let selector = BuiltinWorkerSelector::new(RouterMode::RoundRobin).unwrap();
-        assert_eq!(selector.required_worker_inputs(), WorkerInputs::NONE);
-        assert_eq!(select(&selector, &[10, 20]), 10);
-        assert_eq!(select(&selector, &[10, 20]), 20);
-        assert_eq!(select(&selector, &[10, 20]), 10);
-    }
-
-    #[test]
-    fn random_uses_hosted_selector_input() {
-        let selector = BuiltinWorkerSelector::new(RouterMode::Random).unwrap();
-        assert_eq!(selector.required_worker_inputs(), WorkerInputs::NONE);
-        for _ in 0..32 {
-            assert!(matches!(select(&selector, &[10, 20]), 10 | 20));
-        }
-    }
-
-    #[test]
-    fn occupancy_policies_require_lazy_occupancy_input() {
-        for mode in [RouterMode::PowerOfTwoChoices, RouterMode::LeastLoaded] {
-            let selector = BuiltinWorkerSelector::new(mode).unwrap();
-            assert_eq!(selector.required_worker_inputs(), WorkerInputs::OCCUPANCY);
-            assert!(
-                selector
-                    .select_worker(WorkerSelectionInput::hosted(&[10, 20], None))
-                    .is_err()
-            );
-        }
-    }
-
-    #[test]
-    fn least_loaded_reads_hosted_occupancy() {
-        let selector = BuiltinWorkerSelector::new(RouterMode::LeastLoaded).unwrap();
-        let occupancy = |worker_id| if worker_id == 10 { 4 } else { 1 };
-        let selected = selector
-            .select_worker(WorkerSelectionInput::hosted(&[10, 20], Some(&occupancy)))
-            .unwrap();
-        assert_eq!(selected.worker.worker_id, 20);
-    }
-
-    #[test]
-    fn power_of_two_choices_reads_only_two_occupancies() {
-        let selector = BuiltinWorkerSelector::new(RouterMode::PowerOfTwoChoices).unwrap();
-        let reads = Cell::new(0);
-        let occupancy = |_| {
-            reads.set(reads.get() + 1);
-            0
-        };
-
-        selector
-            .select_worker(WorkerSelectionInput::hosted(
-                &[10, 20, 30, 40],
-                Some(&occupancy),
-            ))
-            .unwrap();
-
-        assert_eq!(reads.get(), 2);
-    }
-}
-
 use super::*;
 
 impl<Sel> RoutingHost<Sel>
@@ -537,5 +462,80 @@ where
             Some(operation) => Ok((metadata, operation.into_stream(target, stream)?)),
             None => Ok((metadata, stream)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    fn select(selector: &BuiltinWorkerSelector, worker_ids: &[u64]) -> u64 {
+        selector
+            .select_worker(WorkerSelectionInput::hosted(worker_ids, None))
+            .unwrap()
+            .worker
+            .worker_id
+    }
+
+    #[test]
+    fn round_robin_uses_hosted_selector_input() {
+        let selector = BuiltinWorkerSelector::new(RouterMode::RoundRobin).unwrap();
+        assert_eq!(selector.required_worker_inputs(), WorkerInputs::NONE);
+        assert_eq!(select(&selector, &[10, 20]), 10);
+        assert_eq!(select(&selector, &[10, 20]), 20);
+        assert_eq!(select(&selector, &[10, 20]), 10);
+    }
+
+    #[test]
+    fn random_uses_hosted_selector_input() {
+        let selector = BuiltinWorkerSelector::new(RouterMode::Random).unwrap();
+        assert_eq!(selector.required_worker_inputs(), WorkerInputs::NONE);
+        for _ in 0..32 {
+            assert!(matches!(select(&selector, &[10, 20]), 10 | 20));
+        }
+    }
+
+    #[test]
+    fn occupancy_policies_require_lazy_occupancy_input() {
+        for mode in [RouterMode::PowerOfTwoChoices, RouterMode::LeastLoaded] {
+            let selector = BuiltinWorkerSelector::new(mode).unwrap();
+            assert_eq!(selector.required_worker_inputs(), WorkerInputs::OCCUPANCY);
+            assert!(
+                selector
+                    .select_worker(WorkerSelectionInput::hosted(&[10, 20], None))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn least_loaded_reads_hosted_occupancy() {
+        let selector = BuiltinWorkerSelector::new(RouterMode::LeastLoaded).unwrap();
+        let occupancy = |worker_id| if worker_id == 10 { 4 } else { 1 };
+        let selected = selector
+            .select_worker(WorkerSelectionInput::hosted(&[10, 20], Some(&occupancy)))
+            .unwrap();
+        assert_eq!(selected.worker.worker_id, 20);
+    }
+
+    #[test]
+    fn power_of_two_choices_reads_only_two_occupancies() {
+        let selector = BuiltinWorkerSelector::new(RouterMode::PowerOfTwoChoices).unwrap();
+        let reads = Cell::new(0);
+        let occupancy = |_| {
+            reads.set(reads.get() + 1);
+            0
+        };
+
+        selector
+            .select_worker(WorkerSelectionInput::hosted(
+                &[10, 20, 30, 40],
+                Some(&occupancy),
+            ))
+            .unwrap();
+
+        assert_eq!(reads.get(), 2);
     }
 }

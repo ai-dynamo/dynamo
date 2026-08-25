@@ -379,7 +379,7 @@ mod tests {
             assert_eq!(
                 workers
                     .iter()
-                    .map(|worker| shared.inner.occupancy_for_test(*worker))
+                    .map(|worker| shared.occupancy_for_test(*worker))
                     .sum::<u64>(),
                 0,
                 "{mode:?} advisory queries must not acquire occupancy"
@@ -389,7 +389,7 @@ mod tests {
             assert_eq!(
                 workers
                     .iter()
-                    .map(|worker| shared.inner.occupancy_for_test(*worker))
+                    .map(|worker| shared.occupancy_for_test(*worker))
                     .sum::<u64>(),
                 1,
                 "{mode:?} committed dispatch must retain exactly one lease"
@@ -398,7 +398,7 @@ mod tests {
             assert_eq!(
                 workers
                     .iter()
-                    .map(|worker| shared.inner.occupancy_for_test(*worker))
+                    .map(|worker| shared.occupancy_for_test(*worker))
                     .sum::<u64>(),
                 0,
                 "{mode:?} dropping the response stream must release the lease"
