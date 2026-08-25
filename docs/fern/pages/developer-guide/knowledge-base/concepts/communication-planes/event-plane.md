@@ -25,6 +25,30 @@ The event plane supports two transports:
 | **External infrastructure** | None (peer-to-peer) | Requires a NATS server |
 | **Setup complexity** | Automatic -- workers bind sockets and register via discovery | Simple -- point at a NATS server |
 
+## Transport Security
+
+| Transport | Authentication and encryption | Production guidance |
+|---|---|---|
+| ZMQ | No built-in authentication or encryption | Keep every publisher, subscriber, broker, and replay endpoint on the trusted network. Bind only to cluster-internal addresses and restrict access with NetworkPolicy or equivalent controls. |
+| NATS | Supports Dynamo client authentication plus TLS and mTLS | Configure one client authentication method, use `tls://` with certificate verification, and enforce subject permissions and client identity on the NATS server. |
+
+Dynamo's NATS client checks these authentication methods in order:
+
+1. `NATS_AUTH_USERNAME` with `NATS_AUTH_PASSWORD`
+2. `NATS_AUTH_TOKEN`
+3. `NATS_AUTH_NKEY`
+4. `NATS_AUTH_CREDENTIALS_FILE`
+
+Configure the corresponding user or credential and subject permissions on the
+NATS server. For TLS and mTLS variables, scheme requirements, and certificate
+validation, see the [TLS reference](../../../../reference/components/tls-configuration.mdx#nats-tls).
+
+KV events are sensitive request-derived data. Stored-block events can include
+token IDs, cumulative sequence hashes, LoRA adapter names, and worker identity;
+given the tokenizer, token IDs can reconstruct prompt content, and hashes can
+reveal shared prefixes. A block hash is an index key, not an anonymization
+boundary. See [KV event security considerations](../../../advanced-customizations/writing-custom-backends/publish-kv-events.md#security-considerations).
+
 ## Configuration
 
 ### Transport Selection
@@ -136,6 +160,7 @@ The operator can inject `DYN_EVENT_PLANE` into pods. The same transport options 
 
 ## Related Documentation
 
+- [Secure Deployment Guidelines](../../../security/secure-deployment-guidelines.md) -- Deployment trust model and checklist
 - [Discovery Plane](discovery-plane.md) -- Service discovery and coordination (etcd, Kubernetes)
 - [Distributed Runtime](../system-architecture/distributed-runtime.md) -- Runtime architecture
 - [Request Plane](request-plane.md) -- Request transport configuration

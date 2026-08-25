@@ -62,6 +62,26 @@ The Rust HTTP server also reads these environment variables, which are not expos
   Unset, `0`, invalid, or unrepresentable values disable keep-alive comments.
 </ParamField>
 
+## Client authentication and exposure
+
+<Warning>
+  The Frontend does not authenticate or authorize clients. Do not expose it
+  directly to an untrusted network. Put it behind a gateway or service mesh that
+  enforces authentication, authorization, request policy, and rate limits.
+</Warning>
+
+`--tls-cert-path` and `--tls-key-path` enable server-side HTTPS on the Frontend.
+They encrypt the HTTP connection but do not enable end-user authentication or
+mutual TLS client-certificate validation. If an ingress or gateway terminates
+public TLS, that protects only the client-to-gateway hop. When the upstream hop
+crosses an untrusted segment, configure the gateway to connect to and verify the
+Frontend over HTTPS, or protect that hop with service-mesh mTLS.
+
+Frontend HTTPS is separate from the internal Dynamo TCP request-plane TLS
+configured with `DYN_TCP_TLS_*`. See [TLS](tls-configuration.mdx) for internal
+component-to-component encryption and [Secure Deployment Guidelines](../../developer-guide/security/secure-deployment-guidelines.md)
+for the deployment trust model.
+
 ## Router
 
 This section is the canonical CLI and environment-variable reference for the frontend's embedded

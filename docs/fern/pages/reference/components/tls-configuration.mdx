@@ -14,6 +14,12 @@ frontend inference output) are encrypted using
 provider. When no TLS configuration is provided, these transports operate in
 plaintext exactly as before.
 
+<Note>
+  This page covers Dynamo's internal TCP request plane and NATS connections.
+  Frontend HTTPS uses the separate `--tls-cert-path` and `--tls-key-path`
+  options documented in [Frontend Configuration](frontend-configuration.mdx#client-authentication-and-exposure).
+</Note>
+
 The `DYN_TCP_TLS_*` environment variables encrypt the frontend↔worker TCP
 request and response streams; NATS traffic is encrypted separately via NATS TLS
 (see the NATS TLS section below). The KV event plane is a separate transport:
@@ -48,9 +54,9 @@ frontend dials worker). All TLS env vars should be set on every pod.
 ## CLI flags
 
 The same configuration is available via command-line flags on all backends
-(vllm, sglang, trtllm, tokenspeed) through `DynamoRuntimeArgGroup`:
+(vLLM, SGLang, TensorRT-LLM, and TokenSpeed) through `DynamoRuntimeArgGroup`:
 
-```
+```text
 --tcp-tls-cert-path PATH      Server certificate (PEM)
 --tcp-tls-key-path PATH       Server private key (PEM)
 --tcp-tls-ca-cert-path PATH   CA certificate for server verification (PEM)
@@ -137,16 +143,18 @@ spec:
 Both components need the same TLS env vars because each acts as both TCP
 server and client depending on the stream direction.
 
-> **Note:** A future PR ([#10809](https://github.com/ai-dynamo/dynamo/issues/10809))
-> will add operator-level TLS configuration via `InfrastructureConfiguration`,
-> allowing TLS to be configured once at the platform level and auto-injected
-> into all DGD pods without per-component env var setup.
+<Note>
+  The operator does not currently provide first-class request-plane TLS
+  injection. Mount the certificate material and set the environment variables
+  on every participating component.
+</Note>
 
 ## NATS TLS
 
-NATS carries JetStream indexer recovery/replay, the audit sink, and — when the
-request plane is set to NATS (`--request-plane nats`) — inference request
-distribution. TLS is configured separately from TCP:
+NATS carries event-plane messages such as KV events and router replica sync,
+JetStream indexer recovery/replay, the audit sink, and—when the request plane is
+set to NATS (`--request-plane nats`)—inference request distribution. TLS is
+configured separately from TCP:
 
 | Variable | Description |
 |---|---|
@@ -169,6 +177,10 @@ CLI flags (all backends via `DynamoRuntimeArgGroup`):
 
 The frontend (`dynamo.frontend`) also accepts `--nats-tls-ca-cert-path` and
 `--nats-tls-insecure`.
+
+TLS encrypts the connection but does not by itself authorize NATS subjects.
+Configure a NATS authentication method and server-side permissions as described
+in [Event-plane transport security](../../developer-guide/knowledge-base/concepts/communication-planes/event-plane.md#transport-security).
 
 ## Mutual TLS (mTLS)
 
@@ -206,11 +218,13 @@ required is enforced by the **NATS server** configuration (e.g.
 | `NATS_TLS_CLIENT_CERT_PATH` | Client | PEM client certificate presented to the NATS server. Set with `NATS_TLS_CLIENT_KEY_PATH`. |
 | `NATS_TLS_CLIENT_KEY_PATH` | Client | PEM private key for the NATS client certificate. |
 
-> **Note:** Dynamo cannot detect whether the NATS broker actually requests a
-> client certificate. If you set `NATS_TLS_CLIENT_CERT_PATH`/`_KEY_PATH` but the
-> broker is not configured to verify client certs, the connection silently
-> falls back to ordinary one-way TLS. Enable verification on the NATS server
-> (`verify: true`) to make NATS mTLS effective.
+<Note>
+  Dynamo cannot detect whether the NATS broker actually requests a client
+  certificate. If you set `NATS_TLS_CLIENT_CERT_PATH` and
+  `NATS_TLS_CLIENT_KEY_PATH` but the broker does not verify client certificates,
+  the connection provides only one-way TLS. Enable client-certificate
+  verification on the NATS server to make NATS mTLS effective.
+</Note>
 
 Client certificate and key must be set **together**, and a client identity
 requires a server CA (`*_CA_CERT_PATH`) — or insecure mode for development — so
@@ -268,3 +282,9 @@ plane is not covered):
   but client does not), a warning is logged at startup.
 - An empty CA certificate file is detected at load time and rejected with a
   clear error message.
+
+## Related Documentation
+
+- [Secure Deployment Guidelines](../../developer-guide/security/secure-deployment-guidelines.md) — Deployment trust model and checklist
+- [Request Plane](../../developer-guide/knowledge-base/concepts/communication-planes/request-plane.md) — Request transport behavior
+- [Event Plane](../../developer-guide/knowledge-base/concepts/communication-planes/event-plane.md) — Event transport and NATS authentication

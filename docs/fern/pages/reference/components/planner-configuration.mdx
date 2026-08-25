@@ -344,7 +344,7 @@ These fields default from environment variables and are excluded from serialized
 </ParamField>
 
 <ParamField path="live_dashboard_port" type="integer" default="8080">
-  Port for the live diagnostics dashboard HTTP server. `0` disables. When enabled, visit `http://host:port/` for a real-time Plotly report.
+  Port for the live diagnostics dashboard HTTP server. The server binds to `0.0.0.0` and does not authenticate callers. `0` disables it. When enabled, visit `http://host:port/` for a real-time Plotly report and restrict access to trusted operators.
 </ParamField>
 
 ## Runtime configuration

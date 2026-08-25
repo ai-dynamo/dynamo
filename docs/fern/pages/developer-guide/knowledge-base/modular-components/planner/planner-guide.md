@@ -170,7 +170,7 @@ KV hit rate and speculative decode accept length are runtime engine/router signa
 |-------|------|---------|-------------|
 | `report_interval_hours` | float or `null` | `24.0` | Generate an HTML diagnostics report every N hours (simulated time). Set to `null` to disable periodic report generation. |
 | `report_output_dir` | string | `./planner_reports` | Directory for HTML diagnostics reports. |
-| `live_dashboard_port` | int | `8080` | Port for the live diagnostics dashboard HTTP server. Set to `0` to disable. When enabled, visit `http://host:port/` to view a real-time Plotly report of accumulated snapshots. |
+| `live_dashboard_port` | int | `8080` | Port for the unauthenticated live diagnostics dashboard. The server binds to `0.0.0.0`; set to `0` to disable. |
 | `control_api_port` | int | `9086` | Port for the loopback-only runtime minimum-endpoint API. Set to `0` to disable. |
 
 ### Runtime Minimum Endpoint API
@@ -235,6 +235,36 @@ spec:
         transport:
           request_timeout_seconds: 5.0
 ```
+
+## Security
+
+The Planner exposes several privileged diagnostic and extension surfaces:
+
+- The live dashboard binds to `0.0.0.0:<live_dashboard_port>` and does not
+  authenticate callers. Its default port is `8080`. Set `live_dashboard_port: 0`
+  when unused; otherwise keep it private and restrict it to trusted operators.
+- The optional Planner Prometheus listener also has no authentication. Scope it
+  to the monitoring system with NetworkPolicy. The runtime minimum-endpoint API
+  has no authentication but binds only to loopback and is not exposed by a
+  Kubernetes Service; use port-forwarding only from a trusted operator session.
+- The plugin-registration gateway is disabled by default and defaults to an
+  in-Pod Unix-domain socket. Prefer that boundary for same-Pod plugins. A TCP
+  gateway carries plugin registration tokens and must not be exposed in plaintext
+  across an untrusted network.
+- The running Planner preserves a legacy compatibility path: if
+  `plugin_registration.auth.trusted_sources` is empty, registration is
+  unauthenticated and a warning is logged. Production deployments that enable
+  external plugins must select `static_secret` explicitly, source the secret from
+  a Kubernetes Secret, and protect it in transit. `allow_unauthenticated` is for
+  development only.
+- Cross-Pod plugin callbacks currently support plaintext gRPC only after the
+  deployer explicitly enables `allow_insecure_grpc`. Keep such traffic inside an
+  authenticated service mesh or a tightly restricted trusted network.
+
+See [Planner Configuration](../../../../reference/components/planner-configuration.mdx#scheduling-and-plugin-pipeline)
+for the exact gateway, authentication, and transport fields, and
+[Secure Deployment Guidelines](../../../security/secure-deployment-guidelines.md)
+for the deployment checklist.
 
 ## Integration with Profiler
 

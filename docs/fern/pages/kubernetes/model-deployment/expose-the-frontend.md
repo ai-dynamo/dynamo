@@ -13,6 +13,20 @@ The [DGD Guide](deploy-with-dgd.md) reaches the Frontend with `kubectl port-forw
 | LoadBalancer Service | You want a cloud load balancer and manage routing yourself |
 | Inference Gateway (GAIE) | You want Gateway API model-aware routing across multiple deployments |
 
+## Secure the public request path
+
+The Frontend does not authenticate or authorize clients. For production, expose
+it through a gateway, ingress, or service mesh that enforces authentication,
+authorization, request policy, and rate limits. A public `LoadBalancer` Service
+does not provide those controls by itself.
+
+TLS termination at the gateway or ingress protects only the client-to-gateway
+hop. Keep the upstream Frontend Service on the trusted network. If that hop
+crosses an untrusted segment, enable [Frontend HTTPS](../../reference/components/frontend-configuration.mdx#client-authentication-and-exposure)
+and configure the proxy to connect to and verify the HTTPS backend, or use
+service-mesh mTLS. Frontend HTTPS is server-side TLS; the gateway remains
+responsible for authenticating end users.
+
 ## Option 1: A Kubernetes Ingress
 
 Point a standard Kubernetes [Ingress](https://kubernetes.io/docs/concepts/services-networking/ingress/) at the operator-created `<name>-frontend` Service. This requires an ingress controller (NGINX, etc.) already installed in the cluster:

@@ -38,6 +38,26 @@ For example, a deployment with TCP request plane can use different KV event plan
 - **ZMQ KV events (local indexer)**: requests use TCP, KV events use direct ZMQ pub/sub, and persistence lives on workers.
 - **No KV events**: requests use TCP and KV routing predicts cache state from routing decisions.
 
+## Transport Security
+
+TCP request-plane and response-stream connections are plaintext by default. For
+production deployments, keep their listeners on the trusted network and
+configure TLS on every participating component. Use mutual TLS when components
+must prove that their peer holds a certificate issued by a trusted CA. The
+internal TCP variables, CLI flags, failure behavior, and certificate-rotation
+semantics are documented in the [TLS reference](../../../../reference/components/tls-configuration.mdx).
+
+When the request plane uses NATS, configure a NATS client authentication method,
+TLS or mTLS, and server-side subject permissions. The same process-wide NATS
+connection settings apply to request and event traffic. See
+[Event-plane transport security](event-plane.md#transport-security) for the
+authentication variables and the [NATS TLS reference](../../../../reference/components/tls-configuration.mdx#nats-tls)
+for certificate configuration.
+
+TLS on the Dynamo request plane does not protect the separate NIXL/RDMA
+data-transfer fabric used by disaggregated serving. Keep that fabric on the
+trusted network and restrict it to the participating workers.
+
 ## Payload Codec Negotiation
 
 `DYN_REQUEST_PLANE_CODEC` sets the payload codec preference advertised by every request-plane
@@ -254,3 +274,9 @@ curl http://localhost:8000/v1/chat/completions \
 
 - **TCP**: Minimal request-plane infrastructure. KV events use the configured event plane; NATS is needed only when `DYN_EVENT_PLANE=nats`, and router-side event consumption can be disabled with `--no-router-kv-events`.
 - **NATS**: Requires running NATS server (additional memory/CPU)
+
+## Related Documentation
+
+- [Secure Deployment Guidelines](../../../security/secure-deployment-guidelines.md) -- Deployment trust model and checklist
+- [TLS](../../../../reference/components/tls-configuration.mdx) -- TCP and NATS TLS/mTLS configuration
+- [Event Plane](event-plane.md) -- KV event transport and NATS authentication

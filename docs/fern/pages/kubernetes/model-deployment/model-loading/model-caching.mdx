@@ -56,7 +56,7 @@ spec:
             - name: MODEL_NAME
               value: "Qwen/Qwen3-0.6B"
             - name: MODEL_REVISION
-              value: "main"
+              value: "<commit-hash>"
             - name: HF_HOME
               value: /cache/huggingface
           envFrom:
@@ -127,6 +127,13 @@ All `VllmWorker` pods that mount `model-cache` now read from the shared cache, a
 
 </Step>
 </Steps>
+
+Use an immutable commit hash for `MODEL_REVISION`, not a mutable branch such as
+`main`. After the download completes, keep the snapshot directory mounted
+read-only in serving pods and restrict write access to the PVC. The snapshot path
+records the resolved commit, but its contents are trustworthy only while the
+backing storage is protected from untrusted writers. See
+[Secure model and image provenance](../introduction.mdx#secure-model-and-image-provenance).
 
 ### Compilation Cache
 

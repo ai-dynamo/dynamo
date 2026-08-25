@@ -51,3 +51,39 @@ size, or distribute the deployment.
     Run workers that require more GPUs than a single Kubernetes node provides.
   </Card>
 </CardGroup>
+
+## Secure Model and Image Provenance
+
+Container images, model weights, tokenizers, chat templates, and model-supplied
+Python execute or influence execution inside the serving workload. Treat them as
+software supply-chain dependencies:
+
+- Use supported [Dynamo release artifacts](../../reference/general/release-artifacts.mdx)
+  and pin production container images by digest. Restrict who can publish or
+  replace images in the selected registry.
+- Pin Hugging Face models to an immutable commit with the backend's revision
+  option, or serve a reviewed local snapshot whose path contains the commit hash.
+  A repository name, branch, or tag can move.
+- Restrict write access to model-cache PVCs and object storage. A read-only mount
+  does not protect a worker if another principal can replace the cached files.
+- Review worker commands, arguments, and generated deployment output before
+  applying them. Pinning the model does not pin the container, and pinning the
+  container does not pin the model.
+
+<Warning>
+  `--trust-remote-code` allows model-supplied Python to execute in the worker
+  process. Enable it only after reviewing the code at the pinned model revision.
+  The presence of the flag in a template or generated DGD is not evidence that a
+  deployer approved that code.
+</Warning>
+
+For DGDR-generated deployments, a mutable remote model whose `config.json`
+contains `auto_map` is not granted implicit remote-code trust. Use a reviewed
+local snapshot, or opt in explicitly through a generated-DGD argument override.
+Use `$patch.args: append`; replacing the atomic `args` list discards the
+profiler-generated command arguments. Set `autoApply: false` and inspect the
+selected DGD before applying it. See [Generated DGD overrides](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#generated-dgd-overrides)
+and [Model Caching](model-loading/model-caching.mdx).
+
+For the full deployment trust model, see
+[Secure Deployment Guidelines](../../developer-guide/security/secure-deployment-guidelines.md).
