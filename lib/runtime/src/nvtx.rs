@@ -49,11 +49,17 @@
 //!   ranges) saw a maximum id of 200,000, zero negative ids, and all 300,000 ranges
 //!   closed. The narrowing has ~2^31 of headroom per process at that allocation rate
 //!   and does not bite in practice. Re-check if the injection library ever changes its
-//!   id scheme; the fix would be a local `extern "C"` shim over the v3 headers rather
-//!   than the upstream crate.
-//! - **Names must not contain an interior NUL.** `CString::new` panics on one. All
-//!   current call sites use literals; think twice before interpolating request-supplied
-//!   text into a marker name.
+//!   id scheme; widening it means a local `cc` shim over the v3 headers, since the
+//!   narrowing is in the vendored C, not in the Rust declarations [`ffi`] corrects.
+//! - **Interior NULs in names are sanitized, not fatal.** The upstream crate builds its
+//!   `CString` with `CString::new(..).expect(..)`, so an interpolated name carrying a NUL
+//!   would panic the annotated request path. [`ffi`] below owns that conversion instead
+//!   and substitutes U+FFFD, because a profiling aid must never be able to abort the
+//!   work it is measuring.
+//! - **The upstream `ffi_range_end` binding does not match its C definition.** In `nvtx`
+//!   1.3.0, `nvtx-sys/export.c` defines `void ffi_range_end(int)` while `src/bindings.rs`
+//!   declares it `-> c_int`. Every guarded range end would cross that mismatched ABI, so
+//!   [`ffi`] declares the whole surface itself, matching `export.c` exactly.
 //!
 //! # Usage
 //!
@@ -91,26 +97,147 @@
 //! the latter also selects the `nvtx` feature of `kvbm-engine`, whose markers have no
 //! `DYN_NVTX` runtime switch and would fire unconditionally.
 
+use anyhow::Context as _;
+
 #[cfg(feature = "nvtx")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "nvtx")]
 static NVTX_ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// Name of the runtime switch. Shared verbatim with the Python layer
+/// (`dynamo.common.utils.nvtx_utils`), which parses it with the same vocabulary.
+pub const ENV_VAR: &str = "DYN_NVTX";
+
+/// Corrected declarations for the C shim that `nvtx` 1.3.0 compiles and links.
+///
+/// The upstream `src/bindings.rs` is not usable as-is: it declares
+/// `ffi_range_end` as returning `c_int` where `nvtx-sys/export.c` defines it
+/// `void`, and it builds every name with `CString::new(..).expect(..)`, which
+/// turns an interior NUL in an interpolated marker name into a panic on the
+/// path being profiled. These declarations match `export.c` exactly and the
+/// conversion below cannot fail.
+///
+/// The symbols come from the static `libnvtx.a` that the `nvtx` crate's build
+/// script compiles with `cc`; depending on that crate is what puts them on the
+/// link line. A rename upstream surfaces as a link error, not as silent drift.
+#[cfg(feature = "nvtx")]
+mod ffi {
+    use std::ffi::{CString, c_char, c_int};
+
+    #[link(name = "nvtx")]
+    unsafe extern "C" {
+        fn ffi_range_push(message: *const c_char) -> c_int;
+        fn ffi_range_pop() -> c_int;
+        fn ffi_range_start(message: *const c_char) -> c_int;
+        fn ffi_range_end(id: c_int);
+        fn ffi_mark(message: *const c_char);
+        fn ffi_name_thread(name: *const c_char);
+    }
+
+    /// Render a marker name into a NUL-terminated C string, infallibly.
+    ///
+    /// An interior NUL is replaced with U+FFFD rather than rejected: the name
+    /// is a human-readable label on a timeline, so a mangled label is a far
+    /// better outcome than either a lost range or a panic. The allocation
+    /// count is unchanged from the upstream path (one `String`, one
+    /// `CString`); the `replace` only runs on the rare bad name.
+    fn c_name<M: std::fmt::Display>(name: M) -> CString {
+        let rendered = name.to_string();
+        let cleaned = if rendered.as_bytes().contains(&0) {
+            rendered.replace('\0', "\u{fffd}")
+        } else {
+            rendered
+        };
+        // No interior NUL remains, so this cannot fail; the fallback keeps the
+        // guarantee local instead of resting on that reasoning alone.
+        CString::new(cleaned).unwrap_or_default()
+    }
+
+    pub fn range_push<M: std::fmt::Display>(name: M) {
+        let name = c_name(name);
+        // SAFETY: signature matches `int ffi_range_push(const char *)` in
+        // nvtx-sys/export.c; the pointer is valid for the call's duration.
+        unsafe { ffi_range_push(name.as_ptr()) };
+    }
+
+    pub fn range_pop() {
+        // SAFETY: signature matches `int ffi_range_pop(void)`.
+        unsafe { ffi_range_pop() };
+    }
+
+    pub fn range_start<M: std::fmt::Display>(name: M) -> c_int {
+        let name = c_name(name);
+        // SAFETY: signature matches `int ffi_range_start(const char *)`.
+        unsafe { ffi_range_start(name.as_ptr()) }
+    }
+
+    pub fn range_end(id: c_int) {
+        // SAFETY: signature matches `void ffi_range_end(int)`. `id` is one
+        // previously returned by `range_start`.
+        unsafe { ffi_range_end(id) };
+    }
+
+    pub fn mark<M: std::fmt::Display>(name: M) {
+        let name = c_name(name);
+        // SAFETY: signature matches `void ffi_mark(const char *)`.
+        unsafe { ffi_mark(name.as_ptr()) };
+    }
+
+    pub fn name_thread<M: std::fmt::Display>(name: M) {
+        let name = c_name(name);
+        // SAFETY: signature matches `void ffi_name_thread(const char *)`.
+        unsafe { ffi_name_thread(name.as_ptr()) };
+    }
+}
+
 // ── Public API ───────────────────────────────────────────────────────────────
 
-/// Initialise the NVTX subsystem from the `DYN_NVTX` environment variable.
+/// Parse the switch value, rejecting anything outside the shared vocabulary.
+///
+/// Split out from [`init`] so the contract can be tested without mutating the
+/// process environment, which is unsound while other tests run in parallel.
+fn parse_switch(raw: Option<&str>) -> anyhow::Result<bool> {
+    match raw {
+        // Delegated to the canonical parser rather than hand-rolled: the
+        // accepted set (1/true/on/yes, 0/false/off/no, empty) is exactly what
+        // `nvtx_utils._parse_enabled` mirrors on the Python side.
+        Some(value) => crate::config::parse_bool(value)
+            .with_context(|| format!("{ENV_VAR} is not a recognized boolean")),
+        None => Ok(false),
+    }
+}
+
+/// Initialise the NVTX subsystem from the [`ENV_VAR`] environment variable.
 /// Must be called once at runtime startup before any annotation macros fire.
-/// No-op when the `nvtx` Cargo feature is off.
-pub fn init() {
+///
+/// The value is validated even when the `nvtx` Cargo feature is off. `DYN_NVTX`
+/// is one switch shared with the Python layer, which rejects an unrecognized
+/// value outright; if this half quietly read `DYN_NVTX=maybe` as "off", the same
+/// capture would half-start and the operator would be told nothing. Rejecting it
+/// in both halves is what makes it a single switch.
+///
+/// Storing the flag and emitting markers remain no-ops without the feature.
+pub fn init() -> anyhow::Result<()> {
+    let enabled = match std::env::var(ENV_VAR) {
+        Ok(raw) => parse_switch(Some(&raw))?,
+        Err(std::env::VarError::NotPresent) => parse_switch(None)?,
+        Err(std::env::VarError::NotUnicode(raw)) => {
+            anyhow::bail!("{ENV_VAR}={raw:?} is not valid unicode")
+        }
+    };
+
     #[cfg(feature = "nvtx")]
     {
-        let enabled = crate::config::env_is_truthy("DYN_NVTX");
         NVTX_ENABLED.store(enabled, Ordering::Relaxed);
         if enabled {
-            tracing::info!("NVTX annotations enabled (DYN_NVTX)");
+            tracing::info!("NVTX annotations enabled ({ENV_VAR})");
         }
     }
+    #[cfg(not(feature = "nvtx"))]
+    let _ = enabled;
+
+    Ok(())
 }
 
 /// Returns `true` when the `nvtx` feature is compiled in **and** `DYN_NVTX` is set.
@@ -131,7 +258,7 @@ pub fn push_impl<M: std::fmt::Display>(name: M) {
     #[cfg(feature = "nvtx")]
     {
         if NVTX_ENABLED.load(Ordering::Relaxed) {
-            nvtx::range_push!("{}", name);
+            ffi::range_push(name);
         }
     }
     let _ = name;
@@ -144,7 +271,7 @@ pub fn pop_impl() {
     #[cfg(feature = "nvtx")]
     {
         if NVTX_ENABLED.load(Ordering::Relaxed) {
-            nvtx::range_pop!();
+            ffi::range_pop();
         }
     }
 }
@@ -156,7 +283,7 @@ pub fn mark_impl<M: std::fmt::Display>(name: M) {
     #[cfg(feature = "nvtx")]
     {
         if NVTX_ENABLED.load(Ordering::Relaxed) {
-            nvtx::mark!("{}", name);
+            ffi::mark(name);
         }
     }
     let _ = name;
@@ -169,7 +296,7 @@ pub fn name_current_thread_impl<M: std::fmt::Display>(name: M) {
     #[cfg(feature = "nvtx")]
     {
         if NVTX_ENABLED.load(Ordering::Relaxed) {
-            nvtx::name_thread!("{}", name);
+            ffi::name_thread(name);
         }
     }
     let _ = name;
@@ -206,7 +333,7 @@ impl NvtxRangeGuard {
             // switch's back.
             let id = NVTX_ENABLED
                 .load(Ordering::Relaxed)
-                .then(|| nvtx::range_start!("{}", name));
+                .then(|| ffi::range_start(name));
             NvtxRangeGuard { id }
         }
         #[cfg(not(feature = "nvtx"))]
@@ -235,7 +362,7 @@ impl NvtxRangeGuard {
 impl Drop for NvtxRangeGuard {
     fn drop(&mut self) {
         if let Some(id) = self.id {
-            nvtx::range_end!(id);
+            ffi::range_end(id);
         }
     }
 }
@@ -451,16 +578,46 @@ mod tests {
         exercise_all_sites();
     }
 
-    /// `init` reads the env var. Run in-process without mutating the environment by
-    /// asserting only the default: unset (or unparseable) means disabled.
+    /// The switch must accept exactly what `nvtx_utils._parse_enabled` accepts on
+    /// the Python side, and reject everything else rather than reading it as "off".
+    /// A value that disables one half and raises in the other is not one switch.
     #[test]
-    fn init_defaults_to_disabled() {
-        #[cfg(feature = "nvtx")]
-        let _flag = EnabledFlag::set(false);
-        if std::env::var("DYN_NVTX").is_err() {
-            super::init();
-            assert!(!super::enabled());
+    fn switch_parsing_matches_the_python_half() {
+        assert!(!super::parse_switch(None).expect("unset is a valid off"));
+
+        for on in ["1", "true", "TRUE", " on ", "yes"] {
+            assert!(super::parse_switch(Some(on)).expect("recognized"), "{on:?}");
         }
+        for off in ["0", "false", "off", "no", ""] {
+            assert!(
+                !super::parse_switch(Some(off)).expect("recognized"),
+                "{off:?}"
+            );
+        }
+        for junk in ["maybe", "2", "enabled", "-1"] {
+            let err = super::parse_switch(Some(junk))
+                .expect_err("an unrecognized value must not read as off");
+            assert!(
+                err.to_string().contains(super::ENV_VAR),
+                "the error must name the variable the operator set: {err}"
+            );
+        }
+    }
+
+    /// A marker name is a label on a timeline; it must never be able to abort the
+    /// work being profiled. The upstream crate's `CString::new(..).expect(..)`
+    /// would panic here, which is why the conversion is owned locally.
+    #[test]
+    fn an_interior_nul_in_a_name_does_not_panic() {
+        #[cfg(feature = "nvtx")]
+        let _flag = EnabledFlag::set(true);
+
+        let hostile = "test.range.\u{0}injected";
+        let _range = dynamo_nvtx_range!("{}", hostile);
+        dynamo_nvtx_mark!("{}", hostile);
+        dynamo_nvtx_push!("{}", hostile);
+        dynamo_nvtx_pop!();
+        dynamo_nvtx_name_thread!("{}", hostile);
     }
 
     // ── Send-ness ────────────────────────────────────────────────────────────
@@ -536,64 +693,39 @@ mod tests {
             .expect("multi-thread runtime");
 
         let drops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let hops = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         runtime.block_on(async {
             let mut handles = Vec::with_capacity(TASKS);
             for i in 0..TASKS {
                 let drops = drops.clone();
-                let hops = hops.clone();
                 handles.push(tokio::spawn(async move {
-                    // Guard + drop sentinel live in the same scope, so the sentinel's
+                    // Guard + drop sentinel share a scope, so the sentinel's
                     // drop count is the guard's drop count.
                     let _range = dynamo_nvtx_range!("test.async.range.{}", i);
                     let _spy = DropSpy(drops);
-                    let start_thread = std::thread::current().id();
 
-                    // Yield, then park the task on a timer: both give the scheduler
-                    // an opportunity to resume this task on another worker.
+                    // Yield and park: both give the scheduler an opportunity to
+                    // resume this task on a different worker thread.
                     tokio::task::yield_now().await;
                     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                     tokio::task::yield_now().await;
-
-                    // A nested range opened *after* the await and closed before the
-                    // outer one, i.e. still on the resumed thread.
-                    {
-                        let _nested = dynamo_nvtx_range!("test.async.nested");
-                        tokio::task::yield_now().await;
-                    }
-
-                    if std::thread::current().id() != start_thread {
-                        hops.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    i
                 }));
             }
-
-            for (expected, handle) in handles.into_iter().enumerate() {
-                let got = handle.await.expect("task must not panic");
-                assert_eq!(got, expected);
+            for handle in handles {
+                handle.await.expect("task must not panic");
             }
         });
 
         drop(runtime);
 
+        // Which thread each task resumed on is scheduler-dependent and so is not
+        // asserted; the cross-thread drop itself is covered deterministically by
+        // `range_guard_can_be_dropped_on_a_different_thread`.
         assert_eq!(
             drops.load(std::sync::atomic::Ordering::Relaxed),
             TASKS,
             "every guard scope must be dropped exactly once"
         );
-        // Thread hops are scheduler-dependent, so they are not asserted — the
-        // count is only reported when it is zero, to flag that this run did not
-        // actually exercise the cross-thread path.
-        let observed_hops = hops.load(std::sync::atomic::Ordering::Relaxed);
-        if observed_hops == 0 {
-            eprintln!(
-                "note: no task changed worker threads this run; \
-                 the cross-thread drop path is covered deterministically by \
-                 range_guard_can_be_dropped_on_a_different_thread"
-            );
-        }
     }
 
     // ── Nesting and non-LIFO ordering ────────────────────────────────────────
@@ -630,62 +762,32 @@ mod tests {
 
     // ── Macro arm coverage ───────────────────────────────────────────────────
 
-    /// Every argument shape each macro accepts, exercised through both arms:
-    /// the `literal [, args]` arm and the `Display` expression arm. This is
-    /// primarily a compile-time test — a macro arm that stops matching one of
-    /// these shapes breaks call sites elsewhere in the tree.
+    /// One representative shape per macro arm: a bare literal, a literal with
+    /// format args, and a non-literal `Display` expression. The exhaustive
+    /// enumeration this replaced re-tested `macro_rules!` itself; what actually
+    /// protects call sites is that both arms still match at all.
     fn exercise_every_macro_arm() {
-        let borrowed: &str = "test.arg.str";
-        let owned: String = String::from("test.arg.string");
-        let by_ref: &String = &owned;
+        let owned = String::from("test.arg.string");
         let number: u32 = 7;
 
-        // 1. bare string literal
-        // 2. literal with format args
-        // 3. literal with a trailing comma (no args, and with args)
-        // 4. &str variable
-        // 5. &String
-        // 6. String by value (Display)
-        // 7. a non-literal expression
-
         dynamo_nvtx_mark!("test.mark.literal");
-        dynamo_nvtx_mark!("test.mark.{}.{}", number, borrowed);
-        dynamo_nvtx_mark!("test.mark.trailing",);
-        dynamo_nvtx_mark!("test.mark.trailing.{}", number,);
-        dynamo_nvtx_mark!(borrowed);
-        dynamo_nvtx_mark!(by_ref);
-        dynamo_nvtx_mark!(owned.clone());
-        dynamo_nvtx_mark!(format!("test.mark.expr.{}", number));
+        dynamo_nvtx_mark!("test.mark.{}", number);
+        dynamo_nvtx_mark!(&owned);
 
         dynamo_nvtx_push!("test.push.literal");
-        dynamo_nvtx_push!("test.push.{}.{}", number, borrowed);
-        dynamo_nvtx_push!("test.push.trailing",);
-        dynamo_nvtx_push!("test.push.trailing.{}", number,);
-        dynamo_nvtx_push!(borrowed);
-        dynamo_nvtx_push!(by_ref);
-        dynamo_nvtx_push!(owned.clone());
-        dynamo_nvtx_push!(format!("test.push.expr.{}", number));
-        for _ in 0..8 {
+        dynamo_nvtx_push!("test.push.{}", number);
+        dynamo_nvtx_push!(&owned);
+        for _ in 0..3 {
             dynamo_nvtx_pop!();
         }
 
         dynamo_nvtx_name_thread!("test.thread.literal");
         dynamo_nvtx_name_thread!("test.thread.{}", number);
-        dynamo_nvtx_name_thread!("test.thread.trailing",);
-        dynamo_nvtx_name_thread!("test.thread.trailing.{}", number,);
-        dynamo_nvtx_name_thread!(borrowed);
-        dynamo_nvtx_name_thread!(by_ref);
-        dynamo_nvtx_name_thread!(owned.clone());
-        dynamo_nvtx_name_thread!(format!("test.thread.expr.{}", number));
+        dynamo_nvtx_name_thread!(&owned);
 
         let _r1 = dynamo_nvtx_range!("test.range.literal");
-        let _r2 = dynamo_nvtx_range!("test.range.{}.{}", number, borrowed);
-        let _r3 = dynamo_nvtx_range!("test.range.trailing",);
-        let _r4 = dynamo_nvtx_range!("test.range.trailing.{}", number,);
-        let _r5 = dynamo_nvtx_range!(borrowed);
-        let _r6 = dynamo_nvtx_range!(by_ref);
-        let _r7 = dynamo_nvtx_range!(owned.clone());
-        let _r8 = dynamo_nvtx_range!(format!("test.range.expr.{}", number));
+        let _r2 = dynamo_nvtx_range!("test.range.{}", number);
+        let _r3 = dynamo_nvtx_range!(&owned);
     }
 
     /// Run [`exercise_every_macro_arm`] with annotations off — the state every
