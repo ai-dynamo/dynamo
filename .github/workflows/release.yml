@@ -179,7 +179,8 @@ jobs:
           # Base version pinned in pyproject.toml at the source SHA. Same value
           # cargo and maturin stamp into the wheel filename / METADATA.
           BASE_VERSION=$(awk '/^version = / {gsub(/"/, "", $3); print $3; exit}' pyproject.toml)
-          if [[ ! "${BASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          # Accept a plain X.Y.Z release or a PEP 440 development release.
+          if [[ ! "${BASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.dev[0-9]+)?$ ]]; then
             echo "Error: cannot parse base version from pyproject.toml (got '${BASE_VERSION}')"
             exit 1
           fi
