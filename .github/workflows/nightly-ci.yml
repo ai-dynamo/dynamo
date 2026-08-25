@@ -1012,10 +1012,6 @@ jobs:
     timeout-minutes: 360
     container:
       image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.resolve-source-sha.outputs.source_sha }}-${{ needs.sglang-build.outputs.target_tag_plain }}-nightly-test
-      env:
-        HOME: /__w/dynamo/dynamo
-        USER: dynamo
-        DOCKER_HOST: tcp://docker:2375
     services:
       docker:
         image: docker:27.5.1-dind
@@ -1045,6 +1041,9 @@ jobs:
       HARBOR_VERSION: '0.21.0'
       MODEL_ALIAS: agent-nightly
       RUNTIME_IMAGE: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.resolve-source-sha.outputs.source_sha }}-${{ needs.sglang-build.outputs.target_tag_plain }}-nightly-test
+      HOME: /__w/dynamo/dynamo
+      USER: dynamo
+      DOCKER_HOST: tcp://127.0.0.1:2375
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -1142,14 +1141,8 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in $(seq 1 60); do
-            if python - <<'PY'
-          import urllib.request
-
-          with urllib.request.urlopen("http://docker:2375/_ping", timeout=2) as response:
-              if response.read().strip() != b"OK":
-                  raise SystemExit(1)
-          PY
-            then
+            if curl --fail --silent --show-error \
+              --max-time 2 http://127.0.0.1:2375/_ping | grep -qx OK; then
               exit 0
             fi
             sleep 5
