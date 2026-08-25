@@ -61,6 +61,30 @@ resolve_ucx_module() {
     printf '%s\n' "${selected}"
 }
 
+install_ucx_module_soname_alias() {
+    local module_name="$1"
+    local target="$2"
+    local alias_path="${OUTPUT_DIR}/ucx/${module_name}.so.0"
+
+    # When libucs is loaded through its generic .so.0 alias, UCX looks for
+    # transport modules with the same suffix. NIXL 1.4 keeps only the fully
+    # versioned module files, so restore the module SONAME links that its UCX
+    # loader expects. Older wheels already provide these paths as regular files.
+    if [[ -e "${alias_path}" || -L "${alias_path}" ]]; then
+        if [[ -L "${alias_path}" ]]; then
+            [[ "$(readlink -f "${alias_path}")" == "$(readlink -f "${target}")" ]] || \
+                die "refusing to replace existing path: ${alias_path}"
+        else
+            [[ -f "${alias_path}" ]] || die "UCX module SONAME is not a file: ${alias_path}"
+        fi
+    else
+        ln -s "${target##*/}" "${alias_path}"
+    fi
+
+    [[ -f "${alias_path}" ]] || die "failed to install UCX module SONAME: ${alias_path}"
+    printf '%s\n' "${alias_path}"
+}
+
 [[ "${OUTPUT_DIR}" == /* && "${OUTPUT_DIR}" != "/" ]] || \
     die "output directory must be an absolute non-root path"
 
@@ -153,7 +177,8 @@ done
 # UCX discovers loadable transports relative to libucs at runtime. Validate the
 # CUDA modules and their private UCX dependency closure through the stable path.
 for module_name in libuct_cuda libucm_cuda; do
-    module_path="$(resolve_ucx_module "${module_name}")"
+    module_path="$(install_ucx_module_soname_alias \
+        "${module_name}" "$(resolve_ucx_module "${module_name}")")"
     resolved="$(env -u LD_LIBRARY_PATH LD_LIBRARY_PATH="${OUTPUT_DIR}" ldd "${module_path}")"
     validate_ucx_dependencies "${module_path}" "${resolved}"
 done
