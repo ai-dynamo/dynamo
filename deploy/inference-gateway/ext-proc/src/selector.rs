@@ -130,54 +130,30 @@ impl Selector {
         kv_router_config: KvRouterConfig,
         policy_registry: Option<WorkerSelectionPolicyRegistry>,
     ) -> Result<Self> {
-        let service = Self::build_selection_service(cfg, kv_router_config, policy_registry).await?;
-        Self::from_service(cfg, service).await
-    }
-
-    async fn build_selection_service(
-        cfg: &EppStandaloneConfig,
-        kv_router_config: KvRouterConfig,
-        policy_registry: Option<WorkerSelectionPolicyRegistry>,
-    ) -> Result<SelectionService> {
         if kv_router_config.has_explicit_stage_worker_selection_policy()? {
             tracing::warn!(
                 "worker_selection.prefill, worker_selection.decode, worker_selection.encode, DYN_ROUTER_PREFILL_POLICY, and DYN_ROUTER_DECODE_POLICY are ignored by aggregated EPP selection"
             );
         }
 
+        let replication = Self::replication(cfg).await?;
         let mut builder = SelectionServiceBuilder::new(kv_router_config)
             .worker_type(WorkerType::Aggregated)
             .worker_selection_policy_registry(policy_registry)
             .indexer_threads(cfg.selector_threads);
-        let replication = Self::replication(cfg).await?;
-
         if let Some((_, peer_sync_port)) = &replication {
             builder = builder.replica_sync(*peer_sync_port, Vec::new());
         }
-
-        builder
-            .build()
-            .await
-            .map_err(|e| anyhow!("building embedded selection service: {e}"))
-    }
-
-    async fn from_service(cfg: &EppStandaloneConfig, service: SelectionService) -> Result<Self> {
-        let service = Arc::new(service);
+        let service = Arc::new(
+            builder
+                .build()
+                .await
+                .map_err(|e| anyhow!("building embedded selection service: {e}"))?,
+        );
         let queueing_enabled = service
             .queueing_enabled(&cfg.model_name)
             .map_err(|e| anyhow!("resolving router policy for model {}: {e}", cfg.model_name))?;
         Self::validate_queueing_requirements(cfg, queueing_enabled)?;
-        let replication = match &cfg.peer_service {
-            Some(name) => Some((
-                name.clone(),
-                service.replica_sync_port().ok_or_else(|| {
-                    anyhow!(
-                        "DYN_EPP_PEER_SERVICE requires a prebuilt SelectionService with replica sync enabled"
-                    )
-                })?,
-            )),
-            None => None,
-        };
         Self::from_service_with_replication(cfg, service, replication).await
     }
 
@@ -876,53 +852,6 @@ worker_selection:
         Selector::new_with_kv_router_config(&cfg, router_config_with_policy(&policy_file), None)
             .await
             .expect("threshold-free model should allow missing capacity");
-    }
-
-    #[tokio::test]
-    async fn prebuilt_service_rejects_missing_queue_capacity() {
-        let policy_file = model_policy_file();
-        let router_config = router_config_with_policy(&policy_file);
-        let service = SelectionServiceBuilder::new(router_config)
-            .indexer_threads(1)
-            .build()
-            .await
-            .expect("selection service should build");
-        let mut cfg = test_config();
-        cfg.model_name = "queueing-model".to_string();
-        cfg.max_num_batched_tokens = None;
-
-        let error = Selector::from_service(&cfg, service)
-            .await
-            .err()
-            .expect("queueing model must reject missing capacity");
-        assert!(
-            error
-                .to_string()
-                .contains("DYN_EPP_MAX_NUM_BATCHED_TOKENS is required"),
-            "{error}"
-        );
-    }
-
-    #[tokio::test]
-    async fn prebuilt_service_rejects_peer_discovery_without_replica_sync() {
-        let service = SelectionServiceBuilder::new(KvRouterConfig::default())
-            .indexer_threads(1)
-            .build()
-            .await
-            .expect("selection service should build");
-        let mut cfg = test_config();
-        cfg.peer_service = Some("does-not-exist".to_string());
-
-        let error = Selector::from_service(&cfg, service)
-            .await
-            .err()
-            .expect("peer discovery must require replica sync");
-        assert!(
-            error
-                .to_string()
-                .contains("SelectionService with replica sync enabled"),
-            "{error}"
-        );
     }
 
     #[tokio::test]
