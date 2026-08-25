@@ -2587,6 +2587,40 @@ fn push_dispatch_event(
 }
 
 /// Empty stream chunk produced by multi-byte token assembly (e.g. emoji).
+/// True when a streaming chunk carries generated model output.
+///
+/// Deliberately narrower than `!is_empty_stream_response`: that predicate exists
+/// to decide what is worth forwarding to the client, so it counts a role-only
+/// opening delta (`{"role": "assistant"}`) as non-empty. Such a delta carries no
+/// generated token, and treating it as one would place the TTFT marker before the
+/// model had produced anything.
+///
+/// Content-based rather than `llm_metrics.chunk_tokens > 0`, which the metrics
+/// path uses: `llm_metrics` is only present when the backend reports it, and a
+/// marker that silently never fires is worse than one placed by inspection.
+fn carries_generated_token(resp: &NvCreateChatCompletionStreamResponse) -> bool {
+    resp.inner.choices.iter().any(|choice| {
+        let ChatCompletionStreamResponseDelta {
+            content,
+            function_call,
+            tool_calls,
+            role: _,
+            refusal,
+            reasoning_content,
+        } = &choice.delta;
+        let content_nonempty = match content {
+            None => false,
+            Some(ChatCompletionMessageContent::Text(t)) => !t.is_empty(),
+            Some(ChatCompletionMessageContent::Parts(p)) => !p.is_empty(),
+        };
+        content_nonempty
+            || reasoning_content.as_ref().is_some_and(|r| !r.is_empty())
+            || refusal.as_ref().is_some_and(|r| !r.is_empty())
+            || tool_calls.as_ref().is_some_and(|t| !t.is_empty())
+            || function_call.is_some()
+    })
+}
+
 fn is_empty_stream_response(resp: &NvCreateChatCompletionStreamResponse) -> bool {
     if resp.nvext.is_some() {
         return false;
@@ -3022,10 +3056,11 @@ async fn chat_completions(
                 }
 
                 // Marked here, not at the top of the loop: the stream is prefixed
-                // with annotation events (`data: None`) and can yield empty chunks
-                // that never reach the client. This is the first chunk actually
-                // carrying token data, which is what a TTFT reading wants.
-                if first_chunk && response.data.is_some() {
+                // with annotation events (`data: None`), can yield empty chunks
+                // that never reach the client, and opens with a role-only delta
+                // that carries no token. This is the first chunk actually carrying
+                // generated output, which is what a TTFT reading wants.
+                if first_chunk && response.data.as_ref().is_some_and(carries_generated_token) {
                     dynamo_nvtx_mark!("frontend.http.chat.first_chunk");
                     first_chunk = false;
                 }
@@ -8050,6 +8085,86 @@ mod tests {
             nvext: None,
             llm_metrics: None,
         }
+    }
+
+    /// The TTFT marker must not fire on stream scaffolding. The role-only case is
+    /// the one that matters: `is_empty_stream_response` reports it as non-empty
+    /// (it is forwarded to the client), so a marker gated on "forwardable" would
+    /// land before the model produced a token.
+    #[test]
+    fn test_carries_generated_token() {
+        // Scaffolding, not a token.
+        assert!(
+            !carries_generated_token(&make_delta(
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(Role::Assistant),
+                None,
+                None
+            )),
+            "role-only opening delta carries no token",
+        );
+        assert!(
+            !carries_generated_token(&make_delta(None, None, None, None, None, None, None, None)),
+            "all-None delta carries no token",
+        );
+        assert!(
+            !carries_generated_token(&make_delta(
+                Some(""),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            )),
+            "empty text from multi-byte token assembly carries no token",
+        );
+
+        // Real generated output, in each of its shapes.
+        assert!(
+            carries_generated_token(&make_delta(
+                Some("hi"),
+                None,
+                None,
+                None,
+                None,
+                Some(Role::Assistant),
+                None,
+                None
+            )),
+            "content alongside the role is a token",
+        );
+        assert!(
+            carries_generated_token(&make_delta(
+                None,
+                Some("thinking"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            )),
+            "reasoning content is generated output",
+        );
+        assert!(
+            carries_generated_token(&make_delta(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some("refused"),
+                None
+            )),
+            "a refusal is generated output",
+        );
     }
 
     #[test]

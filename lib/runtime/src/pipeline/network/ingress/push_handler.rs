@@ -683,8 +683,15 @@ where
         let stream = match stream {
             Ok(stream) => {
                 tracing::trace!("Successfully generated response stream; sending prologue");
-                let _result = publisher.send_prologue(None).await;
-                dynamo_nvtx_mark!("worker.ingress.prologue_sent");
+                // Marked only on a successful send: the prologue is what tells the
+                // frontend the stream is live, so a marker on the failure path would
+                // put an acknowledgement on the timeline that the frontend never got.
+                match publisher.send_prologue(None).await {
+                    Ok(()) => dynamo_nvtx_mark!("worker.ingress.prologue_sent"),
+                    Err(err) => {
+                        tracing::debug!(%err, "failed to send response stream prologue")
+                    }
+                }
                 WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS
                     .observe(start_time.elapsed().as_secs_f64());
                 stream
