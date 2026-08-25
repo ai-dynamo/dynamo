@@ -24,10 +24,12 @@ Dynamo publishes nightly builds from `main`. Nightlies let you try the latest fe
 
 Every night, the [Nightly CI pipeline](https://github.com/ai-dynamo/dynamo/blob/main/.github/workflows/nightly-ci.yml) builds `main` and publishes:
 
-- **Container images (CUDA 13):** `vllm-runtime-nightly`, `sglang-runtime-nightly`, and `tensorrtllm-runtime-nightly` to NGC.
+- **Container images (CUDA 13):** `vllm-runtime-nightly`, `sglang-runtime-nightly`, `tensorrtllm-runtime-nightly`, `dynamo-frontend-nightly`, `kubernetes-operator-nightly`, and `dynamo-planner-nightly` to NGC.
+- **EFA image variants:** the three runtime images also publish an EFA build under a `-efa` tag suffix.
+- **Helm chart:** `dynamo-platform-nightly` to NGC, published when the operator image was staged in the same run.
 - **Python wheels:** `ai-dynamo`, `ai-dynamo-runtime`, and `kvbm` to the NVIDIA prerelease index at [pypi.nvidia.com](https://pypi.nvidia.com/).
 
-Nightly deliberately does **not** publish EFA image variants, `dynamo-frontend`, `kubernetes-operator`, `dynamo-planner`, `snapshot-agent`, Helm charts, or Rust crates. For those, use a [stable or pre-release build](release-artifacts.mdx).
+Nightly deliberately does **not** publish `snapshot-agent` or Rust crates. For those, use a [stable or pre-release build](release-artifacts.mdx).
 
 ## Installing Nightly Containers
 
@@ -38,6 +40,12 @@ Nightly images live in their own `-nightly` NGC repositories so they cannot be p
 docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:latest
 docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime-nightly:latest
 docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-nightly:latest
+docker pull nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:latest
+docker pull nvcr.io/nvidia/ai-dynamo/kubernetes-operator-nightly:latest
+docker pull nvcr.io/nvidia/ai-dynamo/dynamo-planner-nightly:latest
+
+# EFA variant of a runtime image
+docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:latest-efa
 ```
 
 The old nightly docs also described immutable `:YYYYMMDD-<shortsha>` container tags. Those tags are not currently visible for the recent NGC nightly images, so use `:latest` unless you have a specific tag from the publish job.
