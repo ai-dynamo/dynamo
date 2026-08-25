@@ -1046,7 +1046,7 @@ where
             );
         } else if uses_occupancy {
             tracing::info!(
-                router_mode = ?self.inner.router_mode(),
+                router_mode = self.inner.router_mode().telemetry_label(),
                 worker_id = target.worker_id,
                 candidate_count,
                 occupancy = ?final_occupancy,

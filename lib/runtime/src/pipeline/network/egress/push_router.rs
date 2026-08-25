@@ -255,7 +255,7 @@ impl DeviceAwareSelection {
 }
 
 impl RouterMode {
-    const fn telemetry_label(self) -> &'static str {
+    pub const fn telemetry_label(self) -> &'static str {
         match self {
             Self::RoundRobin => "round-robin",
             Self::Random => "random",
