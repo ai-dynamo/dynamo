@@ -172,26 +172,18 @@ def build_decode_row(
 def build_disagg_df_from_static(
     prefill_df: pd.DataFrame,
     decode_df: pd.DataFrame,
-    *,
-    kv_hit_rate: float | None = None,
 ) -> pd.DataFrame:
     """Cross-product prefill x decode into a ColumnsDisagg DataFrame.
 
     Used when calling ``pick_default`` or ``pick_load_match`` from
     THOROUGH-mode benchmark results.
 
-    ``kv_hit_rate`` (0-1) optionally overrides the prefix-cache hit fraction on
-    every prefill row before rate matching, setting ``prefix =
-    round(kv_hit_rate * isl)`` per row. This is a convenience for callers that
-    hold a pre-built ``prefill_df`` and want to apply a hit rate at
-    disagg-assembly time. When ``None`` (default) the ``prefix`` already carried
-    by each prefill row is used unchanged, so existing behaviour is preserved.
+    Prefix-cache discounts must already be reflected in each prefill row's
+    ``prefix`` and measured/predicted ``ttft``.
     """
     combos: list[dict] = []
     for _, p_row in prefill_df.iterrows():
         p_dict = p_row.to_dict()
-        if kv_hit_rate is not None:
-            p_dict["prefix"] = _prefix_len(kv_hit_rate, int(p_dict["isl"]))
         for _, d_row in decode_df.iterrows():
             combo = _build_disagg_summary_dict(
                 prefill_summary_dict=p_dict,
