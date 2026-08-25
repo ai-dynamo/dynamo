@@ -14,8 +14,8 @@
 # The engine's gRPC has no auth and no TLS. It is only safe because vllm-rs binds
 # 127.0.0.1 (--host below), keeping it on pod loopback.
 #
-# There is no published vLLM sidecar image yet: build your own from
-# lib/sidecar/vllm/Dockerfile and set <your-registry> below (see README).
+# There is no published sidecar image yet: build the unified image from
+# lib/sidecar/Dockerfile and set <your-registry> below (see README).
 
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -84,11 +84,11 @@ spec:
             serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051
         containers:
         # The sidecar worker. No published image yet, so build your own from
-        # lib/sidecar/vllm/Dockerfile and set <your-registry> below (see README).
+        # lib/sidecar/Dockerfile and set <your-registry> below (see README).
         # Add imagePullSecrets if private.
         # Must be named "main": the operator injects discovery env + probes by name.
         - name: main
-          image: <your-registry>/dynamo-vllm-sidecar:1.3.0
+          image: <your-registry>/dynamo-sidecar:1.3.0
           command:
           - dynamo-vllm-sidecar
           args:

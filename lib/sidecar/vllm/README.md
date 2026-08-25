@@ -123,8 +123,9 @@ and fidelity limits.
 that colocates the sidecar with a vLLM engine). `deploy/disagg.yaml` runs
 disaggregated prefill/decode with NIXL KV transfer.
 
-There is no published vLLM sidecar image yet, so you build and push your own from
-`Dockerfile` — the same pattern as the TensorRT-LLM and SGLang sidecars.
+There is no published sidecar image yet, so build and push the unified image
+from `lib/sidecar/Dockerfile`. It contains the vLLM, SGLang, and TensorRT-LLM
+sidecar executables; the deployment selects `dynamo-vllm-sidecar`.
 
 The sidecar waits for both the Control and Inference services through the standard gRPC health API before registering the worker. The deployment manifests retain lightweight socket probes for container lifecycle monitoring. The engine image must include a `vllm-rs` build compatible with the vendored protocol.
 
@@ -145,8 +146,8 @@ Build a multi-arch image so it runs on any node — `amd64` (x86) or `arm64`
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -f lib/sidecar/vllm/Dockerfile \
-  -t <your-registry>/dynamo-vllm-sidecar:1.3.0 --push .
+  -f lib/sidecar/Dockerfile \
+  -t <your-registry>/dynamo-sidecar:1.3.0 --push .
 ```
 
 ### 2. Point the manifest at your image
@@ -193,5 +194,8 @@ must reach `2/2 Running`. Apply it the same way and call the frontend as above.
 
 ## Packaging
 
-There is no published image yet; the quick start above builds one from
-`Dockerfile`. Official packaging is deferred to a follow-up change.
+There is no published unified sidecar image yet. The quick start above builds
+`dynamo-sidecar` from `lib/sidecar/Dockerfile`. The same image contains the
+vLLM, SGLang, and TensorRT-LLM executables; each deployment selects the matching
+executable with its container command. Official packaging is deferred to a
+follow-up change.

@@ -47,6 +47,25 @@ through discovery, then send requests directly to the engine. The sidecar stays
 off the request path and uses the engine's native gRPC service for metadata and
 event integration with Dynamo's discovery and event planes.
 
+## Container Packaging
+
+The unified CPU-only sidecar image contains three engine-specific executables:
+
+| Engine | Container command |
+|---|---|
+| vLLM | `dynamo-vllm-sidecar` |
+| SGLang | `dynamo-sglang-sidecar` |
+| TensorRT-LLM | `dynamo-trtllm-sidecar` |
+
+The image has no default entrypoint. Each Kubernetes deployment selects the
+matching executable with `command`. The inference engine remains in a separate
+GPU container, so the sidecar image does not include vLLM, SGLang,
+TensorRT-LLM, CUDA, or engine-specific Python dependencies.
+
+No published unified sidecar image is available yet. Build `dynamo-sidecar`
+from the
+[sidecar Dockerfile](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/Dockerfile).
+
 ## Target Responsibilities
 
 | Layer | Responsibility |
@@ -68,5 +87,5 @@ This table describes validated launch topologies, not feature parity with the
 in-process backends.
 
 See the
-[sidecar source and engine-specific READMEs](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar)
+[sidecar source, unified Dockerfile, and engine-specific READMEs](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar)
 for implementation details.

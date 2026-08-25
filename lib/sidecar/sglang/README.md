@@ -1,7 +1,7 @@
 # SGLang sidecar
 
 > [!WARNING]
-> **Experimental.** These deployment examples and the standalone sidecar image
+> **Experimental.** These deployment examples and the unified sidecar image
 > are experimental and not yet packaged for distribution (the launcher module
 > ships inside `ai-dynamo-runtime`). The manifests, flags, and behavior may change
 > without notice.
@@ -21,8 +21,9 @@ cargo build --release -p dynamo-sglang-sidecar
     --sglang-endpoint http://127.0.0.1:30001
 ```
 
-There is no published image yet; the "Deploy on Kubernetes" section below builds
-a minimal one from `Dockerfile`. Official packaging is deferred to a follow-up.
+There is no published image yet; the "Deploy on Kubernetes" section below
+builds the unified sidecar image from `lib/sidecar/Dockerfile`. Official
+packaging is deferred to a follow-up.
 
 Use `SGLANG_GRPC_ENDPOINT` instead of `--sglang-endpoint` when the endpoint is provided through the environment.
 
@@ -56,8 +57,9 @@ same unified worker lifecycle as the standalone executable.
 that colocates the sidecar with an SGLang engine). `deploy/disagg.yaml` runs
 disaggregated prefill/decode with NIXL KV transfer.
 
-There is no published sidecar image yet, so you build and push your own from
-`Dockerfile` — the same pattern as the TensorRT-LLM and vLLM sidecars.
+There is no published sidecar image yet, so build and push the unified image
+from `lib/sidecar/Dockerfile`. It contains all three engine-specific sidecar
+executables; this deployment selects `dynamo-sglang-sidecar`.
 
 > [!NOTE]
 > The engine image must be a stock SGLang **v0.5.16+** build: the native gRPC
@@ -81,8 +83,8 @@ Build a multi-arch image so it runs on any node — `amd64` (x86) or `arm64`
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -f lib/sidecar/sglang/Dockerfile \
-  -t <your-registry>/dynamo-sglang-sidecar:1.3.0 --push .
+  -f lib/sidecar/Dockerfile \
+  -t <your-registry>/dynamo-sidecar:1.3.0 --push .
 ```
 
 ### 2. Point the manifest at your image

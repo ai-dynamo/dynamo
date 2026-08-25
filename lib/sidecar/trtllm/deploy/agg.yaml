@@ -96,11 +96,11 @@ spec:
             mountPath: /config
         containers:
         # Sidecar worker. No published image yet — build from
-        # lib/sidecar/trtllm/Dockerfile, set <your-registry> (see README), add
+        # lib/sidecar/Dockerfile, set <your-registry> (see README), add
         # imagePullSecrets if private. Must be named "main" (operator injects
         # discovery env + probes by name).
         - name: main
-          image: <your-registry>/dynamo-trtllm-sidecar:1.3.0
+          image: <your-registry>/dynamo-sidecar:1.3.0
           command:
           - dynamo-trtllm-sidecar
           args:
