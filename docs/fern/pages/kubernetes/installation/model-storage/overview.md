@@ -32,7 +32,14 @@ Storage is especially important for large models and multi-node deployments. A s
 - Use persistent storage for model weights when repeated downloads would slow cold starts or stress object storage.
 - Use fast ephemeral or node-local storage for scratch data that does not need to survive pod replacement.
 - Confirm the storage class supports the access mode your deployment needs, such as `ReadWriteMany` for shared model caches.
+- Pin model downloads to an immutable commit rather than a mutable branch or tag.
+  Restrict write access to shared model storage and mount reviewed snapshots
+  read-only in serving pods where possible.
 - Validate throughput during a scale-out test, not only with a single pod.
+
+The snapshot path records the resolved model commit, but its contents remain
+trustworthy only while untrusted principals cannot replace files in the backing
+storage. See [Secure Model and Image Provenance](../../model-deployment/introduction.mdx#secure-model-and-image-provenance).
 
 ## Next Steps
 
