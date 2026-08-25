@@ -3503,7 +3503,10 @@ mod tests {
         watcher.record_removed(&test_instance_id(2));
 
         let (_sink_id, replay) = watcher.add_sink(inert_sink());
-        assert_eq!(replay.iter().map(|id| id.instance_id).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(
+            replay.iter().map(|id| id.instance_id).collect::<Vec<_>>(),
+            vec![1]
+        );
     }
 
     #[test]
