@@ -27,6 +27,7 @@ import (
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/events"
@@ -84,6 +85,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeploymentscalingadapters,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamoworkermetadatas,verbs=get;list;watch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquesets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques,verbs=get;list;watch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale,verbs=get;update;patch
@@ -256,8 +258,8 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 		).
 		Watches(
 			&corev1.Pod{},
-			handler.EnqueueRequestsFromMapFunc(mapDGDWorkerPodToRequests),
-			builder.WithPredicates(dgdWorkerPodEventPredicate()),
+			handler.EnqueueRequestsFromMapFunc(mapDGDRolloutPodToRequests),
+			builder.WithPredicates(dgdRolloutPodEventPredicate()),
 		).
 		Owns(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the deployment
@@ -291,6 +293,23 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
 		WithEventFilter(deploymentEventFilter(r.Config, r.RuntimeConfig))
+	if _, err := mgr.GetRESTMapper().RESTMapping(dynamoWorkerMetadataGVK.GroupKind(), dynamoWorkerMetadataGVK.Version); err != nil {
+		if !meta.IsNoMatchError(err) {
+			return fmt.Errorf("discover DynamoWorkerMetadata API: %w", err)
+		}
+		log.Log.Info("DynamoWorkerMetadata API unavailable; using legacy rollout availability")
+	} else {
+		ctrlBuilder = ctrlBuilder.Watches(
+			newDynamoWorkerMetadata(),
+			handler.EnqueueRequestsFromMapFunc(r.mapDynamoWorkerMetadataToDGDRequests),
+			builder.WithPredicates(predicate.Funcs{
+				CreateFunc:  func(ce event.CreateEvent) bool { return true },
+				DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+				UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
+				GenericFunc: func(ge event.GenericEvent) bool { return false },
+			}),
+		)
+	}
 	if r.RuntimeConfig.Gate.Enabled(features.DRA) {
 		ctrlBuilder = ctrlBuilder.Watches(
 			&resourcev1.ResourceClaim{},
@@ -329,16 +348,22 @@ func (r *DynamoGraphDeploymentReconciler) GetRecorder() events.EventRecorder {
 	return r.Recorder
 }
 
-func isDGDManagedWorkerPod(obj client.Object) bool {
+func isDGDManagedRolloutPod(obj client.Object) bool {
 	pod, ok := obj.(*corev1.Pod)
 	if !ok || pod == nil {
 		return false
 	}
 	labels := pod.GetLabels()
-	return labels[consts.KubeLabelDynamoGraphDeploymentName] != "" &&
-		labels[consts.KubeLabelDynamoComponent] != "" &&
-		labels[consts.KubeLabelDynamoSelector] != "" &&
-		dynamo.IsWorkerComponent(labels[consts.KubeLabelDynamoComponentType])
+	if labels[consts.KubeLabelDynamoGraphDeploymentName] == "" ||
+		labels[consts.KubeLabelDynamoComponent] == "" {
+		return false
+	}
+	componentType := labels[consts.KubeLabelDynamoComponentType]
+	if componentType == consts.ComponentTypeFrontend {
+		return true
+	}
+	return labels[consts.KubeLabelDynamoSelector] != "" &&
+		dynamo.IsWorkerComponent(componentType)
 }
 
 func dgdComponentPodIndexValues(obj client.Object) []string {
@@ -361,21 +386,19 @@ func dgdComponentPodIndexValue(dgdName, componentName string) string {
 	return dgdName + "/" + componentName
 }
 
-// dgdWorkerPodEventPredicate admits only events that can change whether a
-// Recreate rollout is blocked by an old pod. Creation and deletion change pod
-// membership; updates matter only when membership or terminality changes. A
-// deletion timestamp alone leaves the pod non-terminal and does not enqueue.
-func dgdWorkerPodEventPredicate() predicate.Predicate {
+// dgdRolloutPodEventPredicate admits worker drain changes and frontend traffic
+// readiness changes that can unblock a rollout.
+func dgdRolloutPodEventPredicate() predicate.Predicate {
 	return predicate.Funcs{
 		CreateFunc: func(e event.CreateEvent) bool {
-			return isDGDManagedWorkerPod(e.Object)
+			return isDGDManagedRolloutPod(e.Object)
 		},
 		DeleteFunc: func(e event.DeleteEvent) bool {
-			return isDGDManagedWorkerPod(e.Object)
+			return isDGDManagedRolloutPod(e.Object)
 		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			oldManaged := isDGDManagedWorkerPod(e.ObjectOld)
-			newManaged := isDGDManagedWorkerPod(e.ObjectNew)
+			oldManaged := isDGDManagedRolloutPod(e.ObjectOld)
+			newManaged := isDGDManagedRolloutPod(e.ObjectNew)
 			if oldManaged != newManaged {
 				return true
 			}
@@ -386,8 +409,12 @@ func dgdWorkerPodEventPredicate() predicate.Predicate {
 			newPod := e.ObjectNew.(*corev1.Pod)
 			if oldPod.Labels[consts.KubeLabelDynamoGraphDeploymentName] != newPod.Labels[consts.KubeLabelDynamoGraphDeploymentName] ||
 				oldPod.Labels[consts.KubeLabelDynamoComponent] != newPod.Labels[consts.KubeLabelDynamoComponent] ||
+				oldPod.Labels[consts.KubeLabelDynamoComponentType] != newPod.Labels[consts.KubeLabelDynamoComponentType] ||
 				oldPod.Labels[consts.KubeLabelDynamoSelector] != newPod.Labels[consts.KubeLabelDynamoSelector] {
 				return true
+			}
+			if newPod.Labels[consts.KubeLabelDynamoComponentType] == consts.ComponentTypeFrontend {
+				return podReadyForTraffic(oldPod) != podReadyForTraffic(newPod)
 			}
 			return isTerminalPhase(oldPod.Status.Phase) != isTerminalPhase(newPod.Status.Phase)
 		},
@@ -397,8 +424,8 @@ func dgdWorkerPodEventPredicate() predicate.Predicate {
 	}
 }
 
-func mapDGDWorkerPodToRequests(_ context.Context, obj client.Object) []ctrl.Request {
-	if !isDGDManagedWorkerPod(obj) {
+func mapDGDRolloutPodToRequests(_ context.Context, obj client.Object) []ctrl.Request {
+	if !isDGDManagedRolloutPod(obj) {
 		return nil
 	}
 	dgdName := obj.GetLabels()[consts.KubeLabelDynamoGraphDeploymentName]

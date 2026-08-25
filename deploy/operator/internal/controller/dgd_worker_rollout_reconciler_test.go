@@ -29,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -3904,7 +3905,7 @@ func TestListDGDComponentPodsUsesCompositeIndex(t *testing.T) {
 	assert.Equal(t, []string{"matching-a", "matching-b"}, names)
 }
 
-func TestDGDWorkerPodEventPredicate(t *testing.T) {
+func TestDGDRolloutPodEventPredicate(t *testing.T) {
 	newPod := func(phase corev1.PodPhase) *corev1.Pod {
 		return &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
@@ -3921,7 +3922,7 @@ func TestDGDWorkerPodEventPredicate(t *testing.T) {
 		}
 	}
 
-	pred := dgdWorkerPodEventPredicate()
+	pred := dgdRolloutPodEventPredicate()
 	running := newPod(corev1.PodRunning)
 	failed := newPod(corev1.PodFailed)
 	succeeded := newPod(corev1.PodSucceeded)
@@ -3931,11 +3932,16 @@ func TestDGDWorkerPodEventPredicate(t *testing.T) {
 	delete(unrelated.Labels, consts.KubeLabelDynamoSelector)
 	frontend := running.DeepCopy()
 	frontend.Labels[consts.KubeLabelDynamoComponentType] = consts.ComponentTypeFrontend
+	delete(frontend.Labels, consts.KubeLabelDynamoSelector)
+	readyFrontend := frontend.DeepCopy()
+	readyFrontend.Status.Conditions = []corev1.PodCondition{{
+		Type: corev1.PodReady, Status: corev1.ConditionTrue,
+	}}
 	moved := running.DeepCopy()
 	moved.Labels[consts.KubeLabelDynamoSelector] = "another-old-worker"
 
 	assert.True(t, pred.Create(event.CreateEvent{Object: running}), "pod creation changes drain membership")
-	assert.False(t, pred.Create(event.CreateEvent{Object: frontend}), "non-worker pods must be ignored")
+	assert.True(t, pred.Create(event.CreateEvent{Object: frontend}), "frontend creation changes admission membership")
 	assert.True(t, pred.Delete(event.DeleteEvent{Object: running}), "pod deletion can unblock a drain")
 	assert.False(t, pred.Delete(event.DeleteEvent{Object: unrelated}), "unmanaged pods must be ignored")
 	assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: running, ObjectNew: failed}), "transition to Failed can unblock a drain")
@@ -3944,10 +3950,12 @@ func TestDGDWorkerPodEventPredicate(t *testing.T) {
 	assert.False(t, pred.Update(event.UpdateEvent{ObjectOld: failed, ObjectNew: succeeded}), "terminal-to-terminal transitions are irrelevant")
 	assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: running, ObjectNew: moved}), "selector changes move the pod between drain memberships")
 	assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: unrelated, ObjectNew: running}), "becoming a managed worker pod changes drain membership")
+	assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: frontend, ObjectNew: readyFrontend}), "frontend readiness changes admission")
+	assert.False(t, pred.Update(event.UpdateEvent{ObjectOld: frontend, ObjectNew: frontend.DeepCopy()}), "unchanged frontend readiness is irrelevant")
 	assert.False(t, pred.Generic(event.GenericEvent{Object: running}))
 }
 
-func TestMapDGDWorkerPodToRequests(t *testing.T) {
+func TestMapDGDRolloutPodToRequests(t *testing.T) {
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name:      "worker",
 		Namespace: "default",
@@ -3959,12 +3967,16 @@ func TestMapDGDWorkerPodToRequests(t *testing.T) {
 		},
 	}}
 
-	requests := mapDGDWorkerPodToRequests(context.Background(), pod)
+	requests := mapDGDRolloutPodToRequests(context.Background(), pod)
 	require.Len(t, requests, 1)
 	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "test-dgd"}, requests[0].NamespacedName)
 
+	pod.Labels[consts.KubeLabelDynamoComponentType] = consts.ComponentTypeFrontend
+	delete(pod.Labels, consts.KubeLabelDynamoSelector)
+	assert.Len(t, mapDGDRolloutPodToRequests(context.Background(), pod), 1)
+
 	delete(pod.Labels, consts.KubeLabelDynamoGraphDeploymentName)
-	assert.Empty(t, mapDGDWorkerPodToRequests(context.Background(), pod))
+	assert.Empty(t, mapDGDRolloutPodToRequests(context.Background(), pod))
 }
 
 // --- reconcileRollingUpdate state machine tests ---
@@ -4787,6 +4799,161 @@ func TestBuildRollingUpdateContext_NoNewDCDExists(t *testing.T) {
 	// Math runs with newState={0,0,0}: drain old to minAvailable, surge new from zero.
 	assert.Equal(t, int32(8), result.OldWorkerReplicaTargetsByComponent["worker"])
 	assert.Equal(t, int32(3), result.NewWorkerReplicaTargetsByComponent["worker"])
+}
+
+func TestBuildRollingUpdateContext_WaitsForEveryFrontendToAdmitNewWorker(t *testing.T) {
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"frontend": {
+			ComponentType: consts.ComponentTypeFrontend,
+			Replicas:      ptr.To(int32(2)),
+		},
+		"worker": {
+			ComponentType: consts.ComponentTypeWorker,
+			Replicas:      ptr.To(int32(2)),
+			Annotations: map[string]string{
+				KubeAnnotationDeploymentRollingUpdateMaxSurge:       "0",
+				KubeAnnotationDeploymentRollingUpdateMaxUnavailable: "1",
+			},
+		},
+	})
+	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: testOldWorkerHash}
+	newHash := betaDGDWorkersSpecHash(t, dgd)
+	runtimeNamespace := "test-dgd-" + newHash[:8]
+
+	makeDCD := func(hash string, replicas, available int32) *nvidiacomv1beta1.DynamoComponentDeployment {
+		dcd := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      dynamo.GetDCDResourceName(dgd, "worker", hash),
+				Namespace: dgd.Namespace,
+				Labels: map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+					consts.KubeLabelDynamoWorkerHash:          hash,
+				},
+			},
+			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: consts.ComponentTypeWorker,
+					ServiceName:   "worker",
+					Replicas:      ptr.To(replicas),
+				},
+			},
+			Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
+				Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
+					Replicas:          replicas,
+					AvailableReplicas: ptr.To(available),
+				},
+			},
+		})
+		if hash == newHash {
+			dcd.Status.Component.RuntimeNamespace = runtimeNamespace
+		}
+		return dcd
+	}
+	readyPod := func(name, component, componentType, hash string) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: dgd.Namespace,
+				UID:       types.UID(name + "-uid"),
+				Labels: map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+					consts.KubeLabelDynamoComponent:           component,
+					consts.KubeLabelDynamoComponentType:       componentType,
+					consts.KubeLabelDynamoWorkerHash:          hash,
+					consts.KubeLabelDynamoSelector:            dgd.Name + "-" + component,
+				},
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				Conditions: []corev1.PodCondition{{
+					Type: corev1.PodReady, Status: corev1.ConditionTrue,
+				}},
+			},
+		}
+	}
+	makeMetadata := func(pod *corev1.Pod, data map[string]any) *unstructured.Unstructured {
+		metadata := newDynamoWorkerMetadata()
+		metadata.SetName(pod.Name)
+		metadata.SetNamespace(pod.Namespace)
+		metadata.SetOwnerReferences([]metav1.OwnerReference{{
+			APIVersion: "v1", Kind: "Pod", Name: pod.Name, UID: pod.UID,
+		}})
+		metadata.Object["spec"] = map[string]any{"data": data}
+		return metadata
+	}
+	capability := func() map[string]any {
+		return map[string]any{
+			"type": "EventSource", "topic": frontendModelAdmissionTopic,
+			"scope": map[string]any{"kind": "namespace", "name": dgd.Name},
+			"metadata": map[string]any{
+				"protocol": frontendModelAdmissionProtocol, "capability": true,
+			},
+		}
+	}
+	admission := func(member string) map[string]any {
+		return map[string]any{
+			"type": "EventSource", "topic": frontendModelAdmissionTopic,
+			"scope": map[string]any{"kind": "namespace", "name": runtimeNamespace},
+			"metadata": map[string]any{
+				"protocol": frontendModelAdmissionProtocol,
+				"members":  []any{member},
+			},
+		}
+	}
+
+	oldDCD := makeDCD(testOldWorkerHash, 1, 1)
+	newDCD := makeDCD(newHash, 1, 1)
+	workerPod := readyPod("new-worker", "worker", consts.ComponentTypeWorker, newHash)
+	frontendA := readyPod("frontend-a", "frontend", consts.ComponentTypeFrontend, "")
+	frontendB := readyPod("frontend-b", "frontend", consts.ComponentTypeFrontend, "")
+	modelCardPath := runtimeNamespace + "/backend/generate/101"
+	workerMetadata := makeMetadata(workerPod, map[string]any{
+		"model_cards": map[string]any{
+			modelCardPath: map[string]any{
+				"type": "Model", "namespace": runtimeNamespace,
+			},
+		},
+	})
+	frontendAMetadata := makeMetadata(frontendA, map[string]any{
+		"event_sources": map[string]any{
+			"capability": capability(), "group": admission(modelCardPath),
+		},
+	})
+	frontendBMetadata := makeMetadata(frontendB, map[string]any{
+		"event_sources": map[string]any{"capability": capability()},
+	})
+
+	r := createTestReconcilerWithStatus(dgd, withObjects(
+		oldDCD, newDCD, workerPod, frontendA, frontendB,
+		workerMetadata, frontendAMetadata, frontendBMetadata,
+	))
+
+	t.Log("Keep the last old worker while one ready frontend has not committed the replacement")
+	result, err := r.buildRollingUpdateContext(context.Background(), dgd)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), result.OldWorkerReplicaTargetsByComponent["worker"])
+
+	t.Log("Allow scale-down after every ready frontend publishes the exact replacement model card")
+	frontendBMetadata.Object["spec"] = map[string]any{"data": map[string]any{
+		"event_sources": map[string]any{
+			"capability": capability(), "group": admission(modelCardPath),
+		},
+	}}
+	require.NoError(t, r.Update(context.Background(), frontendBMetadata))
+	result, err = r.buildRollingUpdateContext(context.Background(), dgd)
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), result.OldWorkerReplicaTargetsByComponent["worker"])
+
+	t.Log("Preserve legacy rollout behavior when no frontend advertises the admission protocol")
+	for _, metadata := range []*unstructured.Unstructured{frontendAMetadata, frontendBMetadata} {
+		metadata.Object["spec"] = map[string]any{"data": map[string]any{
+			"event_sources": map[string]any{},
+		}}
+		require.NoError(t, r.Update(context.Background(), metadata))
+	}
+	result, err = r.buildRollingUpdateContext(context.Background(), dgd)
+	require.NoError(t, err)
+	assert.Equal(t, int32(0), result.OldWorkerReplicaTargetsByComponent["worker"])
 }
 
 func TestBuildRollingUpdateContext_ListOldDCDsError(t *testing.T) {

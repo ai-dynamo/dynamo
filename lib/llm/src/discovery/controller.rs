@@ -31,6 +31,13 @@ pub(crate) struct GroupKey {
     pub(crate) worker_set_key: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CommittedModelGroup {
+    pub(crate) namespace: String,
+    pub(crate) group_id: String,
+    pub(crate) members: BTreeSet<String>,
+}
+
 impl GroupKey {
     pub(crate) fn id(&self) -> String {
         serde_json::to_string(&(&self.model_name, &self.worker_set_key))
@@ -98,6 +105,8 @@ pub(crate) trait ControllerHost: Send + Sync + 'static {
     fn remove_group(&self, key: &GroupKey);
 
     fn discard_prepared(&self, prepared: Self::Prepared);
+
+    fn replace_committed_groups(&self, groups: Vec<CommittedModelGroup>);
 
     async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>>;
 }
@@ -269,9 +278,42 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     self.release_due_retries();
                 }
             }
+            self.publish_committed_groups();
         }
 
+        self.host.replace_committed_groups(Vec::new());
         self.shutdown_builds().await;
+    }
+
+    fn publish_committed_groups(&self) {
+        let mut committed = self
+            .groups
+            .iter()
+            .filter_map(|(key, group)| {
+                let members = match &group.status {
+                    GroupStatus::Ready {
+                        committed_members, ..
+                    }
+                    | GroupStatus::BlockedReady {
+                        committed_members, ..
+                    } => committed_members,
+                    _ => return None,
+                };
+                let namespace = members
+                    .iter()
+                    .find_map(|member| self.desired.get(member))?
+                    .mcid
+                    .namespace
+                    .clone();
+                Some(CommittedModelGroup {
+                    namespace,
+                    group_id: key.id(),
+                    members: members.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        committed.sort_by(|left, right| left.group_id.cmp(&right.group_id));
+        self.host.replace_committed_groups(committed);
     }
 
     fn apply_event(&mut self, event: DiscoveryEvent, namespace_filter: &NamespaceFilter) {
@@ -935,6 +977,7 @@ mod tests {
         committed: Mutex<HashMap<String, BTreeSet<String>>>,
         adapters: Mutex<HashMap<String, BTreeSet<String>>>,
         adapter_projections: Mutex<HashMap<String, HashMap<String, String>>>,
+        committed_groups: Mutex<Vec<CommittedModelGroup>>,
         removed_groups: AtomicUsize,
         discarded: AtomicUsize,
     }
@@ -953,6 +996,7 @@ mod tests {
                     committed: Mutex::new(HashMap::new()),
                     adapters: Mutex::new(HashMap::new()),
                     adapter_projections: Mutex::new(HashMap::new()),
+                    committed_groups: Mutex::new(Vec::new()),
                     removed_groups: AtomicUsize::new(0),
                     discarded: AtomicUsize::new(0),
                 }),
@@ -999,6 +1043,10 @@ mod tests {
                     .map(|adapter| (adapter.key.clone(), adapter.projection_fingerprint.clone()))
                     .collect(),
             );
+        }
+
+        fn committed_groups(&self) -> Vec<CommittedModelGroup> {
+            self.committed_groups.lock().unwrap().clone()
         }
     }
 
@@ -1129,6 +1177,10 @@ mod tests {
             self.discarded.fetch_add(1, Ordering::SeqCst);
         }
 
+        fn replace_committed_groups(&self, groups: Vec<CommittedModelGroup>) {
+            *self.committed_groups.lock().unwrap() = groups;
+        }
+
         async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>> {
             Ok(Vec::new())
         }
@@ -1212,6 +1264,35 @@ mod tests {
         controller.apply_removed(&third.key);
         assert_eq!(host.members(&group_key()), BTreeSet::from([second.key]));
         assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn frontend_admission_tracks_only_committed_model_groups() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let first = instance(1, "same");
+
+        controller.apply_added(first.clone());
+        controller.publish_committed_groups();
+        assert!(host.committed_groups().is_empty());
+
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        controller.publish_committed_groups();
+        assert_eq!(
+            host.committed_groups(),
+            vec![CommittedModelGroup {
+                namespace: "namespace".to_string(),
+                group_id: group_key().id(),
+                members: BTreeSet::from([first.key.clone()]),
+            }]
+        );
+
+        controller.apply_removed(&first.key);
+        controller.publish_committed_groups();
+        assert!(host.committed_groups().is_empty());
     }
 
     #[tokio::test]

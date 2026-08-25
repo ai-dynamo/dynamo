@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, hash_map::DefaultHasher};
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Notify, mpsc::Sender};
+use tokio::sync::{Notify, mpsc::Sender, watch};
 
 use anyhow::Context as _;
 use async_trait::async_trait;
@@ -16,7 +17,10 @@ use dynamo_kv_router::{
 };
 use dynamo_runtime::{
     DistributedRuntime,
-    discovery::{DiscoveryInstance, DiscoveryQuery, DiscoveryStream, ModelCardInstanceId},
+    discovery::{
+        DiscoveryInstance, DiscoveryQuery, DiscoverySpec, DiscoveryStream, EventScope,
+        EventSourceQuery, ModelCardInstanceId,
+    },
     pipeline::{
         ManyOut, Operator, RouterMode, SegmentSource, ServiceBackend, SingleIn, Source,
         network::egress::push_router::PushRouter,
@@ -63,9 +67,12 @@ use crate::{
 use super::readiness::normalize_legacy_prefill_topology;
 use super::{
     ModelManager,
-    controller::{ControllerHost, DesiredInstance, GroupKey, GroupSpec, ModelDiscoveryController},
+    controller::{
+        CommittedModelGroup, ControllerHost, DesiredInstance, GroupKey, GroupSpec,
+        ModelDiscoveryController,
+    },
 };
-use crate::namespace::NamespaceFilter;
+use crate::namespace::{GLOBAL_NAMESPACE, NamespaceFilter};
 use tokio_util::sync::CancellationToken;
 
 /// Constructs a collision-free WorkerSet storage key from its exact endpoint,
@@ -124,6 +131,215 @@ fn model_card_instance_id(instance: &DiscoveryInstance) -> anyhow::Result<ModelC
             model_suffix: model_suffix.clone(),
         }),
         _ => anyhow::bail!("Unexpected discovery instance type (expected ModelCard)"),
+    }
+}
+
+const FRONTEND_MODEL_ADMISSION_TOPIC: &str = "frontend-model-admission";
+const FRONTEND_MODEL_ADMISSION_PROTOCOL: &str = "v1";
+const FRONTEND_ADMISSION_STARTUP_WAIT: Duration = Duration::from_secs(5);
+const FRONTEND_ADMISSION_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const FRONTEND_ADMISSION_VERIFY_INTERVAL: Duration = Duration::from_secs(30);
+const JSON_SAFE_PUBLISHER_ID_MASK: u64 = (1 << 53) - 1;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FrontendAdmissionSource {
+    scope: EventScope,
+    publisher_id: u64,
+    metadata: serde_json::Value,
+}
+
+impl FrontendAdmissionSource {
+    fn spec(&self) -> DiscoverySpec {
+        DiscoverySpec::EventSource {
+            scope: self.scope.clone(),
+            topic: FRONTEND_MODEL_ADMISSION_TOPIC.to_string(),
+            publisher_id: self.publisher_id,
+            metadata: self.metadata.clone(),
+        }
+    }
+}
+
+fn frontend_admission_publisher_id(connection_id: u64, key: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    connection_id.hash(&mut hasher);
+    key.hash(&mut hasher);
+    hasher.finish() & JSON_SAFE_PUBLISHER_ID_MASK
+}
+
+fn desired_frontend_admission_sources(
+    connection_id: u64,
+    frontend_namespace: &str,
+    groups: &[CommittedModelGroup],
+) -> BTreeMap<String, FrontendAdmissionSource> {
+    let mut desired = BTreeMap::new();
+    desired.insert(
+        "capability".to_string(),
+        FrontendAdmissionSource {
+            scope: EventScope::Namespace {
+                name: frontend_namespace.to_string(),
+            },
+            publisher_id: frontend_admission_publisher_id(connection_id, "capability"),
+            metadata: serde_json::json!({
+                "protocol": FRONTEND_MODEL_ADMISSION_PROTOCOL,
+                "capability": true,
+            }),
+        },
+    );
+    for group in groups {
+        let key = format!("group:{}", group.group_id);
+        desired.insert(
+            key.clone(),
+            FrontendAdmissionSource {
+                scope: EventScope::Namespace {
+                    name: group.namespace.clone(),
+                },
+                publisher_id: frontend_admission_publisher_id(connection_id, &key),
+                metadata: serde_json::json!({
+                    "protocol": FRONTEND_MODEL_ADMISSION_PROTOCOL,
+                    "group_id": group.group_id.clone(),
+                    "members": group.members.clone(),
+                }),
+            },
+        );
+    }
+    desired
+}
+
+async fn reconcile_frontend_admission_sources(
+    drt: &DistributedRuntime,
+    frontend_namespace: &str,
+    groups: &[CommittedModelGroup],
+    active: &mut BTreeMap<String, (FrontendAdmissionSource, DiscoveryInstance)>,
+) -> bool {
+    let desired =
+        desired_frontend_admission_sources(drt.connection_id(), frontend_namespace, groups);
+    let stale = active
+        .iter()
+        .filter_map(|(key, (source, _))| (desired.get(key) != Some(source)).then_some(key.clone()))
+        .collect::<Vec<_>>();
+    for key in stale {
+        let Some((source, instance)) = active.remove(&key) else {
+            continue;
+        };
+        if let Err(error) = drt.discovery().unregister(instance.clone()).await {
+            tracing::warn!(%error, admission = key, "Failed to withdraw frontend model admission; retrying");
+            active.insert(key, (source, instance));
+        }
+    }
+
+    for (key, source) in desired {
+        if active.contains_key(&key) {
+            continue;
+        }
+        match drt.discovery().register(source.spec()).await {
+            Ok(instance) => {
+                active.insert(key, (source, instance));
+            }
+            Err(error) => {
+                tracing::warn!(%error, admission = key, "Failed to publish frontend model admission; retrying");
+            }
+        }
+    }
+
+    active.contains_key("capability")
+}
+
+async fn remove_missing_frontend_admission_sources(
+    drt: &DistributedRuntime,
+    active: &mut BTreeMap<String, (FrontendAdmissionSource, DiscoveryInstance)>,
+) {
+    let published = match drt
+        .discovery()
+        .list(DiscoveryQuery::EventSources(EventSourceQuery::all()))
+        .await
+    {
+        Ok(published) => published,
+        Err(error) => {
+            tracing::warn!(%error, "Failed to verify frontend model admissions; retrying");
+            return;
+        }
+    };
+    active.retain(|key, (_, instance)| {
+        let present = published.contains(instance);
+        if !present {
+            tracing::warn!(
+                admission = key,
+                "Frontend model admission disappeared; republishing"
+            );
+        }
+        present
+    });
+}
+
+async fn run_frontend_admission_publisher(
+    drt: DistributedRuntime,
+    frontend_namespace: String,
+    mut groups_rx: watch::Receiver<Vec<CommittedModelGroup>>,
+    cancellation: CancellationToken,
+    ready_tx: tokio::sync::oneshot::Sender<()>,
+) {
+    let mut active = BTreeMap::new();
+    let ready = loop {
+        let groups = groups_rx.borrow().clone();
+        let published = tokio::select! {
+            _ = cancellation.cancelled() => break false,
+            published = reconcile_frontend_admission_sources(
+                &drt,
+                &frontend_namespace,
+                &groups,
+                &mut active,
+            ) => published,
+        };
+        if published {
+            break true;
+        }
+        tokio::select! {
+            _ = cancellation.cancelled() => break false,
+            _ = tokio::time::sleep(FRONTEND_ADMISSION_RETRY_INTERVAL) => {}
+        }
+    };
+    if ready {
+        let _ = ready_tx.send(());
+    }
+
+    let mut retry_interval = tokio::time::interval(FRONTEND_ADMISSION_RETRY_INTERVAL);
+    retry_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut verify_interval = tokio::time::interval_at(
+        tokio::time::Instant::now() + FRONTEND_ADMISSION_VERIFY_INTERVAL,
+        FRONTEND_ADMISSION_VERIFY_INTERVAL,
+    );
+    verify_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    if ready {
+        loop {
+            let verify = tokio::select! {
+                _ = cancellation.cancelled() => break,
+                changed = groups_rx.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    false
+                }
+                _ = retry_interval.tick() => false,
+                _ = verify_interval.tick() => true,
+            };
+            if verify {
+                remove_missing_frontend_admission_sources(&drt, &mut active).await;
+            }
+            let groups = groups_rx.borrow().clone();
+            let _ = reconcile_frontend_admission_sources(
+                &drt,
+                &frontend_namespace,
+                &groups,
+                &mut active,
+            )
+            .await;
+        }
+    }
+
+    for (_, (_, instance)) in active {
+        if let Err(error) = drt.discovery().unregister(instance).await {
+            tracing::warn!(%error, "Failed to withdraw frontend model admission during shutdown");
+        }
     }
 }
 
@@ -194,6 +410,7 @@ where
     model_update_tx: Option<Sender<ModelUpdate>>,
     model_update_dispatch:
         parking_lot::Mutex<Option<tokio::sync::mpsc::UnboundedSender<ModelUpdate>>>,
+    committed_groups_tx: watch::Sender<Vec<CommittedModelGroup>>,
     chat_engine_factory: Option<ChatEngineFactoryCallback>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     metrics: Arc<Metrics>,
@@ -337,6 +554,7 @@ where
         require_typed_worker_role: bool,
         worker_selector_factory: WorkerSelectorFactory<Sel>,
     ) -> Self {
+        let (committed_groups_tx, _) = watch::channel(Vec::new());
         Self {
             manager: model_manager,
             drt: runtime,
@@ -346,6 +564,7 @@ where
             notify_on_model: Notify::new(),
             model_update_tx: None,
             model_update_dispatch: parking_lot::Mutex::new(None),
+            committed_groups_tx,
             chat_engine_factory,
             prefill_load_estimator,
             metrics,
@@ -423,9 +642,44 @@ where
             })
         });
 
+        let admission_namespace = match &namespace_filter {
+            NamespaceFilter::Exact(namespace) | NamespaceFilter::Prefix(namespace) => {
+                namespace.clone()
+            }
+            NamespaceFilter::Global => GLOBAL_NAMESPACE.to_string(),
+        };
+        let admission_cancellation = CancellationToken::new();
+        let (admission_ready_tx, admission_ready_rx) = tokio::sync::oneshot::channel();
+        let admission_handle = tokio::spawn(run_frontend_admission_publisher(
+            self.drt.clone(),
+            admission_namespace,
+            self.committed_groups_tx.subscribe(),
+            admission_cancellation.clone(),
+            admission_ready_tx,
+        ));
+        match tokio::time::timeout(FRONTEND_ADMISSION_STARTUP_WAIT, admission_ready_rx).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(
+                %error,
+                "Frontend admission publisher stopped before startup; continuing model discovery"
+            ),
+            Err(_) => tracing::warn!(
+                "Frontend admission publication timed out; continuing model discovery while it retries"
+            ),
+        }
+
         ModelDiscoveryController::new(Arc::clone(&self))
             .run(discovery_stream, namespace_filter)
             .await;
+
+        admission_cancellation.cancel();
+        let mut admission_handle = admission_handle;
+        if tokio::time::timeout(Duration::from_secs(2), &mut admission_handle)
+            .await
+            .is_err()
+        {
+            admission_handle.abort();
+        }
 
         self.model_update_dispatch.lock().take();
         if let Some(mut dispatch_handle) = dispatch_handle
@@ -1211,6 +1465,16 @@ where
         drop(prepared);
     }
 
+    fn replace_committed_groups(&self, groups: Vec<CommittedModelGroup>) {
+        self.committed_groups_tx.send_if_modified(|current| {
+            if current == &groups {
+                return false;
+            }
+            *current = groups;
+            true
+        });
+    }
+
     async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>> {
         self.drt.discovery().list(DiscoveryQuery::AllModels).await
     }
@@ -1349,6 +1613,61 @@ mod tests {
             component: "workers".to_string(),
             name: name.to_string(),
         }
+    }
+
+    #[test]
+    fn frontend_admission_source_carries_exact_committed_members() {
+        let member = "workers/backend/generate/7".to_string();
+        let sources = desired_frontend_admission_sources(
+            11,
+            "frontend",
+            &[CommittedModelGroup {
+                namespace: "workers".to_string(),
+                group_id: "group".to_string(),
+                members: std::collections::BTreeSet::from([member.clone()]),
+            }],
+        );
+
+        assert_eq!(sources["capability"].metadata["capability"], true);
+        let group = &sources["group:group"];
+        assert_eq!(
+            group.scope,
+            EventScope::Namespace {
+                name: "workers".to_string()
+            }
+        );
+        assert_eq!(
+            group.metadata["protocol"],
+            FRONTEND_MODEL_ADMISSION_PROTOCOL
+        );
+        assert_eq!(group.metadata["members"], serde_json::json!([member]));
+    }
+
+    #[tokio::test]
+    async fn missing_frontend_admission_is_republished() {
+        use dynamo_runtime::{Runtime, distributed::DistributedConfig};
+
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let mut active = BTreeMap::new();
+
+        assert!(reconcile_frontend_admission_sources(&drt, "frontend", &[], &mut active).await);
+        let original = active["capability"].1.clone();
+        drt.discovery().unregister(original).await.unwrap();
+
+        remove_missing_frontend_admission_sources(&drt, &mut active).await;
+        assert!(active.is_empty());
+        assert!(reconcile_frontend_admission_sources(&drt, "frontend", &[], &mut active).await);
+        let published = drt
+            .discovery()
+            .list(DiscoveryQuery::EventSources(EventSourceQuery::all()))
+            .await
+            .unwrap();
+        assert!(published.contains(&active["capability"].1));
+
+        runtime.shutdown();
     }
 
     #[test]
