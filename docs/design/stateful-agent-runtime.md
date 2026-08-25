@@ -55,7 +55,9 @@ NvCreateResponse
 
 `UnifiedRequest` is the existing API-neutral wrapper that preserves API-specific context while lowering to the shared request understood by Dynamo's preprocessing and engines. The agent runtime should not replace or enlarge that abstraction. It should produce a fully materialized turn *before* the ordinary conversion and inference path.
 
-`AgentContext` is a Dynamo-specific request-domain object, not an `agent-rt` concept. Dynamo ingress decodes Codex, Claude, OpenCode, or canonical Dynamo headers into it. The `agent-rt` core neither interprets nor persists it: a Dynamo adapter preserves the relevant structured request context for every model step in the active turn. In an out-of-process deployment, that adapter preserves the approved Dynamo context carrier to the next hop; Dynamo remains the component that interprets it.
+`AgentContext` is a Dynamo-specific request-domain object, not an `agent-rt` concept. Dynamo ingress decodes Codex, Claude, OpenCode, or canonical Dynamo headers into it. The `agent-rt` core never interprets it or exposes it as runtime state: a Dynamo adapter preserves the relevant structured request context for every model step in the active turn. In an out-of-process deployment, that adapter preserves the approved Dynamo context carrier to the next hop; Dynamo remains the component that interprets it.
+
+The runtime may need to recover a server-tool loop after a process failure. For that purpose, the Dynamo adapter may store an **opaque, adapter-owned binding** with the checkpoint. The runtime can save and return that blob but cannot inspect or construct it. The adapter owns its schema, compatibility, encryption, and the policy for which fields are durable. It must contain only the minimum stable affinity information required for recovery; raw inbound headers, credentials, traces, and one-request hints are never checkpoint data.
 
 ## Proposed Topology
 
@@ -83,7 +85,7 @@ The runtime may be embedded in the same deployment as an ingress frontend for th
 | --- | --- | --- | --- | --- |
 | Wire protocol parsing and Responses/Messages serialization | Own | Consume normalized request/events | No | No |
 | Authn/authz at request boundary | Own | Enforce state/tool authorization | Receive already-authorized request context | Connector-specific authorization |
-| Dynamo agent-metadata carrier | Preserve the approved carrier | Treat as adapter-owned opaque metadata | Interpret into `AgentContext` | No |
+| Dynamo agent-metadata carrier | Preserve the approved carrier | Treat as adapter-owned opaque metadata; retain an opaque binding only when recovery requires it | Interpret into `AgentContext` | No |
 | Response/checkpoint persistence | No | Own | No | No |
 | History hydration and continuation semantics | No | Own | Consume complete prompt only | No |
 | Engine/model selection and preprocessing | No | No | Own | No |
@@ -182,9 +184,14 @@ ToolJournalEntry
   owner/connector identity
   status: started | completed | failed
   normalized result reference or failure
+
+BackendBinding (optional)
+  backend kind: dynamo
+  adapter-defined opaque affinity state
+  encrypted or capability-protected at rest
 ```
 
-The store requires compare-and-swap/versioned commit semantics for concurrent continuations. It should not persist bearer credentials or arbitrary inbound headers. Large artifacts and raw tool payloads should be externalized to an object store with redacted metadata in the checkpoint.
+The store requires compare-and-swap/versioned commit semantics for concurrent continuations. It should not persist bearer credentials or arbitrary inbound headers. Large artifacts and raw tool payloads should be externalized to an object store with redacted metadata in the checkpoint. A `BackendBinding` is not a portable agent-context contract: it is an implementation detail of the selected inference adapter.
 
 The production store must be shared across runtime replicas. An in-memory implementation is sufficient for unit tests; a local SQLite implementation can support a single-process POC; multi-replica deployments require a transactional shared store.
 
@@ -251,6 +258,7 @@ The proposed runtime should learn from Agentic API's externally visible Response
 
 - Shared transactional store, tenant authorization, idempotency, and response-chain concurrency control.
 - Stateful streaming, cancellation policy, bounded buffering, and observability.
+- Adapter-owned durable affinity binding for recovery of a runtime-owned tool loop.
 - Persist stable agent identity fields and enforce consistency on continuation.
 
 ### Phase 2: one runtime-owned connector
@@ -280,7 +288,7 @@ The proposed runtime should learn from Agentic API's externally visible Response
 1. Which shared store and tenancy model should the first multi-replica deployment use?
 2. Should the stateful runtime be embedded with an ingress service initially, or deployed as an independent next-hop service from day one?
 3. What is the exact frontend-owned normalized event interface between the runtime and Responses/Messages serializers?
-4. Which Dynamo invocation metadata can an out-of-process adapter preserve safely, and which fields must remain request-local?
+4. What is the minimum Dynamo adapter binding needed for crash recovery, and which fields must remain request-local?
 5. How should the Dynamo adapter apply or reject changed incoming routing identity on a continuation?
 6. Which runtime-owned tool is constrained enough to be the first production connector?
 7. Which information should endpoint selection inspect to choose direct Dynamo versus the stateful runtime without duplicating protocol parsing?
