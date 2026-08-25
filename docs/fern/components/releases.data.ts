@@ -704,7 +704,7 @@ export const ARTIFACTS: Artifact[] = [
   {
     category: "helm",
     name: "dynamo-platform",
-    description: "Platform services (etcd, NATS) and the Dynamo Operator for a Dynamo cluster",
+    description: "The Dynamo Operator, plus opt-in etcd and NATS subcharts for a Dynamo cluster",
     href: "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.4.1.tgz",
     tags: [
       {
