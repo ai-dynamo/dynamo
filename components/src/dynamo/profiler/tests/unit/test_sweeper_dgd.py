@@ -97,7 +97,7 @@ spec:
             "K8sConfig": {
                 "k8s_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0",
                 "k8s_namespace": "demo",
-                "name_prefix": "sweeper-candidate",
+                "name_prefix": "sweeper-dgd",
             },
             "NodeConfig": {"num_gpus_per_node": 8},
         },
@@ -105,12 +105,62 @@ spec:
     }
     dgd = yaml.safe_load(rendered)
     assert dgd["metadata"] == {
-        "name": "sweeper-candidate-004",
+        "name": "sweeper-dgd-004",
         "namespace": "demo",
     }
     assert {
         component["runtimeVersionOverride"] for component in dgd["spec"]["components"]
     } == {"1.5.0"}
+
+
+def test_materialize_direct_uses_config_modifiers(monkeypatch) -> None:
+    captured = {}
+
+    class FakeMaterializationError(Exception):
+        pass
+
+    class FakeResult:
+        dgd = {
+            "apiVersion": "nvidia.com/v1beta1",
+            "kind": "DynamoGraphDeployment",
+            "metadata": {"name": "direct"},
+            "spec": {"components": [{"name": "Worker"}]},
+        }
+
+    def fake_materialize(config, *, image, num_gpus_per_node):
+        captured.update(
+            config=config,
+            image=image,
+            num_gpus_per_node=num_gpus_per_node,
+        )
+        return FakeResult()
+
+    monkeypatch.setattr(
+        dgd_module,
+        "_load_direct_renderer_api",
+        lambda: (FakeMaterializationError, fake_materialize),
+    )
+
+    candidate = _candidate(deployment_mode="agg")
+    rendered = materialize_candidate_dgd(
+        candidate,
+        SimpleNamespace(isl=4000, osl=1000),
+        _options(),
+        candidate_index=2,
+        renderer="direct",
+    )
+
+    assert captured == {
+        "config": candidate.config,
+        "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0",
+        "num_gpus_per_node": 8,
+    }
+    dgd = yaml.safe_load(rendered)
+    assert dgd["metadata"] == {
+        "name": "sweeper-dgd-002",
+        "namespace": "demo",
+    }
+    assert dgd["spec"]["components"][0]["runtimeVersionOverride"] == "1.5.0"
 
 
 @pytest.mark.parametrize(
