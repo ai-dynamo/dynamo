@@ -193,6 +193,11 @@ impl<'a> LookupPipeline<'a> {
         &self,
         sequence: HashInput<'_>,
     ) -> Result<MatchDetails, KvRouterError> {
+        // Same empty-sequence short-circuit as `find_matches_by_tier` below;
+        // this entry point serves peer routers' `device_only` queries.
+        if sequence.as_slice().is_empty() {
+            return Ok(MatchDetails::new());
+        }
         self.primary.find_match_details(sequence).await
     }
 
@@ -482,6 +487,25 @@ mod tests {
         assert_eq!(
             format!("{empty:?}"),
             format!("{:?}", TieredMatchDetails::default())
+        );
+
+        // The other two entry points carry the same guard.
+        let empty_primary = pipeline
+            .find_primary_matches_by_tier(HashInput::Owned(Vec::new()))
+            .await
+            .expect("empty primary tier query must not touch the (dead) indexer");
+        assert_eq!(
+            format!("{empty_primary:?}"),
+            format!("{:?}", TieredMatchDetails::default())
+        );
+
+        let empty_device = pipeline
+            .find_primary_match_details(HashInput::Owned(Vec::new()))
+            .await
+            .expect("empty device_only query must not touch the (dead) indexer");
+        assert_eq!(
+            format!("{empty_device:?}"),
+            format!("{:?}", MatchDetails::new())
         );
 
         // Control: the same query with one hash has to reach the cancelled

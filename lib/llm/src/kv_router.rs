@@ -2442,6 +2442,68 @@ mod tests {
         );
     }
 
+    /// Empty-token PotentialLoads is a pure load probe: with no blocks to
+    /// hash or match, the projection must equal the current per-worker load
+    /// snapshot, with no cache-hit credit and no indexer contribution (#10566).
+    #[tokio::test]
+    async fn empty_token_potential_loads_match_current_load_snapshot() {
+        let router = make_test_router(
+            InspectingSelector {
+                expected_hits: None,
+                selected_worker: WorkerWithDpRank::from_worker_id(0),
+            },
+            None,
+        )
+        .await;
+
+        // One live sequence makes the snapshot non-trivial.
+        router
+            .add_request(
+                "empty-probe".to_string(),
+                &[11, 12, 21, 22],
+                None,
+                0,
+                None,
+                WorkerWithDpRank::from_worker_id(0),
+                None,
+                None,
+                None,
+            )
+            .await;
+
+        // The current-load snapshot is the same projection with no request
+        // applied (mirrors the selection service's /loads endpoint).
+        let mut snapshot = router
+            .scheduler
+            .get_potential_loads(None, 0, HashMap::new(), false);
+        let mut potential = router
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .expect("empty-token potential loads");
+
+        let key = |load: &PotentialLoad| (load.worker_id, load.dp_rank);
+        snapshot.sort_by_key(key);
+        potential.sort_by_key(key);
+
+        assert!(
+            snapshot.iter().any(|load| load.active_requests == 1),
+            "snapshot should reflect the live request, got {snapshot:?}"
+        );
+        assert_eq!(potential.len(), snapshot.len());
+        for (probe, current) in potential.iter().zip(&snapshot) {
+            assert_eq!(key(probe), key(current));
+            assert_eq!(
+                probe.potential_decode_blocks,
+                current.potential_decode_blocks
+            );
+            assert_eq!(
+                probe.potential_prefill_tokens,
+                current.potential_prefill_tokens
+            );
+            assert_eq!(probe.active_requests, current.active_requests);
+        }
+    }
+
     #[tokio::test]
     async fn test_find_best_match_details_returns_routing_hashes_when_requested() {
         let router = make_test_router(
