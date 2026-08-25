@@ -92,11 +92,6 @@ pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_gener
 /// on the active LoRA adapter. Missing and explicit `false` are equivalent.
 pub const VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY: &str = "vllm_enable_tower_connector_lora";
 
-/// Worker-resolved placeholder token used by vLLM KV-event normalization.
-/// Backends publish this only when they also consume the frontend-approved
-/// `dynamo_mm_routing_hashes`; missing means exact MM routing is unavailable.
-pub const VLLM_ROUTING_IMAGE_TOKEN_ID_RUNTIME_KEY: &str = "vllm_routing_image_token_id";
-
 /// Worker-advertised support for Dynamo's SGLang-compatible `POST /generate`
 /// adapter.
 ///
@@ -402,18 +397,6 @@ impl ModelRuntimeConfig {
             Some(serde_json::Value::Bool(true)) => true,
             Some(serde_json::Value::String(value)) => is_truthy(value),
             _ => false,
-        }
-    }
-
-    /// Read an unsigned 32-bit runtime value from native JSON or a
-    /// string-encoded compatibility card.
-    pub(crate) fn runtime_u32(&self, key: &str) -> Option<u32> {
-        match self.runtime_data.get(key) {
-            Some(serde_json::Value::Number(value)) => {
-                value.as_u64().and_then(|value| u32::try_from(value).ok())
-            }
-            Some(serde_json::Value::String(value)) => value.parse().ok(),
-            _ => None,
         }
     }
 

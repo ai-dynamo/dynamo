@@ -15,9 +15,7 @@ use serde::Serialize;
 use super::ModelManagerError;
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
-use crate::local_model::runtime_config::{
-    VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY, VLLM_ROUTING_IMAGE_TOKEN_ID_RUNTIME_KEY,
-};
+use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
 use crate::protocols::openai::ParsingOptions;
 
 use crate::types::{
@@ -87,7 +85,6 @@ pub(crate) struct GenerateEngineSelection {
     pub(crate) kv_cache_block_size: u32,
     pub(crate) lora_name: Option<String>,
     pub(crate) tower_connector_lora_enabled: bool,
-    pub(crate) routing_image_token_id: Option<u32>,
 }
 
 /// Readiness facts for one namespace, from [`Model::evaluate_namespace`].
@@ -643,10 +640,6 @@ impl Model {
                         .card()
                         .runtime_config
                         .runtime_flag_enabled(VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY),
-                    routing_image_token_id: ws
-                        .card()
-                        .runtime_config
-                        .runtime_u32(VLLM_ROUTING_IMAGE_TOKEN_ID_RUNTIME_KEY),
                 })
         })
         .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
@@ -854,7 +847,6 @@ mod tests {
         block_size: u32,
         lora_name: Option<&str>,
         tower_connector_lora_enabled: bool,
-        routing_image_token_id: Option<u32>,
     ) -> (
         Arc<WorkerSet>,
         GenerateStreamingEngine,
@@ -875,13 +867,6 @@ mod tests {
             VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY.to_string(),
             tower_connector_lora_enabled.into(),
         );
-        if let Some(image_token_id) = routing_image_token_id {
-            card.runtime_config.runtime_data.insert(
-                VLLM_ROUTING_IMAGE_TOKEN_ID_RUNTIME_KEY.to_string(),
-                image_token_id.into(),
-            );
-        }
-
         let engine: GenerateStreamingEngine = Arc::new(StubGenerateEngine);
         let mut worker_set =
             WorkerSet::new(namespace.to_string(), format!("{namespace}-checksum"), card);
@@ -1044,9 +1029,9 @@ mod tests {
     fn test_generate_engine_selection_keeps_worker_set_metadata_atomic() {
         let model = Model::new("generate-model".to_string());
         let (worker_set_a, engine_a, worker_tx_a) =
-            make_generate_worker_set("ns-a", 16, None, false, None);
+            make_generate_worker_set("ns-a", 16, None, false);
         let (worker_set_b, engine_b, worker_tx_b) =
-            make_generate_worker_set("ns-b", 32, Some("adapter-b"), true, Some(151_665));
+            make_generate_worker_set("ns-b", 32, Some("adapter-b"), true);
         worker_tx_b.send(vec![]).expect("disable worker set B");
         model.add_worker_set("ns-a".to_string(), worker_set_a);
         model.add_worker_set("ns-b".to_string(), worker_set_b);
@@ -1058,7 +1043,6 @@ mod tests {
         assert_eq!(selection_a.kv_cache_block_size, 16);
         assert_eq!(selection_a.lora_name, None);
         assert!(!selection_a.tower_connector_lora_enabled);
-        assert_eq!(selection_a.routing_image_token_id, None);
 
         worker_tx_a.send(vec![]).expect("disable worker set A");
         worker_tx_b.send(vec![2]).expect("enable worker set B");
@@ -1070,7 +1054,6 @@ mod tests {
         assert_eq!(selection_b.kv_cache_block_size, 32);
         assert_eq!(selection_b.lora_name.as_deref(), Some("adapter-b"));
         assert!(selection_b.tower_connector_lora_enabled);
-        assert_eq!(selection_b.routing_image_token_id, Some(151_665));
     }
 
     fn make_realtime_worker_set(namespace: &str) -> Arc<WorkerSet> {

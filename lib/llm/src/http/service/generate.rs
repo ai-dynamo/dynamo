@@ -219,7 +219,6 @@ struct GenerateMmRoutingProjection {
 struct GenerateRoutingMetadata {
     kv_cache_block_size: u32,
     tower_connector_lora_enabled: bool,
-    image_token_id: Option<u32>,
     lora_name: Option<String>,
 }
 
@@ -256,7 +255,6 @@ fn intersecting_mm_ranges<'a>(
 fn generate_mm_routing_info(
     request: &GenerateRequest,
     kv_cache_block_size: u32,
-    worker_image_token_id: Option<u32>,
 ) -> Result<Option<GenerateMmRoutingProjection>, &'static str> {
     let Some(features) = request.passthrough.get("features") else {
         return Ok(None);
@@ -369,8 +367,6 @@ fn generate_mm_routing_info(
     if ranges.is_empty() {
         return Ok(None);
     }
-    let worker_image_token_id =
-        worker_image_token_id.ok_or("worker did not publish a multimodal routing image token")?;
 
     if ranges.windows(2).any(|pair| pair[0].0 > pair[1].0) {
         return Err("multimodal placeholders must be ordered by offset");
@@ -411,9 +407,6 @@ fn generate_mm_routing_info(
         }
     }
     let image_token_id = image_token_id.ok_or("multimodal placeholders contain no embed tokens")?;
-    if image_token_id != worker_image_token_id {
-        return Err("renderer and worker multimodal image tokens do not match");
-    }
     if request
         .token_ids
         .iter()
@@ -507,7 +500,6 @@ fn preprocessed_from_generate(
     let GenerateRoutingMetadata {
         kv_cache_block_size,
         tower_connector_lora_enabled,
-        image_token_id,
         lora_name,
     } = routing_metadata;
     let sampling = &request.sampling_params;
@@ -526,7 +518,7 @@ fn preprocessed_from_generate(
         );
         None
     } else {
-        match generate_mm_routing_info(&request, kv_cache_block_size, image_token_id) {
+        match generate_mm_routing_info(&request, kv_cache_block_size) {
             Ok(info) => info,
             Err(reason) => {
                 tracing::debug!(
@@ -661,7 +653,6 @@ async fn handler_generate(
     let routing_metadata = GenerateRoutingMetadata {
         kv_cache_block_size: selection.kv_cache_block_size,
         tower_connector_lora_enabled: selection.tower_connector_lora_enabled,
-        image_token_id: selection.routing_image_token_id,
         lora_name: selection.lora_name,
     };
     let engine = selection.engine;
@@ -867,13 +858,11 @@ mod tests {
     fn routing_metadata(
         kv_cache_block_size: u32,
         tower_connector_lora_enabled: bool,
-        image_token_id: Option<u32>,
         lora_name: Option<&str>,
     ) -> GenerateRoutingMetadata {
         GenerateRoutingMetadata {
             kv_cache_block_size,
             tower_connector_lora_enabled,
-            image_token_id,
             lora_name: lora_name.map(str::to_string),
         }
     }
@@ -1206,7 +1195,7 @@ mod tests {
             "test-model",
             None,
             "resolved-request",
-            routing_metadata(16, false, None, None),
+            routing_metadata(16, false, None),
         )
         .expect("build request");
         assert_eq!(preprocessed.stop_conditions.max_tokens, Some(8));
@@ -1282,7 +1271,7 @@ mod tests {
             "test-model",
             None,
             "resolved-request",
-            routing_metadata(4, false, Some(12), None),
+            routing_metadata(4, false, None),
         )
         .expect("build request");
 
@@ -1337,7 +1326,7 @@ mod tests {
             "adapter-a",
             None,
             "resolved-request",
-            routing_metadata(4, false, Some(99), Some("adapter-a")),
+            routing_metadata(4, false, Some("adapter-a")),
         )
         .expect("build LoRA request");
         let routing = preprocessed
@@ -1411,7 +1400,7 @@ mod tests {
             }
         }))
         .expect("deserialize request");
-        let routing = generate_mm_routing_info(&request, 5, Some(99))
+        let routing = generate_mm_routing_info(&request, 5)
             .expect("valid sparse MM routing metadata")
             .expect("MM routing projection");
         let mm_hash = dynamo_kv_router::protocols::hash_mm_identifier(mm_identifier)
@@ -1459,7 +1448,7 @@ mod tests {
             .expect("deserialize request");
 
             assert_eq!(
-                generate_mm_routing_info(&request, 7, Some(99))
+                generate_mm_routing_info(&request, 7)
                     .expect_err("ambiguous layout must disable exact routing"),
                 expected_error,
                 "{name}"
@@ -1550,7 +1539,7 @@ mod tests {
                 "test-model",
                 None,
                 "resolved-request",
-                routing_metadata(4, false, Some(99), None),
+                routing_metadata(4, false, None),
             )
             .expect("invalid routing metadata must not reject execution");
 
@@ -1582,35 +1571,12 @@ mod tests {
         });
         let base_request: GenerateRequest =
             serde_json::from_value(raw.clone()).expect("deserialize base request");
-        for (name, worker_image_token_id) in [
-            ("missing worker image token", None),
-            ("mismatched worker image token", Some(98)),
-        ] {
-            let request = serde_json::from_value(raw.clone()).expect("deserialize guarded request");
-            let guarded = preprocessed_from_generate(
-                request,
-                "test-model",
-                None,
-                "resolved-request",
-                routing_metadata(4, false, worker_image_token_id, None),
-            )
-            .expect("worker MM contract mismatch must not reject execution");
-            assert!(guarded.mm_routing_info.is_none(), "{name}");
-            assert!(
-                guarded
-                    .extra_args
-                    .as_ref()
-                    .and_then(|extra| extra.get("dynamo_mm_routing_hashes"))
-                    .is_none(),
-                "{name}"
-            );
-        }
         let base = preprocessed_from_generate(
             base_request,
             "test-model",
             None,
             "resolved-request",
-            routing_metadata(4, true, Some(99), None),
+            routing_metadata(4, true, None),
         )
         .expect("build base request");
         assert!(
@@ -1625,7 +1591,7 @@ mod tests {
             "adapter-a",
             None,
             "resolved-request",
-            routing_metadata(4, true, Some(99), Some("adapter-a")),
+            routing_metadata(4, true, Some("adapter-a")),
         )
         .expect("build adapter request");
         assert!(adapter.mm_routing_info.is_none());
@@ -1658,7 +1624,7 @@ mod tests {
             "test-model",
             None,
             "resolved-request",
-            routing_metadata(16, false, None, None),
+            routing_metadata(16, false, None),
         )
         .expect("build request");
         assert_eq!(preprocessed.stop_conditions.max_tokens, None);
@@ -1686,7 +1652,7 @@ mod tests {
             "test-model",
             None,
             "resolved-request",
-            routing_metadata(16, false, None, None),
+            routing_metadata(16, false, None),
         )
         .expect("build request");
         assert_eq!(preprocessed.stop_conditions.min_tokens, Some(0));
@@ -1898,7 +1864,7 @@ mod tests {
             "test-model",
             Some(3),
             "resolved-request",
-            routing_metadata(16, false, None, None),
+            routing_metadata(16, false, None),
         )
         .expect("build request");
         let routing = preprocessed.routing.as_ref().expect("routing hints");
