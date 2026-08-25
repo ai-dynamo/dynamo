@@ -34,7 +34,7 @@ agentic workload:
 
 ## Supported features
 
-- Modalities: Text, Images, Videos, Audio
+- Modalities: Text, Images, Videos
 - Reasoning
 - Tool calling
 
