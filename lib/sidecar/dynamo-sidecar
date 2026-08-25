@@ -1,0 +1,41 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+set -eu
+
+usage() {
+    cat <<'EOF'
+Usage: dynamo-sidecar <engine> [OPTIONS]
+
+Engines:
+  vllm     Run the vLLM sidecar
+  sglang   Run the SGLang sidecar
+  trtllm   Run the TensorRT-LLM sidecar
+EOF
+}
+
+engine="${1:-}"
+
+case "$engine" in
+    vllm)
+        shift
+        exec dynamo-vllm-sidecar "$@"
+        ;;
+    sglang)
+        shift
+        exec dynamo-sglang-sidecar "$@"
+        ;;
+    trtllm)
+        shift
+        exec dynamo-trtllm-sidecar "$@"
+        ;;
+    help | -h | --help | "")
+        usage
+        ;;
+    *)
+        echo "dynamo-sidecar: unknown engine: $engine" >&2
+        usage >&2
+        exit 2
+        ;;
+esac

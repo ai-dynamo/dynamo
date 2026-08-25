@@ -92,9 +92,8 @@ spec:
         # discovery env + probes by name).
         - name: main
           image: <your-registry>/dynamo-sidecar:1.3.0
-          command:
-          - dynamo-sglang-sidecar
           args:
+          - sglang
           - --sglang-endpoint
           - 127.0.0.1:30001
           envFrom:

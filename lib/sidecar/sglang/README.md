@@ -59,7 +59,7 @@ disaggregated prefill/decode with NIXL KV transfer.
 
 There is no published sidecar image yet, so build and push the unified image
 from `lib/sidecar/Dockerfile`. It contains all three engine-specific sidecar
-executables; this deployment selects `dynamo-sglang-sidecar`.
+executables; this deployment passes `sglang` to the image entrypoint.
 
 > [!NOTE]
 > The engine image must be a stock SGLang **v0.5.16+** build: the native gRPC
@@ -79,8 +79,8 @@ executables; this deployment selects `dynamo-sglang-sidecar`.
 ### 1. Build and push the sidecar image
 
 Follow [Build the image](../README.md#build-the-image) and push the result to
-a registry your cluster can pull from. This deployment selects
-`dynamo-sglang-sidecar`.
+a registry your cluster can pull from. This deployment passes `sglang` as the
+first container argument.
 
 ### 2. Point the manifest at your image
 

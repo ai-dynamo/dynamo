@@ -64,7 +64,7 @@ curl localhost:8000/v1/chat/completions \
 No published unified sidecar image is available yet. Follow the
 [Kubernetes quick start](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/trtllm/README.md#deploy-on-kubernetes-quick-start)
 to build `dynamo-sidecar`, which contains all three engine-specific sidecar
-executables. The TensorRT-LLM manifest selects `dynamo-trtllm-sidecar` with the
-container command and pairs it with a stock upstream TensorRT-LLM image. The
-source tree includes an
+executables. The TensorRT-LLM manifest passes `trtllm` to the image entrypoint
+and pairs it with a stock upstream TensorRT-LLM image. The source tree includes
+an
 [aggregated deployment manifest](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/trtllm/deploy/agg.yaml).

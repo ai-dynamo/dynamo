@@ -101,9 +101,8 @@ spec:
         # discovery env + probes by name).
         - name: main
           image: <your-registry>/dynamo-sidecar:1.3.0
-          command:
-          - dynamo-trtllm-sidecar
           args:
+          - trtllm
           - --trtllm-endpoint
           - 127.0.0.1:50051
           - --model-path

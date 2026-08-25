@@ -132,9 +132,8 @@ spec:
         containers:
         - name: main
           image: <your-registry>/dynamo-sidecar:1.3.0
-          command:
-          - dynamo-vllm-sidecar
           args:
+          - vllm
           - --vllm-endpoint
           - 127.0.0.1:50051
           - --disaggregation-mode
@@ -223,9 +222,8 @@ spec:
         containers:
         - name: main
           image: <your-registry>/dynamo-sidecar:1.3.0
-          command:
-          - dynamo-vllm-sidecar
           args:
+          - vllm
           - --vllm-endpoint
           - 127.0.0.1:50051
           - --disaggregation-mode

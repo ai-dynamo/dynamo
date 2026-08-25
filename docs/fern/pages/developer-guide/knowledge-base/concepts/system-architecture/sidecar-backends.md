@@ -49,18 +49,18 @@ event integration with Dynamo's discovery and event planes.
 
 ## Container Packaging
 
-The unified CPU-only sidecar image contains three engine-specific executables:
+The unified CPU-only sidecar image provides one `dynamo-sidecar` entrypoint:
 
-| Engine | Container command |
+| Engine | First container argument |
 |---|---|
-| vLLM | `dynamo-vllm-sidecar` |
-| SGLang | `dynamo-sglang-sidecar` |
-| TensorRT-LLM | `dynamo-trtllm-sidecar` |
+| vLLM | `vllm` |
+| SGLang | `sglang` |
+| TensorRT-LLM | `trtllm` |
 
-The image has no default entrypoint. Each Kubernetes deployment selects the
-matching executable with `command`. The inference engine remains in a separate
-GPU container, so the sidecar image does not include vLLM, SGLang,
-TensorRT-LLM, CUDA, or engine-specific Python dependencies.
+The entrypoint runs the matching engine-specific executable and forwards the
+remaining arguments. The inference engine remains in a separate GPU container,
+so the sidecar image does not include vLLM, SGLang, TensorRT-LLM, CUDA, or
+engine-specific Python dependencies.
 
 No published unified sidecar image is available yet. Build `dynamo-sidecar`
 from the

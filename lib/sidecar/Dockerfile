@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # CPU-only image containing the vLLM, SGLang, and TensorRT-LLM Rust sidecars.
-# Each deployment selects its engine-specific binary through the container
-# command; the GPU engine continues to run in a separate container.
+# The dynamo-sidecar entrypoint selects an engine-specific binary; the GPU
+# engine continues to run in a separate container.
 #
 # Build from the repository root:
 #   docker build -f lib/sidecar/Dockerfile -t dynamo-sidecar:1.3.0 .
@@ -61,11 +61,13 @@ COPY --from=builder \
     /src/target/release/dynamo-trtllm-sidecar \
     /usr/local/bin/
 
+COPY --chmod=755 lib/sidecar/dynamo-sidecar /usr/local/bin/dynamo-sidecar
+
 # Numeric UID so Kubernetes runAsNonRoot can verify it.
 USER 1000
 
 # Dynamo system endpoints (/live, /health) — the operator sets DYN_SYSTEM_PORT=9090.
 EXPOSE 9090
 
-# Intentionally no ENTRYPOINT. Kubernetes deployments select one of the three
-# engine-specific binaries with `command`.
+ENTRYPOINT ["/usr/local/bin/dynamo-sidecar"]
+CMD ["--help"]

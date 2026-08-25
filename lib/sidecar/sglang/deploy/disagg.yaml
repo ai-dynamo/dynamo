@@ -23,7 +23,7 @@
 #     for your fabric (UCX_NET_DEVICES etc.). NIXL/UCX ship in sglang-runtime.
 #   - Model / served-model-name / TP must match between prefill and decode.
 #   - `main` runs the unified dynamo-sidecar image (no GPU); build from
-#     lib/sidecar/Dockerfile (see README) and select dynamo-sglang-sidecar.
+#     lib/sidecar/Dockerfile (see README) and select the sglang entrypoint.
 
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -113,9 +113,8 @@ spec:
         containers:
         - name: main
           image: <your-registry>/dynamo-sidecar:1.3.0
-          command:
-          - dynamo-sglang-sidecar
           args:
+          - sglang
           - --sglang-endpoint
           - 127.0.0.1:30001
           env:
@@ -201,9 +200,8 @@ spec:
         containers:
         - name: main
           image: <your-registry>/dynamo-sidecar:1.3.0
-          command:
-          - dynamo-sglang-sidecar
           args:
+          - sglang
           - --sglang-endpoint
           - 127.0.0.1:30001
           envFrom:

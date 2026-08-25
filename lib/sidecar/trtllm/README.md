@@ -60,8 +60,8 @@ sidecar next to a TensorRT-LLM engine and serves `Qwen/Qwen3-0.6B` on one GPU.
 
 There is no published sidecar image yet (see [Packaging](#packaging)), so build
 and push the unified image from `lib/sidecar/Dockerfile`. It contains all three
-engine-specific sidecar executables; this deployment selects
-`dynamo-trtllm-sidecar`.
+engine-specific sidecar executables; this deployment passes `trtllm` to the
+image entrypoint.
 
 ### Prerequisites
 
@@ -76,8 +76,8 @@ engine-specific sidecar executables; this deployment selects
 ### 1. Build and push the sidecar image
 
 Follow [Build the image](../README.md#build-the-image) and push the result to
-a registry your cluster can pull from. This deployment selects
-`dynamo-trtllm-sidecar`.
+a registry your cluster can pull from. This deployment passes `trtllm` as the
+first container argument.
 
 ### 2. Point the manifest at your image
 
