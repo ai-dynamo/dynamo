@@ -853,16 +853,25 @@ impl From<DeltaChoice> for dynamo_protocols::types::ChatChoice {
     /// # Note
     /// The `function_call` field is deprecated.
     fn from(delta: DeltaChoice) -> Self {
-        // TODO: Revisit whether tool calls produced at the output-token limit should
-        // preserve Length and yield an incomplete Responses result.
-        let finish_reason = if delta
+        // A terminal reason that already explains why generation ended
+        // outranks the tool-call rewrite. Only `Stop` and a missing reason are
+        // rewritten, which is the same rule the streaming path applies in
+        // `unified_parser::ChoiceState::normalize_finish_reason`; the two paths used to
+        // disagree, so a call truncated at the token limit reached a non-streaming
+        // caller labelled `tool_calls` with no sign it had been cut off.
+        //
+        // Preserving `Length` is also what makes the Responses conversion reachable:
+        // `responses::chat_completion_to_response` keys `status: "incomplete"` and
+        // `incomplete_details.reason: "max_output_tokens"` off this exact value.
+        let has_tool_calls = delta
             .tool_calls
             .as_ref()
-            .is_some_and(|calls| !calls.is_empty())
-        {
-            Some(dynamo_protocols::types::FinishReason::ToolCalls)
-        } else {
-            delta.finish_reason
+            .is_some_and(|calls| !calls.is_empty());
+        let finish_reason = match delta.finish_reason {
+            Some(dynamo_protocols::types::FinishReason::Stop) | None if has_tool_calls => {
+                Some(dynamo_protocols::types::FinishReason::ToolCalls)
+            }
+            other => other,
         };
 
         // Determine content format based on what we accumulated
@@ -1941,9 +1950,17 @@ mod tests {
         );
     }
 
+    /// `Length` must survive a tool call, because it is the only thing
+    /// telling the caller that generation was cut off before the call finished.
+    ///
+    /// This test previously asserted the opposite. That made it contradict
+    /// `tool_choice_finish_reasons.rs::test_required_tool_choice_preserves_length_finish_reason`,
+    /// which feeds the same truncated `required` payload through the streaming path and
+    /// requires `Length` to be preserved. Both passed, because they exercised different
+    /// stages of the same request.
     #[tokio::test]
-    async fn test_tool_calling_finish_reason_override_from_length() {
-        // Test that when tool calls are present but finish reason is Length, it gets overridden to ToolCalls
+    async fn test_tool_calling_finish_reason_preserves_length() {
+        // Tool calls are present AND generation hit the token limit: `Length` wins.
         let tool_call_json = r#"{"name": "search", "arguments": {"query": "rust programming"}}"#;
 
         let annotated_delta = create_test_delta(
@@ -1981,10 +1998,38 @@ mod tests {
             dynamo_protocols::types::FunctionType::Function
         );
 
-        // Verify that finish reason was overridden to ToolCalls despite original being Length
+        // The terminal reason explains why generation stopped and is not replaced.
         assert_eq!(
             choice.finish_reason,
-            Some(dynamo_protocols::types::FinishReason::ToolCalls)
+            Some(dynamo_protocols::types::FinishReason::Length)
+        );
+    }
+
+    /// The guard for the rule above: `ContentFilter` is also a terminal reason that
+    /// explains itself, so it must survive a tool call for the same reason `Length` does.
+    #[tokio::test]
+    async fn test_tool_calling_finish_reason_preserves_content_filter() {
+        let tool_call_json = r#"{"name": "search", "arguments": {"query": "rust programming"}}"#;
+
+        let annotated_delta = create_test_delta(
+            0,
+            "Let me search for that.",
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::ContentFilter),
+            None,
+            Some(tool_call_json),
+        );
+
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+        let response = DeltaAggregator::apply(stream, ParsingOptions::default())
+            .await
+            .expect("aggregation should succeed");
+
+        let choice = &response.inner.choices[0];
+        assert!(choice.message.tool_calls.is_some());
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::ContentFilter)
         );
     }
 
