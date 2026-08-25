@@ -36,6 +36,7 @@ from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import ensure_sglang_tensor_image_size
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
+from dynamo.sglang.diffusion_args import build_diffusion_parser, parse_diffusion_args
 
 configure_dynamo_logging()
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
@@ -616,8 +617,6 @@ async def parse_args(args: list[str]) -> Config:
 
 def _print_diffusion_worker_help() -> None:
     """Print combined Dynamo + native diffusion engine options."""
-    from dynamo.sglang.diffusion_args import build_diffusion_parser
-
     dynamo_parser = argparse.ArgumentParser(
         prog="dynamo.sglang",
         description="Dynamo SGLang diffusion worker configuration",
@@ -646,8 +645,6 @@ async def _resolve_diffusion_worker_config(
     DiffusionWorkerArgs adapter: engine fields resolve from the natively
     parsed diffusion ServerArgs, Dynamo-side settings live on the adapter.
     """
-    from dynamo.sglang.diffusion_args import parse_diffusion_args
-
     worker_type = (
         "image diffusion"
         if dynamo_config.image_diffusion_worker
@@ -676,6 +673,11 @@ async def _resolve_diffusion_worker_config(
     served_names = split_served_model_names(server_args.served_model_name)
     if served_names:
         server_args.served_model_name = served_names[0]
+        # If the engine args natively define served_model_name (newer sglang),
+        # keep them consistent with the adapter: the engine must not receive
+        # the unsplit multi-name string.
+        if hasattr(server_args.engine_args, "served_model_name"):
+            server_args.engine_args.served_model_name = served_names[0]
         dynamo_config.served_model_aliases = served_names[1:]
         if served_names[1:]:
             logging.info(

@@ -10,7 +10,9 @@ handoff contract with the engine parser.
 """
 
 import argparse
+import asyncio
 import dataclasses
+import importlib
 import sys
 from types import ModuleType
 from typing import Optional
@@ -77,8 +79,6 @@ def _install_fake_sglang(monkeypatch, engine_cls=FakeEngineArgs):
 
     utils_mod = ModuleType("sglang.multimodal_gen.utils")
     utils_mod.FlexibleArgumentParser = argparse.ArgumentParser
-
-    import importlib
 
     for parent in (
         "sglang",
@@ -265,8 +265,6 @@ class TestParseDiffusionArgs:
     def test_help_routed_to_diffusion_parser(self, monkeypatch, capsys):
         """--help on a diffusion worker must show the diffusion engine's
         options (and Dynamo's), not the LLM engine's."""
-        import asyncio
-
         _install_fake_sglang(monkeypatch)
         from dynamo.sglang.args import parse_args
 
