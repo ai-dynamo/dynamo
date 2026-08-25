@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import copy
 import functools
 import logging
 import os
@@ -622,12 +623,21 @@ class OmniHandler(BaseOmniHandler):
             metadata = self.engine_client.engine.get_stage_metadata(i)
             stage_type = getattr(metadata, "stage_type", "llm")
             if stage_type == "diffusion":
-                result.append(diffusion_sp)
+                result.append(copy.deepcopy(diffusion_sp))
             else:
                 result.append(
                     default.clone() if hasattr(default, "clone") else SamplingParams()
                 )
-        return result if result else [diffusion_sp]
+        return result if result else [copy.deepcopy(diffusion_sp)]
+
+    def _clone_default_diffusion_sampling_params(
+        self,
+    ) -> OmniDiffusionSamplingParams:
+        """Return request-local model defaults for the diffusion stage."""
+        for params in self.engine_client.default_sampling_params_list or []:
+            if isinstance(params, OmniDiffusionSamplingParams):
+                return copy.deepcopy(params)
+        return OmniDiffusionSamplingParams()
 
     def _engine_inputs_from_image(self, req: NvCreateImageRequest) -> EngineInputs:
         """Build engine inputs from an NvCreateImageRequest."""
@@ -681,16 +691,34 @@ class OmniHandler(BaseOmniHandler):
                 attached to the prompt via ``multi_modal_data`` so vllm-omni's
                 I2V pipeline pre-process can use it.
         """
-        width, height = parse_size(req.size)
         nvext = req.nvext or VideoNvExt()
-
-        num_frames = compute_num_frames(
-            num_frames=nvext.num_frames,
-            seconds=req.seconds,
-            fps=nvext.fps,
-            default_fps=DEFAULT_VIDEO_FPS,
+        sp = self._clone_default_diffusion_sampling_params()
+        default_output_fps = int(
+            getattr(self.config, "default_video_fps", DEFAULT_VIDEO_FPS)
         )
-        fps = nvext.fps if nvext.fps is not None else DEFAULT_VIDEO_FPS
+
+        if req.size is not None:
+            width, height = parse_size(req.size)
+            sp.width = width
+            sp.height = height
+
+        if nvext.num_frames is not None:
+            sp.num_frames = nvext.num_frames
+        elif req.seconds is not None:
+            sp.num_frames = compute_num_frames(
+                num_frames=None,
+                seconds=req.seconds,
+                fps=nvext.fps or getattr(sp, "fps", None),
+                default_fps=default_output_fps,
+            )
+
+        if nvext.fps is not None:
+            sp.fps = nvext.fps
+            if hasattr(sp, "frame_rate"):
+                sp.frame_rate = float(nvext.fps)
+
+        resolved_model_fps = getattr(sp, "fps", None) or getattr(sp, "frame_rate", None)
+        output_fps = int(resolved_model_fps or default_output_fps)
 
         prompt = OmniTextPrompt(prompt=req.prompt)
         if nvext.negative_prompt is not None:
@@ -704,19 +732,15 @@ class OmniHandler(BaseOmniHandler):
                 image.size[1],
             )
 
-        sp = OmniDiffusionSamplingParams(
-            height=height,
-            width=width,
-            num_frames=num_frames,
-        )
         self._update_if_not_none(sp, "num_inference_steps", nvext.num_inference_steps)
         self._update_if_not_none(sp, "guidance_scale", nvext.guidance_scale)
-        sp.seed = (
-            nvext.seed if nvext.seed is not None else random.randint(0, 2**32 - 1)
-        )
+        self._update_if_not_none(sp, "seed", nvext.seed)
         self._update_if_not_none(sp, "boundary_ratio", nvext.boundary_ratio)
         self._update_if_not_none(sp, "guidance_scale_2", nvext.guidance_scale_2)
-        self._update_if_not_none(sp, "fps", fps)
+        if req.model_extra:
+            extra_args = dict(getattr(sp, "extra_args", None) or {})
+            extra_args.update(copy.deepcopy(req.model_extra))
+            sp.extra_args = extra_args
 
         sampling_params_list = self._build_sampling_params_list(sp)
         lora_request = self._resolve_and_apply_lora(req.model, sampling_params_list)
@@ -724,17 +748,17 @@ class OmniHandler(BaseOmniHandler):
         logger.info(
             "Video diffusion request: prompt='%s...', size=%sx%s, frames=%s, fps=%s",
             req.prompt[:50],
-            width,
-            height,
-            num_frames,
-            fps,
+            getattr(sp, "width", None),
+            getattr(sp, "height", None),
+            getattr(sp, "num_frames", None),
+            getattr(sp, "fps", None),
         )
 
         return EngineInputs(
             prompt=prompt,
             sampling_params_list=sampling_params_list,
             request_type=RequestType.VIDEO_GENERATION,
-            fps=fps,
+            fps=output_fps,
             response_format=req.response_format,
             output_format=req.output_format,
             lora_request=lora_request,

@@ -10,7 +10,7 @@ to ensure compatibility with the Dynamo HTTP frontend.
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class VideoNvExt(BaseModel):
@@ -52,6 +52,8 @@ class NvCreateVideoRequest(BaseModel):
 
     Matches Rust NvCreateVideoRequest in lib/llm/src/protocols/openai/videos.rs.
     """
+
+    model_config = ConfigDict(extra="allow")
 
     # Required fields
     prompt: str

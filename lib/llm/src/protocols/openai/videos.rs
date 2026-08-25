@@ -46,6 +46,10 @@ pub struct NvCreateVideoRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_format: Option<String>,
 
+    /// Backend-specific fields preserved at the top level of the request.
+    #[serde(default, flatten)]
+    pub passthrough: serde_json::Map<String, serde_json::Value>,
+
     /// Whether to stream the video generation (default: false)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
@@ -219,6 +223,7 @@ mod tests {
             user: None,
             response_format: None,
             output_format: None,
+            passthrough: serde_json::Map::new(),
             stream: None,
             nvext: None,
         };
@@ -238,6 +243,46 @@ mod tests {
         let json = r#"{"prompt":"cat","model":"wan","output_format":"mp4"}"#;
         let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.output_format.as_deref(), Some("mp4"));
+    }
+
+    #[test]
+    fn video_request_passthrough_round_trip() {
+        let json = r#"{
+            "prompt":"cat",
+            "model":"video-model",
+            "task":"t2va",
+            "duration":10.0,
+            "target":{"height":256,"width":448}
+        }"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.passthrough["task"], "t2va");
+        assert_eq!(req.passthrough["duration"], 10.0);
+        assert_eq!(req.passthrough["target"]["height"], 256);
+        assert!(!req.passthrough.contains_key("prompt"));
+
+        let out = serde_json::to_value(&req).unwrap();
+        assert_eq!(out["task"], "t2va");
+        assert_eq!(out["duration"], 10.0);
+        assert_eq!(out["target"]["width"], 448);
+        assert!(out.get("passthrough").is_none());
+    }
+
+    #[test]
+    fn video_request_passthrough_preserves_json_values() {
+        let json = r#"{
+            "prompt":"cat",
+            "model":"video-model",
+            "frame_indices":[0,24,48],
+            "enable_audio":true,
+            "audio_flow_shift":null
+        }"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            req.passthrough["frame_indices"],
+            serde_json::json!([0, 24, 48])
+        );
+        assert_eq!(req.passthrough["enable_audio"], true);
+        assert!(req.passthrough["audio_flow_shift"].is_null());
     }
 
     // --- VideoData ---

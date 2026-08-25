@@ -26,8 +26,15 @@ def test_video_request_wire_shape():
         output_format="mp4",
         response_format="url",
         stream=True,
+        task="t2va",
+        target={"duration_seconds": 10.0, "aspect_ratio": "16:9"},
         nvext=VideoNvExt(boundary_ratio=0.3, guidance_scale_2=1.0),
     )
+
+    assert request.model_extra == {
+        "task": "t2va",
+        "target": {"duration_seconds": 10.0, "aspect_ratio": "16:9"},
+    }
 
     assert request.model_dump(exclude_none=True) == {
         "prompt": "cat",
@@ -36,7 +43,29 @@ def test_video_request_wire_shape():
         "output_format": "mp4",
         "stream": True,
         "nvext": {"boundary_ratio": 0.3, "guidance_scale_2": 1.0},
+        "task": "t2va",
+        "target": {"duration_seconds": 10.0, "aspect_ratio": "16:9"},
     }
+
+
+def test_video_request_passthrough_excludes_known_fields():
+    request = NvCreateVideoRequest.model_validate(
+        {
+            "prompt": "cat",
+            "model": "video-model",
+            "frame_indices": [0, 24, 48],
+            "enable_audio": True,
+            "audio_flow_shift": None,
+        }
+    )
+
+    assert request.model_extra == {
+        "frame_indices": [0, 24, 48],
+        "enable_audio": True,
+        "audio_flow_shift": None,
+    }
+    assert "prompt" not in request.model_extra
+    assert "model" not in request.model_extra
 
 
 def test_video_response_wire_shape():
