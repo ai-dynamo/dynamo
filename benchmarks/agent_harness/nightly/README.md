@@ -39,7 +39,9 @@ the native Claude/Codex logs, trajectories, patches, and verifier results.
 The job runs in the approved SGLang runtime job container on
 `aws-dev-02-tester-amd-gpu-v2`. Dynamo owns the job container's two H100s,
 while a CPU-only Docker-in-Docker service creates Harbor's sibling task
-containers. Manual canaries set the nightly workflow's `agent_harness_only`
+containers. The local frontend and worker share Dynamo's file discovery
+backend, so this aggregated deployment does not require etcd or NATS
+sidecars. Manual canaries set the nightly workflow's `agent_harness_only`
 input to skip the standard vLLM, SGLang, and TensorRT-LLM H100 jobs.
 
 ## Model matrix

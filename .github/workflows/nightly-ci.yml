@@ -1058,10 +1058,13 @@ jobs:
           set -euo pipefail
           RESULTS_DIR="${RUNNER_TEMP}/agent-harness-${{ matrix.id }}"
           HF_CACHE_DIR="${HOME}/.cache/huggingface"
-          install -d -m 0777 "${RESULTS_DIR}" "${HF_CACHE_DIR}"
+          DYN_FILE_KV="${RUNNER_TEMP}/dynamo-discovery-${{ matrix.id }}"
+          install -d -m 0777 "${RESULTS_DIR}" "${HF_CACHE_DIR}" "${DYN_FILE_KV}"
           {
             echo "RESULTS_DIR=${RESULTS_DIR}"
             echo "HF_CACHE_DIR=${HF_CACHE_DIR}"
+            echo "DYN_DISCOVERY_BACKEND=file"
+            echo "DYN_FILE_KV=${DYN_FILE_KV}"
           } >> "${GITHUB_ENV}"
           {
             echo "model=${{ matrix.model_path }}"
@@ -1074,6 +1077,7 @@ jobs:
             echo "runtime_image=${RUNTIME_IMAGE}"
             echo "harbor_version=${HARBOR_VERSION}"
             echo "dataset=swebenchpro@1.0"
+            echo "discovery_backend=file"
           } > "${RESULTS_DIR}/run-metadata.txt"
 
       - name: Launch Dynamo model endpoint
@@ -1105,7 +1109,8 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in $(seq 1 180); do
-            if ! kill -0 "${MODEL_PROCESS_GROUP}" 2>/dev/null; then
+            if ! ps -eo pgid=,stat= | awk -v pgid="${MODEL_PROCESS_GROUP}" \
+              '$1 == pgid && $2 !~ /^Z/ { found=1 } END { exit !found }'; then
               echo "Model process exited before becoming ready" >&2
               cat "${RESULTS_DIR}/model.log" >&2
               exit 1
