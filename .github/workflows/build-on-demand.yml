@@ -22,11 +22,131 @@ on:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      gpu_dind_canary:
+        description: 'Run two isolated 2-GPU DinD jobs on one four-GPU node'
+        type: choice
+        options:
+          - none
+          - packing
+        default: none
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
+
+  gpu-dind-packing:
+    if: inputs.gpu_dind_canary == 'packing'
+    name: GPU DinD packing lane ${{ matrix.lane }}
+    runs-on: canary-tester-amd-gpu-2-dind
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        lane: [0, 1]
+    container:
+      image: nvcr.io/nvidia/cuda:12.8.1-devel-ubuntu22.04
+    steps:
+      - name: Record assigned GPUs
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "lane=${{ matrix.lane }} runner=${{ runner.name }} container=$(hostname)"
+          echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
+          nvidia-smi --query-gpu=index,uuid,name --format=csv,noheader
+          test "$(nvidia-smi -L | wc -l | tr -d ' ')" = "2"
+
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Compile GPU utilization probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/gpu-burn.cu <<'CUDA'
+          #include <cuda_runtime.h>
+          #include <chrono>
+          #include <cstdlib>
+          #include <cstdio>
+          #include <thread>
+          #include <vector>
+
+          __global__ void spin(float* data, size_t size) {
+            const size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+            if (index >= size) return;
+            float value = data[index];
+            for (int iteration = 0; iteration < 4096; ++iteration) {
+              value = fmaf(value, 1.0000001f, 0.0000001f);
+            }
+            data[index] = value;
+          }
+
+          void burn_device(int device, int seconds) {
+            cudaSetDevice(device);
+            constexpr size_t elements = 64 * 1024 * 1024;
+            float* data = nullptr;
+            cudaMalloc(&data, elements * sizeof(float));
+            cudaMemset(data, 1, elements * sizeof(float));
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+            while (std::chrono::steady_clock::now() < deadline) {
+              spin<<<4096, 256>>>(data, elements);
+              cudaDeviceSynchronize();
+            }
+            cudaFree(data);
+          }
+
+          int main(int argc, char** argv) {
+            int count = 0;
+            cudaGetDeviceCount(&count);
+            if (count != 2) {
+              std::fprintf(stderr, "expected two GPUs, found %d\n", count);
+              return 2;
+            }
+            const int seconds = argc > 1 ? std::atoi(argv[1]) : 120;
+            std::vector<std::thread> workers;
+            for (int device = 0; device < count; ++device) {
+              workers.emplace_back(burn_device, device, seconds);
+            }
+            for (auto& worker : workers) worker.join();
+            return 0;
+          }
+          CUDA
+          nvcc -O3 -std=c++17 -o /tmp/gpu-burn /tmp/gpu-burn.cu
+
+      - name: Utilize both GPUs concurrently
+        shell: bash
+        run: |
+          set -euo pipefail
+          /tmp/gpu-burn 120 &
+          burn_pid=$!
+          for sample in $(seq 1 24); do
+            echo "sample=${sample} time=$(date -u +%FT%TZ)"
+            nvidia-smi --query-gpu=index,uuid,utilization.gpu,memory.used --format=csv,noheader
+            sleep 5
+          done
+          wait "${burn_pid}"
+
+      - name: Probe 01
+        run: date +%s%3N
+      - name: Probe 02
+        run: date +%s%3N
+      - name: Probe 03
+        run: date +%s%3N
+      - name: Probe 04
+        run: date +%s%3N
+      - name: Probe 05
+        run: date +%s%3N
+      - name: Probe 06
+        run: date +%s%3N
+      - name: Probe 07
+        run: date +%s%3N
+      - name: Probe 08
+        run: date +%s%3N
+      - name: Probe 09
+        run: date +%s%3N
+      - name: Probe 10
+        run: date +%s%3N
 
   init:
     runs-on: ubuntu-slim
