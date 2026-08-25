@@ -3,6 +3,7 @@
 
 """Unit tests for OmniConfig validation and omni argument parsing."""
 
+import argparse
 import contextlib
 import dataclasses
 import logging
@@ -19,6 +20,7 @@ try:
     from dynamo.vllm import main as vllm_main
     from dynamo.vllm.omni.args import (
         FlexibleArgumentParser,
+        OmniArgGroup,
         OmniConfig,
         OmniDiffusionKwargs,
         OmniEngineArgs,
@@ -103,6 +105,20 @@ def _make_omni_config(**overrides) -> OmniConfig:
 def test_omni_config_valid_defaults():
     config = _make_omni_config()
     config.validate()
+
+
+def test_startup_lora_paths_parse_as_diffusion_options():
+    parser = argparse.ArgumentParser()
+    OmniArgGroup().add_arguments(parser)
+
+    args = parser.parse_args(
+        ["--lora-path", "/models/fast-a.safetensors", "/models/fast-b.safetensors"]
+    )
+
+    assert args.lora_path == [
+        "/models/fast-a.safetensors",
+        "/models/fast-b.safetensors",
+    ]
 
 
 @pytest.mark.parametrize("fps", [0, -1, -100])
