@@ -3399,7 +3399,6 @@ mod tests {
             None,
             "topology-model".to_string(),
             worker_set.namespace().to_string(),
-            false,
             None,
         );
         let encoder = crate::kv_router::EncoderRouter::new(

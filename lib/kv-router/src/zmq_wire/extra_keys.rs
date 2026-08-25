@@ -8,13 +8,21 @@ use super::types::ExtraKeyItem;
 // Must match _DYNAMO_CACHE_SALT_PREFIX in components/src/dynamo/vllm/handlers.py.
 const DYNAMO_CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
 
-/// Parse MM hash from extra_keys string:
-/// - Only accept canonical vLLM MM identifiers (64-char hex digest)
-/// - Convert by taking the first 16 hex chars as u64
+/// Parse a frontend-issued Dynamo MM hash from a vLLM extra key.
+///
+/// The worker canonicalizes a frontend-approved routing hash to its first 16
+/// hex characters plus 48 trailing zeroes before submitting it to vLLM. Treat
+/// that padding as an enablement marker: native 64-character vLLM hashes must
+/// not enable worker-side key rewriting when the frontend disabled exact MM
+/// routing for this request.
 pub fn parse_mm_hash_from_extra_key(s: &str) -> Option<u64> {
     // extra_keys mixes MM identifiers with LoRA/cache_salt/prompt-embed metadata.
     // Only MM identifiers should be mapped into BlockExtraInfo.
-    if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+    let bytes = s.as_bytes();
+    if bytes.len() == 64
+        && bytes[..16].iter().all(u8::is_ascii_hexdigit)
+        && bytes[16..].iter().all(|&c| c == b'0')
+    {
         return u64::from_str_radix(&s[..16], 16).ok();
     }
     None
@@ -140,5 +148,23 @@ mod tests {
             extra_keys_to_cache_namespace(Some(&extra_keys), Some("adapter-a")).as_deref(),
             Some("adapter-a")
         );
+    }
+
+    #[test]
+    fn only_frontend_padded_mm_hashes_are_parsed() {
+        assert_eq!(
+            parse_mm_hash_from_extra_key(
+                "0123456789abcdef000000000000000000000000000000000000000000000000"
+            ),
+            Some(0x0123_4567_89ab_cdef)
+        );
+        assert_eq!(
+            parse_mm_hash_from_extra_key(
+                "0123456789abcdef00112233445566778899aabbccddeefffedcba9876543210"
+            ),
+            None
+        );
+        assert_eq!(parse_mm_hash_from_extra_key("123"), None);
+        assert_eq!(parse_mm_hash_from_extra_key("not_a_hash"), None);
     }
 }
