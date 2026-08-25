@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
+from _thinking_parity import THINKING_PARITY_CASES
 from _tool_guidance_parity import (
     TOOL_GUIDANCE_PARITY_CASES,
     assistant_response_format,
@@ -761,6 +762,105 @@ async def test_prepare_mm_routing_skips_single_modality_transfer_for_mixed_featu
         "image": ["a" * 64],
         "audio": ["b" * 64],
     }
+
+
+@pytest.mark.asyncio
+async def test_prepare_mm_routing_does_not_forward_hashes_without_exact_routing(
+    vllm_processor_module,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "build_mm_routing_info_from_features",
+        lambda *_, **__: None,
+    )
+
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+    processor.block_size = 16
+    processor.nixl_mm_enabled = False
+    processor.use_shm_transfer = True
+    processor._sender = None
+
+    vllm_preproc = SimpleNamespace(
+        prompt_token_ids=list(range(16)),
+        mm_features=[
+            SimpleNamespace(
+                modality="image",
+                mm_hash="a" * 64,
+                data=object(),
+                mm_position=SimpleNamespace(offset=0, length=16),
+            )
+        ],
+    )
+    dynamo_preproc = {}
+
+    mm_routing_info, cleanup_items, transferred = await processor._prepare_mm_routing(
+        vllm_preproc,
+        dynamo_preproc,
+    )
+
+    assert mm_routing_info is None
+    assert cleanup_items == []
+    assert transferred is False
+    assert "mm_hashes" not in dynamo_preproc["extra_args"]
+    assert "mm_hashes_by_modality" not in dynamo_preproc["extra_args"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_mm_routing_processor_kwargs_keep_transfer_but_skip_exact_routing(
+    vllm_processor_module,
+    monkeypatch,
+):
+    def fail_routing(*args, **kwargs):
+        raise AssertionError("processor kwargs must disable exact MM routing")
+
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "build_mm_routing_info_from_features",
+        fail_routing,
+    )
+
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+    processor.block_size = 16
+    processor.nixl_mm_enabled = True
+    processor.use_shm_transfer = True
+    processor._sender = SimpleNamespace(
+        prepare=AsyncMock(
+            return_value=({"mm_kwargs_shm": {"modality": "image"}}, ["cleanup"])
+        )
+    )
+
+    vllm_preproc = SimpleNamespace(
+        prompt_token_ids=list(range(16)),
+        mm_features=[
+            SimpleNamespace(
+                modality="image",
+                mm_hash="a" * 64,
+                data=object(),
+                mm_position=SimpleNamespace(offset=0, length=16),
+            )
+        ],
+    )
+    dynamo_preproc = {}
+
+    mm_routing_info, cleanup_items, transferred = await processor._prepare_mm_routing(
+        vllm_preproc,
+        dynamo_preproc,
+        mm_processor_kwargs={"max_pixels": 4096},
+    )
+
+    assert mm_routing_info is None
+    assert cleanup_items == ["cleanup"]
+    assert transferred is True
+    assert "mm_hashes" not in dynamo_preproc["extra_args"]
+    assert "mm_hashes_by_modality" not in dynamo_preproc["extra_args"]
+    assert dynamo_preproc["extra_args"]["mm_kwargs_shm"] == {"modality": "image"}
+    assert dynamo_preproc["extra_args"]["mm_placeholders"] == [(0, 16)]
+    assert dynamo_preproc["extra_args"]["expanded_token_ids"] == list(range(16))
 
 
 @pytest.mark.asyncio
@@ -2423,3 +2523,19 @@ def test_ensure_chat_template_preserves_existing_hf_template(
     vllm_processor_module._ensure_chat_template(tokenizer, str(tmp_path), None)
 
     assert tokenizer.chat_template == existing
+
+
+class TestThinkingControlParity:  # FRONTEND.10
+    # Keep vLLM's thinking kwargs aligned with the shared backend matrix.
+    @pytest.mark.parametrize("case", THINKING_PARITY_CASES, ids=lambda case: case.name)
+    def test_shared_thinking_policy(self, tokenizer, case):
+        _, _, kwargs, _, _ = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                **case.request,
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        assert kwargs == case.expected

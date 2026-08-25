@@ -119,7 +119,7 @@ jobs:
         # Do not use fetch-depth: 0 — changed-files now works with shallow clone
       - name: Check for changes
         id: changes
-        uses: ./.github/actions/changed-files
+        uses: $/.github/actions/changed-files
         with:
           gh_token: ${{ github.token }}
       - name: Export builder name
@@ -145,6 +145,7 @@ jobs:
       - vllm-dev-build
       - vllm-test
       - vllm-multi-gpu-test
+      - vllm-4-gpu-test
       - vllm-copy-to-acr
       - sglang-build
       - sglang-dev-build
@@ -250,7 +251,7 @@ jobs:
         # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
       - name: Build and push operator
         id: build
-        uses: ./.github/actions/build-deploy-component
+        uses: $/.github/actions/build-deploy-component
         with:
           component: operator
           image_tag: ${{ github.sha }}-operator
@@ -306,7 +307,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
       - name: Build and push power agent
-        uses: ./.github/actions/build-deploy-component
+        uses: $/.github/actions/build-deploy-component
         with:
           component: power-agent
           target: runtime  # push the slim shipped stage, not the test stage
@@ -319,7 +320,7 @@ jobs:
       - name: Refresh BuildKit builder
         # The runtime build above can leave the remote BuildKit connection stale;
         # re-establish it (re-routing only if unhealthy) before the test build.
-        uses: ./.github/actions/builder-refresher
+        uses: $/.github/actions/builder-refresher
         with:
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
           flavor: general
@@ -354,7 +355,7 @@ jobs:
     name: vllm-sidecar
     needs: [changed-files]
     if: needs.changed-files.outputs.vllm_sidecar == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: vllm
       target: sidecar
@@ -372,7 +373,7 @@ jobs:
     name: sglang-sidecar
     needs: [changed-files]
     if: needs.changed-files.outputs.sglang_sidecar == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: sglang
       target: sidecar
@@ -390,7 +391,7 @@ jobs:
     name: trtllm-sidecar
     needs: [changed-files]
     if: needs.changed-files.outputs.trtllm_sidecar == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
       target: sidecar
@@ -426,7 +427,7 @@ jobs:
       needs.changed-files.outputs.operator == 'true' ||
       needs.changed-files.outputs.snapshot == 'true' ||
       needs.changed-files.outputs.snapshot_vllm == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: vllm
       target: runtime
@@ -454,7 +455,7 @@ jobs:
     name: vllm-dev
     needs: [changed-files]
     if: needs.changed-files.outputs.dev_images == 'true' || needs.changed-files.outputs.vllm == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: vllm
       target: dev
@@ -469,7 +470,7 @@ jobs:
     name: vllm-local-dev
     needs: [changed-files]
     if: needs.changed-files.outputs.dev_images == 'true' || needs.changed-files.outputs.vllm == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: vllm
       target: local-dev
@@ -497,7 +498,7 @@ jobs:
       needs.changed-files.outputs.operator == 'true' ||
       needs.changed-files.outputs.snapshot == 'true' ||
       needs.changed-files.outputs.snapshot_sglang == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: sglang
       target: runtime
@@ -525,7 +526,7 @@ jobs:
     name: sglang-dev
     needs: [changed-files]
     if: needs.changed-files.outputs.dev_images == 'true' || needs.changed-files.outputs.sglang == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: sglang
       target: dev
@@ -540,7 +541,7 @@ jobs:
     name: sglang-local-dev
     needs: [changed-files]
     if: needs.changed-files.outputs.dev_images == 'true' || needs.changed-files.outputs.sglang == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: sglang
       target: local-dev
@@ -568,7 +569,7 @@ jobs:
       needs.changed-files.outputs.operator == 'true' ||
       needs.changed-files.outputs.snapshot == 'true' ||
       needs.changed-files.outputs.snapshot_trtllm == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
       target: runtime
@@ -596,7 +597,7 @@ jobs:
     name: trtllm-dev
     needs: [changed-files]
     if: needs.changed-files.outputs.dev_images == 'true' || needs.changed-files.outputs.trtllm == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
       target: dev
@@ -611,7 +612,7 @@ jobs:
     name: trtllm-local-dev
     needs: [changed-files]
     if: needs.changed-files.outputs.dev_images == 'true' || needs.changed-files.outputs.trtllm == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
       target: local-dev
@@ -630,7 +631,7 @@ jobs:
     name: vllm-runtime-efa
     needs: [changed-files]
     if: needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.efa == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: vllm
       target: runtime
@@ -659,7 +660,7 @@ jobs:
     name: sglang-runtime-efa
     needs: [changed-files]
     if: needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.efa == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: sglang
       target: runtime
@@ -688,7 +689,7 @@ jobs:
     name: trtllm-runtime-efa
     needs: [changed-files]
     if: needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.efa == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
       target: runtime
@@ -720,7 +721,7 @@ jobs:
       needs.changed-files.outputs.core == 'true' ||
       needs.changed-files.outputs.planner == 'true' ||
       needs.changed-files.outputs.operator == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
       target: planner
@@ -769,7 +770,7 @@ jobs:
           go-version-file: deploy/operator/go.mod
           cache-dependency-path: deploy/operator/go.sum
       - name: Log in to ECR
-        uses: ./.github/actions/docker-login
+        uses: $/.github/actions/docker-login
         with:
           aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
           ecr_registry: ${{ vars.ECR_REGISTRY }}
@@ -792,7 +793,7 @@ jobs:
       needs.changed-files.outputs.snapshot_sglang == 'true' ||
       needs.changed-files.outputs.snapshot_trtllm == 'true' ||
       needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
       target: frontend
@@ -824,7 +825,7 @@ jobs:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [changed-files, vllm-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true' || needs.changed-files.outputs.sample == 'true'
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
       test_type: Test
@@ -850,16 +851,38 @@ jobs:
       (needs.changed-files.outputs.core == 'true' ||
        needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true')
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
-      test_type: Multi-GPU Test
+      test_type: 2-GPU Test
+      amd_runner: prod-tester-amd-gpu-2-v2
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]' # No ARM GPUs available
+      run_sanity_check: false
+      gpu_test_markers: pre_merge and vllm and gpu_2
+      gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  vllm-4-gpu-test:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [changed-files, vllm-build]
+    if: |
+      needs.changed-files.outputs.run_multigpu_tests == 'true' &&
+      (needs.changed-files.outputs.core == 'true' ||
+       needs.changed-files.outputs.vllm == 'true' ||
+       needs.changed-files.outputs.deploy == 'true')
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: 4-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and vllm and (gpu_2 or gpu_4)
+      # Exercise the only vLLM gpu_4 topology before merge.
+      gpu_test_markers: (pre_merge or post_merge) and vllm and gpu_4
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -867,7 +890,7 @@ jobs:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [changed-files, sglang-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
       test_type: Test
@@ -893,16 +916,16 @@ jobs:
       (needs.changed-files.outputs.core == 'true' ||
        needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.deploy == 'true')
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
-      test_type: Multi-GPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
+      test_type: 2-GPU Test
+      amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and sglang and (gpu_2 or gpu_4)
+      gpu_test_markers: pre_merge and sglang and gpu_2
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -910,7 +933,7 @@ jobs:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [changed-files, trtllm-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: trtllm
       test_type: Test
@@ -936,16 +959,16 @@ jobs:
       (needs.changed-files.outputs.core == 'true' ||
        needs.changed-files.outputs.trtllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true')
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: trtllm
-      test_type: Multi-GPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
+      test_type: 2-GPU Test
+      amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and trtllm and (gpu_2 or gpu_4)
+      gpu_test_markers: pre_merge and trtllm and gpu_2
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -953,7 +976,7 @@ jobs:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [changed-files, planner-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: planner
       test_type: CPU Test
@@ -1006,7 +1029,7 @@ jobs:
       needs.changed-files.outputs.sglang == 'true' ||
       needs.changed-files.outputs.trtllm == 'true' ||
       needs.changed-files.outputs.benchmarks == 'true'
-    uses: ./.github/workflows/dynamo-pipeline.yml
+    uses: $/.github/workflows/dynamo-pipeline.yml
     with:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -1043,7 +1066,7 @@ jobs:
     name: vllm-runtime # grouped in the UI with other vllm jobs
     needs: [changed-files, vllm-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-compliance-audit.yml
+    uses: $/.github/workflows/shared-compliance-audit.yml
     with:
       framework: vllm
       target: runtime
@@ -1057,7 +1080,7 @@ jobs:
     name: sglang-runtime # grouped in the UI with other sglang jobs
     needs: [changed-files, sglang-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-compliance-audit.yml
+    uses: $/.github/workflows/shared-compliance-audit.yml
     with:
       framework: sglang
       target: runtime
@@ -1069,7 +1092,7 @@ jobs:
     name: trtllm-runtime # grouped in the UI with other trtllm jobs
     needs: [changed-files, trtllm-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-compliance-audit.yml
+    uses: $/.github/workflows/shared-compliance-audit.yml
     with:
       framework: trtllm
       target: runtime
@@ -1090,7 +1113,7 @@ jobs:
       needs.changed-files.outputs.snapshot_sglang == 'true' ||
       needs.changed-files.outputs.snapshot_trtllm == 'true' ||
       needs.changed-files.outputs.deploy == 'true'
-    uses: ./.github/workflows/shared-compliance-audit.yml
+    uses: $/.github/workflows/shared-compliance-audit.yml
     with:
       framework: dynamo
       target: frontend
@@ -1106,7 +1129,7 @@ jobs:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [changed-files, planner-build]
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.planner == 'true'
-    uses: ./.github/workflows/shared-compliance.yml
+    uses: $/.github/workflows/shared-compliance.yml
     with:
       framework: dynamo
       target: planner
@@ -1131,7 +1154,7 @@ jobs:
        needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_vllm == 'true') &&
       needs.vllm-build.result == 'success'
-    uses: ./.github/workflows/shared-copy.yml
+    uses: $/.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]' # Deploy tests only use CUDA 13
@@ -1148,7 +1171,7 @@ jobs:
       needs.changed-files.outputs.snapshot_sglang == 'true' ||
       needs.changed-files.outputs.snapshot_trtllm == 'true') &&
       needs.frontend-build.result == 'success'
-    uses: ./.github/workflows/shared-copy.yml
+    uses: $/.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.frontend-build.outputs.target_tag_plain }}
       cuda_version: '[""]'
@@ -1164,7 +1187,7 @@ jobs:
       (needs.changed-files.outputs.operator == 'true' ||
        needs.changed-files.outputs.dgdr == 'true') &&
       needs.planner-build.result == 'success'
-    uses: ./.github/workflows/shared-copy.yml
+    uses: $/.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
       target_image: ai-dynamo/dynamo-planner
@@ -1194,7 +1217,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Build and push snapshot placeholder
-        uses: ./.github/actions/build-deploy-component
+        uses: $/.github/actions/build-deploy-component
         with:
           component: checkpoint-placeholder
           image_tag: ${{ github.sha }}-vllm-placeholder
@@ -1223,7 +1246,7 @@ jobs:
        needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_sglang == 'true') &&
       needs.sglang-build.result == 'success'
-    uses: ./.github/workflows/shared-copy.yml
+    uses: $/.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]' # Deploy tests only use CUDA 13
@@ -1246,7 +1269,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Build and push snapshot placeholder
-        uses: ./.github/actions/build-deploy-component
+        uses: $/.github/actions/build-deploy-component
         with:
           component: checkpoint-placeholder
           image_tag: ${{ github.sha }}-sglang-placeholder
@@ -1275,7 +1298,7 @@ jobs:
        needs.changed-files.outputs.snapshot == 'true' ||
        needs.changed-files.outputs.snapshot_trtllm == 'true') &&
       needs.trtllm-build.result == 'success'
-    uses: ./.github/workflows/shared-copy.yml
+    uses: $/.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
@@ -1299,7 +1322,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Build and push snapshot placeholder
-        uses: ./.github/actions/build-deploy-component
+        uses: $/.github/actions/build-deploy-component
         with:
           component: checkpoint-placeholder
           image_tag: ${{ github.sha }}-trtllm-placeholder
@@ -1345,7 +1368,7 @@ jobs:
           persist-credentials: false
       - name: Setup vCluster and operator
         id: setup
-        uses: ./.github/actions/setup-dynamo-operator
+        uses: $/.github/actions/setup-dynamo-operator
         with:
           # Sole writer of this vCluster name; every other caller recovers into it.
           reset_existing: 'true'
@@ -1369,7 +1392,7 @@ jobs:
       (needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true' ||
        needs.changed-files.outputs.operator == 'true')
-    uses: ./.github/workflows/shared-deploy-test.yml
+    uses: $/.github/workflows/shared-deploy-test.yml
     with:
       framework: vllm
       profiles: '["agg", "agg_router", "disagg", "disagg_router"]'
@@ -1388,7 +1411,7 @@ jobs:
       (needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.deploy == 'true' ||
        needs.changed-files.outputs.operator == 'true')
-    uses: ./.github/workflows/shared-deploy-test.yml
+    uses: $/.github/workflows/shared-deploy-test.yml
     with:
       framework: sglang
       profiles: '["agg", "agg_router"]'
@@ -1407,7 +1430,7 @@ jobs:
       (needs.changed-files.outputs.trtllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true' ||
        needs.changed-files.outputs.operator == 'true')
-    uses: ./.github/workflows/shared-deploy-test.yml
+    uses: $/.github/workflows/shared-deploy-test.yml
     with:
       framework: trtllm
       profiles: '["agg", "agg_router"]'
@@ -1424,7 +1447,7 @@ jobs:
       !cancelled() && !failure() &&
       (needs.changed-files.outputs.operator == 'true' ||
        needs.changed-files.outputs.dgdr == 'true')
-    uses: ./.github/workflows/shared-dgdr-deploy-test.yml
+    uses: $/.github/workflows/shared-dgdr-deploy-test.yml
     with:
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
@@ -1456,7 +1479,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Setup vCluster and operator
         id: setup
-        uses: ./.github/actions/setup-dynamo-operator
+        uses: $/.github/actions/setup-dynamo-operator
         with:
           # Sole writer of this vCluster name; every other caller recovers into it.
           reset_existing: 'true'
@@ -1494,7 +1517,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Setup vCluster and operator
         id: setup
-        uses: ./.github/actions/setup-dynamo-operator
+        uses: $/.github/actions/setup-dynamo-operator
         with:
           # Sole writer of this vCluster name; every other caller recovers into it.
           reset_existing: 'true'
@@ -1532,7 +1555,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Setup vCluster and operator
         id: setup
-        uses: ./.github/actions/setup-dynamo-operator
+        uses: $/.github/actions/setup-dynamo-operator
         with:
           # Sole writer of this vCluster name; every other caller recovers into it.
           reset_existing: 'true'
@@ -1568,13 +1591,13 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Check if vCluster exists
         id: vcluster-check
-        uses: ./.github/actions/check-vcluster-exists
+        uses: $/.github/actions/check-vcluster-exists
         with:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-vllm.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-vllm.outputs.namespace }}
       - name: Self-bootstrap vCluster (rerun)
         if: steps.vcluster-check.outputs.exists != 'true'
-        uses: ./.github/actions/setup-dynamo-operator
+        uses: $/.github/actions/setup-dynamo-operator
         with:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-vllm.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-vllm.outputs.namespace }}
@@ -1591,12 +1614,12 @@ jobs:
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
       - name: Connect to vCluster
         id: connect-vcluster
-        uses: ./.github/actions/connect-vcluster
+        uses: $/.github/actions/connect-vcluster
         with:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-vllm.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-vllm.outputs.namespace }}
       - name: Install snapshot-agent
-        uses: ./.github/actions/setup-snapshot-agent
+        uses: $/.github/actions/setup-snapshot-agent
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
@@ -1619,13 +1642,13 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Check if vCluster exists
         id: vcluster-check
-        uses: ./.github/actions/check-vcluster-exists
+        uses: $/.github/actions/check-vcluster-exists
         with:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
       - name: Self-bootstrap vCluster (rerun)
         if: steps.vcluster-check.outputs.exists != 'true'
-        uses: ./.github/actions/setup-dynamo-operator
+        uses: $/.github/actions/setup-dynamo-operator
         with:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
@@ -1642,12 +1665,12 @@ jobs:
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
       - name: Connect to vCluster
         id: connect-vcluster
-        uses: ./.github/actions/connect-vcluster
+        uses: $/.github/actions/connect-vcluster
         with:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
       - name: Install snapshot-agent
-        uses: ./.github/actions/setup-snapshot-agent
+        uses: $/.github/actions/setup-snapshot-agent
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
@@ -1670,13 +1693,13 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Check if vCluster exists
         id: vcluster-check
-        uses: ./.github/actions/check-vcluster-exists
+        uses: $/.github/actions/check-vcluster-exists
         with:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.namespace }}
       - name: Self-bootstrap vCluster (rerun)
         if: steps.vcluster-check.outputs.exists != 'true'
-        uses: ./.github/actions/setup-dynamo-operator
+        uses: $/.github/actions/setup-dynamo-operator
         with:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.namespace }}
@@ -1693,12 +1716,12 @@ jobs:
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
       - name: Connect to vCluster
         id: connect-vcluster
-        uses: ./.github/actions/connect-vcluster
+        uses: $/.github/actions/connect-vcluster
         with:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.namespace }}
       - name: Install snapshot-agent
-        uses: ./.github/actions/setup-snapshot-agent
+        uses: $/.github/actions/setup-snapshot-agent
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
@@ -1723,13 +1746,13 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Check if vCluster exists
         id: vcluster-check
-        uses: ./.github/actions/check-vcluster-exists
+        uses: $/.github/actions/check-vcluster-exists
         with:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-vllm.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-vllm.outputs.namespace }}
       - name: Self-bootstrap vCluster (rerun)
         if: steps.vcluster-check.outputs.exists != 'true'
-        uses: ./.github/actions/setup-dynamo-operator
+        uses: $/.github/actions/setup-dynamo-operator
         with:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-vllm.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-vllm.outputs.namespace }}
@@ -1746,18 +1769,18 @@ jobs:
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
       - name: Connect to vCluster
         id: connect-vcluster
-        uses: ./.github/actions/connect-vcluster
+        uses: $/.github/actions/connect-vcluster
         with:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-vllm.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-vllm.outputs.namespace }}
       - name: Install snapshot-agent (rerun bootstrap)
         if: steps.vcluster-check.outputs.exists != 'true'
-        uses: ./.github/actions/setup-snapshot-agent
+        uses: $/.github/actions/setup-snapshot-agent
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
       - name: Run DynamoCheckpoint Deploy Test
-        uses: ./.github/actions/dynamo-deploy-test
+        uses: $/.github/actions/dynamo-deploy-test
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
@@ -1796,13 +1819,13 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Check if vCluster exists
         id: vcluster-check
-        uses: ./.github/actions/check-vcluster-exists
+        uses: $/.github/actions/check-vcluster-exists
         with:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
       - name: Self-bootstrap vCluster (rerun)
         if: steps.vcluster-check.outputs.exists != 'true'
-        uses: ./.github/actions/setup-dynamo-operator
+        uses: $/.github/actions/setup-dynamo-operator
         with:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
@@ -1819,18 +1842,18 @@ jobs:
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
       - name: Connect to vCluster
         id: connect-vcluster
-        uses: ./.github/actions/connect-vcluster
+        uses: $/.github/actions/connect-vcluster
         with:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
       - name: Install snapshot-agent (rerun bootstrap)
         if: steps.vcluster-check.outputs.exists != 'true'
-        uses: ./.github/actions/setup-snapshot-agent
+        uses: $/.github/actions/setup-snapshot-agent
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
       - name: Run DynamoCheckpoint Deploy Test
-        uses: ./.github/actions/dynamo-deploy-test
+        uses: $/.github/actions/dynamo-deploy-test
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
@@ -1869,13 +1892,13 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Check if vCluster exists
         id: vcluster-check
-        uses: ./.github/actions/check-vcluster-exists
+        uses: $/.github/actions/check-vcluster-exists
         with:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.namespace }}
       - name: Self-bootstrap vCluster (rerun)
         if: steps.vcluster-check.outputs.exists != 'true'
-        uses: ./.github/actions/setup-dynamo-operator
+        uses: $/.github/actions/setup-dynamo-operator
         with:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.namespace }}
@@ -1892,18 +1915,18 @@ jobs:
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
       - name: Connect to vCluster
         id: connect-vcluster
-        uses: ./.github/actions/connect-vcluster
+        uses: $/.github/actions/connect-vcluster
         with:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.namespace }}
       - name: Install snapshot-agent (rerun bootstrap)
         if: steps.vcluster-check.outputs.exists != 'true'
-        uses: ./.github/actions/setup-snapshot-agent
+        uses: $/.github/actions/setup-snapshot-agent
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
       - name: Run DynamoCheckpoint Deploy Test
-        uses: ./.github/actions/dynamo-deploy-test
+        uses: $/.github/actions/dynamo-deploy-test
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
@@ -1934,7 +1957,7 @@ jobs:
           persist-credentials: false
       - name: Teardown vCluster
         if: needs.deploy-operator.outputs.namespace != '' && needs.deploy-operator.outputs.vcluster_name != ''
-        uses: ./.github/actions/teardown-dynamo-operator
+        uses: $/.github/actions/teardown-dynamo-operator
         with:
           vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
@@ -1951,7 +1974,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Teardown vCluster
-        uses: ./.github/actions/teardown-dynamo-operator
+        uses: $/.github/actions/teardown-dynamo-operator
         with:
           vcluster_name: ci-${{ github.run_id }}-checkpoint-vllm
           vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-vllm-dt
@@ -1968,7 +1991,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Teardown vCluster
-        uses: ./.github/actions/teardown-dynamo-operator
+        uses: $/.github/actions/teardown-dynamo-operator
         with:
           vcluster_name: ci-${{ github.run_id }}-checkpoint-sglang
           vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-sglang-dt
@@ -1985,7 +2008,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Teardown vCluster
-        uses: ./.github/actions/teardown-dynamo-operator
+        uses: $/.github/actions/teardown-dynamo-operator
         with:
           vcluster_name: ci-${{ github.run_id }}-checkpoint-trtllm
           vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-trtllm-dt
@@ -2005,6 +2028,7 @@ jobs:
       - planner-copy-to-acr
       - vllm-copy-to-acr
       - vllm-multi-gpu-test
+      - vllm-4-gpu-test
       - vllm-efa-build
       - sglang-copy-to-acr
       - sglang-multi-gpu-test
@@ -2022,7 +2046,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Create K8s builders (skip bootstrap)
-        uses: ./.github/actions/bootstrap-buildkit
+        uses: $/.github/actions/bootstrap-buildkit
         continue-on-error: true
         with:
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
@@ -2046,6 +2070,7 @@ jobs:
       - vllm-build
       - vllm-test
       - vllm-multi-gpu-test
+      - vllm-4-gpu-test
       - vllm-copy-to-acr
       - sglang-build
       - sglang-test
@@ -2064,7 +2089,7 @@ jobs:
     if: false
     # Disabled: gh-pages branch bloated to ~1GB after 72 commits of Allure reports
     # if: ${{ !cancelled() }}
-    uses: ./.github/workflows/generate-allure-report.yml
+    uses: $/.github/workflows/generate-allure-report.yml
     with:
       run_id: ${{ github.run_id }}
       subdir: pr
