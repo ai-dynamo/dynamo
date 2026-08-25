@@ -535,21 +535,24 @@ async def test_cancelled_admission_does_not_strand_a_concurrent_waiter():
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(asyncio.shield(first), timeout=0.05)
     assert "shared" in router._table.paused
+    first_program = router._table.programs["shared"]
 
     second = asyncio.create_task(
         router.before_request("shared", estimated_prompt_tokens=50)
     )
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(asyncio.shield(second), timeout=0.05)
-    wait_event = router._table.programs["shared"].waiting
+    assert router._table.programs["shared"] is first_program
 
     first.cancel()
     with pytest.raises(asyncio.CancelledError):
         await first
+    await asyncio.sleep(0)
 
     assert "shared" in router._table.programs
     assert "shared" in router._table.paused
-    assert router._table.programs["shared"].waiting is wait_event
+    assert router._table.programs["shared"] is not first_program
+    assert router._table.programs["shared"].step_count == 1
 
     assert await router.end_program("existing") is True
     await router._scheduler_tick()
@@ -561,7 +564,7 @@ async def test_cancelled_admission_does_not_strand_a_concurrent_waiter():
 
 @pytest.mark.fault_tolerance
 @pytest.mark.asyncio
-async def test_cancelled_admission_does_not_undo_a_later_turn():
+async def test_cancelled_admission_serializes_a_later_turn():
     cfg = ThunderAgentConfig(
         scheduler_interval_seconds=1000.0,
         resume_timeout_seconds=5.0,
@@ -585,21 +588,66 @@ async def test_cancelled_admission_does_not_undo_a_later_turn():
     )
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(asyncio.shield(later), timeout=0.05)
-    assert program.token_total == 777
-    assert program.step_count == 3
+    assert program.token_total == 500
+    assert program.step_count == 2
 
     cancelled.cancel()
     with pytest.raises(asyncio.CancelledError):
         await cancelled
+    await asyncio.sleep(0)
 
     assert router._table.programs["p1"] is program
     assert program.token_total == 777
-    assert program.step_count == 3
+    assert program.step_count == 2
     assert program.lifecycle == ProgramLifecycle.PAUSED
 
     later.cancel()
     with pytest.raises(asyncio.CancelledError):
         await later
+
+    assert router._table.programs["p1"] is program
+    assert program.token_total == 110
+    assert program.step_count == 1
+    assert program.lifecycle == ProgramLifecycle.PAUSED
+
+
+@pytest.mark.fault_tolerance
+@pytest.mark.asyncio
+async def test_two_cancelled_admissions_of_new_program_leave_no_trace():
+    cfg = ThunderAgentConfig(
+        scheduler_interval_seconds=1000.0,
+        resume_timeout_seconds=5.0,
+        pause_threshold=1.0,
+        pause_target=1.0,
+        resume_hysteresis=0.0,
+    )
+    router, _ = make_router(capacity_workers={1: 1000}, config=cfg)
+
+    await router.before_request("existing", estimated_prompt_tokens=850)
+
+    first = asyncio.create_task(
+        router.before_request("shared", estimated_prompt_tokens=50)
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(first), timeout=0.05)
+
+    second = asyncio.create_task(
+        router.before_request("shared", estimated_prompt_tokens=75)
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(second), timeout=0.05)
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    second.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await second
+
+    assert "shared" not in router._table.programs
+    assert "shared" not in router._table.paused
+    assert "shared" not in router._admission_gates
 
 
 @pytest.mark.fault_tolerance

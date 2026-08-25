@@ -53,6 +53,14 @@ class ThunderAgentConfig:
     buffer_per_program: int = 100
 
 
+@dataclass
+class _AdmissionGate:
+    """Serialize admission transactions for one program."""
+
+    lock: asyncio.Lock
+    users: int = 0
+
+
 class ThunderAgentScheduler:
     def __init__(
         self,
@@ -63,6 +71,7 @@ class ThunderAgentScheduler:
         self._cfg = config
         self._table = ProgramTable()
         self._lock = asyncio.Lock()
+        self._admission_gates: dict[str, _AdmissionGate] = {}
         self._scheduler_task: Optional[asyncio.Task] = None
         self._stat_forced_resumes = 0
         self._stat_programs_created = 0
@@ -100,6 +109,24 @@ class ThunderAgentScheduler:
         self,
         program_id: str,
         estimated_prompt_tokens: int = 0,
+    ) -> PauseDecision:
+        gate = self._admission_gates.get(program_id)
+        if gate is None:
+            gate = _AdmissionGate(lock=asyncio.Lock())
+            self._admission_gates[program_id] = gate
+        gate.users += 1
+        try:
+            async with gate.lock:
+                return await self._admit_request(program_id, estimated_prompt_tokens)
+        finally:
+            gate.users -= 1
+            if gate.users == 0 and self._admission_gates.get(program_id) is gate:
+                self._admission_gates.pop(program_id)
+
+    async def _admit_request(
+        self,
+        program_id: str,
+        estimated_prompt_tokens: int,
     ) -> PauseDecision:
         wait_started = time.monotonic()
         async with self._lock:

@@ -47,7 +47,7 @@ class Program:
     # monotonic seconds; used to compute resume-side decay
     acting_since: float = 0.0
 
-    # Distinguishes concurrent admissions that share a Program object.
+    # Distinguishes successive admissions that share a Program object.
     admission_epoch: int = 0
 
 
@@ -133,7 +133,7 @@ class ProgramTable:
         program.soft_demoted_until = snapshot.soft_demoted_until
         program.acting_since = snapshot.acting_since
         program.admission_epoch = snapshot.admission_epoch
-        # Do not replace an event installed by a concurrent admission.
+        # Do not replace an event installed after this snapshot was captured.
         if program.waiting is None or program.waiting is snapshot.waiting:
             program.waiting = snapshot.waiting
         if program.lifecycle == ProgramLifecycle.PAUSED and program.waiting is not None:
