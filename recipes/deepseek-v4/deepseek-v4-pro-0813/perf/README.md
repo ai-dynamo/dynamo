@@ -1,81 +1,154 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# DeepSeek-V4-Pro-0813 — performance benchmark
+# DeepSeek-V4-Pro-0813 Benchmark Recipe
 
-AIPerf **Mooncake trace replay** against a deployed 0813 DGD, using the shared
-DeepSeek-V4 agentic traces in [`../../perf/traces/`](../../perf/traces/).
-The traces are not duplicated here.
+A single [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job —
+[`perf.yaml`](perf.yaml) — covers all four DeepSeek-V4-Pro-0813 DGDs. Set `ENDPOINT` for the
+target DGD and `SYNTHESIS_MAX_ISL` for its context limit.
 
-## Variants
+The Job waits for the target model on the DGD frontend, runs a short warmup,
+replays the configured trace at one `CONCURRENCY` value, and writes raw
+artifacts to the shared `model-cache` PVC. The benchmark pod is co-located with
+a DGD frontend through `podAffinity`.
 
-| Target | `ENDPOINT` | Validated `CONCURRENCY` |
-|---|---|---|
-| AGG H200 (agentic) | `deepseek-v4-pro-0813-vllm-h200-agg-agentic-frontend:8000` | **2** |
-| DisAgg H200 (agentic) | `deepseek-v4-pro-0813-vllm-h200-disagg-agentic-frontend:8000` | **7** (gate crossing ≈7.95) |
-| AGG H200 (1M) | `deepseek-v4-pro-0813-vllm-h200-agg-1m-frontend:8000` | 1 |
-| DisAgg H200 (1M) | `deepseek-v4-pro-0813-vllm-h200-disagg-1m-frontend:8000` | 1 |
+## Targeting a variant
 
-`TARGET_MODEL` is `deepseek-ai/DeepSeek-V4-Pro-0813` for all four.
+Edit the `env` block in [`perf.yaml`](perf.yaml) and update the `podAffinity` `values` list to contain only the target DGD name, so the benchmark pod is co-located with the correct frontend:
 
-When switching variants, change **both** `ENDPOINT` and the `podAffinity`
-`nvidia.com/dynamo-graph-deployment-name` in `perf.yaml` — they must name the
-same DGD, or the Job will not co-locate with the frontend it is measuring.
+| Variant target | `ENDPOINT` | Validated `CONCURRENCY` | `TRACE_FILE` |
+| --- | --- | --- | --- |
+| H200 aggregated agentic | `dsv4-pro-0813-agg-h200-agentic-frontend:8000` | `2` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+| H200 disaggregated agentic | `dsv4-pro-0813-disagg-h200-agentic-frontend:8000` | `7` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+| H200 aggregated 1M | `dsv4-pro-0813-agg-h200-1m-frontend:8000` | `1` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+| H200 disaggregated 1M | `dsv4-pro-0813-disagg-h200-1m-frontend:8000` | `1` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
 
-## Stage traces
+If you run more than one benchmark in the same namespace, also update
+`metadata.name` and `labels.app` so Jobs and artifact directories stay
+distinct.
 
-A fresh clone has only LFS pointers:
+## Dataset
+
+The benchmark replays a
+[Mooncake-format](https://github.com/kvcache-ai/Mooncake) trace through
+`--custom-dataset-type mooncake_trace`. Each JSONL line describes one request
+with `input_length`, `output_length`, and `hash_ids`.
+
+This recipe benchmarks the same 64K-ISL / 400-OSL / 90%-KV-reuse agentic trace
+shared across the agentic recipes, so rather than duplicate the Git-LFS blob it
+is referenced from the DeepSeek-V4 family recipes via a symlink under [`traces`](traces):
+
+```text
+traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
+  -> ../../../deepseek-v4/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
+```
+
+The default 15% trace contains 3,541 requests. Its SHA-256 is
+`f20d3f2bc83dd1306cda659fbe34e7c4d85ca5497626c98bc0b1c4d2211379d0`.
+
+## Workflow
 
 ```bash
-git lfs pull --include="recipes/deepseek-v4/perf/traces/*.jsonl"
+export NAMESPACE=your-namespace
 ```
 
-Copy them onto the model-cache PVC at `/model-cache/traces/` — see
-[`../../perf/README.md`](../../perf/README.md) ("Stage Traces").
+### 1. Deploy the DGD
 
-## Run
+See the deployment instructions in the [recipe README](../README.md).
+
+### 2. Stage the trace on the PVC
+
+Materialize the Git LFS trace files, then copy them through a helper pod that
+mounts `model-cache`:
 
 ```bash
-kubectl apply -f perf.yaml
-kubectl logs -f job/dsv4-pro-0813-bench
+git lfs pull --include='recipes/deepseek-v4/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl'
+
+kubectl run pvc-helper -n ${NAMESPACE} \
+  --image=busybox:1.36 --restart=Never \
+  --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.36","command":["sleep","3600"],"volumeMounts":[{"name":"model-cache","mountPath":"/model-cache"}]}],"volumes":[{"name":"model-cache","persistentVolumeClaim":{"claimName":"model-cache"}}]}}' \
+  --command -- sleep 3600
+
+TRACE_SOURCE="$(git rev-parse --show-toplevel)/recipes/deepseek-v4/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl"
+kubectl exec -n "${NAMESPACE}" pvc-helper -- mkdir -p /model-cache/traces
+kubectl cp "${TRACE_SOURCE}" \
+  "${NAMESPACE}/pvc-helper:/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl"
 ```
 
-One concurrency per Job. For a sweep, run them sequentially and reset DGD
-worker/frontend state between independent rows so prefix-cache state does not
-carry over.
+Keep `pvc-helper` for fetching artifacts, or delete it after staging.
 
-## SLA gate
+### 3. Run the benchmark
 
-**E2E ≥ 50 tok/s/user AND TTFT p50 < 5 s, jointly**, where
-
+```bash
+kubectl apply -f perf.yaml -n ${NAMESPACE}
+kubectl logs -n ${NAMESPACE} -l job-name=dsv4-pro-0813-bench -f
+kubectl wait --for=condition=Complete job/dsv4-pro-0813-bench \
+  -n ${NAMESPACE} --timeout=10800s
 ```
-E2E tok/s/user = OSL / (TTFT + OSL × ITL)
+
+The Job uses `nvcr.io/nvidia/ai-dynamo/aiperf:0.11.0` directly and does
+not install or patch AIPerf at runtime.
+
+### 4. Fetch artifacts
+
+```bash
+kubectl cp \
+  ${NAMESPACE}/pvc-helper:/model-cache/perf/<epoch>_dsv4-pro-0813-bench \
+  ./results
 ```
 
-i.e. the per-user token rate *including* time-to-first-token. The looser
-decode-only rate (`1000 / ITL`) is not the gate — at 64K input, prefill is
-latency the user actually experiences.
+### 5. Cleanup
 
-The 1M variants are a **batch capability, not interactive** (TTFT is minutes at
-that length) and are not gated on throughput.
+```bash
+kubectl delete job dsv4-pro-0813-bench -n ${NAMESPACE}
+kubectl delete pod pvc-helper -n ${NAMESPACE}
+```
 
-## Results
+## Running a concurrency sweep
 
-| Workload | Recipe | SKU | Concurrency | System output tok/s/gpu | User output tok/s (P50) | TTFT P50 (ms) |
-| -------- | ------ | --- | ----------- | ----------------------- | ----------------------- | ------------- |
+`perf.yaml` runs one `CONCURRENCY` value. Clear SGLang KV state and Dynamo
+frontend/router state between independent runs:
 
-## Note on comparability
+```bash
+kubectl delete job dsv4-pro-0813-bench -n ${NAMESPACE} --ignore-not-found
 
-The operating points quoted in the deploy configs were measured with AIPerf's
-**synthetic** agentic profile (`--shared-system-prompt-length 57600`,
-`--synthetic-input-tokens-mean 6400`, `--output-tokens-mean 400`, verified ISL
-64,004, 90% measured prefix reuse), not with these Mooncake traces. The traces
-replay a different request-length distribution, so absolute numbers from this
-Job will not reproduce those figures exactly. Use the traces for
-variant-to-variant comparison on equal footing; use the synthetic profile to
-reproduce the published operating points.
+DGD=dsv4-pro-0813-agg-b200-agentic # Choose one of the four variant names above.
+kubectl delete pods -n ${NAMESPACE} \
+  -l nvidia.com/dynamo-graph-deployment-name=${DGD}
+kubectl wait --for=condition=Ready pod -n ${NAMESPACE} \
+  -l nvidia.com/dynamo-graph-deployment-name=${DGD} \
+  --timeout=7200s
 
-Run-to-run variance measured on this setup is **17%**. Treat any delta smaller
-than that as noise, and repeat to N≥3 before quoting a threshold crossing.
+# Update CONCURRENCY in perf.yaml before each run.
+kubectl apply -f perf.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/dsv4-pro-0813-bench \
+  -n ${NAMESPACE} --timeout=10800s
+```
+
+Do not compare partial runs. A completed run must account for successful,
+errored, and unfinished requests before reporting aggregate throughput.
+
+## Tunable environment variables
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `ENDPOINT` | `dsv4-pro-0813-agg-h200-agentic-frontend:8000` | Change per DGD variant |
+| `TRACE_FILE` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | 3,541-request 15% agent trace |
+| `SYNTHESIS_MAX_ISL` | `500000` | Use `250000` for H200 recipes |
+| `CONCURRENCY` | `64` | Single value; reset server state between values |
+| `TARGET_MODEL` | `zai-org/DeepSeek-V4-Pro-0813` | Must match `--served-model-name` |
+
+## Artifacts
+
+Results are written to:
+
+```text
+/model-cache/perf/<epoch>_<job-name>/
+  warmup/
+  DeepSeek-V4-Pro-0813_trace_c<concurrency>_<timestamp>/
+    profile_export_aiperf.json
+    inputs.json
+    ...
+```

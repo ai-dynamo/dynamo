@@ -41,7 +41,7 @@ spec:
                 # with the target frontend. Change this together with ENDPOINT when you
                 # switch variants (one of:
                 # deepseek-v4-pro-0813-vllm-h200-{agg,disagg}-{agentic,1m}).
-                - deepseek-v4-pro-0813-vllm-h200-agg-agentic
+                - dsv4-pro-0813-agg-h200-agentic
             topologyKey: kubernetes.io/hostname
       containers:
       - name: perf
@@ -114,7 +114,7 @@ spec:
         # Edit ENDPOINT + CONCURRENCY per variant AND update the podAffinity
         # graph-deployment-name above to the same DGD (see README.md).
         - name: ENDPOINT
-          value: deepseek-v4-pro-0813-vllm-h200-agg-agentic-frontend:8000
+          value: dsv4-pro-0813-agg-h200-agentic-frontend:8000
         - name: TARGET_MODEL
           value: deepseek-ai/DeepSeek-V4-Pro-0813
         - name: TRACE_FILE

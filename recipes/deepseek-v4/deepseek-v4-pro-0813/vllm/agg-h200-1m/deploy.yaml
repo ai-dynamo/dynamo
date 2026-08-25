@@ -5,7 +5,7 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: deepseek-v4-pro-0813-vllm-h200-agg-1m
+  name: dsv4-pro-0813-agg-h200-1m
 spec:
   backendFramework: vllm
   components:
