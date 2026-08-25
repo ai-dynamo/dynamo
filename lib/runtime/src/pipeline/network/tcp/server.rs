@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use socket2::{Domain, SockAddr, Socket, Type};
+use socket2::{Domain, SockAddr, SockRef, Socket, Type};
 use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr, TcpListener},
@@ -828,7 +828,7 @@ async fn tcp_listener(
             }
         }
 
-        match stream.set_linger(Some(std::time::Duration::from_secs(0))) {
+        match SockRef::from(&stream).set_linger(Some(std::time::Duration::from_secs(0))) {
             Ok(_) => (),
             Err(e) => {
                 tracing::warn!("failed to set tcp stream to linger: {e}");
