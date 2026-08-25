@@ -144,7 +144,7 @@ def test_provider_owns_its_adapter_and_hook_abi_versions() -> None:
     assert router_provider_module._PROVIDER_API_VERSION == 1
     assert router_provider_module._ROUTER_HOOK_API_VERSION == 1
     assert adapter.api_version == router_provider_module._PROVIDER_API_VERSION
-    assert adapter.config_adapter_api_version == 2
+    assert adapter.config_adapter_api_version == 3
     assert adapter.section == "router"
 
 
@@ -152,27 +152,27 @@ def test_public_router_validation_is_owned_by_dynamo_adapter() -> None:
     adapter = create_provider()
     prediction_context = PredictionAdapterContext(engine={}, traffic={}, evaluation={})
     recommendation_context = RecommendationAdapterContext(
-        engine={}, traffic={}, evaluation={}, optimization={}
+        engine={},
+        traffic={},
+        evaluation={},
+        optimization={},
+        sweep=_sweep_context(),
     )
 
-    assert adapter.validate_prediction_config({}, prediction_context) == {
+    assert adapter.compile_prediction({}, prediction_context).config == {
         "policy": "round_robin",
         "prefill_load_model": {"type": "none"},
     }
-    recommendation = adapter.validate_recommendation_config({}, recommendation_context)
-    assert recommendation == {"policy": {"choices": ["round_robin", "kv_router"]}}
-    plan = adapter.generate_search_space(recommendation, _sweep_context())
+    plan = adapter.compile_recommendation({}, recommendation_context)
     assert plan.fragment.choices_by_branch["agg"]["mode"] == [
         "round_robin",
         "kv_router",
     ]
 
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
-        adapter.validate_prediction_config(
-            {"not_a_router_knob": True}, prediction_context
-        )
+        adapter.compile_prediction({"not_a_router_knob": True}, prediction_context)
     with pytest.raises(ValueError, match="round_robin rejects"):
-        adapter.validate_recommendation_config(
+        adapter.compile_recommendation(
             {
                 "policy": "round_robin",
                 "prefill_load_model": {"type": "aic"},
@@ -220,7 +220,7 @@ def test_public_router_search_accepts_custom_values_and_emits_public_config() ->
 
 
 def test_public_router_prediction_materializes_runtime_hook() -> None:
-    replay_spec = create_provider().materialize_prediction(
+    replay_spec = create_provider().compile_prediction(
         {
             "policy": "kv_router",
             "prefill_load_model": {"type": "none"},

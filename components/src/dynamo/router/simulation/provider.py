@@ -5,10 +5,8 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping
 from copy import deepcopy
-from typing import Any
 
 from aisimulate.config_adapter import (
     PredictionAdapterContext,
@@ -23,177 +21,16 @@ from aisimulate.sweeper.provider import (
     SearchSpaceFragment,
     SweepContext,
 )
-from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .public_config import RouterConfig
+from .config import RouterPredictionConfig, RouterRecommendationConfig, domain_choices
 
 _PROVIDER_API_VERSION = 1
 _ROUTER_HOOK_API_VERSION = 1
-_MODES = frozenset({"kv_router", "round_robin"})
-_OVERLAP_SCORE_CREDITS = frozenset({0.0, 0.5, 1.0})
-_PREFILL_LOAD_SCALES = frozenset({0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0})
-_TEMPERATURES = frozenset({0.0, 0.2, 0.5, 1.0})
-_LOAD_MODELS = frozenset({"none", "aic"})
 _HOOK = RuntimeHookSpec(
     provider="dynamo.router",
     kind="placement_policy",
     api_version=_ROUTER_HOOK_API_VERSION,
 )
-
-
-class RouterSearchSpace(BaseModel):
-    """Validated Router-owned search space."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    mode: list[str] = Field(default_factory=lambda: ["kv_router", "round_robin"])
-    overlap_score_credit: list[float] = Field(default_factory=lambda: [0.0, 0.5, 1.0])
-    prefill_load_scale: list[float] = Field(
-        default_factory=lambda: [
-            0.0,
-            0.25,
-            0.5,
-            1.0,
-            2.0,
-            4.0,
-            8.0,
-            16.0,
-            32.0,
-        ]
-    )
-    temperature: list[float] = Field(default_factory=lambda: [0.0, 0.2, 0.5, 1.0])
-    prefill_load_model_type: list[str] = Field(default_factory=lambda: ["none"])
-    active_decode_blocks_threshold: int | None = None
-    active_prefill_tokens_threshold: int | None = None
-    active_prefill_tokens_threshold_frac: float | None = None
-    no_admission_control: bool = False
-    public_schema: bool = False
-
-    @model_validator(mode="before")
-    @classmethod
-    def _normalize_public_schema(cls, value: Any) -> Any:
-        if not isinstance(value, Mapping) or "policy" not in value:
-            return value
-        public = dict(value)
-        normalized = {
-            "public_schema": True,
-            "mode": _domain_choices(public.pop("policy"), ["kv_router", "round_robin"]),
-            "overlap_score_credit": _domain_choices(
-                public.pop("overlap_score_credit", None), [0.0, 0.5, 1.0]
-            ),
-            "prefill_load_scale": _domain_choices(
-                public.pop("prefill_load_scale", None),
-                [0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0],
-            ),
-            "temperature": _domain_choices(
-                public.pop("temperature", None), [0.0, 0.2, 0.5, 1.0]
-            ),
-        }
-        load_model = public.pop("prefill_load_model", None)
-        raw_type = load_model.get("type") if isinstance(load_model, Mapping) else None
-        normalized["prefill_load_model_type"] = _domain_choices(
-            raw_type, ["none", "aic"]
-        )
-        normalized.update(public)
-        return normalized
-
-    @model_validator(mode="after")
-    def _validate_choices(self) -> RouterSearchSpace:
-        specifications = (
-            ("mode", self.mode, _MODES),
-            ("prefill_load_model_type", self.prefill_load_model_type, _LOAD_MODELS),
-        )
-        for name, values, allowed in specifications:
-            if not values:
-                raise ValueError(f"{name} must list at least one choice")
-            invalid = [value for value in values if value not in allowed]
-            if invalid:
-                raise ValueError(
-                    f"{name} has invalid choices {invalid}; allowed: {sorted(allowed)}"
-                )
-        numeric = (
-            ("overlap_score_credit", self.overlap_score_credit, _OVERLAP_SCORE_CREDITS),
-            ("prefill_load_scale", self.prefill_load_scale, _PREFILL_LOAD_SCALES),
-            ("temperature", self.temperature, _TEMPERATURES),
-        )
-        for name, values, legacy_allowed in numeric:
-            if not values:
-                raise ValueError(f"{name} must list at least one choice")
-            if self.public_schema:
-                invalid = [
-                    value for value in values if not math.isfinite(value) or value < 0.0
-                ]
-            else:
-                invalid = [value for value in values if value not in legacy_allowed]
-            if invalid:
-                raise ValueError(f"{name} has invalid choices {invalid}")
-
-        if "kv_router" not in self.mode:
-            return self
-        admission_pins = {
-            "active_decode_blocks_threshold": self.active_decode_blocks_threshold,
-            "active_prefill_tokens_threshold": self.active_prefill_tokens_threshold,
-            "active_prefill_tokens_threshold_frac": self.active_prefill_tokens_threshold_frac,
-        }
-        enabled = [name for name, value in admission_pins.items() if value is not None]
-        if self.no_admission_control:
-            enabled.append("no_admission_control")
-        if enabled:
-            raise ValueError(
-                "Router admission-control knobs are not supported by the Dynamo "
-                "replay API; remove " + ", ".join(enabled)
-            )
-        return self
-
-
-def _domain_choices(value: Any, default: list[Any]) -> list[Any]:
-    if value is None:
-        return list(default)
-    if isinstance(value, Mapping) and set(value) == {"choices"}:
-        choices = value["choices"]
-        if not isinstance(choices, list) or not choices:
-            raise ValueError("Router choices must be a nonempty list")
-        if len({repr(choice) for choice in choices}) != len(choices):
-            raise ValueError("Router choices must contain unique values")
-        return list(choices)
-    if isinstance(value, Mapping) and set(value) == {"range"}:
-        raw = value["range"]
-        if not isinstance(raw, Mapping):
-            raise ValueError("Router range must be a mapping")
-        unknown = set(raw) - {"min", "max", "step", "scale"}
-        if unknown:
-            raise ValueError(f"Router range has unknown fields {sorted(unknown)}")
-        if "min" not in raw or "max" not in raw:
-            raise ValueError("Router range requires min and max")
-        minimum, maximum = raw["min"], raw["max"]
-        if (
-            isinstance(minimum, bool)
-            or isinstance(maximum, bool)
-            or not isinstance(minimum, (int, float))
-            or not isinstance(maximum, (int, float))
-            or not math.isfinite(float(minimum))
-            or not math.isfinite(float(maximum))
-            or minimum > maximum
-        ):
-            raise ValueError("Router range requires finite numeric min <= max")
-        step = raw.get("step")
-        if (
-            step is None
-            or isinstance(step, bool)
-            or not isinstance(step, (int, float))
-            or step <= 0
-            or raw.get("scale", "linear") != "linear"
-        ):
-            raise ValueError("Router numeric ranges require a stepped linear range")
-        values = []
-        current = minimum
-        while current <= maximum:
-            values.append(current)
-            current += step
-        return values
-    if isinstance(value, Mapping):
-        raise ValueError("Router domains must contain exactly choices or range")
-    return [value]
 
 
 def _deployment_modes(
@@ -287,29 +124,57 @@ class DynamoRouterSweepConfigProvider:
 
     name = "dynamo.router"
     section = "router"
-    config_adapter_api_version = 2
+    config_adapter_api_version = 3
     # Keep the implemented provider ABI independent from the installed consumer.
     api_version = _PROVIDER_API_VERSION
 
-    def validate_prediction_config(
+    def compile_prediction(
         self,
         config: Mapping[str, JSONValue],
         context: PredictionAdapterContext,
-    ) -> dict[str, JSONValue]:
-        del context
-        return RouterConfig.model_validate(config).model_dump(
-            mode="json", exclude_none=True
+    ) -> AdapterReplaySpec:
+        public = RouterPredictionConfig.model_validate(config)
+        concrete = public.model_dump(mode="json", exclude_none=True)
+        if public.policy == "round_robin":
+            return AdapterReplaySpec(config=concrete)
+        router_config: dict[str, JSONValue] = {
+            "overlap_score_credit": public.overlap_score_credit
+            if public.overlap_score_credit is not None
+            else 1.0,
+            "prefill_load_scale": public.prefill_load_scale
+            if public.prefill_load_scale is not None
+            else 1.0,
+            "router_temperature": public.temperature
+            if public.temperature is not None
+            else 0.0,
+        }
+        return AdapterReplaySpec(
+            config=concrete,
+            runtime_hooks=(
+                RuntimeHookSpec(
+                    provider=_HOOK.provider,
+                    kind=_HOOK.kind,
+                    api_version=_HOOK.api_version,
+                    config={
+                        "router_mode": public.policy,
+                        "router_config": router_config,
+                        "aic_perf_config": _aic_perf_config_from_prediction(
+                            context,
+                            enabled=public.prefill_load_model.type == "aic",
+                        ),
+                    },
+                ),
+            ),
         )
 
-    def validate_recommendation_config(
+    def compile_recommendation(
         self,
         config: Mapping[str, JSONValue],
         context: RecommendationAdapterContext,
-    ) -> dict[str, JSONValue]:
-        del context
+    ) -> AdapterSearchPlan:
         normalized = deepcopy(dict(config))
         normalized.setdefault("policy", {"choices": ["round_robin", "kv_router"]})
-        policy_values = _domain_choices(
+        policy_values = domain_choices(
             normalized.get("policy"), ["round_robin", "kv_router"]
         )
         if set(policy_values) == {"round_robin"}:
@@ -326,7 +191,7 @@ class DynamoRouterSweepConfigProvider:
             load_type = (
                 load_model.get("type") if isinstance(load_model, Mapping) else None
             )
-            if load_type is not None and set(_domain_choices(load_type, ["none"])) != {
+            if load_type is not None and set(domain_choices(load_type, ["none"])) != {
                 "none"
             }:
                 conflicts.append("prefill_load_model.type")
@@ -335,8 +200,16 @@ class DynamoRouterSweepConfigProvider:
                     "router.policy=round_robin rejects KV-router fields "
                     f"{sorted(conflicts)}"
                 )
-        RouterSearchSpace.model_validate(normalized)
-        return normalized
+        RouterRecommendationConfig.model_validate(normalized)
+        return self.generate_search_space(normalized, context.sweep)
+
+    def materialize_candidate(
+        self,
+        plan: AdapterSearchPlan,
+        selection: Mapping[str, JSONValue],
+        context: CandidateContext,
+    ) -> AdapterReplaySpec:
+        return self.materialize_replay(plan, selection, context)
 
     def generate_search_space(
         self,
@@ -344,7 +217,7 @@ class DynamoRouterSweepConfigProvider:
         context: SweepContext,
     ) -> AdapterSearchPlan:
         public_schema = "policy" in search_spec or "prefill_load_model" in search_spec
-        space = RouterSearchSpace.model_validate(search_spec)
+        space = RouterRecommendationConfig.model_validate(search_spec)
         choices: dict[str, list[JSONValue]] = {"mode": list(space.mode)}
         kv_router_possible = "kv_router" in space.mode
         if kv_router_possible:
@@ -380,7 +253,7 @@ class DynamoRouterSweepConfigProvider:
         raw_space = plan.state["search_space"]
         if not isinstance(raw_space, dict):
             raise TypeError("Router adapter search-space state must be a mapping")
-        RouterSearchSpace.model_validate(raw_space)
+        RouterRecommendationConfig.model_validate(raw_space)
         public_schema = plan.state.get("public_schema") is True
 
         mode = str(selection["mode"])
@@ -437,47 +310,6 @@ class DynamoRouterSweepConfigProvider:
         return AdapterReplaySpec(
             config=concrete_config,
             runtime_hooks=(hook,),
-        )
-
-    def materialize_prediction(
-        self,
-        config: Mapping[str, JSONValue],
-        context: PredictionAdapterContext,
-    ) -> AdapterReplaySpec:
-        concrete = self.validate_prediction_config(config, context)
-        public = RouterConfig.model_validate(concrete)
-        concrete = public.model_dump(mode="json", exclude_none=True)
-        if public.policy == "round_robin":
-            return AdapterReplaySpec(config=concrete)
-        router_config: dict[str, JSONValue] = {
-            "overlap_score_credit": public.overlap_score_credit
-            if public.overlap_score_credit is not None
-            else 1.0,
-            "prefill_load_scale": public.prefill_load_scale
-            if public.prefill_load_scale is not None
-            else 1.0,
-            "router_temperature": public.temperature
-            if public.temperature is not None
-            else 0.0,
-        }
-        aic_perf_config = _aic_perf_config_from_prediction(
-            context,
-            enabled=public.prefill_load_model.type == "aic",
-        )
-        return AdapterReplaySpec(
-            config=concrete,
-            runtime_hooks=(
-                RuntimeHookSpec(
-                    provider=_HOOK.provider,
-                    kind=_HOOK.kind,
-                    api_version=_HOOK.api_version,
-                    config={
-                        "router_mode": public.policy,
-                        "router_config": router_config,
-                        "aic_perf_config": aic_perf_config,
-                    },
-                ),
-            ),
         )
 
 

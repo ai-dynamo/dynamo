@@ -29,6 +29,7 @@ from aisimulate.sweeper.provider import (
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from tqdm import tqdm  # type: ignore[import-untyped]
 
+from .config import PlannerPredictionConfig, PlannerRecommendationConfig
 from .load_predictor import (
     LOAD_PREDICTOR_PRESETS,
     complete_predictor_preset,
@@ -43,7 +44,6 @@ from .presets import (
     load_sensitivity_fields,
     scaling_fields,
 )
-from .public_config import PlannerConfig
 
 _SCALING_KEYS = frozenset(
     {
@@ -232,30 +232,6 @@ def _independent_preset_mappings(
             < mapping["throughput_adjustment_interval_seconds"]
         ]
     return mappings
-
-
-def _validate_public_preset_conflicts(planner: Mapping[str, Any]) -> None:
-    groups = {
-        "scaling_policy": _SCALING_KEYS,
-        "fpm_sampling": _FPM_KEYS,
-        "load_sensitivity": _LOAD_KEYS,
-        "load_predictor": _PREDICTOR_KEYS - {"load_predictor"},
-    }
-    for group, knobs in groups.items():
-        control = planner.get(group)
-        if not isinstance(control, Mapping) or "preset" not in control:
-            continue
-        preset = control["preset"]
-        if preset in (False, {}):
-            continue
-        conflicts = sorted(knobs.intersection(planner))
-        if group == "load_predictor" and "type" in control:
-            conflicts.append("load_predictor.type")
-        if conflicts:
-            raise ValueError(
-                f"planner.{group}.preset cannot be combined with independent "
-                f"knobs {conflicts}"
-            )
 
 
 def _validate_preset_entries(
@@ -637,17 +613,17 @@ class DynamoPlannerSweepConfigProvider:
 
     name = "dynamo.planner"
     section = "planner"
-    config_adapter_api_version = 2
+    config_adapter_api_version = 3
     # Provider-owned constant: importing the consumer's current API_VERSION would
     # let an older wheel accidentally self-certify against a newer core package.
     api_version = _PROVIDER_API_VERSION
 
-    def validate_prediction_config(
+    def compile_prediction(
         self,
         config: Mapping[str, JSONValue],
         context: PredictionAdapterContext,
-    ) -> dict[str, JSONValue]:
-        public = PlannerConfig.model_validate(config)
+    ) -> AdapterReplaySpec:
+        public = PlannerPredictionConfig.model_validate(config)
         if public.policy == "enabled":
             source = context.traffic.get("source")
             trace_format = source.get("format") if isinstance(source, Mapping) else None
@@ -666,20 +642,50 @@ class DynamoPlannerSweepConfigProvider:
                         "evaluation.sla.ttft_ms/itl_ms"
                     )
         else:
-            return {"policy": "disabled"}
-        return public.model_dump(mode="json", exclude_none=True)
+            return AdapterReplaySpec(config={"policy": "disabled"})
+        concrete = public.model_dump(mode="json", exclude_none=True)
+        sample = _prediction_sample(context.engine)
+        raw_sla = context.evaluation.get("sla")
+        sla = raw_sla if isinstance(raw_sla, Mapping) else None
+        planner_config = _planner_config_payload(
+            concrete,
+            sample=sample,
+            optimization_target=public.target,
+            sla=sla,
+            min_endpoint=public.min_workers,
+            prefill_min_endpoint=public.prefill_min_workers,
+            decode_min_endpoint=public.decode_min_workers,
+            max_num_gpus=public.max_num_gpus,
+        )
+        return AdapterReplaySpec(
+            config={"policy": "enabled", **planner_config},
+            runtime_hooks=(
+                RuntimeHookSpec(
+                    provider=_HOOK.provider,
+                    kind=_HOOK.kind,
+                    api_version=_HOOK.api_version,
+                    config={"planner_config": planner_config},
+                ),
+            ),
+        )
 
-    def validate_recommendation_config(
+    def compile_recommendation(
         self,
         config: Mapping[str, JSONValue],
         context: RecommendationAdapterContext,
-    ) -> dict[str, JSONValue]:
-        del context
-        normalized = deepcopy(dict(config))
-        normalized.setdefault("policy", {"choices": ["disabled", "enabled"]})
-        _validate_public_preset_conflicts(normalized)
+    ) -> AdapterSearchPlan:
+        public = PlannerRecommendationConfig.model_validate(config)
+        normalized = public.model_dump(mode="python", exclude_none=True)
         PlannerSearchSpace.model_validate(normalized)
-        return normalized
+        return self.generate_search_space(normalized, context.sweep)
+
+    def materialize_candidate(
+        self,
+        plan: AdapterSearchPlan,
+        selection: Mapping[str, JSONValue],
+        context: CandidateContext,
+    ) -> AdapterReplaySpec:
+        return self.materialize_replay(plan, selection, context)
 
     def generate_search_space(
         self,
@@ -904,40 +910,6 @@ class DynamoPlannerSweepConfigProvider:
         if decode_min_endpoint is not None:
             public_config["decode_min_workers"] = decode_min_endpoint
         return AdapterReplaySpec(config=public_config, runtime_hooks=(hook,))
-
-    def materialize_prediction(
-        self,
-        config: Mapping[str, JSONValue],
-        context: PredictionAdapterContext,
-    ) -> AdapterReplaySpec:
-        concrete = self.validate_prediction_config(config, context)
-        public = PlannerConfig.model_validate(concrete)
-        concrete = public.model_dump(mode="json", exclude_none=True)
-        if public.policy == "disabled":
-            return AdapterReplaySpec(config={"policy": "disabled"})
-        sample = _prediction_sample(context.engine)
-        raw_sla = context.evaluation.get("sla")
-        sla = raw_sla if isinstance(raw_sla, Mapping) else None
-        planner_config = _planner_config_payload(
-            concrete,
-            sample=sample,
-            optimization_target=public.target,
-            sla=sla,
-            min_endpoint=public.min_workers,
-            prefill_min_endpoint=public.prefill_min_workers,
-            decode_min_endpoint=public.decode_min_workers,
-            max_num_gpus=public.max_num_gpus,
-        )
-        hook = RuntimeHookSpec(
-            provider=_HOOK.provider,
-            kind=_HOOK.kind,
-            api_version=_HOOK.api_version,
-            config={"planner_config": planner_config},
-        )
-        return AdapterReplaySpec(
-            config={"policy": "enabled", **planner_config},
-            runtime_hooks=(hook,),
-        )
 
 
 def _prediction_sample(engine: Mapping[str, JSONValue]) -> dict[str, JSONValue]:

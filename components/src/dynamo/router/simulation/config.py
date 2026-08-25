@@ -1,0 +1,202 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Prediction and recommendation config owned by the Dynamo Router adapter."""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Mapping
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+MODES = frozenset({"kv_router", "round_robin"})
+OVERLAP_SCORE_CREDITS = frozenset({0.0, 0.5, 1.0})
+PREFILL_LOAD_SCALES = frozenset({0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0})
+TEMPERATURES = frozenset({0.0, 0.2, 0.5, 1.0})
+LOAD_MODELS = frozenset({"none", "aic"})
+
+
+class PrefillLoadModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["none", "aic"] = "none"
+
+
+class RouterPredictionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    policy: Literal["round_robin", "kv_router"] = "round_robin"
+    prefill_load_model: PrefillLoadModel = Field(default_factory=PrefillLoadModel)
+    overlap_score_credit: float | None = Field(default=None, ge=0.0)
+    prefill_load_scale: float | None = Field(default=None, ge=0.0)
+    temperature: float | None = Field(default=None, ge=0.0)
+
+    @model_validator(mode="after")
+    def _validate_policy(self) -> RouterPredictionConfig:
+        kv_fields = (
+            self.overlap_score_credit,
+            self.prefill_load_scale,
+            self.temperature,
+        )
+        if self.policy == "round_robin" and (
+            self.prefill_load_model.type != "none"
+            or any(value is not None for value in kv_fields)
+        ):
+            raise ValueError(
+                "round_robin requires prefill_load_model.type='none' and "
+                "rejects KV-router knobs"
+            )
+        return self
+
+
+class RouterRecommendationConfig(BaseModel):
+    """Normalized Router search config; accepts public and legacy provider input."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: list[str] = Field(default_factory=lambda: ["kv_router", "round_robin"])
+    overlap_score_credit: list[float] = Field(default_factory=lambda: [0.0, 0.5, 1.0])
+    prefill_load_scale: list[float] = Field(
+        default_factory=lambda: [
+            0.0,
+            0.25,
+            0.5,
+            1.0,
+            2.0,
+            4.0,
+            8.0,
+            16.0,
+            32.0,
+        ]
+    )
+    temperature: list[float] = Field(default_factory=lambda: [0.0, 0.2, 0.5, 1.0])
+    prefill_load_model_type: list[str] = Field(default_factory=lambda: ["none"])
+    active_decode_blocks_threshold: int | None = None
+    active_prefill_tokens_threshold: int | None = None
+    active_prefill_tokens_threshold_frac: float | None = None
+    no_admission_control: bool = False
+    public_schema: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_public_schema(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping) or "policy" not in value:
+            return value
+        public = dict(value)
+        normalized = {
+            "public_schema": True,
+            "mode": domain_choices(public.pop("policy"), ["kv_router", "round_robin"]),
+            "overlap_score_credit": domain_choices(
+                public.pop("overlap_score_credit", None), [0.0, 0.5, 1.0]
+            ),
+            "prefill_load_scale": domain_choices(
+                public.pop("prefill_load_scale", None),
+                [0.0, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0],
+            ),
+            "temperature": domain_choices(
+                public.pop("temperature", None), [0.0, 0.2, 0.5, 1.0]
+            ),
+        }
+        load_model = public.pop("prefill_load_model", None)
+        raw_type = load_model.get("type") if isinstance(load_model, Mapping) else None
+        normalized["prefill_load_model_type"] = domain_choices(
+            raw_type, ["none", "aic"]
+        )
+        normalized.update(public)
+        return normalized
+
+    @model_validator(mode="after")
+    def _validate_choices(self) -> RouterRecommendationConfig:
+        for name, values, allowed in (
+            ("mode", self.mode, MODES),
+            ("prefill_load_model_type", self.prefill_load_model_type, LOAD_MODELS),
+        ):
+            if not values:
+                raise ValueError(f"{name} must list at least one choice")
+            invalid = [value for value in values if value not in allowed]
+            if invalid:
+                raise ValueError(
+                    f"{name} has invalid choices {invalid}; allowed: {sorted(allowed)}"
+                )
+        for name, values, legacy_allowed in (
+            ("overlap_score_credit", self.overlap_score_credit, OVERLAP_SCORE_CREDITS),
+            ("prefill_load_scale", self.prefill_load_scale, PREFILL_LOAD_SCALES),
+            ("temperature", self.temperature, TEMPERATURES),
+        ):
+            if not values:
+                raise ValueError(f"{name} must list at least one choice")
+            invalid = (
+                [value for value in values if not math.isfinite(value) or value < 0.0]
+                if self.public_schema
+                else [value for value in values if value not in legacy_allowed]
+            )
+            if invalid:
+                raise ValueError(f"{name} has invalid choices {invalid}")
+        if "kv_router" not in self.mode:
+            return self
+        admission_pins = {
+            "active_decode_blocks_threshold": self.active_decode_blocks_threshold,
+            "active_prefill_tokens_threshold": self.active_prefill_tokens_threshold,
+            "active_prefill_tokens_threshold_frac": self.active_prefill_tokens_threshold_frac,
+        }
+        enabled = [name for name, value in admission_pins.items() if value is not None]
+        if self.no_admission_control:
+            enabled.append("no_admission_control")
+        if enabled:
+            raise ValueError(
+                "Router admission-control knobs are not supported by the Dynamo "
+                "replay API; remove " + ", ".join(enabled)
+            )
+        return self
+
+
+def domain_choices(value: Any, default: list[Any]) -> list[Any]:
+    if value is None:
+        return list(default)
+    if isinstance(value, Mapping) and set(value) == {"choices"}:
+        choices = value["choices"]
+        if not isinstance(choices, list) or not choices:
+            raise ValueError("Router choices must be a nonempty list")
+        if len({repr(choice) for choice in choices}) != len(choices):
+            raise ValueError("Router choices must contain unique values")
+        return list(choices)
+    if isinstance(value, Mapping) and set(value) == {"range"}:
+        raw = value["range"]
+        if not isinstance(raw, Mapping):
+            raise ValueError("Router range must be a mapping")
+        unknown = set(raw) - {"min", "max", "step", "scale"}
+        if unknown:
+            raise ValueError(f"Router range has unknown fields {sorted(unknown)}")
+        if "min" not in raw or "max" not in raw:
+            raise ValueError("Router range requires min and max")
+        minimum, maximum = raw["min"], raw["max"]
+        if (
+            isinstance(minimum, bool)
+            or isinstance(maximum, bool)
+            or not isinstance(minimum, (int, float))
+            or not isinstance(maximum, (int, float))
+            or not math.isfinite(float(minimum))
+            or not math.isfinite(float(maximum))
+            or minimum > maximum
+        ):
+            raise ValueError("Router range requires finite numeric min <= max")
+        step = raw.get("step")
+        if (
+            step is None
+            or isinstance(step, bool)
+            or not isinstance(step, (int, float))
+            or step <= 0
+            or raw.get("scale", "linear") != "linear"
+        ):
+            raise ValueError("Router numeric ranges require a stepped linear range")
+        values = []
+        current = minimum
+        while current <= maximum:
+            values.append(current)
+            current += step
+        return values
+    if isinstance(value, Mapping):
+        raise ValueError("Router domains must contain exactly choices or range")
+    return [value]

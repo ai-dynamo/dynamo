@@ -541,7 +541,7 @@ def test_provider_owns_its_adapter_and_hook_abi_versions() -> None:
     assert planner_provider_module._PROVIDER_API_VERSION == 1
     assert planner_provider_module._PLANNER_HOOK_API_VERSION == 1
     assert adapter.api_version == planner_provider_module._PROVIDER_API_VERSION
-    assert adapter.config_adapter_api_version == 2
+    assert adapter.config_adapter_api_version == 3
     assert adapter.section == "planner"
 
 
@@ -549,28 +549,26 @@ def test_public_planner_validation_is_owned_by_dynamo_adapter() -> None:
     adapter = create_provider()
     prediction_context = PredictionAdapterContext(engine={}, traffic={}, evaluation={})
     recommendation_context = RecommendationAdapterContext(
-        engine={}, traffic={}, evaluation={}, optimization={}
+        engine={},
+        traffic={},
+        evaluation={},
+        optimization={},
+        sweep=_sweep_context(target="throughput"),
     )
 
-    assert adapter.validate_prediction_config({}, prediction_context) == {
+    assert adapter.compile_prediction({}, prediction_context).config == {
         "policy": "disabled"
     }
-    recommendation = adapter.validate_recommendation_config({}, recommendation_context)
-    assert recommendation["policy"] == {"choices": ["disabled", "enabled"]}
-    plan = adapter.generate_search_space(
-        recommendation, _sweep_context(target="throughput")
-    )
+    plan = adapter.compile_recommendation({}, recommendation_context)
     assert plan.fragment.choices_by_branch["agg"]["policy"] == [
         "disabled",
         "enabled",
     ]
 
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
-        adapter.validate_prediction_config(
-            {"not_a_planner_knob": True}, prediction_context
-        )
+        adapter.compile_prediction({"not_a_planner_knob": True}, prediction_context)
     with pytest.raises(ValueError, match="cannot be combined"):
-        adapter.validate_recommendation_config(
+        adapter.compile_recommendation(
             {
                 "scaling_policy": {"preset": "default"},
                 "enable_load_scaling": {"choices": [False, True]},
@@ -581,7 +579,7 @@ def test_public_planner_validation_is_owned_by_dynamo_adapter() -> None:
 
 def test_public_planner_prediction_requires_sla_for_throughput_scaling() -> None:
     with pytest.raises(ValueError, match="throughput scaling requires"):
-        create_provider().validate_prediction_config(
+        create_provider().compile_prediction(
             {"policy": "enabled"},
             PredictionAdapterContext(engine={}, traffic={}, evaluation={}),
         )
