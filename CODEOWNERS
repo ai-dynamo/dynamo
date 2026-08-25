@@ -63,6 +63,9 @@
 /components/src/dynamo/frontend/                                             @ai-dynamo/dynamo-frontend-codeowners
 /components/src/dynamo/frontend/tests/                                       @ai-dynamo/dynamo-frontend-codeowners
 
+# === agents  (@ai-dynamo/dynamo-agents-codeowners) ===
+/benchmarks/agent_harness/                                                   @ai-dynamo/dynamo-agents-codeowners
+
 # === router  (@ai-dynamo/dynamo-router-codeowners) ===
 /lib/kv-router/                                                              @ai-dynamo/dynamo-router-codeowners
 /lib/router-plugins/                                                         @ai-dynamo/dynamo-router-codeowners
@@ -478,6 +481,7 @@
 /lib/llm/src/grpc.rs                                                         @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/http.rs                                                         @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/lora.rs                                                         @ai-dynamo/dynamo-frontend-codeowners
+/tests/agent_harness/                                                        @ai-dynamo/dynamo-agents-codeowners
 /tests/frontend/grpc/                                                        @ai-dynamo/dynamo-frontend-codeowners
 /tests/router/configs/                                                       @ai-dynamo/dynamo-router-codeowners
 /lib/llm/src/kv_router/                                                      @ai-dynamo/dynamo-router-codeowners

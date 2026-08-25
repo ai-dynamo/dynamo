@@ -995,6 +995,185 @@ jobs:
       image_tag_suffix: '-nightly'
     secrets: inherit
 
+  # Native Claude Code and Codex sessions need production-class agent models
+  # and sibling Docker task containers. This nightly-only job runs the 30B MoE
+  # checkpoints directly on a 2x80-GiB H100 host instead of shared-test's
+  # 24-GiB lanes or runtime job container.
+  agent-harness-nightly:
+    name: Agent harness / ${{ matrix.id }}
+    needs: [compute-release-mode, resolve-source-sha, sglang-copy-to-acr]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    runs-on: aws-dev-02-tester-amd-gpu-v2
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - id: glm-4.7-flash
+            model_path: zai-org/GLM-4.7-Flash
+            revision: 7dd20894a642a0aa287e9827cb1a1f7f91386b67
+            tool_parser: glm47
+            reasoning_parser: glm45
+            thinking_mode: enabled
+          - id: qwen3-coder-30b-a3b
+            model_path: Qwen/Qwen3-Coder-30B-A3B-Instruct
+            revision: b2cff646eb4bb1d68355c01b18ae02e7cf42d120
+            tool_parser: qwen3_coder
+            reasoning_parser: none
+            thinking_mode: none
+    env:
+      HARBOR_VERSION: '0.21.0'
+      MODEL_ALIAS: agent-nightly
+      RUNTIME_IMAGE: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.sglang-copy-to-acr.outputs.image_tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+
+      - name: Prepare run directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          RESULTS_DIR="${RUNNER_TEMP}/agent-harness-${{ matrix.id }}"
+          HF_CACHE_DIR="${HOME}/.cache/huggingface"
+          MODEL_CONTAINER_NAME="agent-harness-${{ matrix.id }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          install -d -m 0777 "${RESULTS_DIR}" "${HF_CACHE_DIR}"
+          {
+            echo "RESULTS_DIR=${RESULTS_DIR}"
+            echo "HF_CACHE_DIR=${HF_CACHE_DIR}"
+            echo "MODEL_CONTAINER_NAME=${MODEL_CONTAINER_NAME}"
+          } >> "${GITHUB_ENV}"
+          {
+            echo "model=${{ matrix.model_path }}"
+            echo "revision=${{ matrix.revision }}"
+            echo "served_model_name=${MODEL_ALIAS}"
+            echo "tensor_parallelism=2"
+            echo "tool_parser=${{ matrix.tool_parser }}"
+            echo "reasoning_parser=${{ matrix.reasoning_parser }}"
+            echo "thinking_mode=${{ matrix.thinking_mode }}"
+            echo "runtime_image=${RUNTIME_IMAGE}"
+            echo "harbor_version=${HARBOR_VERSION}"
+            echo "dataset=swebenchpro@1.0"
+          } > "${RESULTS_DIR}/run-metadata.txt"
+
+      - name: Set up Harbor Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Install pinned Harbor
+        shell: bash
+        run: python -m pip install "harbor==${HARBOR_VERSION}"
+
+      - name: Pull SGLang runtime
+        shell: bash
+        env:
+          ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          ACR_USERNAME: ${{ secrets.AZURE_ACR_USER }}
+          ACR_PASSWORD: ${{ secrets.AZURE_ACR_PASSWORD }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${ACR_PASSWORD}" | docker login "${ACR_HOSTNAME}" --username "${ACR_USERNAME}" --password-stdin
+          docker pull "${RUNTIME_IMAGE}"
+
+      - name: Launch Dynamo model endpoint
+        shell: bash
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          docker run --detach \
+            --name "${MODEL_CONTAINER_NAME}" \
+            --gpus all \
+            --ipc host \
+            --network host \
+            --shm-size 32g \
+            --env HF_TOKEN \
+            --env HF_HOME=/home/dynamo/.cache/huggingface \
+            --env DYNAMO_API_KEY=dummy \
+            --env DYN_REQUEST_TRACE=1 \
+            --env DYN_REQUEST_TRACE_SINKS=jsonl \
+            --env DYN_REQUEST_TRACE_OUTPUT_PATH=/var/tmp/agent-harness/request-trace.jsonl \
+            --volume "${HF_CACHE_DIR}:/home/dynamo/.cache/huggingface" \
+            --volume "${RESULTS_DIR}:/var/tmp/agent-harness" \
+            "${RUNTIME_IMAGE}" \
+            ./examples/backends/sglang/launch/agg_agent.sh \
+            --model-path "${{ matrix.model_path }}" \
+            --served-model-name "${MODEL_ALIAS}" \
+            --tp 2 \
+            --tool-call-parser "${{ matrix.tool_parser }}" \
+            --reasoning-parser "${{ matrix.reasoning_parser }}" \
+            --default-thinking-mode "${{ matrix.thinking_mode }}" \
+            --revision "${{ matrix.revision }}"
+
+      - name: Wait for model readiness
+        timeout-minutes: 45
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 180); do
+            if ! docker inspect --format '{{.State.Running}}' "${MODEL_CONTAINER_NAME}" | grep -qx true; then
+              echo "Model container exited before becoming ready" >&2
+              docker logs "${MODEL_CONTAINER_NAME}" >&2
+              exit 1
+            fi
+            if curl --fail --silent --show-error \
+              --header 'Authorization: Bearer dummy' \
+              http://127.0.0.1:8000/v1/models \
+              | python3 -c 'import json,sys; data=json.load(sys.stdin); raise SystemExit(0 if any(item.get("id") == "agent-nightly" for item in data.get("data", [])) else 1)'; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Timed out waiting for ${MODEL_ALIAS}" >&2
+          docker logs "${MODEL_CONTAINER_NAME}" >&2
+          exit 1
+
+      - name: Run real Claude Code and Codex workloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          HOST_IP="$(ip -4 route get 1.1.1.1 | awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')"
+          if [[ -z "${HOST_IP}" ]]; then
+            echo "Could not determine a host address reachable from Docker task containers" >&2
+            exit 1
+          fi
+          export DYNAMO_BASE_URL="http://${HOST_IP}:8000"
+          export DYNAMO_MODEL_ALIAS="${MODEL_ALIAS}"
+          export DYNAMO_API_KEY=dummy
+          export DYN_REQUEST_TRACE_OUTPUT_PATH="${RESULTS_DIR}/request-trace.jsonl"
+          export TASK_IDS_FILE="${GITHUB_WORKSPACE}/benchmarks/agent_harness/nightly/task_ids.txt"
+          export RESULTS_DIR
+          export HARBOR_VERSION
+          export HARBOR_DATASET=swebenchpro@1.0
+          export HARBOR_CONCURRENCY=1
+          export RUN_NAME_SUFFIX="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.id }}"
+          ./benchmarks/agent_harness/nightly/run_harbor.sh
+
+      - name: Capture model logs
+        if: always()
+        shell: bash
+        run: docker logs "${MODEL_CONTAINER_NAME}" > "${RESULTS_DIR}/model.log" 2>&1 || true
+
+      - name: Upload agent workload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: agent-harness-${{ matrix.id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.RESULTS_DIR }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Stop model endpoint
+        if: always()
+        shell: bash
+        run: docker rm --force "${MODEL_CONTAINER_NAME}" || true
+
   trtllm-test:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [trtllm-build, resolve-source-sha, compute-release-mode]
@@ -1482,7 +1661,7 @@ jobs:
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     if: always()
-    needs: [vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-4-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, deploy-cleanup, rust-tests]
+    needs: [vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-4-gpu-test, sglang-h100-test, agent-harness-nightly, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, deploy-cleanup, rust-tests]
     permissions:
       contents: read
       actions: read   # grant the reusable notifier read access to list this run's jobs

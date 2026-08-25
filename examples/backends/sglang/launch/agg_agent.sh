@@ -6,7 +6,7 @@
 # and reasoning/tool-call parsing.
 # GPUs: 2 (default model uses --tp 2)
 
-set -e
+set -euo pipefail
 trap 'echo Cleaning up...; kill 0' EXIT
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
@@ -16,6 +16,10 @@ source "$SCRIPT_DIR/../../../common/launch_utils.sh" # print_launch_banner, wait
 # Default values
 MODEL="zai-org/GLM-4.7-Flash"
 TP=2
+SERVED_MODEL_NAME=""
+TOOL_CALL_PARSER="glm47"
+REASONING_PARSER="glm45"
+DEFAULT_THINKING_MODE="enabled"
 
 # Parse command line arguments
 EXTRA_ARGS=()
@@ -29,11 +33,31 @@ while [[ $# -gt 0 ]]; do
             TP="$2"
             shift 2
             ;;
+        --served-model-name)
+            SERVED_MODEL_NAME="$2"
+            shift 2
+            ;;
+        --tool-call-parser)
+            TOOL_CALL_PARSER="$2"
+            shift 2
+            ;;
+        --reasoning-parser)
+            REASONING_PARSER="$2"
+            shift 2
+            ;;
+        --default-thinking-mode)
+            DEFAULT_THINKING_MODE="$2"
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
             echo "  --model-path <name>  Specify model (default: $MODEL)"
             echo "  --tp <n>             Tensor parallelism (default: $TP)"
+            echo "  --served-model-name <name>  API model alias (default: model path)"
+            echo "  --tool-call-parser <name|none>  Dynamo tool parser (default: $TOOL_CALL_PARSER)"
+            echo "  --reasoning-parser <name|none>  Dynamo reasoning parser (default: $REASONING_PARSER)"
+            echo "  --default-thinking-mode <mode|none>  Default thinking mode (default: $DEFAULT_THINKING_MODE)"
             echo "  -h, --help           Show this help message"
             echo ""
             echo "Additional SGLang/Dynamo flags can be passed and will be forwarded"
@@ -45,6 +69,21 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ -z "$SERVED_MODEL_NAME" ]]; then
+    SERVED_MODEL_NAME="$MODEL"
+fi
+
+PARSER_ARGS=()
+if [[ "$TOOL_CALL_PARSER" != "none" ]]; then
+    PARSER_ARGS+=(--dyn-tool-call-parser "$TOOL_CALL_PARSER")
+fi
+if [[ "$REASONING_PARSER" != "none" ]]; then
+    PARSER_ARGS+=(--dyn-reasoning-parser "$REASONING_PARSER")
+fi
+if [[ "$DEFAULT_THINKING_MODE" != "none" ]]; then
+    PARSER_ARGS+=(--dyn-default-thinking-mode "$DEFAULT_THINKING_MODE")
+fi
 
 GPU_MEM_FRACTION=$(build_sglang_gpu_mem_args)
 
@@ -67,13 +106,12 @@ python3 -m dynamo.frontend \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
 python3 -m dynamo.sglang \
   --model-path "$MODEL" \
-  --served-model-name "$MODEL" \
+  --served-model-name "$SERVED_MODEL_NAME" \
   --page-size 16 \
   --tp "$TP" \
   --trust-remote-code \
   --radix-eviction-policy priority \
-  --dyn-reasoning-parser glm45 \
-  --dyn-tool-call-parser glm47 \
+  "${PARSER_ARGS[@]}" \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}' \
   --enable-metrics \
   "${EXTRA_ARGS[@]}" &

@@ -42,7 +42,9 @@ areas:
   - tests/frontend/grpc/
 - label: agents
   github_team: '@ai-dynamo/dynamo-agents-codeowners'
-  path_globs: []
+  path_globs:
+  - benchmarks/agent_harness/
+  - tests/agent_harness/
 - label: router
   github_team: '@ai-dynamo/dynamo-router-codeowners'
   path_globs:
