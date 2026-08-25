@@ -357,6 +357,10 @@ type FeaturesSpec struct {
 	Planner *runtime.RawExtension `json:"planner,omitempty"`
 
 	// KVRouter configures KV-cache-aware routing for the generated deployment.
+	// When enabled, DGDR sets DYN_ROUTER_MODE=kv on the generated Frontend.
+	// Settings in spec.overrides.dgd take precedence: an override can replace
+	// DYN_ROUTER_MODE or pass --router-mode. The flag takes precedence over the
+	// environment variable when both are present.
 	// +optional
 	KVRouter *KVRouterSpec `json:"kvRouter,omitempty"`
 

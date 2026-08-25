@@ -2372,7 +2372,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `planner` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | Planner contains the raw Planner configuration passed to the Planner service.<br />Its schema is defined by dynamo.planner.config.planner_config.PlannerConfig.<br />See https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/planner/planner-guide#plannerconfig-reference.<br />DGDR passes this object through without field-level validation; the Planner<br />service validates it at startup.<br />The presence of this field (non-null) enables the planner in the generated DGD. |  | Type: object <br />Optional: \{\} <br /> |
-| `kvRouter` _[KVRouterSpec](#kvrouterspec)_ | KVRouter configures KV-cache-aware routing for the generated deployment. |  | Optional: \{\} <br /> |
+| `kvRouter` _[KVRouterSpec](#kvrouterspec)_ | KVRouter configures KV-cache-aware routing for the generated deployment.<br />When enabled, DGDR sets DYN_ROUTER_MODE=kv on the generated Frontend.<br />Settings in spec.overrides.dgd take precedence: an override can replace<br />DYN_ROUTER_MODE or pass --router-mode. The flag takes precedence over the<br />environment variable when both are present. |  | Optional: \{\} <br /> |
 | `mocker` _[MockerSpec](#mockerspec)_ | Mocker configures the simulated (mocker) backend for testing without GPUs. |  | Optional: \{\} <br /> |
 
 
