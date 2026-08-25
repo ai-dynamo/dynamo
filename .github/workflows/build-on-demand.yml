@@ -37,15 +37,9 @@ env:
 
 jobs:
 
-  novolume-hook-latency:
+  novolume-hook-repeated:
     if: inputs.standard_hook_canary == 'novolume-latency'
-    name: No-volume hook ${{ matrix.shape }} canary
-    strategy:
-      fail-fast: false
-      matrix:
-        shape:
-          - repeated
-          - consolidated
+    name: No-volume self-action canary
     runs-on: prod-tester-amd-gpu-v2
     timeout-minutes: 20
     container:
@@ -56,15 +50,35 @@ jobs:
         run: |
           set -euo pipefail
           test "$(nvidia-smi -L | wc -l | tr -d ' ')" = "1"
-          echo "shape=${{ matrix.shape }} runner=${{ runner.name }} job_pod=$(hostname)"
+          echo "shape=self-action runner=${{ runner.name }} job_pod=$(hostname)"
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Run repeated composite probes
-        if: matrix.shape == 'repeated'
         uses: $/.github/actions/hook-canary-repeated
-      - name: Run consolidated composite probes
-        if: matrix.shape == 'consolidated'
-        uses: $/.github/actions/hook-canary-consolidated
+
+  novolume-hook-consolidated:
+    if: inputs.standard_hook_canary == 'novolume-latency'
+    name: No-volume inline canary
+    runs-on: prod-tester-amd-gpu-v2
+    timeout-minutes: 20
+    container:
+      image: nvcr.io/nvidia/cuda:12.8.1-base-ubuntu22.04
+    steps:
+      - name: Verify no-volume GPU runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(nvidia-smi -L | wc -l | tr -d ' ')" = "1"
+          echo "shape=inline runner=${{ runner.name }} job_pod=$(hostname)"
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Run consolidated probes
+        shell: bash
+        run: |
+          set -euo pipefail
+          for probe in $(seq -w 1 10); do
+            echo "CANARY_PROBE_${probe}=$(date +%s%3N)" >> "$GITHUB_ENV"
+          done
 
   standard-hook-latency:
     if: inputs.standard_hook_canary == 'latency'
