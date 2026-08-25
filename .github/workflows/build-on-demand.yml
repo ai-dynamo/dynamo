@@ -28,6 +28,7 @@ on:
         options:
           - none
           - packing
+          - guard
         default: none
 
 env:
@@ -147,6 +148,31 @@ jobs:
         run: date +%s%3N
       - name: Probe 10
         run: date +%s%3N
+
+  gpu-dind-guard:
+    if: inputs.gpu_dind_canary == 'guard'
+    name: GPU DinD explicit all guard lane ${{ matrix.lane }}
+    runs-on: canary-tester-amd-gpu-2-dind
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        lane: [0, 1]
+    steps:
+      - name: Constrain explicit all-GPU request
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="$(tr ',' '\n' < /var/run/gpu-assignment | sort)"
+          actual="$(docker run --rm --gpus all \
+            nvcr.io/nvidia/cuda:12.8.1-base-ubuntu22.04 \
+            nvidia-smi --query-gpu=uuid --format=csv,noheader | sort)"
+          echo "lane=${{ matrix.lane }}"
+          echo "expected:"; echo "${expected}"
+          echo "actual:"; echo "${actual}"
+          test "$(echo "${actual}" | wc -l | tr -d ' ')" = "2"
+          test "${actual}" = "${expected}"
 
   init:
     runs-on: ubuntu-slim
