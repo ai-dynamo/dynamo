@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the DGDR v1beta2 Candidate-to-DGD materializer.
+"""Unit tests for the direct Sweeper-to-DGD renderer.
 
 The candidate fixtures below are copied verbatim from a real
 aisimulate.sweeper.Sweeper.run() invocation (scalar and Pareto goals), not
@@ -72,8 +72,7 @@ def test_real_candidate_strategy_tep_on_trtllm_raises_materialization_error() ->
     Sweeper.run() output can legally produce exactly this combination, so
     the materializer must turn this into an explicit MaterializationError
     -- not crash uninformatively and not silently fall back to a different
-    strategy, per the DEP: "A materialization failure is reported as a
-    failed candidate outcome and does not create a DGDC."
+    strategy.
     """
     with pytest.raises(MaterializationError, match="not supported"):
         materialize_dgd_from_candidate(REAL_CANDIDATE_TEP_TRTLLM, image=_IMAGE)
@@ -105,9 +104,7 @@ def test_evaluation_context_fields_never_appear_in_the_dgd_spec() -> None:
     all_args: list[str] = []
     for component in result.dgd["spec"]["components"]:
         if component.get("type") == "worker":
-            all_args.extend(
-                component["podTemplate"]["spec"]["containers"][0]["args"]
-            )
+            all_args.extend(component["podTemplate"]["spec"]["containers"][0]["args"])
 
     leak_indicating_substrings = ("concurrency", "kv-load-ratio", "kv_load_ratio")
     for arg in all_args:
@@ -134,11 +131,15 @@ def test_kv_load_ratio_pareto_candidates_carry_distinct_experimental_context() -
         "expected identical DGD specs for this test (that's the point -- "
         "identity must not rely on the DGD spec alone)"
     )
-    assert result_a.experimental["kv_load_ratio"] != result_b.experimental["kv_load_ratio"]
+    assert (
+        result_a.experimental["kv_load_ratio"] != result_b.experimental["kv_load_ratio"]
+    )
 
 
 def test_unknown_backend_raises_materialization_error() -> None:
-    candidate = dict(REAL_CANDIDATE_TEP_TRTLLM, backend="not-a-real-backend", strategy="tp")
+    candidate = dict(
+        REAL_CANDIDATE_TEP_TRTLLM, backend="not-a-real-backend", strategy="tp"
+    )
     with pytest.raises(MaterializationError, match="no CONFIG_MODIFIERS entry"):
         materialize_dgd_from_candidate(candidate, image=_IMAGE)
 
