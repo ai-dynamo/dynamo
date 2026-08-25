@@ -137,6 +137,36 @@ fn test_random_baseline_keeps_sparse_lora_in_rate_window() {
 }
 
 #[test]
+fn test_random_baseline_keeps_warm_lora_after_rate_window_expires() {
+    // The first request makes the adapter resident. Once its sole arrival ages out of the
+    // 90-second window (30 three-second ticks), Random must retain a cold-start route for that
+    // resident adapter instead of dropping the routing entry.
+    let config = SimConfig {
+        num_backends: 1,
+        slots_per_backend: 1,
+        total_loras: 1,
+        concurrent_loras: 1,
+        total_ticks: 32,
+        ..Default::default()
+    };
+    let mut loads = vec![0; config.total_ticks];
+    loads[0] = 1;
+    let schedules = vec![LoraLoadSchedule {
+        lora_name: "warm-random-lora".to_string(),
+        active_window: (0, config.total_ticks),
+        peak_load: 1,
+        ramp_up: 0,
+        steady: 0,
+        ramp_down: 0,
+        per_tick_loads: Some(loads),
+    }];
+
+    let metrics = run_random_simulation(&config, &schedules);
+
+    assert_eq!(metrics.per_tick_lora_removals, vec![0; config.total_ticks]);
+}
+
+#[test]
 fn test_request_path_handles_empty_worker_set() {
     let config = SimConfig {
         num_backends: 0,
