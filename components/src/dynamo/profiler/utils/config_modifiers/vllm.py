@@ -424,6 +424,55 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         return cfg.model_dump()
 
     @classmethod
+    def set_config_kv_cache(
+        cls,
+        config: dict,
+        block_size: int,
+        memory_fraction: float,
+        prefix_caching: bool,
+        component_type: SubComponentType = SubComponentType.DECODE,
+    ) -> dict:
+        """Apply KV-cache block size, memory budget, and prefix-caching policy.
+
+        Mirrors set_config_tp_size's shape: read the searched Candidate values,
+        write the corresponding vLLM flags, and leave everything else in the
+        worker's existing args untouched.
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_component_from_config(
+            cfg, backend="vllm", sub_component_type=component_type
+        )
+
+        args = validate_and_get_worker_args(worker_service, backend="vllm")
+        args = break_arguments(args)
+
+        args = set_argument_value(args, "--block-size", str(block_size))
+        args = set_argument_value(
+            args, "--gpu-memory-utilization", str(memory_fraction)
+        )
+
+        # --enable-prefix-caching / --no-enable-prefix-caching are bare
+        # boolean flags, not "--key value" pairs, so remove_valued_arguments
+        # (which deletes two tokens) does not apply here -- confirmed by a
+        # regression test where a trailing boolean flag with no following
+        # token silently failed to be removed. Matches the plain list.remove
+        # pattern convert_config already uses for this same flag pair.
+        if "--enable-prefix-caching" in args:
+            args.remove("--enable-prefix-caching")
+        if "--no-enable-prefix-caching" in args:
+            args.remove("--no-enable-prefix-caching")
+        args = append_argument(
+            args,
+            "--enable-prefix-caching"
+            if prefix_caching
+            else "--no-enable-prefix-caching",
+        )
+
+        get_main_container(worker_service).args = args
+
+        return cfg.model_dump()
+
+    @classmethod
     def set_config_tep_size(
         cls,
         config: dict,
