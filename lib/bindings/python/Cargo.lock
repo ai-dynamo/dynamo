@@ -1682,6 +1682,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "dynamo-agent-rt"
+version = "0.1.0"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=b7ba63adc734e8c9b84ae96852afb208e80ec107#b7ba63adc734e8c9b84ae96852afb208e80ec107"
+dependencies = [
+ "blake3",
+ "dynamo-protocols",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "dynamo-backend-common"
 version = "1.5.0"
 dependencies = [
@@ -1795,6 +1809,7 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dialoguer",
+ "dynamo-agent-rt",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -1960,8 +1975,7 @@ dependencies = [
 [[package]]
 name = "dynamo-protocols"
 version = "5.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97fd951c32c033f4f220b6087db91d7f7d475f1bf1f886c8e60798ac1cf4cc9a"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=b7ba63adc734e8c9b84ae96852afb208e80ec107#b7ba63adc734e8c9b84ae96852afb208e80ec107"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -4049,119 +4063,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
-]
-
-[[package]]
-name = "kvbm-common"
-version = "1.5.0"
-dependencies = [
- "dynamo-tokens",
- "serde",
-]
-
-[[package]]
-name = "kvbm-config"
-version = "1.5.0"
-dependencies = [
- "anyhow",
- "dynamo-memory",
- "figment",
- "nix 0.30.1",
- "serde",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "validator",
- "velo",
-]
-
-[[package]]
-name = "kvbm-engine"
-version = "1.5.0"
-dependencies = [
- "anyhow",
- "aws-config",
- "aws-sdk-s3",
- "bytes",
- "chrono",
- "crossbeam-queue",
- "dashmap",
- "derive_builder",
- "dynamo-memory",
- "futures",
- "kvbm-common",
- "kvbm-config",
- "kvbm-logical",
- "kvbm-physical",
- "oneshot",
- "parking_lot",
- "rayon",
- "rmp-serde",
- "serde",
- "serde_json",
- "tokio",
- "tokio-rayon",
- "tokio-stream",
- "tracing",
- "uuid",
- "velo",
-]
-
-[[package]]
-name = "kvbm-kernels"
-version = "1.5.0"
-dependencies = [
- "cudarc",
-]
-
-[[package]]
-name = "kvbm-logical"
-version = "1.5.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "bincode 2.0.1",
- "bytes",
- "derive_builder",
- "dynamo-tokens",
- "futures",
- "indexmap 2.14.0",
- "lru 0.16.4",
- "parking_lot",
- "prometheus",
- "rmp-serde",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tracing",
- "xxhash-rust",
-]
-
-[[package]]
-name = "kvbm-physical"
-version = "1.5.0"
-dependencies = [
- "aligned-vec",
- "anyhow",
- "bincode 2.0.1",
- "blake3",
- "cudarc",
- "derive-getters",
- "derive_builder",
- "dynamo-memory",
- "futures",
- "kvbm-common",
- "kvbm-kernels",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
- "validator",
- "velo",
 ]
 
 [[package]]
