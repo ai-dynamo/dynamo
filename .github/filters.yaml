@@ -53,6 +53,8 @@ docs:
   - '.coveragerc'
   - '.claude/**'
   - '.agents/**'
+  # Codex role configs for the optimization skill pack; agent guidance, no CI surface.
+  - '.codex/**'
   # Canonical agent skills live in .agents/skills; root skills/ is a symlink there.
   - 'skills/**'
   # Sidecar documentation is not part of the Fern docs site.
@@ -116,6 +118,7 @@ ignore:
   - '.github/dco.yml'
   - '.github/secret_scanning.yml'
   - '.github/allurerc.mjs'
+  - '.github/actionlint.yaml'
   - 'container/Dockerfile.docs'
   - 'container/run.sh'
   - 'container/use-sccache.sh'

@@ -183,6 +183,14 @@ pub mod nats {
         /// When set, a custom TLS config with this CA is applied to the NATS connection.
         pub const NATS_TLS_CA_CERT_PATH: &str = "NATS_TLS_CA_CERT_PATH";
 
+        /// Path to the PEM client certificate presented to the NATS server for
+        /// mutual TLS (mTLS). Must be set together with `NATS_TLS_CLIENT_KEY_PATH`.
+        pub const NATS_TLS_CLIENT_CERT_PATH: &str = "NATS_TLS_CLIENT_CERT_PATH";
+
+        /// Path to the PEM client private key for NATS mutual TLS (mTLS).
+        /// Must be set together with `NATS_TLS_CLIENT_CERT_PATH`.
+        pub const NATS_TLS_CLIENT_KEY_PATH: &str = "NATS_TLS_CLIENT_KEY_PATH";
+
         /// Disable TLS certificate verification. Set to a truthy value to skip.
         /// WARNING: Only for local development. Never use in production.
         pub const NATS_TLS_INSECURE: &str = "NATS_TLS_INSECURE";
@@ -339,11 +347,10 @@ pub mod llm {
     /// Master switch for the `nvext` extension protocol on the frontend.
     /// The protocol is **enabled by default**; this variable disables it.
     /// Truthy values (`1` / `true` / `yes` / `on`, case-insensitive) cause
-    /// the frontend to drop `request.nvext` at handler entry, ignore the
-    /// routing-override headers (`x-dynamo-worker-instance-id`,
-    /// `x-dynamo-prefill-instance-id`, `x-dynamo-dp-rank`,
-    /// `x-dynamo-prefill-dp-rank`), and silently ignore the response-side
-    /// `extra_fields` opt-in.
+    /// the frontend to drop non-salt request NvExt fields, ignore supported
+    /// routing-override headers, and silently ignore the response-side
+    /// `extra_fields` opt-in. Cache isolation is exempt: supported
+    /// `cache_salt` and `x-tenant-id` inputs remain active.
     pub const DYN_DISABLE_FRONTEND_NVEXT: &str = "DYN_DISABLE_FRONTEND_NVEXT";
 
     /// Ignore unknown OpenAI frontend request fields. Unknown fields are dropped,
@@ -682,6 +689,10 @@ pub mod router {
 
 /// Request plane transport environment variables
 pub mod request_plane {
+    /// Request-plane transport selection: `"tcp"` (default) or `"nats"`. Read by the
+    /// runtime in `distributed.rs` and by the Python launch layer.
+    pub const DYN_REQUEST_PLANE: &str = "DYN_REQUEST_PLANE";
+
     /// Preferred payload codec advertised by every request-plane endpoint in this process.
     /// The process-wide value is cached on first use and defaults to "msgpack". Outbound requests
     /// use the destination endpoint's advertised codec, or "json" for a legacy destination.
@@ -722,6 +733,19 @@ pub mod tcp_response_stream {
         /// address is used. Useful when connecting by IP to a server whose certificate
         /// uses a DNS SAN.
         pub const DYN_TCP_TLS_SERVER_NAME: &str = "DYN_TCP_TLS_SERVER_NAME";
+
+        /// Path to the PEM client certificate presented by TCP clients to the
+        /// server for mutual TLS (mTLS). Must be set together with
+        /// `DYN_TCP_TLS_CLIENT_KEY_PATH`.
+        pub const DYN_TCP_TLS_CLIENT_CERT_PATH: &str = "DYN_TCP_TLS_CLIENT_CERT_PATH";
+
+        /// Path to the PEM private key for the TCP client certificate (mTLS).
+        pub const DYN_TCP_TLS_CLIENT_KEY_PATH: &str = "DYN_TCP_TLS_CLIENT_KEY_PATH";
+
+        /// Path to the PEM CA certificate the TCP server uses to verify client
+        /// certificates. When set, the server requires clients to present a
+        /// certificate signed by this CA (mTLS is enforced).
+        pub const DYN_TCP_TLS_CLIENT_CA_CERT_PATH: &str = "DYN_TCP_TLS_CLIENT_CA_CERT_PATH";
 
         /// TLS handshake timeout in seconds (default: 3).
         pub const DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS: &str = "DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS";
@@ -879,6 +903,8 @@ mod tests {
             nats::auth::NATS_AUTH_CREDENTIALS_FILE,
             nats::stream::DYN_NATS_STREAM_MAX_AGE,
             nats::tls::NATS_TLS_CA_CERT_PATH,
+            nats::tls::NATS_TLS_CLIENT_CERT_PATH,
+            nats::tls::NATS_TLS_CLIENT_KEY_PATH,
             nats::tls::NATS_TLS_INSECURE,
             // ETCD
             etcd::ETCD_ENDPOINTS,
@@ -977,6 +1003,7 @@ mod tests {
             router::DYN_ROUTER_QUEUE_POLICY,
             router::DYN_ROUTER_POLICY_CONFIG,
             router::DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
+            request_plane::DYN_REQUEST_PLANE,
             request_plane::DYN_REQUEST_PLANE_CODEC,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
@@ -986,6 +1013,9 @@ mod tests {
             tcp_response_stream::tls::DYN_TCP_TLS_CA_CERT_PATH,
             tcp_response_stream::tls::DYN_TCP_TLS_INSECURE,
             tcp_response_stream::tls::DYN_TCP_TLS_SERVER_NAME,
+            tcp_response_stream::tls::DYN_TCP_TLS_CLIENT_CERT_PATH,
+            tcp_response_stream::tls::DYN_TCP_TLS_CLIENT_KEY_PATH,
+            tcp_response_stream::tls::DYN_TCP_TLS_CLIENT_CA_CERT_PATH,
             tcp_response_stream::tls::DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS,
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
