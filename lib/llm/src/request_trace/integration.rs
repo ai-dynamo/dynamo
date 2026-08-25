@@ -8,6 +8,7 @@ use dynamo_runtime::pipeline::Context;
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
 
+use crate::protocols::common::FinishReason as BackendFinishReason;
 use crate::protocols::common::preprocessor::PreprocessedRequest;
 use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::openai::{
@@ -27,6 +28,105 @@ pub(crate) struct RequestEndTraceState {
     request: RequestTraceRequestEndState,
 }
 
+/// Protocol-neutral observations shared by request-end trace producers.
+#[derive(Clone)]
+pub(crate) struct RequestEndTraceObserver {
+    request_tracker: Arc<RequestTracker>,
+    finish_reason_metadata: Option<SharedFinishReasonMetadata>,
+}
+
+impl RequestEndTraceObserver {
+    pub(crate) fn tracker(&self) -> &RequestTracker {
+        &self.request_tracker
+    }
+
+    pub(crate) fn records_finish_reason_metadata(&self) -> bool {
+        self.finish_reason_metadata.is_some()
+    }
+
+    pub(crate) fn observe_backend_chunk(
+        &self,
+        choice_index: Option<u32>,
+        finish_reason: Option<&BackendFinishReason>,
+        stop_reason: Option<&dynamo_protocols::types::StopReason>,
+        input_tokens: Option<usize>,
+        output_tokens: usize,
+        cached_tokens: Option<usize>,
+    ) {
+        super::record_backend_finish_reason_metadata(
+            self.finish_reason_metadata.as_ref(),
+            choice_index,
+            finish_reason,
+            stop_reason,
+        );
+        super::record_llm_metric_tokens(
+            Some(&self.request_tracker),
+            input_tokens,
+            output_tokens,
+            cached_tokens,
+        );
+    }
+
+    pub(crate) fn observe_token_usage(
+        &self,
+        input_tokens: Option<usize>,
+        output_tokens: usize,
+        cached_tokens: Option<usize>,
+    ) {
+        super::record_llm_metric_tokens(
+            Some(&self.request_tracker),
+            input_tokens,
+            output_tokens,
+            cached_tokens,
+        );
+    }
+
+    pub(crate) fn observe_chat_finish_reason_from_backend(
+        &self,
+        choice_index: u32,
+        finish_reason: BackendFinishReason,
+    ) -> bool {
+        let Ok(finish_reason) = finish_reason.into_openai_chat_finish_reason() else {
+            return false;
+        };
+        if let Some(metadata) = self.finish_reason_metadata.as_ref() {
+            metadata.record_choice_finish_reason(choice_index, finish_reason);
+            metadata.reconcile_tool_call_finish_reason(choice_index);
+        }
+        true
+    }
+
+    pub(crate) fn observe_tool_call(
+        &self,
+        choice_index: u32,
+        tool_call_index: u32,
+        id: Option<&str>,
+        name: Option<&str>,
+    ) {
+        if let Some(metadata) = self.finish_reason_metadata.as_ref() {
+            metadata.record_tool_call(choice_index, tool_call_index, id, name);
+        }
+    }
+
+    pub(crate) fn reconcile_tool_call_finish_reason(&self, choice_index: u32) {
+        if let Some(metadata) = self.finish_reason_metadata.as_ref() {
+            metadata.reconcile_tool_call_finish_reason(choice_index);
+        }
+    }
+
+    fn observe_chat_response(&self, response: &Annotated<NvCreateChatCompletionStreamResponse>) {
+        if let Some(metadata) = self.finish_reason_metadata.as_ref() {
+            super::record_chat_finish_reason_metadata(metadata, response);
+        }
+    }
+
+    fn observe_completion_response(&self, response: &Annotated<NvCreateCompletionResponse>) {
+        if let Some(metadata) = self.finish_reason_metadata.as_ref() {
+            super::record_completion_finish_reason_metadata(metadata, response);
+        }
+    }
+}
+
 impl RequestEndTraceState {
     pub(super) fn new(
         agent: Option<AgentContextTraceState>,
@@ -42,14 +142,14 @@ impl RequestEndTraceState {
         }
     }
 
-    pub(super) fn request_tracker(&self) -> Arc<RequestTracker> {
-        self.request.request_tracker.clone()
-    }
-
-    pub(super) fn finish_reason_metadata(&self) -> Option<SharedFinishReasonMetadata> {
-        self.agent
-            .as_ref()
-            .map(|state| state.finish_reason_metadata.clone())
+    pub(crate) fn observer(&self) -> RequestEndTraceObserver {
+        RequestEndTraceObserver {
+            request_tracker: self.request.request_tracker.clone(),
+            finish_reason_metadata: self
+                .agent
+                .as_ref()
+                .map(|state| state.finish_reason_metadata.clone()),
+        }
     }
 }
 
@@ -162,12 +262,10 @@ fn build_request_end_trace_state_for_policy(
     ))
 }
 
-pub(crate) fn finish_reason_metadata_handle(
+pub(crate) fn request_end_trace_observer(
     trace_state: &Option<RequestEndTraceState>,
-) -> Option<SharedFinishReasonMetadata> {
-    trace_state
-        .as_ref()
-        .and_then(RequestEndTraceState::finish_reason_metadata)
+) -> Option<RequestEndTraceObserver> {
+    trace_state.as_ref().map(RequestEndTraceState::observer)
 }
 
 fn wrap_request_end_stream<Resp>(
@@ -213,12 +311,12 @@ pub(crate) fn wrap_chat_request_end_stream(
     trace_state: Option<RequestEndTraceState>,
     request_id: String,
 ) -> Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>> {
-    let Some(finish_reason_metadata) = finish_reason_metadata_handle(&trace_state) else {
+    let Some(observer) = request_end_trace_observer(&trace_state) else {
         return wrap_request_end_stream(stream, trace_state, request_id);
     };
 
     let stream = stream.map(move |response| {
-        super::record_chat_finish_reason_metadata(&finish_reason_metadata, &response);
+        observer.observe_chat_response(&response);
         response
     });
     wrap_request_end_stream(Box::pin(stream), trace_state, request_id)
@@ -229,12 +327,12 @@ pub(crate) fn wrap_completion_request_end_stream(
     trace_state: Option<RequestEndTraceState>,
     request_id: String,
 ) -> Pin<Box<dyn Stream<Item = Annotated<NvCreateCompletionResponse>> + Send>> {
-    let Some(finish_reason_metadata) = finish_reason_metadata_handle(&trace_state) else {
+    let Some(observer) = request_end_trace_observer(&trace_state) else {
         return wrap_request_end_stream(stream, trace_state, request_id);
     };
 
     let stream = stream.map(move |response| {
-        super::record_completion_finish_reason_metadata(&finish_reason_metadata, &response);
+        observer.observe_completion_response(&response);
         response
     });
     wrap_request_end_stream(Box::pin(stream), trace_state, request_id)
