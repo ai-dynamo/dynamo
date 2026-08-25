@@ -74,7 +74,7 @@ export const MAIN_TOT: BackendPins = {
   sglang: "0.5.18",
   trtllm: "1.3.0rc24",
   vllm: "0.27.1",
-  nixlSglang: "1.3.2",
+  nixlSglang: "1.4.0",
   nixlTrtllm: "1.3.1",
   nixlVllm: "1.3.2",
 };

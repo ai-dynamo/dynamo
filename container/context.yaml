@@ -140,7 +140,7 @@ sglang:
   # (see templates/dev.Dockerfile). The CUDA runtime re-pins the unversioned
   # upstream lmsysorg/sglang NIXL packages to this same release; its wheel COPY
   # remains narrowed to ai_dynamo*.whl so the SDK build doesn't leak in.
-  nixl_ref: v1.3.2
+  nixl_ref: v1.4.0
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"
