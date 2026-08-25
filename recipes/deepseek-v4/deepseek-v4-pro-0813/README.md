@@ -6,10 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 Dynamo + vLLM recipe for **DeepSeek-V4-Pro-0813** (native FP8) on **GB200**, tuned for an
 agentic coding and tool-use workload with long shared prefixes.
 
-This is a different checkpoint from the undated `deepseek-ai/DeepSeek-V4-Pro` recipes under
-`recipes/deepseek-v4/`: 0813 ships native FP8 weights, uses DSpark speculative decoding
-rather than MTP, and requires a different MoE backend on aarch64. The configurations are not
-interchangeable, so they live in separate trees.
+This is a different checkpoint from the undated `deepseek-ai/DeepSeek-V4-Pro` recipes in the
+sibling [`deepseek-v4-pro/`](../deepseek-v4-pro/) directory: 0813 ships native FP8 weights,
+uses DSpark speculative decoding rather than MTP, and requires a different MoE backend on
+aarch64. The two are **not** interchangeable -- do not mix manifests between them.
 
 ## Configurations
 
@@ -38,7 +38,7 @@ GB200 is 4 GPUs per node, so TP8 spans two nodes (`multinode.nodeCount: 2`). One
 
 - A Kubernetes cluster with **8 GB200 GPUs across 2 nodes** available to one worker
 - The Dynamo Kubernetes operator installed — see
-  [the Kubernetes quickstart](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)
+  [the Kubernetes quickstart](../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx)
 - A `model-cache` PVC with at least **1 TiB** free. The checkpoint is 892.7 GB.
 - Hugging Face access to `deepseek-ai/DeepSeek-V4-Pro-0813`
 

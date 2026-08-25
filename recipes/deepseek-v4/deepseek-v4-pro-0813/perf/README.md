@@ -38,7 +38,7 @@ git lfs install
 git lfs pull --include "recipes/kimi-k2.6/perf/traces/*"
 python3 -c "
 import json
-src='recipes/deepseek-v4-pro-0813/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl'
+src='recipes/deepseek-v4/deepseek-v4-pro-0813/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl'
 for line in open(src):
     print(json.dumps({'timestamp': 0, **json.loads(line)}))
 " > mooncake_agentic.jsonl
@@ -80,7 +80,7 @@ Keep `pvc-helper` around for fetching artifacts later, or
 operating point — aggregated is at its SLA knee at c8 — then:
 
 ```bash
-kubectl apply -f recipes/deepseek-v4-pro-0813/perf/perf.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro-0813/perf/perf.yaml -n ${NAMESPACE}
 ```
 
 It waits for the model to serve, warms up, replays the whole trace, and writes artifacts to
