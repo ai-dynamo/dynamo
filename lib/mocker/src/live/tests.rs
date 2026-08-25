@@ -1,14 +1,29 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use super::*;
 use crate::common::handoff::HandoffId;
-use crate::common::protocols::{EngineType, WorkerType};
+use crate::common::protocols::{EngineType, FpmPublisher, FpmSink, WorkerType};
 use dynamo_kv_router::protocols::StorageTier;
 
 struct NoopKvSink;
+
+#[derive(Default)]
+struct CountingFpmSink(AtomicUsize);
+
+impl FpmSink for CountingFpmSink {
+    fn publish(
+        &self,
+        _snapshot: crate::common::protocols::ForwardPassSnapshot,
+    ) -> anyhow::Result<()> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
 
 impl crate::common::protocols::KvCacheEventSink for NoopKvSink {
     fn publish(&self, _event: dynamo_kv_router::protocols::KvCacheEvent) -> anyhow::Result<()> {
@@ -88,6 +103,11 @@ async fn submit_and_finish(engine: &LiveEngine, tokens: Vec<u32>, uuid: Uuid) {
     })
     .await
     .expect("request should complete");
+    // The ordered output lane acknowledges terminal delivery before the
+    // grouped pass dispatcher publishes its completion metrics. Wait for the
+    // whole boundary so the assertion below observes the same semantic point
+    // as the historical single-rank live boundary.
+    engine.drain_completion_boundary().await.unwrap();
     wait_for_idle(engine).await;
 }
 
@@ -109,6 +129,109 @@ async fn sglang_live_metrics_retain_the_last_prefill_cache_observation() {
     assert_eq!(miss.sglang_cache_hit_tokens, 0);
     assert!(miss.sglang_cache_total_tokens > 0);
     engine.shutdown().await.unwrap();
+}
+
+async fn assert_mtp_lifecycle_drains_through_live_boundary(engine_type: EngineType) {
+    let mut mtp_args = args(engine_type);
+    mtp_args.aic_nextn = Some(2);
+    mtp_args.aic_nextn_accept_rates = Some("1,1".to_string());
+    let fpm = Arc::new(CountingFpmSink::default());
+    let engine = LiveEngine::start_with_options(
+        mtp_args,
+        0,
+        LiveEngineOptions {
+            fpm_publisher: FpmPublisher::new(Some(Arc::clone(&fpm) as Arc<dyn FpmSink>)),
+            ..LiveEngineOptions::default()
+        },
+    )
+    .unwrap();
+
+    let mut submissions = Vec::new();
+    for ordinal in 0..8_u128 {
+        let engine = engine.clone();
+        submissions.push(tokio::spawn(async move {
+            let first_token = 1_000 + ordinal as u32 * 10;
+            let output_token_ids = (0..7)
+                .map(|offset| first_token + offset)
+                .collect::<Vec<_>>();
+            let request = engine
+                .submit(DirectRequest {
+                    tokens: vec![ordinal as u32 + 1; 5],
+                    max_output_tokens: output_token_ids.len(),
+                    output_token_ids: Some(output_token_ids.clone()),
+                    uuid: Some(Uuid::from_u128(10_000 + ordinal)),
+                    ..Default::default()
+                })
+                .await?;
+            anyhow::Ok((request, output_token_ids))
+        }));
+    }
+
+    for submission in submissions {
+        let (mut request, expected) = submission.await.unwrap().unwrap();
+        let mut observed = Vec::new();
+        while let Some(output) = request.recv().await {
+            if let Some(token_id) = output.token_id {
+                observed.push(token_id);
+            }
+            if output.completed {
+                break;
+            }
+        }
+        assert_eq!(observed, expected);
+        assert!(request.recv().await.is_none());
+    }
+
+    wait_for_idle(&engine).await;
+    let passes = fpm.0.load(Ordering::Relaxed);
+    assert!(passes > 0);
+    assert!(
+        passes < 7,
+        "MTP should emit seven planned tokens in fewer than seven forward passes, got {passes}"
+    );
+    engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn attention_dp_live_handles_share_one_grouped_engine() {
+    let mut grouped_args = args(EngineType::Vllm);
+    grouped_args.dp_size = 2;
+    let engines = LiveEngine::start_grouped_with_configs(
+        grouped_args,
+        vec![LiveEngineConfig::default(), LiveEngineConfig::default()],
+    )
+    .unwrap();
+
+    assert_eq!(engines.len(), 2);
+    assert!(Arc::ptr_eq(
+        &engines[0].inner.group,
+        &engines[1].inner.group
+    ));
+
+    let rank0 = engines[0].submit(DirectRequest {
+        tokens: vec![1, 2, 3, 4],
+        max_output_tokens: 1,
+        output_token_ids: Some(vec![101]),
+        dp_rank: 0,
+        ..Default::default()
+    });
+    let rank1 = engines[1].submit(DirectRequest {
+        tokens: vec![5, 6, 7, 8],
+        max_output_tokens: 1,
+        output_token_ids: Some(vec![202]),
+        dp_rank: 1,
+        ..Default::default()
+    });
+    let (mut rank0, mut rank1) = tokio::join!(rank0, rank1);
+    let rank0 = rank0.as_mut().unwrap().recv().await.unwrap();
+    let rank1 = rank1.as_mut().unwrap().recv().await.unwrap();
+    assert_eq!(rank0.token_id, Some(101));
+    assert_eq!(rank1.token_id, Some(202));
+    assert!(rank0.completed);
+    assert!(rank1.completed);
+
+    engines[0].shutdown().await.unwrap();
+    engines[1].shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -145,6 +268,16 @@ async fn streams_planned_tokens_to_the_owning_request() {
         assert!(request.recv().await.is_none());
         assert_eq!(engine.active_request_count(), 0);
     }
+}
+
+#[tokio::test]
+async fn vllm_mtp_lifecycle_drains_through_live_boundary() {
+    assert_mtp_lifecycle_drains_through_live_boundary(EngineType::Vllm).await;
+}
+
+#[tokio::test]
+async fn sglang_mtp_lifecycle_drains_through_live_boundary() {
+    assert_mtp_lifecycle_drains_through_live_boundary(EngineType::Sglang).await;
 }
 
 #[tokio::test]
@@ -404,7 +537,7 @@ async fn late_request_cancellation_cannot_cancel_a_reused_handoff_id() {
         .unwrap();
         let handoff_id = HandoffId::from(Uuid::new_v4());
         let (old_control, mut old_events) = engine.register_handoff(handoff_id).unwrap();
-        let (old_registration, old_request) = engine
+        let (old_registration, mut old_request) = engine
             .prepare_request(DirectRequest {
                 tokens: vec![1, 2, 3, 4],
                 max_output_tokens: 1,
@@ -423,6 +556,17 @@ async fn late_request_cancellation_cannot_cancel_a_reused_handoff_id() {
         ));
         old_control.activate_destination().await.unwrap();
 
+        // Completion is not visible until the gated route has acknowledged
+        // the terminal output. Keep the LiveRequest object itself alive so
+        // dropping it after handoff-ID reuse still exercises the stale
+        // cancellation guard.
+        gate_tx.send(true).unwrap();
+        let old_output = tokio::time::timeout(Duration::from_secs(1), old_request.recv())
+            .await
+            .expect("old destination output timed out")
+            .expect("old destination output stream closed");
+        assert!(old_output.completed);
+
         let mut metrics = engine.metrics_receiver();
         tokio::time::timeout(Duration::from_secs(3), async {
             loop {
@@ -435,6 +579,7 @@ async fn late_request_cancellation_cannot_cancel_a_reused_handoff_id() {
         })
         .await
         .expect("old destination should finish before handoff ID reuse");
+        gate_tx.send(false).unwrap();
         drop(old_events);
         drop(old_control);
 
@@ -479,13 +624,12 @@ async fn late_request_cancellation_cannot_cancel_a_reused_handoff_id() {
 }
 
 #[tokio::test]
-async fn queued_output_does_not_reach_a_reused_request_id() {
+async fn pass_boundary_waits_for_gated_route_delivery_before_id_reuse() {
     let (gate_tx, gate_rx) = watch::channel(false);
     let engine =
         LiveEngine::start_with_output_gate(args(EngineType::Vllm), 0, Some(gate_rx), 2).unwrap();
-    let mut metrics = engine.metrics_receiver();
     let uuid = Uuid::from_u128(8);
-    let old = engine
+    let mut old = engine
         .submit(DirectRequest {
             tokens: vec![1],
             max_output_tokens: 1,
@@ -496,18 +640,27 @@ async fn queued_output_does_not_reach_a_reused_request_id() {
         .await
         .unwrap();
 
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        loop {
-            metrics.changed().await.unwrap();
-            let metrics = metrics.borrow();
-            if metrics.running_requests == 0 && metrics.waiting_requests == 0 {
-                break;
-            }
-        }
-    })
-    .await
-    .expect("old terminal output should be queued before ID reuse");
-    assert!(!engine.cancel(uuid).await.unwrap());
+    // Let the scheduler enqueue the terminal output behind the closed gate.
+    // A cancellation cannot cross that pass boundary until the request-route
+    // dispatcher acknowledges actual delivery.
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    let cancel_engine = engine.clone();
+    let cancellation = tokio::spawn(async move { cancel_engine.cancel(uuid).await });
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert!(
+        !cancellation.is_finished(),
+        "the grouped actor released a pass after enqueue, before route delivery"
+    );
+
+    gate_tx.send(true).unwrap();
+    let old_output = tokio::time::timeout(Duration::from_secs(1), old.recv())
+        .await
+        .expect("gated output cleanup timed out");
+    assert!(
+        old_output.is_none(),
+        "cancellation abandons the old stream before route cleanup"
+    );
+    assert!(!cancellation.await.unwrap().unwrap());
     drop(old);
 
     let mut replacement = engine
@@ -520,8 +673,6 @@ async fn queued_output_does_not_reach_a_reused_request_id() {
         })
         .await
         .unwrap();
-    gate_tx.send(true).unwrap();
-
     let output = tokio::time::timeout(std::time::Duration::from_secs(3), replacement.recv())
         .await
         .expect("replacement should produce its planned token")
@@ -533,7 +684,19 @@ async fn queued_output_does_not_reach_a_reused_request_id() {
 
 #[tokio::test]
 async fn full_output_stream_is_cancelled_without_stalling_an_unrelated_request() {
-    let engine = LiveEngine::start_with_output_gate(args(EngineType::Vllm), 0, None, 1).unwrap();
+    let fpm = Arc::new(CountingFpmSink::default());
+    let engine = LiveEngine::start_with_options(
+        args(EngineType::Vllm),
+        0,
+        LiveEngineOptions {
+            request_output_buffering: RequestOutputBuffering::CancelOnOverflow {
+                capacity: NonZeroUsize::MIN,
+            },
+            fpm_publisher: FpmPublisher::new(Some(Arc::clone(&fpm) as Arc<dyn FpmSink>)),
+            ..LiveEngineOptions::default()
+        },
+    )
+    .unwrap();
     let mut slow = engine
         .submit(DirectRequest {
             tokens: vec![1],
@@ -564,6 +727,11 @@ async fn full_output_stream_is_cancelled_without_stalling_an_unrelated_request()
     assert_eq!(slow.recv().await.unwrap().token_id, Some(7));
     assert!(slow.recv().await.is_none());
     wait_for_idle(&engine).await;
+    assert_eq!(
+        fpm.0.load(Ordering::Relaxed),
+        2,
+        "a full route must be cancelled at its completion boundary before a third pass starts"
+    );
 }
 
 #[tokio::test]
@@ -621,6 +789,80 @@ async fn dropping_an_active_request_cleans_up_and_allows_id_reuse() {
     let output = replacement.recv().await.unwrap();
     assert_eq!(output.token_id, Some(22));
     assert!(output.completed);
+}
+
+#[tokio::test(start_paused = true)]
+async fn concurrent_live_submits_are_applied_at_one_pass_boundary() {
+    let mut timed_args = args(EngineType::Vllm);
+    timed_args.speedup_ratio = 0.1;
+    let engine = LiveEngine::start(timed_args, 0).unwrap();
+    let boundary = engine.pause_completion_boundary_before_finish();
+    let first = engine
+        .submit(DirectRequest {
+            tokens: vec![1],
+            max_output_tokens: 100,
+            output_token_ids: Some(vec![7; 100]),
+            uuid: Some(Uuid::from_u128(100)),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    boundary.wait_until_reached().await;
+
+    let mut submissions = Vec::new();
+    for request_id in 101..107 {
+        let engine = engine.clone();
+        submissions.push(tokio::spawn(async move {
+            engine
+                .submit(DirectRequest {
+                    tokens: vec![request_id as u32],
+                    max_output_tokens: 100,
+                    output_token_ids: Some(vec![request_id as u32; 100]),
+                    uuid: Some(Uuid::from_u128(request_id)),
+                    ..Default::default()
+                })
+                .await
+        }));
+    }
+    while engine.active_request_count() != 7 {
+        tokio::task::yield_now().await;
+    }
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+
+    let boundary_time = tokio::time::Instant::now();
+    boundary.release();
+    for _ in 0..1_000 {
+        if submissions.iter().any(tokio::task::JoinHandle::is_finished) {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        submissions.iter().any(tokio::task::JoinHandle::is_finished),
+        "at least one queued submit should be acknowledged at the released boundary"
+    );
+    for _ in 0..32 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        submissions.iter().all(tokio::task::JoinHandle::is_finished),
+        "the production command bridge must drain the whole submit burst before the next pass"
+    );
+    assert_eq!(
+        tokio::time::Instant::now(),
+        boundary_time,
+        "batched submit acknowledgements must not advance modeled time"
+    );
+
+    let mut requests = Vec::new();
+    for submission in submissions {
+        requests.push(submission.await.unwrap().unwrap());
+    }
+    drop(requests);
+    drop(first);
+    engine.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -760,12 +1002,12 @@ async fn ordered_lane_forwards_admission_before_releasing_output() {
 }
 
 #[tokio::test]
-async fn replay_options_allow_zero_output_and_full_response_buffering() {
+async fn replay_options_allow_zero_output() {
     let zero_engine = LiveEngine::start_with_options(
         args(EngineType::Sglang),
         0,
         LiveEngineOptions {
-            request_output_capacity: None,
+            request_output_buffering: RequestOutputBuffering::FullResponse,
             allow_zero_output: true,
             ..LiveEngineOptions::default()
         },
@@ -784,45 +1026,56 @@ async fn replay_options_allow_zero_output_and_full_response_buffering() {
     assert!(terminal.completed);
     assert_eq!(terminal.token_id, None);
     zero_engine.shutdown().await.unwrap();
+}
 
-    let buffered_engine = LiveEngine::start_with_options(
+#[tokio::test]
+async fn full_response_buffering_preserves_concurrent_unread_requests() {
+    let buffered_engine = LiveEngine::start_with_config_and_request_output_buffering(
         args(EngineType::Vllm),
         0,
-        LiveEngineOptions {
-            request_output_capacity: None,
-            allow_zero_output: true,
-            ..LiveEngineOptions::default()
-        },
+        LiveEngineConfig::default(),
+        RequestOutputBuffering::FullResponse,
     )
     .unwrap();
-    let mut buffered = buffered_engine
-        .submit(DirectRequest {
-            tokens: vec![4, 5, 6],
-            max_output_tokens: 32,
-            output_token_ids: Some(vec![7; 32]),
-            uuid: Some(Uuid::from_u128(22)),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
+    let mut requests = Vec::new();
+    for ordinal in 0..4_u128 {
+        let token_id = 7 + ordinal as u32;
+        requests.push(
+            buffered_engine
+                .submit(DirectRequest {
+                    tokens: vec![4, 5, 6],
+                    max_output_tokens: 32,
+                    output_token_ids: Some(vec![token_id; 32]),
+                    uuid: Some(Uuid::from_u128(22 + ordinal)),
+                    ..Default::default()
+                })
+                .await
+                .unwrap(),
+        );
+    }
     tokio::time::timeout(Duration::from_secs(1), async {
         while buffered_engine.active_request_count() != 0 {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("the full response should buffer without a receiver draining it");
-    let mut output_count = 0;
-    let mut saw_terminal = false;
-    while let Some(output) = buffered.recv().await {
-        output_count += usize::from(output.token_id.is_some());
-        if output.completed {
-            saw_terminal = true;
-            break;
+    .expect("full responses should buffer without any receiver draining them");
+    for (ordinal, mut request) in requests.into_iter().enumerate() {
+        let expected_token_id = 7 + ordinal as u32;
+        let mut output_count = 0;
+        let mut saw_terminal = false;
+        while let Some(output) = request.recv().await {
+            assert_eq!(output.token_id, Some(expected_token_id));
+            output_count += 1;
+            if output.completed {
+                saw_terminal = true;
+                break;
+            }
         }
+        assert_eq!(output_count, 32);
+        assert!(saw_terminal);
+        assert!(request.recv().await.is_none());
     }
-    assert_eq!(output_count, 32);
-    assert!(saw_terminal);
     assert_eq!(buffered_engine.active_request_count(), 0);
     buffered_engine.shutdown().await.unwrap();
 }

@@ -215,6 +215,7 @@ def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool =
         server_args=SimpleNamespace(served_model_name="test-model"),
         dynamo_args=SimpleNamespace(enable_rl=enable_rl),
     )
+    handler._first_token_source = None
 
     @asynccontextmanager
     async def no_cancellation_monitor(*args, **kwargs):
@@ -568,6 +569,9 @@ async def _stream(items):
 class _Context:
     def is_stopped(self):
         return False
+
+    def notify_first_token(self):
+        pass
 
 
 def test_build_sampling_params_passes_n_for_token_requests():
@@ -1021,6 +1025,33 @@ async def test_process_token_stream_accepts_incremental_logprob_arrays():
 
 
 @pytest.mark.asyncio
+async def test_process_token_stream_passes_through_encoded_routed_experts():
+    """Preserve SGLang's base64 routed-experts payload without re-encoding."""
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [101],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": None,
+                            "routed_experts": "AQIDBA==",
+                        },
+                    }
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    assert chunks[0]["engine_data"]["routed_experts"] == "AQIDBA=="
+
+
+@pytest.mark.asyncio
 async def test_process_token_stream_uploads_large_metadata(tmp_path):
     handler = _new_decode_handler()
     uploader = MetadataUploader(
@@ -1204,6 +1235,37 @@ async def test_process_text_stream_tracks_delta_per_choice_index():
 
 
 @pytest.mark.asyncio
+async def test_process_text_stream_notifies_for_empty_decoded_token():
+    handler = _new_decode_handler()
+
+    class Context(_Context):
+        def __init__(self):
+            self.notifications = 0
+
+        def notify_first_token(self):
+            self.notifications += 1
+
+    context = Context()
+
+    async def token_stream():
+        yield {
+            "output_ids": [101],
+            "text": "",
+            "meta_info": {"id": "request-1", "finish_reason": None},
+        }
+        assert context.notifications == 1
+        yield {
+            "output_ids": [102],
+            "text": "a",
+            "meta_info": {"id": "request-1", "finish_reason": None},
+        }
+
+    await _collect(handler._process_text_stream(token_stream(), context))
+
+    assert context.notifications == 1
+
+
+@pytest.mark.asyncio
 async def test_process_text_stream_stop_reason_uses_response_nvext():
     handler = _new_decode_handler()
 
@@ -1254,6 +1316,33 @@ async def test_process_text_stream_stop_reason_requires_nvext_extra_field():
 
     assert "stop_reason" not in chunks[0]["choices"][0]
     assert "nvext" not in chunks[0]
+
+
+@pytest.mark.asyncio
+async def test_process_text_stream_passes_through_encoded_routed_experts():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_text_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "text": "Hello",
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": None,
+                            "routed_experts": "AQIDBA==",
+                        },
+                    }
+                ]
+            ),
+            _Context(),
+            request={"nvext": {"extra_fields": ["routed_experts"]}},
+        )
+    )
+
+    assert chunks[0]["nvext"]["routed_experts"] == "AQIDBA=="
 
 
 @pytest.mark.asyncio

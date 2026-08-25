@@ -3235,6 +3235,44 @@ async fn response_format_gemma4_bare_json_stays_content() {
     assert_eq!(content, json);
 }
 
+#[tokio::test]
+async fn gemma4_without_enable_thinking_keeps_parser_markers_as_content() {
+    let preprocessor = build_preprocessor(Some("gemma4"), None);
+
+    let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+        "model": "dummy-gemma4-model",
+        "messages": [
+            {
+                "role": "user",
+                "content": "answer plainly"
+            }
+        ],
+        "stream": true
+    }))
+    .unwrap();
+
+    let text = "<|channel>thought\nshould stay plain<channel|>final answer";
+    let input_stream = stream::iter(
+        vec![mock_content_chunk(text), mock_final_chunk()]
+            .into_iter()
+            .map(Annotated::from_data),
+    );
+
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(input_stream, &request, false, false)
+        .expect("postprocessor_parsing_stream should build");
+
+    let DrainOutput {
+        reasoning, content, ..
+    } = drain_stream(output_stream).await;
+
+    assert!(
+        reasoning.is_empty(),
+        "Gemma 4 reasoning parser must be gated off without enable_thinking=true, got: {reasoning:?}"
+    );
+    assert_eq!(content, text);
+}
+
 /// MiniMax append-think is a force-reasoning parser that is not yet proven to
 /// preserve native reasoning before guided JSON. Structured bare JSON should
 /// therefore use the legacy guided-output bypass and remain assistant content.
@@ -4462,5 +4500,202 @@ async fn postprocessor_parsing_stream_force_nonempty_whitespace_only_turn_surviv
     assert_eq!(
         content, "\n  ",
         "whitespace-only output must not vanish for a force_nonempty_content request"
+    );
+}
+
+// ── Muse unified parser routing (default-on) ──────────────────────────────────
+
+/// One muse turn: a `to=self` thought, one `get_weather` call, then the visible
+/// `to=user` answer. Raw model markup, one channel per streamed chunk.
+const MUSE_MARKUP_SHAPE: [&str; 3] = [
+    "<|start|>assistant to=self<|message|>Look it up.<|eom|>",
+    "<|start|>assistant to=get_weather<|message|><atem:invoke name=\"get_weather\"><atem:parameter name=\"location\">Paris</atem:parameter></atem:invoke><|eom|>",
+    "<|start|>assistant to=user<|message|>It's 18C.<|eot|>",
+];
+
+/// Default-on routing: `tool_call_parser=muse_glimmer`, NO reasoning parser. The
+/// guard routes the whole turn through the v2 UNIFIED parser, which owns
+/// reasoning + content + tool calls in one pass — all three surface cleanly with
+/// no marker leak, and neither the v1 reasoning stage nor the jail runs.
+#[tokio::test]
+async fn postprocessor_parsing_stream_muse_routes_to_unified() {
+    let preprocessor = build_preprocessor(None, Some("muse_glimmer"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+
+    let out = solo_output(&preprocessor, &request, &MUSE_MARKUP_SHAPE).await;
+
+    assert_eq!(
+        out.reasoning, "Look it up.",
+        "reasoning_content must come from the unified parser"
+    );
+    assert_eq!(
+        out.content, "It's 18C.",
+        "content must be the stripped answer"
+    );
+    assert_eq!(
+        out.tool_calls.len(),
+        1,
+        "expected one tool call: {:?}",
+        out.tool_calls
+    );
+    assert_eq!(out.tool_calls[0].0.as_deref(), Some("get_weather"));
+    let args: Value = serde_json::from_str(&out.tool_calls[0].1).unwrap();
+    assert_eq!(args, serde_json::json!({"location": "Paris"}));
+    for marker in ["<|start|>", "<|message|>", "<atem:invoke"] {
+        assert!(
+            !out.content.contains(marker) && !out.reasoning.contains(marker),
+            "marker {marker:?} leaked: content={:?} reasoning={:?}",
+            out.content,
+            out.reasoning
+        );
+    }
+}
+
+/// `tool_choice=Required` is excluded by the guard (auto/none only), so the turn
+/// falls through to the guided-decode + jail path. No reasoning parser is
+/// configured there, so `reasoning_content` can never be produced — proof the
+/// unified parser (which would yield "Look it up.") did NOT engage.
+#[tokio::test]
+async fn postprocessor_parsing_stream_muse_required_does_not_route_to_unified() {
+    let preprocessor = build_preprocessor(None, Some("muse_glimmer"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Required);
+
+    let out = solo_output(&preprocessor, &request, &MUSE_MARKUP_SHAPE).await;
+
+    assert!(
+        out.reasoning.is_empty(),
+        "Required must NOT route to unified; reasoning_content must stay empty, got {:?}",
+        out.reasoning
+    );
+    // Empty reasoning alone also passes if the unified parser ran and dropped it, so
+    // assert the POSITIVE signal of the jail path: it does not strip muse markers.
+    assert!(
+        out.content.contains("<|start|>"),
+        "the jail path leaves muse markup in content; got {:?}",
+        out.content
+    );
+    assert!(
+        out.tool_calls
+            .iter()
+            .all(|(name, _)| name.as_deref() != Some("get_weather")),
+        "the unified parser must not produce a native-markup call here: {:?}",
+        out.tool_calls
+    );
+}
+
+/// A structural-tag request must stay on the guided-decode + jail path, exactly as a
+/// forced `tool_choice` does: it emits guided JSON, not the native ATEM markup the
+/// unified parser reads. The guard carries `!uses_tool_call_structural_tag` for that,
+/// and nothing pinned it — a refactor could drop the clause and every other muse test
+/// would still pass, because they all run with the flag false.
+///
+/// `solo_output` hardcodes `false, false`, so this drives
+/// `postprocessor_parsing_stream` directly to set the flag.
+#[tokio::test]
+async fn postprocessor_parsing_stream_muse_structural_tag_does_not_route_to_unified() {
+    let preprocessor = build_preprocessor(None, Some("muse_glimmer"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+
+    let mut input: Vec<NvCreateChatCompletionStreamResponse> = MUSE_MARKUP_SHAPE
+        .iter()
+        .map(|text| mock_multi_choice_content_chunk(&[(0, *text)]))
+        .collect();
+    input.push(mock_multi_choice_final_chunk(&[0]));
+
+    let output_stream = preprocessor
+        .postprocessor_parsing_stream(
+            stream::iter(input.into_iter().map(Annotated::from_data)),
+            &request,
+            false,
+            // The one axis under test.
+            true,
+        )
+        .expect("postprocessor_parsing_stream should build");
+    let output_chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> =
+        output_stream.collect().await;
+    let out = demux_by_choice(&output_chunks)
+        .remove(&0)
+        .map(|acc| ChoiceOutput {
+            reasoning: acc.reasoning,
+            content: acc.content,
+            tool_calls: acc
+                .tool_calls
+                .into_values()
+                .map(|tc| (tc.name, tc.arguments))
+                .collect(),
+        })
+        .unwrap_or_default();
+
+    // No reasoning parser is configured, so any `reasoning_content` at all could only
+    // have come from the unified parser engaging.
+    assert!(
+        out.reasoning.is_empty(),
+        "structural-tag must NOT route to unified; reasoning stayed {:?}",
+        out.reasoning
+    );
+    // The positive jail signal: that path does not strip muse markers.
+    assert!(
+        out.content.contains("<|start|>"),
+        "the jail path leaves muse markup in content; got {:?}",
+        out.content
+    );
+    assert!(
+        out.tool_calls
+            .iter()
+            .all(|(name, _)| name.as_deref() != Some("get_weather")),
+        "the unified parser must not produce a native-markup call here: {:?}",
+        out.tool_calls
+    );
+}
+
+/// `unified_family` keys on EITHER parser name, so a card that sets only
+/// `--dyn-reasoning-parser muse_glimmer` must route the stream to unified as well.
+/// The batch path pins this (`test_muse_unified_batch_finalize_routes_on_reasoning_name_only`);
+/// streaming had no equivalent.
+#[tokio::test]
+async fn postprocessor_parsing_stream_muse_reasoning_name_only_routes_to_unified() {
+    let preprocessor = build_preprocessor(Some("muse_glimmer"), None);
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
+
+    let out = solo_output(&preprocessor, &request, &MUSE_MARKUP_SHAPE).await;
+
+    assert_eq!(out.reasoning, "Look it up.");
+    assert_eq!(out.content, "It's 18C.");
+}
+
+/// Explicit `tool_choice=None` must route to unified like auto — the guard's
+/// "auto/none only" contract. A stream guard that matched only unset+auto let None fall
+/// through to the Basic reasoning fallback, which leaked raw markers into content and
+/// dropped reasoning; the batch path always routed it, so only streaming regressed.
+#[tokio::test]
+async fn postprocessor_parsing_stream_muse_none_routes_to_unified() {
+    let preprocessor = build_preprocessor(None, Some("muse_glimmer"));
+    let request = streaming_tool_request(ChatCompletionToolChoiceOption::None);
+
+    let out = solo_output(&preprocessor, &request, &MUSE_MARKUP_SHAPE).await;
+
+    assert_eq!(
+        out.reasoning, "Look it up.",
+        "tool_choice=None must route to unified; reasoning_content must come from it"
+    );
+    assert_eq!(
+        out.content, "It's 18C.",
+        "content must be the stripped answer"
+    );
+    for marker in ["<|start|>", "<|message|>", "<atem:invoke"] {
+        assert!(
+            !out.content.contains(marker) && !out.reasoning.contains(marker),
+            "marker {marker:?} leaked under tool_choice=None: content={:?} reasoning={:?}",
+            out.content,
+            out.reasoning
+        );
+    }
+    // Routing here is for the split and the stripping ONLY. The caller disabled tool
+    // calling, so the parsed call must be dropped rather than surfaced — the contract
+    // every other family gets from `should_apply_tool_jail` returning false for `none`.
+    assert!(
+        out.tool_calls.is_empty(),
+        "tool_choice=None must not return tool_calls, got {:?}",
+        out.tool_calls
     );
 }

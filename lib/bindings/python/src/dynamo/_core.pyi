@@ -148,6 +148,8 @@ class Endpoint:
 
     ...
 
+    async def first_token_source(self, worker_type: WorkerType) -> Optional[FirstTokenSource]: ...
+
     async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True, metrics_labels: Optional[List[Tuple[str, str]]] = None, health_check_payload: Optional[Dict[str, Any]] = None) -> None:
         """
         Serve an endpoint discoverable by all connected clients at
@@ -456,6 +458,12 @@ class ContextMetadata:
     def items(self) -> List[Tuple[str, str]]: ...
     def clear(self) -> None: ...
     def copy(self) -> Dict[str, str]: ...
+
+class FirstTokenSource:
+    """Endpoint-scoped worker prefill-completion source."""
+
+    def bind(self, context: Context, dp_rank: Optional[int] = None) -> None: ...
+
 
 class Context:
     """
@@ -869,6 +877,7 @@ class ModelRuntimeConfig:
     data_parallel_size: int
     enable_local_indexer: bool
     kv_event_publishing_enabled: bool | None
+    kv_event_source_mode: str | None
     kv_state_endpoint: str | None
     enable_eagle: bool
     taints: Set[str]
@@ -1758,6 +1767,7 @@ class KvRouterConfig:
         router_track_prefill_tokens: bool = True,
         router_prefill_load_model: str = "none",
         router_ttl_secs: float = 120.0,
+        router_approximate_cache_policy: Literal["ttl", "lru"] = "ttl",
         router_queue_threshold: Optional[float] = None,
         router_event_threads: int = 4,
         router_queue_policy: str = "fcfs",
@@ -1766,11 +1776,19 @@ class KvRouterConfig:
         shared_cache_multiplier: float = 0.0,
         shared_cache_type: str = "none",
         router_predicted_ttl_secs: Optional[float] = None,
+        conditional_disagg_enabled: bool = False,
+        conditional_disagg_policy: str = "isl_bounding",
+        conditional_disagg_eff_isl_threshold: int = 2048,
+        conditional_disagg_eff_isl_ratio_threshold: float = 0.7,
+        conditional_disagg_prefill_busy_threshold: Optional[float] = None,
+        conditional_disagg_decode_busy_threshold: Optional[float] = None,
         overlap_score_credit: float = 1.0,
         overlap_score_credit_decay: float = 0.0,
         prefill_load_scale: float = 1.0,
         decode_active_request_weight: float = 0.0,
         router_policy_config: Optional[str] = None,
+        router_prefill_policy: Optional[str] = None,
+        router_decode_policy: Optional[str] = None,
         router_tracking_hash: Literal["public-xxh3-v1", "keyed-xxh3-v1"] = "public-xxh3-v1",
         router_tracking_key_file: Optional[str | os.PathLike[str]] = None,
         router_tracking_key_id: Optional[str] = None,
@@ -1807,6 +1825,8 @@ class KvRouterConfig:
                 "none" keeps static prompt load accounting.
                 "aic" decays the oldest active prefill request using AIC-predicted duration.
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
+            router_approximate_cache_policy: Process-local approximate-index retention policy,
+                "ttl" or "lru" (default: "ttl"). LRU requires use_kv_events=False.
             router_queue_threshold: Optional queue threshold fraction for prefill token capacity (default: None).
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
@@ -1814,6 +1834,10 @@ class KvRouterConfig:
             router_policy_config: Startup-only policy-family and cache-bucket queue
                 YAML path. When omitted, router_queue_threshold and
                 router_queue_policy define one synthetic policy class.
+            router_prefill_policy: Process-local override of
+                worker_selection.prefill for disaggregated prefill workers.
+            router_decode_policy: Process-local override of worker_selection.decode
+                for decode workers in this router process.
             router_event_threads: Number of KV indexer worker threads (default: 4).
                 When > 1, uses a concurrent radix tree with a thread pool,
                 including for approximate routing when KV events are disabled.
@@ -1825,6 +1849,12 @@ class KvRouterConfig:
             serve_indexer: Serve this router's local indexer from the worker component (default: False).
             shared_cache_multiplier: Credit multiplier for shared cache hits beyond the device prefix (default: 0.0).
             shared_cache_type: External shared KV cache type, "none" or "hicache" (default: "none").
+            conditional_disagg_enabled: Enable conditional-disagg bypass from prefill to decode (default: False).
+            conditional_disagg_policy: Conditional-disagg policy, one of "isl_bounding", "prefill_load", or "isl_or_load" (default: "isl_bounding").
+            conditional_disagg_eff_isl_threshold: For "isl_bounding" and the ISL arm of "isl_or_load", require effective ISL to be below this many tokens (default: 2048).
+            conditional_disagg_eff_isl_ratio_threshold: For "isl_bounding" and the ISL arm of "isl_or_load", require effective ISL / raw ISL to be below this value (default: 0.7).
+            conditional_disagg_prefill_busy_threshold: Prefill busy threshold for load-aware conditional-disagg policies. When omitted, inherits router_queue_threshold when available.
+            conditional_disagg_decode_busy_threshold: Decode-busy guard threshold that disables bypass when the selected decode worker's projected decode load exceeds this fraction of KV capacity (default: None).
             router_predicted_ttl_secs: Enables predict-on-route when set. This TTL
                 applies to entries in the local side indexer and requires
                 use_kv_events=True. Set to None to disable. Independent of
@@ -1949,18 +1979,7 @@ class MockEngineArgs:
         router_queue_policy: Optional[str] = None,
         sglang: Optional[SglangArgs] = None,
         trtllm: Optional[TrtllmArgs] = None,
-        num_g2_blocks: Optional[int] = None,
-        num_g3_blocks: Optional[int] = None,
-        offload_batch_size: Optional[int] = None,
-        bandwidth_g1_to_g2_gbps: Optional[float] = None,
-        bandwidth_g2_to_g1_gbps: Optional[float] = None,
-        bandwidth_g2_to_g3_gbps: Optional[float] = None,
-        bandwidth_g3_to_g2_gbps: Optional[float] = None,
-        enable_g4_storage: bool = False,
-        bandwidth_g2_to_g4_gbps: Optional[float] = None,
-        bandwidth_g4_to_g2_gbps: Optional[float] = None,
         max_model_len: Optional[int] = None,
-        g1_backend: Optional[str] = None,
     ) -> None:
         ...
 
@@ -1995,9 +2014,6 @@ class MockEngineArgs:
     def enable_prefix_caching(self, value: bool) -> None: ...
 
     @property
-    def g1_backend(self) -> str: ...
-
-    @property
     def enable_local_indexer(self) -> bool: ...
 
     @property
@@ -2017,36 +2033,6 @@ class MockEngineArgs:
 
     @property
     def response_replay_trace_path(self) -> Optional[os.PathLike[str]]: ...
-
-    @property
-    def num_g2_blocks(self) -> Optional[int]: ...
-
-    @property
-    def num_g3_blocks(self) -> Optional[int]: ...
-
-    @property
-    def offload_batch_size(self) -> Optional[int]: ...
-
-    @property
-    def bandwidth_g1_to_g2_gbps(self) -> Optional[float]: ...
-
-    @property
-    def bandwidth_g2_to_g1_gbps(self) -> Optional[float]: ...
-
-    @property
-    def bandwidth_g2_to_g3_gbps(self) -> Optional[float]: ...
-
-    @property
-    def bandwidth_g3_to_g2_gbps(self) -> Optional[float]: ...
-
-    @property
-    def enable_g4_storage(self) -> bool: ...
-
-    @property
-    def bandwidth_g2_to_g4_gbps(self) -> Optional[float]: ...
-
-    @property
-    def bandwidth_g4_to_g2_gbps(self) -> Optional[float]: ...
 
     @property
     def aic_backend(self) -> Optional[str]: ...
@@ -2230,7 +2216,7 @@ async def register_model(
     *,
     worker_type: WorkerType,
     kv_cache_block_size: Optional[int] = None,
-    router_mode: Optional[RouterMode] = None,
+    router_config: Optional[RouterConfig] = None,
     runtime_config: Optional[ModelRuntimeConfig] = None,
     tensor_model_config: Optional[Dict[str, Any]] = None,
     user_data: Optional[Dict[str, Any]] = None,
@@ -2262,6 +2248,15 @@ async def register_model(
         peer dependencies. `needs` is a DNF list — each inner list is an
         AND-set, the outer list is OR. `worker_type` is required; backends
         declare it literally at each call site.
+
+    Routing:
+        `router_config` lets a worker set declare how the frontend should route
+        to it, overriding the frontend's global `--router-mode`. Omit it to
+        inherit that global. Combined with `worker_type`, this is how a
+        disaggregated deployment gives its prefill and decode tiers different
+        strategies — for example a prefill tier registered with
+        `RouterConfig(RouterMode.KV)` in front of a decode tier registered with
+        `RouterConfig(RouterMode.RoundRobin)`.
 
     When `ignore_weights` is true, remote HuggingFace model resolution skips
     weight files and downloads only the metadata needed for registration.
@@ -2295,10 +2290,10 @@ def lora_name_to_id(lora_name: str) -> int:
     ...
 
 def resolve_routing_image_token_id(model_id: str, model_dir: str) -> Optional[int]:
-    """Routing-side image-placeholder token id for a model, resolved with the
-    same per-family logic the frontend's MM-aware KV routing uses. Returns None
-    when the model isn't in the MM-routing registry or its config can't be read.
-    Only present when the bindings are built with the ``mm-routing`` feature.
+    """Routing-side image-placeholder token id resolved with the frontend's static
+    checks. Returns None when its model prerequisites are unavailable. Request-time
+    gates require a frontend-issued canonical MM UUID in worker KV events. Only
+    present when the bindings are built with the ``mm-routing`` feature.
     """
     ...
 
@@ -2823,6 +2818,38 @@ class KvDcRelay:
     async def shutdown(self) -> None:
         ...
 
+    async def wait_for_shutdown(self) -> None:
+        """Resolve once the relay has stopped, whether by shutdown() or a terminal host failure."""
+        ...
+
+class KvStateAgentHost:
+    def __init__(self, endpoint: Endpoint, max_slots: int = 8) -> None:
+        ...
+
+    async def start(self) -> None:
+        ...
+
+    async def status(self) -> Dict[str, Any]:
+        ...
+
+    async def shutdown(self) -> None:
+        ...
+
+    async def wait_terminated(self) -> None:
+        ...
+
+class KvStateAttachmentOwner:
+    def __init__(
+        self, endpoint: Endpoint, worker_id: int, descriptors: List[Dict[str, Any]]
+    ) -> None:
+        ...
+
+    async def start(self) -> None:
+        ...
+
+    async def close(self) -> None:
+        ...
+
 class KvRouter:
     """
     A KV-aware router that performs intelligent routing based on KV cache overlap.
@@ -3111,6 +3138,7 @@ class EntrypointArgs:
         enable_streaming_tool_dispatch: Optional[bool] = None,
         enable_streaming_reasoning_dispatch: Optional[bool] = None,
         tokenizer_backend: Optional[str] = None,
+        tokenizer_fallback: Optional[bool] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3144,7 +3172,8 @@ class EntrypointArgs:
             strip_anthropic_preamble: Optional Anthropic preamble stripping override
             enable_streaming_tool_dispatch: Optional streaming tool dispatch override
             enable_streaming_reasoning_dispatch: Optional streaming reasoning dispatch override
-            tokenizer_backend: Optional tokenizer backend override ("default" or "fastokens")
+            tokenizer_backend: Optional tokenizer backend override ("default", "fastokens", or "basetenkenizer")
+            tokenizer_fallback: Whether alternate tokenizer load failures fall back to HuggingFace
         """
         ...
 

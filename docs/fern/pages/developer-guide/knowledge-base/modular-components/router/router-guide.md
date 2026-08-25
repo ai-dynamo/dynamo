@@ -140,7 +140,7 @@ When using KV routing, the router needs to know what each worker has cached. The
 |------------|---------------|-------------|
 | **ZMQ (local indexer)** | Router default (no router flag) | Workers maintain a local indexer and publish KV events via ZMQ PUB sockets; the router recovers state by querying live workers. This is the default event plane for all backends |
 | **NATS Core (local indexer)** | `--event-plane nats` (or `DYN_EVENT_PLANE=nats`) | Same local-indexer model, but events flow over NATS Core instead of ZMQ. |
-| **Approximate (no events)** | `--no-router-kv-events` | No events consumed; router predicts cache state from its own routing decisions with TTL-based expiration |
+| **Approximate (no events)** | `--no-router-kv-events` | No events consumed; router predicts cache state from its own routing decisions. Retention defaults to TTL; experimental `--router-approximate-cache-policy lru` uses advertised per-rank KV capacity. |
 
 ### Aggregated vs. Disaggregated Topology
 
@@ -150,6 +150,58 @@ When using KV routing, the router needs to know what each worker has cached. The
 | **Disaggregated** | Separate prefill and decode pools | Frontend routes to a prefill worker first, then to a decode worker; requires workers registered with `WorkerType.Prefill` |
 
 Disaggregated mode is activated automatically when prefill workers register alongside decode workers. See [Disaggregated Serving](disaggregated-serving.md) for details.
+
+## Per-Worker Router Configuration
+
+`--router-mode` on the frontend sets the default for every worker. A worker set can override it for itself by declaring its own routing in its model deployment card, which the frontend then uses in place of its own configuration when routing to that set. This lets one deployment serve worker sets that want different strategies — for example a heterogeneous CPU/GPU encoder pool on `device-aware-weighted` while everything else stays round-robin.
+
+Workers accept the same flags as the frontend, on vLLM, SGLang, TensorRT-LLM, and the mocker:
+
+```bash
+# Frontend default for the deployment
+python -m dynamo.frontend --router-mode round-robin --http-port 8000
+
+# Worker set A -- overrides to KV. Every replica is launched with the same flags.
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B --router-mode kv --router-kv-overlap-score-credit 2.0
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B --router-mode kv --router-kv-overlap-score-credit 2.0
+
+# Worker set B -- a different model, no router flags, so it inherits round-robin
+python -m dynamo.vllm --model meta-llama/Llama-3.1-8B-Instruct
+
+# Worker set C -- a different model again, on its own strategy
+python -m dynamo.vllm --model BAAI/bge-m3 --router-mode device-aware-weighted
+```
+
+Sets A, B, and C are distinct because a worker set is keyed on model name as well as endpoint and worker type. Each carries its own routing configuration and the three do not interact.
+
+A worker that omits `--router-mode`, like set B, advertises nothing and inherits the frontend's configuration. That is the default, and it is what every deployment written before this option did.
+
+### The override is per worker set, not per worker
+
+Workers that share a namespace, component, endpoint, model type, and worker type form a single worker set, and a worker set has one routing configuration. Two replicas of the same model launched with different router flags are not two independently routed workers — they are one set whose members disagree.
+
+> [!WARNING]
+> Every worker in a set must be launched with identical router flags. The frontend fingerprints each worker's card together with its effective routing configuration, so mismatched flags split the set into two cohorts. A split set is treated as a conflict: **no instances are admitted and the set stops serving**. It does not fall back to one worker's configuration or to the frontend's.
+
+This is not specific to router flags — any card difference splits a set the same way — but router flags are easy to apply to one replica by mistake. Two practical consequences:
+
+- **Changing the routing of a running fleet is a card change.** Roll the whole set rather than mixing old and new replicas, the same as any other change that alters the card.
+- **Applying the flag to only some replicas of a set splits it.** Whether by flag or by an exported `DYN_ROUTER_MODE` that reaches some processes and not others, every member of a set must end up with the same value.
+
+> [!IMPORTANT]
+> An advertised configuration **replaces** the frontend's for that worker set rather than merging with it. On a worker, a flag you do not pass means **the default**, not "inherit the frontend's value". If the frontend was tuned with `--router-kv-overlap-score-credit 2.5` and a worker advertises only `--router-mode kv`, that worker set routes with the default `1.0` — the tuning is not inherited, it is replaced. Restate on the worker every flag that matters for it.
+
+Merging is not offered because it cannot be done correctly: the KV tuning is flat concrete values with no record of which ones were set explicitly, so a deliberate `1.0` is indistinguishable from a default `1.0`.
+
+Workers and the frontend share defaults exactly — both build their configuration from the same argument groups — so the values only diverge when the frontend is tuned and the worker is not.
+
+The flags also read the same environment variables, and this changes the answer depending on how you deploy. If the frontend's tuning comes from the environment and the worker shares that environment — a single shell starting both — the worker picks the tuning up and nothing is lost. Kubernetes scopes environment per service, so there the worker sees only its own flags. The same intent can therefore produce different routing in the two setups. `--router-mode` itself is the exception in the other direction: a shared `DYN_ROUTER_MODE` makes a worker advertise when you meant it to inherit.
+
+The `Activating prefill router` log line reports the configuration each hop actually resolved — mode, block size, session TTL, and KV tuning — which is the quickest way to confirm what a worker set ended up with.
+
+The frontend-only options (`--router-min-initial-workers`, `--enforce-disagg`, `--admission-control`) are not accepted by workers, since a model card does not carry them.
+
+Advertised configuration applies to the worker sets the frontend routes to directly — aggregated and decode. See [Frontend Configuration Reference](../../../../reference/components/frontend-configuration.mdx#router) for the full flag list.
 
 ## More Router Docs
 

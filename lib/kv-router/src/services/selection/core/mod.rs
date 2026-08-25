@@ -47,6 +47,7 @@ use super::types::{
     WorkerPatchRequest, WorkerRequest,
 };
 use crate::WorkerSelectionPolicyFactory;
+use crate::WorkerType;
 
 type SelectionScheduler = LocalScheduler<
     ScopedSequencePublisher,
@@ -504,7 +505,7 @@ impl SelectionCore {
                 ));
                 let selector = self.worker_selection_policy_factory.as_ref().map_or_else(
                     || WorkerSelectionPolicy::default(self.kv_router_config.clone(), WORKER_TYPE),
-                    |factory| factory(&self.kv_router_config, WORKER_TYPE, key.as_ref()),
+                    |factory| factory(&self.kv_router_config, WorkerType::Aggregated, key.as_ref()),
                 );
                 let profile = self
                     .kv_router_config
@@ -1578,6 +1579,64 @@ mod tests {
         assert!(matches!(
             err,
             SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown)
+        ));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_operations_find_reservation_in_later_entry() {
+        let mut config = test_config(false);
+        config.router_track_prefill_tokens = true;
+        let core = SelectionCore::new_local(
+            config,
+            1,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        );
+
+        for (worker_id, routing_group) in [(1, "group-a"), (2, "group-b")] {
+            let mut request = worker(worker_id);
+            request.routing_group = routing_group.to_string();
+            core.upsert_worker(request).await.expect("worker upsert");
+        }
+
+        let entries = core.initialized_entries();
+        assert_eq!(entries.len(), 2);
+        let target = &entries[1];
+        let target_group = target.key.routing_group.clone();
+        let target_worker = *target
+            .workers_tx
+            .borrow()
+            .keys()
+            .next()
+            .expect("target worker");
+
+        let mut request = reserve_request("later-entry-reservation");
+        request.routing_group = target_group.clone();
+        core.select_and_reserve(request)
+            .await
+            .expect("reserve in later entry");
+
+        let load = || {
+            core.loads(Some("model"), Some(&target_group))[0]
+                .loads
+                .iter()
+                .find(|load| load.worker_id == target_worker)
+                .expect("target load")
+                .potential_prefill_tokens
+        };
+        assert_eq!(load(), 4);
+
+        core.prefill_complete("later-entry-reservation")
+            .await
+            .expect("complete prefill in later entry");
+        assert_eq!(load(), 0);
+
+        core.free_reservation("later-entry-reservation")
+            .await
+            .expect("free reservation in later entry");
+        assert!(matches!(
+            core.add_output_block("later-entry-reservation", None),
+            Err(SelectionError::NotFound(_))
         ));
     }
 
