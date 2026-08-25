@@ -1,37 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Materialize one AI-Simulate-Sweeper ``Candidate`` into a real DGD.
+"""Lower an AI Simulate Sweeper result through Dynamo's v1 DGD templates.
 
-This is the Python-side counterpart to DGDR v1beta2's DGDC
-(``DynamoGraphDeploymentCandidate``): ``DynamoGraphDeploymentCandidate.Spec``
-is typed as the real ``v1beta1.DynamoGraphDeploymentSpec`` (confirmed against
-deploy/operator/api/v1beta2/dynamographdeploymentcandidate_types.go), and
-``.Status.Experimental`` is a schema-free ``RawExtension`` -- the defined home
-for evaluation-context values that never belonged in a DGD spec to begin
-with. This module's return shape follows that split exactly: ``dgd`` maps to
-DGDC.spec, ``experimental`` maps to DGDC.status.experimental.
-
-Deliberately takes a plain dict (the shape of AI-Simulate-Sweeper's
-``Candidate.config``) rather than importing ``aisimulate.sweeper.Candidate``
-directly. Two reasons, both load-bearing, not just convenience:
-
-1. AI-Simulate-Sweeper is published as a separate, independently-versioned
-   package (aisimulate==0.1.0.dev1 per pyproject.toml / requirements
-   .aisimulate.txt) and explicitly does not depend on Dynamo. A hard import
-   the other direction would not break that boundary technically (Dynamo
-   already depends on aisimulate), but pinning this module's contract to one
-   exact aisimulate release's class shape would recreate the coupling the
-   decoupling work (#12441) was for. A documented dict shape is a looser,
-   more stable contract across aisimulate releases.
-2. It keeps this module's own tests independent of having a real aisimulate
-   wheel installed.
-
-Runs inside the Sweeper Job's Python process, alongside (not inside)
-aisimulate -- see the DGDR v1beta2 architecture discussion: a Go publisher
-cannot reuse this Python templating logic, so the materialized DGD has to be
-produced here, before the payload ever reaches the publisher over the
-observer socket.
+The direct renderer consumes the plain ``Candidate.config`` mapping and reuses
+the existing ``CONFIG_MODIFIERS`` implementation without invoking AIC's
+generator. Keeping this adapter independent of Sweeper orchestration makes it
+usable by the standalone CLI and straightforward to compare with the AIC
+renderer.
 """
 
 from __future__ import annotations
@@ -75,18 +51,12 @@ EVALUATION_CONTEXT_FIELDS = frozenset(
 
 
 class MaterializationError(Exception):
-    """One Candidate could not be materialized into a DGD.
-
-    Per the DEP: "A materialization failure is reported as a failed
-    candidate outcome and does not create a DGDC." Callers should catch this
-    specifically (not a bare Exception) and translate it into that failure
-    outcome, rather than letting the Job crash uninformatively.
-    """
+    """The direct renderer could not faithfully materialize a DGD."""
 
 
 @dataclass
 class MaterializationResult:
-    """The DGDC.spec / DGDC.status.experimental split, ready to publish."""
+    """A rendered DGD plus evaluation inputs that do not belong in its spec."""
 
     dgd: dict[str, Any]
     experimental: dict[str, Any] = field(default_factory=dict)
@@ -96,6 +66,7 @@ def materialize_dgd_from_candidate(
     candidate_config: dict[str, Any],
     *,
     image: str,
+    num_gpus_per_node: int = 8,
     component_type: SubComponentType = SubComponentType.DECODE,
 ) -> MaterializationResult:
     """Materialize one Candidate.config dict into a real DGD.
@@ -117,9 +88,7 @@ def materialize_dgd_from_candidate(
 
     modifier = CONFIG_MODIFIERS.get(backend)
     if modifier is None:
-        raise MaterializationError(
-            f"no CONFIG_MODIFIERS entry for backend {backend!r}"
-        )
+        raise MaterializationError(f"no CONFIG_MODIFIERS entry for backend {backend!r}")
     if mode not in ("agg", "disagg"):
         raise MaterializationError(f"unsupported deployment_mode {mode!r}")
 
@@ -139,16 +108,15 @@ def materialize_dgd_from_candidate(
         if strategy == "tp":
             config = setter(config, candidate_config["tp"], component_type)
         else:
-            # tep/dep setters additionally require num_gpus_per_node; the
-            # DEP's MVP scope is single-node agg, so this is pinned rather
-            # than threaded through from the candidate for now -- a real
-            # multi-node materializer needs this to come from deployment
-            # context, not the candidate itself.
-            tp_or_ep_size = candidate_config["moe_tp" if strategy == "tep" else "moe_ep"]
+            # TEP/DEP setters need the physical node boundary in addition to
+            # the parallel shape carried by the Candidate.
+            tp_or_ep_size = candidate_config[
+                "moe_tp" if strategy == "tep" else "moe_ep"
+            ]
             config = setter(
                 config,
                 tp_or_ep_size,
-                num_gpus_per_node=8,
+                num_gpus_per_node=num_gpus_per_node,
                 component_type=component_type,
             )
 

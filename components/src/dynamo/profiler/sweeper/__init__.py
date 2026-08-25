@@ -6,6 +6,7 @@
 from dynamo.profiler.sweeper.dgd import (
     CandidateMaterializationError,
     DGDMaterializationOptions,
+    DGDRenderer,
     materialize_candidate_dgd,
 )
 from dynamo.profiler.sweeper.runner import SweepResult, run_sweep
@@ -13,6 +14,7 @@ from dynamo.profiler.sweeper.runner import SweepResult, run_sweep
 __all__ = [
     "CandidateMaterializationError",
     "DGDMaterializationOptions",
+    "DGDRenderer",
     "SweepResult",
     "materialize_candidate_dgd",
     "run_sweep",
