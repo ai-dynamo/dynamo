@@ -206,10 +206,15 @@ While some provide their own authentication, many do not, and several bind on al
 interfaces.
 
 **Keep every such interface on the trusted network**, expose only the routes a
-deployment uses, and disable the ones you don't need. Where an interface offers its
-own authentication, enable it as defense in depth — but treat it as additional
-hardening within the boundary, not a replacement for network isolation. See each
-component's documentation for its specific listeners and controls.
+deployment uses, and disable the ones you don't need. Network reachability is not
+authorization — a `ClusterIP` Service (for example the worker system routes on
+`DYN_SYSTEM_PORT`, default `9090`) is reachable cluster-wide with no caller
+authentication. Deployers should restrict these interfaces to authorized workloads
+and namespaces (for example with a NetworkPolicy) and verify that isolation. Where
+an interface offers its own authentication, enable it as defense in depth — but
+treat it as additional hardening within the boundary, not a replacement for network
+isolation. See each component's documentation for its specific listeners and
+controls.
 
 ## Securing Model and Backend Code
 
