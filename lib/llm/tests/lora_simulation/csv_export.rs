@@ -3,6 +3,9 @@
 
 use super::*;
 
+/// Modeled cost of one physical adapter load in the swap-time estimate.
+const ADAPTER_LOAD_COST_MS: usize = 50;
+
 fn percentile_99(values: &[usize]) -> usize {
     if values.is_empty() {
         return 0;
@@ -64,7 +67,7 @@ fn test_export_csv() {
         fs::File::create(v2_out_dir.join("summary.csv")).expect("create v2 summary csv");
     writeln!(
         summary,
-        "scenario,algorithm,seed,total_adapter_churn,total_route_churn,churn_free_ticks,churn_free_pct,peak_churn_per_tick,p99_churn_per_tick,overall_hit_rate,mean_worker_load_cov,mean_occupancy_pct,solve_ms_p50,solve_ms_p99,total_overflow,est_swap_ms"
+        "scenario,algorithm,seed,total_adapter_churn,total_route_churn,adapter_churn_free_ticks,adapter_churn_free_pct,peak_adapter_churn_per_tick,p99_adapter_churn_per_tick,overall_hit_rate,mean_worker_load_cov,mean_occupancy_pct,solve_ms_p50,solve_ms_p99,total_overflow,est_swap_ms"
     )
     .unwrap();
 
@@ -303,7 +306,7 @@ fn test_export_csv() {
                 percentile_50_ms(&metrics.per_tick_solve_ms),
                 percentile_99_ms(&metrics.per_tick_solve_ms),
                 total_overflow,
-                total_loads * 50,
+                total_loads * ADAPTER_LOAD_COST_MS,
             )
             .unwrap();
         }
@@ -560,12 +563,34 @@ fn test_export_csv() {
     }
 
     println!("\nAll CSVs written to: {}", out_dir.display());
+    let meta_config = &all_runs[0].1;
+    assert!(
+        all_runs.iter().all(|(_, config, _)| {
+            config.timestep_secs == meta_config.timestep_secs
+                && config.rate_window_multiplier == meta_config.rate_window_multiplier
+                && config.scale_down_cooldown_ticks == meta_config.scale_down_cooldown_ticks
+        }),
+        "v2 meta.csv describes a single timing configuration for all scenarios"
+    );
     let mut meta = fs::File::create(v2_out_dir.join("meta.csv")).expect("create v2 meta csv");
     writeln!(meta, "key,value").unwrap();
-    writeln!(meta, "timestep_secs,3").unwrap();
-    writeln!(meta, "rate_window_secs,90").unwrap();
-    writeln!(meta, "scale_down_cooldown_ticks,3").unwrap();
-    writeln!(meta, "adapter_load_cost_ms,50").unwrap();
+    writeln!(meta, "timestep_secs,{}", meta_config.timestep_secs).unwrap();
+    writeln!(
+        meta,
+        "rate_window_secs,{}",
+        meta_config
+            .timestep_secs
+            .saturating_mul(meta_config.rate_window_multiplier)
+            .max(5)
+    )
+    .unwrap();
+    writeln!(
+        meta,
+        "scale_down_cooldown_ticks,{}",
+        meta_config.scale_down_cooldown_ticks
+    )
+    .unwrap();
+    writeln!(meta, "adapter_load_cost_ms,{}", ADAPTER_LOAD_COST_MS).unwrap();
     writeln!(meta, "seed_count,1").unwrap();
     println!("Run: python lib/llm/tests/lora_simulation/plot_lora_churn.py");
 }

@@ -72,6 +72,7 @@ pub struct LoraController {
     prev_workers: HashSet<WorkerWithDpRank>,
     prev_worker_capacities: HashMap<WorkerWithDpRank, u32>,
     prev_replica_counts: HashMap<String, usize>,
+    last_overflow_count: usize,
 }
 
 impl LoraController {
@@ -115,6 +116,7 @@ impl LoraController {
             prev_workers: HashSet::new(),
             prev_worker_capacities: HashMap::new(),
             prev_replica_counts: HashMap::new(),
+            last_overflow_count: 0,
         }
     }
 
@@ -253,7 +255,14 @@ impl LoraController {
         self.recompute_allocations(now);
     }
 
+    /// Return the overflow placements reported by the most recent recompute.
+    #[doc(hidden)]
+    pub fn last_overflow_count(&self) -> usize {
+        self.last_overflow_count
+    }
+
     fn recompute_allocations(&mut self, now: Instant) {
+        self.last_overflow_count = 0;
         self.tick += 1;
         let observed = self.state_tracker.snapshot();
         let incarnation = observed.incarnation();
@@ -765,6 +774,7 @@ impl LoraController {
 
         match solve_result {
             Ok(result) => {
+                self.last_overflow_count = result.overflow_count;
                 let total_loads: usize = result.loads.values().map(|s| s.len()).sum();
                 let total_unloads: usize = result.unloads.values().map(|s| s.len()).sum();
 

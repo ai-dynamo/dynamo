@@ -154,6 +154,9 @@ impl ResidencyModel {
                 metrics.requests += 1;
                 let candidates =
                     filter.filter_worker_ids_for_lora(Some(&schedule.lora_name), &available_ids);
+                if candidates.is_empty() {
+                    continue;
+                }
                 let cursor = self
                     .next_candidate
                     .entry(schedule.lora_name.clone())
@@ -195,6 +198,10 @@ impl ResidencyModel {
                 );
                 metrics.adapter_loads += 1;
             }
+        }
+
+        if workers.is_empty() {
+            return metrics;
         }
 
         let occupancy: Vec<usize> = workers
@@ -245,6 +252,7 @@ fn record_routing_metrics(
     metrics: &mut ChurnMetrics,
     routing_table: &LoraRoutingTable,
     solve_ms: f64,
+    overflow_count: usize,
 ) {
     let configs = routing_table.snapshot_configs();
     metrics.per_tick_active_loras.push(
@@ -261,7 +269,7 @@ fn record_routing_metrics(
             .count(),
     );
     metrics.per_tick_solve_ms.push(solve_ms);
-    metrics.per_tick_overflow_count.push(0);
+    metrics.per_tick_overflow_count.push(overflow_count);
 }
 
 /// Compute churn between two allocation snapshots
@@ -517,7 +525,7 @@ fn run_hrw_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
             *replica_dist.entry(replica_set.len()).or_insert(0) += 1;
         }
         metrics.per_tick_replica_dist.push(replica_dist);
-        record_routing_metrics(&mut metrics, &routing_table, solve_ms);
+        record_routing_metrics(&mut metrics, &routing_table, solve_ms, 0);
         let request_metrics = residency.serve_tick(
             schedules,
             tick,
@@ -555,21 +563,27 @@ fn run_random_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> 
     }
     let filter = LoraFilter::new(routing_table.clone(), state_tracker.clone());
     let mut residency = ResidencyModel::new(&workers);
+    let load_estimator = LoadEstimator::with_config(LoadEstimatorConfig::from_controller_timestep(
+        config.timestep_secs,
+        config.rate_window_multiplier,
+    ));
 
     let mut metrics = ChurnMetrics::new("Random");
     let mut prev_snapshot: AllocationSnapshot = HashMap::new();
+    let base = Instant::now();
 
     for tick in 0..config.total_ticks {
-        // Compute loads for this tick
-        let mut active_loads: Vec<(String, usize)> = Vec::new();
-        // Match the controller paths: adapters with zero current load have no load-estimator
-        // entry, so the random baseline excludes them rather than adding unmatched cold pins.
+        let now = base + Duration::from_secs(tick as u64 * config.timestep_secs);
         for schedule in schedules {
             let load = schedule.load_at_tick(tick);
-            if load > 0 {
-                active_loads.push((schedule.lora_name.clone(), load));
+            for _ in 0..load {
+                load_estimator.increment_load_at(&schedule.lora_name, now);
             }
         }
+        let active_loads: Vec<(String, usize)> = load_estimator
+            .get_current_load_at(now)
+            .into_iter()
+            .collect();
 
         let curr_snapshot = compute_random_snapshot(
             &mut random_allocator,
@@ -594,7 +608,7 @@ fn run_random_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> 
                 },
             );
         }
-        record_routing_metrics(&mut metrics, &routing_table, 0.0);
+        record_routing_metrics(&mut metrics, &routing_table, 0.0, 0);
         // Compute churn
         let (loads, unloads) = compute_churn(&prev_snapshot, &curr_snapshot);
         let tick_churn = loads + unloads;
@@ -627,6 +641,11 @@ fn run_random_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> 
                 config.slots_per_backend,
             ),
         );
+        for schedule in schedules {
+            for _ in 0..schedule.load_at_tick(tick) {
+                load_estimator.decrement_load_at(&schedule.lora_name, now);
+            }
+        }
 
         prev_snapshot = curr_snapshot;
     }
@@ -716,7 +735,12 @@ fn run_mcf_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
             *replica_dist.entry(replica_set.len()).or_insert(0) += 1;
         }
         metrics.per_tick_replica_dist.push(replica_dist);
-        record_routing_metrics(&mut metrics, &routing_table, solve_ms);
+        record_routing_metrics(
+            &mut metrics,
+            &routing_table,
+            solve_ms,
+            controller.last_overflow_count(),
+        );
         let request_metrics = residency.serve_tick(
             schedules,
             tick,
