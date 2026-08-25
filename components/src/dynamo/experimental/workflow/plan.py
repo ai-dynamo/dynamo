@@ -10,7 +10,11 @@ from types import MappingProxyType
 from typing import Mapping, Union
 
 from dynamo.experimental.workflow.ir import WorkflowIR
-from dynamo.experimental.workflow.types import StageContract, WorkflowValidationError, validate_name
+from dynamo.experimental.workflow.types import (
+    StageContract,
+    WorkflowValidationError,
+    validate_name,
+)
 
 
 @dataclass(frozen=True)
