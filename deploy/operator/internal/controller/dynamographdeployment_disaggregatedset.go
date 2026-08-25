@@ -775,41 +775,7 @@ func (r *disaggregatedSetWorkloadsReconciler) syncDGDStableService(
 
 	updated := existing.DeepCopy()
 	updated.Spec = *desired.Spec.DeepCopy()
-	// The apiserver defaults these fields even when the rendered object leaves
-	// them empty. Apply the typed defaults before comparing so a subsequent
-	// reconcile does not continually overwrite the server-defaulted values.
-	if updated.Spec.Type == "" {
-		updated.Spec.Type = corev1.ServiceTypeClusterIP
-	}
-	if updated.Spec.SessionAffinity == "" {
-		updated.Spec.SessionAffinity = corev1.ServiceAffinityNone
-	}
-	if updated.Spec.SessionAffinity == corev1.ServiceAffinityNone {
-		updated.Spec.SessionAffinityConfig = nil
-	}
-	if updated.Spec.Type == corev1.ServiceTypeNodePort || updated.Spec.Type == corev1.ServiceTypeLoadBalancer {
-		if updated.Spec.ExternalTrafficPolicy == "" {
-			updated.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyTypeCluster
-		}
-	}
-	if updated.Spec.InternalTrafficPolicy == nil &&
-		(updated.Spec.Type == corev1.ServiceTypeClusterIP ||
-			updated.Spec.Type == corev1.ServiceTypeNodePort ||
-			updated.Spec.Type == corev1.ServiceTypeLoadBalancer) {
-		updated.Spec.InternalTrafficPolicy = ptr.To(corev1.ServiceInternalTrafficPolicyCluster)
-	}
-	for i := range updated.Spec.Ports {
-		port := &updated.Spec.Ports[i]
-		if port.Protocol == "" {
-			port.Protocol = corev1.ProtocolTCP
-		}
-		if port.TargetPort == intstr.FromInt32(0) || port.TargetPort == intstr.FromString("") {
-			port.TargetPort = intstr.FromInt32(port.Port)
-		}
-	}
-	if updated.Spec.Type == corev1.ServiceTypeLoadBalancer && updated.Spec.AllocateLoadBalancerNodePorts == nil {
-		updated.Spec.AllocateLoadBalancerNodePorts = ptr.To(true)
-	}
+	normalizeDGDStableServiceSpec(&updated.Spec)
 	updated.Labels = maps.Clone(existing.Labels)
 	if updated.Labels == nil {
 		updated.Labels = map[string]string{}
@@ -840,6 +806,45 @@ func (r *disaggregatedSetWorkloadsReconciler) syncDGDStableService(
 		return err
 	}
 	return nil
+}
+
+// normalizeDGDStableServiceSpec applies the defaults that the apiserver adds
+// to a Service when the rendered object leaves those fields unspecified. This
+// keeps the desired object comparable with the object read on the next
+// reconcile and prevents a defaulting-induced update loop.
+func normalizeDGDStableServiceSpec(spec *corev1.ServiceSpec) {
+	if spec.Type == "" {
+		spec.Type = corev1.ServiceTypeClusterIP
+	}
+	if spec.SessionAffinity == "" {
+		spec.SessionAffinity = corev1.ServiceAffinityNone
+	}
+	if spec.SessionAffinity == corev1.ServiceAffinityNone {
+		spec.SessionAffinityConfig = nil
+	}
+	if spec.Type == corev1.ServiceTypeNodePort || spec.Type == corev1.ServiceTypeLoadBalancer {
+		if spec.ExternalTrafficPolicy == "" {
+			spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyTypeCluster
+		}
+	}
+	if spec.InternalTrafficPolicy == nil &&
+		(spec.Type == corev1.ServiceTypeClusterIP ||
+			spec.Type == corev1.ServiceTypeNodePort ||
+			spec.Type == corev1.ServiceTypeLoadBalancer) {
+		spec.InternalTrafficPolicy = ptr.To(corev1.ServiceInternalTrafficPolicyCluster)
+	}
+	for i := range spec.Ports {
+		port := &spec.Ports[i]
+		if port.Protocol == "" {
+			port.Protocol = corev1.ProtocolTCP
+		}
+		if port.TargetPort == intstr.FromInt32(0) || port.TargetPort == intstr.FromString("") {
+			port.TargetPort = intstr.FromInt32(port.Port)
+		}
+	}
+	if spec.Type == corev1.ServiceTypeLoadBalancer && spec.AllocateLoadBalancerNodePorts == nil {
+		spec.AllocateLoadBalancerNodePorts = ptr.To(true)
+	}
 }
 
 func sortedDCDKeys(dcds map[string]*nvidiacomv1beta1.DynamoComponentDeployment) []string {
