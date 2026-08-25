@@ -21,11 +21,6 @@ Throughout this guide, **deployer** refers to the team responsible for deploying
 and operating Dynamo in a cluster — distinct from the **Dynamo Operator**, the
 Kubernetes operator component.
 
-> [!NOTE]
-> Configuration variables are shown inline here for now. As the canonical component
-> reference pages gain their security sections, that variable-level detail will move
-> there and this guide will link to those sections instead of duplicating them.
-
 > [!WARNING]
 > Do not expose the Dynamo frontend, planner dashboard, standalone router
 > services, NATS, etcd, or ZMQ endpoints directly to an untrusted network.
@@ -170,10 +165,6 @@ you use.
   `DYN_TCP_TLS_CLIENT_KEY_PATH`. For the NATS transport, use
   `NATS_TLS_CLIENT_CERT_PATH` / `NATS_TLS_CLIENT_KEY_PATH`.
 - Keep the **NIXL/RDMA** data-transfer fabric on the trusted network.
-
-> [!NOTE]
-> Helm-based setup of the TCP and NATS certificates is tracked in
-> [#10809](https://github.com/ai-dynamo/dynamo/issues/10809).
 
 **Why it matters:** TLS encrypts request-plane traffic, and mTLS additionally
 authenticates the client so an unauthenticated peer cannot deliver requests or
