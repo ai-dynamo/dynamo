@@ -59,7 +59,13 @@ spec:
           containers:
             - name: main
               image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-e3ca1b40dd877531f3276116cb773c6a782b1122-vllm-runtime
+              imagePullPolicy: Always
               workingDir: /workspace
+              env:
+                # Set explicitly rather than relying on the default: this trace has ~90%
+                # shared prefix, so KV-aware routing is the meaningful choice for the family.
+                - name: DYN_ROUTER_MODE
+                  value: kv
               command:
                 - /bin/bash
                 - -lc
@@ -107,10 +113,11 @@ spec:
           containers:
             - name: main
               image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-e3ca1b40dd877531f3276116cb773c6a782b1122-vllm-runtime
+              imagePullPolicy: Always
               workingDir: /workspace/examples/backends/vllm
               volumeMounts:
                 - name: model-cache
-                  mountPath: /opt/models
+                  mountPath: /model-cache
                 - name: dshm
                   mountPath: /dev/shm
               env:
@@ -150,7 +157,7 @@ spec:
                 - name: TILELANG_CLEANUP_TEMP_FILES
                   value: "1"
                 - name: HF_HOME
-                  value: /opt/models
+                  value: /model-cache
                 - name: HF_HUB_OFFLINE
                   value: "1"
                 - name: SPECULATIVE_CONFIG
