@@ -6,10 +6,10 @@
 import argparse
 import asyncio
 
+from dynamo.experimental.workflow import RemoteStageServer
 from dynamo.runtime import DistributedRuntime, dynamo_worker
-from dynamo.workflow import RemoteStageServer
-from examples.custom_backend.workflow_hello_world.stages import STAGES
-from examples.custom_backend.workflow_hello_world.workflow import ENDPOINTS
+from examples.experimental.workflow.hello_world.stages import STAGES
+from examples.experimental.workflow.hello_world.workflow import ENDPOINTS
 
 
 @dynamo_worker()

@@ -6,12 +6,10 @@
 import asyncio
 import os
 
+from dynamo.experimental.workflow import WorkflowEndpointHandler, WorkflowOrchestrator
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
-from dynamo.workflow import WorkflowEndpointHandler, WorkflowOrchestrator
-from examples.custom_backend.workflow_hello_world.workflow import (
-    compile_remote_workflow,
-)
+from examples.experimental.workflow.hello_world.workflow import compile_remote_workflow
 
 ORCHESTRATOR_ENDPOINT = "workflow-hello-world.orchestrator.generate"
 MODEL_NAME = "hello-world"

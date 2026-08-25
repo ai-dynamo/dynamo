@@ -7,14 +7,14 @@ from typing import Any
 
 import pytest
 
-from dynamo.workflow import (
+from dynamo.experimental.workflow import (
     RemoteBinding,
     RemoteStageServer,
     WorkflowEndpointHandler,
     WorkflowOrchestrator,
 )
-from examples.custom_backend.workflow_hello_world.stages import STAGES
-from examples.custom_backend.workflow_hello_world.workflow import (
+from examples.experimental.workflow.hello_world.stages import STAGES
+from examples.experimental.workflow.hello_world.workflow import (
     ENDPOINTS,
     compile_remote_workflow,
 )

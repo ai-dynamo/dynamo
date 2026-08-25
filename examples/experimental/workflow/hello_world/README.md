@@ -5,6 +5,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # Hello World Workflow
 
+> Experimental: This workflow API is under active development and may evolve
+> based on feedback. It is an optional orchestration layer over Dynamo's
+> discoverable workers and endpoints; applications may compose those primitives
+> directly when they prefer to own the orchestration logic.
+
 This example serves a declarative workflow through a discovered orchestrator
 worker. It accepts an OpenAI chat-completions request, ignores its content, and
 returns `Hello, World!`:
@@ -28,13 +33,13 @@ OpenAI client -> generic Dynamo frontend -> orchestrator worker --+--> remote He
 Start the frontend, orchestrator, and three stage workers:
 
 ```bash
-examples/custom_backend/workflow_hello_world/launch.sh
+examples/experimental/workflow/hello_world/launch.sh
 ```
 
 The frontend listens on port 8000 by default. Send a request with:
 
 ```bash
-python3 -m examples.custom_backend.workflow_hello_world.client
+python3 -m examples.experimental.workflow.hello_world.client
 ```
 
 Set `DYN_HTTP_PORT` to change the frontend port and pass the matching

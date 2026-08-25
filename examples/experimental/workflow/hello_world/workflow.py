@@ -3,8 +3,13 @@
 
 """Author and compile the declarative Hello World workflow."""
 
-from dynamo.workflow import DeploymentSpec, ExecutionPlan, Workflow, compile_workflow
-from examples.custom_backend.workflow_hello_world.stages import (
+from dynamo.experimental.workflow import (
+    DeploymentSpec,
+    ExecutionPlan,
+    Workflow,
+    compile_workflow,
+)
+from examples.experimental.workflow.hello_world.stages import (
     HelloStage,
     MergeStage,
     WorldStage,
