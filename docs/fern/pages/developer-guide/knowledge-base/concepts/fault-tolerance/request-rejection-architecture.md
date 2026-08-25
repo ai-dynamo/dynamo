@@ -120,12 +120,16 @@ engine to sustain. The in-process health-check canary is issued through the loca
 and never passes through the gate.
 
 A request takes a free engine slot when one is available, otherwise it joins the FIFO queue, and
-otherwise the worker responds `Server overloaded: worker at capacity` on the response-stream
-prologue. A slot is released when the admitted request finishes, errors, or is cancelled, and passes
-to the oldest queued request. New arrivals never bypass an older waiter, and a request cancelled
-while queued frees its queue slot immediately. The Frontend maps the prologue rejection to the
-worker-scoped `WorkerOverloaded` error. When request migration is enabled, it can retry the request
-without changing its allowlist or routing constraints.
+otherwise the worker refuses it with `Server overloaded: worker at capacity`. A slot is released when
+the admitted request finishes, errors, or is cancelled, and passes to the oldest queued request. New
+arrivals never bypass an older waiter, and a request cancelled while queued frees its queue slot
+immediately.
+
+The refusal happens before the backend is asked to do any work, so the request never reaches the
+engine. It is reported through the same pre-stream error path a failed `generate` uses, which today
+carries an opaque message rather than a category; the Frontend therefore treats it as it treats any
+pre-stream worker failure. Preserving the worker-scoped classification across that boundary is
+separate transport work.
 
 `N` resolves in this order:
 
@@ -138,16 +142,35 @@ without changing its allowlist or routing constraints.
 `Q` defaults to `40000` and is overridden independently by `DYN_DYNAMO_REQUEST_QUEUE_LIMIT`. The
 queue holds exactly `Q` requests: no dispatcher holds a hidden `Q + 1`th.
 
-The worker rejection does not add a failed-worker exclusion to the routing request or change the
-standalone router protocol. An in-process router can exclude the failed worker with request-local
-state while retrying. In a split or standalone deployment, selection uses the router's current global
-overload and fault state, so a retry can select the same worker again. Worker-local overload
-migration is therefore best-effort in that topology. Pool-scoped `ResourceExhausted` remains
-non-migratable because no eligible worker has known capacity. If either overload error reaches the
-client, the Frontend returns the configured overload status, HTTP 529 by default.
+The worker refusal does not add a failed-worker exclusion to the routing request or change the
+standalone router protocol.
 
 The effective maximum is `N + Q` requests. `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` is an advanced override
 read independently of the engine limit, and defaults to `40000`.
+
+### Controlled Delay
+
+Queueing is bounded in time as well as in length. Every request that joins the FIFO is stamped, at
+enqueue, with a deadline of `enqueue time + queue delay`. The delay is one process-wide budget: it
+defaults to `5000` milliseconds and is overridden by a positive `DYN_DYNAMO_REQUEST_QUEUE_TIMEOUT_MS`,
+in whole milliseconds, down to `1`. That override is environment-only; there is no command-line flag.
+An unset, unparseable or non-positive value leaves the default in place.
+
+The deadline bounds queue residence only. It does not limit how long an admitted request may run,
+it is not a per-request SLO, and a request that takes a free engine slot immediately never carries
+one at all. When a queued request passes its deadline it is removed from the queue at once, so it
+stops consuming queue capacity, and the worker refuses it with
+`Server overloaded: request rejected after exceeding the backend admission queue delay` — the same
+refusal path as a full queue, distinguished only by the message.
+
+Because every entry gets the same delay budget at enqueue, FIFO order is also nondecreasing deadline
+order, so expiry only ever removes a prefix of the queue and never inspects the requests behind it.
+The gate owns exactly one timer for the oldest live deadline, re-armed whenever the head changes,
+rather than a periodic sweep or a timer per queued request. Every path that hands a freed slot to a
+queued request also re-checks the head deadline first, so a slot released before that timer fires is
+still never given to a request the delay budget has already given up on. Queue order among requests
+that have not expired is unchanged. This is transport-independent: the same gate, timer and expiry
+result apply over TCP and NATS.
 
 ### Where The Capacity Hint Comes From
 

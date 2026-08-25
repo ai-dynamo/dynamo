@@ -253,8 +253,8 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   `ceil(3/2 x max_num_seqs x data_parallel_size)`, and falls back to exactly `10000` when no card
   reports a usable `max_num_seqs`. Any component that registers a base card can supply that value,
   routers included; the runtime does not restrict it to engines. When the slots and the Dynamo
-  overflow queue are full, the process rejects the request and the Frontend returns the configured
-  overload status, 529 by default.
+  overflow queue are full, the process refuses the request before it reaches the engine and the
+  request fails.
 
   Environment variable: `DYN_ENGINE_REQUEST_LIMIT`
 </ParamField>
@@ -264,6 +264,17 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   whether or not the engine limit is set explicitly. The effective per-worker-process cap is the
   engine limit plus this queue limit, counted across the TCP and NATS request planes together and
   across every endpoint the process serves.
+</ParamField>
+
+<ParamField path="DYN_DYNAMO_REQUEST_QUEUE_TIMEOUT_MS" type="integer" default="5000">
+  Advanced maximum time, in whole milliseconds, that a request may wait in the Dynamo overflow queue
+  before the worker gives up on it. Environment-only: there is no command-line flag. A positive
+  integer replaces the default, down to `1`; an unset, unparseable or non-positive value leaves the
+  default in place.
+
+  This bounds queue residence only. It does not limit how long an admitted request may run, and a
+  request that takes a free engine slot immediately never carries a deadline. An expired request is
+  removed from the queue at once and refused exactly as a full queue refuses one.
 </ParamField>
 
 ## Related pages

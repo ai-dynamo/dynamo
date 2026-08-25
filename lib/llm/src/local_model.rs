@@ -480,19 +480,8 @@ pub async fn register_model_card(
     )?;
     let _instance = discovery.register(spec).await?;
 
-    // Offer this card's capacity to the process-global admission gate, only once
-    // the model is actually registered: a component that then fails to register
-    // would otherwise claim the process-global sizing slot without ever serving.
-    // The gate is already admitting by now, so it accepts this late hint rather
-    // than being frozen at construction.
-    //
-    // Every non-LoRA base card routed through this function reports, whatever
-    // registered it. That includes routers -- `global_router`,
-    // `vllm.omni.stage_router` and `thunderagent_router` all reach here via
-    // `register_model` -- so this is not an engine-only signal. Those router
-    // cards leave `max_num_seqs` unset in tree, so they report nothing usable
-    // today, but the gate's rule is simply first-usable-report-wins and does not
-    // test who published the card. LoRA adapters carry no capacity of their own.
+    // Size the process-global admission gate from this card, after registration
+    // succeeds. LoRA adapters carry no capacity of their own.
     if lora_name.is_none() {
         dynamo_runtime::admission_gate::record_engine_capacity(
             card.runtime_config.max_num_seqs,

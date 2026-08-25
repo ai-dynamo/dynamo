@@ -708,20 +708,8 @@ impl AddressedPushRouter {
         let response_stream = match response_stream_provider.await {
             Ok(Ok(stream)) => stream,
             Ok(Err(e)) => {
-                // The worker shed this request at its backend admission gate.
-                // That is capacity on one worker, not a connection fault, so it
-                // must stay `WorkerOverloaded` for the HTTP 529 / `Overloaded`
-                // contract and for worker-scoped migration.
-                if let Some(err) = classify_prologue_error(&e) {
-                    tracing::warn!(
-                        request_id = context.id(),
-                        worker_response = %err.to_string(),
-                        "Request rejected by worker"
-                    );
-                    return Err(err.into());
-                }
-                // Otherwise generate() failed before any response bytes; migrate
-                // via CannotConnect since the dominant cause is a worker-local
+                // generate() failed before any response bytes; migrate via
+                // CannotConnect since the dominant cause is a worker-local
                 // setup/version issue. The wire prologue carries only an
                 // opaque string today, so app-level rejections also retry
                 // -- safe because no side effects are visible yet. Follow-up:
@@ -834,26 +822,6 @@ impl AddressedPushRouter {
     }
 }
 
-/// Map a response-stream prologue error to a typed error. `None` when the
-/// prologue error is an ordinary engine failure.
-///
-/// The worker's backend admission gate reports an overload on the prologue
-/// rather than the request-plane ACK, because the gate sits after the response
-/// stream is open and is shared by every transport. Matching the message prefix
-/// here is what preserves worker-scoped `WorkerOverloaded` (HTTP 529) over both
-/// TCP and NATS.
-fn classify_prologue_error(prologue_error: &str) -> Option<DynamoError> {
-    if !prologue_error.starts_with(crate::admission_gate::OVERLOADED_PREFIX) {
-        return None;
-    }
-    Some(
-        DynamoError::builder()
-            .error_type(ErrorType::WorkerOverloaded)
-            .message(prologue_error.to_string())
-            .build(),
-    )
-}
-
 /// Map a worker rejection ACK to the corresponding typed error. `None` for
 /// normal responses, including the empty "queued" ACK.
 fn detect_worker_rejection_response(res_bytes: &[u8]) -> Option<DynamoError> {
@@ -908,30 +876,6 @@ mod rejection_detection_tests {
             &[ErrorType::WorkerOverloaded],
             &[]
         ));
-    }
-
-    #[test]
-    fn overload_prologue_maps_to_worker_overloaded() {
-        use crate::admission_gate;
-
-        // The backend admission gate reports an overload on the response-stream
-        // prologue, so this mapping is what preserves HTTP 529 over both TCP and
-        // NATS. Drive it with the exact message the gate sends.
-        let err = classify_prologue_error(admission_gate::OVERLOADED_MESSAGE)
-            .expect("the gate's prologue must be classified as an overload");
-        assert_eq!(err.error_type(), ErrorType::WorkerOverloaded);
-        assert!(
-            admission_gate::OVERLOADED_MESSAGE.starts_with(admission_gate::OVERLOADED_PREFIX),
-            "the gate's message must carry the prefix this mapping matches"
-        );
-    }
-
-    #[test]
-    fn other_prologue_errors_are_not_overload() {
-        // Ordinary generate failures must keep falling through to CannotConnect.
-        assert!(classify_prologue_error("engine failed to start").is_none());
-        assert!(classify_prologue_error("").is_none());
-        assert!(classify_prologue_error("overloaded").is_none());
     }
 }
 
