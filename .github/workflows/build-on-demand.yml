@@ -23,18 +23,80 @@ on:
         type: boolean
         default: false
       standard_hook_canary:
-        description: 'Run the isolated standard-hook latency or TensorRT-LLM canary'
+        description: 'Run an isolated runner-hook canary'
         type: choice
         options:
           - none
           - latency
           - trtllm
+          - novolume-latency
         default: none
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
+
+  novolume-hook-latency:
+    if: inputs.standard_hook_canary == 'novolume-latency'
+    name: No-volume hook ${{ matrix.shape }} canary
+    strategy:
+      fail-fast: false
+      matrix:
+        shape:
+          - repeated
+          - consolidated
+    runs-on: prod-tester-amd-gpu-v2
+    timeout-minutes: 20
+    container:
+      image: nvcr.io/nvidia/cuda:12.8.1-base-ubuntu22.04
+    steps:
+      - name: Verify no-volume GPU runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(nvidia-smi -L | wc -l | tr -d ' ')" = "1"
+          echo "shape=${{ matrix.shape }} runner=${{ runner.name }} job_pod=$(hostname)"
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - name: Repeated probe 01
+        if: matrix.shape == 'repeated'
+        run: date +%s%3N
+      - name: Repeated probe 02
+        if: matrix.shape == 'repeated'
+        run: date +%s%3N
+      - name: Repeated probe 03
+        if: matrix.shape == 'repeated'
+        run: date +%s%3N
+      - name: Repeated probe 04
+        if: matrix.shape == 'repeated'
+        run: date +%s%3N
+      - name: Repeated probe 05
+        if: matrix.shape == 'repeated'
+        run: date +%s%3N
+      - name: Repeated probe 06
+        if: matrix.shape == 'repeated'
+        run: date +%s%3N
+      - name: Repeated probe 07
+        if: matrix.shape == 'repeated'
+        run: date +%s%3N
+      - name: Repeated probe 08
+        if: matrix.shape == 'repeated'
+        run: date +%s%3N
+      - name: Repeated probe 09
+        if: matrix.shape == 'repeated'
+        run: date +%s%3N
+      - name: Repeated probe 10
+        if: matrix.shape == 'repeated'
+        run: date +%s%3N
+      - name: Consolidated probes 01-10
+        if: matrix.shape == 'consolidated'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for probe in $(seq -w 1 10); do
+            echo "probe=${probe} timestamp=$(date +%s%3N)"
+          done
 
   standard-hook-latency:
     if: inputs.standard_hook_canary == 'latency'
