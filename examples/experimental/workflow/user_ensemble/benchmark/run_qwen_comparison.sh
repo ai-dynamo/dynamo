@@ -8,7 +8,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(readlink -f "$SCRIPT_DIR/../../../..")"
+REPO_ROOT="$(readlink -f "$SCRIPT_DIR/../../../../..")"
 LAUNCH_ROOT="${DYN_BENCH_LAUNCH_ROOT:-$REPO_ROOT}"
 WORKLOAD_ROOT="${DYN_BENCH_WORKLOAD_ROOT:-/dynamo-tmp/logs/08-05/qwen25-user-ensemble-textisl644-osl7-mixed1000/workload}"
 OUTPUT_ROOT="${DYN_BENCH_OUTPUT_ROOT:?set DYN_BENCH_OUTPUT_ROOT to a new result directory}"
@@ -86,7 +86,7 @@ cleanup_cell() {
 }
 trap cleanup_cell EXIT
 
-python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark \
+python -m examples.experimental.workflow.user_ensemble.benchmark.remote_qwen_benchmark \
     validate-workload "$WORKLOAD_ROOT" \
     --output "$OUTPUT_ROOT/workload_audit.json"
 
@@ -101,7 +101,7 @@ GPU_INFO="$(nvidia-smi \
 TORCH_GPU_COUNT="$(python -c 'import torch; print(torch.cuda.device_count())')"
 AIPERF_VERSION="${DYN_BENCH_AIPERF_VERSION:-$("$AIPERF_BIN" --version 2>&1)}"
 
-python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark \
+python -m examples.experimental.workflow.user_ensemble.benchmark.remote_qwen_benchmark \
     capture-metadata \
     --output "$OUTPUT_ROOT/benchmark_metadata.json" \
     --source-commit "$SOURCE_COMMIT" \
@@ -115,10 +115,10 @@ python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark 
     --aiperf-version "$AIPERF_VERSION"
 
 sha256sum \
-    "$REPO_ROOT/examples/custom_backend/user_ensemble/workflow.py" \
-    "$REPO_ROOT/examples/custom_backend/user_ensemble/remote/launch.sh" \
+    "$REPO_ROOT/examples/experimental/workflow/user_ensemble/workflow.py" \
+    "$REPO_ROOT/examples/experimental/workflow/user_ensemble/remote/launch.sh" \
     "$REPO_ROOT/components/src/dynamo/vllm/multimodal_utils/custom_encoder/batcher.py" \
-    "$REPO_ROOT/components/src/dynamo/workflow/nixl.py" \
+    "$REPO_ROOT/components/src/dynamo/experimental/workflow/nixl.py" \
     "$REPO_ROOT/lib/bindings/python/src/dynamo/nixl_connect/__init__.py" \
     "$REPO_ROOT/examples/custom_encoder/qwen2_5_vl_benchmark_encoder.py" \
     > "$OUTPUT_ROOT/source_files_sha256.txt"
@@ -148,7 +148,7 @@ common_aiperf_args=(
 launch_topology() {
     local topology="$1"
     local output_dir="$2"
-    local launch_script="$LAUNCH_ROOT/examples/custom_backend/user_ensemble/remote/launch.sh"
+    local launch_script="$LAUNCH_ROOT/examples/experimental/workflow/user_ensemble/remote/launch.sh"
     local launch_args=(--max-num-seqs 64 --no-enable-prefix-caching)
 
     if [[ "$topology" != remote ]]; then
@@ -216,7 +216,7 @@ run_cell() {
         --artifact-dir "$output_dir/warmup" \
         --zmq-ipc-path "${zmq_prefix}-warmup" \
         > "$output_dir/warmup/client.log" 2>&1
-    python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark \
+    python -m examples.experimental.workflow.user_ensemble.benchmark.remote_qwen_benchmark \
         validate-profile \
         --profile "$output_dir/warmup/profile_export_aiperf.json" \
         --expected-requests 20 \
@@ -246,7 +246,7 @@ run_cell() {
 
     # Validate the exact 20+1,000 encoder calls before the remote joined-response
     # smoke adds one intentionally excluded request to the server log.
-    python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark \
+    python -m examples.experimental.workflow.user_ensemble.benchmark.remote_qwen_benchmark \
         validate-cell \
         --profile "$output_dir/measured/profile_export_aiperf.json" \
         --wall-seconds "$output_dir/full_client_process_wall_seconds.txt" \
@@ -255,7 +255,7 @@ run_cell() {
         --output "$output_dir/cell_audit.json"
 
     if [[ "$topology" == remote ]]; then
-        python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark \
+        python -m examples.experimental.workflow.user_ensemble.benchmark.remote_qwen_benchmark \
             smoke \
             --input "$WARMUP_INPUT" \
             --output "$output_dir/joined_smoke.json" \
@@ -278,7 +278,7 @@ for cell in $CELL_PLAN; do
 done
 
 if [[ "$CELL_PLAN" == "$DEFAULT_CELL_PLAN" ]]; then
-    python -m examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark \
+    python -m examples.experimental.workflow.user_ensemble.benchmark.remote_qwen_benchmark \
         summarize "$OUTPUT_ROOT" | tee "$OUTPUT_ROOT/summary.log"
 else
     printf '%s\n' "$CELL_PLAN" > "$OUTPUT_ROOT/partial_cell_plan.txt"

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from examples.custom_backend.user_ensemble.benchmark.remote_qwen_benchmark import (
+from examples.experimental.workflow.user_ensemble.benchmark.remote_qwen_benchmark import (
     BenchmarkAuditError,
     audit_encoder_log,
     summarize,
@@ -179,8 +179,8 @@ def test_summary_reports_remote_achieved_to_offered_gate(
 
 def test_runner_omits_measured_concurrency_limit() -> None:
     runner = (
-        Path(__file__).parents[5]
-        / "examples/custom_backend/user_ensemble/benchmark/run_qwen_comparison.sh"
+        Path(__file__).parents[6]
+        / "examples/experimental/workflow/user_ensemble/benchmark/run_qwen_comparison.sh"
     ).read_text(encoding="utf-8")
 
     measured = runner.split("TIMEFORMAT='%R'", maxsplit=1)[1].split(
