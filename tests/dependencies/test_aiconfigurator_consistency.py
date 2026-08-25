@@ -68,8 +68,7 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
     dependencies = bindings_cargo["dependencies"]
     assert "aiconfigurator-core" not in dependencies
     assert all(
-        package["name"] != "aiconfigurator-core"
-        for package in bindings_lock["package"]
+        package["name"] != "aiconfigurator-core" for package in bindings_lock["package"]
     )
     assert features["aic-forward-pass"] == ["dep:aisimulate-core"]
     assert dependencies["aisimulate-core"] == {
