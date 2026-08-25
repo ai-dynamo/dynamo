@@ -223,5 +223,12 @@ Non-obvious knobs, all already set in the manifest:
 
 ## Known issues
 
+- **vLLM MTP is disabled.** Stock vLLM 0.27.1 has no MTP mapping for the
+  `qwen3_5_moe_text` architecture, so these profiles do not pass
+  `--speculative-config`.
+- **SGLang profiles require a newer engine.** The stock
+  `lmsysorg/sglang:v0.5.16` base cannot load the text-only checkpoint; support
+  requires the fix first released in SGLang v0.5.17. The SGLang manifests are
+  retained for use with a patched or newer runtime image.
 - Every worker replica loads its own copy of the checkpoint from the PVC on every cold start, with no
   shared or streamed loading — pod restarts are expensive.
