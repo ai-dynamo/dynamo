@@ -259,7 +259,7 @@ The proposed runtime should learn from Agentic API's externally visible Response
 - Shared transactional store, tenant authorization, idempotency, and response-chain concurrency control.
 - Stateful streaming, cancellation policy, bounded buffering, and observability.
 - Next-hop-owned durable carrier snapshot for recovery of a runtime-owned tool loop.
-- Persist stable agent identity fields and enforce consistency on continuation.
+- Validate checkpoint access separately from Dynamo routing metadata; define changed-carrier policy in the Dynamo next-hop client.
 
 ### Phase 2: one runtime-owned connector
 
@@ -289,7 +289,7 @@ The proposed runtime should learn from Agentic API's externally visible Response
 2. Should the stateful runtime be embedded with an ingress service initially, or deployed as an independent next-hop service from day one?
 3. What is the exact frontend-owned normalized event interface between the runtime and Responses/Messages serializers?
 4. What is the minimum Dynamo carrier snapshot needed for crash recovery, and which fields must remain request-local?
-5. How should the Dynamo adapter apply or reject changed incoming routing identity on a continuation?
+5. How should the Dynamo next-hop client apply or reject changed incoming routing metadata on a continuation?
 6. Which runtime-owned tool is constrained enough to be the first production connector?
 7. Which information should endpoint selection inspect to choose direct Dynamo versus the stateful runtime without duplicating protocol parsing?
 
