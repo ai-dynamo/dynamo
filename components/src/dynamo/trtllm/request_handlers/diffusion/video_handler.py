@@ -190,6 +190,10 @@ class VideoGenerationHandler(BaseGenerativeHandler):
         try:
             # Parse request
             req = NvCreateVideoRequest(**request)
+            if req.extra_params:
+                raise ValueError(
+                    "extra_params is only supported by the vLLM-Omni video backend"
+                )
             nvext = req.nvext or VideoNvExt()
 
             # Parse parameters

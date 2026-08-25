@@ -885,6 +885,26 @@ class TestVideoHandlerResponseFormats:
         assert response["error"] == "GPU OOM"
         assert response["data"] == []
 
+    @pytest.mark.asyncio
+    async def test_nonempty_extra_params_are_rejected(self):
+        handler = self._make_handler()
+
+        results = []
+        async for result in handler.generate(
+            {
+                "prompt": "a test video",
+                "model": "test-model",
+                "extra_params": {"task": "t2va"},
+            },
+            MagicMock(),
+        ):
+            results.append(result)
+
+        assert len(results) == 1
+        assert results[0]["status"] == "failed"
+        assert "only supported by the vLLM-Omni" in results[0]["error"]
+        handler.engine.generate.assert_not_called()
+
 
 # =============================================================================
 # Part 7: output_format field handling

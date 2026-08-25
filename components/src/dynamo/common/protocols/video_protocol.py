@@ -8,7 +8,7 @@ to ensure compatibility with the Dynamo HTTP frontend.
 """
 # TODO: Replace these Pydantic models with Python bindings to the Rust protocol types once PyO3 bindings are available.
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -80,6 +80,9 @@ class NvCreateVideoRequest(BaseModel):
     output_format: Optional[str] = None
     """Requested container format (e.g. 'mp4', 'mjpeg').
     This is a hint; check output_format in the response data for the actual format."""
+
+    extra_params: Optional[dict[str, Any]] = None
+    """Model-specific parameters passed to vLLM-Omni diffusion ``extra_args``."""
 
     stream: Optional[bool] = None
     """Whether to stream the video generation (default: false)."""

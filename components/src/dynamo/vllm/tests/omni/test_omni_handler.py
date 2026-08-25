@@ -44,6 +44,7 @@ def _make_handler(stage_types=("diffusion",)):
     config.model = "test-model"
     config.served_model_name = None
     config.output_modalities = ["text"]
+    config.default_video_fps = 16
     config.enable_lora = False  # Disable LoRA for tests unless explicitly set
     config.engine_args = SimpleNamespace(enable_lora=False)
     handler.config = config
@@ -224,6 +225,96 @@ class TestI2VEngineInputs:
         assert sp.guidance_scale_2 == 1.0
         assert sp.num_inference_steps == 40
 
+    @pytest.mark.asyncio
+    async def test_video_preserves_model_defaults_and_merges_extra_params(self):
+        handler = _make_handler()
+        model_defaults = handler.engine_client.default_sampling_params_list[0]
+        model_defaults.num_frames = 209
+        model_defaults.seed = 7
+        model_defaults.extra_args = {
+            "flow_shift": 11.0,
+            "model_default": "preserved",
+        }
+        req = NvCreateVideoRequest(
+            prompt="cat playing piano",
+            model="video-model",
+            nvext=VideoNvExt(num_inference_steps=50),
+            extra_params={
+                "task": "t2va",
+                "duration": 10.0,
+                "flow_shift": 12.0,
+                "audio_flow_shift": 3.0,
+            },
+        )
+
+        result = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        sp = result.sampling_params_list[0]
+
+        assert sp.width is None
+        assert sp.height is None
+        assert sp.fps is None
+        assert sp.num_frames == 209
+        assert sp.seed == 7
+        assert sp.num_inference_steps == 50
+        assert sp.extra_args == {
+            "flow_shift": 12.0,
+            "model_default": "preserved",
+            "task": "t2va",
+            "duration": 10.0,
+            "audio_flow_shift": 3.0,
+        }
+        assert model_defaults.extra_args == {
+            "flow_shift": 11.0,
+            "model_default": "preserved",
+        }
+
+    @pytest.mark.asyncio
+    async def test_video_extra_params_do_not_leak_between_requests(self):
+        handler = _make_handler()
+        first = NvCreateVideoRequest(
+            prompt="first",
+            model="video-model",
+            extra_params={"task": "t2va"},
+        )
+        second = NvCreateVideoRequest(prompt="second", model="video-model")
+
+        first_inputs = await handler.build_engine_inputs(
+            first, RequestType.VIDEO_GENERATION
+        )
+        second_inputs = await handler.build_engine_inputs(
+            second, RequestType.VIDEO_GENERATION
+        )
+
+        assert first_inputs.sampling_params_list[0].extra_args == {"task": "t2va"}
+        assert second_inputs.sampling_params_list[0].extra_args == {}
+
+    @pytest.mark.asyncio
+    async def test_explicit_video_fields_override_model_defaults(self):
+        handler = _make_handler()
+        model_defaults = handler.engine_client.default_sampling_params_list[0]
+        model_defaults.width = 1024
+        model_defaults.height = 576
+        model_defaults.num_frames = 209
+        model_defaults.fps = None
+        model_defaults.seed = 7
+        req = NvCreateVideoRequest(
+            prompt="cat",
+            model="video-model",
+            size="448x256",
+            seconds=10,
+            nvext=VideoNvExt(fps=24, seed=42),
+        )
+
+        result = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        sp = result.sampling_params_list[0]
+
+        assert (sp.width, sp.height) == (448, 256)
+        assert sp.num_frames == 240
+        assert sp.fps == 24
+        assert sp.frame_rate == 24.0
+        assert sp.seed == 42
+        assert result.fps == 24
+
     def test_i2v_protocol_roundtrip(self):
         """VideoNvExt and NvCreateVideoRequest serialize/deserialize I2V fields correctly."""
         req = NvCreateVideoRequest(
@@ -250,7 +341,9 @@ class TestBuildSamplingParamsList:
         sp = OmniDiffusionSamplingParams(height=512, width=512)
         result = handler._build_sampling_params_list(sp)
         assert len(result) == 1
-        assert result[0] is sp
+        assert result[0] is not sp
+        assert result[0].height == 512
+        assert result[0].width == 512
 
     def test_llm_then_diffusion(self):
         handler = _make_handler(stage_types=("llm", "diffusion"))
@@ -258,14 +351,19 @@ class TestBuildSamplingParamsList:
         result = handler._build_sampling_params_list(sp)
         assert len(result) == 2
         assert isinstance(result[0], SamplingParams)
-        assert result[1] is sp
+        assert result[1] is not sp
+        assert result[1].height == 512
+        assert result[1].width == 512
 
     def test_fallback_when_defaults_empty(self):
         handler = _make_handler()
         handler.engine_client.default_sampling_params_list = []
         sp = OmniDiffusionSamplingParams(height=512, width=512)
         result = handler._build_sampling_params_list(sp)
-        assert result == [sp]
+        assert len(result) == 1
+        assert result[0] is not sp
+        assert result[0].height == 512
+        assert result[0].width == 512
 
     def test_llm_default_is_cloned(self):
         handler = _make_handler(stage_types=("llm", "diffusion"))

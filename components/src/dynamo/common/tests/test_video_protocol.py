@@ -26,6 +26,10 @@ def test_video_request_wire_shape():
         output_format="mp4",
         response_format="url",
         stream=True,
+        extra_params={
+            "task": "t2va",
+            "target": {"duration_seconds": 10.0, "aspect_ratio": "16:9"},
+        },
         nvext=VideoNvExt(boundary_ratio=0.3, guidance_scale_2=1.0),
     )
 
@@ -34,9 +38,24 @@ def test_video_request_wire_shape():
         "model": "wan",
         "response_format": "url",
         "output_format": "mp4",
+        "extra_params": {
+            "task": "t2va",
+            "target": {"duration_seconds": 10.0, "aspect_ratio": "16:9"},
+        },
         "stream": True,
         "nvext": {"boundary_ratio": 0.3, "guidance_scale_2": 1.0},
     }
+
+
+def test_video_request_extra_params_requires_object():
+    with pytest.raises(ValueError):
+        NvCreateVideoRequest.model_validate(
+            {
+                "prompt": "cat",
+                "model": "video-model",
+                "extra_params": ["not", "an", "object"],
+            }
+        )
 
 
 def test_video_response_wire_shape():
