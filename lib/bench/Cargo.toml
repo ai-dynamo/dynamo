@@ -24,6 +24,7 @@ active-sequences = [
   "dep:rustc-hash",
   "dep:tracing-subscriber",
 ]
+approximate-lru = ["active-sequences"]
 claude-trace-export = [
   "dep:chrono",
   "dep:crossbeam-channel",
@@ -132,6 +133,17 @@ name = "active_sequences_bench"
 path = "kv_router/active_sequences_bench.rs"
 harness = false
 required-features = ["active-sequences"]
+
+[[bench]]
+name = "approximate_lru_bench"
+path = "kv_router/approximate_lru_bench.rs"
+harness = false
+required-features = ["approximate-lru"]
+
+[[test]]
+name = "approximate_lru"
+path = "tests/approximate_lru.rs"
+required-features = ["approximate-lru"]
 
 [[bench]]
 name = "dc_ckf_relay_bench"

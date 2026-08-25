@@ -90,7 +90,6 @@ pub struct KvStateAttachmentStatus {
     pub generation: u64,
     pub worker: WorkerWithDpRank,
     pub ready: bool,
-    pub cache_readable: bool,
     pub ready_at_outbound_cursor: u64,
 }
 
@@ -604,6 +603,7 @@ pub enum WorkerTask {
         event: RouterEvent,
         resp: oneshot::Sender<bool>,
     },
+    ApproximateLru(super::ApproximateLruTask),
     #[cfg(feature = "bench")]
     InstallObservation {
         writer: EventCompletionWriter,

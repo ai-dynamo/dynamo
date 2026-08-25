@@ -43,15 +43,11 @@ spec:
           args:
           - -m
           - dynamo.frontend
-          - --model-path
-          - Qwen/Qwen3.8-2.4T-A95B-FP8
-          - --model-name
-          - Qwen/Qwen3.8-2.4T-A95B-FP8
           - --dyn-chat-processor
           - sglang
           - --reasoning-parser
           - qwen3
-          - --dyn-tool-call-parser
+          - --tool-call-parser
           - qwen3_coder
           - --enable-streaming-reasoning-dispatch
           - --router-mode

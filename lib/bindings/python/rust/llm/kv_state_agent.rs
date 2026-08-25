@@ -165,21 +165,6 @@ impl KvStateAttachmentOwner {
         })
     }
 
-    fn set_cache_readable<'py>(
-        &self,
-        py: Python<'py>,
-        global_dp_rank: u32,
-        readable: bool,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.started()?;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner
-                .set_cache_readable(global_dp_rank, readable)
-                .await
-                .map_err(to_pyerr)
-        })
-    }
-
     fn close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.started()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {

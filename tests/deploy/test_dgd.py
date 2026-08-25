@@ -14,7 +14,7 @@ import logging
 import os
 import subprocess
 import time
-from typing import Any, Dict
+from typing import Any
 
 import kr8s
 import pytest
@@ -22,29 +22,21 @@ import requests
 import yaml
 
 from tests.deploy.conftest import DeploymentTarget
-from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment, _get_workspace_dir
+from tests.deploy.dgd_utils import (
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_REQUEST_TIMEOUT,
+    DEFAULT_TEMPERATURE,
+    MIN_RESPONSE_CONTENT_LENGTH,
+    TEST_PROMPT,
+    DeploymentSpec,
+    ManagedDeployment,
+    _get_workspace_dir,
+    validate_chat_response,
+)
 from tests.utils.client import send_request, wait_for_model_availability
 
 logger = logging.getLogger(__name__)
 
-# Test prompt designed to validate model capabilities:
-# - Long enough to test context handling (multiple sentences, ~150 words)
-# - Descriptive content requiring multi-sentence responses
-# - Consistent across test runs for reproducibility
-# This prompt is maintained from the original shell-based deployment tests.
-TEST_PROMPT = """In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, \
-lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried \
-beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, \
-known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at \
-the city's location. Your journey will take you through treacherous deserts, enchanted forests, \
-and across perilous mountain ranges. Describe your first steps into the ruins of Aeloria."""
-
-DEFAULT_MAX_TOKENS = 30
-DEFAULT_TEMPERATURE = 0.0
-DEFAULT_REQUEST_TIMEOUT = 120
-# Minimum response content length to validate that the model is generating meaningful output.
-# This matches the validation threshold from the original shell-based deployment tests.
-MIN_RESPONSE_CONTENT_LENGTH = 100
 GAIE_MODEL_NAME = "Qwen/Qwen3-0.6B"
 JSON_LOG_REQUIRED_FIELDS = frozenset({"time", "level", "target", "message"})
 # The install script deploys the Gateway into agentgateway-system; the
@@ -59,7 +51,7 @@ def normalize_log_lines(log_lines: Any) -> list[str]:
     return list(log_lines)
 
 
-def find_structured_json_log(log_lines: list[str]) -> Dict[str, Any] | None:
+def find_structured_json_log(log_lines: list[str]) -> dict[str, Any] | None:
     """Return the first Dynamo JSONL record with the documented core fields."""
     for line in log_lines:
         try:
@@ -96,66 +88,6 @@ def validate_agg_logging_output(frontend_pod: Any, baseline_line_count: int) -> 
         json_log_record["target"],
         json_log_record["message"],
     )
-
-
-def validate_chat_response(
-    response: requests.Response,
-    expected_model: str,
-    min_content_length: int = MIN_RESPONSE_CONTENT_LENGTH,
-) -> Dict[str, Any]:
-    """Validate the structure and content of a chat completion response.
-
-    Args:
-        response: HTTP response from the chat completion endpoint
-        expected_model: Expected model name in the response
-        min_content_length: Minimum required length for response content
-
-    Returns:
-        Parsed response JSON on success
-
-    Raises:
-        AssertionError: If validation fails
-    """
-    # Check HTTP status
-    assert response.status_code == 200, (
-        f"Expected status 200, got {response.status_code}. "
-        f"Response: {response.text[:500]}"
-    )
-
-    try:
-        data = response.json()
-    except ValueError as e:
-        pytest.fail(f"Response is not valid JSON: {e}. Response: {response.text[:500]}")
-
-    assert "choices" in data, f"Response missing 'choices' field: {data}"
-    assert len(data["choices"]) > 0, f"Response has empty 'choices': {data}"
-
-    choice = data["choices"][0]
-    assert "message" in choice, f"Choice missing 'message' field: {choice}"
-
-    message = choice["message"]
-    assert (
-        message.get("role") == "assistant"
-    ), f"Expected role 'assistant', got '{message.get('role')}'"
-    assert "content" in message, f"Message missing 'content' field: {message}"
-
-    content = message["content"]
-    assert len(content) >= min_content_length, (
-        f"Response content too short: {len(content)} chars (min: {min_content_length}). "
-        f"Content: {content[:200]}"
-    )
-
-    assert "model" in data, f"Response missing 'model' field: {data}"
-    assert (
-        data["model"] == expected_model
-    ), f"Expected model '{expected_model}', got '{data['model']}'"
-
-    logger.info(
-        f"Response validation passed: model={data['model']}, "
-        f"content_length={len(content)}"
-    )
-
-    return data
 
 
 @pytest.mark.framework_only

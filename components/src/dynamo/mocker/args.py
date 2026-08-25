@@ -195,8 +195,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         dest="num_gpu_blocks",  # Maps to num_gpu_blocks in MockEngineArgs
         default=None,
-        help="Explicit usable GPU-block capacity for the mock KV cache. When "
-        "unset, AIC-backed mocker estimates the value; non-AIC mocker uses 16384.",
+        help="Explicit usable GPU-block capacity per data-parallel rank for the mock "
+        "KV cache. When unset, AIC-backed mocker estimates the value; non-AIC "
+        "mocker uses 16384.",
     )
     parser.add_argument(
         "--block-size",

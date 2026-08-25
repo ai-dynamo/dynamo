@@ -52,15 +52,16 @@ use super::{
 use crate::engines::ValidateRequest;
 use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
 use crate::protocols::common::extensions::{
-    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, SESSION_AFFINITY_CONTEXT_KEY,
-    SessionAffinityId, agent_context_from_headers, apply_header_routing_overrides,
-    session_affinity_from_headers,
+    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, NvExt as CommonNvExt,
+    SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, agent_context_from_headers,
+    apply_frontend_nvext_policy, has_non_cache_salt_routing_headers, session_affinity_from_headers,
 };
 use crate::protocols::common::input_trigger::{
     classify_chat_request, classify_completion_request, classify_response_request,
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
 use crate::protocols::openai::{
+    ParsingOptions,
     audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
     chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
@@ -106,7 +107,7 @@ const BATCH_OUTPUT_RETRIEVAL_NOT_IMPLEMENTED: &str =
 static FORCE_INCLUDE_USAGE: LazyLock<bool> =
     LazyLock::new(|| env_is_truthy(env_llm::DYN_ENABLE_FORCE_INCLUDE_USAGE));
 
-use super::error::{SanitizedError, overload_status_code};
+use super::error::{BackendStatusAction, SanitizedError, overload_status_code};
 
 pub(super) fn rl_router(
     drt: Arc<dynamo_runtime::DistributedRuntime>,
@@ -148,9 +149,17 @@ impl ErrorMessage {
 }
 
 fn map_error_code_to_error_type(code: StatusCode) -> String {
+    // The configured overload code is checked before `canonical_reason()`, not
+    // after. `DYN_HTTP_OVERLOAD_STATUS_CODE` accepts any status, and an IANA
+    // registered one has a canonical reason that would otherwise win: set it to
+    // 507 and a load-shed response reported itself as "Insufficient Storage".
+    // 529 never showed that, because IANA does not register it and
+    // `canonical_reason()` returns `None`.
+    if code == overload_status_code() {
+        return "Overloaded".to_string();
+    }
     match code.canonical_reason() {
         Some(reason) => reason.to_string(),
-        None if code.as_u16() == 529 => "Overloaded".to_string(),
         // 499 is not IANA-registered (nginx convention for client-closed-request),
         // so canonical_reason() returns None. Use the de facto standard name.
         None if code.as_u16() == 499 => "Client Closed Request".to_string(),
@@ -158,8 +167,39 @@ fn map_error_code_to_error_type(code: StatusCode) -> String {
     }
 }
 
+/// `error_type` for a genuine 503 (readiness, model-unavailable, no routable
+/// worker) that is not itself a load-shed rejection. `map_error_code_to_error_type`
+/// cannot be reused here: it checks `code == overload_status_code()` first, and
+/// when an operator configures `DYN_HTTP_OVERLOAD_STATUS_CODE=503` that check
+/// would relabel every one of these unrelated 503s as "Overloaded".
+fn unavailable_error_type() -> String {
+    StatusCode::SERVICE_UNAVAILABLE
+        .canonical_reason()
+        .expect("503 is IANA-registered")
+        .to_string()
+}
+
+/// `error_type` for a genuine 500 (unhandled panic, bug, misconfiguration)
+/// that is not a load-shed rejection. Same reasoning as `unavailable_error_type`:
+/// `map_error_code_to_error_type` checks `code == overload_status_code()`
+/// first, and an operator can configure `DYN_HTTP_OVERLOAD_STATUS_CODE=500`,
+/// which would otherwise relabel every internal error as "Overloaded".
+fn internal_error_type() -> String {
+    StatusCode::INTERNAL_SERVER_ERROR
+        .canonical_reason()
+        .expect("500 is IANA-registered")
+        .to_string()
+}
+
 /// Classify error for metrics based on status code and message
 fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
+    // Same reason as `map_error_code_to_error_type`: the configured overload
+    // code goes first. A registered status such as 507 matches an arm below and
+    // would otherwise be counted as `Internal`, so a load shed would look like a
+    // server fault on the dashboards.
+    if code == overload_status_code() {
+        return ErrorType::Overload;
+    }
     match code {
         StatusCode::BAD_REQUEST => {
             // 400
@@ -277,17 +317,23 @@ impl ErrorMessage {
 
     /// Service Unavailable
     /// This is returned when the service is live, but not ready.
+    ///
+    /// Always reports the plain "Service Unavailable" type and
+    /// `ErrorType::Unavailable`, even when `DYN_HTTP_OVERLOAD_STATUS_CODE` is
+    /// configured to 503 — `map_error_code_to_error_type` and
+    /// `classify_error_for_metrics` would otherwise relabel this readiness
+    /// failure as "Overloaded", though it has nothing to do with load
+    /// shedding.
     pub fn _service_unavailable() -> ErrorResponse {
         let code = StatusCode::SERVICE_UNAVAILABLE;
-        let error_type = map_error_code_to_error_type(code);
         (
             code,
             Json(ErrorMessage {
                 message: "Service is not ready".to_string(),
-                error_type,
+                error_type: unavailable_error_type(),
                 code: code.as_u16(),
                 details: None,
-                metric_error_type: None,
+                metric_error_type: Some(ErrorType::Unavailable),
             }),
         )
     }
@@ -295,17 +341,19 @@ impl ErrorMessage {
     /// Service Unavailable with a structured message body. Used by readiness
     /// reporting to distinguish "model registered but not ready" from generic
     /// "service not ready".
+    ///
+    /// See [`Self::_service_unavailable`] for why `error_type` and
+    /// `metric_error_type` are set directly rather than derived from `code`.
     pub fn service_unavailable_with_body(message: String) -> ErrorResponse {
         let code = StatusCode::SERVICE_UNAVAILABLE;
-        let error_type = map_error_code_to_error_type(code);
         (
             code,
             Json(ErrorMessage {
                 message,
-                error_type,
+                error_type: unavailable_error_type(),
                 code: code.as_u16(),
                 details: None,
-                metric_error_type: None,
+                metric_error_type: Some(ErrorType::Unavailable),
             }),
         )
     }
@@ -314,18 +362,21 @@ impl ErrorMessage {
     /// Return this error when the service encounters an internal error.
     /// We should return a generic message to the client instead of the real error.
     /// Internal Services errors are the result of misconfiguration or bugs in the service.
+    /// Always reports the plain "Internal Server Error" type and
+    /// `ErrorType::Internal`, even when `DYN_HTTP_OVERLOAD_STATUS_CODE` is
+    /// configured to 500 — see [`internal_error_type`] for why
+    /// `map_error_code_to_error_type` cannot be reused here.
     pub fn internal_server_error(msg: &str) -> ErrorResponse {
         tracing::error!("Internal server error: {msg}");
         let code = StatusCode::INTERNAL_SERVER_ERROR;
-        let error_type = map_error_code_to_error_type(code);
         (
             code,
             Json(ErrorMessage {
                 message: msg.to_string(),
-                error_type,
+                error_type: internal_error_type(),
                 code: code.as_u16(),
                 details: None,
-                metric_error_type: None,
+                metric_error_type: Some(ErrorType::Internal),
             }),
         )
     }
@@ -335,21 +386,23 @@ impl ErrorMessage {
     /// Use this whenever the detail could carry an anyhow chain, JoinError
     /// debug output, or anything else that may leak file paths, library
     /// versions, or other internal implementation details.
+    ///
+    /// See [`Self::internal_server_error`] for why `error_type` and
+    /// `metric_error_type` are set directly rather than derived from `code`.
     pub fn internal_server_error_with_details(
         public_msg: &str,
         details: impl std::fmt::Display,
     ) -> ErrorResponse {
         tracing::error!("Internal server error: {public_msg}: {details}");
         let code = StatusCode::INTERNAL_SERVER_ERROR;
-        let error_type = map_error_code_to_error_type(code);
         (
             code,
             Json(ErrorMessage {
                 message: public_msg.to_string(),
-                error_type,
+                error_type: internal_error_type(),
                 code: code.as_u16(),
                 details: None,
-                metric_error_type: None,
+                metric_error_type: Some(ErrorType::Internal),
             }),
         )
     }
@@ -369,16 +422,44 @@ impl ErrorMessage {
         } else {
             tracing::debug!(status = %status, "{err}: {details}");
         }
+        // SanitizedError::Unavailable/Internal and SanitizedError::Overloaded
+        // can carry the same StatusCode once an operator points
+        // DYN_HTTP_OVERLOAD_STATUS_CODE at 503 or 500 (see
+        // `unavailable_error_type`/`internal_error_type`), so the variant, not
+        // just the status, decides error_type/metric_error_type here.
+        let (error_type, metric_error_type) = match err {
+            SanitizedError::Unavailable => (unavailable_error_type(), Some(ErrorType::Unavailable)),
+            SanitizedError::Internal => (internal_error_type(), Some(ErrorType::Internal)),
+            _ => (map_error_code_to_error_type(status), None),
+        };
         (
             status,
             Json(ErrorMessage {
                 message: err.to_string(),
-                error_type: map_error_code_to_error_type(status),
+                error_type,
                 code: status.as_u16(),
                 details: None,
-                metric_error_type: None,
+                metric_error_type,
             }),
         )
+    }
+
+    /// Answer 500, with the status the engine asserted in `details`.
+    ///
+    /// The number is all that crosses the boundary; the backend's own message
+    /// stays server-side, because a 5xx body may carry filesystem paths.
+    fn coerced_backend_error(
+        asserted: StatusCode,
+        details: impl std::fmt::Display,
+    ) -> ErrorResponse {
+        let (status, mut body) = ErrorMessage::sanitized_with_details(
+            SanitizedError::Internal,
+            format!("backend asserted status {}: {details}", asserted.as_u16()),
+        );
+        body.0.details = Some(Box::new(
+            serde_json::json!({ "backend_status": asserted.as_u16() }),
+        ));
+        (status, body)
     }
 
     /// Not Implemented Error
@@ -481,31 +562,35 @@ impl ErrorMessage {
         }
     }
 
-    /// Implementers should only be able to throw 400-499 errors.
+    /// Convert a backend-supplied [`HttpError`] into a client response.
+    ///
+    /// Parse first, so a code outside the HTTP status space cannot reach the
+    /// response, then let [`BackendStatusAction::triage`] decide. A 5xx keeps
+    /// its own status only when it is 503 or the configured overload code,
+    /// which is what makes a deliberate load shed distinguishable from an
+    /// internal error. The body text is sanitized either way.
     pub fn from_http_error(err: HttpError) -> ErrorResponse {
-        // 499 is part of the 4xx range but its body can carry cancellation
-        // context (queue paths, context IDs) — sanitize separately.
-        if err.code == 499 {
-            return ErrorMessage::sanitized_with_details(SanitizedError::Cancelled, err.message);
-        }
-        // Backend-supplied messages are only forwarded for the documented 4xx
-        // range; for 5xx or codes outside the HTTP space the message may
-        // contain internal paths/details and is kept server-side only.
-        if err.code < 400 || err.code >= 500 {
+        let Ok(status) = StatusCode::from_u16(err.code) else {
             return ErrorMessage::sanitized_with_details(SanitizedError::Internal, err.message);
-        }
-        match StatusCode::from_u16(err.code) {
-            Ok(code) => (
-                code,
+        };
+        match BackendStatusAction::triage(status) {
+            BackendStatusAction::Sanitize(variant) => {
+                ErrorMessage::sanitized_with_details(variant, err.message)
+            }
+            BackendStatusAction::CoerceToInternal(asserted) => {
+                ErrorMessage::coerced_backend_error(asserted, err.message)
+            }
+            // 4xx (non-499): forward the backend's own message.
+            BackendStatusAction::ForwardClientError => (
+                status,
                 Json(ErrorMessage {
                     message: err.message,
-                    error_type: map_error_code_to_error_type(code),
-                    code: code.as_u16(),
+                    error_type: map_error_code_to_error_type(status),
+                    code: status.as_u16(),
                     details: None,
                     metric_error_type: None,
                 }),
             ),
-            Err(_) => ErrorMessage::sanitized_with_details(SanitizedError::Internal, err.message),
         }
     }
 }
@@ -661,35 +746,13 @@ fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     }
 }
 
-/// Warn (once per request) when nvext data is dropped because the extension is
-/// disabled. Only called from the disabled branch, so the default path is free.
-fn warn_nvext_disabled(endpoint: &str, nvext_present: bool, headers: &HeaderMap) {
-    use crate::protocols::common::extensions::{
-        HEADER_DATA_PARALLEL_RANK_ALIAS, HEADER_DP_RANK, HEADER_DP_RANK_ALIAS,
-        HEADER_PREFILL_DP_RANK, HEADER_PREFILL_DP_RANK_ALIAS, HEADER_PREFILL_INSTANCE_ID,
-        HEADER_PREFILL_INSTANCE_ID_ALIAS, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY,
-        HEADER_WORKER_INSTANCE_ID, HEADER_WORKER_INSTANCE_ID_ALIAS,
-    };
-    let header_present = [
-        HEADER_WORKER_INSTANCE_ID,
-        HEADER_WORKER_INSTANCE_ID_ALIAS,
-        HEADER_PREFILL_INSTANCE_ID,
-        HEADER_PREFILL_INSTANCE_ID_ALIAS,
-        HEADER_DP_RANK,
-        HEADER_DP_RANK_ALIAS,
-        HEADER_DATA_PARALLEL_RANK_ALIAS,
-        HEADER_PREFILL_DP_RANK,
-        HEADER_PREFILL_DP_RANK_ALIAS,
-        HEADER_REQUEST_PRIORITY,
-        HEADER_REQUEST_STRICT_PRIORITY,
-    ]
-    .iter()
-    .any(|h| headers.contains_key(*h));
-
-    if nvext_present || header_present {
+/// Warn once when the disabled NvExt policy discards a field or routing header.
+/// Honored cache salts and `x-tenant-id` headers do not cause this warning.
+pub(super) fn warn_nvext_disabled(endpoint: &str, discarded: bool) {
+    if discarded {
         tracing::warn!(
             endpoint,
-            "request carried nvext data but the nvext extension is disabled on this frontend; dropping it"
+            "request carried disabled nvext fields or routing headers; dropping them"
         );
     }
 }
@@ -717,12 +780,18 @@ async fn handler_completions(
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.inner.model)?;
 
-    request.nvext = if state.nvext_enabled() {
-        apply_header_routing_overrides(request.nvext.take(), &headers)
-    } else {
-        warn_nvext_disabled("completions", request.nvext.is_some(), &headers);
-        None
-    };
+    if !state.nvext_enabled() {
+        warn_nvext_disabled(
+            "completions",
+            request
+                .nvext
+                .as_ref()
+                .is_some_and(CommonNvExt::has_non_cache_salt_fields)
+                || has_non_cache_salt_routing_headers(&headers),
+        );
+    }
+    request.nvext =
+        apply_frontend_nvext_policy(request.nvext.take(), &headers, state.nvext_enabled());
 
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
@@ -1298,7 +1367,13 @@ async fn embeddings(
     check_model_serving_ready(&state, &request.inner.model)?;
 
     if !state.nvext_enabled() {
-        warn_nvext_disabled("embeddings", request.nvext.is_some(), &headers);
+        warn_nvext_disabled(
+            "embeddings",
+            request
+                .nvext
+                .as_ref()
+                .is_some_and(|nvext| nvext.annotations.is_some()),
+        );
         request.nvext = None;
     }
 
@@ -1470,7 +1545,13 @@ async fn classify(
     check_model_serving_ready(&state, &request.model)?;
 
     if !state.nvext_enabled() {
-        warn_nvext_disabled("classify", request.nvext.is_some(), &headers);
+        warn_nvext_disabled(
+            "classify",
+            request
+                .nvext
+                .as_ref()
+                .is_some_and(|nvext| nvext.annotations.is_some()),
+        );
         request.nvext = None;
     }
 
@@ -1741,7 +1822,13 @@ async fn pooling(
     check_model_serving_ready(&state, &request.model)?;
 
     if !state.nvext_enabled() {
-        warn_nvext_disabled("pooling", request.nvext.is_some(), &headers);
+        warn_nvext_disabled(
+            "pooling",
+            request
+                .nvext
+                .as_ref()
+                .is_some_and(|nvext| nvext.annotations.is_some()),
+        );
         request.nvext = None;
     }
     let response_encoding = request.encoding_format;
@@ -1885,12 +1972,18 @@ async fn handler_chat_completions(
         check_model_serving_ready(&state, resolved_model)?;
     }
 
-    request.nvext = if state.nvext_enabled() {
-        apply_header_routing_overrides(request.nvext.take(), &headers)
-    } else {
-        warn_nvext_disabled("chat_completions", request.nvext.is_some(), &headers);
-        None
-    };
+    if !state.nvext_enabled() {
+        warn_nvext_disabled(
+            "chat_completions",
+            request
+                .nvext
+                .as_ref()
+                .is_some_and(CommonNvExt::has_non_cache_salt_fields)
+                || has_non_cache_salt_routing_headers(&headers),
+        );
+    }
+    request.nvext =
+        apply_frontend_nvext_policy(request.nvext.take(), &headers, state.nvext_enabled());
 
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
@@ -2396,19 +2489,37 @@ where
 /// (`check_for_backend_error`) and the streaming preflight so both paths speak
 /// the same sanitization + status contract to the client.
 ///
-/// A classification carried on the info wins over one derived from the status:
-/// the status alone cannot distinguish a capacity rejection from an outage once
-/// `DYN_HTTP_OVERLOAD_STATUS_CODE` is set outside the 5xx range.
+/// The streaming counterpart of [`ErrorMessage::from_http_error`], and it must
+/// triage identically. Both once called [`SanitizedError::for_backend_status`]
+/// directly, which preserves every 5xx on the wire — including ones that
+/// should have been coerced to 500 because they do not keep retry semantics.
+/// Only the unary path moved to [`BackendStatusAction`], so the same backend
+/// failure answered 502 when it arrived mid-stream and 500 when it arrived as
+/// an `HttpError`, and a client could not tell which it would get.
+///
+/// A classification carried on `backend_error.sanitized` wins over one derived
+/// from the status: the status alone cannot distinguish a capacity rejection
+/// from an outage once `DYN_HTTP_OVERLOAD_STATUS_CODE` is set outside the 5xx
+/// range.
 fn backend_error_response(backend_error: BackendErrorInfo) -> ErrorResponse {
     let BackendErrorInfo {
         message,
         status,
         sanitized,
     } = backend_error;
-    match sanitized.or_else(|| SanitizedError::for_backend_status(status)) {
-        Some(variant) => ErrorMessage::sanitized_with_details(variant, message),
+    let action = match sanitized {
+        Some(variant) => BackendStatusAction::Sanitize(variant),
+        None => BackendStatusAction::triage(status),
+    };
+    match action {
+        BackendStatusAction::Sanitize(variant) => {
+            ErrorMessage::sanitized_with_details(variant, message)
+        }
+        BackendStatusAction::CoerceToInternal(asserted) => {
+            ErrorMessage::coerced_backend_error(asserted, message)
+        }
         // 4xx (non-499): protocol contract — forward backend message as-is.
-        None => (
+        BackendStatusAction::ForwardClientError => (
             status,
             Json(ErrorMessage {
                 message,
@@ -2739,7 +2850,12 @@ async fn chat_completions(
     // Request policy controls whether parser-produced tool calls may be exposed.
     // Assistant response/guided constraints are handled separately during
     // preprocessing and do not revoke an auto request's tool-call permission.
-    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request);
+    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request)
+        .map_err(|e| {
+            let err_response = ErrorMessage::from_anyhow(e.into(), "Invalid tool_choice");
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
 
     // When parallel_tool_calls is false, limit the response to a single tool call.
     let parsing_options =
@@ -2758,10 +2874,7 @@ async fn chat_completions(
     // Computed before `request` moves into `generate`. Only a stream that can
     // withhold every data frame needs forced keep-alive frames.
     let stream_can_defer_all_output =
-        crate::preprocessor::OpenAIPreprocessor::stream_can_defer_all_output(
-            parsing_options.reasoning_parser.as_deref(),
-            request.chat_template_args.as_ref(),
-        );
+        request_stream_can_defer_all_output(&parsing_options, request.chat_template_args.as_ref());
 
     let mut response_collector = state
         .metrics_clone()
@@ -3023,6 +3136,17 @@ fn normalize_chat_reasoning_template_args(
     })
 }
 
+fn request_stream_can_defer_all_output(
+    parsing_options: &ParsingOptions,
+    chat_template_args: Option<&HashMap<String, serde_json::Value>>,
+) -> bool {
+    crate::preprocessor::OpenAIPreprocessor::stream_can_defer_all_output(
+        parsing_options.tool_call_parser.as_deref(),
+        parsing_options.reasoning_parser.as_deref(),
+        chat_template_args,
+    )
+}
+
 /// Validates that required fields are present and valid in the chat completion request
 pub fn validate_chat_completion_required_fields(
     request: &NvCreateChatCompletionRequest,
@@ -3125,12 +3249,18 @@ async fn handler_responses(
         check_model_serving_ready(&state, resolved_model)?;
     }
 
-    request.nvext = if state.nvext_enabled() {
-        apply_header_routing_overrides(request.nvext.take(), &headers)
-    } else {
-        warn_nvext_disabled("responses", request.nvext.is_some(), &headers);
-        None
-    };
+    if !state.nvext_enabled() {
+        warn_nvext_disabled(
+            "responses",
+            request
+                .nvext
+                .as_ref()
+                .is_some_and(CommonNvExt::has_non_cache_salt_fields)
+                || has_non_cache_salt_routing_headers(&headers),
+        );
+    }
+    request.nvext =
+        apply_frontend_nvext_policy(request.nvext.take(), &headers, state.nvext_enabled());
 
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
@@ -3335,7 +3465,12 @@ async fn responses(
 
     // The Responses API is converted to the same chat request contract. Narrow
     // the model parser before unary aggregation just as the streaming path does.
-    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request);
+    let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request)
+        .map_err(|e| {
+            let err_response = ErrorMessage::from_anyhow(e.into(), "Invalid tool_choice");
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
 
     // Responses requests share the chat-completions aggregator for the unary
     // path. Thread this option through so its post-parse fallback also caps a
@@ -3344,20 +3479,30 @@ async fn responses(
     let parsing_options =
         parsing_options.with_parallel_tool_calls(request.inner.parallel_tool_calls);
 
-    // NOTE: `move_reasoning_to_content_when_empty` is the aggregator flag and is
-    // not set here. A non-streaming Responses request DOES reach the aggregator
-    // (forcing stream=true on the converted request only drives internal
-    // streaming; the client-facing `streaming` flag still selects the aggregating
-    // branch below), so it reaches it with the flag false.
+    // A non-streaming Responses request DOES reach the aggregator (forcing
+    // stream=true on the converted request only drives internal streaming; the
+    // client-facing `streaming` flag still selects the aggregating branch
+    // below), so it needs the same backstop the chat path installs.
     //
-    // That is currently unreachable rather than wrong: the Responses-to-chat
-    // conversion hard-codes `chat_template_args: None`, so
-    // `force_nonempty_content` can never be set on this path in the first place.
-    // If that conversion ever forwards chat_template_args, the streaming stage
-    // would still cover the reasoning-only case — `postprocessor_parsing_stream`
-    // gates on the request's own args via `wants_reasoning_as_content_when_empty`
-    // rather than on this flag — but the aggregator backstop should be wired here
-    // too at that point. Tracked as follow-up.
+    // This used to be left unset, which was safe only because the
+    // Responses-to-chat conversion hard-coded `chat_template_args: None` and
+    // `force_nonempty_content` could never be set on this path. Now that the
+    // conversion forwards those args, the flag has to be wired here: the
+    // streaming stage gates on the request's own args via
+    // `wants_reasoning_as_content_when_empty`, but the aggregating branch reads
+    // this flag instead.
+    let move_reasoning_to_content_when_empty =
+        crate::preprocessor::OpenAIPreprocessor::wants_reasoning_as_content_when_empty(
+            request.chat_template_args.as_ref(),
+        );
+    let parsing_options = parsing_options
+        .with_move_reasoning_to_content_when_empty(move_reasoning_to_content_when_empty);
+
+    // Computed before `request` moves into `generate`. Responses streams use
+    // the same force-nonempty deferral as chat completions and therefore need
+    // the same fallback keep-alive when every data frame may be withheld.
+    let stream_can_defer_all_output =
+        request_stream_can_defer_all_output(&parsing_options, request.chat_template_args.as_ref());
 
     let mut response_collector = state
         .metrics_clone()
@@ -3460,7 +3605,7 @@ async fn responses(
         let stream = monitor_for_disconnects(full_stream, ctx, inflight_guard, stream_handle);
 
         let mut sse_stream = Sse::new(stream);
-        if let Some(keep_alive) = state.sse_keep_alive() {
+        if let Some(keep_alive) = state.sse_keep_alive_for_response(stream_can_defer_all_output) {
             sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
         }
 
@@ -4486,21 +4631,62 @@ pub fn videos_router(
     (vec![doc, stream_doc], router)
 }
 
-async fn audio_speech(
+fn audio_content_type(format: &str) -> &'static str {
+    match format {
+        "mp3" => "audio/mpeg",
+        "flac" => "audio/flac",
+        "pcm" => "audio/pcm",
+        "aac" => "audio/aac",
+        "opus" => "audio/ogg; codecs=opus",
+        _ => "audio/wav",
+    }
+}
+
+fn decode_audio_chunks(response: &NvAudioSpeechResponse) -> Result<Vec<Bytes>, String> {
+    response
+        .data
+        .iter()
+        .map(|audio| {
+            let encoded = audio
+                .b64_json
+                .as_deref()
+                .ok_or_else(|| "Audio response did not contain base64 data".to_string())?;
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map(Bytes::from)
+                .map_err(|e| format!("Failed to decode audio data: {e}"))
+        })
+        .collect()
+}
+
+async fn handler_audio_speech(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateAudioSpeechRequest>,
+    Json(mut request): Json<NvCreateAudioSpeechRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     // (per-model readiness check is deferred until after we resolve the
     // Option<String> model field; see below)
     check_ready(&state)?;
 
+    let returns_audio_bytes = request.data_source.as_deref() != Some("url");
+    let streams_audio_chunks = returns_audio_bytes
+        && matches!(
+            request.response_format.as_deref().unwrap_or("wav"),
+            "pcm" | "wav"
+        )
+        && request.speed.is_none_or(|speed| speed == 1.0);
     let request_id = get_or_create_request_id(&headers);
+    if streams_audio_chunks {
+        // Advertise that this frontend can concatenate incremental worker
+        // responses. Older frontends omit the signal, so new workers aggregate.
+        // TODO(v1.7): Remove when v1.4 falls outside the N-2 window.
+        request
+            .nvext
+            .get_or_insert_default()
+            .frontend_accepts_audio_chunks = Some(true);
+    }
     let request = context_from_headers(request, request_id, &headers)?;
-    let request_id = request.id().to_string();
-
-    let streaming = false;
 
     // model is optional in the request; fall back to a model that can actually
     // serve right now (complete worker set), not just any displayable one, so
@@ -4514,11 +4700,60 @@ async fn audio_speech(
             .next()
             .unwrap_or_default()
     });
-    let metric_model = state.manager().metric_model_for(&model).to_string();
-
     // Per-model serving readiness gate (now that we have a resolved model
     // name string).
     check_model_serving_ready(&state, &model)?;
+
+    let context = request.context();
+    let (mut connection_handle, stream_handle) = create_connection_monitor(
+        context,
+        Some(state.metrics_clone()),
+        CancellationLabels {
+            model: model.clone(),
+            endpoint: Endpoint::Audios.to_string(),
+            request_type: if streams_audio_chunks {
+                "stream"
+            } else {
+                "unary"
+            }
+            .to_string(),
+        },
+    )
+    .await;
+
+    let response = tokio::spawn(
+        audio_speech(
+            state,
+            request,
+            model,
+            returns_audio_bytes,
+            streams_audio_chunks,
+            stream_handle,
+        )
+        .in_current_span(),
+    )
+    .await
+    .map_err(|e| {
+        ErrorMessage::internal_server_error_with_details(
+            "Failed to await audio speech task",
+            format!("{e:?}"),
+        )
+    })?;
+
+    connection_handle.disarm();
+    response
+}
+
+async fn audio_speech(
+    state: Arc<service_v2::State>,
+    request: Context<NvCreateAudioSpeechRequest>,
+    model: String,
+    returns_audio_bytes: bool,
+    streams_audio_chunks: bool,
+    mut stream_handle: ConnectionHandle,
+) -> Result<Response, ErrorResponse> {
+    let request_id = request.id().to_string();
+    let metric_model = state.manager().metric_model_for(&model).to_string();
 
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
 
@@ -4530,12 +4765,14 @@ async fn audio_speech(
     let mut inflight = state.metrics_clone().create_inflight_guard(
         &model,
         Endpoint::Audios,
-        streaming,
+        streams_audio_chunks,
         &request_id,
     );
 
     let mut response_collector = state.metrics_clone().create_response_collector(&model);
 
+    let ctx = request.context();
+    inflight.mark_error(ErrorType::Cancelled);
     let stream = engine.generate(request).await.map_err(|e| {
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
@@ -4547,6 +4784,18 @@ async fn audio_speech(
         err_response
     })?;
 
+    let stream = check_for_backend_error(stream, None)
+        .await
+        .inspect_err(|error_response| {
+            let error_type = match error_response.0 {
+                // Worker-side InvalidArgument messages are not guaranteed to use
+                // the "Validation:" prefix expected by the shared classifier.
+                StatusCode::BAD_REQUEST => ErrorType::Validation,
+                _ => extract_error_type_from_response(error_response),
+            };
+            inflight.mark_error(error_type);
+        })?;
+
     let mut http_queue_guard = Some(http_queue_guard);
     let stream = stream.inspect(move |response| {
         process_response_and_observe_metrics(
@@ -4555,6 +4804,128 @@ async fn audio_speech(
             &mut http_queue_guard,
         );
     });
+
+    if streams_audio_chunks {
+        let mut stream = Box::pin(stream);
+        let first_response = loop {
+            let Some(annotated) = stream.next().await else {
+                let err_response = ErrorMessage::internal_server_error(
+                    "Audio stream ended without producing data",
+                );
+                inflight.mark_error(extract_error_type_from_response(&err_response));
+                return Err(err_response);
+            };
+            let annotated = annotated.ok().map_err(|e| {
+                let err_response = ErrorMessage::internal_server_error_with_details(
+                    "Audio stream failed before producing data",
+                    e.to_string(),
+                );
+                inflight.mark_error(extract_error_type_from_response(&err_response));
+                err_response
+            })?;
+            let Some(response) = annotated.data else {
+                continue;
+            };
+            if response.status == "failed" {
+                inflight.mark_error(ErrorType::Validation);
+                return Ok((StatusCode::BAD_REQUEST, Json(response)).into_response());
+            }
+            if !response.data.is_empty() {
+                break response;
+            }
+        };
+
+        let content_type = first_response
+            .data
+            .first()
+            .map(|audio| audio_content_type(&audio.output_format))
+            .unwrap_or("audio/wav");
+        let first_chunks = decode_audio_chunks(&first_response).map_err(|e| {
+            let err_response = ErrorMessage::internal_server_error_with_details(
+                "Failed to decode audio stream",
+                e,
+            );
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+        if first_chunks.is_empty() {
+            let err_response =
+                ErrorMessage::internal_server_error("Audio response did not contain data");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            return Err(err_response);
+        }
+
+        stream_handle.arm();
+
+        let body_stream = async_stream::stream! {
+            for chunk in first_chunks {
+                yield Ok::<Bytes, std::io::Error>(chunk);
+            }
+
+            let stopped = ctx.stopped();
+            tokio::pin!(stopped);
+            loop {
+                tokio::select! {
+                    biased;
+                    item = stream.next() => {
+                        let Some(annotated) = item else {
+                            inflight.mark_ok();
+                            stream_handle.disarm();
+                            break;
+                        };
+                        let annotated = match annotated.ok() {
+                            Ok(annotated) => annotated,
+                            Err(e) => {
+                                inflight.mark_error(ErrorType::Internal);
+                                stream_handle.disarm();
+                                yield Err(std::io::Error::other(e.to_string()));
+                                break;
+                            }
+                        };
+                        let Some(response) = annotated.data else {
+                            continue;
+                        };
+                        if response.status == "failed" {
+                            inflight.mark_error(ErrorType::Internal);
+                            stream_handle.disarm();
+                            yield Err(std::io::Error::other(
+                                response.error.unwrap_or_else(|| "Audio generation failed".to_string())
+                            ));
+                            break;
+                        }
+                        match decode_audio_chunks(&response) {
+                            Ok(chunks) => {
+                                for chunk in chunks {
+                                    yield Ok(chunk);
+                                }
+                            }
+                            Err(e) => {
+                                inflight.mark_error(ErrorType::Internal);
+                                stream_handle.disarm();
+                                yield Err(std::io::Error::other(e));
+                                break;
+                            }
+                        }
+                    }
+                    _ = &mut stopped => {
+                        inflight.mark_error(ErrorType::Cancelled);
+                        stream_handle.disarm();
+                        break;
+                    }
+                }
+            }
+        };
+
+        return Response::builder()
+            .header("content-type", content_type)
+            .body(Body::from_stream(body_stream))
+            .map_err(|e| {
+                ErrorMessage::internal_server_error_with_details(
+                    "Failed to build audio response",
+                    e.to_string(),
+                )
+            });
+    }
 
     let response = NvAudioSpeechResponse::from_annotated_stream(stream)
         .await
@@ -4573,30 +4944,49 @@ async fn audio_speech(
         return Ok((axum::http::StatusCode::BAD_REQUEST, Json(response)).into_response());
     }
 
-    inflight.mark_ok();
+    if returns_audio_bytes {
+        let content_type = response
+            .data
+            .first()
+            .map(|audio| audio_content_type(&audio.output_format))
+            .unwrap_or("audio/wav");
+        let chunks = decode_audio_chunks(&response).map_err(|e| {
+            let err_response = ErrorMessage::internal_server_error_with_details(
+                "Failed to decode audio response",
+                e,
+            );
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+        if chunks.is_empty() {
+            let err_response =
+                ErrorMessage::internal_server_error("Audio response did not contain data");
+            inflight.mark_error(extract_error_type_from_response(&err_response));
+            return Err(err_response);
+        }
 
-    // If b64_json is present (data_source defaulted or explicitly "b64_json"),
-    // decode and return binary with content-type from AudioData.output_format.
-    // (matching OpenAI/vLLM-Omni behavior: curl --output file.wav)
-    if let Some(first) = response.data.first()
-        && let Some(b64) = &first.b64_json
-        && let Ok(audio_bytes) = base64::engine::general_purpose::STANDARD.decode(b64)
-    {
-        let content_type = match first.output_format.as_str() {
-            "mp3" => "audio/mpeg",
-            "flac" => "audio/flac",
-            "pcm" => "audio/pcm",
-            "aac" => "audio/aac",
-            "opus" => "audio/ogg; codecs=opus",
-            _ => "audio/wav",
-        };
-        return Ok(Response::builder()
+        let content_length = chunks.iter().map(Bytes::len).sum();
+        let mut audio_bytes = Vec::with_capacity(content_length);
+        for chunk in chunks {
+            audio_bytes.extend_from_slice(&chunk);
+        }
+        let response = Response::builder()
             .header("content-type", content_type)
-            .body(axum::body::Body::from(audio_bytes))
-            .unwrap());
+            .header("content-length", content_length.to_string())
+            .body(Body::from(audio_bytes))
+            .map_err(|e| {
+                let err_response = ErrorMessage::internal_server_error_with_details(
+                    "Failed to build audio response",
+                    e.to_string(),
+                );
+                inflight.mark_error(extract_error_type_from_response(&err_response));
+                err_response
+            })?;
+        inflight.mark_ok();
+        return Ok(response);
     }
 
-    // Fallback: return JSON (url format responses)
+    inflight.mark_ok();
     Ok(Json(response).into_response())
 }
 
@@ -4609,7 +4999,7 @@ pub fn audios_router(
     let path = path.unwrap_or("/v1/audio/speech".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
-        .route(&path, post(audio_speech))
+        .route(&path, post(handler_audio_speech))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state(state);
@@ -4981,7 +5371,40 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         }
+    }
+
+    #[test]
+    fn responses_force_nonempty_request_requires_fallback_keep_alive() {
+        let parsing_options = ParsingOptions::new(Some("qwen3_coder".into()), Some("qwen3".into()));
+        let mut chat_template_args = HashMap::new();
+
+        assert!(!request_stream_can_defer_all_output(&parsing_options, None));
+
+        chat_template_args.insert(
+            "force_nonempty_content".to_string(),
+            serde_json::Value::Bool(false),
+        );
+        assert!(!request_stream_can_defer_all_output(
+            &parsing_options,
+            Some(&chat_template_args)
+        ));
+
+        chat_template_args.insert(
+            "force_nonempty_content".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        assert!(request_stream_can_defer_all_output(
+            &parsing_options,
+            Some(&chat_template_args)
+        ));
+
+        let muse_tool_parser_only = ParsingOptions::new(Some("muse_glimmer".into()), None);
+        assert!(request_stream_can_defer_all_output(
+            &muse_tool_parser_only,
+            Some(&chat_template_args)
+        ));
     }
 
     #[test]
@@ -5163,11 +5586,21 @@ mod tests {
     #[test]
     fn test_error_response_from_anyhow_out_of_range() {
         // Backend-supplied messages outside the 4xx range must NOT be
-        // forwarded to the client — they may include internal paths.
-        for code in [399u16, 500, 501] {
+        // forwarded to the client — they may include internal paths. 503 keeps
+        // its status, matching the streaming path
+        // (`test_check_for_backend_error_with_503_preserves_status`); the rest
+        // answer 500.
+        for (code, expected_status) in [
+            (399u16, 500u16),
+            (500, 500),
+            (501, 500),
+            (503, 503),
+            (507, 500),
+        ] {
             let err = http_error_from_engine(code).unwrap_err();
             let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
-            assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(response.0.as_u16(), expected_status, "status for {code}");
+            assert_eq!(response.1.code, expected_status, "body code for {code}");
             assert_eq!(response.1.message, "Internal server error");
             assert!(
                 !response.1.message.contains("custom error message"),
@@ -5190,6 +5623,129 @@ mod tests {
         assert_eq!(response.1.message, "Request cancelled");
         assert!(!response.1.message.contains("abc-123"));
         assert!(!response.1.message.contains("/srv/queue.py"));
+    }
+
+    #[test]
+    fn test_from_http_error_preserves_529_overload_status() {
+        // A deliberate load shed must stay distinguishable from an internal
+        // error. The body is still sanitized: it may carry internal paths.
+        let err = HttpError {
+            code: 529,
+            message: "site overloaded at /srv/pool.py:12".to_string(),
+        };
+        let response = ErrorMessage::from_http_error(err);
+        assert_eq!(response.0.as_u16(), 529);
+        assert_eq!(response.1.code, 529);
+        assert_eq!(response.1.error_type, "Overloaded");
+        assert!(
+            !response.1.message.contains("/srv/pool.py"),
+            "client response must not include the backend-supplied path"
+        );
+        assert!(
+            !response.1.message.contains("site overloaded"),
+            "client response must not include the backend-supplied HttpError message"
+        );
+    }
+
+    #[test]
+    fn test_from_http_error_529_classifies_as_overload_for_metrics() {
+        // Observability half of the same bug: the metric recorded Internal
+        // while the status was squashed, hiding load shedding.
+        let response = ErrorMessage::from_http_error(HttpError {
+            code: 529,
+            message: "site overloaded".to_string(),
+        });
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::Overload
+        );
+    }
+
+    #[test]
+    fn test_from_http_error_rejects_out_of_range_code() {
+        // Codes outside the HTTP status space fall back to a sanitized 500.
+        let err = HttpError {
+            code: 1000,
+            message: "bogus status from /srv/backend.py:7".to_string(),
+        };
+        let response = ErrorMessage::from_http_error(err);
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.1.code, 500);
+        assert_eq!(response.1.message, "Internal server error");
+        assert!(!response.1.message.contains("/srv/backend.py"));
+    }
+
+    /// Read the tunnelled backend status out of an error response body.
+    fn tunnelled_backend_status(response: &ErrorResponse) -> Option<u64> {
+        response.1.details.as_ref()?.get("backend_status")?.as_u64()
+    }
+
+    #[test]
+    fn test_from_http_error_coerces_unlisted_5xx_and_tunnels_status() {
+        // The client sees a generic 500 while the asserted status survives in
+        // `details`. 507 is a WebDAV code no Dynamo component emits; 501 is
+        // what the previous blanket pass-through forwarded verbatim.
+        for code in [501u16, 502, 504, 507] {
+            let response = ErrorMessage::from_http_error(HttpError {
+                code,
+                message: format!("engine failure {code} at /srv/pool.py:12"),
+            });
+            assert_eq!(
+                response.0,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "status {code}"
+            );
+            assert_eq!(response.1.code, 500, "body code {code}");
+            assert_eq!(response.1.message, "Internal server error");
+            assert_eq!(
+                tunnelled_backend_status(&response),
+                Some(u64::from(code)),
+                "asserted status must be tunnelled for {code}"
+            );
+            // `details` carries a number, never the backend's prose.
+            let serialized = serde_json::to_string(&response.1.0).unwrap();
+            assert!(
+                !serialized.contains("/srv/pool.py"),
+                "serialized body must not include the backend-supplied path for {code}"
+            );
+            assert!(
+                !serialized.contains("engine failure"),
+                "serialized body must not include the backend-supplied message for {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_http_error_preserves_retryable_5xx_without_tunnel() {
+        // These two survive on the status line, so nothing lands in `details`.
+        for status in [StatusCode::SERVICE_UNAVAILABLE, overload_status_code()] {
+            let response = ErrorMessage::from_http_error(HttpError {
+                code: status.as_u16(),
+                message: "shedding load at /srv/pool.py:12".to_string(),
+            });
+            assert_eq!(response.0, status);
+            assert_eq!(response.1.code, status.as_u16());
+            assert_eq!(response.1.message, "Internal server error");
+            assert_eq!(
+                tunnelled_backend_status(&response),
+                None,
+                "a preserved status must not also be tunnelled"
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_http_error_forwards_4xx_verbatim() {
+        // The 5xx allowlist leaves 4xx alone: the backend's own description is
+        // what the caller needs (e.g. the in-tree 415 from image loading).
+        let response = ErrorMessage::from_http_error(HttpError {
+            code: 415,
+            message: "Unsupported Media Type: image/tiff".to_string(),
+        });
+        assert_eq!(response.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(response.1.code, 415);
+        assert_eq!(response.1.message, "Unsupported Media Type: image/tiff");
+        assert_eq!(tunnelled_backend_status(&response), None);
     }
 
     #[test]
@@ -6493,6 +7049,105 @@ mod tests {
         }
     }
 
+    /// The streaming path must triage a backend status exactly as the unary
+    /// path does. Both once called `SanitizedError::for_backend_status`, which
+    /// preserves every 5xx, and only the unary path moved to
+    /// `BackendStatusAction`. A backend 501 therefore answered 501 mid-stream
+    /// and 500 as an `HttpError`, so the status a client saw depended on which
+    /// door the same failure came through.
+    ///
+    /// The status codes here mirror `test_from_http_error_*` above, which is the
+    /// point: the two lists must not drift apart again.
+    #[tokio::test]
+    async fn test_check_for_backend_error_matches_unary_triage() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use futures::stream;
+
+        for (code, expected) in [
+            (399u16, 500u16),
+            (500, 500),
+            (501, 500),
+            (507, 500),
+            (503, 503),
+        ] {
+            let error_json =
+                format!(r#"{{"message":"engine failed at /srv/engine.py:88","code":{code}}}"#);
+            let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: Some(vec![error_json]),
+                error: None,
+            };
+
+            let result = check_for_backend_error(stream::iter(vec![error_event]), None).await;
+            let Err(response) = result else {
+                panic!("backend status {code} should produce an error response");
+            };
+            assert_eq!(response.0.as_u16(), expected, "status for backend {code}");
+            assert_eq!(response.1.code, expected, "body code for backend {code}");
+            // Sanitisation must survive the retriage: a coerced 5xx still hides
+            // the backend's own message, which can carry filesystem paths.
+            assert_eq!(response.1.message, "Internal server error");
+            assert!(!response.1.message.contains("/srv/engine.py"));
+        }
+    }
+
+    /// The configured overload status keeps its meaning on the streaming path,
+    /// and reports as an overload rather than by its registered reason.
+    #[tokio::test]
+    async fn test_check_for_backend_error_preserves_overload_status() {
+        use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+        use futures::stream;
+
+        let overload = overload_status_code();
+        let error_json = format!(
+            r#"{{"message":"shedding load at /srv/pool.py:12","code":{}}}"#,
+            overload.as_u16()
+        );
+        let error_event = Annotated::<NvCreateChatCompletionStreamResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: Some(vec![error_json]),
+            error: None,
+        };
+
+        let result = check_for_backend_error(stream::iter(vec![error_event]), None).await;
+        let Err(response) = result else {
+            panic!("an overload status should produce an error response");
+        };
+        assert_eq!(response.0, overload);
+        assert_eq!(response.1.code, overload.as_u16());
+        assert_eq!(response.1.error_type, "Overloaded");
+        assert_eq!(
+            classify_error_for_metrics(overload, &response.1.message),
+            ErrorType::Overload
+        );
+        assert!(!response.1.message.contains("/srv/pool.py"));
+    }
+
+    /// `map_error_code_to_error_type` and `classify_error_for_metrics` must read
+    /// the configured overload code rather than the literal 529. Both once
+    /// special-cased 529 only, and both consulted `canonical_reason()` first, so
+    /// a registered status such as 507 never reached the overload arm: the
+    /// response said "Insufficient Storage" and the metric said `Internal`. 529
+    /// hid that, because IANA does not register it.
+    ///
+    /// This asserts the wiring, not a non-default value. `overload_status_code`
+    /// caches in a `LazyLock`, so a test cannot change it after first use, and
+    /// only a process started with `DYN_HTTP_OVERLOAD_STATUS_CODE` set exercises
+    /// the non-default path.
+    #[test]
+    fn test_overload_classification_follows_configured_code() {
+        let overload = overload_status_code();
+        assert_eq!(map_error_code_to_error_type(overload), "Overloaded");
+        assert_eq!(
+            classify_error_for_metrics(overload, "Internal server error"),
+            ErrorType::Overload
+        );
+    }
+
     #[tokio::test]
     async fn test_check_for_backend_error_with_499_sanitizes_cancellation() {
         use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
@@ -6845,6 +7500,28 @@ mod tests {
             extract_error_type_from_response(&response),
             ErrorType::Internal
         );
+    }
+
+    /// `internal_server_error` and `internal_server_error_with_details` set
+    /// `error_type`/`metric_error_type` directly, the same as
+    /// `_service_unavailable` does for 503. If they instead derived those
+    /// from `map_error_code_to_error_type(StatusCode::INTERNAL_SERVER_ERROR)`,
+    /// an operator who set `DYN_HTTP_OVERLOAD_STATUS_CODE=500` would see every
+    /// genuine internal error reported and counted as "Overloaded", though it
+    /// has nothing to do with load shedding.
+    #[test]
+    fn test_internal_server_error_ignores_configured_overload() {
+        let plain = ErrorMessage::internal_server_error("boom");
+        assert_eq!(plain.1.error_type, "Internal Server Error");
+        assert_eq!(plain.1.metric_error_type, Some(ErrorType::Internal));
+
+        let with_details = ErrorMessage::internal_server_error_with_details("boom", "cause");
+        assert_eq!(with_details.1.error_type, "Internal Server Error");
+        assert_eq!(with_details.1.metric_error_type, Some(ErrorType::Internal));
+
+        let sanitized = ErrorMessage::sanitized_with_details(SanitizedError::Internal, "cause");
+        assert_eq!(sanitized.1.error_type, "Internal Server Error");
+        assert_eq!(sanitized.1.metric_error_type, Some(ErrorType::Internal));
     }
 
     #[test]

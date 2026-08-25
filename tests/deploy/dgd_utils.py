@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, List, Literal, Optional
 
 import kr8s
+import pytest
 import requests
 import yaml
 from kr8s.objects import Pod, Service
@@ -20,6 +21,94 @@ from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
 
 from tests.utils.test_output import resolve_test_output_path
+
+logger = logging.getLogger(__name__)
+
+# Shared chat-completion request defaults and response validation.
+#
+# These live here rather than in a test module so every deploy test asserts the
+# same thing: a second copy is free to lose an assertion, and one did -- the EFA
+# test's private validator had dropped the role and key checks below.
+# tests/deploy/test_dgd.py and tests/deploy/test_deploy_efa.py both import them.
+
+# Test prompt designed to validate model capabilities:
+# - Long enough to test context handling (multiple sentences, ~150 words)
+# - Descriptive content requiring multi-sentence responses
+# - Consistent across test runs for reproducibility
+# This prompt is maintained from the original shell-based deployment tests.
+TEST_PROMPT = """In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, \
+lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried \
+beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, \
+known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at \
+the city's location. Your journey will take you through treacherous deserts, enchanted forests, \
+and across perilous mountain ranges. Describe your first steps into the ruins of Aeloria."""
+
+DEFAULT_MAX_TOKENS = 30
+DEFAULT_TEMPERATURE = 0.0
+DEFAULT_REQUEST_TIMEOUT = 120
+# Minimum response content length to validate that the model is generating meaningful output.
+# This matches the validation threshold from the original shell-based deployment tests.
+MIN_RESPONSE_CONTENT_LENGTH = 100
+
+
+def validate_chat_response(
+    response: requests.Response,
+    expected_model: str,
+    min_content_length: int = MIN_RESPONSE_CONTENT_LENGTH,
+) -> dict[str, Any]:
+    """Validate the structure and content of a chat completion response.
+
+    Args:
+        response: HTTP response from the chat completion endpoint
+        expected_model: Expected model name in the response
+        min_content_length: Minimum required length for response content
+
+    Returns:
+        Parsed response JSON on success
+
+    Raises:
+        AssertionError: If validation fails
+    """
+    # Check HTTP status
+    assert response.status_code == 200, (
+        f"Expected status 200, got {response.status_code}. "
+        f"Response: {response.text[:500]}"
+    )
+
+    try:
+        data = response.json()
+    except ValueError as e:
+        pytest.fail(f"Response is not valid JSON: {e}. Response: {response.text[:500]}")
+
+    assert "choices" in data, f"Response missing 'choices' field: {data}"
+    assert len(data["choices"]) > 0, f"Response has empty 'choices': {data}"
+
+    choice = data["choices"][0]
+    assert "message" in choice, f"Choice missing 'message' field: {choice}"
+
+    message = choice["message"]
+    assert (
+        message.get("role") == "assistant"
+    ), f"Expected role 'assistant', got '{message.get('role')}'"
+    assert "content" in message, f"Message missing 'content' field: {message}"
+
+    content = message["content"]
+    assert len(content) >= min_content_length, (
+        f"Response content too short: {len(content)} chars (min: {min_content_length}). "
+        f"Content: {content[:200]}"
+    )
+
+    assert "model" in data, f"Response missing 'model' field: {data}"
+    assert (
+        data["model"] == expected_model
+    ), f"Expected model '{expected_model}', got '{data['model']}'"
+
+    logger.info(
+        f"Response validation passed: model={data['model']}, "
+        f"content_length={len(content)}"
+    )
+
+    return data
 
 
 def _get_workspace_dir() -> str:
@@ -790,6 +879,10 @@ class ManagedDeployment:
     # the service containing component_type: Frontend determines what is actually the frontend service
     frontend_service_name: str = "Frontend"
     skip_service_restart: bool = False
+    # Readiness budget for __aenter__. Tests carrying a pytest timeout should set
+    # this below it, so _wait_for_condition raises with pod-status diagnostics
+    # instead of pytest-timeout killing the test mid-wait with a bare traceback.
+    readiness_timeout: int = 1800
 
     _custom_api: Optional[client.CustomObjectsApi] = None
     _core_api: Optional[client.CoreV1Api] = None
@@ -1669,7 +1762,7 @@ class ManagedDeployment:
             await asyncio.gather(*tasks)
 
             await self._create_deployment()
-            await self._wait_for_ready()
+            await self._wait_for_ready(timeout=self.readiness_timeout)
 
         except:
             await self._cleanup()

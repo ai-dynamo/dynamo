@@ -174,6 +174,7 @@ async fn parse_response_stream(
                 None,  // No tool_choice in this test
                 None,  // No tool_definitions in this test
                 false, // No structural_tag in this test
+                false,
                 stream,
             ))
         } else {
@@ -1998,6 +1999,7 @@ mod tests {
             None,
             None,
             false,
+            false,
             Box::pin(futures::stream::iter(chunks)),
         )
         .collect()
@@ -2078,6 +2080,7 @@ async fn run_glm47_jail(
         Some("glm47".to_string()),
         None,
         None,
+        false,
         false,
         Box::pin(stream::iter(chunks)),
     )
@@ -2198,4 +2201,122 @@ async fn test_glm47_streaming_emoji_content_no_marker_no_panic() {
     ];
     let out = run_glm47_jail(chunks).await;
     assert!(!out.is_empty());
+}
+
+// A partial, never-closed DSML invoke (same payload the finalize-recovery test above
+// proves the vendored jail WILL complete into a real `ToolCalls` chunk on a clean EOF
+// with no finish_reason at all — see
+// `test_deepseek_v4_stream_finalize_recovers_complete_invoke_without_outer_close`'s
+// sibling behavior, reproduced directly against bare EOF below) — but this time the
+// upstream stream ends in an error instead of a clean EOF. The jail's own vendored
+// finalize logic cannot distinguish "upstream failed" from "upstream legitimately
+// finished", so without the wrapper's error short-circuit it would still synthesize
+// and emit that same completed (but never actually confirmed) tool call — a data
+// fabrication bug: the request failed, yet the caller would see a normal-looking
+// `finish_reason: ToolCalls` with a plausible `location: "NYC"` argument that was never
+// truly finished being generated.
+fn deepseek_v4_partial_invoke_chunk() -> Annotated<NvCreateChatCompletionStreamResponse> {
+    Annotated {
+        id: Some("probe".to_string()),
+        data: Some(NvCreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "probe".to_string(),
+                object: "chat.completion.chunk".to_string(),
+                created: 0,
+                model: "m".to_string(),
+                choices: vec![ChatChoiceStream {
+                    index: 0,
+                    delta: dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+                        role: Some(dynamo_protocols::types::Role::Assistant),
+                        content: Some(ChatCompletionMessageContent::Text(
+                            "<｜DSML｜tool_calls>\n\
+<｜DSML｜invoke name=\"get_weather\">\n\
+<｜DSML｜parameter name=\"location\" string=\"true\">NYC</｜DSML｜parameter>\n\
+</｜DSML｜invoke>"
+                                .to_string(),
+                        )),
+                        tool_calls: None,
+                        function_call: None,
+                        refusal: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                }],
+                usage: None,
+                service_tier: None,
+                system_fingerprint: None,
+            },
+            nvext: None,
+            llm_metrics: None,
+        }),
+        event: None,
+        comment: None,
+        error: None,
+    }
+}
+
+// Empirically confirms the vendored jail DOES finalize a complete tool call from bare
+// EOF with no finish_reason ever seen — the exact mechanism finding #6 describes. This
+// is the "red" half of the regression below: same payload, but terminated by a clean
+// EOF instead of an upstream error, is EXPECTED to recover the tool call normally.
+#[tokio::test]
+async fn test_deepseek_v4_finalize_recovers_at_bare_eof_with_no_finish_reason() {
+    let output_chunks = parse_response_stream(
+        stream::iter(vec![deepseek_v4_partial_invoke_chunk()]),
+        true,
+        false,
+        Some("deepseek_v4".to_string()),
+        None,
+    )
+    .await;
+
+    let aggregated = aggregate_content_from_chunks(&output_chunks);
+    assert!(
+        aggregated.has_tool_calls,
+        "sanity check: a clean EOF (no error) must still recover the finished invoke; \
+         got: {output_chunks:#?}"
+    );
+}
+
+// Finding #6 regression: the SAME partial invoke, but the upstream stream ends in an
+// error instead of a clean EOF. The jail wrapper must yield exactly that error and
+// nothing else — no synthesized `ToolCalls` finish chunk fabricated from the jail's
+// own EOF-triggered finalize, because the request never actually completed.
+#[tokio::test]
+async fn test_deepseek_v4_upstream_error_suppresses_jail_finalize() {
+    let output_chunks = parse_response_stream(
+        stream::iter(vec![
+            deepseek_v4_partial_invoke_chunk(),
+            Annotated::from_error("upstream disconnected"),
+        ]),
+        true,
+        false,
+        Some("deepseek_v4".to_string()),
+        None,
+    )
+    .await;
+
+    assert!(
+        !output_chunks.is_empty(),
+        "the terminal error itself must still reach the caller"
+    );
+    let last = output_chunks.last().expect("non-empty output");
+    assert!(
+        last.is_error(),
+        "the terminal error must be the LAST item in the output stream; got: {output_chunks:#?}"
+    );
+    assert_eq!(
+        output_chunks.iter().filter(|a| a.is_error()).count(),
+        1,
+        "the terminal error must be surfaced exactly once; got: {output_chunks:#?}"
+    );
+
+    let aggregated = aggregate_content_from_chunks(&output_chunks);
+    assert!(
+        !aggregated.has_tool_calls,
+        "an upstream error must suppress the jail's EOF finalize entirely — no \
+         synthesized tool call may reach the caller for a request that never actually \
+         completed; got: {output_chunks:#?}"
+    );
 }
