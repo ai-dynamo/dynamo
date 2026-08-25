@@ -14,6 +14,11 @@ already running, with no edits.
 """
 
 import pytest
+from dynamo_harness import Capability, Verdict
+
+# Small enough to differ from any model's default, large enough for the
+# prompts in this file.
+NARROWED_CONTEXT = 2048
 
 pytestmark = [pytest.mark.e2e]
 
@@ -76,14 +81,39 @@ def test_empty_prompt_is_rejected(dynamo):
 
 @pytest.mark.needs_deployment
 def test_restart_with_different_flags(dynamo):
-    """Config/topology testing, made portable.
+    """Configuration testing, made portable.
 
-    Today this class of test restarts a process inside the Dynamo container.
-    Here the test asks the component to come back with different flags and the
-    deployment decides how -- container recreate here, a DGD patch on
-    Kubernetes.
+    Today this class of test restarts a process inside the Dynamo container
+    with different flags. Here the test names the flags and the deployment
+    decides how to apply them -- a container recreate under Docker; a DGD patch
+    once a Kubernetes lifecycle provider exists.
+
+    The flags are asserted to have taken effect two independent ways: a value
+    the frontend reports (``context_window``) and a capability derived from the
+    launch configuration. A restart that silently ignored them would satisfy
+    neither -- which is the failure a bare `restart()` plus a liveness check
+    cannot see.
+
+    Note this mutates session state: the deployment keeps the new flags for any
+    test that runs after it.
     """
     deployment = dynamo.require_deployment()
-    deployment.restart()
-    assert dynamo.frontend.wait_until_serving(timeout=900)
+
+    before = dynamo.frontend.model_info().get("context_window")
+    assert before != NARROWED_CONTEXT, (
+        f"deployment already runs with context_window={before}; this test needs "
+        "to change it to prove the restart applied new flags"
+    )
+    assert dynamo.check(Capability.REASONING_PARSER).verdict is Verdict.UNSATISFIED
+
+    deployment.restart(max_model_len=NARROWED_CONTEXT, dyn_reasoning_parser="qwen3")
+    dynamo.wait_until_serving(timeout=900)
+
+    after = dynamo.frontend.model_info().get("context_window")
+    assert (
+        after == NARROWED_CONTEXT
+    ), f"restart did not apply --max-model-len: context_window {before} -> {after}"
+    assert dynamo.check(Capability.REASONING_PARSER).verdict is Verdict.SATISFIED
+
+    # and it still serves
     assert "paris" in dynamo.frontend.query("What is the capital of France?").lower()

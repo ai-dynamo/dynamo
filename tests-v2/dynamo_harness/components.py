@@ -79,6 +79,14 @@ class Frontend:
         body = self.http.get_json("/v1/models")
         return [entry["id"] for entry in body.get("data", [])]
 
+    def model_info(self, name: Optional[str] = None) -> Dict[str, Any]:
+        """The /v1/models entry for a model, including its context window."""
+        wanted = name or self.model
+        for entry in self.http.get_json("/v1/models").get("data", []):
+            if entry.get("id") == wanted:
+                return entry
+        raise AssertionError(f"model {wanted!r} not advertised by the frontend")
+
     def chat(self, prompt: str, **kw: Any) -> Dict[str, Any]:
         """Raw chat-completions response, for tests that need the envelope."""
         body: Dict[str, Any] = {
