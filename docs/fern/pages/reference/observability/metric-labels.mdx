@@ -31,6 +31,20 @@ Added by `create_metric()` in `lib/runtime/src/metrics.rs` for every metric regi
   On worker and router metrics this is the emitting component's own namespace, injected from its position in the hierarchy. On the frontend request metrics listed under [Frontend metrics and the namespace label](#frontend-metrics-and-the-namespace-label) it is instead the namespace of the worker set **selected to serve that request** — a frontend discovering one model in several namespaces load-balances across them per request. The two meanings coincide for the frontend's per-namespace routers, so `sum by (dynamo_namespace)` aggregates across both sets consistently.
 </ParamField>
 
+<ParamField path="dynamo_component" type="string">
+  `[Shared]` Service role of the emitting component. See [Component names](#component-names) for the enumeration of values. Example: `backend`, `prefill`, `router`.
+</ParamField>
+
+<ParamField path="dynamo_endpoint" type="string">
+  `[Shared]` The RPC within that component. See [Endpoint names](#endpoint-names) for the enumeration of values. Example: `generate`, `clear_kv_blocks`, `worker_kv_indexer_query_dp0`.
+</ParamField>
+
+<ParamField path="worker_id" type="string">
+  `[Shared]` Hex-encoded discovery instance ID of the endpoint, providing a stable per-worker identity that does not depend on Kubernetes. Injected only when the endpoint hierarchy has a connection ID. Example: `1a2b3c4d`.
+
+  On the per-worker frontend gauges (`dynamo_frontend_worker_*`) this label carries the worker's etcd lease ID instead. Example: `7890`.
+</ParamField>
+
 ### Frontend metrics and the namespace label
 
 A frontend can serve one model name from several namespaces at once, so some `dynamo_frontend_*` families carry `dynamo_namespace` and some deliberately do not. The split follows *when* the value is recorded, not the metric's importance.
