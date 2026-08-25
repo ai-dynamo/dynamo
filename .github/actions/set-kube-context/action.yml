@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: 'Select a Teleport kube context'
+description: >
+  Copy the runner's Teleport kubeconfig to a job-local path and select $KUBE_CONTEXT
+  in it, then export KUBECONFIG for the rest of the job.
+
+# Copied rather than used in place because selecting a context mutates the file:
+# /teleport/kubeconfig.yaml is shared by every job on the runner, so setting
+# current-context there would race concurrent jobs onto the wrong cluster.
+#
+# KUBE_CONTEXT is read from the job environment rather than taken as an input, so
+# it stays declared once per job -- setup-dynamo-operator also reads it (to resolve
+# the shared dynamo-deploy-test namespace on aws-dev-01/02) and would otherwise
+# need to be kept in sync with a separate input.
+
+runs:
+  using: "composite"
+  steps:
+    - name: Select kube context
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -z "${KUBE_CONTEXT:-}" ]; then
+          echo "KUBE_CONTEXT is not set; declare it in the job's env: block" >&2
+          exit 1
+        fi
+        KUBECONFIG_PATH="${RUNNER_TEMP}/kubeconfig-${KUBE_CONTEXT##*-dynamo-}.yaml"
+        cp /teleport/kubeconfig.yaml "${KUBECONFIG_PATH}"
+        chmod 600 "${KUBECONFIG_PATH}"
+        kubectl --kubeconfig="${KUBECONFIG_PATH}" config use-context "${KUBE_CONTEXT}"
+        echo "KUBECONFIG=${KUBECONFIG_PATH}" >> "$GITHUB_ENV"
+        echo "Selected ${KUBE_CONTEXT} in ${KUBECONFIG_PATH}"
