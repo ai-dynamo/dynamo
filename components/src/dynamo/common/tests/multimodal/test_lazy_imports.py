@@ -37,9 +37,15 @@ def _torch_imported_by(names: str) -> bool:
         [sys.executable, "-c", _PROBE.format(names=names)],
         capture_output=True,
         text=True,
-        check=True,
         timeout=30,
     )
+    # Checked here rather than with check=True: that raises CalledProcessError,
+    # whose message names the command and the exit status only. The reason the
+    # child died is in stderr, which pytest never shows, so a missing torch or
+    # PIL or a raise during package import reads as a bare non-zero exit.
+    assert (
+        result.returncode == 0
+    ), f"probe for {names} exited {result.returncode}\nstderr:\n{result.stderr}"
     answers = [
         line.removeprefix("RESULT:")
         for line in result.stdout.splitlines()
