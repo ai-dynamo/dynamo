@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Vendored from github.com/ai-dynamo/snapshot api/v1alpha1/crds/ (v0.1.0-alpha.1), for envtest only.
+# Vendored from github.com/ai-dynamo/snapshot api/v1alpha1/crds/ (branch RUN-39806-snapshotjob-e2e-docs @ 2e78da31, tree-identical to build 28a7d5ad), for envtest only.
 
 ---
 apiVersion: apiextensions.k8s.io/v1
@@ -141,6 +141,9 @@ spec:
             - snapshotRef
             - source
             type: object
+            x-kubernetes-validations:
+            - message: spec is immutable
+              rule: self == oldSelf
           status:
             description: PodSnapshotContentStatus defines the observed state of PodSnapshotContent.
             properties:
@@ -204,10 +207,9 @@ spec:
                   type: object
                 type: array
             type: object
+        required:
+        - spec
         type: object
-        x-kubernetes-validations:
-        - message: spec is immutable
-          rule: '!has(oldSelf.spec) || self.spec == oldSelf.spec'
     served: true
     storage: true
     subresources:

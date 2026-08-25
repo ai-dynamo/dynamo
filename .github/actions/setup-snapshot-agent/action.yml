@@ -16,7 +16,7 @@ inputs:
   chart_version:
     description: 'github.com/ai-dynamo/snapshot chart version to install (pinned, never latest)'
     required: false
-    default: 0.1.0-alpha.1
+    default: 0.0.0-g28a7d5ad
   storage_size:
     description: 'Checkpoint PVC size for agentMount mode'
     required: false

@@ -478,7 +478,7 @@ runs:
       shell: bash
       env:
         # Keep in lockstep with .github/actions/setup-snapshot-agent/action.yml.
-        SNAPSHOT_CHART_VERSION: 0.1.0-alpha.1
+        SNAPSHOT_CHART_VERSION: 0.0.0-g28a7d5ad
       run: |
         echo "::group::Install snapshot CRDs before operator start"
         set -euo pipefail
