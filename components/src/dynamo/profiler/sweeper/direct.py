@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Lower an AI Simulate Sweeper result through Dynamo's v1 DGD templates.
+"""Lower an AI Simulate Sweeper result directly through Dynamo's v1 DGD templates.
 
 The direct renderer consumes the plain ``Candidate.config`` mapping and reuses
 the existing ``CONFIG_MODIFIERS`` implementation without invoking AIC's
@@ -22,9 +22,7 @@ from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 # Candidate.config fields that describe the deployment shape and have a
 # direct, confirmed CONFIG_MODIFIERS destination. Everything else on
 # Candidate.config is evaluation context (see EVALUATION_CONTEXT_FIELDS)
-# and is preserved in `experimental`, never silently dropped -- the DEP's
-# own materialization rule: "An unmapped value is an error; silently using
-# an engine default changes the evaluated Candidate."
+# and is preserved in `experimental` for renderer comparison.
 _STRATEGY_SETTERS = {
     "tp": "set_config_tp_size",
     "tep": "set_config_tep_size",
