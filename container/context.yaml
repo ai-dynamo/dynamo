@@ -137,10 +137,10 @@ sglang:
     # to avoid affecting sglang-cuda or other frameworks (e.g. dynamo KVBM link).
     nixl_ref: v1.1.0
   # Builds the NIXL C++ SDK in wheel_builder so the dev stage can link nixl-sys
-  # (see templates/dev.Dockerfile). Runtime stays on the upstream lmsysorg/sglang
-  # NIXL Python stack — its wheel COPY is narrowed to ai_dynamo*.whl so the SDK
-  # build doesn't leak into the runtime image.
-  nixl_ref: v1.4.0
+  # (see templates/dev.Dockerfile). The CUDA runtime re-pins the unversioned
+  # upstream lmsysorg/sglang NIXL packages to this same release; its wheel COPY
+  # remains narrowed to ai_dynamo*.whl so the SDK build doesn't leak in.
+  nixl_ref: v1.3.2
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"
