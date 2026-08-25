@@ -8,7 +8,7 @@
 
 Stateful agent traffic needs a component that receives the request before inference: it must resolve `previous_response_id`, hydrate prior items, coordinate any server-owned tools, and commit the next checkpoint. That requirement does **not** mean that Dynamo should own response history, MCP clients, web search, or sandboxes.
 
-The proposed design places an optional stateful agent runtime behind the existing frontend/ingress crates and in front of Dynamo. The runtime materializes a normal inference turn and invokes Dynamo through a Dynamo-specific adapter. Dynamo remains responsible for request preprocessing, KV-aware routing, model/engine selection, streaming inference, and observability. MCP, web search, code execution, and other server-owned tools run in external workers controlled by the runtime.
+The proposed design places an optional stateful agent runtime behind the existing frontend/ingress crates and in front of Dynamo. The runtime materializes a native Responses request and forwards it through Dynamo's existing frontend boundary. Dynamo remains responsible for request preprocessing, `UnifiedRequest` conversion, `AgentContext` creation, KV-aware routing, model/engine selection, streaming inference, and observability. MCP, web search, code execution, and other server-owned tools run in external workers controlled by the runtime.
 
 This is intentionally not a reimplementation of vLLM Agentic API. It is a composable response-processing stage that uses the existing Dynamo frontend boundary and the existing multi-engine inference path.
 
@@ -55,9 +55,9 @@ NvCreateResponse
 
 `UnifiedRequest` is the existing API-neutral wrapper that preserves API-specific context while lowering to the shared request understood by Dynamo's preprocessing and engines. The agent runtime should not replace or enlarge that abstraction. It should produce a fully materialized turn *before* the ordinary conversion and inference path.
 
-`AgentContext` is a Dynamo-specific request-domain object, not an `agent-rt` concept. Dynamo ingress decodes Codex, Claude, OpenCode, or canonical Dynamo headers into it. The `agent-rt` core never interprets it or exposes it as runtime state: a Dynamo adapter preserves the relevant structured request context for every model step in the active turn. In an out-of-process deployment, that adapter preserves the approved Dynamo context carrier to the next hop; Dynamo remains the component that interprets it.
+`AgentContext` is a Dynamo-specific request-domain object, not an `agent-rt` concept. Dynamo ingress decodes Codex, Claude, OpenCode, or canonical Dynamo headers into it. The `agent-rt` core never interprets or exposes it: for each model step it forwards the materialized native request and an approved Dynamo metadata carrier to Dynamo's existing HTTP or in-process frontend boundary. Dynamo remains the component that creates and interprets `AgentContext`.
 
-The runtime may need to recover a server-tool loop after a process failure. For that purpose, the Dynamo adapter may store an **opaque, adapter-owned binding** with the checkpoint. The runtime can save and return that blob but cannot inspect or construct it. The adapter owns its schema, compatibility, encryption, and the policy for which fields are durable. It must contain only the minimum stable affinity information required for recovery; raw inbound headers, credentials, traces, and one-request hints are never checkpoint data.
+The runtime may need to recover a server-tool loop after a process failure. For that purpose, its Dynamo next-hop client may store an **opaque, client-owned carrier snapshot** with the checkpoint. The runtime can save and return that blob but cannot inspect or construct it. The next-hop client owns its schema, compatibility, encryption, and the policy for which forwarded fields are durable. It must contain only the minimum stable affinity metadata required for recovery; raw inbound headers, credentials, traces, and one-request hints are never checkpoint data.
 
 ## Proposed Topology
 
@@ -66,7 +66,7 @@ flowchart LR
   C["Coding harness / SDK"] --> F["Existing frontend crates\nprotocol and auth"]
   F -->|"ordinary stateless request"| D["Dynamo inference\nfrontend, router, engines"]
   F -->|"continuation or runtime-owned tool"| R["Stateful agent runtime\ncheckpoint and turn coordination"]
-  R -->|"materialized inference request\n+ Dynamo invocation metadata"| D
+  R -->|"materialized Responses request\n+ approved Dynamo carrier"| D
   R --> W["External tool workers\nMCP, web, sandbox"]
   D --> E["vLLM / SGLang / TRT-LLM"]
 ```
@@ -85,7 +85,7 @@ The runtime may be embedded in the same deployment as an ingress frontend for th
 | --- | --- | --- | --- | --- |
 | Wire protocol parsing and Responses/Messages serialization | Own | Consume normalized request/events | No | No |
 | Authn/authz at request boundary | Own | Enforce state/tool authorization | Receive already-authorized request context | Connector-specific authorization |
-| Dynamo agent-metadata carrier | Preserve the approved carrier | Treat as adapter-owned opaque metadata; retain an opaque binding only when recovery requires it | Interpret into `AgentContext` | No |
+| Dynamo agent-metadata carrier | Preserve the approved carrier | Forward it on each Dynamo request; retain an opaque snapshot only when recovery requires it | Interpret into `AgentContext` | No |
 | Response/checkpoint persistence | No | Own | No | No |
 | History hydration and continuation semantics | No | Own | Consume complete prompt only | No |
 | Engine/model selection and preprocessing | No | No | Own | No |
@@ -109,8 +109,8 @@ sequenceDiagram
 
   Client->>Frontend: POST /v1/responses + agent headers
   Frontend->>Frontend: Parse request and authenticate
-  Frontend->>Runtime: StartTurn(request, opaque invocation context)
-  Runtime->>Dynamo: Materialized request + preserved Dynamo invocation context
+  Frontend->>Runtime: StartTurn(request, approved Dynamo carrier)
+  Runtime->>Dynamo: Materialized Responses request + preserved carrier
   Dynamo->>Engine: Normal selected-engine generation
   Engine-->>Dynamo: Output/events
   Dynamo-->>Runtime: Normalized response events
@@ -126,7 +126,7 @@ For `previous_response_id`, the runtime validates access to the checkpoint, load
 The new materialized request then follows the exact same Dynamo path as a first turn. The response chain and Dynamo's routing identity are intentionally separate:
 
 - `response_id` identifies a checkpoint and can branch.
-- A Dynamo adapter may preserve a stable routing/session identity for the active turn, but `agent-rt` does not define or store that identity.
+- The Dynamo next-hop client may preserve a stable routing/session carrier for the active turn, but `agent-rt` does not define or interpret that identity.
 
 ### Tool loop
 
@@ -142,7 +142,7 @@ flowchart TD
   N --> M
 ```
 
-The runtime re-enters Dynamo for each model step through the same adapter-owned invocation context. Dynamo does not need to know whether the additional input originated from a human, a tool result, or hydration.
+The runtime re-enters Dynamo for each model step through the same native frontend boundary and approved carrier. Dynamo does not need to know whether the additional input originated from a human, a tool result, or hydration.
 
 ## Tool Ownership and Execution
 
@@ -185,13 +185,13 @@ ToolJournalEntry
   status: started | completed | failed
   normalized result reference or failure
 
-BackendBinding (optional)
-  backend kind: dynamo
-  adapter-defined opaque affinity state
+ForwardedCarrierSnapshot (optional)
+  next hop: dynamo
+  client-defined opaque affinity metadata
   encrypted or capability-protected at rest
 ```
 
-The store requires compare-and-swap/versioned commit semantics for concurrent continuations. It should not persist bearer credentials or arbitrary inbound headers. Large artifacts and raw tool payloads should be externalized to an object store with redacted metadata in the checkpoint. A `BackendBinding` is not a portable agent-context contract: it is an implementation detail of the selected inference adapter.
+The store requires compare-and-swap/versioned commit semantics for concurrent continuations. It should not persist bearer credentials or arbitrary inbound headers. Large artifacts and raw tool payloads should be externalized to an object store with redacted metadata in the checkpoint. A `ForwardedCarrierSnapshot` is not a portable agent-context contract: it is an implementation detail of the Dynamo next-hop client.
 
 The production store must be shared across runtime replicas. An in-memory implementation is sufficient for unit tests; a local SQLite implementation can support a single-process POC; multi-replica deployments require a transactional shared store.
 
@@ -236,7 +236,7 @@ Its llm-d documentation configures `--llm-api-base` to the inference-gateway ser
 | State/tool loop | Coupled to gateway core | Runtime concern, independent of Dynamo inference |
 | Upstream invocation | Direct HTTP request to configured `llm_api_base` | Existing Dynamo inference boundary and routing |
 | Engine support | Any compatible upstream endpoint | Dynamo's existing multi-engine support |
-| Dynamo context continuity | Proxy path differs from stateful executor path | Dynamo adapter preserves invocation context in all model steps |
+| Dynamo context continuity | Proxy path differs from stateful executor path | Runtime forwards the approved carrier on every Dynamo model step |
 | Tool execution | Gateway-owned MCP/web/tool framework | External workers selected by runtime policy |
 | llm-d role | Backend service behind Agentic | Gateway chooses direct Dynamo or stateful next hop |
 
@@ -251,14 +251,14 @@ The proposed runtime should learn from Agentic API's externally visible Response
 - Route only Responses requests with `previous_response_id` or `store=true` through the runtime.
 - Implement checkpoint persistence and hydration.
 - Materialize the full request and invoke Dynamo through the current path.
-- Verify that the Dynamo adapter preserves routing/session metadata for every inference request in a tool loop.
+- Verify that the Dynamo next-hop client preserves approved routing/session metadata for every inference request in a tool loop.
 - Support text and client-owned function calls only.
 
 ### Phase 1: production state semantics
 
 - Shared transactional store, tenant authorization, idempotency, and response-chain concurrency control.
 - Stateful streaming, cancellation policy, bounded buffering, and observability.
-- Adapter-owned durable affinity binding for recovery of a runtime-owned tool loop.
+- Next-hop-owned durable carrier snapshot for recovery of a runtime-owned tool loop.
 - Persist stable agent identity fields and enforce consistency on continuation.
 
 ### Phase 2: one runtime-owned connector
@@ -276,7 +276,7 @@ The proposed runtime should learn from Agentic API's externally visible Response
 ## POC Success Criteria
 
 - A two-turn Responses continuation returns correct model-visible history without client replay.
-- Where the caller supplies Dynamo agent metadata, every model step for a response chain preserves its expected routing/session identity in Dynamo request traces.
+- Where the caller supplies Dynamo agent metadata, every model step for a response chain forwards it and preserves its expected routing/session identity in Dynamo request traces.
 - The same POC executes against all engines already supported by the Dynamo deployment without agent-runtime engine-specific code.
 - A stateless Responses request still follows the direct path and incurs no state-store lookup or runtime hop.
 - A client-owned function call commits state and resumes correctly on submitted tool output.
@@ -288,7 +288,7 @@ The proposed runtime should learn from Agentic API's externally visible Response
 1. Which shared store and tenancy model should the first multi-replica deployment use?
 2. Should the stateful runtime be embedded with an ingress service initially, or deployed as an independent next-hop service from day one?
 3. What is the exact frontend-owned normalized event interface between the runtime and Responses/Messages serializers?
-4. What is the minimum Dynamo adapter binding needed for crash recovery, and which fields must remain request-local?
+4. What is the minimum Dynamo carrier snapshot needed for crash recovery, and which fields must remain request-local?
 5. How should the Dynamo adapter apply or reject changed incoming routing identity on a continuation?
 6. Which runtime-owned tool is constrained enough to be the first production connector?
 7. Which information should endpoint selection inspect to choose direct Dynamo versus the stateful runtime without duplicating protocol parsing?
