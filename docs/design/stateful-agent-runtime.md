@@ -135,7 +135,7 @@ This is the first proof-of-concept topology. The invoker calls Dynamo’s normal
 
 1. The Responses frontend authenticates the caller and creates `RuntimeAuthorization`.
 2. It invokes `agent-rt` for requests with persistent state, `previous_response_id`, or runtime-owned tools. Stateless requests invoke Dynamo directly.
-3. `agent-rt` claims the response chain, validates checkpoint access, hydrates prior model-visible items, resolves inherited instructions/tools/tool choice, and appends the new input.
+3. `agent-rt` claims the response chain, validates checkpoint access, hydrates prior model-visible items, resolves inherited tool definitions/tool choice, and appends the new input. Instructions are per-turn and do not carry across `previous_response_id`.
 4. It clears `previous_response_id` only on the model-facing request. Storage retains the response lineage.
 5. `DirectDynamoInvoker` invokes Dynamo with the complete native request and the approved carrier.
 6. Dynamo derives `AgentContext`, lowers through `UnifiedRequest`, applies its normal routing policy, and invokes the selected engine.
@@ -272,7 +272,7 @@ ResponseCheckpoint
   tenant/principal scope
   status, version, turn lease, idempotency key
   model-visible input/output item references
-  effective instructions, tools, and tool choice
+  per-turn instructions and effective tools/tool choice
   renderer/tokenization compatibility fingerprint where required
 
 ToolJournalEntry
