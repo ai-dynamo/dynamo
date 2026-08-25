@@ -150,9 +150,10 @@ Names are hierarchical, so filtering on a prefix in Nsight Systems isolates one 
 | `transport.tcp.wait_backend` | Waiting for the worker's response stream to open |
 | `transport.tcp.send` | Writing the request to the worker |
 
-`frontend.http.chat.first_chunk` is an instantaneous marker on the first chunk carrying token data,
-which is the point a Time To First Token (TTFT) reading should use. Annotation events and dropped
-empty chunks are excluded.
+`frontend.http.chat.first_chunk` is an instantaneous marker on the first chunk carrying generated
+output, which is the point a Time To First Token (TTFT) reading should use. Annotation events,
+dropped empty chunks, and the role-only opening delta are all excluded — the last of these is
+forwarded to the client but contains no token.
 
 ### Worker
 
@@ -171,17 +172,31 @@ empty chunks are excluded.
 | `detokenize` | Detokenization |
 
 `worker.ingress.prologue_sent` marks the point the response stream is acknowledged to the frontend.
+It is emitted only when that send succeeds, so its absence on a request that otherwise progressed
+means the acknowledgement itself failed.
 
 ## Reading the timeline
 
-The value is in the **gaps**, not only the bars. Consecutive `worker.egress.chunk` ranges are
-separated by the engine producing the next token, so the bars are Dynamo's cost and the gaps are the
-engine's. The `pybridge.*` ranges deliberately exclude their awaits for the same reason.
+The value is in the **gaps**, not only the bars: the bars are annotated Dynamo work, and everything
+else in a request's span falls between them. What a gap is *made of* depends on where you are
+looking, and no gap is a clean engine-time reading.
 
 <Warning>
-  Gaps between `frontend.http.*.sse_chunk` ranges are not pure worker time. The frontend's own
-  response receive and decode path is not annotated, so its cost falls into those gaps. Disaggregated
-  prefill dispatch is likewise unannotated and appears inside `frontend.http.chat.generate`.
+  **A gap is a mixed interval, not a single component's cost.** Attributing one to the engine, or to
+  the worker, overstates whatever you are trying to measure.
+
+  - Between consecutive `worker.egress.chunk` ranges: the engine producing the next token, plus the
+    unannotated part of polling the response stream. `worker.egress.chunk` opens only after
+    `stream.next().await` returns, and that poll also runs `pybridge.anext_call` and
+    `pybridge.decode_response` — Python bridge and Dynamo work that is inside the gap, not the bar.
+  - Between consecutive `frontend.http.*.sse_chunk` ranges: worker time, the frontend's own
+    unannotated response receive and decode path, and — because an SSE range ends before the `yield`
+    — downstream consumer time and network backpressure.
+  - Inside `frontend.http.chat.generate`: disaggregated prefill dispatch, which is unannotated.
+
+  The `pybridge.*` ranges deliberately exclude their awaits, so their bars are GIL-bound work only.
+  Use the bars for what Dynamo costs; treat gaps as an upper bound on anything you attribute to a
+  component outside them.
 </Warning>
 
 Marker names are static, so concurrent requests produce overlapping identically-named ranges.

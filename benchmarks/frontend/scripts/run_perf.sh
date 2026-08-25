@@ -272,6 +272,22 @@ if ! command -v aiperf &>/dev/null && ! python3 -c "import aiperf" 2>/dev/null; 
     exit 1
 fi
 echo "  aiperf:     available"
+
+# Checked here, not at the point of use: with nsys present this script sets
+# DYN_NVTX=1 (see below), and dynamo.common.utils.nvtx_utils imports the nvtx
+# package eagerly when that switch is on. Without the package the frontend and
+# the mocker workers raise ImportError at startup, so the run would die minutes
+# in with a traceback that says nothing about nsys. A source install satisfies
+# every other prerequisite here and still hits it.
+if [[ "$HAS_NSYS" == true ]] && ! python3 -c "import nvtx" 2>/dev/null; then
+    echo "ERROR: nsys is present, which turns on DYN_NVTX, but the nvtx package is not"
+    echo "       installed. The Python components import it at startup when DYN_NVTX is set."
+    echo "       Install: pip install 'ai-dynamo[profiling]'  (or re-run with --skip-nsys)"
+    exit 1
+fi
+if [[ "$HAS_NSYS" == true ]]; then
+    echo "  nvtx:       available"
+fi
 echo ""
 
 # ─── Tracked PIDs for cleanup ───────────────────────────────────────────────

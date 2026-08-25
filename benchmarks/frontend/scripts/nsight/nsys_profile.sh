@@ -72,6 +72,15 @@ mkdir -p "$OUTPUT_DIR"
 # the Python components (dynamo.common.utils.nvtx_utils) both read this.
 export DYN_NVTX=1
 
+# nvtx_utils imports the nvtx package eagerly once the switch is on, so a Python
+# target dies at startup without it. Warned rather than fatal: this script also
+# profiles pure-Rust binaries, which need nothing from Python.
+if ! python3 -c "import nvtx" 2>/dev/null; then
+    echo "WARNING: the nvtx package is not installed. DYN_NVTX=1 is exported above, so a"
+    echo "         Python target will raise ImportError at startup."
+    echo "         Install: pip install 'ai-dynamo[profiling]'"
+fi
+
 echo "Profiling: $BINARY $*"
 echo "Duration: ${DURATION}s"
 echo "Output: ${OUTPUT_DIR}/${OUTPUT_PREFIX}.nsys-rep"
