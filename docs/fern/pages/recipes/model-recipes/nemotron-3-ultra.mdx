@@ -8,7 +8,9 @@ subtitle: "Serve Nemotron-3-Ultra with optimized Dynamo 1.4.0 and vLLM profiles 
 The Nemotron-3-Ultra recipe serves
 `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4` with optimized aggregated and
 disaggregated Dynamo profiles. The model's native context length is 256K. The 1M profiles are an
-explicit long-context enablement and carry their qualified 1M settings in separate manifests.
+explicit long-context enablement that overrides the serving framework's model-length guardrail;
+they do not change the model's native context length in `config.json`. The qualified 1M settings
+are carried in separate manifests.
 
 <Info>
 All profiles use the released public `vllm-runtime:1.4.0` image pinned by digest. No NGC image pull

@@ -8,7 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 This directory contains the optimized Dynamo 1.4.0 recipes for
 `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4`. The 12 profiles cover B200, GB200, and H200 at
 the model-native 256K context length and the opt-in 1M context length, with aggregated and
-disaggregated serving.
+disaggregated serving. The 1M profiles explicitly override the serving framework's model-length
+guardrail; they do not change the model's native context length in `config.json`.
 
 Use the [Nemotron-3-Ultra Fern recipe](../../docs/fern/pages/recipes/model-recipes/nemotron-3-ultra.mdx)
 to select a target, prepare the model cache, deploy a manifest, run a smoke test, and review known
