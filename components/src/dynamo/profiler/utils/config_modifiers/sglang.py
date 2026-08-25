@@ -456,3 +456,40 @@ class SGLangConfigModifier(BaseConfigModifier):
 
         get_main_container(worker_service).args = args
         return cfg.model_dump()
+
+    @classmethod
+    def set_config_kv_cache(
+        cls,
+        config: dict,
+        block_size: int,
+        memory_fraction: float,
+        prefix_caching: bool,
+        component_type: SubComponentType = SubComponentType.DECODE,
+    ) -> dict:
+        """Apply KV-cache block size, memory budget, and prefix-caching policy.
+
+        SGLang naming/polarity differs from vLLM, confirmed against the real
+        base template (--page-size) and real deploy examples/launch scripts
+        (--mem-fraction-static, present at examples/backends/sglang/deploy and
+        launch/_test_agg.sh). Prefix caching (SGLang: radix cache) defaults ON
+        and is a single-flag toggle, not a paired enable/disable flag like
+        vLLM -- presence of --disable-radix-cache means OFF, its absence means
+        the (default) ON state. Do not copy vLLM's flag names or polarity here.
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_component_from_config(
+            cfg, backend="sglang", sub_component_type=component_type
+        )
+        args = validate_and_get_worker_args(worker_service, backend="sglang")
+        args = break_arguments(args)
+
+        args = set_argument_value(args, "--page-size", str(block_size))
+        args = set_argument_value(args, "--mem-fraction-static", str(memory_fraction))
+
+        if "--disable-radix-cache" in args:
+            args.remove("--disable-radix-cache")
+        if not prefix_caching:
+            args = append_argument(args, "--disable-radix-cache")
+
+        get_main_container(worker_service).args = args
+        return cfg.model_dump()
