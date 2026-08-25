@@ -61,10 +61,10 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Run repeated composite probes
         if: matrix.shape == 'repeated'
-        uses: ./.github/actions/hook-canary-repeated
+        uses: $/.github/actions/hook-canary-repeated
       - name: Run consolidated composite probes
         if: matrix.shape == 'consolidated'
-        uses: ./.github/actions/hook-canary-consolidated
+        uses: $/.github/actions/hook-canary-consolidated
 
   standard-hook-latency:
     if: inputs.standard_hook_canary == 'latency'
