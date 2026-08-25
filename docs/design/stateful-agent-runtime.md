@@ -8,7 +8,7 @@
 
 Stateful agent traffic needs a component that receives the request before inference: it must resolve `previous_response_id`, hydrate prior items, coordinate any server-owned tools, and commit the next checkpoint. That requirement does **not** mean that Dynamo should own response history, MCP clients, web search, or sandboxes.
 
-The proposed design places an optional stateful agent runtime behind the existing frontend/ingress crates and in front of Dynamo. The runtime materializes a native Responses request and forwards it through Dynamo's existing frontend boundary. Dynamo remains responsible for request preprocessing, `UnifiedRequest` conversion, `AgentContext` creation, KV-aware routing, model/engine selection, streaming inference, and observability. MCP, web search, code execution, and other server-owned tools run in external workers controlled by the runtime.
+The proposed design composes an optional stateful agent runtime into a Responses next-hop proxy. The runtime materializes a native Responses request and passes it to the proxy's configured inference next hop. A direct deployment can use Dynamo's frontend boundary as that next hop; an llm-d deployment can use a private endpoint-picker path which ultimately reaches Dynamo. Dynamo remains responsible for request preprocessing, `UnifiedRequest` conversion, `AgentContext` creation, KV-aware routing, model/engine selection, streaming inference, and observability. MCP, web search, code execution, and other server-owned tools run in external workers controlled by the runtime.
 
 This is intentionally not a reimplementation of vLLM Agentic API. It is a composable response-processing stage that uses the existing Dynamo frontend boundary and the existing multi-engine inference path.
 
@@ -63,31 +63,34 @@ The runtime may need to recover a server-tool loop after a process failure. For 
 
 ```mermaid
 flowchart LR
-  C["Coding harness / SDK"] --> F["Existing frontend crates\nprotocol and auth"]
-  F -->|"ordinary stateless request"| D["Dynamo inference\nfrontend, router, engines"]
-  F -->|"continuation or runtime-owned tool"| R["Stateful agent runtime\ncheckpoint and turn coordination"]
-  R -->|"materialized Responses request\n+ approved Dynamo carrier"| D
+  C["Coding harness / SDK"] --> G["Gateway"]
+  G --> P["Responses next-hop proxy\nfrontend crates and flow composition"]
+  P -->|"stateless"| I["Configured inference next hop\nendpoint picker / ext_proc"]
+  P -->|"stateful or runtime-owned tool"| R["agent-rt\ncheckpoint and turn coordination"]
+  R -->|"materialized Responses request\n+ approved Dynamo carrier"| I
   R --> W["External tool workers\nMCP, web, sandbox"]
+  I --> D["Dynamo frontend\nrouter and engines"]
   D --> E["vLLM / SGLang / TRT-LLM"]
 ```
 
-The frontend is the policy/dispatch boundary:
+The next-hop proxy is the policy/dispatch boundary:
 
-- Requests with no state and only client-owned tools take the current direct path to Dynamo.
-- Requests that reference prior state, request persistent state, or declare runtime-owned tools go to the stateful runtime.
-- The runtime invokes Dynamo through one inference boundary. Dynamo selects the actual engine exactly as it does today.
+- Requests with no state and only client-owned tools skip the state module and invoke the configured inference next hop.
+- Requests that reference prior state, request persistent state, or declare runtime-owned tools invoke `agent-rt` first.
+- `agent-rt` returns a complete native request to the same configured inference next hop. Dynamo selects the actual engine exactly as it does today when it is the selected backend path.
 
-The runtime may be embedded in the same deployment as an ingress frontend for the lowest control-plane latency, or deployed as a separate scalable service. In either case it is logically a next-hop endpoint, not a new engine adapter.
+The gateway sees the Responses next-hop proxy as its one endpoint. The proxy can be deployed as a dedicated service or an endpoint-picker/ext-proc-capable component. `agent-rt` is a module in that flow, not a second public gateway or a new engine adapter.
 
 ## Responsibilities
 
 | Area | Frontend crates | Stateful agent runtime | Dynamo | External tool workers |
 | --- | --- | --- | --- | --- |
-| Wire protocol parsing and Responses/Messages serialization | Own | Consume normalized request/events | No | No |
+| Wire protocol parsing and Responses/Messages serialization | Own inside next-hop proxy | Consume normalized request/events | No | No |
 | Authn/authz at request boundary | Own | Enforce state/tool authorization | Receive already-authorized request context | Connector-specific authorization |
 | Dynamo agent-metadata carrier | Preserve the approved carrier | Forward it on each Dynamo request; retain an opaque snapshot only when recovery requires it | Interpret into `AgentContext` | No |
 | Response/checkpoint persistence | No | Own | No | No |
 | History hydration and continuation semantics | No | Own | Consume complete prompt only | No |
+| Inference next-hop selection | Configure/invoke | Receive injected next hop | Choose engine after request reaches Dynamo | No |
 | Engine/model selection and preprocessing | No | No | Own | No |
 | KV-aware routing and session affinity | Pass context | Preserve context | Own | No |
 | Client function tools | Preserve protocol semantics | Commit/resume state | Parse model output | No |
@@ -101,22 +104,25 @@ The runtime may be embedded in the same deployment as an ingress frontend for th
 ```mermaid
 sequenceDiagram
   participant Client
-  participant Frontend
+  participant Proxy as Responses next-hop proxy
   participant Runtime
+  participant NextHop as Configured inference next hop
   participant Dynamo
   participant Engine
   participant Store
 
-  Client->>Frontend: POST /v1/responses + agent headers
-  Frontend->>Frontend: Parse request and authenticate
-  Frontend->>Runtime: StartTurn(request, approved Dynamo carrier)
-  Runtime->>Dynamo: Materialized Responses request + preserved carrier
+  Client->>Proxy: POST /v1/responses + agent headers
+  Proxy->>Proxy: Parse request and authenticate
+  Proxy->>Runtime: StartTurn(request, approved Dynamo carrier, inference next hop)
+  Runtime->>NextHop: Materialized Responses request + preserved carrier
+  NextHop->>Dynamo: Forward selected request
   Dynamo->>Engine: Normal selected-engine generation
   Engine-->>Dynamo: Output/events
-  Dynamo-->>Runtime: Normalized response events
+  Dynamo-->>NextHop: Normalized response events
+  NextHop-->>Runtime: Normalized response events
   Runtime->>Store: Commit response checkpoint
-  Runtime-->>Frontend: Typed Responses events/result
-  Frontend-->>Client: Response or SSE
+  Runtime-->>Proxy: Typed Responses events/result
+  Proxy-->>Client: Response or SSE
 ```
 
 ### Continuation
@@ -208,17 +214,19 @@ The runtime must apply bounded buffering between model streaming, external tools
 
 ## llm-d Composition
 
-The stateful runtime is a next-hop service from the gateway's perspective:
+The Responses next-hop proxy is the only next-hop service from the gateway's perspective:
 
 ```text
-Client -> Gateway HTTPRoute -> endpoint selection
-  -> direct Dynamo endpoint                 (stateless)
-  -> stateful response runtime -> Dynamo    (state/tool-enabled)
+Client -> Gateway HTTPRoute -> Responses next-hop proxy
+  -> state module skipped                   (stateless)
+  -> agent-rt state module                  (state/tool-enabled)
+  -> configured inference next hop / endpoint picker
+  -> Dynamo
 ```
 
-An endpoint-picker or `ext_proc` policy may decide which next hop receives the request. It should not execute the full agent loop itself: request hydration, SSE lifecycle, durable storage, MCP connections, and sandboxes require an application service with independent scaling and recovery.
+The proxy injects the configured inference next hop into the runtime flow. This keeps backend/endpoint choice under gateway policy and applies it after state hydration, when the complete model-visible request is available. An endpoint-picker or `ext_proc` may implement that next hop, but it should not execute the full agent loop itself: request hydration, SSE lifecycle, durable storage, MCP connections, and sandboxes require an application service with independent scaling and recovery.
 
-This permits deployment-specific composition. An operator may enable only state hydration, add selected tool modules, use an externally managed tool plane, or leave all traffic on the direct Dynamo route.
+This permits deployment-specific composition. An operator may enable only state hydration, add selected tool modules, use an externally managed tool plane, or leave the state module disabled while all Responses traffic still uses the same proxy and inference next hop.
 
 ## Comparison with vLLM Agentic API
 
@@ -238,7 +246,7 @@ Its llm-d documentation configures `--llm-api-base` to the inference-gateway ser
 | Engine support | Any compatible upstream endpoint | Dynamo's existing multi-engine support |
 | Dynamo context continuity | Proxy path differs from stateful executor path | Runtime forwards the approved carrier on every Dynamo model step |
 | Tool execution | Gateway-owned MCP/web/tool framework | External workers selected by runtime policy |
-| llm-d role | Backend service behind Agentic | Gateway chooses direct Dynamo or stateful next hop |
+| llm-d role | Backend service behind Agentic | Gateway delegates to one Responses proxy; proxy composes state and endpoint selection |
 
 Agentic API's `agentic-praxis` crate is currently a placeholder, so it does not yet provide the lifecycle composition point needed for this deployment model. An upstream refactor that separates hydrate, invoke-inference, tool execution, and commit would make it substantially more consumable by llm-d. Until then, placing Agentic API in front of the gateway is the supported integration.
 
@@ -250,7 +258,7 @@ The proposed runtime should learn from Agentic API's externally visible Response
 
 - Route only Responses requests with `previous_response_id` or `store=true` through the runtime.
 - Implement checkpoint persistence and hydration.
-- Materialize the full request and invoke Dynamo through the current path.
+- Materialize the full request and configure the inference next hop to use the current Dynamo path.
 - Verify that the Dynamo next-hop client preserves approved routing/session metadata for every inference request in a tool loop.
 - Support text and client-owned function calls only.
 
@@ -278,7 +286,7 @@ The proposed runtime should learn from Agentic API's externally visible Response
 - A two-turn Responses continuation returns correct model-visible history without client replay.
 - Where the caller supplies Dynamo agent metadata, every model step for a response chain forwards it and preserves its expected routing/session identity in Dynamo request traces.
 - The same POC executes against all engines already supported by the Dynamo deployment without agent-runtime engine-specific code.
-- A stateless Responses request still follows the direct path and incurs no state-store lookup or runtime hop.
+- A stateless Responses request still uses the proxy/inference next hop but incurs no state-store lookup or `agent-rt` execution.
 - A client-owned function call commits state and resumes correctly on submitted tool output.
 - Failure to commit or hydrate produces a typed request/runtime error rather than silently falling back to an incomplete prompt.
 - No tool credentials, bearer tokens, or arbitrary inbound headers enter checkpoint storage or the Dynamo request body.
@@ -291,7 +299,7 @@ The proposed runtime should learn from Agentic API's externally visible Response
 4. What is the minimum Dynamo carrier snapshot needed for crash recovery, and which fields must remain request-local?
 5. How should the Dynamo next-hop client apply or reject changed incoming routing metadata on a continuation?
 6. Which runtime-owned tool is constrained enough to be the first production connector?
-7. Which information should endpoint selection inspect to choose direct Dynamo versus the stateful runtime without duplicating protocol parsing?
+7. Which normalized request attributes should select the state module while keeping endpoint selection independent of protocol parsing?
 
 ## References
 
