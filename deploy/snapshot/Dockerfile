@@ -217,6 +217,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     util-linux \
     && rm -rf /var/lib/apt/lists/*
 
+# The CUDA base ships an optional efa_metrics sampler under the Nsight Systems
+# CLI, for EFA network counters. Nothing in the Dynamo tree references it, and
+# AWS EFA confirmed on 2026-08-18 that they do not use it. It is a static Go
+# binary, so it carries its own copy of the Go standard library and is the sole
+# carrier for every Critical and High finding on this image, 36 in total.
+#
+# Removed in agent_pre so the agent, licenses and sources_collect stages all
+# inherit it. The glob spans the CUDA version, the Nsight version and the target
+# architecture, all of which move with AGENT_BASE_IMAGE.
+#
+# The guard is the point of the change, not decoration: a glob that silently
+# matches nothing after a base bump would leave the findings in place while the
+# build stayed green.
+RUN rm -rf /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/plugins/efa_metrics; \
+    if find /usr/local -type d -name efa_metrics 2>/dev/null | grep -q .; then \
+        echo "ERROR: an efa_metrics plugin directory survived removal; the glob no" >&2; \
+        echo "       longer matches the base image's Nsight layout." >&2; \
+        find /usr/local -type d -name efa_metrics >&2; \
+        exit 1; \
+    fi
+
 # Copy CRIU from builder
 COPY --from=criu-builder /criu-install/usr/local /usr/local
 COPY --from=criu-builder /tmp/criu/COPYING /legal/CRIU/COPYING
