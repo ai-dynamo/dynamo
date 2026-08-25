@@ -26,6 +26,25 @@ Events are published over the **Dynamo event plane**, a transport-agnostic pub/s
 1. **Direct publishing** — Your engine calls `publish_stored()` / `publish_removed()` to push events directly over the event plane. Simplest approach for custom engines.
 2. **ZMQ relay** — For engines that emit raw KV events over a ZMQ socket (like SGLang and vLLM). The publisher subscribes to the ZMQ endpoint and relays events to the event plane automatically.
 
+## Security Considerations
+
+KV events are sensitive request-derived data. Stored-block events can contain
+token IDs, cumulative sequence block hashes, LoRA adapter names, cache namespace
+data, and worker identifiers. Depending on the publisher and event, token IDs may
+expose block-aligned portions of request text when decoded with the corresponding
+model tokenizer; they do not imply that the complete prompt is recoverable.
+Cumulative hashes can reveal shared-prefix relationships, but do not disclose the
+prefix text on their own. A block hash is an index key, not an anonymization
+boundary.
+
+Restrict who can publish, subscribe, query, dump, or replay KV state. Keep ZMQ
+endpoints on the trusted network because Dynamo's ZMQ transports do not add
+authentication or encryption. When publishing over NATS, configure NATS
+authentication, TLS or mTLS, server-side subject permissions, and
+NetworkPolicy. See
+[Event-plane security](../../knowledge-base/concepts/system-architecture/architecture.md#event-plane-security)
+and the [Secure Deployment Guidelines](../../security/secure-deployment-guidelines.md).
+
 ## Event Types
 
 The KV cache supports three event types:
