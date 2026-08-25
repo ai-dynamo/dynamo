@@ -642,7 +642,7 @@ export const ARTIFACTS: Artifact[] = [
     category: "container",
     group: "component",
     name: "dynamo-frontend",
-    description: "OpenAI-compatible API gateway with Endpoint Prediction Protocol (EPP)",
+    description: "OpenAI-compatible API gateway with Endpoint Picker Plugin (EPP)",
     meta: "AMD64/ARM64",
     href: `${NGC_C}/dynamo-frontend/tags`,
     tags: [{ label: "1.4.1", clipboard: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1" }],
