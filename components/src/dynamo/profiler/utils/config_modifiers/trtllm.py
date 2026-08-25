@@ -549,3 +549,42 @@ class TrtllmConfigModifier(BaseConfigModifier):
 
         get_main_container(worker_service).args = args
         return cfg.model_dump()
+
+    @classmethod
+    def set_config_kv_cache(
+        cls,
+        config: dict,
+        block_size: int,
+        memory_fraction: float,
+        prefix_caching: bool,
+        component_type: SubComponentType = SubComponentType.DECODE,
+    ) -> dict:
+        """Apply KV-cache block size, memory budget, and prefix-caching policy.
+
+        Real TRT-LLM key names confirmed against
+        examples/backends/trtllm/engine_configs/qwen3/agg.yaml and the
+        existing test_trtllm_override_merge.py coverage:
+        kv_cache_config.tokens_per_block, kv_cache_config.free_gpu_memory_fraction,
+        kv_cache_config.enable_block_reuse. _merge_overrides_into_args merges
+        into the existing --override-engine-args JSON (idempotent by
+        construction) rather than appending flags, so this needs no manual
+        remove-then-append step.
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_component_from_config(
+            cfg, backend="trtllm", sub_component_type=component_type
+        )
+        args = validate_and_get_worker_args(worker_service, backend="trtllm")
+        args = break_arguments(args)
+
+        args = _merge_overrides_into_args(
+            args,
+            {
+                "kv_cache_config.tokens_per_block": int(block_size),
+                "kv_cache_config.free_gpu_memory_fraction": float(memory_fraction),
+                "kv_cache_config.enable_block_reuse": bool(prefix_caching),
+            },
+        )
+
+        get_main_container(worker_service).args = args
+        return cfg.model_dump()
