@@ -10,7 +10,7 @@ import json
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 
@@ -108,6 +108,30 @@ def _aic_fpm_digest(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _aic_performance_model_config(
+    metadata: dict[str, Any] | None, mode: str
+) -> dict[str, Any] | None:
+    """Select runner-neutral AIC identity without changing runtime engine args."""
+    if not metadata:
+        return None
+    roles = ("aggregated", "agg") if mode == "agg" else ("decode", "prefill")
+    for role in roles:
+        raw = metadata.get(role)
+        if raw is None:
+            continue
+        if not isinstance(raw, dict):
+            raise TypeError(f"performance_model_metadata.{role} must be a mapping")
+        if raw.get("provider") != "aic":
+            continue
+        config = raw.get("config")
+        if not isinstance(config, dict):
+            raise TypeError(
+                f"performance_model_metadata.{role}.config must be a mapping"
+            )
+        return dict(config)
+    return None
+
+
 def prepare_planner_replay(
     extra_engine_args: MockEngineArgs | None,
     prefill_engine_args: MockEngineArgs | None,
@@ -115,6 +139,7 @@ def prepare_planner_replay(
     planner_config_arg: str,
     benchmark_granularity: int = 8,
     capture_details: bool = True,
+    performance_model_metadata: dict[str, Any] | None = None,
 ):
     """Create and bootstrap the scaling component for an offline replay."""
 
@@ -164,30 +189,47 @@ def prepare_planner_replay(
     if adapter._is_easy_mode():
         return adapter
 
-    ref_args = (
-        extra_engine_args
-        or (
-            decode_engine_args
-            if decode_engine_args is not None
-            and decode_engine_args.aic_backend is not None
-            else None
-        )
-        or prefill_engine_args
-        or decode_engine_args
-        or MockEngineArgs()
+    perf_config = _aic_performance_model_config(
+        performance_model_metadata, planner_config.mode
     )
+    if perf_config is not None:
+        ref_args = (
+            extra_engine_args
+            or decode_engine_args
+            or prefill_engine_args
+            or MockEngineArgs()
+        )
+    else:
+        ref_args = (
+            extra_engine_args
+            or (
+                decode_engine_args
+                if decode_engine_args is not None
+                and decode_engine_args.aic_backend is not None
+                else None
+            )
+            or prefill_engine_args
+            or decode_engine_args
+            or MockEngineArgs()
+        )
     p_args = (
         extra_engine_args if planner_config.mode == "agg" else prefill_engine_args
     ) or ref_args
     d_args = (
         extra_engine_args if planner_config.mode == "agg" else decode_engine_args
     ) or ref_args
-    aic_backend = ref_args.aic_backend
-    if (
-        aic_backend is None
-        or ref_args.aic_system is None
-        or ref_args.aic_model_path is None
-    ):
+    aic_backend = (
+        perf_config.get("backend") if perf_config is not None else ref_args.aic_backend
+    )
+    aic_system = (
+        perf_config.get("system") if perf_config is not None else ref_args.aic_system
+    )
+    aic_model_path = (
+        perf_config.get("model_path")
+        if perf_config is not None
+        else ref_args.aic_model_path
+    )
+    if aic_backend is None or aic_system is None or aic_model_path is None:
         adapter.set_bootstrap_metadata(
             {
                 "status": "not_configured_load_only",
@@ -200,29 +242,52 @@ def prepare_planner_replay(
         )
         return adapter
 
+    aic_nextn = (
+        perf_config.get("nextn") if perf_config is not None else d_args.aic_nextn
+    )
+    nextn_accept_rates = (
+        ",".join(["0"] * int(aic_nextn)) if aic_nextn is not None else None
+    )
+
     try:
         from dynamo._internal.aic import create_session
 
         aic_session = create_session(
             backend_name=aic_backend,
-            system=ref_args.aic_system,
-            model_path=ref_args.aic_model_path,
-            tp_size=ref_args.aic_tp_size or 1,
-            backend_version=ref_args.aic_backend_version,
-            moe_tp_size=ref_args.aic_moe_tp_size,
-            moe_ep_size=ref_args.aic_moe_ep_size,
-            attention_dp_size=ref_args.aic_attention_dp_size,
+            system=aic_system,
+            model_path=aic_model_path,
+            tp_size=(
+                perf_config.get("tp_size", 1)
+                if perf_config is not None
+                else ref_args.aic_tp_size or 1
+            ),
+            backend_version=(
+                perf_config.get("backend_version")
+                if perf_config is not None
+                else ref_args.aic_backend_version
+            ),
+            moe_tp_size=(
+                perf_config.get("moe_tp_size")
+                if perf_config is not None
+                else ref_args.aic_moe_tp_size
+            ),
+            moe_ep_size=(
+                perf_config.get("moe_ep_size")
+                if perf_config is not None
+                else ref_args.aic_moe_ep_size
+            ),
+            attention_dp_size=(
+                perf_config.get("attention_dp_size")
+                if perf_config is not None
+                else ref_args.aic_attention_dp_size
+            ),
             gemm_dtype=ref_args.aic_gemm_dtype,
             moe_dtype=ref_args.aic_moe_dtype,
             fmha_dtype=ref_args.aic_fmha_dtype,
             kv_cache_dtype=ref_args.aic_kv_cache_dtype,
             comm_dtype=ref_args.aic_comm_dtype,
-            nextn=d_args.aic_nextn,
-            nextn_accept_rates=(
-                ",".join(["0"] * d_args.aic_nextn)
-                if d_args.aic_nextn is not None
-                else None
-            ),
+            nextn=aic_nextn,
+            nextn_accept_rates=nextn_accept_rates,
         )
     except (
         ImportError,
@@ -294,6 +359,7 @@ def planner_replay_adapter(
     planner_config_arg: str,
     benchmark_granularity: int = 8,
     capture_details: bool = True,
+    performance_model_metadata: dict[str, Any] | None = None,
 ) -> Iterator:
     """Own Planner preparation, replay execution, and cleanup as one scope."""
 
@@ -302,6 +368,7 @@ def planner_replay_adapter(
         prefill_engine_args=prefill_engine_args,
         decode_engine_args=decode_engine_args,
         planner_config_arg=planner_config_arg,
+        performance_model_metadata=performance_model_metadata,
         benchmark_granularity=benchmark_granularity,
         capture_details=capture_details,
     )

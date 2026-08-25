@@ -242,6 +242,50 @@ def test_public_router_prediction_materializes_runtime_hook() -> None:
         "overlap_score_credit": 1.0,
         "prefill_load_scale": 1.0,
         "router_temperature": 0.1,
+        "router_prefill_load_model": "none",
+    }
+
+
+def test_public_router_aic_load_model_reaches_runtime_config() -> None:
+    replay_spec = create_provider().compile_prediction(
+        {
+            "policy": "kv_router",
+            "prefill_load_model": {"type": "aic"},
+        },
+        PredictionAdapterContext(
+            engine={
+                "mode": "aggregated",
+                "model": "example/model",
+                "hardware": "h200_sxm",
+                "backend": "vllm",
+                "backend_version": "0.11.0",
+                "workers": {
+                    "aggregated": {
+                        "parallelism": {
+                            "tensor": 1,
+                            "attention_data": 1,
+                            "moe_tensor": 1,
+                            "moe_expert": 1,
+                        }
+                    }
+                },
+            },
+            traffic={},
+            evaluation={},
+        ),
+    )
+
+    hook_config = replay_spec.runtime_hooks[0].config
+    assert hook_config["router_config"]["router_prefill_load_model"] == "aic"
+    assert hook_config["aic_perf_config"] == {
+        "aic_backend": "vllm",
+        "aic_system": "h200_sxm",
+        "aic_model_path": "example/model",
+        "aic_backend_version": "0.11.0",
+        "aic_tp_size": 1,
+        "aic_attention_dp_size": 1,
+        "aic_moe_tp_size": None,
+        "aic_moe_ep_size": None,
     }
 
 

@@ -327,6 +327,40 @@ def test_direct_predict_resolves_kv_capacity_fraction(monkeypatch) -> None:
     assert runner._synthetic_kwargs(spec)["request_count"] == 210
 
 
+def test_fixed_timing_keeps_aic_identity_out_of_runtime_args(monkeypatch) -> None:
+    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(
+        simulation,
+        "materialize_aic_num_gpu_blocks",
+        lambda payload: payload,
+    )
+    engine_args = simulation.DynamoReplayRunner._engine_args(
+        {
+            "engine_type": "vllm",
+            "aic_backend": "vllm",
+            "aic_backend_version": "0.11.0",
+            "aic_system": "h200_sxm",
+            "aic_model_path": "example/model",
+            "aic_attention_dp_size": 2,
+            "aic_pp_size": 1,
+            "timing_model": {
+                "type": "fixed",
+                "prefill_ms": 1.0,
+                "decode_ms": 1.0,
+            },
+        }
+    )
+
+    lowered = json.loads(engine_args.payload)
+    assert "aic_backend" not in lowered
+    assert "aic_backend_version" not in lowered
+    assert "aic_system" not in lowered
+    assert "aic_model_path" not in lowered
+    assert "aic_attention_dp_size" not in lowered
+    assert lowered["dp_size"] == 2
+    assert "aic_pp_size" not in lowered
+
+
 def test_factory_preserves_trtllm_disagg_gate() -> None:
     capabilities = simulation.DynamoReplayRunnerFactory().capabilities()
 
@@ -347,9 +381,9 @@ def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
             supports_disaggregated_attention_dp=False,
         ):
             seen["version"] = replay_spec_api_version
-            seen[
-                "supports_disaggregated_attention_dp"
-            ] = supports_disaggregated_attention_dp
+            seen["supports_disaggregated_attention_dp"] = (
+                supports_disaggregated_attention_dp
+            )
             self.replay_spec_api_version = replay_spec_api_version
             self.supported_backend_topologies = supported_backend_topologies
             self.supported_hooks = supported_hooks

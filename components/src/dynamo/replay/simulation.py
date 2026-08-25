@@ -113,6 +113,9 @@ class DynamoReplayRunner:
             "arrival_speedup_ratio": self._arrival_speedup_ratio(spec),
             "replay_concurrency": self._effective_in_flight_cap(spec),
             "planner_config": planner_config,
+            "performance_model_metadata": (
+                getattr(spec.backend_deployment, "performance_model_metadata", {})
+            ),
             "benchmark_granularity": self.benchmark_granularity,
             # Sweeper uses the lightweight default. CLI and other callers can
             # explicitly request detailed output through the Runner contract.

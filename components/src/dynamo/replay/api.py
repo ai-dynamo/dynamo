@@ -33,6 +33,7 @@ class _CommonReplayOptions(TypedDict, total=False):
     sla_itl_ms: float | None
     sla_e2e_ms: float | None
     planner_config: Any
+    performance_model_metadata: dict[str, Any] | None
     benchmark_granularity: int
     capture_per_request: bool
     capture_planner_details: bool
@@ -140,6 +141,7 @@ def run_trace_replay(
     sla_itl_ms=None,
     sla_e2e_ms=None,
     planner_config=None,
+    performance_model_metadata=None,
     benchmark_granularity=8,
     capture_per_request=False,
     capture_planner_details=True,
@@ -215,6 +217,7 @@ def run_trace_replay(
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,
             planner_config_arg=_planner_config_arg(planner_config),
+            performance_model_metadata=performance_model_metadata,
             benchmark_granularity=benchmark_granularity,
             capture_details=capture_planner_details,
         )
@@ -303,6 +306,7 @@ def run_synthetic_trace_replay(
     sla_itl_ms=None,
     sla_e2e_ms=None,
     planner_config=None,
+    performance_model_metadata=None,
     benchmark_granularity=8,
     capture_per_request=False,
     capture_planner_details=True,
@@ -349,6 +353,7 @@ def run_synthetic_trace_replay(
             prefill_engine_args=prefill_engine_args,
             decode_engine_args=decode_engine_args,
             planner_config_arg=_planner_config_arg(planner_config),
+            performance_model_metadata=performance_model_metadata,
             benchmark_granularity=benchmark_granularity,
             capture_details=capture_planner_details,
         )

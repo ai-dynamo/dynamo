@@ -154,6 +154,7 @@ class DynamoRouterSweepConfigProvider:
             "router_temperature": public.temperature
             if public.temperature is not None
             else 0.0,
+            "router_prefill_load_model": public.prefill_load_model.type,
         }
         return AdapterReplaySpec(
             config=concrete,
@@ -372,6 +373,8 @@ class DynamoRouterSweepConfigProvider:
             "router_temperature": _float_selection(selection, "temperature"),
         }
         load_model = str(selection.get("prefill_load_model_type", "none"))
+        if public_schema:
+            router_config["router_prefill_load_model"] = load_model
         concrete_config: dict[str, JSONValue]
         if public_schema:
             concrete_config = {

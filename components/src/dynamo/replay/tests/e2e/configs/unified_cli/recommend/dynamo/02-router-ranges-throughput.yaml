@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+traffic:
+  source: {type: synthetic, input_tokens: 32, output_tokens: 4}
+  load: {type: concurrency, concurrency: 2}
+  stop: {requests: 6}
+engine:
+  mode: aggregated
+  model: components/src/dynamo/replay/tests/e2e/configs/unified_cli/fixtures/tiny-model
+  hardware: h200_sxm
+  backend: vllm
+  context_length: 2048
+  workers:
+    aggregated:
+      parallelism:
+        preset:
+          - {replicas: 2, tensor: 1, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
+      scheduler: {max_batched_tokens: 8192, max_sequences: 256}
+      kv_cache: {block_size: 64, prefix_caching: true, capacity: {type: fixed, blocks: 256}}
+      timing: {type: fixed, prefill_ms: 1, decode_ms: 1}
+router:
+  policy: {choices: [round_robin, kv_router]}
+  prefill_load_model: {type: none}
+  overlap_score_credit: {range: {min: 0.1, max: 1.0}}
+  prefill_load_scale: {range: {min: 0.25, max: 32.0, scale: log}}
+  temperature: {choices: [0.0, 0.5]}
+optimization:
+  target: throughput
+  constraints: {max_candidate_gpus: 2}
+optimizer: {algorithm: random, max_trials: 4, parallelism: 1, candidate_timeout_seconds: 30.0, seed: 22}
