@@ -282,6 +282,10 @@ runs:
                   kubernetes.azure.com/mode: "user"
             runtimeClasses:
               enabled: true
+            # The snapshot-agent checkpoint PVC uses the host's RWX-capable
+            # azurefile-csi class, which must be visible inside the vCluster.
+            storageClasses:
+              enabled: true
         EOF
           VCLUSTER_HELM_ARGS+=(--values "${VCLUSTER_CHECKPOINT_VALUES}")
         fi
