@@ -41,7 +41,7 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
       <p>Filter by provider, runtime, and hardware. Each card notes its serving technique and workload shape.</p>
     </div>
     <div className="dynamo-catalog-facts">
-      <strong>84</strong>
+      <strong>86</strong>
       <span>Deployable configurations</span>
       <button className="dynamo-filter-reset" type="reset">Reset filters</button>
     </div>
@@ -87,13 +87,13 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <div className="dynamo-model-tags"><span>SGLang</span><span>4x/12x B200 · 8x/16x H200</span><span>Agentic · up to 500K context</span></div>
   <a className="dynamo-card-link" href="glm-5-2.mdx" aria-label="Open the GLM-5.2 recipe">Open recipe</a>
   </div>
-  <div className="dynamo-model-card" data-recipe-card data-provider="thinkingmachines" data-runtime="sglang" data-hardware="b200" data-technique="aggregated spec-decoding" data-workload="multimodal-reuse">
+  <div className="dynamo-model-card" data-recipe-card data-provider="thinkingmachines" data-runtime="sglang vllm" data-hardware="b200 gb300" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse multimodal-reuse">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/thinkingmachines.png" alt="" />
       <div><h3>Inkling NVFP4</h3><p>Thinking Machines</p></div>
     </div>
-    <p className="dynamo-model-summary">Day-0 aggregated SGLang recipe for Thinking Machines' first open-weights model — multimodal MoE with controllable reasoning effort, TP8 with EAGLE speculation.</p>
-    <div className="dynamo-model-tags"><span>SGLang</span><span>8x B200</span><span>Text + image + audio</span><span>Day-0</span></div>
+    <p className="dynamo-model-summary">Thinking Machines' first open-weights model — a multimodal MoE with controllable reasoning effort. vLLM GB300 targets serve agentic traffic at 1M context with MTP speculation and KV-aware routing, aggregated or disaggregated; the Day-0 SGLang B200 target adds image and audio input.</p>
+    <div className="dynamo-model-tags"><span>vLLM · SGLang</span><span>8x GB300 / 8x B200</span><span>Agentic · 1M context</span><span>Text + image + audio</span></div>
   <a className="dynamo-card-link" href="inkling-nvfp4.mdx" aria-label="Open the Inkling NVFP4 recipe">Open recipe</a>
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="moonshot" data-runtime="vllm" data-hardware="b200 h200" data-technique="aggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">

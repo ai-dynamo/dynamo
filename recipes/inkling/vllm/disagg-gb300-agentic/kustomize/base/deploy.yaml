@@ -1,0 +1,269 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Inkling-NVFP4 on vLLM, disaggregated prefill/decode on GB300, tuned for an
+# agentic workload (64K median ISL / 400 median OSL, 90% KV cache hit) with
+# KV-aware routing.
+#
+# Shape: 1 prefill x TP4 + 1 decode x TP4 = 8x GB300.
+#
+# Fabric: this base is fabric-neutral. NIXL moves KV over MNNVL `cuda_ipc`
+# within the ComputeDomain, and UCX carries its active-message control plane
+# over TCP. Clusters that expose RDMA NICs to pods select a fabric Component —
+# see ../components/ and the recipe's `.kustomize-matrix.yaml`.
+#
+# Weights come from the `model-cache` PVC — see ../../../../model-cache/.
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: inkling-vllm-gb300-disagg-agentic-compute-domain
+spec:
+  numNodes: 0
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: inkling-vllm-gb300-disagg-agentic-compute-domain-channel
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: inkling-vllm-gb300-disagg-agentic
+  labels:
+    app.kubernetes.io/name: inkling-vllm-gb300-disagg-agentic
+    app.kubernetes.io/part-of: dynamo
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      replicas: 1
+      type: frontend
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              # TODO(image): pending the public vLLM runtime release carrying the
+              # MTP-8-capable vLLM build and the Dynamo frontend reasoning-parser
+              # fixes. Before merge, replace with `<tag>@sha256:<digest>`; if the
+              # final tag is not a Dynamo semantic version, admission also needs
+              # `runtimeVersionOverride` on each component.
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:TODO-RELEASE-TAG
+              imagePullPolicy: Always
+              command: [python3, -m, dynamo.frontend]
+              args:
+                - --router-mode
+                - kv
+                - --router-kv-events
+                - --http-port
+                - "8000"
+                - --model-path
+                - /model-cache/thinkingmachines/Inkling-NVFP4
+                - --dyn-chat-processor
+                - vllm
+                - --reasoning-parser
+                - inkling
+                - --tool-call-parser
+                - inkling
+                - --enable-auto-tool-choice
+                - --trust-remote-code
+              env:
+                - {name: DYN_ROUTER_MODE, value: kv}
+                - {name: HF_HUB_OFFLINE, value: "1"}
+                - {name: TRANSFORMERS_OFFLINE, value: "1"}
+              ports: [{name: http, containerPort: 8000, protocol: TCP}]
+              readinessProbe:
+                httpGet: {path: /v1/models, port: http}
+                periodSeconds: 10
+                timeoutSeconds: 5
+                failureThreshold: 3
+              resources:
+                requests: {cpu: "4", memory: 8Gi}
+                limits: {cpu: "4", memory: 8Gi}
+              volumeMounts:
+                - {name: model-cache, mountPath: /model-cache}
+          volumes:
+            - {name: model-cache, persistentVolumeClaim: {claimName: model-cache}}
+
+    - name: VllmPrefillWorker
+      replicas: 1
+      type: prefill
+      # tmpfs at /dev/shm for the vLLM multiprocess executor's TP4 IPC buffers.
+      # The operator default (8Gi) is too small for this context length.
+      sharedMemorySize: 64Gi
+      podTemplate:
+        metadata:
+          annotations: {nvidia.com/vllm-distributed-executor-backend: mp}
+        spec:
+          hostIPC: true
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-GB300
+          resourceClaims:
+            - name: compute-domain-channel
+              resourceClaimTemplateName: inkling-vllm-gb300-disagg-agentic-compute-domain-channel
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:TODO-RELEASE-TAG
+              imagePullPolicy: Always
+              command: [/bin/bash, -lc]
+              args:
+                - |
+                  set -euo pipefail
+                  # Fabric discovery. When the cluster allocates this pod an RDMA
+                  # HCA with a pod network interface, point UCX at it. With no HCA
+                  # the transports in UCX_TLS carry NIXL instead: MNNVL cuda_ipc
+                  # for bulk KV, TCP for the active-message control plane. Never
+                  # hardcode UCX_NET_DEVICES -- the device name is host-specific.
+                  hca=""
+                  for hca_path in /sys/class/infiniband/*; do
+                    [ -d "${hca_path}/device/net" ] || continue
+                    for net_path in "${hca_path}"/device/net/*; do
+                      [ -e "${net_path}" ] || continue
+                      hca="${hca_path##*/}"; break 2
+                    done
+                  done
+                  if [ -n "${hca}" ]; then
+                    export UCX_NET_DEVICES="${hca}:1"
+                    echo "RDMA_HCA_SELECTED=${hca} UCX_TLS=${UCX_TLS:-default}"
+                  else
+                    echo "RDMA_HCA_SELECTED=none UCX_TLS=${UCX_TLS:-default}"
+                  fi
+                  exec python3 -m dynamo.vllm \
+                    --model /model-cache/thinkingmachines/Inkling-NVFP4 \
+                    --served-model-name thinkingmachines/Inkling-NVFP4 \
+                    --trust-remote-code \
+                    --tokenizer-mode inkling \
+                    --dyn-reasoning-parser inkling \
+                    --dyn-tool-call-parser inkling \
+                    --reasoning-parser inkling \
+                    --tensor-parallel-size 4 \
+                    --max-model-len 1048576 \
+                    --speculative-config '{"method":"mtp","num_speculative_tokens":8}' \
+                    --gpu-memory-utilization 0.92 \
+                    --kv-cache-memory-bytes 109521666048 \
+                    --enable-prefix-caching \
+                    --prefix-cache-retention-interval 0 \
+                    --kernel-config.enable_flashinfer_autotune=False \
+                    --kv-events-config '{"enable_kv_cache_events": true}' \
+                    --disaggregation-mode prefill \
+                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_connector_extra_config":{"num_threads":8}}'
+              env: &workerEnv
+                - {name: HF_HOME, value: /model-cache}
+                - {name: HF_HUB_OFFLINE, value: "1"}
+                - {name: TRANSFORMERS_OFFLINE, value: "1"}
+                - {name: VLLM_USE_V2_MODEL_RUNNER, value: "1"}
+                - {name: FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED, value: "1"}
+                # A 1M-token forward pass can exceed the default worker timeout.
+                - {name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS, value: "1800"}
+                # Pin the control-plane interface. Left unset, NCCL and Gloo pick
+                # an interface from the host, which silently varies per node.
+                - {name: NCCL_SOCKET_IFNAME, value: eth0}
+                - {name: GLOO_SOCKET_IFNAME, value: eth0}
+                # MNNVL fabric for TP collectives and for NIXL's cuda_ipc path.
+                - {name: NCCL_MNNVL_ENABLE, value: "1"}
+                - {name: NCCL_NVLS_ENABLE, value: "1"}
+                - {name: NCCL_P2P_LEVEL, value: NVL}
+                - {name: NCCL_CUMEM_ENABLE, value: "1"}
+                - {name: VLLM_USE_NCCL_SYMM_MEM, value: "0"}
+                - {name: UCX_CUDA_IPC_ENABLE_MNNVL, value: "y"}
+                - {name: MC_FORCE_MNNVL, value: "1"}
+                # UCX's memory-type cache misattributes MNNVL-mapped buffers.
+                - {name: UCX_MEMTYPE_CACHE, value: "n"}
+                # cuda_ipc and cuda_copy are memory-type transports and cannot
+                # carry NIXL's UCX active-message control plane; tcp can. A
+                # fabric Component replaces this with its RDMA transports.
+                - {name: UCX_TLS, value: "cuda_copy,cuda_ipc,tcp"}
+                - {name: VLLM_ALLREDUCE_USE_FLASHINFER, value: "1"}
+                - {name: VLLM_FLASHINFER_ALLREDUCE_BACKEND, value: mnnvl}
+                # TODO(image): drop once the release image ships a FlashInfer
+                # build that matches the vLLM pin.
+                - {name: FLASHINFER_DISABLE_VERSION_CHECK, value: "1"}
+              ports: [{name: system, containerPort: 9090, protocol: TCP}]
+              # 2h budget: weight load, FlashInfer warmup, and CUDA graph capture
+              # at 1M context on a cold JIT cache.
+              startupProbe: &workerStartupProbe
+                httpGet: {path: /live, port: system}
+                periodSeconds: 10
+                timeoutSeconds: 5
+                failureThreshold: 720
+              securityContext: &workerSecurityContext
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities: {add: [IPC_LOCK, SYS_RESOURCE]}
+              resources:
+                requests: {nvidia.com/gpu: "4"}
+                limits: {nvidia.com/gpu: "4"}
+                claims: [{name: compute-domain-channel}]
+              volumeMounts: &workerVolumeMounts
+                - {name: model-cache, mountPath: /model-cache}
+                # Scratch for JIT/CUDA-graph caches, which stay at their default
+                # in-container locations. Keeps them off the container layer.
+                - {name: tmp, mountPath: /tmp}
+          volumes: &workerVolumes
+            - {name: model-cache, persistentVolumeClaim: {claimName: model-cache}}
+            - {name: tmp, emptyDir: {sizeLimit: 200Gi}}
+
+    - name: VllmDecodeWorker
+      replicas: 1
+      type: decode
+      sharedMemorySize: 64Gi
+      podTemplate:
+        metadata:
+          annotations: {nvidia.com/vllm-distributed-executor-backend: mp}
+        spec:
+          hostIPC: true
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-GB300
+          resourceClaims:
+            - name: compute-domain-channel
+              resourceClaimTemplateName: inkling-vllm-gb300-disagg-agentic-compute-domain-channel
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:TODO-RELEASE-TAG
+              imagePullPolicy: Always
+              command: [/bin/bash, -lc]
+              args:
+                - |
+                  set -euo pipefail
+                  # See VllmPrefillWorker for the fabric-discovery rationale.
+                  hca=""
+                  for hca_path in /sys/class/infiniband/*; do
+                    [ -d "${hca_path}/device/net" ] || continue
+                    for net_path in "${hca_path}"/device/net/*; do
+                      [ -e "${net_path}" ] || continue
+                      hca="${hca_path##*/}"; break 2
+                    done
+                  done
+                  if [ -n "${hca}" ]; then
+                    export UCX_NET_DEVICES="${hca}:1"
+                    echo "RDMA_HCA_SELECTED=${hca} UCX_TLS=${UCX_TLS:-default}"
+                  else
+                    echo "RDMA_HCA_SELECTED=none UCX_TLS=${UCX_TLS:-default}"
+                  fi
+                  exec python3 -m dynamo.vllm \
+                    --model /model-cache/thinkingmachines/Inkling-NVFP4 \
+                    --served-model-name thinkingmachines/Inkling-NVFP4 \
+                    --trust-remote-code \
+                    --tokenizer-mode inkling \
+                    --dyn-reasoning-parser inkling \
+                    --dyn-tool-call-parser inkling \
+                    --reasoning-parser inkling \
+                    --tensor-parallel-size 4 \
+                    --max-model-len 1048576 \
+                    --speculative-config '{"method":"mtp","num_speculative_tokens":8}' \
+                    --gpu-memory-utilization 0.92 \
+                    --kv-cache-memory-bytes 109521666048 \
+                    --enable-prefix-caching \
+                    --prefix-cache-retention-interval 0 \
+                    --kernel-config.enable_flashinfer_autotune=False \
+                    --kv-events-config '{"enable_kv_cache_events": true}' \
+                    --disaggregation-mode decode \
+                    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_connector_extra_config":{"num_threads":8}}'
+              env: *workerEnv
+              ports: [{name: system, containerPort: 9090, protocol: TCP}]
+              startupProbe: *workerStartupProbe
+              securityContext: *workerSecurityContext
+              resources:
+                requests: {nvidia.com/gpu: "4"}
+                limits: {nvidia.com/gpu: "4"}
+                claims: [{name: compute-domain-channel}]
+              volumeMounts: *workerVolumeMounts
+          volumes: *workerVolumes

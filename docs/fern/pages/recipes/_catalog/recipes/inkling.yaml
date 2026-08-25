@@ -14,6 +14,61 @@ artifacts:
   recipe_specific_images:
   - nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1
 targets:
+- id: agg-gb300-agentic
+  recommended: true
+  hardware:
+    gpu: GB300
+    count: 8
+  runtime:
+    framework: vLLM
+  topology: aggregated
+  techniques:
+  - tp4
+  - mtp-spec-dec
+  - kv-aware-routing
+  - prefix-caching
+  - 1m-context
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 20
+    sla: user_tps P50 >= 50 and TTFT P50 <= 5000 ms
+  deploy:
+    asset: recipes/inkling/vllm/agg-gb300-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/inkling/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 192.41 tok/s/GPU, 84.87 user tok/s P50 at concurrency 20 over 2 TP4 replicas (3,541-request agentic trace); measured on the pre-release validation image, not the pinned image
+- id: disagg-gb300-agentic
+  recommended: false
+  hardware:
+    gpu: GB300
+    count: 8
+  runtime:
+    framework: vLLM
+  topology: disaggregated
+  techniques:
+  - 1p1d
+  - tp4-per-role
+  - mtp-spec-dec
+  - kv-aware-routing
+  - prefix-caching
+  - 1m-context
+  - pd-kv-transfer
+  - mnnvl-compute-domain
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 16
+    sla: user_tps P50 >= 50 and TTFT P50 <= 5000 ms
+  deploy:
+    asset: recipes/inkling/vllm/disagg-gb300-agentic/deploy-generic.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/inkling/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 144.01 tok/s/GPU, 77.94 user tok/s P50, TTFT P50 1305 ms at concurrency 16 over 4P + 4D (3,541-request agentic trace); measured on the aws-roce variant and the pre-release validation image, not on the generic variant or the pinned image
 - id: agg-b200
   recommended: true
   hardware:
@@ -38,10 +93,23 @@ targets:
 related_benchmarks: []
 maintainer: null
 gaps:
-- no perf.yaml / benchmark reproduction path in source (day-0 deploy only)
-- no expected-performance numbers published
+- the vLLM GB300 targets carry a placeholder image tag (TODO-RELEASE-TAG) pending the
+  public runtime release; published numbers were measured on the pre-release validation
+  image and must be re-confirmed on the pinned build
+- aggregated is the recommended vLLM path on this workload. Prefill is only ~5% of the
+  GPU-time budget at 90% KV-cache hit, so a disaggregated split dedicates half the fleet
+  to it and loses per-GPU throughput; the disaggregated target is for independent
+  prefill/decode scaling, not throughput
+- the disaggregated numbers were measured on the aws-roce fabric variant. The generic
+  variant carries NIXL over MNNVL cuda_ipc with a TCP control plane and is unmeasured;
+  it is the portable default, not the benchmarked configuration
+- --kv-cache-memory-bytes on the vLLM GB300 targets is measured for 288 GB GB300 and
+  must be re-measured if the context length or GPU changes
 - no related Feature Benchmark page exists for this model
-- runtime is a Day-0 dev image (sglang-runtime:1.4.0-inkling-dev.1, custom SGLang build) pending upstream merge
-- AAC/.m4a audio decode absent from the runtime image (royalty-bearing codec removal); noted on page
-- provider logo sourced from thinkingmachines.ai site icon; formal brand-asset provenance pass pending (same debt as the other provider logos)
+- SGLang runtime is a Day-0 dev image (sglang-runtime:1.4.0-inkling-dev.1, custom SGLang
+  build) pending upstream merge; no expected-performance numbers published for it
+- AAC/.m4a audio decode absent from the SGLang runtime image (royalty-bearing codec
+  removal); noted on page
+- provider logo sourced from thinkingmachines.ai site icon; formal brand-asset provenance
+  pass pending (same debt as the other provider logos)
 - maintainer unknown

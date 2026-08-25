@@ -25,16 +25,36 @@ Dynamo + SGLang deployment profile:
 | **Mamba radix cache**    | extra_buffer strategy                 |
 | **Speculative decoding** | EAGLE multi-layer (8 steps, topk 1, 9 draft tokens, rejection sampling) |
 
+Dynamo + vLLM deployment profiles, tuned for an agentic workload (64K median
+ISL, 400 median OSL, 90% KV cache hit):
+
+|                          | GB300 aggregated                | GB300 disaggregated             |
+|--------------------------|---------------------------------|---------------------------------|
+| **GPU**                  | 8x GB300 (2 replicas x TP4)     | 8x GB300 (1 prefill + 1 decode, TP4 each) |
+| **Mode**                 | aggregated                      | disaggregated prefill/decode    |
+| **Framework**            | vLLM                            | vLLM                            |
+| **Precision**            | NVFP4 (ModelOpt), BF16 KV       | NVFP4 (ModelOpt), BF16 KV       |
+| **Parallelism**          | TP4                             | TP4 per worker                  |
+| **MoE runner backend**   | FLASHINFER_TRTLLM               | FLASHINFER_TRTLLM               |
+| **AllReduce backend**    | FlashInfer                      | FlashInfer (MNNVL)              |
+| **Context length**       | 1,048,576                       | 1,048,576                       |
+| **Speculative decoding** | MTP, 8 draft tokens             | MTP, 8 draft tokens             |
+| **Routing**              | KV-aware                        | KV-aware                        |
+| **KV transfer**          | n/a                             | NIXL over MNNVL, or RDMA where available |
+
 ## Supported features
 
-- Modalities: Text, image, and audio input
-- Reasoning (`inkling` reasoning parser)
-- Tool calling (`inkling` tool-call parser)
+- Reasoning (`inkling` reasoning parser) — all profiles
+- Tool calling (`inkling` tool-call parser) — all profiles
+- Modalities: text, image, and audio input — **SGLang B200 only**. The vLLM
+  GB300 profiles are text-only by design; their target agentic workload is
+  text, so the vision and audio path is deliberately left off.
 
 ## Prerequisites
 
 1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).
-2. **Image pull secret** with access to `nvcr.io/nvstaging/nim` (staging registry):
+2. **Image pull secret** — SGLang B200 profile only, for access to
+   `nvcr.io/nvstaging/nim` (staging registry):
    ```bash
    export NAMESPACE=your-namespace
    kubectl create secret docker-registry nvcr-imagepullsecret \
@@ -62,7 +82,7 @@ kubectl create namespace ${NAMESPACE}
 ### 2. Create Storage
 
 > [!NOTE]
-> Edit `model-cache/model-cache.yaml` first and update `storageClassName` to match your cluster (`kubectl get storageclass`). On clusters that already provide a shared RWX PVC (e.g. `shared-model-cache` on the Dynamo dev clusters), skip this step and replace the `model-cache` claim name in three places: `model-cache/model-download.yaml` (`.spec.template.spec.volumes[0].persistentVolumeClaim.claimName`) and `sglang/agg-b200/deploy.yaml` (both the Frontend and decode component volumes).
+> Edit `model-cache/model-cache.yaml` first and update `storageClassName` to match your cluster (`kubectl get storageclass`). On clusters that already provide a shared RWX PVC (e.g. `shared-model-cache` on the Dynamo dev clusters), skip this step and replace the `model-cache` claim name in `model-cache/model-download.yaml` (`.spec.template.spec.volumes[0].persistentVolumeClaim.claimName`) and in every `persistentVolumeClaim.claimName` of the profile you deploy. For the Kustomize-based disaggregated profile, change it in `vllm/disagg-gb300-agentic/kustomize/base/deploy.yaml` and re-render, rather than editing `deploy-*.yaml`.
 
 ```bash
 kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
@@ -79,15 +99,58 @@ kubectl wait --for=condition=Complete job/inkling-model-download -n ${NAMESPACE}
 
 ### 4. Deploy the DynamoGraphDeployment
 
+Pick one profile.
+
+SGLang, aggregated on B200:
+
 ```bash
 kubectl apply -f sglang/agg-b200/deploy.yaml -n ${NAMESPACE}
 ```
 
-### 5. Smoke Test
+vLLM, aggregated on GB300:
 
 ```bash
-kubectl port-forward svc/tml-inkling-sglang-agg-frontend 8000:8000 -n ${NAMESPACE} &
+kubectl apply -f vllm/agg-gb300-agentic/deploy.yaml -n ${NAMESPACE}
 ```
+
+vLLM, disaggregated on GB300. This one ships as Kustomize variants — `generic`
+moves KV over MNNVL `cuda_ipc` inside the ComputeDomain, and `aws-roce` adds a
+RoCE device claim on clusters that expose one through Dynamic Resource
+Allocation:
+
+```bash
+kubectl apply -f vllm/disagg-gb300-agentic/deploy-generic.yaml -n ${NAMESPACE}
+# or, on EKS with the roce.networking.k8s.aws device class:
+kubectl apply -f vllm/disagg-gb300-agentic/deploy-aws-roce.yaml -n ${NAMESPACE}
+```
+
+Both disaggregated variants need the ComputeDomain controller (DRA) installed
+cluster-wide. To compose a different fabric, apply the checked-in overlay
+instead: `kubectl apply -k vllm/disagg-gb300-agentic/kustomize/overlays/generic`.
+
+> [!IMPORTANT]
+> The vLLM GB300 manifests carry a placeholder image tag
+> (`TODO-RELEASE-TAG`). Replace it with the released runtime image before
+> applying.
+
+To benchmark a deployment, see [`perf/README.md`](perf/README.md).
+
+### 5. Smoke Test
+
+Forward the frontend of whichever profile you deployed:
+
+```bash
+# SGLang B200
+kubectl port-forward svc/tml-inkling-sglang-agg-frontend 8000:8000 -n ${NAMESPACE} &
+# vLLM GB300 aggregated
+kubectl port-forward svc/inkling-vllm-gb300-agg-agentic-frontend 8000:8000 -n ${NAMESPACE} &
+# vLLM GB300 disaggregated
+kubectl port-forward svc/inkling-vllm-gb300-disagg-agentic-frontend 8000:8000 -n ${NAMESPACE} &
+```
+
+All profiles serve the model as `thinkingmachines/Inkling-NVFP4`, so the text
+and reasoning-effort requests below work against any of them. The image and
+audio requests need the SGLang B200 profile.
 
 #### Text
 
@@ -224,8 +287,14 @@ To tear down the deployment and free cluster resources:
 # Stop the port-forward if it is still running
 pkill -f "kubectl port-forward svc/tml-inkling-sglang-agg-frontend" 2>/dev/null || true
 
-# Delete the deployment (stops all pods)
+# Delete the deployment (stops all pods) -- whichever profile you deployed
 kubectl delete dynamographdeployment tml-inkling-sglang-agg -n ${NAMESPACE} 2>/dev/null || true
+kubectl delete dynamographdeployment inkling-vllm-gb300-agg-agentic -n ${NAMESPACE} 2>/dev/null || true
+kubectl delete dynamographdeployment inkling-vllm-gb300-disagg-agentic -n ${NAMESPACE} 2>/dev/null || true
+
+# Disaggregated only: the ComputeDomain and the RoCE claim template outlive the DGD
+kubectl delete computedomain inkling-vllm-gb300-disagg-agentic-compute-domain -n ${NAMESPACE} 2>/dev/null || true
+kubectl delete resourceclaimtemplate inkling-vllm-gb300-disagg-agentic-roce -n ${NAMESPACE} 2>/dev/null || true
 
 # Delete the model-download job (idempotent — already finished or not yet run)
 kubectl delete job inkling-model-download -n ${NAMESPACE} 2>/dev/null || true

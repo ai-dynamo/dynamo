@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: inkling-vllm-gb300-disagg-agentic-roce
+spec:
+  spec:
+    devices:
+      requests:
+        - name: roce
+          exactly:
+            allocationMode: ExactCount
+            count: 1
+            deviceClassName: roce.networking.k8s.aws

@@ -2,31 +2,83 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Inkling NVFP4"
-subtitle: "Day-0 SGLang recipe for Thinking Machines' Inkling on 8x B200."
+subtitle: "Serve Thinking Machines' Inkling on GB300 with vLLM for long-context agentic workloads, or on B200 with SGLang for multimodal input."
 ---
 
 import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Day-0 aggregated SGLang deployment for `thinkingmachines/Inkling-NVFP4` — the NVFP4-quantized checkpoint of Thinking Machines Lab's first open-weights model, a Mixture-of-Experts that reasons natively over text, image, and audio input with controllable reasoning effort. One TP8 worker on 8x B200 with EAGLE speculative decoding, FA4 attention, and the Inkling reasoning and tool-call parsers wired end to end.
+Deployments for `thinkingmachines/Inkling-NVFP4` — the NVFP4-quantized checkpoint of Thinking Machines Lab's first open-weights model, a Mixture-of-Experts that reasons natively with controllable reasoning effort. Two stacks, aimed at different jobs. **GB300 with vLLM** targets an agentic workload (64K median ISL, 400 median OSL, 90% KV cache hit) at 1M context with MTP speculative decoding and KV-aware routing, aggregated or disaggregated. **B200 with SGLang** is the day-0 profile and the only one that serves image and audio input. Pick your target; every command on this page updates to match.
 
-<div className="dynamo-target-picker static">
-<p className="dynamo-target-picker-title">Deployment target</p>
-<div className="dynamo-target-picker-summary">
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">GPU</span>
+<input type="radio" id="recipe-sku-gb300" name="recipe-sku" value="gb300" defaultChecked />
+<label htmlFor="recipe-sku-gb300">GB300 · vLLM</label>
+<input type="radio" id="recipe-sku-b200" name="recipe-sku" value="b200" />
+<label htmlFor="recipe-sku-b200">B200 · SGLang</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Topology</span>
+<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
+<label htmlFor="recipe-variant-agg">Aggregated <span className="dynamo-target-picker-hint">Recommended</span></label>
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
+<label htmlFor="recipe-variant-disagg">Disaggregated</label>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="gb300" data-variant="agg">
 <span><b>Checkpoint</b> thinkingmachines/Inkling-NVFP4 (~592 GB)</span>
-<span><b>Precision</b> NVFP4 (modelopt_fp4)</span>
+<span><b>Precision</b> NVFP4 (ModelOpt), BF16 KV</span>
+<span><b>GPUs</b> 4x GB300 per replica, `replicas: 2` (8x)</span>
+<span><b>Parallelism</b> TP4</span>
+<span><b>Context</b> 1,048,576</span>
+<span><b>Spec decode</b> MTP, 8 draft tokens</span>
+<span><b>Routing</b> KV-aware</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="gb300" data-variant="disagg">
+<span><b>Checkpoint</b> thinkingmachines/Inkling-NVFP4 (~592 GB)</span>
+<span><b>Precision</b> NVFP4 (ModelOpt), BF16 KV</span>
+<span><b>GPUs</b> 4x GB300 prefill + 4x GB300 decode</span>
+<span><b>Parallelism</b> TP4 per worker</span>
+<span><b>Context</b> 1,048,576</span>
+<span><b>Spec decode</b> MTP, 8 draft tokens</span>
+<span><b>Routing</b> KV-aware, NIXL over MNNVL or RDMA</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="b200" data-variant="agg">
+<span><b>Checkpoint</b> thinkingmachines/Inkling-NVFP4 (~592 GB)</span>
+<span><b>Precision</b> NVFP4 (`modelopt_fp4`)</span>
 <span><b>GPUs</b> 8x B200, one TP8 worker</span>
-<span><b>Techniques</b> Aggregated serving, EAGLE speculative decoding, FA4 attention, Mamba radix cache</span>
+<span><b>Techniques</b> EAGLE speculative decoding, FA4 attention, Mamba radix cache</span>
 <span><b>Modalities</b> Text + image + audio input, text output</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="b200" data-variant="disagg">
+<span><b>Not available</b> The SGLang B200 profile is aggregated only. Select GB300 for a disaggregated deployment.</span>
 </div>
 </div>
 
 ## Prerequisites
 
+<div data-sku="gb300">
+
+- A Kubernetes cluster with the Dynamo platform installed and **8x GB300** available — see the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
+- A Hugging Face token (the model is public, but a token avoids rate limits).
+
+</div>
+
+<div data-sku="b200">
+
 - A Kubernetes cluster with the Dynamo platform installed and **8x B200** available on one node — see the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
 - An image pull secret with access to the runtime image registry.
 - A Hugging Face token (the model is public, but a token avoids rate limits).
+
+</div>
+
+<div data-sku="gb300" data-variant="disagg">
+
+- The NVIDIA DRA driver installed cluster-wide, so the recipe's `ComputeDomain` can allocate an MNNVL channel to each worker.
+
+</div>
 
 Create the namespace and secrets:
 
@@ -34,16 +86,22 @@ Create the namespace and secrets:
 export NAMESPACE=your-namespace
 kubectl create namespace ${NAMESPACE}
 
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" \
+  -n ${NAMESPACE}
+```
+
+<div data-sku="b200">
+
+```bash
 kubectl create secret docker-registry nvcr-imagepullsecret \
   --docker-server=nvcr.io \
   --docker-username='$oauthtoken' \
   --docker-password="your-ngc-api-key" \
   -n ${NAMESPACE}
-
-kubectl create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN="your-token" \
-  -n ${NAMESPACE}
 ```
+
+</div>
 
 <Warning>
 Update `storageClassName` in `model-cache/model-cache.yaml` to match your cluster (`kubectl get storageclass`) before applying. The checkpoint is ~592 GB — the download job can take a while. On clusters that already provide a shared RWX PVC, skip the cache step and replace the `model-cache` claim name in the manifests with the shared PVC name.
@@ -51,7 +109,7 @@ Update `storageClassName` in `model-cache/model-cache.yaml` to match your cluste
 
 ## Deploy
 
-Prepare the model cache and download the checkpoint:
+Prepare the model cache and download the checkpoint. All profiles share one PVC:
 
 ```bash
 # Update storageClassName in model-cache.yaml first!
@@ -62,17 +120,78 @@ kubectl wait --for=condition=Complete job/inkling-model-download -n ${NAMESPACE}
 
 Then deploy:
 
+<div data-sku="gb300" data-variant="agg">
+
+```bash
+kubectl apply -f recipes/inkling/vllm/agg-gb300-agentic/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="gb300" data-variant="disagg">
+
+The disaggregated profile ships as Kustomize variants, because the fabric that carries KV from prefill to decode is a cluster property. The `generic` variant moves KV over MNNVL `cuda_ipc` inside the ComputeDomain and carries the NIXL control plane over TCP. The `aws-roce` variant adds a RoCE device claim on clusters that expose one through Dynamic Resource Allocation:
+
+```bash
+kubectl apply -f recipes/inkling/vllm/disagg-gb300-agentic/deploy-generic.yaml -n ${NAMESPACE}
+```
+
+```bash
+# On EKS, where the roce.networking.k8s.aws device class is available:
+kubectl apply -f recipes/inkling/vllm/disagg-gb300-agentic/deploy-aws-roce.yaml -n ${NAMESPACE}
+```
+
+To compose a different fabric, apply the checked-in overlay and add your own Component rather than editing the rendered manifest:
+
+```bash
+kubectl apply -k recipes/inkling/vllm/disagg-gb300-agentic/kustomize/overlays/generic -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="gb300">
+
+<Warning>
+The vLLM GB300 manifests carry a placeholder image tag (`TODO-RELEASE-TAG`). Replace it with the released runtime image before applying.
+</Warning>
+
+</div>
+
+<div data-sku="b200" data-variant="agg">
+
 ```bash
 kubectl apply -f recipes/inkling/sglang/agg-b200/deploy.yaml -n ${NAMESPACE}
 ```
 
+</div>
+
 ## Smoke Test
 
-Inkling accepts text, image, and audio input in a single OpenAI-compatible API. First, forward the frontend port:
+Forward the frontend port:
+
+<div data-sku="gb300" data-variant="agg">
+
+```bash
+kubectl port-forward svc/inkling-vllm-gb300-agg-agentic-frontend 8000:8000 -n ${NAMESPACE} &
+```
+
+</div>
+
+<div data-sku="gb300" data-variant="disagg">
+
+```bash
+kubectl port-forward svc/inkling-vllm-gb300-disagg-agentic-frontend 8000:8000 -n ${NAMESPACE} &
+```
+
+</div>
+
+<div data-sku="b200" data-variant="agg">
 
 ```bash
 kubectl port-forward svc/tml-inkling-sglang-agg-frontend 8000:8000 -n ${NAMESPACE} &
 ```
+
+</div>
 
 ### Text
 
@@ -85,6 +204,23 @@ curl -s http://localhost:8000/v1/chat/completions \
     "max_tokens": 64
   }'
 ```
+
+### Reasoning effort
+
+Inkling's controllable thinking is exposed per request: pass `reasoning_effort` as a named level (`none` / `minimal` / `low` / `medium` / `high` / `max`) or a float in `[0.0, 0.99]`; omitted requests default to `0.9` (high). These are the values in this checkpoint's chat template — `xhigh` from the launch blog is not in its map and is rejected:
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "thinkingmachines/Inkling-NVFP4",
+    "messages": [{"role": "user", "content": "What is 17 times 24?"}],
+    "chat_template_kwargs": {"reasoning_effort": "low"},
+    "max_tokens": 128
+  }'
+```
+
+<div data-sku="b200">
 
 ### Image
 
@@ -128,22 +264,48 @@ curl -s http://localhost:8000/v1/chat/completions \
 
 For air-gapped clusters, send local files as `data:` URIs instead. Encode to a single line first (`base64` wraps output by default, which breaks the JSON payload): `AUDIO_B64=$(base64 < sample.wav | tr -d '\n')`, then `{"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,'"${AUDIO_B64}"'"}}`. Multiple media parts can ride in one message as the context budget allows.
 
-### Reasoning effort
+</div>
 
-Inkling's controllable thinking is exposed per request: pass `reasoning_effort` as a named level (`none` / `minimal` / `low` / `medium` / `high` / `max`) or a float in `[0.0, 0.99]`; omitted requests default to `0.9` (high). These are the values in this checkpoint's chat template — `xhigh` from the launch blog is not in its map and is rejected:
+<div data-sku="gb300">
 
-```bash
-curl -s http://localhost:8000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "thinkingmachines/Inkling-NVFP4",
-    "messages": [{"role": "user", "content": "What is 17 times 24?"}],
-    "chat_template_kwargs": {"reasoning_effort": "low"},
-    "max_tokens": 128
-  }'
-```
+## Performance
+
+Measured with the [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job in [`recipes/inkling/perf`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/inkling/perf/README.md), replaying a 3,541-request agentic trace against the SLO pair `user_tps p50 >= 50` and `TTFT p50 <= 5000 ms`. Both topologies clear both gates.
+
+| Topology | GPUs | Concurrency | tok/s/GPU | user_tps p50 | TTFT p50 |
+| --- | --- | --- | --- | --- | --- |
+| Aggregated (ship point) | 8 (2x TP4) | 20 | 192.41 | 84.87 | — |
+| Aggregated | 8 (2x TP4) | 24 | 193.65 | 70.04 | 410 ms |
+| Disaggregated | 8 (4P + 4D) | 16 | 144.01 | 77.94 | 1305 ms |
+
+Measurement specifics: every row was measured on the pre-release validation image, not the image this recipe pins. The disaggregated row was measured on the `aws-roce` fabric variant; the `generic` variant differs only in KV transport — MNNVL `cuda_ipc` with a TCP control plane instead of RoCE RDMA — and was not separately measured.
+
+The aggregated ship point is concurrency 20, not the throughput maximum. Concurrency 24 measured +0.64% aggregate throughput — inside the 2.23% run-to-run noise floor, so the two are tied — while costing 17% of per-user throughput. When rungs tie on throughput, the lower concurrency wins on per-user headroom.
+
+<Note>
+Aggregated outperformed every disaggregated split tested on this workload. Prefill is only about 5% of the GPU-time budget here, so dedicating half the fleet to it costs more per-GPU throughput than the prefill/decode separation returns. Choose the disaggregated profile when you need to scale prefill and decode independently, not for throughput on this trace.
+</Note>
+
+<Warning>
+Re-run the benchmark to confirm these numbers on the released build before quoting them.
+</Warning>
+
+</div>
 
 ## Notes
+
+<div data-sku="gb300">
+
+- These profiles are text-only by design: the agentic workload they target is text, so the vLLM manifests deliberately leave the vision and audio path off rather than pay for capacity nothing in this workload uses. Use the B200 SGLang profile for image and audio input.
+- `--kv-cache-memory-bytes` is required. Sizing the KV cache from `--gpu-memory-utilization` alone leaves too little headroom at 1M context and OOMs during CUDA graph capture. The value is measured for 288 GB GB300; re-measure it if you change the context length or GPU.
+- `--max-model-len 1048576` keeps the model's full 1M context available. Lowering it frees KV headroom if you do not need it.
+- Reasoning and tool calling use the model's dedicated parsers, wired in both the frontend and the worker (`--reasoning-parser inkling --tool-call-parser inkling`).
+- MTP speculative decoding runs at 8 draft tokens on both topologies. Remove `--speculative-config` to run without it.
+- Compilation and JIT caches stay at their in-container defaults on a `/tmp` volume, so the first start of each pod pays warmup and CUDA graph capture. The worker startup probe allows two hours for it.
+
+</div>
+
+<div data-sku="b200">
 
 - This is a Day-0 recipe on a dedicated dev runtime image (`sglang-runtime:1.4.0-inkling-dev.1`, a custom SGLang build carrying the Inkling model support); it is functional but not yet promoted to a release runtime image, and no benchmark results are published yet.
 - Audio input: the model card specifies WAV sampled at 16 kHz, ideally under 20 minutes. The runtime image ships without royalty-bearing media codecs — AAC/`.m4a` decode is not included; other common formats (WAV, FLAC, OGG/Opus, MP3) decode via `libsndfile`. Image input is unaffected.
@@ -153,9 +315,14 @@ curl -s http://localhost:8000/v1/chat/completions \
 - The manifest sets `DYN_FORWARDPASS_METRIC_PORT` to an empty value — a deliberate workaround that keeps forward-pass metrics off, because this rc image crashes on EAGLE batches when they are enabled. Keep it (and don't set that variable) until a fixed image ships.
 - The worker enables the Mamba radix cache (`extra_buffer` strategy) and FlashInfer TRT-LLM GEMM/MoE backends; these flags are part of the validated configuration — change them only deliberately.
 
+</div>
+
 ## Source
 
 - Source README: [recipes/inkling/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/inkling/README.md)
+- vLLM aggregated GB300: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/inkling/vllm/agg-gb300-agentic/deploy.yaml)
+- vLLM disaggregated GB300: [deploy-generic.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/inkling/vllm/disagg-gb300-agentic/deploy-generic.yaml) and [deploy-aws-roce.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/inkling/vllm/disagg-gb300-agentic/deploy-aws-roce.yaml)
 - SGLang aggregated B200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/inkling/sglang/agg-b200/deploy.yaml)
+- Benchmark: [recipes/inkling/perf](https://github.com/ai-dynamo/dynamo/blob/main/recipes/inkling/perf/README.md)
 - Setup assets: [model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/inkling/model-cache/model-cache.yaml) and [model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/inkling/model-cache/model-download.yaml)
 - Model announcement: [Inkling — Thinking Machines Lab](https://thinkingmachines.ai/news/introducing-inkling/)

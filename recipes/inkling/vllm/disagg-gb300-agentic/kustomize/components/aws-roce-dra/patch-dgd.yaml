@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: inkling-vllm-gb300-disagg-agentic
+spec:
+  components:
+    - name: VllmPrefillWorker
+      podTemplate:
+        spec:
+          resourceClaims: &roceClaims
+            - name: roce
+              resourceClaimTemplateName: inkling-vllm-gb300-disagg-agentic-roce
+          containers:
+            - name: main
+              env: &roceEnv
+                # RDMA transports replace the base's TCP control plane: rc_x/rc
+                # are active-message capable, so NIXL runs entirely over RoCE
+                # while cuda_ipc still serves peers reachable over MNNVL.
+                - {name: UCX_TLS, value: "rc_x,rc,cuda_copy,cuda_ipc"}
+                # RoCE, not InfiniBand: address the HCA by its Ethernet GID.
+                - {name: UCX_IB_ADDR_TYPE, value: eth}
+              resources:
+                claims: &roceResourceClaims
+                  - name: compute-domain-channel
+                  - name: roce
+    - name: VllmDecodeWorker
+      podTemplate:
+        spec:
+          resourceClaims: *roceClaims
+          containers:
+            - name: main
+              env: *roceEnv
+              resources:
+                claims: *roceResourceClaims
