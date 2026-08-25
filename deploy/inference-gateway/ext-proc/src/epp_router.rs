@@ -73,7 +73,13 @@ impl EppRouter {
         policy_registry: Option<WorkerSelectionPolicyRegistry>,
     ) -> Result<Self> {
         let selector = Arc::new(Selector::new(&cfg, policy_registry).await?);
-        let (renderer, reflector, reflector_ready) = Self::dependencies(&cfg).await?;
+        let renderer = VllmRenderClient::new(
+            &cfg.tokenizer_service_url,
+            Duration::from_millis(cfg.tokenization_timeout_ms),
+            cfg.tokenizer_max_response_bytes,
+        )?;
+        let (reflector, reflector_ready) = PodDiscovery::spawn(&cfg).await?;
+        let reflector = Arc::new(reflector);
         let peer_ready = selector.peer_ready();
         let defaults = RegistrationDefaults::from_config(&cfg);
         let adapter =
@@ -92,21 +98,6 @@ impl EppRouter {
             model_name: cfg.model_name,
             inflight: Arc::new(Semaphore::new(cfg.max_inflight_requests)),
         })
-    }
-
-    async fn dependencies(
-        cfg: &EppStandaloneConfig,
-    ) -> Result<(VllmRenderClient, Arc<PodDiscovery>, Arc<AtomicBool>)> {
-        let renderer = VllmRenderClient::new(
-            &cfg.tokenizer_service_url,
-            Duration::from_millis(cfg.tokenization_timeout_ms),
-            cfg.tokenizer_max_response_bytes,
-        )?;
-
-        let (reflector, reflector_ready) = PodDiscovery::spawn(cfg).await?;
-        let reflector = Arc::new(reflector);
-
-        Ok((renderer, reflector, reflector_ready))
     }
 
     /// Overall EPP readiness for the gRPC health signal: the pod reflector is
