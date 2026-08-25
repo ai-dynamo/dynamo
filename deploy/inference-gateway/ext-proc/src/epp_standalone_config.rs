@@ -14,6 +14,7 @@ use validator::Validate;
 use validator::ValidationError;
 
 use crate::vllm_render_client::parse_tokenizer_service_base_url;
+use crate::worker_role::{DEFAULT_WORKER_ROLE_LABEL, WorkerRole};
 
 const DEFAULT_KV_EVENT_PORT: u16 = 5557;
 const DEFAULT_REPLICA_SYNC_PORT: u16 = 9092;
@@ -36,6 +37,19 @@ pub const DYNAMO_RUNTIME_MODE: &str = "dynamo";
 /// Mirrors `DYN_KUBE_DISCOVERY_MODE` in `dynamo_runtime::discovery`; read
 /// directly here because standalone mode has no Dynamo runtime to read it for.
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
+/// Environment variable that selects the serving topology within standalone mode.
+pub const DYN_EPP_TOPOLOGY_MODE: &str = "DYN_EPP_TOPOLOGY_MODE";
+/// `DYN_EPP_TOPOLOGY_MODE` value selecting a single routable worker pool.
+pub const AGGREGATED_TOPOLOGY: &str = "aggregated";
+/// `DYN_EPP_TOPOLOGY_MODE` value selecting role-split prefill/decode pools.
+pub const DISAGGREGATED_TOPOLOGY: &str = "disaggregated";
+/// Environment variable naming the pod label that carries a worker's role.
+pub const DYN_EPP_WORKER_ROLE_LABEL: &str = "DYN_EPP_WORKER_ROLE_LABEL";
+
+/// Longest Kubernetes label-key name segment (the part after any `/`).
+const MAX_LABEL_NAME_LEN: usize = 63;
+/// Longest Kubernetes label-key prefix (the DNS subdomain before the `/`).
+const MAX_LABEL_PREFIX_LEN: usize = 253;
 
 /// Reads an environment variable, matching the injectable getter used in tests.
 type EnvGet<'a> = dyn Fn(&str) -> Option<String> + 'a;
@@ -64,6 +78,44 @@ impl EppMode {
                  expected {STANDALONE_MODE:?} or {DYNAMO_RUNTIME_MODE:?}"
             ),
         }
+    }
+}
+
+/// Serving topology inside standalone mode.
+///
+/// Parsed separately from [`EppStandaloneConfig`] because `run_inner` must reject
+/// `Disaggregated` under `DYN_EPP_MODE=dynamo` *before* the standalone config is
+/// ever read — otherwise the setting is silently ignored and every pool-selected
+/// pod, prefill included, becomes a routable gateway destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EppTopologyMode {
+    /// Every eligible worker is a routable decode target. Today's behavior.
+    Aggregated,
+    /// The pool carries both prefill and decode pods, split by the worker-role
+    /// label into two catalogs with their own `SelectionService` instances.
+    Disaggregated,
+}
+
+impl EppTopologyMode {
+    pub fn from_env() -> anyhow::Result<Self> {
+        Self::parse(&|k| std::env::var(k).ok())
+    }
+
+    fn parse(get: &EnvGet) -> anyhow::Result<Self> {
+        match trimmed(get(DYN_EPP_TOPOLOGY_MODE)).as_deref() {
+            None | Some(AGGREGATED_TOPOLOGY) => Ok(Self::Aggregated),
+            Some(DISAGGREGATED_TOPOLOGY) => Ok(Self::Disaggregated),
+            // Never fall back: a typo that silently selected aggregated would
+            // hand prefill pods to the gateway as destinations.
+            Some(other) => anyhow::bail!(
+                "{DYN_EPP_TOPOLOGY_MODE} has invalid value {other:?}; \
+                 expected {DISAGGREGATED_TOPOLOGY:?} or {AGGREGATED_TOPOLOGY:?}"
+            ),
+        }
+    }
+
+    pub fn is_disaggregated(self) -> bool {
+        matches!(self, Self::Disaggregated)
     }
 }
 
@@ -115,6 +167,12 @@ pub struct EppStandaloneConfig {
     /// `InferencePool` this EPP backs; its selector + target port drive discovery.
     #[validate(length(min = 1, message = "DYN_EPP_INFERENCE_POOL_NAME is required"))]
     pub inference_pool_name: String,
+    /// Whether the pool holds one routable worker set or a prefill/decode split.
+    pub topology_mode: EppTopologyMode,
+    /// Pod label key carrying a worker's role. Read only when
+    /// `topology_mode == Disaggregated`; the key's syntax is checked there by
+    /// [`EppStandaloneConfig::validate_config`].
+    pub worker_role_label: String,
     /// Kubernetes namespace the EPP runs in (from `POD_NAMESPACE`, downward API).
     #[validate(length(min = 1, message = "POD_NAMESPACE is required"))]
     pub namespace: String,
@@ -148,12 +206,37 @@ pub struct EppStandaloneConfig {
     pub replay_port: Option<u16>,
     /// Optional per-worker total KV blocks.
     pub total_kv_blocks: Option<u64>,
+    /// Per-worker total KV blocks for prefill workers, defaulting to
+    /// [`Self::total_kv_blocks`]. Disaggregated fleets size the two roles
+    /// differently (different TP degree and GPU count), so one shared value
+    /// misdescribes at least one of them.
+    pub prefill_total_kv_blocks: Option<u64>,
+    /// Per-worker total KV blocks for decode workers, defaulting to
+    /// [`Self::total_kv_blocks`].
+    pub decode_total_kv_blocks: Option<u64>,
     /// Optional per-worker max batched tokens.
     #[validate(range(
         min = 1,
         message = "DYN_EPP_MAX_NUM_BATCHED_TOKENS must be greater than zero when set"
     ))]
     pub max_num_batched_tokens: Option<u64>,
+    /// Max batched tokens for prefill workers, defaulting to
+    /// [`Self::max_num_batched_tokens`]. This is the denominator of the
+    /// scheduler's busy test, and shipped disaggregated recipes differ between
+    /// the roles by 8-16x, so sharing one value mis-sizes one role by an order
+    /// of magnitude.
+    #[validate(range(
+        min = 1,
+        message = "DYN_EPP_PREFILL_MAX_NUM_BATCHED_TOKENS must be greater than zero when set"
+    ))]
+    pub prefill_max_num_batched_tokens: Option<u64>,
+    /// Max batched tokens for decode workers, defaulting to
+    /// [`Self::max_num_batched_tokens`].
+    #[validate(range(
+        min = 1,
+        message = "DYN_EPP_DECODE_MAX_NUM_BATCHED_TOKENS must be greater than zero when set"
+    ))]
+    pub decode_max_num_batched_tokens: Option<u64>,
     /// Safety ceiling on concurrent in-flight `pick()`s: bounds concurrent
     /// tokenizer/render calls and buffered bodies (a load-shed guardrail, not a
     /// throughput throttle). Excess requests are shed with a 503, not queued.
@@ -194,11 +277,19 @@ impl EppStandaloneConfig {
             })
             .transpose()?;
 
+        // Bound first: the per-role capacity vars fall back to these, so an
+        // operator can set only the shared value and have both roles inherit it.
+        let total_kv_blocks = opt_parse::<u64>(get, "DYN_EPP_TOTAL_KV_BLOCKS")?;
+        let max_num_batched_tokens = opt_parse::<u64>(get, "DYN_EPP_MAX_NUM_BATCHED_TOKENS")?;
+
         Ok(Self {
             selector_threads: opt_parse::<usize>(get, "DYN_EPP_SELECTION_INDEXER_THREADS")?
                 .unwrap_or(DEFAULT_SELECTOR_THREADS),
             peer_replication,
             inference_pool_name: trimmed(get("DYN_EPP_INFERENCE_POOL_NAME")).unwrap_or_default(),
+            topology_mode: EppTopologyMode::parse(get)?,
+            worker_role_label: trimmed(get(DYN_EPP_WORKER_ROLE_LABEL))
+                .unwrap_or_else(|| DEFAULT_WORKER_ROLE_LABEL.to_string()),
             namespace: trimmed(get("POD_NAMESPACE")).unwrap_or_default(),
             model_name: trimmed(get("DYN_MODEL_NAME")).unwrap_or_default(),
             tokenizer_service_url: trimmed(get("DYN_EPP_TOKENIZER_SERVICE_URL"))
@@ -215,18 +306,118 @@ impl EppStandaloneConfig {
             kv_event_port: opt_parse::<u16>(get, "DYN_EPP_KV_EVENT_PORT")?
                 .unwrap_or(DEFAULT_KV_EVENT_PORT),
             replay_port: opt_parse::<u16>(get, "DYN_EPP_KV_EVENT_REPLAY_PORT")?,
-            total_kv_blocks: opt_parse::<u64>(get, "DYN_EPP_TOTAL_KV_BLOCKS")?,
-            max_num_batched_tokens: opt_parse::<u64>(get, "DYN_EPP_MAX_NUM_BATCHED_TOKENS")?,
+            total_kv_blocks,
+            prefill_total_kv_blocks: opt_parse::<u64>(get, "DYN_EPP_PREFILL_TOTAL_KV_BLOCKS")?
+                .or(total_kv_blocks),
+            decode_total_kv_blocks: opt_parse::<u64>(get, "DYN_EPP_DECODE_TOTAL_KV_BLOCKS")?
+                .or(total_kv_blocks),
+            max_num_batched_tokens,
+            prefill_max_num_batched_tokens: opt_parse::<u64>(
+                get,
+                "DYN_EPP_PREFILL_MAX_NUM_BATCHED_TOKENS",
+            )?
+            .or(max_num_batched_tokens),
+            decode_max_num_batched_tokens: opt_parse::<u64>(
+                get,
+                "DYN_EPP_DECODE_MAX_NUM_BATCHED_TOKENS",
+            )?
+            .or(max_num_batched_tokens),
             max_inflight_requests: opt_parse::<usize>(get, "DYN_EPP_MAX_INFLIGHT_REQUESTS")?
                 .unwrap_or(DEFAULT_MAX_INFLIGHT_REQUESTS),
         })
     }
 
-    /// Enforce the `validator` constraints, mapping the failure to `anyhow`.
+    /// Enforce the `validator` constraints, then the cross-field rules the
+    /// derive cannot express, mapping any failure to `anyhow`.
     pub fn validate_config(&self) -> anyhow::Result<()> {
         self.validate()
             .map_err(|e| anyhow::anyhow!("invalid {STANDALONE_MODE} EPP config: {e}"))?;
+
+        if self.topology_mode.is_disaggregated() {
+            // Only meaningful when the label is actually read. Note the
+            // emptiness case is unreachable through `parse` — `trimmed` maps a
+            // whitespace-only value to `None` and the field takes its non-empty
+            // default — but a caller building the struct literally can still
+            // produce it, so `validate_label_key` rejects it on its own merits.
+            validate_label_key(&self.worker_role_label).map_err(|reason| {
+                anyhow::anyhow!("{DYN_EPP_WORKER_ROLE_LABEL} is not a valid label key: {reason}")
+            })?;
+
+            if self.peer_replication.is_some() {
+                // Both role instances would resolve the same `replica-agg`
+                // named port and race to bind one ZMQ publisher. Multi-replica
+                // disaggregated EPP is Milestone 8.
+                anyhow::bail!(
+                    "{DYN_EPP_TOPOLOGY_MODE}={DISAGGREGATED_TOPOLOGY} does not support \
+                     DYN_EPP_PEER_SERVICE; multi-replica disaggregated EPP is tracked by \
+                     ai-dynamo/dynamo#13418"
+                );
+            }
+        }
+
         Ok(())
+    }
+
+    /// Max batched tokens to register for a worker in `role`.
+    pub fn max_num_batched_tokens_for(&self, role: WorkerRole) -> Option<u64> {
+        match role {
+            WorkerRole::Aggregated => self.max_num_batched_tokens,
+            WorkerRole::Prefill => self.prefill_max_num_batched_tokens,
+            WorkerRole::Decode => self.decode_max_num_batched_tokens,
+        }
+    }
+
+    /// Total KV blocks to register for a worker in `role`.
+    pub fn total_kv_blocks_for(&self, role: WorkerRole) -> Option<u64> {
+        match role {
+            WorkerRole::Aggregated => self.total_kv_blocks,
+            WorkerRole::Prefill => self.prefill_total_kv_blocks,
+            WorkerRole::Decode => self.decode_total_kv_blocks,
+        }
+    }
+
+    /// Env var naming the effective max-batched-tokens for `role`, for error
+    /// messages that must tell an operator which knob to set.
+    pub fn max_num_batched_tokens_env_for(role: WorkerRole) -> &'static str {
+        match role {
+            WorkerRole::Aggregated => "DYN_EPP_MAX_NUM_BATCHED_TOKENS",
+            WorkerRole::Prefill => "DYN_EPP_PREFILL_MAX_NUM_BATCHED_TOKENS",
+            WorkerRole::Decode => "DYN_EPP_DECODE_MAX_NUM_BATCHED_TOKENS",
+        }
+    }
+
+    /// Minimal aggregated config for tests in this crate.
+    ///
+    /// Exists so test fixtures use `..EppStandaloneConfig::for_test()` instead
+    /// of exhaustive struct literals — otherwise every new field is a
+    /// compile break in every test module that builds one.
+    /// `max_num_batched_tokens` is set so `Selector::new` never trips its
+    /// queueing fast-fail regardless of the ambient router policy.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self {
+            selector_threads: 1,
+            peer_replication: None,
+            inference_pool_name: "test-pool".to_string(),
+            topology_mode: EppTopologyMode::Aggregated,
+            worker_role_label: DEFAULT_WORKER_ROLE_LABEL.to_string(),
+            namespace: "test-ns".to_string(),
+            model_name: "test-model".to_string(),
+            tokenizer_service_url: "http://vllm-render:8000".to_string(),
+            tokenizer_protocol: TokenizerProtocol::VllmRender,
+            tokenization_timeout_ms: DEFAULT_TOKENIZATION_TIMEOUT_MS,
+            tokenizer_max_response_bytes: DEFAULT_TOKENIZER_MAX_RESPONSE_BYTES,
+            block_size: 16,
+            kv_event_port: DEFAULT_KV_EVENT_PORT,
+            replay_port: None,
+            total_kv_blocks: None,
+            prefill_total_kv_blocks: None,
+            decode_total_kv_blocks: None,
+            max_num_batched_tokens: Some(8192),
+            prefill_max_num_batched_tokens: Some(8192),
+            decode_max_num_batched_tokens: Some(8192),
+            max_inflight_requests: DEFAULT_MAX_INFLIGHT_REQUESTS,
+        }
     }
 }
 
@@ -276,6 +467,101 @@ fn validate_tokenizer_service_url(value: &str) -> Result<(), ValidationError> {
                 Some("DYN_EPP_TOKENIZER_SERVICE_URL must be an absolute HTTP(S) URL".into());
             error
         })
+}
+
+/// Validate a Kubernetes label key, per apimachinery's qualified-name rules.
+///
+/// Written here because the repo has no label-key validator and `validator` is
+/// pulled in derive-only, without `regex`.
+///
+/// ```text
+/// key    := [ prefix "/" ] name        at most one '/'
+/// name   := 1..=63 chars, [A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?   (case-sensitive)
+/// prefix := 1..=253 chars, dot-joined DNS-1123 labels, each [a-z0-9]([-a-z0-9]*[a-z0-9])?
+/// ```
+fn validate_label_key(key: &str) -> Result<(), String> {
+    let (prefix, name) = match key.split_once('/') {
+        Some((prefix, name)) => (Some(prefix), name),
+        None => (None, key),
+    };
+
+    if name.contains('/') {
+        return Err(format!("{key:?} contains more than one '/'"));
+    }
+    validate_label_name(name)?;
+
+    match prefix {
+        None => Ok(()),
+        Some(prefix) => validate_label_prefix(prefix),
+    }
+}
+
+fn validate_label_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("the name segment is empty".to_string());
+    }
+    if name.len() > MAX_LABEL_NAME_LEN {
+        return Err(format!(
+            "the name segment is {} characters, over the {MAX_LABEL_NAME_LEN}-character limit",
+            name.len()
+        ));
+    }
+    if !bounded_by_alphanumeric(name, char::is_ascii_alphanumeric) {
+        return Err(format!(
+            "the name segment {name:?} must start and end with an alphanumeric"
+        ));
+    }
+    if let Some(bad) = name
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+    {
+        return Err(format!(
+            "the name segment {name:?} contains {bad:?}; only alphanumerics, '-', '_' and '.' are allowed"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_label_prefix(prefix: &str) -> Result<(), String> {
+    if prefix.is_empty() {
+        return Err("the prefix before '/' is empty".to_string());
+    }
+    if prefix.len() > MAX_LABEL_PREFIX_LEN {
+        return Err(format!(
+            "the prefix is {} characters, over the {MAX_LABEL_PREFIX_LEN}-character limit",
+            prefix.len()
+        ));
+    }
+    for label in prefix.split('.') {
+        if label.is_empty() {
+            return Err(format!(
+                "the prefix {prefix:?} has an empty dot-separated label"
+            ));
+        }
+        if !bounded_by_alphanumeric(label, |c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
+            return Err(format!(
+                "the prefix label {label:?} must start and end with a lowercase alphanumeric"
+            ));
+        }
+        if let Some(bad) = label
+            .chars()
+            .find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-'))
+        {
+            return Err(format!(
+                "the prefix label {label:?} contains {bad:?}; only lowercase alphanumerics and '-' are allowed"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether the first and last characters both satisfy `allowed`.
+fn bounded_by_alphanumeric(segment: &str, allowed: impl Fn(&char) -> bool) -> bool {
+    let mut chars = segment.chars();
+    let (Some(first), last) = (chars.next(), segment.chars().next_back()) else {
+        return false;
+    };
+    allowed(&first) && last.is_some_and(|c| allowed(&c))
 }
 
 /// Trim a raw value and treat empty as absent.
@@ -724,6 +1010,254 @@ mod tests {
                 ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
             ])
             .is_err()
+        );
+    }
+
+    // --- disaggregated topology -------------------------------------------
+
+    /// The minimum env every valid standalone config needs, so topology tests
+    /// state only what they are actually about.
+    const BASE_ENV: &[(&str, &str)] = &[
+        ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
+        ("POD_NAMESPACE", "inference"),
+        ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+        ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
+        ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
+        ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
+    ];
+
+    fn cfg_with(extra: &[(&str, &str)]) -> anyhow::Result<EppStandaloneConfig> {
+        let mut pairs = BASE_ENV.to_vec();
+        pairs.extend_from_slice(extra);
+        parse_cfg(&pairs)
+    }
+
+    fn disagg_with(extra: &[(&str, &str)]) -> anyhow::Result<EppStandaloneConfig> {
+        let mut pairs = vec![(DYN_EPP_TOPOLOGY_MODE, DISAGGREGATED_TOPOLOGY)];
+        pairs.extend_from_slice(extra);
+        cfg_with(&pairs)
+    }
+
+    fn parse_topology(pairs: &[(&str, &str)]) -> anyhow::Result<EppTopologyMode> {
+        EppTopologyMode::parse(&getter(pairs))
+    }
+
+    #[test]
+    fn topology_defaults_to_aggregated_when_unset_or_blank() {
+        assert_eq!(parse_topology(&[]).unwrap(), EppTopologyMode::Aggregated);
+        assert_eq!(
+            parse_topology(&[(DYN_EPP_TOPOLOGY_MODE, "   ")]).unwrap(),
+            EppTopologyMode::Aggregated
+        );
+        assert_eq!(
+            parse_topology(&[(DYN_EPP_TOPOLOGY_MODE, AGGREGATED_TOPOLOGY)]).unwrap(),
+            EppTopologyMode::Aggregated
+        );
+    }
+
+    #[test]
+    fn topology_parses_disaggregated() {
+        assert_eq!(
+            parse_topology(&[(DYN_EPP_TOPOLOGY_MODE, DISAGGREGATED_TOPOLOGY)]).unwrap(),
+            EppTopologyMode::Disaggregated
+        );
+    }
+
+    #[test]
+    fn topology_rejects_unknown_values_naming_both_alternatives() {
+        // Falling back to aggregated on a typo would make every prefill pod a
+        // routable gateway destination, so this must fail loudly.
+        for value in ["disagg", "DISAGGREGATED", "true", "nonsense"] {
+            let error = parse_topology(&[(DYN_EPP_TOPOLOGY_MODE, value)])
+                .expect_err("unknown topology must not fall back")
+                .to_string();
+            assert!(error.contains(DISAGGREGATED_TOPOLOGY), "{error}");
+            assert!(error.contains(AGGREGATED_TOPOLOGY), "{error}");
+        }
+    }
+
+    #[test]
+    fn worker_role_label_defaults_to_the_dep_contract() {
+        let cfg = cfg_with(&[]).unwrap();
+        assert_eq!(cfg.worker_role_label, DEFAULT_WORKER_ROLE_LABEL);
+        assert_eq!(cfg.topology_mode, EppTopologyMode::Aggregated);
+    }
+
+    #[test]
+    fn worker_role_label_is_overridable() {
+        let cfg = disagg_with(&[(
+            DYN_EPP_WORKER_ROLE_LABEL,
+            "nvidia.com/dynamo-component-type",
+        )])
+        .unwrap();
+        assert_eq!(cfg.worker_role_label, "nvidia.com/dynamo-component-type");
+    }
+
+    #[test]
+    fn malformed_role_label_keys_fail_only_under_disaggregated() {
+        let malformed = [
+            ("a/b/c", "two slashes"),
+            ("prefix/", "empty name segment"),
+            ("/role", "empty prefix"),
+            ("-lead", "name starts with a dash"),
+            ("trail-", "name ends with a dash"),
+            ("NVIDIA.com/role", "uppercase in the prefix"),
+        ];
+
+        for (key, why) in malformed {
+            assert!(
+                disagg_with(&[(DYN_EPP_WORKER_ROLE_LABEL, key)]).is_err(),
+                "{key:?} should be rejected under disaggregated ({why})"
+            );
+            // Aggregated never reads the label, so it must not gate startup on it.
+            assert!(
+                cfg_with(&[(DYN_EPP_WORKER_ROLE_LABEL, key)]).is_ok(),
+                "{key:?} must be ignored under aggregated ({why})"
+            );
+        }
+    }
+
+    #[test]
+    fn role_label_name_segment_length_is_bounded() {
+        let ok = "a".repeat(MAX_LABEL_NAME_LEN);
+        let too_long = "a".repeat(MAX_LABEL_NAME_LEN + 1);
+        assert!(disagg_with(&[(DYN_EPP_WORKER_ROLE_LABEL, &ok)]).is_ok());
+        assert!(disagg_with(&[(DYN_EPP_WORKER_ROLE_LABEL, &too_long)]).is_err());
+    }
+
+    #[test]
+    fn role_label_prefix_length_is_bounded() {
+        let long_prefix = format!("{}.com", "a".repeat(MAX_LABEL_PREFIX_LEN));
+        assert!(
+            disagg_with(&[(DYN_EPP_WORKER_ROLE_LABEL, &format!("{long_prefix}/role"))]).is_err()
+        );
+    }
+
+    #[test]
+    fn valid_prefixed_and_bare_role_label_keys_pass() {
+        for key in [
+            "nvidia.com/role",
+            "role",
+            "a.b.c/some_name.with-punct",
+            "x/y",
+        ] {
+            assert!(
+                disagg_with(&[(DYN_EPP_WORKER_ROLE_LABEL, key)]).is_ok(),
+                "{key:?} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn disaggregated_rejects_peer_service() {
+        // Both role instances would resolve the same `replica-agg` named port
+        // and race to bind one ZMQ publisher.
+        let error = disagg_with(&[
+            ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+            ("POD_IP", "10.0.0.5"),
+        ])
+        .expect_err("multi-replica disaggregated EPP is not supported yet")
+        .to_string();
+        assert!(error.contains("DYN_EPP_PEER_SERVICE"), "{error}");
+        assert!(error.contains("13418"), "{error}");
+    }
+
+    #[test]
+    fn aggregated_still_accepts_peer_service() {
+        assert!(
+            cfg_with(&[
+                ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+                ("POD_IP", "10.0.0.5")
+            ])
+            .is_ok()
+        );
+    }
+
+    // --- per-role capacity -------------------------------------------------
+
+    #[test]
+    fn per_role_capacity_falls_back_to_the_shared_value() {
+        let cfg = cfg_with(&[
+            ("DYN_EPP_MAX_NUM_BATCHED_TOKENS", "8192"),
+            ("DYN_EPP_TOTAL_KV_BLOCKS", "1000"),
+        ])
+        .unwrap();
+
+        for role in [WorkerRole::Prefill, WorkerRole::Decode] {
+            assert_eq!(cfg.max_num_batched_tokens_for(role), Some(8192));
+            assert_eq!(cfg.total_kv_blocks_for(role), Some(1000));
+        }
+    }
+
+    #[test]
+    fn per_role_capacity_overrides_independently() {
+        // Shipped disaggregated recipes differ between the roles by 8-16x, so
+        // one shared value mis-sizes one role by an order of magnitude.
+        let cfg = disagg_with(&[
+            ("DYN_EPP_MAX_NUM_BATCHED_TOKENS", "8192"),
+            ("DYN_EPP_PREFILL_MAX_NUM_BATCHED_TOKENS", "16384"),
+            ("DYN_EPP_DECODE_MAX_NUM_BATCHED_TOKENS", "2048"),
+            ("DYN_EPP_TOTAL_KV_BLOCKS", "1000"),
+            ("DYN_EPP_PREFILL_TOTAL_KV_BLOCKS", "4000"),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cfg.max_num_batched_tokens_for(WorkerRole::Prefill),
+            Some(16384)
+        );
+        assert_eq!(
+            cfg.max_num_batched_tokens_for(WorkerRole::Decode),
+            Some(2048)
+        );
+        assert_eq!(
+            cfg.max_num_batched_tokens_for(WorkerRole::Aggregated),
+            Some(8192)
+        );
+
+        assert_eq!(cfg.total_kv_blocks_for(WorkerRole::Prefill), Some(4000));
+        // Not overridden: falls back to the shared value.
+        assert_eq!(cfg.total_kv_blocks_for(WorkerRole::Decode), Some(1000));
+    }
+
+    #[test]
+    fn per_role_capacity_is_absent_when_nothing_is_set() {
+        let cfg = cfg_with(&[]).unwrap();
+        for role in [
+            WorkerRole::Aggregated,
+            WorkerRole::Prefill,
+            WorkerRole::Decode,
+        ] {
+            assert!(cfg.max_num_batched_tokens_for(role).is_none());
+            assert!(cfg.total_kv_blocks_for(role).is_none());
+        }
+    }
+
+    #[test]
+    fn zero_per_role_max_num_batched_tokens_fails() {
+        // Mirrors the existing guard on the shared var: a zero denominator
+        // would reach the scheduler's busy test.
+        for var in [
+            "DYN_EPP_PREFILL_MAX_NUM_BATCHED_TOKENS",
+            "DYN_EPP_DECODE_MAX_NUM_BATCHED_TOKENS",
+        ] {
+            assert!(disagg_with(&[(var, "0")]).is_err(), "{var} = 0 must fail");
+        }
+    }
+
+    #[test]
+    fn per_role_capacity_env_names_are_reported_for_operators() {
+        assert_eq!(
+            EppStandaloneConfig::max_num_batched_tokens_env_for(WorkerRole::Prefill),
+            "DYN_EPP_PREFILL_MAX_NUM_BATCHED_TOKENS"
+        );
+        assert_eq!(
+            EppStandaloneConfig::max_num_batched_tokens_env_for(WorkerRole::Decode),
+            "DYN_EPP_DECODE_MAX_NUM_BATCHED_TOKENS"
+        );
+        assert_eq!(
+            EppStandaloneConfig::max_num_batched_tokens_env_for(WorkerRole::Aggregated),
+            "DYN_EPP_MAX_NUM_BATCHED_TOKENS"
         );
     }
 }

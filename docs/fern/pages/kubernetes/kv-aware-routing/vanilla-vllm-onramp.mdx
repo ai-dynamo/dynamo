@@ -483,6 +483,8 @@ from live worker events and optional replay. For consistency details, see
 [Standalone Selection Service](../../developer-guide/knowledge-base/modular-components/router/standalone-selection.md).
 
 For a single EPP replica, set `spec.replicas: 1` and remove `DYN_EPP_PEER_SERVICE` and `POD_IP`.
+`DYN_EPP_PEER_SERVICE` is rejected under `DYN_EPP_TOPOLOGY_MODE=disaggregated`: both role
+selectors would bind the same replica-sync port.
 
 ## Standalone EPP Configuration Reference
 
@@ -495,10 +497,16 @@ For a single EPP replica, set `spec.replicas: 1` and remove `DYN_EPP_PEER_SERVIC
 | `DYN_EPP_TOKENIZER_SERVICE_URL` | Yes | Base URL of the vLLM render Service. |
 | `DYN_EPP_TOKENIZER_PROTOCOL=vllm-render` | Yes | Tokenizer wire protocol; this is the only supported value. |
 | `DYN_KV_CACHE_BLOCK_SIZE` | Yes | Must equal vLLM `--block-size`. |
+| `DYN_EPP_TOPOLOGY_MODE` | No | `aggregated` (default) treats every worker as a routable target. `disaggregated` splits the pool by worker role; see the note below. Any other value fails startup. |
+| `DYN_EPP_WORKER_ROLE_LABEL` | With `disaggregated` | Pod label key naming a worker's role; defaults to `nvidia.com/role`. Values must be `prefill` or `decode`. |
 | `DYN_EPP_KV_EVENT_PORT` | No | Per-pod vLLM KV event port; defaults to `5557`. |
 | `DYN_EPP_KV_EVENT_REPLAY_PORT` | No | Per-pod replay port for KV event gap recovery. |
-| `DYN_EPP_MAX_NUM_BATCHED_TOKENS` | Policy-dependent | Must equal vLLM `--max-num-batched-tokens`; required when router queue thresholds are enabled. |
-| `DYN_EPP_TOTAL_KV_BLOCKS` | No | Optional per-worker total KV block hint. |
+| `DYN_EPP_MAX_NUM_BATCHED_TOKENS` | Policy-dependent | Must equal vLLM `--max-num-batched-tokens`; required when router queue thresholds are enabled. Under `disaggregated` this is the fallback for both roles. |
+| `DYN_EPP_PREFILL_MAX_NUM_BATCHED_TOKENS` | No | Prefill-worker override; defaults to `DYN_EPP_MAX_NUM_BATCHED_TOKENS`. |
+| `DYN_EPP_DECODE_MAX_NUM_BATCHED_TOKENS` | No | Decode-worker override; defaults to `DYN_EPP_MAX_NUM_BATCHED_TOKENS`. |
+| `DYN_EPP_TOTAL_KV_BLOCKS` | No | Optional per-worker total KV block hint. Under `disaggregated` this is the fallback for both roles. |
+| `DYN_EPP_PREFILL_TOTAL_KV_BLOCKS` | No | Prefill-worker override; defaults to `DYN_EPP_TOTAL_KV_BLOCKS`. |
+| `DYN_EPP_DECODE_TOTAL_KV_BLOCKS` | No | Decode-worker override; defaults to `DYN_EPP_TOTAL_KV_BLOCKS`. |
 | `DYN_EPP_SELECTION_INDEXER_THREADS` | No | KV indexer thread count; defaults to `4`. |
 | `DYN_EPP_TOKENIZATION_TIMEOUT_MS` | No | Render request timeout; defaults to `5000`. |
 | `DYN_EPP_TOKENIZER_MAX_RESPONSE_BYTES` | No | Maximum render response size; defaults to `16777216`. |
@@ -506,6 +514,15 @@ For a single EPP replica, set `spec.replicas: 1` and remove `DYN_EPP_PEER_SERVIC
 | `DYN_EPP_PEER_SERVICE` | No | Existing EPP Service used to discover sibling replicas. Enables replica sync. |
 | `DYN_EPP_REPLICA_SYNC_PORT` | No | ZMQ port every replica binds and dials for replica sync; defaults to `9092`. All replicas selected by `DYN_EPP_PEER_SERVICE` must use the same value. |
 | `POD_IP` | With peer service | EPP pod IP used to exclude the local replica from its peer set. |
+
+<Note>
+`DYN_EPP_TOPOLOGY_MODE=disaggregated` requires `DYN_EPP_MODE=standalone` and is incompatible with
+`DYN_EPP_PEER_SERVICE`; both combinations fail startup. It builds the prefill and decode worker
+catalogs but does not yet select a prefill/decode pair, so decode workers still perform the whole
+prefill. The end-to-end path lands with
+[#13405](https://github.com/ai-dynamo/dynamo/issues/13405) and
+[#13407](https://github.com/ai-dynamo/dynamo/issues/13407).
+</Note>
 
 ## Scope and Limitations
 
@@ -526,10 +543,11 @@ operator-generated resource contract; that contract does not configure standalon
 | EPP stays not ready | Confirm the pool exists, its selector is valid, at least one matching pod is Ready, and EPP RBAC can watch pods and `InferencePool` resources. |
 | EPP replicas do not sync active load | Confirm `DYN_EPP_PEER_SERVICE` names the EPP Service and EPP RBAC grants `list` and `watch` access to `EndpointSlice` resources. |
 | EPP exits while validating its peer Service | Confirm the Service exists and EPP RBAC grants `get` access to Services. |
-| EPP reports no schedulable workers | Set `DYN_EPP_MAX_NUM_BATCHED_TOKENS` to the vLLM `--max-num-batched-tokens` value when queueing is enabled. |
+| EPP reports no schedulable workers | Set `DYN_EPP_MAX_NUM_BATCHED_TOKENS` to the vLLM `--max-num-batched-tokens` value when queueing is enabled. Under `disaggregated` the startup error names the role-specific variable to set. |
 | Route has no accepted parent | Confirm `parentRefs[].namespace` names the Gateway namespace, `sectionName` names its listener, and the listener allows routes from the workload namespace. |
 | Tokenization fails | Check the render Service endpoints and call `/v1/chat/completions/render` from the EPP namespace. |
 | Prefix locality does not improve | Confirm the vLLM event publisher and EPP event port match, and that the EPP block size equals vLLM `--block-size`. |
+| Every request fails under `disaggregated` | Confirm each pool-selected pod carries the worker-role label with value `prefill` or `decode`. Pods without a resolvable role are excluded from both catalogs and logged at warn. |
 
 Follow the full request path when debugging:
 

@@ -8,13 +8,13 @@
 //! set to the [`Selector`].
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
 use crate::epp_standalone_config::EppStandaloneConfig;
 use crate::pod_discovery::{PodDiscovery, RawWorker};
-use crate::selector::{Selector, WorkerRegistration};
+use crate::selector::{RoleSelectors, Selector, WorkerRegistration};
+use crate::worker_role::WorkerRole;
 
 #[derive(Debug, Clone)]
 pub struct RegistrationDefaults {
@@ -26,11 +26,21 @@ pub struct RegistrationDefaults {
 
 impl RegistrationDefaults {
     pub fn from_config(cfg: &EppStandaloneConfig) -> Self {
+        Self::for_role(cfg, WorkerRole::Aggregated)
+    }
+
+    /// Catalog metadata for a worker in `role`.
+    ///
+    /// Capacity is per-role because disaggregated fleets size prefill and decode
+    /// differently — shipped recipes differ by 8-16x on batched tokens — and that
+    /// value is the denominator of the scheduler's busy test, so one shared
+    /// number mis-sizes whichever role did not set it.
+    pub fn for_role(cfg: &EppStandaloneConfig, role: WorkerRole) -> Self {
         Self {
             model_name: cfg.model_name.clone(),
             block_size: cfg.block_size,
-            total_kv_blocks: cfg.total_kv_blocks,
-            max_num_batched_tokens: cfg.max_num_batched_tokens,
+            total_kv_blocks: cfg.total_kv_blocks_for(role),
+            max_num_batched_tokens: cfg.max_num_batched_tokens_for(role),
         }
     }
 }
@@ -45,15 +55,22 @@ pub struct TopologyAdapter {
 impl TopologyAdapter {
     pub fn spawn(
         reflector: PodDiscovery,
-        selector: Arc<Selector>,
-        defaults: RegistrationDefaults,
+        selectors: RoleSelectors,
+        cfg: &EppStandaloneConfig,
     ) -> Self {
+        // Resolved once: the defaults are per-role but static for the process.
+        let defaults: Vec<(WorkerRole, RegistrationDefaults)> = selectors
+            .each()
+            .into_iter()
+            .map(|(role, _)| (role, RegistrationDefaults::for_role(cfg, role)))
+            .collect();
+
         let cancel = CancellationToken::new();
         let cancel_child = cancel.clone();
         tokio::spawn(async move {
             let mut pod_changes = reflector.subscribe_changes();
             loop {
-                reconcile_once(&reflector, selector.as_ref(), &defaults).await;
+                reconcile_once(&reflector, &selectors, &defaults).await;
                 tokio::select! {
                     _ = cancel_child.cancelled() => break,
                     // Re-reconcile on a pod change. Exit if the sender drops
@@ -63,11 +80,16 @@ impl TopologyAdapter {
                             tracing::warn!(
                                 "Reflector change channel closed; clearing selector topology"
                             );
-                            if let Err(e) = selector.reconcile(&[]).await {
-                                tracing::warn!(
-                                    error = %e,
-                                    "Failed to clear selector topology after reflector stopped"
-                                );
+                            // Every role's catalog, not just the serving one:
+                            // a stale prefill catalog would outlive the watch.
+                            for (role, selector) in selectors.each() {
+                                if let Err(e) = selector.reconcile(&[]).await {
+                                    tracing::warn!(
+                                        error = %e,
+                                        role = %role,
+                                        "Failed to clear selector topology after reflector stopped"
+                                    );
+                                }
                             }
                             break;
                         }
@@ -85,27 +107,72 @@ impl Drop for TopologyAdapter {
     }
 }
 
-/// Run one reconcile pass: build the desired catalog from the Ready pods and
-/// hand it to the selector, which owns the actual-vs-desired diff.
+/// Run one reconcile pass: build each role's desired catalog from the Ready pods
+/// and hand it to that role's selector, which owns the actual-vs-desired diff.
 async fn reconcile_once(
     reflector: &PodDiscovery,
-    selector: &Selector,
-    defaults: &RegistrationDefaults,
+    selectors: &RoleSelectors,
+    defaults: &[(WorkerRole, RegistrationDefaults)],
 ) {
-    let desired: Vec<WorkerRegistration> = reflector
-        .ready_workers()
+    match selectors {
+        RoleSelectors::Aggregated(selector) => {
+            let Some((role, defaults)) = defaults.first() else {
+                return;
+            };
+            let desired = registrations(reflector.ready_workers(), defaults);
+            apply(selector, *role, desired).await;
+        }
+        RoleSelectors::Disaggregated { prefill, decode } => {
+            // One snapshot for both roles. Reading them through two calls would
+            // take two locks and observe two generations, and a role flip
+            // between them would put one worker into both desired sets.
+            let sets = reflector.ready_workers_by_role();
+            for (role, workers) in [
+                (WorkerRole::Prefill, sets.prefill),
+                (WorkerRole::Decode, sets.decode),
+            ] {
+                let Some((_, role_defaults)) = defaults.iter().find(|(r, _)| *r == role) else {
+                    continue;
+                };
+                let selector = match role {
+                    WorkerRole::Prefill => prefill,
+                    _ => decode,
+                };
+                apply(selector, role, registrations(workers, role_defaults)).await;
+            }
+        }
+    }
+}
+
+fn registrations(
+    workers: Vec<RawWorker>,
+    defaults: &RegistrationDefaults,
+) -> Vec<WorkerRegistration> {
+    workers
         .into_iter()
         .map(|w| build_registration(w, defaults))
-        .collect();
+        .collect()
+}
 
+async fn apply(selector: &Selector, role: WorkerRole, desired: Vec<WorkerRegistration>) {
     if let Err(e) = selector.reconcile(&desired).await {
-        tracing::warn!(error = %e, "Selector reconcile failed; will retry on next change");
+        tracing::warn!(
+            error = %e,
+            role = %role,
+            "Selector reconcile failed; will retry on next change"
+        );
     }
 }
 
 fn build_registration(w: RawWorker, defaults: &RegistrationDefaults) -> WorkerRegistration {
     let mut kv_events_endpoints = HashMap::new();
-    kv_events_endpoints.insert(0u32, w.kv_events_endpoint);
+    // A decode worker has no endpoint: its `SelectionService` runs with KV
+    // events off, so leaving the map empty is exactly what keeps the worker
+    // schedulable there — `missing_schedulable_metadata` only demands an
+    // endpoint per dp_rank when that instance consumes KV events.
+    if let Some(endpoint) = w.kv_events_endpoint {
+        kv_events_endpoints.insert(0u32, endpoint);
+    }
 
     WorkerRegistration {
         worker_id: w.worker_id,
@@ -121,28 +188,17 @@ fn build_registration(w: RawWorker, defaults: &RegistrationDefaults) -> WorkerRe
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::sync::Arc;
     use std::time::Duration;
 
     use super::*;
-    use crate::epp_standalone_config::TokenizerProtocol;
 
     fn config() -> EppStandaloneConfig {
         EppStandaloneConfig {
-            selector_threads: 1,
-            peer_replication: None,
-            inference_pool_name: "test-pool".to_string(),
-            namespace: "test-ns".to_string(),
             model_name: "Qwen/Qwen3-0.6B".to_string(),
-            tokenizer_service_url: "http://vllm-render:8000".to_string(),
-            tokenizer_protocol: TokenizerProtocol::VllmRender,
-            tokenizer_max_response_bytes: 16 * 1024 * 1024,
-            tokenization_timeout_ms: 5_000,
-            block_size: 16,
-            kv_event_port: 5557,
-            replay_port: None,
             total_kv_blocks: Some(1000),
-            max_num_batched_tokens: Some(8192),
-            max_inflight_requests: 1024,
+            ..EppStandaloneConfig::for_test()
         }
     }
 
@@ -160,8 +216,9 @@ mod tests {
             worker_id: id,
             pod_name: format!("vllm-{id}"),
             pod_ip: ip.to_string(),
+            role: WorkerRole::Aggregated,
             http_endpoint: format!("http://{ip}:8000"),
-            kv_events_endpoint: format!("tcp://{ip}:5557"),
+            kv_events_endpoint: Some(format!("tcp://{ip}:5557")),
             replay_endpoint: None,
         }
     }
@@ -191,7 +248,11 @@ mod tests {
             .expect("selector should build"),
         );
         let (discovery, changes_tx) = PodDiscovery::for_test(vec![worker(7, "10.0.0.1")]);
-        let adapter = TopologyAdapter::spawn(discovery, selector.clone(), defaults());
+        let adapter = TopologyAdapter::spawn(
+            discovery,
+            RoleSelectors::Aggregated(selector.clone()),
+            &config(),
+        );
 
         tokio::time::timeout(Duration::from_secs(1), async {
             while !selector.any_ready().await {
@@ -213,5 +274,169 @@ mod tests {
         .expect("terminal empty topology was not reconciled");
 
         drop(adapter);
+    }
+
+    // --- disaggregated fan-out ---------------------------------------------
+
+    fn disagg_config() -> EppStandaloneConfig {
+        EppStandaloneConfig {
+            topology_mode: crate::epp_standalone_config::EppTopologyMode::Disaggregated,
+            model_name: "test-model".to_string(),
+            ..EppStandaloneConfig::for_test()
+        }
+    }
+
+    fn role_worker(id: u64, ip: &str, role: WorkerRole) -> RawWorker {
+        RawWorker {
+            worker_id: id,
+            pod_name: format!("w-{id}"),
+            pod_ip: ip.to_string(),
+            role,
+            http_endpoint: format!("http://{ip}:8000"),
+            // Mirrors what discovery produces: only prefill carries an endpoint.
+            kv_events_endpoint: (role != WorkerRole::Decode).then(|| format!("tcp://{ip}:5557")),
+            replay_endpoint: None,
+        }
+    }
+
+    /// Two real `SelectionService`s configured exactly as production does.
+    async fn role_selectors(cfg: &EppStandaloneConfig) -> RoleSelectors {
+        use crate::role_config::kv_router_config_for_role;
+        use dynamo_kv_router::config::KvRouterConfig;
+        use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
+
+        let base = KvRouterConfig::default();
+        async fn build(
+            cfg: &EppStandaloneConfig,
+            base: &KvRouterConfig,
+            role: WorkerRole,
+        ) -> Arc<Selector> {
+            Arc::new(
+                Selector::new_with_kv_router_config(
+                    cfg,
+                    role,
+                    kv_router_config_for_role(base, role),
+                    WorkerSelectionPolicyRegistry::default(),
+                )
+                .await
+                .expect("role selector should build"),
+            )
+        }
+        RoleSelectors::Disaggregated {
+            prefill: build(cfg, &base, WorkerRole::Prefill).await,
+            decode: build(cfg, &base, WorkerRole::Decode).await,
+        }
+    }
+
+    async fn await_counts(selectors: &RoleSelectors, model: &str, prefill: usize, decode: usize) {
+        let RoleSelectors::Disaggregated {
+            prefill: p,
+            decode: d,
+        } = selectors
+        else {
+            panic!("expected a disaggregated topology");
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while p.schedulable_count(model) != prefill || d.schedulable_count(model) != decode {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "catalogs did not converge to prefill={prefill} decode={decode}; \
+                 got prefill={} decode={}",
+                p.schedulable_count(model),
+                d.schedulable_count(model)
+            )
+        });
+    }
+
+    #[tokio::test]
+    async fn disaggregated_reconcile_splits_add_flip_and_remove() {
+        let cfg = disagg_config();
+        let model = cfg.model_name.clone();
+        let selectors = role_selectors(&cfg).await;
+
+        let (discovery, changes_tx) = PodDiscovery::for_test(vec![]);
+        let adapter = TopologyAdapter::spawn(discovery.clone(), selectors.clone(), &cfg);
+
+        // Add: one worker of each role lands in its own instance.
+        discovery.set_workers(vec![
+            role_worker(1, "10.0.0.1", WorkerRole::Prefill),
+            role_worker(2, "10.0.0.2", WorkerRole::Decode),
+        ]);
+        changes_tx.send(1).expect("adapter is listening");
+        await_counts(&selectors, &model, 1, 1).await;
+
+        let RoleSelectors::Disaggregated { prefill, decode } = &selectors else {
+            unreachable!()
+        };
+        // The invariant, asserted directly: each instance is one role, so asking
+        // decode what it holds cannot be answered by a role filter.
+        assert_eq!(decode.schedulable_worker_ids(&model), HashSet::from([2]));
+        assert_eq!(prefill.schedulable_worker_ids(&model), HashSet::from([1]));
+
+        // Role flip: the same worker_id moves between instances.
+        discovery.set_workers(vec![
+            role_worker(1, "10.0.0.1", WorkerRole::Decode),
+            role_worker(2, "10.0.0.2", WorkerRole::Decode),
+        ]);
+        changes_tx.send(2).expect("adapter is listening");
+        await_counts(&selectors, &model, 0, 2).await;
+        assert_eq!(decode.schedulable_worker_ids(&model), HashSet::from([1, 2]));
+
+        // Remove: dropping one decode worker leaves the other untouched.
+        discovery.set_workers(vec![role_worker(2, "10.0.0.2", WorkerRole::Decode)]);
+        changes_tx.send(3).expect("adapter is listening");
+        await_counts(&selectors, &model, 0, 1).await;
+        assert_eq!(decode.schedulable_worker_ids(&model), HashSet::from([2]));
+
+        drop(adapter);
+    }
+
+    #[tokio::test]
+    async fn decode_workers_are_schedulable_without_kv_event_endpoints() {
+        // The whole reason discovery leaves decode's endpoint `None`: the decode
+        // instance runs with KV events off, so schedulability must not demand one.
+        let cfg = disagg_config();
+        let selectors = role_selectors(&cfg).await;
+        let RoleSelectors::Disaggregated { decode, .. } = &selectors else {
+            unreachable!()
+        };
+
+        let registration = build_registration(
+            role_worker(9, "10.0.0.9", WorkerRole::Decode),
+            &RegistrationDefaults::for_role(&cfg, WorkerRole::Decode),
+        );
+        assert!(
+            registration.kv_events_endpoints.is_empty(),
+            "a decode registration carries no kv-events endpoint"
+        );
+
+        decode
+            .reconcile(&[registration])
+            .await
+            .expect("reconcile should succeed");
+        assert_eq!(decode.schedulable_count(&cfg.model_name), 1);
+    }
+
+    #[test]
+    fn per_role_defaults_take_that_role_capacity() {
+        let cfg = EppStandaloneConfig {
+            prefill_max_num_batched_tokens: Some(16384),
+            decode_max_num_batched_tokens: Some(2048),
+            prefill_total_kv_blocks: Some(4000),
+            decode_total_kv_blocks: Some(1000),
+            ..disagg_config()
+        };
+
+        let prefill = RegistrationDefaults::for_role(&cfg, WorkerRole::Prefill);
+        assert_eq!(prefill.max_num_batched_tokens, Some(16384));
+        assert_eq!(prefill.total_kv_blocks, Some(4000));
+
+        let decode = RegistrationDefaults::for_role(&cfg, WorkerRole::Decode);
+        assert_eq!(decode.max_num_batched_tokens, Some(2048));
+        assert_eq!(decode.total_kv_blocks, Some(1000));
     }
 }

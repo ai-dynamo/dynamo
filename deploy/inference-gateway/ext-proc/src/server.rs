@@ -927,7 +927,9 @@ struct ExtProcError {
 impl ExtProcError {
     fn from_pick_error(e: PickError) -> Self {
         match e {
-            PickError::NoEndpoints => Self {
+            // Both mean "nothing to route to right now"; the role variant only
+            // carries a more specific message for the client.
+            PickError::NoEndpoints | PickError::RoleCatalogEmpty(_) => Self {
                 status_code: StatusCode::ServiceUnavailable,
                 message: e.to_string(),
             },
@@ -1581,5 +1583,17 @@ mod tests {
     fn overloaded_pick_error_maps_to_503() {
         let err = ExtProcError::from_pick_error(PickError::Overloaded);
         assert_eq!(err.status_code, StatusCode::ServiceUnavailable);
+    }
+
+    #[test]
+    fn empty_role_catalog_maps_to_503_and_names_the_role() {
+        // Same status as an empty pool, but the message says which role is
+        // missing — the only place that distinction reaches the caller, since
+        // pick errors are never logged.
+        let err = ExtProcError::from_pick_error(PickError::RoleCatalogEmpty(
+            crate::worker_role::WorkerRole::Decode,
+        ));
+        assert_eq!(err.status_code, StatusCode::ServiceUnavailable);
+        assert!(err.message.contains("decode"), "{}", err.message);
     }
 }
