@@ -168,6 +168,23 @@ Allowed local helpers:
   as conversion inputs, but remain scrubbed from converted metadata. Do not
   reintroduce per-field compatibility annotations.
 
+## DGDR v1beta2 Envelope
+
+DGDR `v1beta1` and `v1beta2` have incompatible native schemas and result models.
+They do not use semantic field conversion. Each version instead exposes an
+explicit, complete foreign-version payload under `spec.v1beta1` or
+`spec.v1beta2`, and likewise under `status`.
+
+- Native fields and a foreign-version envelope are mutually exclusive.
+- Conversion unwraps the matching envelope when returning to its native version.
+- Otherwise conversion moves the complete native spec and status into the
+  target version's envelope without mutating the source.
+- The still-served `v1alpha1` spoke carries a `v1beta2` envelope opaquely through
+  its existing sparse preservation annotations; it must not project that payload
+  into profiler fields.
+- Controllers may branch on these public envelope fields to select the native
+  runtime path. The private sparse annotations remain conversion-only.
+
 ## API Changes
 
 For every added, removed, renamed, or semantically changed API field, choose one

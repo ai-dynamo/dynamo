@@ -19,6 +19,7 @@ package v1beta2
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -266,32 +267,49 @@ type RecommendationSpec struct {
 }
 
 // DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
+// Native v1beta2 fields and the V1Beta1 conversion envelope are mutually exclusive.
+// +kubebuilder:validation:XValidation:rule="has(self.v1beta1) != (has(self.modelRef) && has(self.backends) && has(self.hardware) && has(self.workload) && has(self.objective) && has(self.search))",message="exactly one of native v1beta2 fields or v1beta1 must be specified"
+// +kubebuilder:validation:XValidation:rule="!has(self.v1beta1) || !(has(self.modelRef) || has(self.backends) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.search) || has(self.recommendation))",message="v1beta1 is mutually exclusive with native v1beta2 fields"
 type DynamoGraphDeploymentRequestSpec struct {
 	// ModelRef identifies the model whose deployment configurations are evaluated.
-	ModelRef ModelReference `json:"modelRef"`
+	// +optional
+	ModelRef *ModelReference `json:"modelRef,omitempty"`
 
 	// Backends lists one or more inference backends searched by Sweeper and used by generated candidates.
 	// +kubebuilder:validation:MinItems=1
-	Backends []Backend `json:"backends"`
+	// +optional
+	Backends []Backend `json:"backends,omitempty"`
 
 	// Hardware bounds the accelerator configurations evaluated by the search.
-	Hardware HardwareSpec `json:"hardware"`
+	// +optional
+	Hardware *HardwareSpec `json:"hardware,omitempty"`
 
 	// Workload defines exactly one traffic model used for every candidate evaluation.
-	Workload WorkloadSpec `json:"workload"`
+	// +optional
+	Workload *WorkloadSpec `json:"workload,omitempty"`
 
 	// Objective defines scalar optimization or a multi-objective Pareto search.
-	Objective ObjectiveSpec `json:"objective"`
+	// +optional
+	Objective *ObjectiveSpec `json:"objective,omitempty"`
 
 	// Search configures current Sweeper run control and implementation-owned dimensions.
-	Search SearchSpec `json:"search"`
+	// +optional
+	Search *SearchSpec `json:"search,omitempty"`
 
 	// Recommendation controls bounded projection into DGDC resources.
 	// +optional
 	Recommendation *RecommendationSpec `json:"recommendation,omitempty"`
+
+	// V1Beta1 losslessly preserves a native v1beta1 spec while this object is
+	// represented through v1beta2. It is mutually exclusive with native fields.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	V1Beta1 *apiextensionsv1.JSON `json:"v1beta1,omitempty"`
 }
 
 // DynamoGraphDeploymentRequestStatus represents reconciliation of persistent search intent.
+// +kubebuilder:validation:XValidation:rule="!has(self.v1beta1) || !(has(self.observedGeneration) || has(self.activeRunRef) || has(self.recentRunRefs) || has(self.conditions))",message="v1beta1 is mutually exclusive with native v1beta2 status fields"
 type DynamoGraphDeploymentRequestStatus struct {
 	// ObservedGeneration is the most recent DGDR generation accepted by the controller.
 	// +optional
@@ -310,6 +328,13 @@ type DynamoGraphDeploymentRequestStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// V1Beta1 losslessly preserves a native v1beta1 status while this object is
+	// represented through v1beta2.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	V1Beta1 *apiextensionsv1.JSON `json:"v1beta1,omitempty"`
 }
 
 // +kubebuilder:object:root=true
