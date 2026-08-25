@@ -221,13 +221,13 @@ func TestValidateDynamoComponentDeploymentSharedSpecFieldPaths(t *testing.T) {
 	spec := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 		ComponentName:          "epp",
 		ComponentType:          nvidiacomv1beta1.ComponentTypeEPP,
-		RuntimeVersionOverride: "1.5.0",
+		RuntimeVersionOverride: "1.1.0",
 		PodTemplate: &corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{
 				Annotations: map[string]string{consts.KubeAnnotationVLLMDistributedExecutorBackend: "invalid"},
 			},
 			Spec: corev1.PodSpec{
-				Containers:     []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/dynamo-frontend:1.5.0"}, {Name: "sidecar"}},
+				Containers:     []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}, {Name: "sidecar"}},
 				InitContainers: []corev1.Container{{Name: "init"}},
 			},
 		},
@@ -235,7 +235,10 @@ func TestValidateDynamoComponentDeploymentSharedSpecFieldPaths(t *testing.T) {
 		MinAvailable:     &minAvailable,
 		Multinode:        &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
 		SharedMemorySize: &sharedMemorySize,
-		FrontendSidecar:  &frontendSidecar,
+		EPPConfig: &nvidiacomv1beta1.EPPConfig{
+			ConfigMapRef: &corev1.ConfigMapKeySelector{},
+		},
+		FrontendSidecar: &frontendSidecar,
 	}
 	validation := &sharedValidation{ctx: context.Background(), mgr: newGroveTopologyTestManager(t)}
 
@@ -252,6 +255,7 @@ func TestValidateDynamoComponentDeploymentSharedSpecFieldPaths(t *testing.T) {
 		"spec.components[0].type",
 		"spec.components[0].multinode",
 		"spec.components[0].replicas",
+		"spec.components[0].eppConfig.configMapRef.name",
 		"spec.components[0].frontendSidecar",
 	})
 }

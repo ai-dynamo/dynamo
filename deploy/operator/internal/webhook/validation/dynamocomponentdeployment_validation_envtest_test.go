@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sptr "k8s.io/utils/ptr"
+	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
 
 const (
@@ -1038,6 +1039,64 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				dcd.Spec.PodTemplate.Spec.Containers[0].Image = "registry.example/epp-image:1.4.0"
 			}),
 			wantWebhookErrs: []string{"spec.eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
+		},
+		// eppConfig is deprecated but still served, so its shape rules keep
+		// their coverage. The default 1.1.0 fixture image is a pre-1.5.0
+		// legacy Go EPP runtime, where an eppConfig is expected and only its
+		// shape is under test.
+		{
+			name: "v1alpha1 empty EPP config reaches and is rejected by the webhook",
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeEPP,
+				EPPConfig:     &nvidiacomv1alpha1.EPPConfig{},
+			}),
+			wantWebhookErrs: []string{"spec.eppConfig: Forbidden: exactly one of configMapRef or config is required"},
+		},
+		{
+			name: "v1beta1 empty EPP config is rejected by source CEL",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{}
+			}),
+			wantCELErr: "spec.eppConfig: Invalid value: exactly one of configMapRef or config must be specified",
+		},
+		{
+			name: "v1alpha1 conflicting EPP config reaches and is rejected by the webhook",
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeEPP,
+				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp-config"}},
+					Config: &apixv1alpha1.EndpointPickerConfig{
+						Plugins:            []apixv1alpha1.PluginSpec{},
+						SchedulingProfiles: []apixv1alpha1.SchedulingProfile{},
+					},
+				},
+			}),
+			wantWebhookErrs: []string{"spec.eppConfig: Forbidden: exactly one of configMapRef or config is required"},
+		},
+		{
+			name: "v1beta1 conflicting EPP config is rejected by source CEL",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				dcd.Spec.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "epp-config"}},
+					Config: &apixv1alpha1.EndpointPickerConfig{
+						Plugins:            []apixv1alpha1.PluginSpec{},
+						SchedulingProfiles: []apixv1alpha1.SchedulingProfile{},
+					},
+				}
+			}),
+			wantCELErr: "spec.eppConfig: Invalid value: exactly one of configMapRef or config must be specified",
+		},
+		{
+			name: "v1alpha1 EPP config map without a name reaches and is rejected by the webhook",
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeEPP,
+				EPPConfig: &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{},
+				},
+			}),
+			wantWebhookErrs: []string{"spec.eppConfig.configMapRef.name: Required value: is required"},
 		},
 		{
 			// eppConfig is only meaningful for an EPP component; the controller
