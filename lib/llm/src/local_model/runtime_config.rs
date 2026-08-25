@@ -185,6 +185,8 @@ pub struct ModelRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_length: Option<u32>,
 
+    /// Physical KV-cache capacity for each router-visible data-parallel rank.
+    /// This is per rank, never the aggregate capacity of the worker process.
     pub total_kv_blocks: Option<u64>,
 
     pub max_num_seqs: Option<u64>,

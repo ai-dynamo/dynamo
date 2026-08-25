@@ -294,14 +294,10 @@ where
         let record_result: Result<(), Error> = async {
             if !is_query_only && self.chooser.indexer().records_routing_decisions() {
                 let worker = selected_worker;
-                let record_result = if let Some(hashes) = selection.routing_hashes.take() {
-                    cancel_on_stop(
-                        request_context.as_ref(),
-                        self.chooser.record_routing_decision_hashes(hashes, worker),
-                    )
-                    .await?
+                let hashes = if let Some(hashes) = selection.routing_hashes.take() {
+                    hashes
                 } else {
-                    let lora_name = request.routing.as_ref().and_then(|r| r.lora_name.clone());
+                    let routing = request.routing.as_ref();
                     let mut tokens_with_hashes = TokensWithHashes::new(
                         routing_parts.token_ids.to_vec(),
                         self.chooser.block_size(),
@@ -310,13 +306,30 @@ where
                     if let Some(infos) = routing_parts.block_mm_infos {
                         tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.to_vec());
                     }
-                    if let Some(lora_name) = lora_name {
+                    if let Some(lora_name) = routing.and_then(|r| r.lora_name.clone()) {
                         tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name);
                     }
+                    if let Some(cache_namespace) = routing.and_then(|r| r.cache_namespace.clone()) {
+                        tokens_with_hashes =
+                            tokens_with_hashes.with_cache_namespace(cache_namespace);
+                    }
+                    let local_hashes = tokens_with_hashes.get_or_compute_block_hashes().to_vec();
+                    let sequence_hashes = tokens_with_hashes.get_or_compute_seq_hashes().to_vec();
+                    dynamo_kv_router::indexer::RoutingDecisionHashes {
+                        local_hashes,
+                        sequence_hashes,
+                    }
+                };
+                let record_result = if guard.has_approximate_lru() {
                     cancel_on_stop(
                         request_context.as_ref(),
-                        self.chooser
-                            .record_routing_decision(tokens_with_hashes, worker),
+                        guard.acquire_approximate_lru(hashes),
+                    )
+                    .await?
+                } else {
+                    cancel_on_stop(
+                        request_context.as_ref(),
+                        self.chooser.record_routing_decision_hashes(hashes, worker),
                     )
                     .await?
                 };
