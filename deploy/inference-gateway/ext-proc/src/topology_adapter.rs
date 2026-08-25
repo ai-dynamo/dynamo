@@ -92,15 +92,23 @@ async fn reconcile_once(
     selector: &Selector,
     defaults: &RegistrationDefaults,
 ) {
-    let desired: Vec<WorkerRegistration> = reflector
-        .ready_workers()
-        .into_iter()
-        .map(|w| build_registration(w, defaults))
-        .collect();
+    let desired = registrations(reflector, defaults);
 
     if let Err(e) = selector.reconcile(&desired).await {
         tracing::warn!(error = %e, "Selector reconcile failed; will retry on next change");
     }
+}
+
+/// Convert the reflector's current Ready-worker snapshot into selector input.
+pub(crate) fn registrations(
+    reflector: &PodDiscovery,
+    defaults: &RegistrationDefaults,
+) -> Vec<WorkerRegistration> {
+    reflector
+        .ready_workers()
+        .into_iter()
+        .map(|worker| build_registration(worker, defaults))
+        .collect()
 }
 
 fn build_registration(w: RawWorker, defaults: &RegistrationDefaults) -> WorkerRegistration {
