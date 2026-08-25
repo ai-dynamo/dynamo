@@ -16,6 +16,7 @@ import pytest
 from tests.utils.port_utils import allocate_ports, deallocate_ports
 
 pytestmark = [
+    pytest.mark.multimodal,
     pytest.mark.e2e,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,

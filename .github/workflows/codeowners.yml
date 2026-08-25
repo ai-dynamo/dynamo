@@ -30,17 +30,27 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pyyaml pytest
+      - name: Install ownership and marker-audit dependencies
+        run: |
+          pip install \
+            pyyaml pytest pytest-asyncio tomli pydantic filelock \
+            'prometheus_client>=0.23.1' openai
 
       # Unit tests for the canonical matcher + the emitter's tree-independence
       # contract. These are the only piece the gates below trust -- if they
       # fail, nothing else means anything.
-      - name: Unit tests (matcher + tree-independence)
+      - name: Unit tests (matcher, pytest selection, and tree-independence)
         run: |
-          python -m pytest .github/codeowners/test_codeowners.py -v \
+          python -m pytest \
+            .github/codeowners/test_codeowners.py \
+            .github/codeowners/test_pytest_selection.py \
+            -v \
             -p no:cacheprovider \
             --override-ini="addopts=" \
             --override-ini="filterwarnings="
+
+      - name: Validate effective pytest marker coverage
+        run: python tests/report_pytest_markers.py
 
       # Coverage gate on PRs: DIFF-AWARE. checkout builds the base+PR merge
       # tree, so git ls-files sees paths that only ever landed on the base

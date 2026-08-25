@@ -140,6 +140,11 @@ const testCases = [
     expect: { sidecar: true, rust: false, core: false, frontend: false, docs: false, vllm: false, sglang: false, trtllm: false },
     desc: 'sidecar README avoids Rust, Fern, and E2E checks'
   },
+  {
+    file: '.github/codeowners/areas.yaml',
+    expect: { core: true, ignore: true },
+    desc: 'pytest ownership routing changes exercise the full CI fallback'
+  },
 
   // Doc files should be excluded from core (negation patterns)
   {

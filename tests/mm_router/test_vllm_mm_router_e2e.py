@@ -41,6 +41,7 @@ BLOCK_SIZE = 16
 NAMESPACE = "dynamo"
 
 pytestmark = [
+    pytest.mark.router,
     pytest.mark.e2e,
     pytest.mark.vllm,
     pytest.mark.multimodal,

@@ -185,6 +185,8 @@ STUB_MODULES = [
     "sglang.srt.disaggregation.utils",
     "sglang.srt.server_args",
     "sglang.srt.server_args_config_parser",
+    "sglang.srt.speculative",
+    "sglang.srt.speculative.spec_info",
     "vllm",
     "vllm.config",
     "vllm.distributed",
@@ -293,6 +295,11 @@ PROJECT_PATHS = [
     os.getcwd(),
     os.path.join(os.getcwd(), "components", "src"),
     os.path.join(os.getcwd(), "lib", "bindings", "python", "src"),
+    os.path.join(os.getcwd(), "tests", "wheels"),
+    os.path.join(os.getcwd(), "components", "src", "dynamo", "frontend", "tests"),
+    os.path.join(
+        os.getcwd(), "components", "src", "dynamo", "planner", "tests", "unit"
+    ),
 ]
 sys.path[:0] = PROJECT_PATHS  # prepend to sys.path
 
@@ -301,22 +308,42 @@ sys.path[:0] = PROJECT_PATHS  # prepend to sys.path
 # repo root, and the `tests` package is not importable any earlier.
 from tests.marker_categories import REQUIRED_CATEGORIES  # noqa: E402
 
+FRAMEWORK_MARKERS = {"vllm", "sglang", "trtllm"}
+SELECTIVE_FEATURE_MARKERS = {
+    "core",
+    "fault_tolerance",
+    "kvbm",
+    "lmcache",
+    "multimodal",
+    "planner",
+    "router",
+}
+
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
 
 
-def sanitize(s: str, max_len: int = 200) -> str:
+def sanitize(s: str, max_len: Optional[int] = 200) -> str:
     """Safe, trimmed string for output."""
     s = re.sub(r"[^\x20-\x7E\n\t]", "", str(s))
-    return s if len(s) <= max_len else s[: max_len - 3] + "..."
+    if max_len is None or len(s) <= max_len:
+        return s
+    return s[: max_len - 3] + "..."
 
 
 def missing_categories(markers: Set[str]) -> List[str]:
     """Return required categories missing in a test's markers."""
-    return [
+    missing = [
         cat for cat, allowed in REQUIRED_CATEGORIES.items() if not (markers & allowed)
     ]
+    if (
+        "unit" not in markers
+        and markers & FRAMEWORK_MARKERS
+        and not markers & SELECTIVE_FEATURE_MARKERS
+    ):
+        missing.append("Selective Feature")
+    return missing
 
 
 # --------------------------------------------------------------------------- #
@@ -475,6 +502,7 @@ class Report:
     total_skipped_mypy: int
     total_missing: int
     tests: List[TestRecord]
+    collected_tests: List[TestRecord]
     undeclared_markers: Optional[List[str]] = None
     missing_in_project_config: Optional[List[str]] = None
 
@@ -487,18 +515,26 @@ class Report:
 class MarkerReportPlugin:
     def __init__(self):
         self.records: List[TestRecord] = []
+        self.collected_records: List[TestRecord] = []
         self.checked = 0
         self.skipped_mypy = 0
 
     def pytest_collection_modifyitems(self, session, config, items):
         for item in items:
             markers = {m.name for m in item.iter_markers()}
+            nodeid = sanitize(item.nodeid, max_len=None)
+            collected_record = TestRecord(
+                nodeid=nodeid,
+                markers=sorted(markers),
+                missing=[],
+            )
+            self.collected_records.append(collected_record)
             if markers & {"mypy", "skip", "skipif"}:
                 self.skipped_mypy += 1
                 continue
 
             record = TestRecord(
-                nodeid=sanitize(item.nodeid),
+                nodeid=nodeid,
                 markers=sorted(markers),
                 missing=missing_categories(markers),
             )
@@ -511,6 +547,7 @@ class MarkerReportPlugin:
             total_skipped_mypy=self.skipped_mypy,
             total_missing=sum(bool(r.missing) for r in self.records),
             tests=self.records,
+            collected_tests=self.collected_records,
         )
 
 
@@ -674,6 +711,7 @@ def run_collection(test_paths: list[str], use_stubbing: bool) -> tuple[int, Repo
     exitcode = pytest.main(
         [
             "--collect-only",
+            "--import-mode=importlib",
             "-qq",
             "--disable-warnings",
             # Override config from pyproject.toml to avoid picking up options

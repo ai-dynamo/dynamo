@@ -132,11 +132,14 @@ ignore:
   # CODEOWNERS generation tooling (data + scripts). Validated by its own
   # codeowners.yml workflow (triggers on '**'); no backend CI needed here.
   - '.github/codeowners/**'
-
 ci: &ci
   - '.github/workflows/**'
   - '.github/filters.yaml'
   - '.github/actions/**'
+  # Ownership areas also define changed-path -> pytest marker routing.
+  - '.github/codeowners/areas.yaml'
+  - '.github/codeowners/codeowners_match.py'
+  - '.github/codeowners/select_pytest.py'
   - '.github/scripts/parse_buildkit_output.py'
   - '.github/scripts/route_buildkit.sh'
   - 'container/Dockerfile.test'

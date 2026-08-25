@@ -14,6 +14,7 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
 
 # Total runtime ~0.67s — no need for parallel marker.
 pytestmark = [
+    pytest.mark.multimodal,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.integration,

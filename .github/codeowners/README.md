@@ -25,7 +25,7 @@ adding required approvals.
 
 | File | What it is |
 |------|------------|
-| `areas.yaml` | The single source of truth: path globs to GitHub team, by subsystem. **Edit this.** |
+| `areas.yaml` | The single source of truth: path globs to GitHub team and pytest markers, by subsystem. **Edit this.** |
 | `external_contributors.yaml` | External individuals granted area-scoped codeownership. Attaches a person to an area **label** (not a copy of its globs); drives the `@handle` co-owner lines and `CONTRIBUTORS.md`. **Edit this.** |
 | `codeowners_match.py` | Shared matcher + policy resolver. Build, emit, and who_owns share its CODEOWNERS semantics. |
 | `build_codeowners.py` | Validates the resolved policy against the tracked tree for 100% explicit coverage (CI gate). |
@@ -48,6 +48,41 @@ adding required approvals.
    ```
 
 3. Commit `areas.yaml` and `CODEOWNERS` together.
+
+## Select pytest coverage
+
+An area can associate its owned paths with pytest markers:
+
+```yaml
+- label: router
+  github_team: '@ai-dynamo/dynamo-router-codeowners'
+  pytest:
+    markers: [router]
+  path_globs:
+  - components/src/dynamo/router/
+  - lib/kv-router/
+  - tests/router/
+```
+
+The PR workflow evaluates every ownership area matching each changed path.
+Backend markers narrow a feature to that framework, while other markers select
+the affected feature tests. Different changed paths are unioned. Omit `pytest`
+for an area without a safe marker mapping; omission conservatively selects the
+full suite. Documentation-only areas can use `pytest: {mode: none}`.
+
+The marker report collects effective pytest markers, including module, class,
+function, and parameter inheritance. Unit tests are the always-on smoke slice.
+Every non-unit test carrying a framework marker (`vllm`, `sglang`, or `trtllm`)
+must also carry at least one selective feature marker such as `core`, `router`,
+`multimodal`, `kvbm`, `lmcache`, `planner`, or `fault_tolerance`. Tests that span
+features may carry more than one. In selective mode, triggered backend lanes run
+their `unit` tests in addition to the selected feature expression.
+
+The default rollout mode reports the marker expressions and exact selected
+pytest node IDs without reducing coverage. The complete selection is uploaded
+as the `pytest-shadow-selection-<run id>` JSON artifact; the job summary shows
+counts and the first 200 node IDs per lane. Set repository variable
+`PYTEST_SELECTION_MODE` to `selective` to apply it to backend pytest jobs.
 
 ## External contributors
 

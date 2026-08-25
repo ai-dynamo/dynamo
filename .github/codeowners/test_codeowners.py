@@ -289,6 +289,7 @@ class TestComputeResolution:
                     "label": "kvbm",
                     "github_team": "@kvbm",
                     "path_globs": [],
+                    "pytest": {"markers": ["kvbm"]},
                 },
                 {
                     "label": "docs",
@@ -321,6 +322,43 @@ class TestComputeResolution:
         # docs area unchanged
         docs = next(a for a in model.areas if a.label == "docs")
         assert "docs/" in docs.path_globs
+
+    def test_pytest_metadata_is_preserved(self) -> None:
+        model = compute_resolution(self._spec())
+        runtime = next(area for area in model.areas if area.label == "runtime")
+        kvbm = next(area for area in model.areas if area.label == "kvbm")
+
+        assert runtime.pytest_mode == "fallback"
+        assert runtime.pytest_markers == []
+        assert kvbm.pytest_markers == ["kvbm"]
+
+    def test_matching_areas_returns_all_overlaps(self) -> None:
+        spec = self._spec()
+        spec["areas"][1]["path_globs"] = ["lib/llm/shared/"]
+        model = compute_resolution(spec)
+
+        assert [area.label for area in model.matching_areas("lib/llm/shared/x.rs")] == [
+            "runtime",
+            "kvbm",
+        ]
+
+    @pytest.mark.parametrize(
+        ("pytest_spec", "message"),
+        [
+            ({"mode": "invalid"}, "pytest.mode"),
+            ({"markers": "router"}, "pytest.markers"),
+            ({"markers": ["router"], "mode": "none"}, "both markers and mode"),
+            ({"unknown": True}, "unsupported key"),
+        ],
+    )
+    def test_invalid_pytest_metadata_is_rejected(
+        self, pytest_spec: dict, message: str
+    ) -> None:
+        spec = self._spec()
+        spec["areas"][0]["pytest"] = pytest_spec
+
+        with pytest.raises(SystemExit, match=message):
+            compute_resolution(spec)
 
     @pytest.mark.parametrize(
         "rule",

@@ -167,6 +167,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="agg_spec_decoding.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,
             # Also predownload the EAGLE3 draft: CI workers run HF_HUB_OFFLINE=True
             # and only the base cfg.model is auto-registered, so the draft repo
@@ -402,6 +403,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="disagg_same_gpu.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(7.3),
             pytest.mark.requested_vllm_kv_cache_bytes(1_023_525_000),
@@ -422,6 +424,7 @@ vllm_configs = {
         directory=vllm_dir,
         script_name="disagg_same_gpu.sh",
         marks=[
+            pytest.mark.router,
             pytest.mark.gpu_1,
             pytest.mark.profiled_vram_gib(7.3),
             pytest.mark.requested_vllm_kv_cache_bytes(1_023_525_000),
