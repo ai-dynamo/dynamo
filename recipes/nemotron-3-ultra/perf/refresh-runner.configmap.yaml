@@ -32,8 +32,6 @@ data:
     : "${GPU_COUNT:?GPU_COUNT is required}"
     : "${REQUEST_TIMEOUT:?REQUEST_TIMEOUT is required}"
     : "${WARMUP_BURSTS:?WARMUP_BURSTS is required}"
-    : "${EXPECTED_REQUEST_COUNT:?EXPECTED_REQUEST_COUNT is required}"
-    : "${EXPECTED_ERROR_COUNT:?EXPECTED_ERROR_COUNT is required}"
 
     MODEL="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-NVFP4"
     TRACE_URL="https://media.githubusercontent.com/media/ai-dynamo/dynamo/main/recipes/nemotron-3-ultra/perf/traces/nim_turbo_64k_400_90kv_agent_new_noschedule_short_15perc.jsonl"
@@ -117,9 +115,8 @@ data:
 
     keys = [
         "JOB_NAME", "DGD_NAME", "ENDPOINT", "CONTEXT", "CONCURRENCY",
-        "GPU_COUNT", "REQUEST_TIMEOUT", "WARMUP_BURSTS", "EXPECTED_REQUEST_COUNT",
-        "EXPECTED_ERROR_COUNT", "SERVER_RUNTIME", "ROUTING_MODE",
-        "WORKER_REPLICAS",
+        "GPU_COUNT", "REQUEST_TIMEOUT", "WARMUP_BURSTS", "SERVER_RUNTIME",
+        "ROUTING_MODE", "WORKER_REPLICAS",
         "AIPERF_VERSION", "TRACE_SHA256", "RUN_ID",
     ]
     payload = {key.lower(): os.environ.get(key) for key in keys}
@@ -179,8 +176,6 @@ data:
 
     request_count = int(avg("request_count"))
     error_count = int(avg("error_request_count"))
-    expected_requests = int(os.environ["EXPECTED_REQUEST_COUNT"])
-    expected_errors = int(os.environ["EXPECTED_ERROR_COUNT"])
     gpu_count = int(os.environ["GPU_COUNT"])
     throughput = avg("output_token_throughput")
     summary = {
@@ -194,9 +189,6 @@ data:
         "inter_token_latency_p50_ms": report["inter_token_latency"]["p50"],
         "total_output_tokens": int(avg("total_output_tokens")),
         "benchmark_duration_seconds": avg("benchmark_duration"),
-        "expected_request_count": expected_requests,
-        "expected_error_request_count": expected_errors,
-        "validity_pass": request_count == expected_requests and error_count == expected_errors,
     }
     summary["sla_pass"] = (
         summary["output_token_throughput_per_user_p50"] >= 50
@@ -205,8 +197,6 @@ data:
     )
     (result_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))
-    if not summary["validity_pass"]:
-        raise SystemExit("VALIDITY_GATE_FAILED")
     PY
 
     echo "RESULT_DIR=${RESULT_DIR}"

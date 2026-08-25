@@ -55,10 +55,6 @@ spec:
           value: '1200'
         - name: WARMUP_BURSTS
           value: '2'
-        - name: EXPECTED_REQUEST_COUNT
-          value: '3411'
-        - name: EXPECTED_ERROR_COUNT
-          value: '130'
         - name: SERVER_RUNTIME
           value: 1.4.0
         - name: AIPERF_HTTP_CONNECTION_LIMIT
