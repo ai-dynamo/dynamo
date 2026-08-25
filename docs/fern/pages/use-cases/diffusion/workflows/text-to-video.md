@@ -20,6 +20,7 @@ Text-to-video generation runs a vLLM-Omni worker with `--output-modalities video
 |---|---|
 | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` | Default model (1 GPU) |
 | `Wan-AI/Wan2.2-T2V-A14B-Diffusers` | |
+| `MiniMaxAI/MiniMax-H3` | Joint 24-FPS video and 32-kHz stereo audio; 4 B200 GPUs recommended |
 
 To run a non-default model, pass `--model` to the launch script:
 
@@ -52,6 +53,71 @@ curl -s http://localhost:8000/v1/videos \
 ```
 
 The response returns a video URL or base64 data depending on `response_format` (e.g. `{"object": "video", "status": "completed", "data": [{"url": "file:///tmp/dynamo_media/videos/req-abc123.mp4"}]}`).
+
+## MiniMax-H3
+
+The initial MiniMax-H3 qualification serves text-to-video-and-audio (T2VA) with
+one aggregated diffusion worker. The launcher passes `--task-type t2va`, which
+loads only H3's FL2VA checkpoint partition. Dynamo's standard image stays on
+its VP9-only media stack, so build the opt-in video-audio overlay to mux H.264
+video and AAC audio:
+
+```bash
+docker build \
+  --build-arg BASE_IMAGE=<dynamo-vllm-local-dev-image> \
+  -f examples/backends/vllm/omni/video_audio.Dockerfile \
+  -t dynamo-vllm-minimax-h3 .
+```
+
+Launch the four-B200 profile. It uses four-way Ulysses and text-encoder tensor
+parallelism while keeping VAE patch parallelism at one, so small supported
+resolutions such as 448x256 still have at least one tile per participating
+rank. Larger resolutions can opt into four-way VAE patch parallelism with
+`DYN_H3_VAE_PATCH_PARALLEL_SIZE=4`:
+
+```bash
+bash examples/backends/vllm/launch/agg_omni_minimax_h3.sh
+```
+
+Run the supplied end-to-end qualification against the same worker. It requests
+a 10-second clip, then verifies a non-empty H.264 stream at 24 FPS and a
+non-silent 32-kHz stereo AAC stream:
+
+```bash
+export DYN_H3_QUAL_DIR=/tmp/dynamo_minimax_h3_qualification
+bash examples/backends/vllm/launch/validate_omni_minimax_h3.sh
+```
+
+```json
+{
+  "model": "MiniMaxAI/MiniMax-H3",
+  "prompt": "A cat playing Canon in D on a grand piano.",
+  "size": "448x256",
+  "response_format": "url",
+  "output_format": "mp4",
+  "nvext": {
+    "num_inference_steps": 50,
+    "seed": 42
+  },
+  "extra_params": {
+    "task": "t2va",
+    "duration": 10.0,
+    "flow_shift": 12.0,
+    "audio_flow_shift": 3.0,
+    "aspect_ratio": "16:9"
+  }
+}
+```
+
+The request deliberately omits `fps`, so the upstream H3 pipeline keeps its
+native 24-FPS default. `extra_params` is a generic vLLM-Omni escape hatch:
+Dynamo passes this model-specific object through to the pipeline's
+`extra_args`, where the upstream model validates it. Generated responses report
+`fps` and `audio_sample_rate` for each MP4.
+
+First/last-frame FL2VA and reference-driven Ref2VA are not part of this initial
+qualification. They additionally require typed image, video, and audio input
+references.
 
 ## Request Parameters (`nvext`)
 
