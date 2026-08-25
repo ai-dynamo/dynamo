@@ -10,7 +10,11 @@ from types import MappingProxyType
 from typing import Any
 
 from dynamo.experimental.workflow.plan import ExecutionPlan, InlineBinding
-from dynamo.experimental.workflow.runtime import StageContext, StageRunner, WorkflowExecutionError
+from dynamo.experimental.workflow.runtime import (
+    StageContext,
+    StageRunner,
+    WorkflowExecutionError,
+)
 from dynamo.experimental.workflow.types import WorkflowValidationError
 
 
