@@ -141,14 +141,9 @@ The sidecar waits for both the Control and Inference services through the standa
 
 ### 1. Build and push the sidecar image
 
-Build a multi-arch image so it runs on any node — `amd64` (x86) or `arm64`
-(GB200/Grace):
-
-```bash
-docker buildx build --platform linux/amd64,linux/arm64 \
-  -f lib/sidecar/Dockerfile \
-  -t <your-registry>/dynamo-sidecar:1.3.0 --push .
-```
+Follow [Build the image](../README.md#build-the-image) and push the result to
+a registry your cluster can pull from. This deployment selects
+`dynamo-vllm-sidecar`.
 
 ### 2. Point the manifest at your image
 
@@ -194,8 +189,8 @@ must reach `2/2 Running`. Apply it the same way and call the frontend as above.
 
 ## Packaging
 
-There is no published unified sidecar image yet. The quick start above builds
-`dynamo-sidecar` from `lib/sidecar/Dockerfile`. The same image contains the
-vLLM, SGLang, and TensorRT-LLM executables; each deployment selects the matching
+There is no published unified sidecar image yet. See
+[Build the image](../README.md#build-the-image). The image contains the vLLM,
+SGLang, and TensorRT-LLM executables; each deployment selects the matching
 executable with its container command. Official packaging is deferred to a
 follow-up change.

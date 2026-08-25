@@ -21,9 +21,9 @@ cargo build --release -p dynamo-sglang-sidecar
     --sglang-endpoint http://127.0.0.1:30001
 ```
 
-There is no published image yet; the "Deploy on Kubernetes" section below
-builds the unified sidecar image from `lib/sidecar/Dockerfile`. Official
-packaging is deferred to a follow-up.
+There is no published image yet; see
+[Build the image](../README.md#build-the-image) for the unified sidecar image.
+Official packaging is deferred to a follow-up.
 
 Use `SGLANG_GRPC_ENDPOINT` instead of `--sglang-endpoint` when the endpoint is provided through the environment.
 
@@ -78,14 +78,9 @@ executables; this deployment selects `dynamo-sglang-sidecar`.
 
 ### 1. Build and push the sidecar image
 
-Build a multi-arch image so it runs on any node — `amd64` (x86) or `arm64`
-(GB200/Grace):
-
-```bash
-docker buildx build --platform linux/amd64,linux/arm64 \
-  -f lib/sidecar/Dockerfile \
-  -t <your-registry>/dynamo-sidecar:1.3.0 --push .
-```
+Follow [Build the image](../README.md#build-the-image) and push the result to
+a registry your cluster can pull from. This deployment selects
+`dynamo-sglang-sidecar`.
 
 ### 2. Point the manifest at your image
 

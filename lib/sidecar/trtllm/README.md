@@ -75,17 +75,9 @@ engine-specific sidecar executables; this deployment selects
 
 ### 1. Build and push the sidecar image
 
-Build a multi-arch image so it runs on any node — `amd64` (x86) or `arm64`
-(GB200/Grace):
-
-```bash
-docker buildx build --platform linux/amd64,linux/arm64 \
-  -f lib/sidecar/Dockerfile \
-  -t <your-registry>/dynamo-sidecar:1.3.0 --push .
-```
-
-To build faster for one arch, pass just that platform (e.g. `linux/arm64` for
-GB200/Grace).
+Follow [Build the image](../README.md#build-the-image) and push the result to
+a registry your cluster can pull from. This deployment selects
+`dynamo-trtllm-sidecar`.
 
 ### 2. Point the manifest at your image
 
@@ -150,5 +142,5 @@ all the gain.
 
 There is no published unified sidecar image yet. The image contains the vLLM,
 SGLang, and TensorRT-LLM executables and uses a minimal CPU-only base. Until
-official packaging is available, build and push `dynamo-sidecar` from
-`lib/sidecar/Dockerfile` as shown above.
+official packaging is available, build and push `dynamo-sidecar` as described in
+[Build the image](../README.md#build-the-image).

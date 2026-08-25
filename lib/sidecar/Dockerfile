@@ -25,12 +25,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /src
 COPY . .
 
-# Release linking is memory intensive. Limit Cargo to one rustc process so the
-# three binaries are linked serially instead of exhausting smaller builders.
-RUN cargo build --release --locked --jobs 1 \
-        -p dynamo-vllm-sidecar \
-        -p dynamo-sglang-sidecar \
-        -p dynamo-trtllm-sidecar \
+# Release linking is memory intensive: every sidecar links the same large
+# dependency graph under `lto = "thin"` and `codegen-units = 1`. Build the three
+# targets in sequence so only one link runs at a time on smaller builders, while
+# shared dependencies still compile in parallel during the first invocation.
+# Building each package on its own also matches what `cargo build -p <crate>`
+# produces locally: a single invocation would unify Cargo features across all
+# three, so a feature added to one sidecar would silently reach the other two.
+#
+# There is no dependency-cache layer, so a source change recompiles the
+# dependencies — acceptable for this occasional image build.
+RUN cargo build --release --locked -p dynamo-vllm-sidecar \
+    && cargo build --release --locked -p dynamo-sglang-sidecar \
+    && cargo build --release --locked -p dynamo-trtllm-sidecar \
     && strip \
         target/release/dynamo-vllm-sidecar \
         target/release/dynamo-sglang-sidecar \
@@ -41,7 +48,8 @@ FROM debian:bookworm-slim AS runtime
 
 # ca-certificates supports tokenizer downloads and TLS connections to Dynamo
 # services. TLS crypto is statically linked, so no engine or GPU libraries are
-# needed in this image.
+# needed in this image. The sidecar user is created with a home directory
+# because the Hugging Face tokenizer cache lives there.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
@@ -53,7 +61,10 @@ COPY --from=builder \
     /src/target/release/dynamo-trtllm-sidecar \
     /usr/local/bin/
 
+# Numeric UID so Kubernetes runAsNonRoot can verify it.
 USER 1000
+
+# Dynamo system endpoints (/live, /health) — the operator sets DYN_SYSTEM_PORT=9090.
 EXPOSE 9090
 
 # Intentionally no ENTRYPOINT. Kubernetes deployments select one of the three
