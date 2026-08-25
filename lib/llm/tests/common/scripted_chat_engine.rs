@@ -13,7 +13,8 @@ use dynamo_llm::protocols::{
     },
 };
 use dynamo_runtime::pipeline::{
-    AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn, async_trait,
+    AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
+    async_trait,
 };
 use tokio::sync::{Mutex, Semaphore};
 
@@ -25,6 +26,16 @@ enum QueuedScript {
         chunks: Script,
         split_at: usize,
         release: std::sync::Arc<Semaphore>,
+    },
+    /// Yields `chunk` forever without ever awaiting, so `next()` is *always*
+    /// immediately ready. Models a backend fast enough to keep the frontend's
+    /// select loop permanently fed.
+    ///
+    /// Boxed: the response type is far larger than the other variants' payloads,
+    /// and an inline copy would bloat every `QueuedScript` (clippy
+    /// `large_enum_variant`).
+    Endless {
+        chunk: Box<NvCreateChatCompletionStreamResponse>,
     },
 }
 
@@ -42,6 +53,7 @@ impl ScriptGate {
 pub struct ScriptedChatEngine {
     scripts: Mutex<VecDeque<QueuedScript>>,
     requests: Mutex<Vec<NvCreateChatCompletionRequest>>,
+    contexts: Mutex<Vec<std::sync::Arc<dyn AsyncEngineContext>>>,
 }
 
 impl ScriptedChatEngine {
@@ -49,6 +61,7 @@ impl ScriptedChatEngine {
         Self {
             scripts: Mutex::new(scripts.into_iter().map(QueuedScript::Immediate).collect()),
             requests: Mutex::new(Vec::new()),
+            contexts: Mutex::new(Vec::new()),
         }
     }
 
@@ -66,9 +79,27 @@ impl ScriptedChatEngine {
                     release: release.clone(),
                 }])),
                 requests: Mutex::new(Vec::new()),
+                contexts: Mutex::new(Vec::new()),
             },
             ScriptGate { release },
         )
+    }
+
+    /// An engine whose stream is *always* immediately ready: it repeats `chunk`
+    /// forever and never awaits. Used to prove the frontend cannot be starved out
+    /// of enforcing its wall-clock deadline by a backend that never stops
+    /// producing.
+    // This module is shared by several test binaries; only the Anthropic one
+    // exercises deadline starvation.
+    #[allow(dead_code)]
+    pub fn with_endless_repeat(chunk: NvCreateChatCompletionStreamResponse) -> Self {
+        Self {
+            scripts: Mutex::new(VecDeque::from([QueuedScript::Endless {
+                chunk: Box::new(chunk),
+            }])),
+            requests: Mutex::new(Vec::new()),
+            contexts: Mutex::new(Vec::new()),
+        }
     }
 
     /// Remove and return all requests observed so far, in arrival order.
@@ -78,6 +109,21 @@ impl ScriptedChatEngine {
 
     pub async fn remaining_scripts(&self) -> usize {
         self.scripts.lock().await.len()
+    }
+
+    /// Whether the most recent request's backend context has been stopped, i.e.
+    /// `stop_generating()` (or `kill()`/`stop()`) was called on it. Lets a test
+    /// confirm that a frontend-side truncation actually signals the backend to
+    /// stop producing tokens, not just that the client-visible SSE looks right.
+    // This module is shared by several test binaries; not all of them assert on
+    // backend cancellation.
+    #[allow(dead_code)]
+    pub async fn last_context_stopped(&self) -> bool {
+        self.contexts
+            .lock()
+            .await
+            .last()
+            .is_some_and(|ctx| ctx.is_stopped())
     }
 }
 
@@ -97,6 +143,7 @@ impl
         let ctx = context.context();
 
         self.requests.lock().await.push(request);
+        self.contexts.lock().await.push(ctx.clone());
         let script = self
             .scripts
             .lock()
@@ -127,6 +174,15 @@ impl
                     permit.forget();
                     for chunk in chunks {
                         yield Annotated::from_data(chunk);
+                    }
+                }
+                QueuedScript::Endless { chunk } => {
+                    // No `.await` anywhere in this arm: every poll resolves
+                    // immediately, so a `biased` select that polls this stream
+                    // first will never reach a later arm unless the consumer
+                    // explicitly checks it.
+                    loop {
+                        yield Annotated::from_data(chunk.as_ref().clone());
                     }
                 }
             }

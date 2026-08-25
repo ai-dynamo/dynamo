@@ -53,6 +53,15 @@ impl HarnessService {
         (Self::start_with_engine(Arc::new(engine)).await, gate)
     }
 
+    /// Backend that never stops producing and never awaits — see
+    /// [`ScriptedChatEngine::with_endless_repeat`].
+    #[allow(dead_code)]
+    pub async fn start_endless(
+        chunk: dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
+    ) -> Self {
+        Self::start_with_engine(Arc::new(ScriptedChatEngine::with_endless_repeat(chunk))).await
+    }
+
     async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()
