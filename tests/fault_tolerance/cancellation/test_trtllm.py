@@ -12,7 +12,6 @@ Test Execution Times (Last Run: 2025-12-13):
 
 import logging
 import os
-import shutil
 import time
 
 import pytest
@@ -31,6 +30,9 @@ from tests.utils.payloads import check_health_generate, check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
 
 logger = logging.getLogger(__name__)
+
+REQUEST_PHASE_TIMEOUT_MS = 30_000
+CANCELLATION_TIMEOUT_MS = 30_000
 
 pytestmark = [
     pytest.mark.fault_tolerance,
@@ -60,10 +62,9 @@ class DynamoWorkerProcess(ManagedProcess):
             frontend_port: Port for the frontend server
             mode: One of "agg", "prefill", "decode"
         """
-        # Allocate system port for this worker
-        system_port = allocate_port(DynamoPortRange.SERVE.value)
-        request.addfinalizer(lambda port=system_port: deallocate_port(port))
-        self.system_port = system_port
+        # Register cleanup before process startup so failed workers release their port.
+        self.system_port = allocate_port(DynamoPortRange.SERVE.value)
+        request.addfinalizer(self._release_worker_port)
         self.frontend_port = frontend_port
 
         command = [
@@ -80,15 +81,20 @@ class DynamoWorkerProcess(ManagedProcess):
             "16384",
         ]
         if mode != "agg":
-            with open("test_request_cancellation_trtllm_config.yaml", "w") as f:
-                f.write(
-                    "cache_transceiver_config:\n  backend: DEFAULT\n  max_tokens_in_buffer: 16384\n"
-                )
-                f.write("disable_overlap_scheduler: true\n")
-                f.write("kv_cache_config:\n  max_tokens: 16384\n")
+            tmp_path = request.getfixturevalue("tmp_path")
+            config_path = tmp_path / f"trtllm_{mode}.yaml"
+            config_path.write_text(
+                "cache_transceiver_config:\n"
+                "  backend: DEFAULT\n"
+                "  max_tokens_in_buffer: 16384\n"
+                "disable_overlap_scheduler: true\n"
+                "kv_cache_config:\n"
+                "  max_tokens: 16384\n",
+                encoding="utf-8",
+            )
             command += [
                 "--extra-engine-args",
-                "test_request_cancellation_trtllm_config.yaml",
+                str(config_path),
             ]
 
         health_check_urls = [
@@ -99,7 +105,7 @@ class DynamoWorkerProcess(ManagedProcess):
         # Set health check based on worker type
         if mode in ["prefill", "decode"]:
             health_check_urls = [
-                (f"http://localhost:{system_port}/health", self.is_ready)
+                (f"http://localhost:{self.system_port}/health", self.is_ready)
             ]
 
         # Set environment variables
@@ -113,18 +119,9 @@ class DynamoWorkerProcess(ManagedProcess):
         # intermittent failures
         env["DYN_HEALTH_CHECK_ENABLED"] = "false"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
-        env["DYN_SYSTEM_PORT"] = str(system_port)
+        env["DYN_SYSTEM_PORT"] = str(self.system_port)
 
-        # Set log directory based on worker type
-        log_dir = f"{request.node.name}_{mode}_worker"
-
-        # Clean up any existing log directory from previous runs
-        try:
-            shutil.rmtree(log_dir)
-            logger.info(f"Cleaned up existing log directory: {log_dir}")
-        except FileNotFoundError:
-            # Directory doesn't exist, which is fine
-            pass
+        log_dir = request.getfixturevalue("tmp_path") / f"{mode}_worker"
 
         super().__init__(
             command=command,
@@ -133,7 +130,7 @@ class DynamoWorkerProcess(ManagedProcess):
             timeout=300,
             display_output=True,
             terminate_all_matching_process_names=False,
-            log_dir=log_dir,
+            log_dir=str(log_dir),
         )
 
         self.mode = mode
@@ -154,15 +151,12 @@ class DynamoWorkerProcess(ManagedProcess):
             )
         return False
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Release allocated port when worker exits."""
-        try:
-            # system_port is always allocated in __init__
-            deallocate_port(self.system_port)
-        except Exception as e:
-            logging.warning(f"Failed to release TRT-LLM worker port: {e}")
-
-        return super().__exit__(exc_type, exc_val, exc_tb)
+    def _release_worker_port(self) -> None:
+        """Release the worker port once, including after partial startup."""
+        if self.system_port is None:
+            return
+        deallocate_port(self.system_port)
+        self.system_port = None
 
 
 @pytest.mark.timeout(135)  # 3x average
@@ -338,6 +332,7 @@ def test_request_cancellation_trtllm_decode_cancel(
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
                     pattern="issued control message control_msg=Kill",
+                    max_wait_ms=CANCELLATION_TIMEOUT_MS,
                 )
 
                 logger.info(
@@ -362,7 +357,6 @@ def test_request_cancellation_trtllm_decode_cancel(
                 )
 
 
-@pytest.mark.skip(reason="TRT-LLM prefill cancellation is disabled due to reliability")
 @pytest.mark.timeout(195)  # 3x average
 def test_request_cancellation_trtllm_prefill_cancel(
     request, runtime_services_dynamic_ports, predownload_models
@@ -413,7 +407,9 @@ def test_request_cancellation_trtllm_prefill_cancel(
                 request_id, prefill_log_offset = poll_for_pattern(
                     process=prefill_worker,
                     pattern="Prefill Request ID: ",
+                    max_wait_ms=REQUEST_PHASE_TIMEOUT_MS,
                     match_type="contains",
+                    cancellable_request=cancellable_req,
                 )
 
                 # Cancel during prefill phase
@@ -425,6 +421,8 @@ def test_request_cancellation_trtllm_prefill_cancel(
                     process=prefill_worker,
                     pattern=f"Aborted Request ID: {request_id}",
                     log_offset=prefill_log_offset,
+                    max_wait_ms=CANCELLATION_TIMEOUT_MS,
+                    cancellable_request=cancellable_req,
                 )
 
                 # Verify frontend log has kill message
@@ -434,21 +432,31 @@ def test_request_cancellation_trtllm_prefill_cancel(
                 )
 
                 # Verify decode worker never received the request
-                pattern = "Request ID: "
-                try:
-                    _, decode_log_offset = poll_for_pattern(
-                        process=decode_worker,
-                        pattern=pattern,
-                        max_wait_ms=10,
-                        match_type="contains",
-                    )
-                    pytest.fail(
-                        "Decode worker received request cancelled during prefill phase"
-                    )
-                except AssertionError as e:
-                    assert str(e).startswith(
-                        f"Failed to find '{pattern}' pattern after 2 iterations "
-                    ), f"Unexpected error: {e}"
+                decode_logs = decode_worker.read_logs()
+                assert f"Decode Request ID: {request_id}" not in decode_logs
+
+                # Verify both workers can process a subsequent request.
+                followup_req = send_cancellable_request(
+                    frontend.frontend_port,
+                    "chat_completion_stream",
+                    max_tokens=16,
+                )
+                followup_id, prefill_log_offset = poll_for_pattern(
+                    process=prefill_worker,
+                    pattern="Prefill Request ID: ",
+                    log_offset=prefill_log_offset,
+                    max_wait_ms=REQUEST_PHASE_TIMEOUT_MS,
+                    match_type="contains",
+                    cancellable_request=followup_req,
+                )
+                _, decode_log_offset = poll_for_pattern(
+                    process=decode_worker,
+                    pattern=f"Decode Request ID: {followup_id}",
+                    log_offset=len(decode_logs),
+                    max_wait_ms=REQUEST_PHASE_TIMEOUT_MS,
+                    cancellable_request=followup_req,
+                )
+                read_streaming_responses(followup_req, expected_count=5)
 
                 logger.info(
                     "Completion request cancellation during prefill phase detected successfully"
@@ -472,7 +480,6 @@ def test_request_cancellation_trtllm_prefill_cancel(
                 )
 
 
-@pytest.mark.skip(reason="Test fails only on CI")
 @pytest.mark.timeout(195)  # 3x average
 def test_request_cancellation_trtllm_kv_transfer_cancel(
     request, runtime_services_dynamic_ports, predownload_models
@@ -522,14 +529,18 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
                 request_id, prefill_log_offset = poll_for_pattern(
                     process=prefill_worker,
                     pattern="Prefill Request ID: ",
+                    max_wait_ms=REQUEST_PHASE_TIMEOUT_MS,
                     match_type="contains",
+                    cancellable_request=cancellable_req,
                 )
 
                 # Poll for decode worker entry signaling start of KV transfer phase
                 _, decode_log_offset = poll_for_pattern(
                     process=decode_worker,
                     pattern=f"Decode Request ID: {request_id}",
+                    max_wait_ms=REQUEST_PHASE_TIMEOUT_MS,
                     poll_interval_ms=2,
+                    cancellable_request=cancellable_req,
                 )
 
                 # Cancel during KV transfer phase in decode worker
@@ -543,12 +554,15 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
                     process=decode_worker,
                     pattern=f"Aborted Request ID: {request_id}",
                     log_offset=decode_log_offset,
+                    max_wait_ms=CANCELLATION_TIMEOUT_MS,
+                    cancellable_request=cancellable_req,
                 )
 
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
                     pattern="issued control message control_msg=Kill",
+                    max_wait_ms=CANCELLATION_TIMEOUT_MS,
                 )
 
                 logger.info(
@@ -556,16 +570,27 @@ def test_request_cancellation_trtllm_kv_transfer_cancel(
                 )
 
                 # Verify the workers are still functional
-                cancellable_req = send_cancellable_request(
-                    frontend.frontend_port, "chat_completion_stream"
+                followup_req = send_cancellable_request(
+                    frontend.frontend_port,
+                    "chat_completion_stream",
+                    max_tokens=16,
+                )
+                followup_id, prefill_log_offset = poll_for_pattern(
+                    process=prefill_worker,
+                    pattern="Prefill Request ID: ",
+                    log_offset=prefill_log_offset,
+                    max_wait_ms=REQUEST_PHASE_TIMEOUT_MS,
+                    match_type="contains",
+                    cancellable_request=followup_req,
                 )
                 _, decode_log_offset = poll_for_pattern(
                     process=decode_worker,
-                    pattern="Decode Request ID: ",
+                    pattern=f"Decode Request ID: {followup_id}",
                     log_offset=decode_log_offset,
-                    match_type="contains",
+                    max_wait_ms=REQUEST_PHASE_TIMEOUT_MS,
+                    cancellable_request=followup_req,
                 )
-                read_streaming_responses(cancellable_req, expected_count=5)
+                read_streaming_responses(followup_req, expected_count=5)
 
                 logger.info(
                     "Workers are functional after cancellation during KV transfer"
