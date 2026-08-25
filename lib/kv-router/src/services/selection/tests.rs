@@ -1965,6 +1965,9 @@ async fn hash_path_validation_returns_bad_request() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
+/// An empty-token `/potential_loads` probe is a pure load query: with no
+/// blocks to hash or match it must return exactly the current `/loads`
+/// snapshot, with no cache-hit credit (#10566).
 #[tokio::test]
 async fn empty_token_potential_loads_equal_current_load_snapshot() {
     let app = app();

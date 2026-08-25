@@ -189,29 +189,35 @@ impl<'a> LookupPipeline<'a> {
         Ok(merge_side_or_warn(self.side, primary_details, sequence).await)
     }
 
+    /// Device-tier match details from the primary indexer, with no lower-tier
+    /// walk and no side-indexer merge. Serves peer routers' `device_only`
+    /// queries through the remote indexer server.
+    ///
+    /// Carries the same empty-sequence short-circuit as `find_matches_by_tier`.
     async fn find_primary_match_details(
         &self,
         sequence: HashInput<'_>,
     ) -> Result<MatchDetails, KvRouterError> {
-        // Same empty-sequence short-circuit as `find_matches_by_tier` below;
-        // this entry point serves peer routers' `device_only` queries.
         if sequence.as_slice().is_empty() {
             return Ok(MatchDetails::new());
         }
         self.primary.find_match_details(sequence).await
     }
 
+    /// Full tiered match for `sequence`: device-tier overlap merged with side
+    /// scores, plus per-tier lower-tier hits.
+    ///
+    /// An empty hash sequence can match nothing, so it is answered here
+    /// instead of paying the primary, lower-tier, and side queries (a full
+    /// network round trip for remote primaries). Empty sequences are routine:
+    /// any prompt shorter than one KV block hashes to zero blocks, as do
+    /// empty-token PotentialLoads probes (#10566). Mirrors the
+    /// `PrimaryLookup::None` arm below.
     async fn find_matches_by_tier(
         &self,
         sequence: HashInput<'_>,
         lower_tier_options: LowerTierQueryOptions,
     ) -> Result<TieredMatchDetails, KvRouterError> {
-        // An empty hash sequence can match nothing, so answer it here instead
-        // of paying the primary, lower-tier, and side queries (a full network
-        // round trip for remote primaries). Empty sequences are routine: any
-        // prompt shorter than one KV block hashes to zero blocks, as do
-        // empty-token PotentialLoads probes (#10566). Mirrors the
-        // `PrimaryLookup::None` arm below.
         if sequence.as_slice().is_empty() {
             return Ok(TieredMatchDetails::default());
         }
@@ -274,11 +280,15 @@ impl<'a> LookupPipeline<'a> {
         }
     }
 
+    /// Tiered match built from the primary indexer only, skipping the
+    /// side-indexer merge. Serves peer routers' tiered queries through the
+    /// remote indexer server.
+    ///
+    /// Carries the same empty-sequence short-circuit as `find_matches_by_tier`.
     async fn find_primary_matches_by_tier(
         &self,
         sequence: HashInput<'_>,
     ) -> Result<TieredMatchDetails, KvRouterError> {
-        // Same empty-sequence short-circuit as `find_matches_by_tier` above.
         if sequence.as_slice().is_empty() {
             return Ok(TieredMatchDetails::default());
         }
