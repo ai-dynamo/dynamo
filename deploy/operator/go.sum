@@ -18,8 +18,8 @@ github.com/NYTimes/gziphandler v1.1.1 h1:ZUDjpQae29j0ryrS0u/B8HZfJBtBQHjqw2rQ2cq
 github.com/NYTimes/gziphandler v1.1.1/go.mod h1:n/CVRwUEOgIxrgPvAQhUUr9oeUtvrhMomdKFjzJNB0c=
 github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.12-rc1 h1:rhi1HzLU68RO573k0bQHkTc+o293Ij2sVYmNPoc1d2s=
 github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.12-rc1/go.mod h1:aebLeDCrknulT10/uDj2G1i9K2MEIfVAa25bzrvWxsQ=
-github.com/ai-dynamo/snapshot/api v0.1.0-alpha.1.0.20260824192239-2e78da31ab00 h1:J6oBsyxHqtX0uKw7OUotnV+bfdRn8LiinO3OqDlC1s8=
-github.com/ai-dynamo/snapshot/api v0.1.0-alpha.1.0.20260824192239-2e78da31ab00/go.mod h1:LPkn788YGMGlWN1hm1M3Jm82WVY6tUWpRfmE+8seA04=
+github.com/ai-dynamo/snapshot/api v0.1.0-alpha.1.0.20260824192234-273cc46a3415 h1:emdPrRuxcEeLEeeDiBJ3jeDZu7kFxmgCMQxJjWG8IX0=
+github.com/ai-dynamo/snapshot/api v0.1.0-alpha.1.0.20260824192234-273cc46a3415/go.mod h1:LPkn788YGMGlWN1hm1M3Jm82WVY6tUWpRfmE+8seA04=
 github.com/antlr4-go/antlr/v4 v4.13.0 h1:lxCg3LAv+EUK6t1i0y1V6/SLeUi0eKEKdhQAlS8TVTI=
 github.com/antlr4-go/antlr/v4 v4.13.0/go.mod h1:pfChB/xh/Unjila75QW7+VU4TSnWnnk9UTnmpPaOR2g=
 github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5 h1:0CwZNZbxp69SHPdPJAN/hZIm0C4OItdklCFmMRWYpio=

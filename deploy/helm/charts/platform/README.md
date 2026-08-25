@@ -150,7 +150,7 @@ Kubernetes: `>=1.30.0-0`
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
 | oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.12-rc1 |
-| oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.1.0-alpha.1 |
+| oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.0.0-g273cc46a |
 | oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.13.4 |
 
 ## Values

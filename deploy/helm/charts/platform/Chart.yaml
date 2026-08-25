@@ -46,8 +46,8 @@ dependencies:
     repository: oci://ghcr.io/ai-dynamo/grove
     condition: global.grove.install
   - name: snapshot
-    # Dev build from snapshot branch RUN-39806-snapshotjob-e2e-docs (28a7d5ad);
+    # Dev build from snapshot main (273cc46a);
     # revert to a release tag before merging.
-    version: 0.0.0-g28a7d5ad
+    version: 0.0.0-g273cc46a
     repository: oci://ghcr.io/ai-dynamo/snapshot
     condition: global.snapshot.install
