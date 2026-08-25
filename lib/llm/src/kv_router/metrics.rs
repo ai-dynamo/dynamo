@@ -64,6 +64,7 @@ use prometheus::{
 
 use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
+use dynamo_kv_router::indexer::ApproximateLruStats;
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
@@ -1003,6 +1004,189 @@ impl RouterRequestMetrics {
         self.overlap_blocks_lost
             .with_label_values(&[worker_type])
             .observe(overlap_blocks_lost);
+    }
+}
+
+/// Process-local observability for the experimental approximate LRU.
+///
+/// NOTE: Gauges are last-router-wins. Approximate primaries are expected to be
+/// singleton/local for now; a distributed deployment first needs explicit cache
+/// synchronization, at which point metric aggregation should be designed with it.
+pub(crate) struct ApproximateLruMetrics {
+    configured_policy: IntGaugeVec,
+    effective_policy: IntGaugeVec,
+    ranks: IntGaugeVec,
+    blocks: IntGaugeVec,
+    leases: IntGauge,
+    mutation_queue_depth: IntGauge,
+    fallback_activations_total: IntCounter,
+    eviction_batches_total: IntCounter,
+    evicted_blocks_total: IntCounter,
+    output_batches_total: IntCounter,
+    messages_per_request: prometheus::Histogram,
+    mutation_wait_seconds: prometheus::Histogram,
+}
+
+static APPROXIMATE_LRU_METRICS: OnceLock<Arc<ApproximateLruMetrics>> = OnceLock::new();
+
+impl ApproximateLruMetrics {
+    pub(crate) fn from_component(component: &Component) -> Arc<Self> {
+        APPROXIMATE_LRU_METRICS
+            .get_or_init(|| {
+                let metrics = component.metrics();
+                let gauge_vec = |name, help, label| {
+                    metrics
+                        .create_intgaugevec(name, help, &[label], &[])
+                        .unwrap_or_else(|error| panic!("failed to create {name}: {error}"))
+                };
+                let counter = |name, help| {
+                    metrics
+                        .create_intcounter(name, help, &[])
+                        .unwrap_or_else(|error| panic!("failed to create {name}: {error}"))
+                };
+                Arc::new(Self {
+                    configured_policy: gauge_vec(
+                        "router_approximate_cache_configured_policy",
+                        "Configured process-local approximate cache policy",
+                        "policy",
+                    ),
+                    effective_policy: gauge_vec(
+                        "router_approximate_cache_effective_policy",
+                        "Effective process-local approximate cache policy",
+                        "policy",
+                    ),
+                    ranks: gauge_vec(
+                        "router_approximate_lru_ranks",
+                        "Approximate index ranks by effective retention policy",
+                        "policy",
+                    ),
+                    blocks: gauge_vec(
+                        "router_approximate_lru_blocks",
+                        "Approximate LRU physical blocks by state",
+                        "state",
+                    ),
+                    leases: metrics
+                        .create_intgauge(
+                            "router_approximate_lru_leases",
+                            "Live approximate LRU request leases",
+                            &[],
+                        )
+                        .expect("failed to create router_approximate_lru_leases"),
+                    mutation_queue_depth: metrics
+                        .create_intgauge(
+                            "router_approximate_lru_mutation_queue_depth",
+                            "Aggregate approximate LRU FIFO depth at command enqueue",
+                            &[],
+                        )
+                        .expect("failed to create approximate LRU queue-depth gauge"),
+                    fallback_activations_total: counter(
+                        "router_approximate_lru_fallback_activations_total",
+                        "Total rank incarnations pinned to TTL because capacity was unavailable",
+                    ),
+                    eviction_batches_total: counter(
+                        "router_approximate_lru_eviction_batches_total",
+                        "Total approximate LRU mutation batches that evicted physical copies",
+                    ),
+                    evicted_blocks_total: counter(
+                        "router_approximate_lru_evicted_blocks_total",
+                        "Total physical block copies evicted by approximate LRU",
+                    ),
+                    output_batches_total: counter(
+                        "router_approximate_lru_output_batches_total",
+                        "Total completed output-block batches sent to approximate LRU",
+                    ),
+                    messages_per_request: metrics
+                        .create_histogram(
+                            "router_approximate_lru_messages_per_request",
+                            "Approximate LRU FIFO messages per request over each observation interval",
+                            &[],
+                            Some(prometheus::linear_buckets(1.0, 1.0, 16).unwrap()),
+                        )
+                        .expect("failed to create approximate LRU messages/request histogram"),
+                    mutation_wait_seconds: metrics
+                        .create_histogram(
+                            "router_approximate_lru_mutation_wait_seconds",
+                            "Mean approximate LRU FIFO wait per command over each observation interval",
+                            &[],
+                            Some(generate_log_buckets(0.000_001, 1.0, 16)),
+                        )
+                        .expect("failed to create approximate LRU mutation wait histogram"),
+                })
+            })
+            .clone()
+    }
+
+    pub(crate) fn set_policies(&self, configured: &str, effective: &str) {
+        for policy in ["ttl", "lru", "disabled"] {
+            self.configured_policy
+                .with_label_values(&[policy])
+                .set(i64::from(policy == configured));
+            self.effective_policy
+                .with_label_values(&[policy])
+                .set(i64::from(policy == effective));
+        }
+    }
+
+    pub(crate) fn observe(&self, current: ApproximateLruStats, previous: &mut ApproximateLruStats) {
+        let gauge = |value: usize| i64::try_from(value).unwrap_or(i64::MAX);
+        self.ranks
+            .with_label_values(&["lru"])
+            .set(gauge(current.ranks));
+        self.ranks
+            .with_label_values(&["ttl_fallback"])
+            .set(gauge(current.fallback_ranks));
+        for (state, value) in [
+            ("resident", current.resident_blocks),
+            ("active", current.active_blocks),
+            ("inactive", current.inactive_blocks),
+            ("private", current.private_blocks),
+            ("overcapacity", current.overcapacity_blocks),
+        ] {
+            self.blocks.with_label_values(&[state]).set(gauge(value));
+        }
+        self.leases.set(gauge(current.leases));
+        self.mutation_queue_depth
+            .set(gauge(current.mutation_queue_depth));
+
+        self.fallback_activations_total.inc_by(
+            current
+                .fallback_activations
+                .saturating_sub(previous.fallback_activations),
+        );
+        self.eviction_batches_total.inc_by(
+            current
+                .eviction_batches
+                .saturating_sub(previous.eviction_batches),
+        );
+        self.evicted_blocks_total.inc_by(
+            current
+                .evicted_blocks
+                .saturating_sub(previous.evicted_blocks),
+        );
+        self.output_batches_total.inc_by(
+            current
+                .output_batches
+                .saturating_sub(previous.output_batches),
+        );
+        let requests = current.requests.saturating_sub(previous.requests);
+        if requests > 0 {
+            let messages = current
+                .request_messages
+                .saturating_sub(previous.request_messages);
+            self.messages_per_request
+                .observe(messages as f64 / requests as f64);
+        }
+        let wait_samples = current
+            .mutation_wait_samples
+            .saturating_sub(previous.mutation_wait_samples);
+        if wait_samples > 0 {
+            let wait_ns = current
+                .mutation_wait_ns
+                .saturating_sub(previous.mutation_wait_ns);
+            self.mutation_wait_seconds
+                .observe(wait_ns as f64 / wait_samples as f64 / 1_000_000_000.0);
+        }
+        *previous = current;
     }
 }
 

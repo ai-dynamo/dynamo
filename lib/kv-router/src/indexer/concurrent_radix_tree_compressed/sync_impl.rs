@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::indexer::AnchorCapableSyncIndexer;
 #[cfg(feature = "bench")]
 use crate::indexer::WorkerObservationState;
+use crate::indexer::{AnchorCapableSyncIndexer, ApproximateLruLane, ApproximateLruTask};
 
 // ============================================================================
 // SyncIndexer implementation for ConcurrentRadixTreeCompressed
@@ -19,6 +19,7 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
     ) -> anyhow::Result<()> {
         let mut lookup = FxHashMap::default();
         let counters = metrics.as_ref().map(|m| m.prebind());
+        let mut approximate_lru = ApproximateLruLane::default();
         #[cfg(feature = "bench")]
         let mut observation = WorkerObservationState::default();
 
@@ -45,6 +46,45 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                         c.inc(kind, result);
                     }
                     let _ = resp.send(applied);
+                }
+                WorkerTask::ApproximateLru(task) => {
+                    approximate_lru.observe_task(&task);
+                    let ApproximateLruTask {
+                        command,
+                        response,
+                        fallback_prune_manager,
+                        ..
+                    } = task;
+                    let result = approximate_lru.apply(command).and_then(|output| {
+                        let crate::indexer::ApproximateLruApplyOutput {
+                            events,
+                            reply,
+                            ttl_update,
+                        } = output;
+                        for event in events {
+                            let kind = EventKind::of(&event.event.data);
+                            let applied = self.apply_event(&mut lookup, event, counters.as_ref());
+                            if let Some(ref counters) = counters {
+                                counters.inc(kind, applied);
+                            }
+                            if applied.is_err() {
+                                return Err(KvRouterError::IndexerDroppedRequest);
+                            }
+                        }
+                        if let Some(update) = ttl_update {
+                            let manager = fallback_prune_manager.as_ref().ok_or_else(|| {
+                                KvRouterError::Unsupported(
+                                    "approximate LRU TTL fallback requires a prune manager"
+                                        .to_string(),
+                                )
+                            })?;
+                            update.apply(manager);
+                        }
+                        Ok(reply)
+                    });
+                    if let Some(response) = response {
+                        let _ = response.send(result);
+                    }
                 }
                 #[cfg(feature = "bench")]
                 WorkerTask::InstallObservation { writer, resp } => {
@@ -79,6 +119,7 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                     sweep_tree,
                     resp,
                 } => {
+                    approximate_lru.forget_worker(worker_id);
                     self.erase_worker_coverage(
                         &mut lookup,
                         WorkerRemovalTarget::WorkerId(worker_id),
@@ -91,6 +132,7 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                     dp_rank,
                     sweep_tree,
                 } => {
+                    approximate_lru.forget_rank(WorkerWithDpRank::new(worker_id, dp_rank));
                     self.erase_worker_coverage(
                         &mut lookup,
                         WorkerRemovalTarget::DpRank(WorkerWithDpRank::new(worker_id, dp_rank)),

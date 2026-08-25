@@ -1,10 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Refreshes docs/fern/components/events.generated.ts from the public Dynamo
-# Google Calendar and commits it to main. The push is what publishes: main is
-# in fern-docs.yml's `push:` trigger and events.generated.ts sits under
-# `docs/**`, so the existing sync-and-publish job picks the change up.
+# Refreshes both generated views of the public Dynamo Google Calendar and commits
+# them to main in a single commit:
+#
+#   docs/fern/components/events.generated.ts  -- the docs-site calendar grid
+#   README.md, between the EVENTS markers     -- the repo front-door table
+#
+# For the docs site the push is what publishes: main is in fern-docs.yml's
+# `push:` trigger and events.generated.ts sits under `docs/**`, so the existing
+# sync-and-publish job picks the change up. README.md is served by GitHub
+# directly and needs no publish step.
 #
 # This used to be a step inside fern-docs.yml, fired by a `schedule:` trigger on
 # that workflow. Regenerating there meant the refreshed file only ever existed
@@ -12,13 +18,24 @@
 # people read and diff -- silently drifted from what the site served. Committing
 # to main instead keeps one source of truth and gives the calendar a history.
 #
+# The README table used to have a workflow of its own, update-events.yml, which
+# opened a PR with peter-evans/create-pull-request. That could never work: this
+# repo has "Allow GitHub Actions to create and approve pull requests" off, so
+# every scheduled run died on `GitHub Actions is not permitted to create or
+# approve pull requests` and the table sat stale from mid-July into late August.
+# Folding it in here reuses the direct-push path that already works and drops a
+# duplicate ICS fetch running on the same six-hour cron.
+#
 # Direct push requires ruleset bypass: OPS_BOT_PAT authenticates as dynamo-ops,
 # which must stay on @ai-dynamo/autobots (bypass actor on "Required PR Checks").
 # Commits use `git commit -s` so DCO passes when the bypass is exercised.
 #
-# Runs land at most once a day in practice: the generator's only always-moving
-# field is GENERATED_ON, a Pacific date, so the other three runs are no-ops and
-# exit without committing.
+# Most runs are no-ops. The docs-site component's only always-moving field is
+# GENERATED_ON, a Pacific date, so that file changes once a day. README.md
+# changes on that rollover and additionally whenever an event starts or ends,
+# because update-events.js recomputes the upcoming/past split from the current
+# time on every run. Expect roughly one commit a day plus one near each event
+# boundary.
 
 name: Community Events Refresh
 
@@ -59,57 +76,59 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Regenerate events from the public Google Calendar
+      - name: Install pinned generator deps
         run: |
           # Pinned deps from the committed lockfile rather than a floating
           # `npm install` — reproducible and offline-cache-friendly.
           npm ci --prefix .github/scripts/events
-          # generate-events.js lives at .github/scripts/ and `require('node-ical')`s,
-          # so point Node at the events node_modules (npm --prefix installs there).
-          NODE_PATH=.github/scripts/events/node_modules \
-            node .github/scripts/generate-events.js
 
-      - name: Commit and push if the calendar moved
+      - name: Refresh both calendars and push if either moved
         env:
           EVENTS: docs/fern/components/events.generated.ts
+          README: README.md
         run: |
-          if [ -z "$(git status --porcelain -- "$EVENTS")" ]; then
-            echo "No calendar change; nothing to publish."
-            exit 0
-          fi
+          # Both generators live at .github/scripts/ and `require('node-ical')`,
+          # so point Node at the events node_modules (npm --prefix installs
+          # there). update-events.js resolves README.md relative to the cwd,
+          # which is the repo root.
+          regenerate() {
+            export NODE_PATH=.github/scripts/events/node_modules
+            node .github/scripts/generate-events.js
+            node .github/scripts/update-events.js
+          }
 
           # Match auto-dep-upgrade: commit as dynamo-ops (the PAT that pushes).
           git config user.name "dynamo-ops"
           git config user.email "170655669+dynamo-ops@users.noreply.github.com"
 
-          # Keep the generated file aside: the replay below resets the tree to
-          # whatever main has moved to, which would otherwise discard it.
-          generated=$(mktemp)
-          cp "$EVENTS" "$generated"
-
           # Replay onto current main rather than rebasing. main does move under
-          # us -- any docs PR can touch this file, as the PR introducing this
-          # workflow does -- and a rebase conflict would fail the run red on a
-          # six-hour cron. The file is wholly generated and has no meaningful
-          # merge semantics, so taking our copy is always the right resolution.
+          # us -- any docs PR can touch either file -- and a rebase conflict
+          # would fail the run red on a six-hour cron.
+          #
+          # Regenerate after each reset rather than stashing the outputs aside
+          # and copying them back. events.generated.ts is wholly generated, so a
+          # whole-file copy would be safe, but README.md is hand-written around a
+          # generated block: restoring a saved copy of it would silently revert
+          # any other README edit that landed while we were pushing.
           for attempt in 1 2 3; do
             git fetch --depth=1 origin main
             git reset --hard FETCH_HEAD
 
-            cp "$generated" "$EVENTS"
-            if [ -z "$(git status --porcelain -- "$EVENTS")" ]; then
+            regenerate
+
+            if [ -z "$(git status --porcelain -- "$EVENTS" "$README")" ]; then
               echo "Calendar already current on main; nothing to publish."
               exit 0
             fi
 
-            # Only ever stage the generated file. npm ci writes node_modules
+            # Only ever stage the generated files. npm ci writes node_modules
             # into .github/scripts/events/ and a stray `git add -A` would
             # commit it.
-            git add "$EVENTS"
+            git add "$EVENTS" "$README"
             # Separate -m flags: a YAML block scalar would carry its own
             # indentation into the commit body verbatim.
             git commit -s \
-              -m "docs(fern): refresh community events" \
+              -m "docs: refresh community events" \
               -m "Automated refresh from the public Dynamo Google Calendar." \
               -m "Generated by .github/workflows/community-events-refresh.yml."
 

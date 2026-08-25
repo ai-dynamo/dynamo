@@ -341,10 +341,18 @@ impl WorkerSet {
 
     /// Build ParsingOptions from this WorkerSet's card configuration.
     pub fn parsing_options(&self) -> crate::protocols::openai::ParsingOptions {
-        crate::protocols::openai::ParsingOptions::new(
-            self.card.runtime_config.tool_call_parser.clone(),
-            self.card.runtime_config.reasoning_parser.clone(),
-        )
+        crate::protocols::openai::ParsingOptions {
+            structural_tag_mode: self.card.runtime_config.structural_tag_mode,
+            structural_tag_scope: self.card.runtime_config.structural_tag_scope,
+            exclude_tools_when_tool_choice_none: self
+                .card
+                .runtime_config
+                .exclude_tools_when_tool_choice_none,
+            ..crate::protocols::openai::ParsingOptions::new(
+                self.card.runtime_config.tool_call_parser.clone(),
+                self.card.runtime_config.reasoning_parser.clone(),
+            )
+        }
     }
 
     /// Number of active workers in this set, derived from the Client's discovery watcher.
