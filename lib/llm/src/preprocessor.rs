@@ -3298,6 +3298,17 @@ impl OpenAIPreprocessor {
         let uses_tool_call_structural_tag = guided_tool_constraint.uses_structural_tag();
         let defer_reasoning_for_nonempty_content =
             Self::wants_reasoning_as_content_when_empty(request.chat_template_args.as_ref());
+        // Two different streaming paths can release a grammar-constrained tool call
+        // before its payload closes: the unified (v2) adapter below and the jail near
+        // the end of this function. Both must obey the same rollback lever, so
+        // `DYN_ENABLE_GUIDED_TOOL_STREAMING` is read ONCE, here, and the single decision
+        // is handed to whichever path runs. Reading it again at either site would be a
+        // second predicate that can drift; a site with no read at all makes the lever
+        // silently inert for every request routed through it.
+        let guided_tool_streaming = Self::guided_tool_streaming_release(
+            guided_tool_constraint.installs_guided_json(),
+            env_is_falsey(env_llm::DYN_ENABLE_GUIDED_TOOL_STREAMING),
+        );
 
         // Two independent families each own ONE unified parser (ordered reasoning +
         // content + tool calls) that replaces the v1 reasoning stage AND the tool
@@ -3369,6 +3380,7 @@ impl OpenAIPreprocessor {
                     guided_tool_constraint,
                     unified_parser::stream_prefill(family, prompt_injected_reasoning),
                     family,
+                    guided_tool_streaming,
                 ));
             return Ok(Self::apply_unified_response_policies(
                 unified,
@@ -3542,8 +3554,8 @@ impl OpenAIPreprocessor {
         // argument object itself, and a required choice's is an array of
         // `{name, parameters}`. Routing comes from the SHARED constraint predicate, not
         // from `tool_choice`, because a Kimi K3 forced request is indistinguishable
-        // there yet installs no JSON schema at all.
-        let guided = guided_tool_constraint;
+        // there yet installs no JSON schema at all. That predicate is read once at the
+        // top of this function, into `guided_tool_streaming`.
 
         let parser_name = effective_tool_call_parser.as_deref();
         let use_parsers_v2 = tool_parser_v2::enabled()
@@ -3569,16 +3581,13 @@ impl OpenAIPreprocessor {
                 // calls as they arrive instead of buffering to the closing brace. The
                 // jail keeps its own native fallback, so a backend that ignores the
                 // grammar (MiniMax M2 emits XML under `required`) still parses normally.
-                let incremental_release = Self::guided_tool_streaming_release(
-                    guided.installs_guided_json(),
-                    env_is_falsey(env_llm::DYN_ENABLE_GUIDED_TOOL_STREAMING),
-                );
+                // Same request-scoped decision the unified path above was given.
                 Box::pin(Self::apply_tool_calling_jail(
                     effective_tool_call_parser,
                     request.inner.tool_choice.clone(),
                     tool_definitions,
                     uses_tool_call_structural_tag,
-                    incremental_release,
+                    guided_tool_streaming,
                     stream,
                 ))
             } else {
@@ -4075,13 +4084,22 @@ impl OpenAIPreprocessor {
     }
 
     /// Whether a forced tool_choice's installed JSON grammar should release
-    /// jailed calls incrementally, or fall back to buffer-to-completion.
+    /// calls incrementally, or fall back to buffer-to-completion.
+    ///
+    /// The SINGLE owner of that decision, for BOTH streaming paths that can act on
+    /// it: the tool-calling jail (`apply_tool_calling_jail`'s `guided_streaming`)
+    /// and the unified v2 adapter (`unified_parser::apply_stream_with_constraint`'s
+    /// `guided_streaming`, which becomes `StreamBestEffort` vs `RecoverAsText`).
+    /// `postprocessor_parsing_stream_with_constraint` calls this once per request
+    /// and hands the answer to whichever path runs; neither site re-reads the env
+    /// var, because two reads are two predicates that can drift.
     ///
     /// Rollback lever: the grammar-constrained decoding itself lives in the
-    /// published `dynamo-parsers` dependency, not in this repo, so a backend
-    /// that misbehaves under guided decoding in production has no same-release
-    /// fix other than `DYN_ENABLE_GUIDED_TOOL_STREAMING`. On by default; set it
-    /// to a falsy value (`0`/`false`) to fall back to buffer-to-completion.
+    /// published `dynamo-parsers` / `dynamo-parsers-v2` dependencies, not in this
+    /// repo, so a backend that misbehaves under guided decoding in production has
+    /// no same-release fix other than `DYN_ENABLE_GUIDED_TOOL_STREAMING`. On by
+    /// default; set it to a falsy value (`0`/`false`) to fall back to
+    /// buffer-to-completion.
     fn guided_tool_streaming_release(installs_guided_json: bool, rollback_disabled: bool) -> bool {
         installs_guided_json && !rollback_disabled
     }

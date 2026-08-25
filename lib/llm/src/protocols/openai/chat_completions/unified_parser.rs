@@ -393,6 +393,26 @@ fn tool_output_mode(constraint: &GuidedToolConstraint) -> UnifiedToolOutputMode 
     }
 }
 
+/// The malformed-guided-payload contract for one request, selected by the
+/// guided tool-call streaming rollback lever.
+///
+/// Only [`InvalidGuidedPayloadPolicy::StreamBestEffort`] may emit a call before its
+/// payload closes; the other two contracts buffer to completion (see the policy's
+/// own doc table). So this IS the streaming decision on the unified path, the same
+/// way `guided_streaming` is on the jail path — the caller passes down one already-
+/// made decision rather than re-deriving it here.
+///
+/// Rolling back picks `RecoverAsText`, not `Reject`: the lever exists to stop early
+/// emission, not to convert a malformed payload from recovered text into a typed
+/// error, which would be a second, louder behaviour change riding along with it.
+fn invalid_guided_payload_policy(guided_streaming: bool) -> InvalidGuidedPayloadPolicy {
+    if guided_streaming {
+        InvalidGuidedPayloadPolicy::StreamBestEffort
+    } else {
+        InvalidGuidedPayloadPolicy::RecoverAsText
+    }
+}
+
 /// Select the complete-output grammar from the bytes that actually arrived.
 ///
 /// A remote frontend can reconstruct a forced request as guided JSON without seeing
@@ -488,6 +508,7 @@ impl ChoiceState {
         tools: &[Tool],
         prefill: UnifiedParserStartingState,
         tool_output_mode: UnifiedToolOutputMode,
+        guided_streaming: bool,
     ) -> anyhow::Result<Self> {
         let mut parser = create_unified_parser_for_family(family, tools)?;
         // `prompt_token_ids` stays empty: this path establishes the starting state from
@@ -496,12 +517,17 @@ impl ChoiceState {
         //
         // Streaming guided calls commit per call once the name and argument object opener
         // are unambiguous. A committed fragment cannot later be rejected or recovered as
-        // text, so this path opts into that contract explicitly.
+        // text, so this path opts into that contract explicitly — unless the request
+        // rolled guided tool streaming back, in which case it buffers to completion.
+        // `guided_streaming` is decided once per request by
+        // `OpenAIPreprocessor::guided_tool_streaming_release` and threaded down here;
+        // it is inert in `UnifiedToolOutputMode::Native`, where the parser builds no
+        // guided state at all.
         parser.initialize_request(UnifiedParserInit {
             prompt_token_ids: Vec::new(),
             starting_state: prefill,
             tool_output_mode,
-            invalid_guided_payload: InvalidGuidedPayloadPolicy::StreamBestEffort,
+            invalid_guided_payload: invalid_guided_payload_policy(guided_streaming),
         })?;
         Ok(Self {
             family: family.to_string(),
@@ -963,15 +989,25 @@ where
         guided_tool_constraint,
         prefill,
         family,
+        // Streaming released, matching the production default when the rollback lever
+        // is unset. Tests that exercise the rolled-back contract call
+        // `apply_stream_with_constraint` directly with `false`.
+        true,
     )
 }
 
+/// `guided_streaming` is the request's already-made guided tool-call streaming
+/// decision (`OpenAIPreprocessor::guided_tool_streaming_release`), not a second
+/// derivation of it: `true` releases each call as soon as its name and argument
+/// object opener are unambiguous, `false` buffers every call to completion. It is
+/// inert unless `guided_tool_constraint` installed guided JSON.
 pub(crate) fn apply_stream_with_constraint<S>(
     stream_in: S,
     tool_definitions: Option<Vec<ToolDefinition>>,
     guided_tool_constraint: GuidedToolConstraint,
     prefill: UnifiedParserStartingState,
     family: &'static str,
+    guided_streaming: bool,
 ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
 where
     S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
@@ -1115,7 +1151,7 @@ where
                         } else {
                             prefill
                         };
-                        match ChoiceState::new(family, &tools, choice_prefill, mode) {
+                        match ChoiceState::new(family, &tools, choice_prefill, mode, guided_streaming) {
                             Ok(mut state) => {
                                 // A raw run resuming after an already-parsed detour
                                 // gets a brand-new parser instance; seed it with any
@@ -1658,6 +1694,7 @@ mod tests {
             &[],
             UnifiedParserStartingState::None,
             UnifiedToolOutputMode::Native,
+            true,
         )
         .expect("qwen3 unified parser")
     }
@@ -2118,6 +2155,99 @@ mod tests {
                 .as_ref()
                 .and_then(|function| function.name.as_deref()),
             Some("get_weather")
+        );
+    }
+
+    /// Drive one guided-`required` stream whose payload closes only in the LAST
+    /// upstream chunk, and report how many emitted responses carried a tool-call
+    /// delta plus the assembled logical events.
+    ///
+    /// Anything counted above one is an argument fragment that went out before the
+    /// payload closed, which is exactly the difference the guided tool-call
+    /// streaming rollback lever is supposed to make. Nothing here touches process
+    /// env, so it is safe under the default parallel test runner.
+    async fn guided_required_tool_chunk_count(
+        guided_streaming: bool,
+    ) -> (usize, Vec<LogicalEvent>) {
+        let head = r#"reason</think>[{"name":"get_weather","arguments":{"city":"Tok"#;
+        let tail = r#"yo"}}]"#;
+        let responses = apply_stream_with_constraint(
+            stream::iter([chunk(head, false), chunk(tail, true)]),
+            Some(weather_tools()),
+            GuidedToolConstraint::GuidedJsonRequired,
+            UnifiedParserStartingState::Reasoning,
+            QWEN3_UNIFIED_FAMILY,
+            guided_streaming,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let tool_chunks = responses
+            .iter()
+            .filter(|response| {
+                response.data.as_ref().is_some_and(|data| {
+                    data.inner.choices.iter().any(|choice| {
+                        choice
+                            .delta
+                            .tool_calls
+                            .as_ref()
+                            .is_some_and(|calls| !calls.is_empty())
+                    })
+                })
+            })
+            .count();
+        (tool_chunks, logical_events(&responses))
+    }
+
+    #[tokio::test]
+    async fn guided_streaming_rollback_buffers_the_call_to_completion() {
+        let expected_call = LogicalEvent::Tool {
+            index: 0,
+            name: Some("get_weather".to_string()),
+            arguments: r#"{"city":"Tokyo"}"#.to_string(),
+        };
+
+        // Released (production default when DYN_ENABLE_GUIDED_TOOL_STREAMING is unset):
+        // the call goes out in pieces as the argument object streams in.
+        let (released_chunks, released_events) = guided_required_tool_chunk_count(true).await;
+        assert!(
+            released_chunks > 1,
+            "guided streaming must emit argument fragments before the payload closes, \
+             got {released_chunks} tool-call chunk(s)"
+        );
+
+        // Rolled back (DYN_ENABLE_GUIDED_TOOL_STREAMING=0): nothing may go out until the
+        // payload closes, so the whole call arrives as one chunk.
+        let (rolled_back_chunks, rolled_back_events) =
+            guided_required_tool_chunk_count(false).await;
+        assert_eq!(
+            rolled_back_chunks, 1,
+            "DYN_ENABLE_GUIDED_TOOL_STREAMING=0 must buffer the guided call to completion \
+             on the unified path, but {rolled_back_chunks} tool-call chunk(s) went out"
+        );
+
+        // The lever changes WHEN the call is emitted, never WHAT is emitted.
+        assert!(
+            released_events.contains(&expected_call),
+            "released events lost the call: {released_events:?}"
+        );
+        assert!(
+            rolled_back_events.contains(&expected_call),
+            "rolled-back events lost the call: {rolled_back_events:?}"
+        );
+    }
+
+    #[test]
+    fn only_stream_best_effort_may_emit_before_the_payload_closes() {
+        // The two buffering contracts are interchangeable for WHEN, but not for WHAT a
+        // malformed payload becomes, so the rollback must pick `RecoverAsText` (text)
+        // and not `Reject` (typed error).
+        assert_eq!(
+            invalid_guided_payload_policy(true),
+            InvalidGuidedPayloadPolicy::StreamBestEffort
+        );
+        assert_eq!(
+            invalid_guided_payload_policy(false),
+            InvalidGuidedPayloadPolicy::RecoverAsText
         );
     }
 
