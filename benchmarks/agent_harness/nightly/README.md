@@ -26,20 +26,21 @@ the native Claude/Codex logs, trajectories, patches, and verifier results.
   `agent-nightly`. Codex removes provider prefixes from model names, so the
   shared alias keeps Claude and Codex on the same advertised model.
 - Keep a reviewed five-task SWE-bench Pro set in a task-ID file. Cache those
-  exact task images on the Docker host before the measured run. The committed
-  `task_ids.txt` is the initial cross-project set covering NodeBB, qutebrowser,
-  Flipt, Tutanota, and Open Library; the runner uses Harbor's `--no-delete`
-  mode so those images stay warm.
+  exact task images in the Harbor Docker service before the measured run. The
+  committed `task_ids.txt` is the initial cross-project set covering NodeBB,
+  qutebrowser, Flipt, Tutanota, and Open Library; the runner uses Harbor's
+  `--no-delete` mode so those images stay warm.
 - Enable Dynamo request tracing with a JSONL sink and preserve both the trace
   and Harbor job directory as CI artifacts.
 - Run the two harnesses sequentially against the warm model. Run task
   containers with low concurrency initially; increase it only after the signal
   is stable.
 
-The job runs directly on the Docker-capable
-`aws-dev-02-tester-amd-gpu-v2` host so Harbor can create sibling task
-containers. It intentionally does not use the existing shared H100 workflow,
-which runs its steps inside a runtime job container.
+The job runs in the approved SGLang runtime job container on
+`aws-dev-02-tester-amd-gpu-v2`. Dynamo owns the job container's two H100s,
+while a CPU-only Docker-in-Docker service creates Harbor's sibling task
+containers. Manual canaries set the nightly workflow's `agent_harness_only`
+input to skip the standard vLLM, SGLang, and TensorRT-LLM H100 jobs.
 
 ## Model matrix
 
