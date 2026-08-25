@@ -73,11 +73,15 @@ mkdir -p "$OUTPUT_DIR"
 export DYN_NVTX=1
 
 # nvtx_utils imports the nvtx package eagerly once the switch is on, so a Python
-# target dies at startup without it. Warned rather than fatal: this script also
-# profiles pure-Rust binaries, which need nothing from Python.
+# target dies at startup without it. Warned rather than fatal, and checked against
+# `python3` rather than the target: BINARY is arbitrary here — it may be a Rust
+# binary that needs nothing from Python, or a launcher whose interpreter this
+# script cannot know. Treat the warning as a prompt to check the environment the
+# target actually runs in.
 if ! python3 -c "import nvtx" 2>/dev/null; then
-    echo "WARNING: the nvtx package is not installed. DYN_NVTX=1 is exported above, so a"
-    echo "         Python target will raise ImportError at startup."
+    echo "WARNING: the nvtx package is not importable from python3. DYN_NVTX=1 is exported"
+    echo "         above, so a Python target will raise ImportError at startup — verify the"
+    echo "         interpreter '$BINARY' runs under."
     echo "         Install: pip install 'ai-dynamo[profiling]'"
 fi
 
