@@ -37,6 +37,8 @@ class RemoteStageInvoker(Protocol):
         contract: StageContract,
         inputs: Mapping[str, Any],
         context: StageContext,
+        *,
+        request_context: Any = None,
     ) -> Mapping[str, Any]:
         ...
 
@@ -164,6 +166,8 @@ class StageDispatcher:
         stage_id: str,
         inputs: Mapping[str, Any],
         context: StageContext,
+        *,
+        request_context: Any = None,
     ) -> dict[str, Any]:
         """Invoke one stage and validate its complete input/output contract."""
 
@@ -182,7 +186,11 @@ class StageDispatcher:
             result = await binding.runner.run(frozen_inputs, context)
         else:
             result = await self._remote_clients[binding.endpoint_id].run(
-                stage_id, contract, frozen_inputs, context
+                stage_id,
+                contract,
+                frozen_inputs,
+                context,
+                request_context=request_context,
             )
         if not isinstance(result, Mapping):
             raise WorkflowExecutionError(
