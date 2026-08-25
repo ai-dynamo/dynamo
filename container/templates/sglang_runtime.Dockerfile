@@ -14,9 +14,6 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
 
 ARG MODELEXPRESS_VERSION
-{% if device == "cuda" %}
-ARG NIXL_REF
-{% endif %}
 
 WORKDIR /workspace
 
@@ -107,16 +104,6 @@ RUN pip install --no-deps \
         /opt/dynamo/wheelhouse/nixl/nixl*.whl \
         "distro==1.9.0"
 {% else %}
-# SGLang's runtime image installs NIXL without a version constraint. Reinstall
-# Dynamo's selected version so an upstream image rebuild cannot silently change
-# the NIXL Python/C++ ABI underneath the compatibility layer.
-RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
-    export PIP_CACHE_DIR=/root/.cache/pip && \
-    NIXL_VERSION="${NIXL_REF#v}" && \
-    pip install --break-system-packages --force-reinstall --no-deps \
-        "nixl==${NIXL_VERSION}" \
-        "nixl-cu13==${NIXL_VERSION}"
-
 RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps \
