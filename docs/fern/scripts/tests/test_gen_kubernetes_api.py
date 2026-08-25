@@ -37,10 +37,11 @@ TARGET_MDX = K8S_DIR / "full-api-reference.mdx"
 # it and defeat the comparison against the unescaped source.
 _DEV_URL_RE = re.compile(r"[^\s<>()\[\]&\"']*/dynamo/dev/[^\s<>()\[\]&,;\"']*")
 
-# Content baseline pinned by the plan.
+# Content baseline pinned by the generated API surface.
 EXPECTED_PACKAGES = (
     "nvidia.com/v1alpha1",
     "nvidia.com/v1beta1",
+    "nvidia.com/v1beta2",
     "operator.config.dynamo.nvidia.com/v1alpha1",
 )
 EXPECTED_TYPE_COUNTS = {
@@ -50,6 +51,7 @@ EXPECTED_TYPE_COUNTS = {
     # owned by github.com/ai-dynamo/snapshot.
     "nvidia.com/v1alpha1": 75,
     "nvidia.com/v1beta1": 68,
+    "nvidia.com/v1beta2": 38,
     "operator.config.dynamo.nvidia.com/v1alpha1": 32,
 }
 EXPECTED_OPERATOR_DEFAULT_SECTIONS = (
@@ -110,11 +112,11 @@ def workspace(tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def test_reference_lists_the_three_agreed_packages(
+def test_reference_lists_the_agreed_packages(
     reference: kubernetes_api_discovery.KubernetesReference,
 ) -> None:
-    """The upstream Markdown carries exactly three CRD/config API packages;
-    the parser must surface each of them so the compact index has three
+    """The upstream Markdown carries the agreed CRD/config API packages;
+    the parser must surface each of them so the compact index has four
     filterable groups."""
     assert tuple(pkg.name for pkg in reference.packages) == EXPECTED_PACKAGES
 

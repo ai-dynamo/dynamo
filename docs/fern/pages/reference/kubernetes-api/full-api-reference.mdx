@@ -10,11 +10,12 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 175 typed CRD and config sections.
+Dynamo publishes 4 Kubernetes API packages with 213 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">75 types</Card>
 <Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">68 types</Card>
+<Card title="nvidia.com/v1beta2" href="#nvidia-com-v1beta2">38 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">32 types</Card>
 </CardGroup>
 
@@ -4222,6 +4223,885 @@ Concurrency is the target concurrency level. Mutually exclusive with the request
 
 <ParamField path="requestRate" type="float">
 RequestRate is the target request rate (req/s). Mutually exclusive with the concurrency field. When both fields are omitted and the planner is disabled, the profiler uses its default maximum-throughput selection.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<div id="nvidia-com-v1beta2" />
+
+## nvidia.com/v1beta2
+
+Package v1beta2 contains API Schema definitions for the nvidia.com v1beta2 API group.
+
+**Resource Types**
+
+<CardGroup cols={3}>
+<Card title="DynamoGraphDeploymentCandidate" href="#dynamographdeploymentcandidate" />
+<Card title="DynamoGraphDeploymentRequest" href="#v1beta2-v1beta1-dynamographdeploymentrequest" />
+<Card title="DynamoGraphDeploymentRun" href="#dynamographdeploymentrun" />
+</CardGroup>
+
+<Accordion id="backend" title="Backend">
+Backend identifies an inference backend searched by Sweeper and used by generated candidates.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [vllm sglang trtllm]
+**Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta2-v1beta1-dynamographdeploymentrequestspec)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>vllm</Badge>
+- <Badge intent="note" minimal>sglang</Badge>
+- <Badge intent="note" minimal>trtllm</Badge>
+</Accordion>
+
+<Accordion id="branchprogress" title="BranchProgress">
+BranchProgress reports progress for one resolved deployment-mode branch.
+
+
+**Kind:** `type`
+**Appears in:** [DGDRRunProgress](#dgdrrunprogress)
+
+<ParamField path="name" type="string">
+</ParamField>
+
+<ParamField path="rounds" type="RoundProgress">
+See [RoundProgress](#roundprogress).
+</ParamField>
+</Accordion>
+
+<Accordion id="candidateprogress" title="CandidateProgress">
+CandidateProgress reports bounded Kubernetes publication, not all internal trials.
+
+
+**Kind:** `type`
+**Appears in:** [DGDRRunProgress](#dgdrrunprogress)
+
+<ParamField path="paretoFront" type="integer">
+</ParamField>
+
+<ParamField path="published" type="integer">
+</ParamField>
+</Accordion>
+
+<Accordion id="dgdrrunphase" title="DGDRRunPhase">
+DGDRRunPhase is a concise presentation state. Conditions remain authoritative.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Pending Running Succeeded Failed]
+**Appears in:** [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Pending</Badge>
+- <Badge intent="note" minimal>Running</Badge>
+- <Badge intent="note" minimal>Succeeded</Badge>
+- <Badge intent="note" minimal>Failed</Badge>
+</Accordion>
+
+<Accordion id="dgdrrunprogress" title="DGDRRunProgress">
+DGDRRunProgress contains branch-aware round limits and evaluation outcome counters.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus)
+
+<ParamField path="branches" type="BranchProgress array">
+Branches reports each resolved deployment-mode branch because MaxRounds applies per branch.
+See [BranchProgress](#branchprogress).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="evaluations" type="EvaluationProgress">
+Evaluations reports unique candidate outcomes.
+See [EvaluationProgress](#evaluationprogress).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="candidates" type="CandidateProgress">
+Candidates reports bounded Kubernetes publication.
+See [CandidateProgress](#candidateprogress).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="dgdrrunprovenance" title="DGDRRunProvenance">
+DGDRRunProvenance records execution implementation versions.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus)
+
+<ParamField path="sweeperVersion" type="string">
+</ParamField>
+
+<ParamField path="replayVersion" type="string">
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamographdeploymentcandidate" title="DynamoGraphDeploymentCandidate">
+DynamoGraphDeploymentCandidate is one bounded, user-visible search result.
+Its spec is exactly the v1beta1 DynamoGraphDeploymentSpec schema.
+
+
+**Kind:** `resource`
+
+<ParamField path="apiVersion" type="string">
+`nvidia.com/v1beta2`
+</ParamField>
+
+<ParamField path="kind" type="string">
+`DynamoGraphDeploymentCandidate`
+</ParamField>
+
+<ParamField path="metadata" type="ObjectMeta">
+Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+</ParamField>
+
+<ParamField path="spec" type="DynamoGraphDeploymentSpec">
+</ParamField>
+
+<ParamField path="status" type="DynamoGraphDeploymentCandidateStatus">
+See [DynamoGraphDeploymentCandidateStatus](#dynamographdeploymentcandidatestatus).
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamographdeploymentcandidatestatus" title="DynamoGraphDeploymentCandidateStatus">
+DynamoGraphDeploymentCandidateStatus describes simulation and materialization,
+never deployment health.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentCandidate](#dynamographdeploymentcandidate)
+
+<ParamField path="rank" type="integer">
+Rank is the one-based scalar ordering and is absent for Pareto searches.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="conditions" type="Condition array">
+Conditions describes evaluation and materialization.
+See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="experimental" type="RawExtension">
+Experimental contains Sweeper-version-specific diagnostics and round-trips without a nested CRD schema.
+See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
+**Validation:** Type: object  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="v1beta2-v1beta1-dynamographdeploymentrequest" title="v1beta1 DynamoGraphDeploymentRequest">
+DynamoGraphDeploymentRequest is the Schema for replay-backed deployment searches.
+
+
+**Kind:** `resource`
+
+<ParamField path="apiVersion" type="string">
+`nvidia.com/v1beta2`
+</ParamField>
+
+<ParamField path="kind" type="string">
+`DynamoGraphDeploymentRequest`
+</ParamField>
+
+<ParamField path="metadata" type="ObjectMeta">
+Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+</ParamField>
+
+<ParamField path="spec" type="DynamoGraphDeploymentRequestSpec">
+See [DynamoGraphDeploymentRequestSpec](#v1beta2-v1beta1-dynamographdeploymentrequestspec).
+</ParamField>
+
+<ParamField path="status" type="DynamoGraphDeploymentRequestStatus">
+See [DynamoGraphDeploymentRequestStatus](#v1beta2-v1beta1-dynamographdeploymentrequeststatus).
+</ParamField>
+</Accordion>
+
+<Accordion id="v1beta2-v1beta1-dynamographdeploymentrequestspec" title="v1beta1 DynamoGraphDeploymentRequestSpec">
+DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequest](#v1beta2-v1beta1-dynamographdeploymentrequest)
+
+<ParamField path="modelRef" type="ModelReference">
+ModelRef identifies the model whose deployment configurations are evaluated.
+See [ModelReference](#v1beta2-modelreference).
+</ParamField>
+
+<ParamField path="backends" type="Backend array">
+Backends lists one or more inference backends searched by Sweeper and used by generated candidates.
+See [Backend](#backend).
+**Validation:** Enum: [vllm sglang trtllm]  MinItems: 1
+</ParamField>
+
+<ParamField path="image" type="string">
+Image is the versioned container image used by the controller-generated search Job.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="hardware" type="HardwareSpec">
+Hardware bounds the accelerator configurations evaluated by the search.
+See [HardwareSpec](#v1beta2-hardwarespec).
+</ParamField>
+
+<ParamField path="workload" type="WorkloadSpec">
+Workload defines exactly one traffic model used for every candidate evaluation.
+See [WorkloadSpec](#v1beta2-workloadspec).
+</ParamField>
+
+<ParamField path="objective" type="ObjectiveSpec">
+Objective defines scalar optimization or a multi-objective Pareto search.
+See [ObjectiveSpec](#objectivespec).
+</ParamField>
+
+<ParamField path="search" type="SearchSpec">
+Search configures current Sweeper run control and implementation-owned dimensions.
+See [SearchSpec](#searchspec).
+</ParamField>
+
+<ParamField path="recommendation" type="RecommendationSpec">
+Recommendation controls bounded projection into DGDC resources.
+See [RecommendationSpec](#recommendationspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="rerun" type="RerunSpec">
+Rerun intentionally changes the DGDR spec when search inputs otherwise remain unchanged.
+See [RerunSpec](#rerunspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="overrides" type="OverridesSpec">
+Overrides customizes the generated Job and DGD without changing modeled search semantics.
+See [OverridesSpec](#v1beta2-overridesspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="v1beta2-v1beta1-dynamographdeploymentrequeststatus" title="v1beta1 DynamoGraphDeploymentRequestStatus">
+DynamoGraphDeploymentRequestStatus represents reconciliation of persistent search intent.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequest](#v1beta2-v1beta1-dynamographdeploymentrequest)
+
+<ParamField path="observedGeneration" type="integer">
+ObservedGeneration is the most recent DGDR generation accepted by the controller.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="activeRunRef" type="LocalObjectReference">
+ActiveRunRef identifies the one non-terminal run.
+See [LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="recentRunRefs" type="LocalObjectReference array">
+RecentRunRefs identifies retained terminal runs in newest-first order.
+See [LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="conditions" type="Condition array">
+Conditions reports reconciliation of the persistent request, not run execution outcomes.
+See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamographdeploymentrun" title="DynamoGraphDeploymentRun">
+DynamoGraphDeploymentRun is one immutable accepted DGDR request and its execution status.
+
+
+**Kind:** `resource`
+
+<ParamField path="apiVersion" type="string">
+`nvidia.com/v1beta2`
+</ParamField>
+
+<ParamField path="kind" type="string">
+`DynamoGraphDeploymentRun`
+</ParamField>
+
+<ParamField path="metadata" type="ObjectMeta">
+Refer to Kubernetes API documentation for fields of `metadata`.
+See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
+</ParamField>
+
+<ParamField path="spec" type="DynamoGraphDeploymentRunSpec">
+</ParamField>
+
+<ParamField path="status" type="DynamoGraphDeploymentRunStatus">
+See [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus).
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamographdeploymentrunstatus" title="DynamoGraphDeploymentRunStatus">
+DynamoGraphDeploymentRunStatus represents one search execution's observed state.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRun](#dynamographdeploymentrun)
+
+<ParamField path="phase" type="DGDRRunPhase">
+Phase is a concise presentation state. Conditions remain authoritative.
+See [DGDRRunPhase](#dgdrrunphase).
+**Validation:** Enum: [Pending Running Succeeded Failed]  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="jobRef" type="ResourceReference">
+JobRef identifies the controller-owned Job for this run.
+See [ResourceReference](#resourcereference).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="progress" type="DGDRRunProgress">
+Progress contains branch-aware round limits and evaluation outcome counters.
+See [DGDRRunProgress](#dgdrrunprogress).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="candidateRefs" type="LocalObjectReference array">
+CandidateRefs identifies the current bounded DGDC projection.
+See [LocalObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#localobjectreference-v1-core).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="provenance" type="DGDRRunProvenance">
+Provenance records execution implementations.
+See [DGDRRunProvenance](#dgdrrunprovenance).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="startTime" type="Time">
+StartTime is when execution started.
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="completionTime" type="Time">
+CompletionTime is present only after a terminal outcome.
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="lastProgressTime" type="Time">
+LastProgressTime is the latest progress update or heartbeat.
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="conditions" type="Condition array">
+Conditions contains standard Kubernetes conditions merged by type.
+See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="evaluationprogress" title="EvaluationProgress">
+EvaluationProgress reports unique candidate outcomes without creating one resource per trial.
+
+
+**Kind:** `type`
+**Appears in:** [DGDRRunProgress](#dgdrrunprogress)
+
+<ParamField path="scheduled" type="integer">
+</ParamField>
+
+<ParamField path="running" type="integer">
+</ParamField>
+
+<ParamField path="feasible" type="integer">
+</ParamField>
+
+<ParamField path="infeasible" type="integer">
+</ParamField>
+
+<ParamField path="failed" type="integer">
+</ParamField>
+
+<ParamField path="unsupported" type="integer">
+</ParamField>
+
+<ParamField path="cacheHits" type="integer">
+</ParamField>
+</Accordion>
+
+<Accordion id="gpuhardwarespec" title="GPUHardwareSpec">
+GPUHardwareSpec describes accelerator identity and the maximum allocation per candidate.
+
+
+**Kind:** `type`
+**Appears in:** [HardwareSpec](#v1beta2-hardwarespec)
+
+<ParamField path="sku" type="string">
+SKU identifies the accelerator using the Sweeper hardware catalog name.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="budget" type="integer">
+Budget is the maximum total number of GPUs one candidate may use.
+**Validation:** Minimum: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="v1beta2-hardwarespec" title="HardwareSpec">
+HardwareSpec bounds the accelerator configurations evaluated by the search.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta2-v1beta1-dynamographdeploymentrequestspec)
+
+<ParamField path="gpu" type="GPUHardwareSpec">
+GPU describes accelerator identity and the maximum allocation per candidate.
+See [GPUHardwareSpec](#gpuhardwarespec).
+</ParamField>
+</Accordion>
+
+<Accordion id="kvloadratio" title="KVLoadRatio">
+KVLoadRatio is either a pinned load ratio or a minimum/maximum range.
+The installed Sweeper performs mode-specific validation.
+
+
+**Kind:** `type`
+**Underlying type:** `float array`
+**Validation:** MaxItems: 2; MinItems: 1
+**Appears in:** [StaticWorkloadSpec](#staticworkloadspec)
+</Accordion>
+
+<Accordion id="v1beta2-modelcachespec" title="ModelCacheSpec">
+ModelCacheSpec identifies model weights already available to the search Job
+and generated DGD.
+
+
+**Kind:** `type`
+**Appears in:** [ModelReference](#v1beta2-modelreference)
+
+<ParamField path="pvc" type="ModelPVCSpec">
+PVC mounts model weights from a PersistentVolumeClaim in the DGDR namespace.
+See [ModelPVCSpec](#modelpvcspec).
+</ParamField>
+</Accordion>
+
+<Accordion id="modelpvcspec" title="ModelPVCSpec">
+ModelPVCSpec identifies model weights on a PersistentVolumeClaim in the DGDR namespace.
+
+
+**Kind:** `type`
+**Appears in:** [ModelCacheSpec](#v1beta2-modelcachespec)
+
+<ParamField path="name" type="string">
+Name is the PersistentVolumeClaim containing the model weights.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="modelPath" type="string">
+ModelPath is the model directory relative to the root of the claim.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="mountPath" type="string">
+MountPath is the absolute mount path in generated containers.
+**Validation:** Pattern: `^/`
+</ParamField>
+</Accordion>
+
+<Accordion id="v1beta2-modelreference" title="ModelReference">
+ModelReference identifies the model whose deployment configurations are evaluated.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta2-v1beta1-dynamographdeploymentrequestspec)
+
+<ParamField path="name" type="string">
+Name identifies the model in the syntax accepted by the selected backend.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="revision" type="string">
+Revision pins repository contents. Backends that do not support revisions reject this field.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="remoteCode" type="RemoteCodePolicy" default="Never">
+RemoteCode controls whether generated backend commands may execute model-repository Python code.
+See [RemoteCodePolicy](#remotecodepolicy).
+**Validation:** Enum: [Never TrustCacheAndRevision AlwaysTrust]  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="cache" type="ModelCacheSpec">
+Cache identifies model weights already available to the search Job and generated DGD.
+See [ModelCacheSpec](#v1beta2-modelcachespec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="objectivemetric" title="ObjectiveMetric">
+ObjectiveMetric is a metric optimized by Sweeper.
+
+
+**Kind:** `type`
+**Underlying type:** `string`
+**Validation:** Enum: [throughput throughputPerGpu throughputPerUser e2eLatency goodput goodputPerGpu]
+**Appears in:** [ObjectiveSpec](#objectivespec)
+</Accordion>
+
+<Accordion id="objectivemode" title="ObjectiveMode">
+ObjectiveMode selects scalar optimization or a multi-objective Pareto search.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [optimize pareto]
+**Appears in:** [ObjectiveSpec](#objectivespec)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>optimize</Badge>
+- <Badge intent="note" minimal>pareto</Badge>
+</Accordion>
+
+<Accordion id="objectiveslaspec" title="ObjectiveSLASpec">
+ObjectiveSLASpec defines per-request latency bounds used to calculate goodput.
+
+
+**Kind:** `type`
+**Appears in:** [ObjectiveSpec](#objectivespec)
+
+<ParamField path="ttftMs" type="float">
+TTFTMs is the Time To First Token bound in milliseconds.
+**Validation:** ExclusiveMinimum: true  Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="itlMs" type="float">
+ITLMs is the Inter-Token Latency bound in milliseconds.
+**Validation:** ExclusiveMinimum: true  Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="e2eMs" type="float">
+E2EMs is an alternative end-to-end bound in milliseconds.
+**Validation:** ExclusiveMinimum: true  Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="objectivespec" title="ObjectiveSpec">
+ObjectiveSpec defines scalar optimization or a multi-objective Pareto search.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta2-v1beta1-dynamographdeploymentrequestspec)
+
+<ParamField path="mode" type="ObjectiveMode">
+Mode is optimize or pareto.
+See [ObjectiveMode](#objectivemode).
+**Validation:** Enum: [optimize pareto]
+</ParamField>
+
+<ParamField path="metric" type="ObjectiveMetric">
+Metric is the scalar target when mode is optimize.
+See [ObjectiveMetric](#objectivemetric).
+**Validation:** Enum: [throughput throughputPerGpu throughputPerUser e2eLatency goodput goodputPerGpu]  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="metrics" type="ObjectiveMetric array">
+Metrics lists two or more scalar targets when mode is pareto. Sweeper uses its default pair when omitted.
+See [ObjectiveMetric](#objectivemetric).
+**Validation:** Enum: [throughput throughputPerGpu throughputPerUser e2eLatency goodput goodputPerGpu]  MinItems: 2  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="sla" type="ObjectiveSLASpec">
+SLA defines per-request latency bounds used to calculate goodput.
+See [ObjectiveSLASpec](#objectiveslaspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="v1beta2-overridesspec" title="OverridesSpec">
+OverridesSpec customizes the generated Job and DGD without changing modeled search semantics.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta2-v1beta1-dynamographdeploymentrequestspec)
+
+<ParamField path="profilingJob" type="JobSpec">
+ProfilingJob is a partial batch/v1 JobSpec merged into the controller-generated Job.
+See [JobSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#jobspec-v1-batch).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="dgd" type="RawExtension">
+DGD is a partial versioned DGD merged after candidate materialization and before hashing.
+See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
+**Validation:** EmbeddedResource: \&#123;\&#125;  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="recommendationspec" title="RecommendationSpec">
+RecommendationSpec controls bounded projection into DGDC resources.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta2-v1beta1-dynamographdeploymentrequestspec)
+
+<ParamField path="maxCandidates" type="integer" default="5">
+MaxCandidates is the maximum number of DGDCs owned by one run. It does not limit internal trials.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="remotecodepolicy" title="RemoteCodePolicy">
+RemoteCodePolicy controls whether generated backend commands may execute
+Python code from the model repository.
+
+
+**Kind:** `enum`
+**Underlying type:** `string`
+**Validation:** Enum: [Never TrustCacheAndRevision AlwaysTrust]
+**Appears in:** [ModelReference](#v1beta2-modelreference)
+
+**Allowed values**
+
+- <Badge intent="note" minimal>Never</Badge>
+- <Badge intent="note" minimal>TrustCacheAndRevision</Badge>
+- <Badge intent="note" minimal>AlwaysTrust</Badge>
+</Accordion>
+
+<Accordion id="rerunspec" title="RerunSpec">
+RerunSpec intentionally changes the DGDR spec when search inputs otherwise remain unchanged.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta2-v1beta1-dynamographdeploymentrequestspec)
+
+<ParamField path="reason" type="string">
+Reason records why the user requested another run. Any new value creates a new generation.
+**Validation:** MinLength: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="resourcereference" title="ResourceReference">
+ResourceReference identifies a namespaced resource by name and UID.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRunStatus](#dynamographdeploymentrunstatus)
+
+<ParamField path="name" type="string">
+Name is the resource name.
+</ParamField>
+
+<ParamField path="uid" type="UID">
+UID is the resource UID.
+See [UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="roundprogress" title="RoundProgress">
+RoundProgress reports completed and total optimizer rounds.
+
+
+**Kind:** `type`
+**Appears in:** [BranchProgress](#branchprogress)
+
+<ParamField path="completed" type="integer">
+</ParamField>
+
+<ParamField path="total" type="integer">
+</ParamField>
+</Accordion>
+
+<Accordion id="searchbudgetspec" title="SearchBudgetSpec">
+SearchBudgetSpec maps directly to Sweeper's current SweepConfig.
+
+
+**Kind:** `type`
+**Appears in:** [SearchSpec](#searchspec)
+
+<ParamField path="maxRounds" type="integer">
+MaxRounds is the maximum number of optimizer barrier rounds per resolved deployment-mode branch.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="candidatesPerRound" type="integer">
+CandidatesPerRound is the target number of successful unique replay configurations in one branch round. When omitted, Sweeper uses ParallelEvaluations.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="parallelEvaluations" type="integer">
+ParallelEvaluations is the replay worker-process fan-out.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="maxEvaluationDuration" type="Duration">
+MaxEvaluationDuration is the timeout for one candidate replay.
+See [Duration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#duration-v1-meta).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="searchspec" title="SearchSpec">
+SearchSpec configures current Sweeper run control and implementation-owned dimensions.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta2-v1beta1-dynamographdeploymentrequestspec)
+
+<ParamField path="budget" type="SearchBudgetSpec">
+Budget maps directly to Sweeper's current SweepConfig.
+See [SearchBudgetSpec](#searchbudgetspec).
+</ParamField>
+
+<ParamField path="parameters" type="RawExtension">
+Parameters contains current Sweeper fields whose nested schema is not copied into the CRD. The installed Sweeper validates it before evaluating candidates.
+See [RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg).
+**Validation:** Type: object  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="staticworkloadspec" title="StaticWorkloadSpec">
+StaticWorkloadSpec defines one of Sweeper's synthetic workload shapes.
+
+
+**Kind:** `type`
+**Appears in:** [WorkloadSpec](#v1beta2-workloadspec)
+
+<ParamField path="isl" type="integer">
+ISL is the input sequence length in tokens.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="osl" type="integer">
+OSL is the output sequence length in tokens.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="numRequestRatio" type="float">
+NumRequestRatio sets request count relative to the selected load.
+**Validation:** Minimum: 1
+</ParamField>
+
+<ParamField path="requestRate" type="float">
+RequestRate is a fixed open-loop arrival rate in requests per second.
+**Validation:** ExclusiveMinimum: true  Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="concurrency" type="integer">
+Concurrency is a fixed closed-loop in-flight request cap.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="kvLoadRatio" type="KVLoadRatio">
+KVLoadRatio derives concurrency from candidate KV capacity. A two-value range is supported only for a Pareto objective.
+See [KVLoadRatio](#kvloadratio).
+**Validation:** MaxItems: 2  MinItems: 1  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="tracepvcsource" title="TracePVCSource">
+TracePVCSource identifies a trace artifact on a PersistentVolumeClaim in the DGDR namespace.
+
+
+**Kind:** `type`
+**Appears in:** [TraceSource](#tracesource)
+
+<ParamField path="claimName" type="string">
+ClaimName is the PersistentVolumeClaim containing the trace.
+**Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="path" type="string">
+Path is the trace path relative to the root of the claim.
+**Validation:** MinLength: 1
+</ParamField>
+</Accordion>
+
+<Accordion id="tracereplayspec" title="TraceReplaySpec">
+TraceReplaySpec configures current Sweeper controls for a decoded trace.
+
+
+**Kind:** `type`
+**Appears in:** [TraceWorkloadSpec](#traceworkloadspec)
+
+<ParamField path="arrivalSpeedupRatio" type="float" default="1">
+ArrivalSpeedupRatio multiplies the recorded request-arrival rate. 1.0 preserves it.
+**Validation:** ExclusiveMinimum: true  Minimum: 0  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="concurrency" type="integer">
+Concurrency changes trace replay to closed loop and ignores recorded timestamps.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="tracesource" title="TraceSource">
+TraceSource identifies exactly one trace artifact.
+
+
+**Kind:** `type`
+**Appears in:** [TraceWorkloadSpec](#traceworkloadspec)
+
+<ParamField path="pvc" type="TracePVCSource">
+PVC reads the artifact from a PersistentVolumeClaim in the DGDR namespace.
+See [TracePVCSource](#tracepvcsource).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="uri" type="string">
+URI identifies an object-storage location supported by the DGDR integration.
+**Validation:** MinLength: 1  Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="traceworkloadspec" title="TraceWorkloadSpec">
+TraceWorkloadSpec replays requests from an artifact.
+
+
+**Kind:** `type`
+**Appears in:** [WorkloadSpec](#v1beta2-workloadspec)
+
+<ParamField path="format" type="string" default="mooncake">
+Format identifies the trace decoder.
+**Validation:** MinLength: 1  Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="source" type="TraceSource">
+Source identifies exactly one trace artifact.
+See [TraceSource](#tracesource).
+</ParamField>
+
+<ParamField path="replay" type="TraceReplaySpec">
+Replay configures current Sweeper controls for a decoded trace.
+See [TraceReplaySpec](#tracereplayspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="v1beta2-workloadspec" title="WorkloadSpec">
+WorkloadSpec defines exactly one traffic model used for every candidate evaluation.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta2-v1beta1-dynamographdeploymentrequestspec)
+
+<ParamField path="trace" type="TraceWorkloadSpec">
+Trace replays requests from an artifact.
+See [TraceWorkloadSpec](#traceworkloadspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="static" type="StaticWorkloadSpec">
+Static defines one of Sweeper's synthetic workload shapes.
+See [StaticWorkloadSpec](#staticworkloadspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>

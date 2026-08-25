@@ -19,6 +19,7 @@ package v1beta1
 
 import (
 	batchv1 "k8s.io/api/batch/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
@@ -444,17 +445,18 @@ type HardwareSpec struct {
 }
 
 // DynamoGraphDeploymentRequestSpec defines the desired state of a DynamoGraphDeploymentRequest.
-// Only the Model field is required; all other fields are optional and have sensible defaults.
+// Native v1beta1 fields and the V1Beta2 conversion envelope are mutually exclusive.
+// +kubebuilder:validation:XValidation:rule="has(self.v1beta2) != has(self.model)",message="exactly one of native v1beta1 fields or v1beta2 must be specified"
+// +kubebuilder:validation:XValidation:rule="!has(self.v1beta2) || !(has(self.backend) || has(self.image) || has(self.modelCache) || has(self.hardware) || has(self.workload) || has(self.sla) || has(self.overrides) || has(self.features) || has(self.searchStrategy) || has(self.autoApply))",message="v1beta2 is mutually exclusive with native v1beta1 fields"
 type DynamoGraphDeploymentRequestSpec struct {
 	// Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").
 	// Can be a HuggingFace ID or a private model name.
-	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
-	Model string `json:"model"`
+	// +optional
+	Model string `json:"model,omitempty"`
 
 	// Backend specifies the inference backend to use for profiling and deployment.
 	// +optional
-	// +kubebuilder:default=auto
 	// +kubebuilder:validation:Enum=auto;sglang;trtllm;vllm
 	Backend BackendType `json:"backend,omitempty"`
 
@@ -502,7 +504,6 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// SearchStrategy controls the profiling search depth.
 	// "rapid" performs a fast sweep; "thorough" explores more configurations.
 	// +optional
-	// +kubebuilder:default=rapid
 	// +kubebuilder:validation:Enum=rapid;thorough
 	SearchStrategy SearchStrategy `json:"searchStrategy,omitempty"`
 
@@ -510,8 +511,14 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// after profiling completes. If false, the generated spec is stored in status
 	// for manual review and application.
 	// +optional
-	// +kubebuilder:default=true
 	AutoApply *bool `json:"autoApply,omitempty"`
+
+	// V1Beta2 losslessly preserves a native v1beta2 spec while this object is
+	// represented through v1beta1. It is mutually exclusive with native fields.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	V1Beta2 *apiextensionsv1.JSON `json:"v1beta2,omitempty"`
 }
 
 // ParetoConfig is retained for compatibility with status objects produced by
@@ -552,6 +559,7 @@ type DeploymentInfoStatus struct {
 }
 
 // DynamoGraphDeploymentRequestStatus represents the observed state of a DynamoGraphDeploymentRequest.
+// +kubebuilder:validation:XValidation:rule="!has(self.v1beta2) || !(has(self.phase) || has(self.profilingPhase) || has(self.dgdName) || has(self.profilingJobName) || has(self.conditions) || has(self.profilingResults) || has(self.deploymentInfo) || has(self.observedGeneration))",message="v1beta2 is mutually exclusive with native v1beta1 status fields"
 type DynamoGraphDeploymentRequestStatus struct {
 	// Phase is the high-level lifecycle phase of the deployment request.
 	// +optional
@@ -590,6 +598,13 @@ type DynamoGraphDeploymentRequestStatus struct {
 	// ObservedGeneration is the most recent generation observed by the controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// V1Beta2 losslessly preserves a native v1beta2 status while this object is
+	// represented through v1beta1.
+	// +optional
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Type=object
+	V1Beta2 *apiextensionsv1.JSON `json:"v1beta2,omitempty"`
 }
 
 // DynamoGraphDeploymentRequest is the Schema for the dynamographdeploymentrequests API.
