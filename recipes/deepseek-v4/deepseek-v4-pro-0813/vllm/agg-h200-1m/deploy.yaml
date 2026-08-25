@@ -1,0 +1,104 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Aggregated, 8x H200, 1M context. Batch capability, NOT interactive: TTFT ~202 s at 1M.
+# Verified by needle-in-haystack to 998,218 tokens.
+# CPU offload is MANDATORY here: GPU-resident KV caps at 86,016 tokens on 8x H200.
+# Requires ~1.4 TB host RAM for the offload tier; size the node accordingly.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: deepseek-v4-pro-0813-vllm-h200-agg-1m
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
+          imagePullPolicy: Always
+          workingDir: /workspace
+          command:
+          - python3
+          args:
+          - -m
+          - dynamo.frontend
+          - --trust-remote-code
+          env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 15
+            failureThreshold: 200
+  - name: VllmDecodeWorker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
+          imagePullPolicy: Always
+          workingDir: /workspace
+          command:
+          - /bin/bash
+          - -lc
+          args:
+          - |
+            python3 -m dynamo.vllm \
+              --model deepseek-ai/DeepSeek-V4-Pro-0813 \
+              --served-model-name deepseek-ai/DeepSeek-V4-Pro-0813 \
+              --trust-remote-code \
+              --tokenizer-mode deepseek_v4 \
+              --dyn-tool-call-parser deepseek_v4 \
+              --dyn-reasoning-parser deepseek_v4 \
+              --kv-cache-dtype fp8 \
+              --block-size 256 \
+              --tensor-parallel-size 8 \
+              --enable-expert-parallel \
+              --moe-backend marlin \
+              --enable-prefix-caching \
+              --no-enable-flashinfer-autotune \
+              --max-model-len 1048576 \
+              --max-num-seqs 128 \
+              --max-num-batched-tokens 4096 \
+              --gpu-memory-utilization 0.97 \
+              --kv-transfer-config '{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":1400000000000}}' \
+              --compilation-config '{"mode":0,"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,10,12,16,32,64,80,96,128],"max_cudagraph_capture_size":128}'
+          env:
+          - name: HF_HOME
+            value: /model-cache
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          resources:
+            limits:
+              nvidia.com/gpu: "8"
+            requests:
+              cpu: "16"
+              memory: 1500Gi
+              nvidia.com/gpu: "8"
+          startupProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 15
+            failureThreshold: 200
+          volumeMounts:
+          - mountPath: /model-cache
+            name: model-cache
+          - mountPath: /dev/shm
+            name: dshm
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
