@@ -17,7 +17,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
 use crate::client::{self, CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
-use crate::convert::{ResponseState, build_generate_request, data_parallel_rank};
+use crate::convert::{
+    ResponseState, build_generate_request, data_parallel_rank, request_has_multimodal_input,
+};
 use crate::model::DiscoveredModel;
 
 pub struct VllmSidecarEngine {
@@ -101,6 +103,16 @@ impl VllmSidecarEngine {
         }
 
         let endpoint = GrpcEndpoint::parse(&args.vllm_endpoint, "--vllm-endpoint")?;
+        let enable_rl = args.sidecar.common.enable_rl;
+        let vllm_http_url = if enable_rl {
+            args.vllm_http_endpoint
+                .as_deref()
+                .map(|value| GrpcEndpoint::parse(value, "--vllm-http-endpoint"))
+                .transpose()?
+                .map(|endpoint| endpoint.to_string())
+        } else {
+            None
+        };
         let transport = args.sidecar.grpc.config();
         let bootstrap_deadline = client::startup_deadline(transport.startup_deadline)?;
         eprintln!(
@@ -109,6 +121,9 @@ impl VllmSidecarEngine {
         );
         let model = bootstrap_discover(&endpoint, transport, bootstrap_deadline)?;
         let mode = args.sidecar.common.disaggregation_mode;
+        let rl_metadata = enable_rl
+            .then(|| model.rl_worker_metadata(vllm_http_url))
+            .transpose()?;
         let engine = Self::new(endpoint, model.clone(), mode, transport);
         let config = WorkerConfig {
             namespace: args.sidecar.common.namespace,
@@ -134,7 +149,8 @@ impl VllmSidecarEngine {
             enable_kv_routing: true,
             disaggregation_mode: mode,
             route_to_encoder: false,
-            enable_rl: args.sidecar.common.enable_rl,
+            enable_rl,
+            rl_metadata,
             ..Default::default()
         };
         Ok((engine, config))
@@ -194,12 +210,7 @@ impl LLMEngine for VllmSidecarEngine {
         request: dynamo_backend_common::PreprocessedRequest,
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
-        if request
-            .multi_modal_data
-            .as_ref()
-            .is_some_and(|media| media.values().any(|items| !items.is_empty()))
-            && !self.model.supports_multimodal
-        {
+        if request_has_multimodal_input(&request) && !self.model.supports_multimodal {
             return Err(client::invalid_argument(format!(
                 "model `{}` does not advertise multimodal support",
                 self.model.served_name

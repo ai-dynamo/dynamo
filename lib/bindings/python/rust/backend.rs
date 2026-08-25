@@ -469,6 +469,7 @@ impl WorkerConfig {
                 // Python vLLM owns and serves its existing `.rl` endpoint.
                 // The shared Rust endpoint is opt-in for Rust sidecars only.
                 enable_rl: false,
+                rl_metadata: None,
                 media_decoder: media_decoder.map(|decoder| decoder.inner),
                 media_fetcher: media_fetcher.map(|fetcher| fetcher.inner),
             },

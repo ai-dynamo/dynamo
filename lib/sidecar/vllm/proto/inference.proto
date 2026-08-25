@@ -107,6 +107,10 @@ message ResponseOptions {
   bool output_token_ids = 5;
   bool output_logprobs = 6;
   optional CandidateTokens output_candidates = 7;
+  // Defaults to true when omitted.
+  optional bool skip_special_tokens = 8;
+  // Skip routing rows for this already-returned prompt prefix.
+  optional uint32 routed_experts_prompt_start = 9;
 }
 
 message KVCacheParameters {
@@ -152,6 +156,14 @@ message SequenceOutput {
 
   // Only present in final output for this sequence
   optional FinishInfo finish_info = 8;
+  // Only present in final output when routed-experts capture is enabled.
+  optional RoutedExperts routed_experts = 9;
+}
+
+message RoutedExperts {
+  bytes data = 1;
+  repeated uint32 shape = 2;
+  string dtype = 3;
 }
 
 // Prompt info, returned in the first response
@@ -223,7 +235,22 @@ message MediaItem {
     string url = 2;       // http:// or https://
     string data_uri = 3;  // data:
     bytes raw_bytes = 4;
+    PreprocessedMediaFeatures features = 7;
   }
   string mime_type = 5;
   string uuid = 6;
+}
+
+// Engine-ready multimodal features produced by a version-compatible frontend.
+// `kwargs` is the MessagePack wire representation of one MmKwargsItem.
+message PreprocessedMediaFeatures {
+  // Required inline payload. Cache-only references are not accepted.
+  optional bytes kwargs = 1;
+  // Caller metadata accepted for wire compatibility. The server derives the
+  // EngineCore cache identity from the modality and kwargs payload.
+  string identifier = 2;
+  uint64 offset = 3;
+  uint64 length = 4;
+  optional string mm_hash = 5;
+  repeated bool is_embed = 6;
 }

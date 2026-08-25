@@ -1,12 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_backend_common::{DynamoError, EngineConfig, LlmRegistration};
+use dynamo_backend_common::{DynamoError, EngineConfig, LlmRegistration, RlWorkerMetadata};
 
 use crate::client;
 use crate::proto as pb;
 
 const SUPPORTED_API_VERSION: &str = "vllm";
+const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ModelIdentity {
@@ -82,11 +83,10 @@ impl DiscoveredModel {
                 self.identity, observed.identity
             )));
         }
-        let expected_dp_size = self.data_parallel_size();
-        let observed_dp_size = observed.data_parallel_size();
-        if expected_dp_size != observed_dp_size {
+        if self.server.parallelism != observed.server.parallelism {
             return Err(client::protocol_error(format!(
-                "data-parallel size changed between bootstrap and startup: expected {expected_dp_size}, observed {observed_dp_size}"
+                "parallelism changed between bootstrap and startup: expected {:?}, observed {:?}",
+                self.server.parallelism, observed.server.parallelism
             )));
         }
         if self.server.rl_capabilities != observed.server.rl_capabilities {
@@ -102,13 +102,34 @@ impl DiscoveredModel {
         self.server.rl_capabilities.as_ref()
     }
 
+    pub(crate) fn rl_worker_metadata(
+        &self,
+        admin_base_url: Option<String>,
+    ) -> Result<RlWorkerMetadata, DynamoError> {
+        let parallelism = self.server.parallelism.as_ref().ok_or_else(|| {
+            client::protocol_error("RL discovery requires vLLM parallelism metadata")
+        })?;
+        let world_size = parallelism
+            .tensor_parallel_size
+            .checked_mul(parallelism.pipeline_parallel_size)
+            .and_then(|size| size.checked_mul(parallelism.data_parallel_size))
+            .filter(|size| *size > 0)
+            .ok_or_else(|| client::protocol_error("vLLM reports an invalid RL world size"))?;
+        RlWorkerMetadata::new(world_size, admin_base_url)
+            .map_err(|error| client::protocol_error(error.to_string()))
+    }
+
     pub(crate) fn engine_config(&self) -> EngineConfig {
         let parallelism = self.server.parallelism.as_ref();
         EngineConfig {
             model: self.source.clone(),
             served_model_name: Some(self.served_name.clone()),
             model_aliases: self.identity.aliases.clone(),
-            runtime_data: Default::default(),
+            runtime_data: [(
+                VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
+                serde_json::Value::Bool(true),
+            )]
+            .into(),
             llm: Some(LlmRegistration {
                 context_length: nonzero(self.server.max_model_len),
                 kv_cache_block_size: nonzero(self.server.kv_block_size),

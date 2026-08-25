@@ -194,6 +194,8 @@ pub struct WorkerConfig {
     pub route_to_encoder: bool,
     /// Publish the worker's engine routes through an auxiliary RL discovery endpoint.
     pub enable_rl: bool,
+    /// Optional RL topology and weight-transfer metadata published by the worker.
+    pub rl_metadata: Option<crate::RlWorkerMetadata>,
     /// Optional frontend media decoding and fetch policy advertised on the
     /// model deployment card.
     pub media_decoder: Option<MediaDecoder>,
@@ -239,6 +241,7 @@ impl Default for WorkerConfig {
             runtime: RuntimeConfig::default(),
             route_to_encoder: false,
             enable_rl: false,
+            rl_metadata: None,
             media_decoder: None,
             media_fetcher: None,
             default_thinking_mode: None,
@@ -935,12 +938,16 @@ impl Worker {
         let model_type = resolve_model_type(&self.config)?;
         let (worker_type, needs) = resolve_worker_type_and_needs(&self.config);
         let rl_config = if self.config.enable_rl {
-            Some(crate::rl::prepare_endpoint(&endpoint).map_err(|error| {
-                err(
-                    ErrorType::Backend(BackendError::InvalidArgument),
-                    format!("RL endpoint configuration: {error}"),
-                )
-            })?)
+            Some(
+                crate::rl::prepare_endpoint(&endpoint, self.config.rl_metadata.clone()).map_err(
+                    |error| {
+                        err(
+                            ErrorType::Backend(BackendError::InvalidArgument),
+                            format!("RL endpoint configuration: {error}"),
+                        )
+                    },
+                )?,
+            )
         } else {
             None
         };
