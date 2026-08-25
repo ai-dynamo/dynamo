@@ -634,9 +634,43 @@ fn recover_completed_members(raw: &str) -> Option<serde_json::Map<String, serde_
         }
     }
 
+    // Truncation can land after a member's value but before the outer `}`, in which
+    // case there is no trailing comma and the comma scan finds nothing — yet every
+    // member present did finish. Close the object and take it, but only when the last
+    // value is provably complete (see `ends_on_a_finished_value`).
+    if ends_on_a_finished_value(trimmed)
+        && let Ok(map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+            &format!("{}}}", trimmed.trim_end()),
+        )
+    {
+        return Some(map);
+    }
+
     let boundary = last_boundary?;
     let candidate = format!("{}}}", &trimmed[..boundary]);
     serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&candidate).ok()
+}
+
+/// Whether the payload's last value is one that cannot have been cut short.
+///
+/// Appending `}` to a truncated object can turn an unfinished value into a plausible
+/// finished one. `{"n": 25` cut to `{"n": 2` closes into `{"n": 2}`, reporting an
+/// argument the model never emitted — the exact fabrication this module refuses to do.
+/// A closing quote, brace or bracket is different: those characters only appear once the
+/// value is over, so a payload ending in one has no half-written tail. Bare numbers and
+/// bare literals are ambiguous by construction and fall through to the comma scan.
+fn ends_on_a_finished_value(trimmed: &str) -> bool {
+    let tail = trimmed.trim_end();
+    // A closing quote must not itself be escaped, or the string is still open.
+    if tail.ends_with('"') {
+        let backslashes = tail[..tail.len() - 1]
+            .chars()
+            .rev()
+            .take_while(|ch| *ch == '\\')
+            .count();
+        return backslashes % 2 == 0;
+    }
+    tail.ends_with('}') || tail.ends_with(']')
 }
 
 /// Convert a completed chat completion response into an Anthropic Messages response.
@@ -2447,6 +2481,53 @@ mod dis2780_tests {
     fn valid_arguments_are_passed_through_unchanged() {
         let input = tool_use_input("get_weather", r#"{"location": "SF", "unit": "c"}"#);
         assert_eq!(input, serde_json::json!({"location": "SF", "unit": "c"}));
+    }
+
+    /// Truncation after a member value but before the closing brace. There is no
+    /// trailing comma, so the comma scan alone finds nothing, yet `label` did finish.
+    /// Returning `{}` here would be the empty-object failure this module exists to stop.
+    #[test]
+    fn a_final_member_without_a_trailing_comma_is_recovered() {
+        let recovered =
+            recover_completed_members(r#"{"label": "customer-eof""#).expect("`label` completed");
+        assert_eq!(
+            recovered.get("label").and_then(|v| v.as_str()),
+            Some("customer-eof")
+        );
+        assert_eq!(recovered.len(), 1);
+
+        // Same shape reached through the public entry point.
+        assert_eq!(
+            tool_use_input("record_literal", r#"{"label": "customer-eof""#),
+            serde_json::json!({"label": "customer-eof"})
+        );
+
+        // A closed nested value is equally provably finished.
+        let recovered =
+            recover_completed_members(r#"{"a": 1, "b": {"p": 2}"#).expect("`a` and `b` completed");
+        assert_eq!(recovered.get("b"), Some(&serde_json::json!({"p": 2})));
+        assert_eq!(recovered.len(), 2);
+    }
+
+    /// The guard on the case above: closing the brace after a BARE NUMBER would invent a
+    /// value, because the digits may themselves be truncated. `{"n": 25` cut to `{"n": 2`
+    /// must not be reported as `n = 2`.
+    #[test]
+    fn a_truncated_number_is_never_closed_into_a_value() {
+        assert_eq!(recover_completed_members(r#"{"n": 2"#), None);
+
+        // With an earlier complete member, fall back to the comma boundary and drop the
+        // ambiguous tail rather than reporting it.
+        let recovered = recover_completed_members(r#"{"a": "x", "n": 2"#).expect("`a` completed");
+        assert_eq!(recovered.get("a").and_then(|v| v.as_str()), Some("x"));
+        assert!(
+            !recovered.contains_key("n"),
+            "a possibly-truncated number must not be reported, got: {recovered:?}"
+        );
+
+        // An escaped quote at the very end leaves the string open; it is not a finished
+        // value and must not be closed either.
+        assert_eq!(recover_completed_members(r#"{"a": "he said \""#), None);
     }
 
     #[test]
