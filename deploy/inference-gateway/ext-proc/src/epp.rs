@@ -22,7 +22,8 @@ use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_llm::protocols::common::extensions::{
-    HEADER_TENANT_ID, NvExt, request_cache_salt, routing_constraints_to_kv,
+    HEADER_TENANT_ID, NvExt, last_non_empty_trimmed_value, request_cache_salt,
+    routing_constraints_to_kv,
 };
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_protocols::types::Prompt;
@@ -32,7 +33,6 @@ use dynamo_runtime::discovery::{
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
-use crate::envoy_helpers::find_header;
 use crate::epp_router::endpoint_in_subset;
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo, ResponseUsage};
 
@@ -83,10 +83,14 @@ fn cache_namespace_with_header_override(
     headers: &[(String, String)],
     body_cache_namespace: Option<String>,
 ) -> Option<String> {
-    find_header(headers, HEADER_TENANT_ID)
-        .filter(|tenant_id| !tenant_id.is_empty())
-        .map(str::to_owned)
-        .or(body_cache_namespace)
+    last_non_empty_trimmed_value(
+        headers
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case(HEADER_TENANT_ID))
+            .map(|(_, value)| value.as_str()),
+    )
+    .map(str::to_owned)
+    .or(body_cache_namespace)
 }
 
 /// Name of the inference-serving HTTP port on a Dynamo worker pod.
@@ -186,7 +190,6 @@ impl Router {
             None,
             model_name.clone(),
             actual_namespace.to_string(),
-            enable_eagle,
             // ext-proc constructs no KvWorkerMonitor; overload publishing is
             // unused on this path (matches the prior namespace-lookup miss).
             None,
@@ -1453,7 +1456,10 @@ mod tests {
 
     #[test]
     fn empty_tenant_header_falls_back_to_body_cache_namespace() {
-        let headers = vec![(HEADER_TENANT_ID.to_string(), String::new())];
+        let headers = vec![
+            (HEADER_TENANT_ID.to_string(), String::new()),
+            ("X-Tenant-ID".to_string(), "   ".to_string()),
+        ];
 
         assert_eq!(
             cache_namespace_with_header_override(&headers, Some("tenant-body".to_string()))
@@ -1465,6 +1471,21 @@ mod tests {
     #[test]
     fn absent_cache_namespace_stays_absent() {
         assert_eq!(cache_namespace_with_header_override(&[], None), None);
+    }
+
+    #[test]
+    fn last_non_empty_trimmed_tenant_header_wins() {
+        let headers = vec![
+            (HEADER_TENANT_ID.to_string(), "tenant-client".to_string()),
+            ("X-Tenant-ID".to_string(), "   ".to_string()),
+            (HEADER_TENANT_ID.to_string(), " tenant-gateway ".to_string()),
+        ];
+
+        assert_eq!(
+            cache_namespace_with_header_override(&headers, Some("tenant-body".to_string()))
+                .as_deref(),
+            Some("tenant-gateway")
+        );
     }
 
     /// Proves the core feature: `nvext.agent_hints.priority` lifts into a

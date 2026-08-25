@@ -17,6 +17,7 @@ use dynamo_kv_router::config::{KvRouterConfig, try_kv_router_config_from_dynamo_
 use dynamo_kv_router::services::selection::{SelectionService, WorkerSelectionPolicyRegistry};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
+use tokio_util::sync::CancellationToken;
 
 use crate::{EppMode, EppStandaloneConfig, ExtProcServer, Router, Selector, metrics};
 
@@ -27,6 +28,12 @@ const HEALTH_SERVICE_NAME: &str = "inference-extension";
 /// connection flood from exhausting fds / memory. Tuned for an inference EPP
 /// where a single Envoy upstream typically holds <100 concurrent streams.
 const MAX_CONCURRENT_CONNECTIONS: usize = 1024;
+/// Propagation window after a shutdown signal before the server stops
+/// accepting new connections. The gateway stops routing to this EPP as soon
+/// as health flips to NOT_SERVING. Configurable via
+/// `DYN_EPP_GRACEFUL_SHUTDOWN_PROPAGATION_SECS`.
+const DEFAULT_GRACEFUL_SHUTDOWN_PROPAGATION_SECS: u64 = 5;
+const GRACEFUL_SHUTDOWN_PROPAGATION_ENV: &str = "DYN_EPP_GRACEFUL_SHUTDOWN_PROPAGATION_SECS";
 /// Max time to wait for the TLS handshake to complete before dropping the
 /// connection. Without this, a client that finishes the TCP connect but
 /// stalls the TLS handshake holds a connection-limit permit indefinitely;
@@ -218,6 +225,23 @@ fn init_tracing() {
         .try_init();
 }
 
+/// Wait for SIGTERM (kubelet pod termination) or SIGINT (Ctrl-C).
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 async fn run_inner(
     mode: EppMode,
     standalone_selection_service: StandaloneSelectionService,
@@ -262,6 +286,38 @@ async fn run_inner(
         });
     }
 
+    // Shutdown coordination: on SIGTERM/SIGINT, flip health to NOT_SERVING
+    // (the gateway stops routing new requests to this EPP), allow the endpoint
+    // propagation window to elapse, then stop accepting connections. The
+    // protocol-correct drain deadline and forced close of long-lived HTTP/2
+    // connections are handled by the follow-up connection-lifecycle work.
+    let draining = CancellationToken::new();
+    let shutdown = CancellationToken::new();
+    {
+        let draining = draining.clone();
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            wait_for_shutdown_signal().await;
+            tracing::info!("Shutdown signal received; starting endpoint withdrawal");
+            // The readiness mirror owns the health transition so it cannot
+            // race with a final SERVING update. If initialization has not
+            // reached `serve` yet, health is already NOT_SERVING and the
+            // draining cancellation below makes initialization return.
+            draining.cancel();
+            let propagation_secs = parse_env(
+                GRACEFUL_SHUTDOWN_PROPAGATION_ENV,
+                DEFAULT_GRACEFUL_SHUTDOWN_PROPAGATION_SECS,
+            );
+            tracing::info!(
+                propagation_secs,
+                "EPP health set to NOT_SERVING; allowing endpoint propagation"
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(propagation_secs)).await;
+            shutdown.cancel();
+            tracing::info!("EPP endpoint propagation complete; stopping accepts");
+        });
+    }
+
     if standalone {
         let selector_cfg = EppStandaloneConfig::from_env()?;
         tracing::info!(
@@ -271,38 +327,69 @@ async fn run_inner(
             "Initializing standalone selector mode (no Dynamo runtime)..."
         );
         metrics::set_served_model(&selector_cfg.model_name);
-        let router = Arc::new(match standalone_selection_service {
-            StandaloneSelectionService::Default => {
-                crate::EppRouter::from_selector(selector_cfg).await?
+        let router = tokio::select! {
+            _ = draining.cancelled() => {
+                tracing::info!("Shutdown received during standalone EPP initialization");
+                return Ok(());
             }
-            StandaloneSelectionService::Existing(service) => {
-                crate::EppRouter::from_selection_service(selector_cfg, service).await?
-            }
-            StandaloneSelectionService::LinkedWorkerSelectionPolicy {
-                kv_router_config,
-                factory,
-            } => {
-                let service =
-                    Selector::build_selection_service_with_worker_selection_policy_factory(
-                        &selector_cfg,
-                        *kv_router_config,
+            router = async {
+                Ok::<_, anyhow::Error>(Arc::new(match standalone_selection_service {
+                    StandaloneSelectionService::Default => {
+                        crate::EppRouter::from_selector(selector_cfg).await?
+                    }
+                    StandaloneSelectionService::Existing(service) => {
+                        crate::EppRouter::from_selection_service(selector_cfg, service).await?
+                    }
+                    StandaloneSelectionService::LinkedWorkerSelectionPolicy {
+                        kv_router_config,
                         factory,
-                    )
-                    .await?;
-                crate::EppRouter::from_selection_service(selector_cfg, service).await?
-            }
-        });
+                    } => {
+                        let service =
+                            Selector::build_selection_service_with_worker_selection_policy_factory(
+                                &selector_cfg,
+                                *kv_router_config,
+                                factory,
+                            )
+                            .await?;
+                        crate::EppRouter::from_selection_service(selector_cfg, service).await?
+                    }
+                }))
+            } => router?,
+        };
+        if draining.is_cancelled() {
+            tracing::info!("Shutdown received before standalone EPP serving started");
+            return Ok(());
+        }
         let ready_router = router.clone();
-        serve(router, move || ready_router.is_ready(), health_reporter).await
+        serve(
+            router,
+            move || ready_router.is_ready(),
+            health_reporter,
+            draining,
+            shutdown,
+        )
+        .await
     } else {
         tracing::info!("Initializing KV-aware router from discovery...");
-        let router = Router::from_discovery(&config.namespace, &config.component).await?;
+        let router = tokio::select! {
+            _ = draining.cancelled() => {
+                tracing::info!("Shutdown received during Dynamo discovery initialization");
+                return Ok(());
+            }
+            router = Router::from_discovery(&config.namespace, &config.component) => router?,
+        };
+        if draining.is_cancelled() {
+            tracing::info!("Shutdown received before Dynamo discovery serving started");
+            return Ok(());
+        }
         metrics::set_served_model(router.served_model());
         let ready = router.pod_store_ready();
         serve(
             Arc::new(router),
             move || ready.load(std::sync::atomic::Ordering::Acquire),
             health_reporter,
+            draining,
+            shutdown,
         )
         .await
     }
@@ -314,6 +401,8 @@ async fn serve<P: crate::EndpointPicker>(
     picker: Arc<P>,
     is_ready: impl Fn() -> bool + Send + 'static,
     health_reporter: tonic_health::server::HealthReporter,
+    draining: CancellationToken,
+    shutdown: CancellationToken,
 ) -> Result<()> {
     // Continuously mirror readiness onto the health status. `is_ready()` is a
     // *live* signal that can flip both ways — standalone discovery clears it when
@@ -323,13 +412,25 @@ async fn serve<P: crate::EndpointPicker>(
     // transitions and moves the health status in lock-step, dropping out of
     // SERVING when readiness drops and recovering when it returns. Health starts
     // NOT_SERVING (set during startup); the mirror polls a cheap closure (atomic loads).
-    {
+    let readiness_task = {
         let health_reporter = health_reporter.clone();
+        let draining = draining.clone();
         tokio::spawn(async move {
             let mut last: Option<bool> = None;
             loop {
+                if draining.is_cancelled() {
+                    health_reporter
+                        .set_service_status(
+                            HEALTH_SERVICE_NAME,
+                            tonic_health::ServingStatus::NotServing,
+                        )
+                        .await;
+                    tracing::info!("EPP readiness mirror stopped; health set to NOT_SERVING");
+                    break;
+                }
+
                 let now = is_ready();
-                if last != Some(now) {
+                if !draining.is_cancelled() && last != Some(now) {
                     let status = if now {
                         tonic_health::ServingStatus::Serving
                     } else {
@@ -338,13 +439,27 @@ async fn serve<P: crate::EndpointPicker>(
                     health_reporter
                         .set_service_status(HEALTH_SERVICE_NAME, status)
                         .await;
+                    if draining.is_cancelled() {
+                        health_reporter
+                            .set_service_status(
+                                HEALTH_SERVICE_NAME,
+                                tonic_health::ServingStatus::NotServing,
+                            )
+                            .await;
+                        tracing::info!("EPP readiness mirror stopped; health set to NOT_SERVING");
+                        break;
+                    }
                     tracing::info!(ready = now, "EPP readiness changed; health status updated");
                     last = Some(now);
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                tokio::select! {
+                    _ = draining.cancelled() => {}
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+                }
             }
-        });
-    }
+        })
+    };
 
     let server = ExtProcServer::new(picker);
     // Default to TLS. Verified working with kGateway (`appProtocol: http2`
@@ -365,11 +480,24 @@ async fn serve<P: crate::EndpointPicker>(
             "Listening for ext_proc connections (TLS)"
         );
 
-        loop {
+        let result: Result<()> = loop {
             // Acquire permit before accept() so we backpressure the listener
-            // instead of accepting and immediately dropping connections.
-            let permit = conn_semaphore.clone().acquire_owned().await?;
-            let (tcp_stream, remote_addr) = listener.accept().await?;
+            // instead of accepting and immediately dropping connections. Stop
+            // accepting once the endpoint propagation window has elapsed.
+            let permit = tokio::select! {
+                _ = shutdown.cancelled() => break Ok(()),
+                permit = conn_semaphore.clone().acquire_owned() => match permit {
+                    Ok(permit) => permit,
+                    Err(error) => break Err(error.into()),
+                },
+            };
+            let (tcp_stream, remote_addr) = tokio::select! {
+                _ = shutdown.cancelled() => break Ok(()),
+                accepted = listener.accept() => match accepted {
+                    Ok(accepted) => accepted,
+                    Err(error) => break Err(error.into()),
+                },
+            };
             let tls_acceptor = tls_acceptor.clone();
             let svc = svc.clone();
 
@@ -407,13 +535,18 @@ async fn serve<P: crate::EndpointPicker>(
                     tracing::debug!(%remote_addr, error = %e, "Connection ended");
                 }
             });
-        }
+        };
+        readiness_task.abort();
+        let _ = readiness_task.await;
+        result
     } else {
         tracing::info!(%addr, "Listening for ext_proc connections (plaintext h2)");
         tonic::transport::Server::builder()
             .add_service(server.into_service())
-            .serve(addr)
+            .serve_with_shutdown(addr, shutdown.cancelled_owned())
             .await?;
+        readiness_task.abort();
+        let _ = readiness_task.await;
         Ok(())
     }
 }
