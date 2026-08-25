@@ -1344,7 +1344,7 @@ impl ModelManager {
 
     /// Select a Generate engine and its routing metadata from one worker set
     /// that advertises `capability`.
-    pub fn get_generate_engine_for_capability_with_routing(
+    pub(crate) fn get_generate_engine_for_capability_with_routing(
         &self,
         model: &str,
         capability: &str,

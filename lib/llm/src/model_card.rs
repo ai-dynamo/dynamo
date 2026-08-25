@@ -1213,7 +1213,27 @@ impl ModelDeploymentCard {
                     }
                 }
 
-                // TODO: Do we want any of user_data or runtime_config?
+                // Tower/connector LoRA changes vLLM's multimodal cache identity.
+                // Isolate such workers from the default/missing=false WorkerSet
+                // without changing checksums for existing deployments.
+                if self.runtime_config.runtime_flag_enabled(
+                    crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY,
+                ) {
+                    bytes_to_hash.extend_from_slice(b"\0vllm_enable_tower_connector_lora\0true");
+                }
+
+                // A worker that cannot resolve the vLLM image placeholder token
+                // must not share a routing set with one that can. The frontend
+                // reads this value from the selected set before enabling exact
+                // multimodal routing.
+                if let Some(image_token_id) = self.runtime_config.runtime_u32(
+                    crate::local_model::runtime_config::VLLM_ROUTING_IMAGE_TOKEN_ID_RUNTIME_KEY,
+                ) {
+                    bytes_to_hash.extend_from_slice(b"\0vllm_routing_image_token_id\0");
+                    bytes_to_hash.extend_from_slice(&image_token_id.to_be_bytes());
+                }
+
+                // TODO: Do we want any other user_data or runtime_config?
 
                 blake3::hash(&bytes_to_hash).to_string()
             })
@@ -3143,6 +3163,46 @@ mod ownership_tests {
         enabled.runtime_config.kv_event_publishing_enabled = Some(true);
 
         assert_eq!(disabled.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
+    fn tower_connector_lora_runtime_flag_isolates_worker_sets() {
+        use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
+
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled.runtime_config.runtime_data.insert(
+            VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY.to_string(),
+            false.into(),
+        );
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled.runtime_config.runtime_data.insert(
+            VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY.to_string(),
+            true.into(),
+        );
+
+        assert_eq!(missing.mdcsum(), disabled.mdcsum());
+        assert_ne!(missing.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
+    fn routing_image_token_id_isolates_worker_sets() {
+        use crate::local_model::runtime_config::VLLM_ROUTING_IMAGE_TOKEN_ID_RUNTIME_KEY;
+
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let mut token_a = ModelDeploymentCard::with_name_only("model");
+        token_a.runtime_config.runtime_data.insert(
+            VLLM_ROUTING_IMAGE_TOKEN_ID_RUNTIME_KEY.to_string(),
+            151_665.into(),
+        );
+        let mut token_b = ModelDeploymentCard::with_name_only("model");
+        token_b.runtime_config.runtime_data.insert(
+            VLLM_ROUTING_IMAGE_TOKEN_ID_RUNTIME_KEY.to_string(),
+            151_666.into(),
+        );
+
+        assert_ne!(missing.mdcsum(), token_a.mdcsum());
+        assert_ne!(token_a.mdcsum(), token_b.mdcsum());
     }
 }
 
