@@ -518,6 +518,29 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 RUN /usr/bin/python3 -c 'import os, re, sys; D = "/usr/local/lib/python3.12/dist-packages"; W = {"aiohttp": ((3, 14, 3), (4, 0, 0)), "pillow": ((12, 3, 0), (12, 4, 0)), "mistune": ((3, 3, 0), (3, 4, 0)), "tornado": ((6, 5, 6), (6, 6, 0)), "jupyter-server": ((2, 20, 0), (2, 21, 0)), "jupyterlab": ((4, 5, 10), (4, 6, 0)), "gitpython": ((3, 1, 58), (3, 2, 0)), "soupsieve": ((2, 8, 4), (2, 9, 0))}; norm = lambda s: re.sub(r"[-_.]+", "-", s).lower(); tv = lambda s: tuple(int(x) for x in re.findall(r"\d+", s)[:3]); stems = [d[:-10].rsplit("-", 1) for d in os.listdir(D) if d.endswith(".dist-info") and "-" in d[:-10]]; found = {k: [] for k in W}; [found[norm(n)].append(v) for n, v in stems if norm(n) in found]; print("post-overlay system-site dist-info:", found); bad = [(k, v) for k, v in sorted(found.items()) if len(v) != 1 or not (W[k][0] <= tv(v[0]) < W[k][1])]; print("FAILED:", bad) if bad else None; sys.exit(1 if bad else 0)' && \
     /usr/bin/python3 -c 'import glob, os, sys; D = "/usr/local/lib/python3.12/dist-packages"; libs = os.path.join(D, "pillow.libs"); recs = glob.glob(os.path.join(D, "pillow-*.dist-info", "RECORD")); sys.exit(1) if len(recs) != 1 else None; owned = {os.path.basename(l.split(",")[0]) for l in open(recs[0]) if l.startswith("pillow.libs/")}; disk = set(os.listdir(libs)) if os.path.isdir(libs) else set(); stale = sorted(disk - owned); print("pillow.libs owned:", len(owned), "on disk:", len(disk)); print("STALE:", stale) if stale else None; sys.exit(1 if stale else 0)'
 
+# The Nsight Systems CLI in the CUDA base ships an optional efa_metrics sampler
+# for EFA network counters. Nothing in the Dynamo tree references it, and AWS
+# EFA confirmed on 2026-08-18 that they do not use it. It is a static Go binary,
+# so it carries its own copy of the Go standard library and is the sole carrier
+# for 17 of this image's Critical and High findings.
+#
+# Removed after the overlay rather than in the rm -rf above, for the same reason
+# the guards here exist: COPY --from=runtime_full / / reinstates whatever the
+# base holds, so a pre-overlay whiteout would just be undone. The glob spans the
+# CUDA version, the Nsight version and both target architectures, all of which
+# move with the base image.
+#
+# The guard is the point of the change, not decoration: a glob that silently
+# matches nothing after a base bump would leave the finding in place while the
+# build stayed green.
+RUN rm -rf /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/plugins/efa_metrics; \
+    if find /usr/local -type d -name efa_metrics 2>/dev/null | grep -q .; then \
+        echo "ERROR: an efa_metrics plugin directory survived removal; the glob no" >&2; \
+        echo "       longer matches the base image's Nsight layout." >&2; \
+        find /usr/local -type d -name efa_metrics >&2; \
+        exit 1; \
+    fi
+
 # Mirrors runtime_full's ENV — must stay in sync. Re-declaration is required
 # because `FROM ${RUNTIME_IMAGE}` here does not inherit runtime_full's config.
 # dev/local-dev create their own venv in a later stage, so the venv ENV is left
