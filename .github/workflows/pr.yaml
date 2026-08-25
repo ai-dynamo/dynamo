@@ -195,7 +195,11 @@ jobs:
     steps:
       - name: Check all deploy test jobs
         run: |
-          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped", "cancelled"] | any($result == .))'
+          # "cancelled" is deliberately not accepted: a job killed by its own
+          # timeout-minutes (pods that never reach Ready, a hung port-forward)
+          # is reported as cancelled, not failure, so allowing it turns a whole
+          # matrix of deploy tests that never ran into a green merge gate.
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
   dynamo-status-check:
     runs-on: ubuntu-slim
