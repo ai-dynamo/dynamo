@@ -29,7 +29,7 @@ def _make_cpu_nixl_importer() -> TensorImporter:
     # Keep the workflow/NIXL dependency off the ordinary vLLM startup path.
     # The package (and its native connector) is loaded only when the first
     # request actually carries an external encoder result.
-    from dynamo.workflow.nixl import NixlTensorCarrier
+    from dynamo.experimental.workflow.nixl import NixlTensorCarrier
 
     return NixlTensorCarrier(receive_device="cpu")
 
