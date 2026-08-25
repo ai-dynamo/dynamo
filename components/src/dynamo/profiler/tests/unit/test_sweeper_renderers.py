@@ -6,12 +6,14 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from dynamo.profiler.sweeper import dgd as dgd_module
-from dynamo.profiler.sweeper.dgd import (
+from dynamo.profiler.sweeper.renderers import (
     CandidateMaterializationError,
     DGDMaterializationOptions,
-    materialize_candidate_dgd,
 )
+from dynamo.profiler.sweeper.renderers import base as base_module
+from dynamo.profiler.sweeper.renderers import render_dgd
+from dynamo.profiler.sweeper.renderers.aic import renderer as aic_renderer
+from dynamo.profiler.sweeper.renderers.direct import renderer as direct_renderer
 
 pytestmark = [
     pytest.mark.unit,
@@ -74,14 +76,14 @@ spec:
         }
 
     monkeypatch.setattr(
-        dgd_module,
+        aic_renderer,
         "_load_generator_api",
         lambda: (fake_from_sweeper_candidate, fake_generate_from_request),
     )
     candidate = _candidate()
     workload = SimpleNamespace(isl=4000, osl=1000)
 
-    rendered = materialize_candidate_dgd(
+    rendered = render_dgd(
         candidate,
         workload,
         _options(),
@@ -136,13 +138,13 @@ def test_materialize_direct_uses_config_modifiers(monkeypatch) -> None:
         return FakeResult()
 
     monkeypatch.setattr(
-        dgd_module,
-        "_load_direct_renderer_api",
+        direct_renderer,
+        "_load_materializer",
         lambda: (FakeMaterializationError, fake_materialize),
     )
 
     candidate = _candidate(deployment_mode="agg")
-    rendered = materialize_candidate_dgd(
+    rendered = render_dgd(
         candidate,
         SimpleNamespace(isl=4000, osl=1000),
         _options(),
@@ -177,7 +179,7 @@ def test_materialize_requires_candidate_to_match_runtime_target(
     candidate, message
 ) -> None:
     with pytest.raises(CandidateMaterializationError, match=message):
-        materialize_candidate_dgd(
+        render_dgd(
             candidate,
             SimpleNamespace(isl=4000, osl=1000),
             _options(),
@@ -200,7 +202,7 @@ spec:
   components: []
 """
 
-    patched = dgd_module._patch_dgd_manifest(
+    patched = base_module.patch_dgd_manifest(
         rendered,
         _options(),
         candidate_index=1,
