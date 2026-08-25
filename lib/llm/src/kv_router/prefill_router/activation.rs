@@ -165,6 +165,7 @@ where
     ) -> Arc<Self> {
         Arc::new(Self {
             binding: arc_swap::ArcSwapOption::empty(),
+            tracked_reservations: Default::default(),
             target: parking_lot::Mutex::new(None),
             target_tx: None,
             decode_router: None,
@@ -216,6 +217,7 @@ where
 
         let router = Arc::new(Self {
             binding: arc_swap::ArcSwapOption::empty(),
+            tracked_reservations: Default::default(),
             target: parking_lot::Mutex::new(None),
             target_tx: Some(target_tx),
             decode_router,

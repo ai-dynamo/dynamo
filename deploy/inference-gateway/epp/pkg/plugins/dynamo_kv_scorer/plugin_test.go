@@ -193,3 +193,9 @@ func TestBuildOpenAIRequestJSON_MissingPayloadReturnsError(t *testing.T) {
 		t.Fatalf("expected an error when the raw payload is unavailable, got nil")
 	}
 }
+
+func TestCallRoutePrefillRequestWithRequestIDRequiresBookingID(t *testing.T) {
+	if _, err := CallRoutePrefillRequestWithRequestID("", `{}`, ""); err == nil {
+		t.Fatal("expected empty request ID to be rejected before prefill routing")
+	}
+}

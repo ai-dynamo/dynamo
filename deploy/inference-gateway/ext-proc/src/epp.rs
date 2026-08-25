@@ -15,8 +15,9 @@ use std::time::Duration;
 use anyhow::Result;
 use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
+use dynamo_kv_router::sequences::SequenceError;
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
-use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
+use dynamo_llm::kv_router::prefill_router::{PrefillError, PrefillQueryOutcome};
 use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
@@ -103,6 +104,145 @@ pub struct Router {
     pod_store: kube::runtime::reflector::Store<k8s_openapi::api::core::v1::Pod>,
     pod_store_ready: Arc<AtomicBool>,
     served_model: String,
+}
+
+async fn mark_prefill_completed_in_routers(
+    prefill_router: Arc<PrefillRouter>,
+    decode_router: Arc<KvRouter>,
+    reservation_id: String,
+) -> Result<()> {
+    let (prefill_result, decode_result) = tokio::join!(
+        prefill_router.mark_prefill_completed(&reservation_id),
+        decode_router.mark_prefill_completed(&reservation_id),
+    );
+    merge_router_lifecycle_results(
+        prefill_result,
+        normalize_decode_lifecycle_result(decode_result),
+        "mark prefill complete",
+    )
+}
+
+async fn free_request_from_routers(
+    prefill_router: Arc<PrefillRouter>,
+    decode_router: Arc<KvRouter>,
+    reservation_id: String,
+) -> Result<()> {
+    let (prefill_result, decode_result) = tokio::join!(
+        prefill_router.free(&reservation_id),
+        decode_router.free(&reservation_id),
+    );
+    merge_router_lifecycle_results(
+        prefill_result,
+        normalize_decode_lifecycle_result(decode_result),
+        "free request",
+    )
+}
+
+fn normalize_decode_lifecycle_result(result: std::result::Result<(), SequenceError>) -> Result<()> {
+    match result {
+        Ok(()) | Err(SequenceError::RequestNotFound { .. }) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn merge_router_lifecycle_results(
+    prefill_result: Result<()>,
+    decode_result: Result<()>,
+    operation: &str,
+) -> Result<()> {
+    match (prefill_result, decode_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(anyhow::anyhow!(
+            "{operation} failed in prefill router: {error:#}"
+        )),
+        (Ok(()), Err(error)) => Err(anyhow::anyhow!(
+            "{operation} failed in decode router: {error:#}"
+        )),
+        (Err(prefill_error), Err(decode_error)) => Err(anyhow::anyhow!(
+            "{operation} failed in both routers: prefill={prefill_error:#}; decode={decode_error:#}"
+        )),
+    }
+}
+
+/// Cleans up an admitted route if `pick()` is cancelled or errors before the
+/// server adopts its reservation ID. Lifecycle callbacks own cleanup after
+/// `disarm()`.
+struct RoutingReservationGuard {
+    prefill_router: Arc<PrefillRouter>,
+    decode_router: Arc<KvRouter>,
+    reservation_id: String,
+    runtime_handle: tokio::runtime::Handle,
+    armed: bool,
+}
+
+enum PrefillReservationOutcome {
+    Routed {
+        worker_id: u64,
+        dp_rank: Option<u32>,
+    },
+    Unavailable,
+    QueueRejected,
+}
+
+impl RoutingReservationGuard {
+    fn new(
+        prefill_router: Arc<PrefillRouter>,
+        decode_router: Arc<KvRouter>,
+        reservation_id: String,
+        runtime_handle: tokio::runtime::Handle,
+    ) -> Self {
+        Self {
+            prefill_router,
+            decode_router,
+            reservation_id,
+            runtime_handle,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+fn spawn_reservation_cleanup(
+    runtime_handle: &tokio::runtime::Handle,
+    cleanup: impl std::future::Future<Output = ()> + Send + 'static,
+) {
+    // A reservation guard can be dropped by a caller that is no longer
+    // entered into a Tokio runtime. The captured server runtime remains the
+    // cleanup executor in that case.
+    drop(runtime_handle.spawn(cleanup));
+}
+
+impl Drop for RoutingReservationGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let prefill_router = self.prefill_router.clone();
+        let decode_router = self.decode_router.clone();
+        let reservation_id = std::mem::take(&mut self.reservation_id);
+        spawn_reservation_cleanup(&self.runtime_handle, async move {
+            match tokio::time::timeout(
+                BOOKKEEPING_TIMEOUT,
+                free_request_from_routers(prefill_router, decode_router, reservation_id.clone()),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::warn!(
+                    request_id = %reservation_id,
+                    %error,
+                    "Failed to roll back an unadopted routing reservation"
+                ),
+                Err(_) => tracing::warn!(
+                    request_id = %reservation_id,
+                    "Timed out rolling back an unadopted routing reservation"
+                ),
+            }
+        });
+    }
 }
 
 impl Router {
@@ -335,8 +475,6 @@ impl Router {
             self.prefill_router.register_workers(ids);
         }
 
-        // TODO(epp-prefill-booking): Atomically reserve the selected prefill worker
-        // and release it on first output, cancellation, or routing failure.
         let outcome = self
             .prefill_router
             .query_prefill_worker(
@@ -350,10 +488,9 @@ impl Router {
                 RoutingConstraints::default(),
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Prefill query failed: {:?}", e))?;
+            .map_err(|e| anyhow::anyhow!("Prefill query failed: {e:?}"))?;
 
         match outcome {
-            // Advisory only: the gateway owns dispatch and lifecycle state.
             PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
             PrefillQueryOutcome::QueueRejected { rejection } => Err(anyhow::anyhow!(
                 "Prefill router policy-class queue rejection: policy_class={}, limit_kind={}, current={}, limit={}",
@@ -362,6 +499,63 @@ impl Router {
                 rejection.current,
                 rejection.limit
             )),
+        }
+    }
+
+    async fn reserve_prefill(
+        &self,
+        reservation_id: &str,
+        tokens: &[u32],
+        cache_namespace: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        allowed_worker_ids: Option<HashSet<u64>>,
+    ) -> Result<PrefillReservationOutcome> {
+        if let Some(ref ids) = allowed_worker_ids {
+            self.prefill_router.register_workers(ids);
+        }
+
+        let outcome = match self
+            .prefill_router
+            .reserve_prefill_worker(
+                reservation_id,
+                tokens,
+                None,
+                None,
+                cache_namespace,
+                priority_jump,
+                strict_priority,
+                allowed_worker_ids,
+                RoutingConstraints::default(),
+            )
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<PrefillError>(),
+                    Some(PrefillError::NotActivated)
+                ) =>
+            {
+                return Ok(PrefillReservationOutcome::Unavailable);
+            }
+            Err(error) => return Err(anyhow::anyhow!("Prefill reservation failed: {error:?}")),
+        };
+
+        match outcome {
+            PrefillQueryOutcome::Routed { worker_id, dp_rank } => {
+                Ok(PrefillReservationOutcome::Routed { worker_id, dp_rank })
+            }
+            PrefillQueryOutcome::QueueRejected { rejection } => {
+                tracing::warn!(
+                    policy_class = %rejection.policy_class,
+                    limit_kind = %rejection.limit_kind,
+                    current = rejection.current,
+                    limit = rejection.limit,
+                    "Prefill reservation rejected by queue policy"
+                );
+                Ok(PrefillReservationOutcome::QueueRejected)
+            }
         }
     }
 
@@ -450,30 +644,28 @@ impl Router {
 
     /// Mark prefill as completed for a request.
     pub async fn mark_prefill_complete(&self, request_id: &str) -> Result<()> {
+        let prefill_router = self.prefill_router.clone();
         let decode_router = self.decode_router.clone();
         let request_id = request_id.to_owned();
 
-        tokio::time::timeout(BOOKKEEPING_TIMEOUT, async {
-            decode_router
-                .mark_prefill_completed(&request_id)
-                .await
-                .map_err(|e| anyhow::anyhow!("mark_prefill_completed failed: {e}"))
-        })
+        tokio::time::timeout(
+            BOOKKEEPING_TIMEOUT,
+            mark_prefill_completed_in_routers(prefill_router, decode_router, request_id),
+        )
         .await
         .map_err(|_| anyhow::anyhow!("mark_prefill_complete timed out"))?
     }
 
     /// Free a request from the router's bookkeeping.
     pub async fn free_request(&self, request_id: &str) -> Result<()> {
+        let prefill_router = self.prefill_router.clone();
         let decode_router = self.decode_router.clone();
         let request_id = request_id.to_owned();
 
-        tokio::time::timeout(BOOKKEEPING_TIMEOUT, async {
-            decode_router
-                .free(&request_id)
-                .await
-                .map_err(|e| anyhow::anyhow!("free failed: {e}"))
-        })
+        tokio::time::timeout(
+            BOOKKEEPING_TIMEOUT,
+            free_request_from_routers(prefill_router, decode_router, request_id),
+        )
         .await
         .map_err(|_| anyhow::anyhow!("free_request timed out"))?
     }
@@ -952,12 +1144,25 @@ impl EndpointPicker for Router {
         let cache_namespace =
             cache_namespace_with_header_override(&req.headers, body_cache_namespace);
 
+        // Use an internal booking key so concurrent attempts that reuse an
+        // external request ID never overwrite each other's scheduler state.
+        let reservation_id = uuid::Uuid::new_v4().to_string();
+        // Arm before the first admission await. If this future is cancelled
+        // after admission succeeds, Drop rolls both routers back.
+        let mut reservation_guard = RoutingReservationGuard::new(
+            self.prefill_router.clone(),
+            self.decode_router.clone(),
+            reservation_id.clone(),
+            self.runtime.secondary(),
+        );
+
         // Try prefill routing first (disaggregated mode).
         //
         // If the prefill router is not activated (no prefill workers discovered yet, or the inner
         // router has been deactivated), fall back to aggregated routing.
         let prefill_result = self
-            .route_prefill(
+            .reserve_prefill(
+                &reservation_id,
                 &tokens,
                 cache_namespace.clone(),
                 priority_jump,
@@ -966,21 +1171,21 @@ impl EndpointPicker for Router {
             )
             .await;
 
-        let is_disaggregated = match &prefill_result {
-            Ok(_) => true,
-            Err(e) => {
-                tracing::debug!(
-                    error = %e,
-                    "Prefill routing failed; falling back to aggregated mode"
-                );
-                false
+        let (prefill_result, is_disaggregated) = match prefill_result {
+            Ok(PrefillReservationOutcome::Routed { worker_id, dp_rank }) => {
+                (Some((worker_id, dp_rank)), true)
             }
+            Ok(PrefillReservationOutcome::Unavailable) => {
+                tracing::debug!("Prefill router unavailable; falling back to aggregated mode");
+                (None, false)
+            }
+            Ok(PrefillReservationOutcome::QueueRejected) => return Err(PickError::Overloaded),
+            Err(error) => return Err(PickError::RoutingFailed(error.to_string())),
         };
 
-        // TODO(epp-atomic-admission): Replace query-only selection plus add_request
-        // with one tracked operation. Propagate booking failures, use an internal
-        // booking ID independent of x-request-id, handle cancellation races, roll
-        // back endpoint-resolution failures, and never forward to an unbooked fallback.
+        // TODO(epp-atomic-decode-admission): Replace decode query plus add_request
+        // with one tracked operation. The guard below keeps the current two-step
+        // path leak-free, but another selection may interleave before decode booking.
         let (decode_worker, _overlap) = self
             .route_decode(
                 &tokens,
@@ -1009,35 +1214,28 @@ impl EndpointPicker for Router {
                 .iter()
                 .find(|(wid, _)| *wid == decode_worker.worker_id)
                 .map(|(_, ep)| ep.address_port())
-                .unwrap_or_else(|| {
+                .ok_or_else(|| {
                     tracing::warn!(
                         worker_id = decode_worker.worker_id,
-                        "Selected worker not in endpoint list, using first available"
+                        "Selected worker not in endpoint list"
                     );
-                    endpoints[0].address_port()
-                })
+                    PickError::NoEndpoints
+                })?
         };
 
-        // Register the request with the router for bookkeeping (load tracking).
-        // Mirrors Go EPP's PreRequest() → CallAddRequest(requestID, tokenData, workerID, dpRank).
-        if !req.request_id.is_empty()
-            && let Err(e) = self
-                .add_request(
-                    &req.request_id,
-                    &tokens,
-                    decode_worker.worker_id,
-                    decode_worker.dp_rank,
-                    is_disaggregated,
-                    cache_namespace,
-                )
-                .await
-        {
-            tracing::warn!(
-                request_id = %req.request_id,
-                error = %e,
-                "Failed to register request with router bookkeeping"
-            );
-        }
+        // Book the decode side under the same internal key. Lifecycle callbacks
+        // receive this key through `PickResult::reservation_id` and release both
+        // independent router reservations together.
+        self.add_request(
+            &reservation_id,
+            &tokens,
+            decode_worker.worker_id,
+            decode_worker.dp_rank,
+            is_disaggregated,
+            cache_namespace,
+        )
+        .await
+        .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
 
         // Build routing headers matching the Go EPP's disagg plugin:
         // x-dynamo-worker-instance-id, x-dynamo-dp-rank,
@@ -1053,7 +1251,7 @@ impl EndpointPicker for Router {
             ),
         ];
 
-        if let Ok((prefill_worker_id, prefill_dp_rank)) = &prefill_result {
+        if let Some((prefill_worker_id, prefill_dp_rank)) = &prefill_result {
             headers.push((
                 "x-dynamo-routing-mode".to_string(),
                 "disaggregated".to_string(),
@@ -1088,12 +1286,15 @@ impl EndpointPicker for Router {
             tracing::debug!(key = %k, value = %v, "Routing header set in PickResult");
         }
 
+        // No awaits after disarming: the server adopts the booking key
+        // synchronously from the returned PickResult.
+        reservation_guard.disarm();
         Ok(PickResult {
             endpoint,
             fallbacks: vec![],
             headers,
             token_ids: Some(tokens),
-            reservation_id: None,
+            reservation_id: Some(reservation_id),
         })
     }
 
@@ -1137,6 +1338,27 @@ impl EndpointPicker for Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captured_runtime_handle_spawns_cleanup_from_plain_thread() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let runtime_handle = runtime.handle().clone();
+        let (cleanup_tx, cleanup_rx) = tokio::sync::oneshot::channel();
+
+        std::thread::spawn(move || {
+            assert!(tokio::runtime::Handle::try_current().is_err());
+            spawn_reservation_cleanup(&runtime_handle, async move {
+                cleanup_tx.send(()).unwrap();
+            });
+        })
+        .join()
+        .unwrap();
+
+        runtime.block_on(cleanup_rx).unwrap();
+    }
 
     #[test]
     fn tenant_header_overrides_body_cache_namespace() {

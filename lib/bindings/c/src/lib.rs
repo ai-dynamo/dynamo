@@ -30,7 +30,7 @@ use dynamo_runtime::Runtime;
 
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
 use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
-use dynamo_llm::kv_router::{KvRouter, PrefillRouter};
+use dynamo_llm::kv_router::{KvRouter, PrefillRouter, sequence::SequenceError};
 use dynamo_runtime::pipeline::RouterMode;
 
 use std::collections::HashSet;
@@ -62,6 +62,18 @@ unsafe fn cstr_or_default<'a>(ptr: *const c_char, default_val: &'a str) -> Cow<'
     {
         Some(s) if !s.is_empty() => Cow::from(s.to_owned()),
         _ => Cow::from(default_val),
+    }
+}
+
+unsafe fn parse_nonempty_request_id(
+    request_id: *const c_char,
+) -> Result<String, QueryRouterResult> {
+    if request_id.is_null() {
+        return Err(QueryRouterResult::ErrInvalidParam);
+    }
+    match unsafe { CStr::from_ptr(request_id) }.to_str() {
+        Ok(request_id) if !request_id.is_empty() => Ok(request_id.to_owned()),
+        _ => Err(QueryRouterResult::ErrInvalidParam),
     }
 }
 
@@ -475,13 +487,10 @@ pub struct RouterHandles {
 }
 
 impl RouterHandles {
-    /// Query optimal prefill worker for a request.
-    ///
-    /// When `allowed_worker_ids` is Some, only workers in that set are considered.
-    /// Returns worker_id on success.
     #[expect(clippy::too_many_arguments)]
-    async fn query_prefill_worker(
+    async fn route_prefill_worker(
         &self,
+        request_id: Option<&str>,
         tokens: &[u32],
         block_mm_infos: Option<&[Option<dynamo_kv_router::protocols::BlockExtraInfo>]>,
         lora_name: Option<String>,
@@ -495,25 +504,47 @@ impl RouterHandles {
             self.prefill_router.register_workers(ids);
         }
 
-        let outcome = self
-            .prefill_router
-            .query_prefill_worker(
-                tokens,
-                block_mm_infos,
-                lora_name,
-                cache_namespace,
-                priority_jump,
-                strict_priority,
-                allowed_worker_ids,
-                routing_constraints,
-            )
-            .await
-            .map_err(|e| {
-                tracing::error!(error = ?e, "Prefill query failed");
-                QueryRouterResult::ErrQueryFailed
-            })?;
+        let outcome = match request_id {
+            Some(request_id) => {
+                self.prefill_router
+                    .reserve_prefill_worker(
+                        request_id,
+                        tokens,
+                        block_mm_infos,
+                        lora_name,
+                        cache_namespace,
+                        priority_jump,
+                        strict_priority,
+                        allowed_worker_ids,
+                        routing_constraints,
+                    )
+                    .await
+            }
+            None => {
+                self.prefill_router
+                    .query_prefill_worker(
+                        tokens,
+                        block_mm_infos,
+                        lora_name,
+                        cache_namespace,
+                        priority_jump,
+                        strict_priority,
+                        allowed_worker_ids,
+                        routing_constraints,
+                    )
+                    .await
+            }
+        }
+        .map_err(|e| {
+            tracing::error!(
+                error = ?e,
+                tracked = request_id.is_some(),
+                "Prefill routing failed"
+            );
+            QueryRouterResult::ErrQueryFailed
+        })?;
+
         match outcome {
-            // Advisory only: the external caller owns dispatch and lifecycle state.
             PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
             PrefillQueryOutcome::QueueRejected { rejection } => {
                 tracing::warn!(
@@ -538,9 +569,9 @@ impl RouterHandles {
     /// When `allowed_worker_ids` is Some, only workers in that set are considered.
     /// This does NOT overwrite the router's internal worker state — it only filters this decision.
     ///
-    /// Note: The C bindings are query-only and must not mutate router state during worker
-    /// selection. State updates require a `context_id` (request id) and are managed via the
-    /// explicit bookkeeping APIs (`add_request`, `mark_prefill_complete`, `free_request`).
+    /// Note: This decode selection API is advisory and does not mutate router state. Decode state
+    /// updates require a `context_id` (request id) and are managed via the explicit bookkeeping
+    /// APIs (`add_request`, `mark_prefill_complete`, `free_request`).
     /// Returns (worker, overlap_blocks) on success.
     #[expect(clippy::too_many_arguments)]
     async fn query_decode_worker(
@@ -1049,6 +1080,123 @@ pub unsafe extern "C" fn add_request_with_cache_namespace(
     }
 }
 
+#[derive(Clone, Copy)]
+enum RouterLifecycleOperation {
+    MarkPrefillCompleted,
+    Free,
+}
+
+impl RouterLifecycleOperation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::MarkPrefillCompleted => "mark_prefill_complete",
+            Self::Free => "free_request",
+        }
+    }
+}
+
+async fn apply_prefill_lifecycle_operation(
+    router: Arc<PrefillRouter>,
+    request_id: &str,
+    operation: RouterLifecycleOperation,
+) -> anyhow::Result<()> {
+    match operation {
+        RouterLifecycleOperation::MarkPrefillCompleted => {
+            router.mark_prefill_completed(request_id).await
+        }
+        RouterLifecycleOperation::Free => router.free(request_id).await,
+    }
+}
+
+async fn apply_decode_lifecycle_operation(
+    router: Arc<KvRouter>,
+    request_id: &str,
+    operation: RouterLifecycleOperation,
+) -> anyhow::Result<()> {
+    let result = match operation {
+        RouterLifecycleOperation::MarkPrefillCompleted => {
+            router.mark_prefill_completed(request_id).await
+        }
+        RouterLifecycleOperation::Free => router.free(request_id).await,
+    };
+    match result {
+        Ok(()) | Err(SequenceError::RequestNotFound { .. }) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LifecycleOperationStatus {
+    Completed,
+    Failed,
+    TimedOut,
+}
+
+fn lifecycle_operation_status(
+    result: std::result::Result<anyhow::Result<()>, tokio::time::error::Elapsed>,
+    request_id: &str,
+    router: &'static str,
+    operation: RouterLifecycleOperation,
+) -> LifecycleOperationStatus {
+    match result {
+        Ok(Ok(())) => {
+            tracing::debug!(
+                request_id,
+                router,
+                operation = operation.as_str(),
+                "Router lifecycle operation completed"
+            );
+            LifecycleOperationStatus::Completed
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(request_id, router, operation = operation.as_str(), %error, "Router lifecycle operation failed");
+            LifecycleOperationStatus::Failed
+        }
+        Err(_) => {
+            tracing::warn!(
+                request_id,
+                router,
+                operation = operation.as_str(),
+                timeout_secs = BOOKKEEPING_TIMEOUT_SEC,
+                "Router lifecycle operation timed out"
+            );
+            LifecycleOperationStatus::TimedOut
+        }
+    }
+}
+
+async fn run_lifecycle_operation_on_both(
+    prefill_router: Arc<PrefillRouter>,
+    decode_router: Arc<KvRouter>,
+    request_id: &str,
+    operation: RouterLifecycleOperation,
+) -> QueryRouterResult {
+    let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SEC);
+    let (prefill_result, decode_result) = tokio::join!(
+        tokio::time::timeout(
+            timeout_duration,
+            apply_prefill_lifecycle_operation(prefill_router, request_id, operation),
+        ),
+        tokio::time::timeout(
+            timeout_duration,
+            apply_decode_lifecycle_operation(decode_router, request_id, operation),
+        ),
+    );
+
+    let prefill_status =
+        lifecycle_operation_status(prefill_result, request_id, "prefill", operation);
+    let decode_status = lifecycle_operation_status(decode_result, request_id, "decode", operation);
+    match (prefill_status, decode_status) {
+        (LifecycleOperationStatus::TimedOut, _) | (_, LifecycleOperationStatus::TimedOut) => {
+            QueryRouterResult::ErrTimeout
+        }
+        (LifecycleOperationStatus::Failed, _) | (_, LifecycleOperationStatus::Failed) => {
+            QueryRouterResult::ErrQueryFailed
+        }
+        _ => QueryRouterResult::Ok,
+    }
+}
+
 /// Mark prefill as completed for a request.
 ///
 /// Call when the first token is generated to release prefill tokens from decode worker's load
@@ -1071,39 +1219,18 @@ pub unsafe extern "C" fn mark_prefill_complete(
         Err(_) => return QueryRouterResult::ErrInvalidParam,
     };
 
+    let prefill_router = handles.prefill_router.clone();
     let decode_router = handles.decode_router.clone();
 
-    let result = handles.runtime.secondary().block_on(async {
-        let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SEC);
-
-        tokio::time::timeout(timeout_duration, async {
-            if let Err(e) = decode_router.mark_prefill_completed(&request_id_str).await {
-                tracing::warn!(
-                    request_id = %request_id_str,
-                    error = %e,
-                    "Failed to mark prefill complete"
-                );
-            } else {
-                tracing::debug!(
-                    request_id = %request_id_str,
-                    "mark_prefill_complete completed"
-                );
-            }
-        })
-        .await
-    });
-
-    match result {
-        Ok(()) => QueryRouterResult::Ok,
-        Err(_elapsed) => {
-            tracing::warn!(
-                request_id = %request_id_str,
-                timeout_secs = BOOKKEEPING_TIMEOUT_SEC,
-                "mark_prefill_complete timed out"
-            );
-            QueryRouterResult::ErrTimeout
-        }
-    }
+    handles
+        .runtime
+        .secondary()
+        .block_on(run_lifecycle_operation_on_both(
+            prefill_router,
+            decode_router,
+            &request_id_str,
+            RouterLifecycleOperation::MarkPrefillCompleted,
+        ))
 }
 
 /// Free a request from the router's bookkeeping.
@@ -1128,39 +1255,18 @@ pub unsafe extern "C" fn free_request(
         Err(_) => return QueryRouterResult::ErrInvalidParam,
     };
 
+    let prefill_router = handles.prefill_router.clone();
     let decode_router = handles.decode_router.clone();
 
-    let result = handles.runtime.secondary().block_on(async {
-        let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SEC);
-
-        tokio::time::timeout(timeout_duration, async {
-            if let Err(e) = decode_router.free(&request_id_str).await {
-                tracing::warn!(
-                    request_id = %request_id_str,
-                    error = %e,
-                    "Failed to free request"
-                );
-            } else {
-                tracing::debug!(
-                    request_id = %request_id_str,
-                    "free_request completed"
-                );
-            }
-        })
-        .await
-    });
-
-    match result {
-        Ok(()) => QueryRouterResult::Ok,
-        Err(_elapsed) => {
-            tracing::warn!(
-                request_id = %request_id_str,
-                timeout_secs = BOOKKEEPING_TIMEOUT_SEC,
-                "free_request timed out"
-            );
-            QueryRouterResult::ErrTimeout
-        }
-    }
+    handles
+        .runtime
+        .secondary()
+        .block_on(run_lifecycle_operation_on_both(
+            prefill_router,
+            decode_router,
+            &request_id_str,
+            RouterLifecycleOperation::Free,
+        ))
 }
 
 /// Destroy router handles
@@ -1401,6 +1507,65 @@ fn write_cache_namespace_to_result(cache_namespace: Option<&str>, out: &mut CRou
     std::mem::forget(namespace_boxed);
 }
 
+unsafe fn route_prefill_request_impl(
+    handles: &RouterHandles,
+    request_id: Option<&str>,
+    request_json: *const c_char,
+    pods_json: *const c_char,
+    out_result: *mut CRoutingResult,
+) -> QueryRouterResult {
+    let (tokens, cache_namespace, priority_jump, strict_priority, routing_constraints) =
+        match unsafe { preprocess_request(handles, request_json) } {
+            Ok(t) => t,
+            Err(code) => return code,
+        };
+
+    let allowed_worker_ids = unsafe { parse_pods_filter(pods_json) };
+
+    let result = handles.runtime.secondary().block_on(async {
+        let (prefill_worker_id, prefill_dp_rank) = handles
+            .route_prefill_worker(
+                request_id,
+                &tokens,
+                None,
+                None,
+                cache_namespace.clone(),
+                priority_jump,
+                strict_priority,
+                allowed_worker_ids,
+                routing_constraints,
+            )
+            .await?;
+        let prefill_dp_rank = prefill_dp_rank.unwrap_or(u32::MAX);
+
+        tracing::info!(
+            prefill_worker_id,
+            prefill_dp_rank,
+            token_count = tokens.len(),
+            priority_jump,
+            strict_priority,
+            tracked = request_id.is_some(),
+            "Routed prefill request"
+        );
+
+        Ok((prefill_worker_id, prefill_dp_rank))
+    });
+
+    match result {
+        Ok((prefill_worker_id, prefill_dp_rank)) => {
+            let out = unsafe { &mut *out_result };
+            *out = CRoutingResult::default();
+            out.is_disaggregated = true;
+            out.prefill_worker_id = prefill_worker_id;
+            out.prefill_dp_rank = prefill_dp_rank;
+            write_tokens_to_result(&tokens, out);
+            write_cache_namespace_to_result(cache_namespace.as_deref(), out);
+            QueryRouterResult::Ok
+        }
+        Err(code) => code,
+    }
+}
+
 /// Route a request to select the best **prefill** worker only.
 ///
 /// This is used in disaggregated mode where the EPP runs separate prefill and decode
@@ -1429,55 +1594,46 @@ pub unsafe extern "C" fn route_prefill_request(
     }
 
     let handles = unsafe { &*handle };
+    unsafe { route_prefill_request_impl(handles, None, request_json, pods_json, out_result) }
+}
 
-    let (tokens, cache_namespace, priority_jump, strict_priority, routing_constraints) =
-        match unsafe { preprocess_request(handles, request_json) } {
-            Ok(t) => t,
-            Err(code) => return code,
-        };
+/// Route and reserve a request on the best **prefill** worker.
+///
+/// This is the tracked counterpart to [`route_prefill_request`]. It performs normal scheduler
+/// admission under `request_id`; callers must pair it with [`mark_prefill_complete`] and
+/// [`free_request`].
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+/// - `request_id` must be a valid null-terminated UTF-8 C string
+/// - `request_json` must be a valid null-terminated C string containing JSON
+/// - `pods_json` must be a valid null-terminated C string containing JSON, or null
+/// - `out_result` must be a valid pointer
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn route_prefill_request_with_request_id(
+    handle: RouterHandlesPtr,
+    request_id: *const c_char,
+    request_json: *const c_char,
+    pods_json: *const c_char,
+    out_result: *mut CRoutingResult,
+) -> QueryRouterResult {
+    if handle.is_null() || request_json.is_null() || out_result.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    }
 
-    let allowed_worker_ids = unsafe { parse_pods_filter(pods_json) };
-
-    let result = handles.runtime.secondary().block_on(async {
-        let (prefill_worker_id, prefill_dp_rank) = handles
-            .query_prefill_worker(
-                &tokens,
-                None,
-                None,
-                cache_namespace.clone(),
-                priority_jump,
-                strict_priority,
-                allowed_worker_ids,
-                routing_constraints,
-            )
-            .await?;
-
-        let prefill_dp_rank = prefill_dp_rank.unwrap_or(u32::MAX);
-
-        tracing::info!(
-            prefill_worker_id = prefill_worker_id,
-            prefill_dp_rank = prefill_dp_rank,
-            token_count = tokens.len(),
-            priority_jump,
-            strict_priority,
-            "Routed prefill request"
-        );
-
-        Ok((prefill_worker_id, prefill_dp_rank))
-    });
-
-    match result {
-        Ok((prefill_worker_id, prefill_dp_rank)) => {
-            let out = unsafe { &mut *out_result };
-            *out = CRoutingResult::default();
-            out.is_disaggregated = true;
-            out.prefill_worker_id = prefill_worker_id;
-            out.prefill_dp_rank = prefill_dp_rank;
-            write_tokens_to_result(&tokens, out);
-            write_cache_namespace_to_result(cache_namespace.as_deref(), out);
-            QueryRouterResult::Ok
-        }
-        Err(code) => code,
+    let request_id = match unsafe { parse_nonempty_request_id(request_id) } {
+        Ok(request_id) => request_id,
+        Err(code) => return code,
+    };
+    let handles = unsafe { &*handle };
+    unsafe {
+        route_prefill_request_impl(
+            handles,
+            Some(&request_id),
+            request_json,
+            pods_json,
+            out_result,
+        )
     }
 }
 
@@ -1759,6 +1915,31 @@ async fn fetch_preprocessor_from_discovery(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tracked_prefill_request_id_must_be_nonempty_utf8() {
+        let valid = std::ffi::CString::new("request-1").unwrap();
+        assert!(matches!(
+            unsafe { parse_nonempty_request_id(valid.as_ptr()) },
+            Ok(request_id) if request_id == "request-1"
+        ));
+
+        let empty = std::ffi::CString::new("").unwrap();
+        assert!(matches!(
+            unsafe { parse_nonempty_request_id(empty.as_ptr()) },
+            Err(QueryRouterResult::ErrInvalidParam)
+        ));
+
+        let invalid_utf8 = [0xff_u8, 0];
+        assert!(matches!(
+            unsafe { parse_nonempty_request_id(invalid_utf8.as_ptr().cast::<c_char>()) },
+            Err(QueryRouterResult::ErrInvalidParam)
+        ));
+        assert!(matches!(
+            unsafe { parse_nonempty_request_id(std::ptr::null()) },
+            Err(QueryRouterResult::ErrInvalidParam)
+        ));
+    }
 
     #[test]
     fn priority_jump_lifted_from_agent_hints_priority() {

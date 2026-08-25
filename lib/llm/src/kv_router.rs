@@ -1095,6 +1095,58 @@ where
         .await
     }
 
+    /// Requests scheduler-owned cancellation cleanup for admitted best-match
+    /// routing when queue lifecycle tracking is enabled. The caller must still
+    /// retain its own guard until it adopts the returned booking.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn find_best_match_details_with_lifecycle(
+        &self,
+        context_id: Option<&str>,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
+        return_routing_hashes: bool,
+        lora_name: Option<String>,
+        cache_namespace: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+    ) -> anyhow::Result<FindBestMatchOutcome> {
+        match self
+            .find_best_match_details_with_policy_class_inner(
+                context_id,
+                tokens,
+                block_mm_infos,
+                router_config_override,
+                update_states,
+                return_routing_hashes,
+                lora_name,
+                cache_namespace,
+                priority_jump,
+                strict_priority,
+                None,
+                None,
+                expected_output_tokens,
+                pinned_worker,
+                allowed_worker_ids,
+                routing_constraints,
+                FindBestMatchAdmission::WithAdmission {
+                    track_lifecycle: true,
+                },
+            )
+            .await?
+        {
+            FindBestMatchInnerOutcome::WithAdmission(outcome) => Ok(outcome),
+            FindBestMatchInnerOutcome::WithoutAdmission(_) => {
+                unreachable!("with-admission routing returned advisory outcome")
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn find_best_match_details_with_policy_class(
         &self,
