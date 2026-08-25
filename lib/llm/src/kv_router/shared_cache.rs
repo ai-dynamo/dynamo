@@ -924,6 +924,7 @@ mod tests {
 
         assert_eq!(hits.ranges, vec![Range { start: 0, end: 1 }]);
         assert_eq!(hits.total_hits, 1);
+        assert_eq!(hits.queried_blocks, Some(2));
 
         cache.apply_batch(
             2,
@@ -939,6 +940,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(hits.total_hits, 0);
+        assert_eq!(hits.queried_blocks, Some(2));
+    }
+
+    #[tokio::test]
+    async fn test_eagle_reports_actual_queried_pages() {
+        let mut config = mooncake_config();
+        config.is_eagle = true;
+        let cache = HicacheSharedKvCache::new(runtime_watch_with_config(config));
+
+        let hits = cache
+            .check_blocks(&[1, 2, 3, 4, 5, 6, 7, 8], 4, None)
+            .await
+            .unwrap();
+
+        // EAGLE hashes adjacent token pairs, so eight tokens contain only one
+        // complete four-pair page rather than two ordinary token pages.
+        assert_eq!(hits.total_hits, 0);
+        assert_eq!(hits.queried_blocks, Some(1));
     }
 
     #[tokio::test]
@@ -1150,5 +1169,6 @@ mod tests {
 
         assert!(hits.ranges.is_empty());
         assert_eq!(hits.total_hits, 0);
+        assert_eq!(hits.queried_blocks, None);
     }
 }

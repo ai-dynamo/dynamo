@@ -17,8 +17,9 @@
 //!   - Frontend (aggregated and disaggregated): available on default port 8000
 //!   - Standalone router: not created (frontend-only)
 //!
-//! - [`RouterRequestMetrics`]: Per-request aggregate histograms and counters (TTFT, ITL,
-//!   tokens, KV hit rate, and non-max-overlap routing decisions).
+//! - [`RouterRequestMetrics`]: Per-request aggregate histograms and block-weighted counters
+//!   (TTFT, ITL, tokens, selected-worker KV hit, optional shared-cache hit, and
+//!   non-max-overlap routing decisions).
 //!   Registered on the DRT `MetricsRegistry` hierarchy via `Component::metrics()`.
 //!   Eagerly created so they appear as zeros before any requests arrive.
 //!   Populated by `KvPushRouter::generate()` and its `RequestGuard` as it observes
@@ -59,7 +60,7 @@ fn router_metric(suffix: &str) -> String {
 }
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use prometheus::{
-    HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
+    Counter, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts,
 };
 
 use crate::http::service::metrics::generate_log_buckets;
@@ -831,6 +832,15 @@ impl RoutingOverheadMetrics {
 /// decode pool). Component-scoped metrics let each local router emit metrics with
 /// distinct `dynamo_component` labels, so pools can be monitored and scaled
 /// independently.
+///
+/// # KV hit aggregation
+///
+/// `router_kv_hit_rate` is the arithmetic mean of per-request hit fractions. Use
+/// `router_kv_hit_effective_overlap_blocks_total / router_kv_hit_input_blocks_total`
+/// for a block-weighted effective hit fraction, or substitute
+/// `router_kv_hit_device_overlap_blocks_total` in the numerator for device-only overlap.
+/// Shared-cache metrics describe a separate optional external lookup and are not folded
+/// into the selected-worker overlap counters.
 pub struct RouterRequestMetrics {
     pub requests_total: prometheus::IntCounter,
     pub time_to_first_token_seconds: prometheus::Histogram,
@@ -838,9 +848,15 @@ pub struct RouterRequestMetrics {
     pub input_sequence_tokens: prometheus::Histogram,
     pub output_sequence_tokens: prometheus::Histogram,
     pub kv_hit_rate: prometheus::Histogram,
+    pub kv_hit_effective_overlap_blocks_total: Counter,
+    pub kv_hit_device_overlap_blocks_total: IntCounter,
+    pub kv_hit_input_blocks_total: IntCounter,
     pub kv_transfer_estimated_latency_seconds: prometheus::Histogram,
     pub shared_cache_hit_rate: prometheus::Histogram,
     pub shared_cache_beyond_blocks: prometheus::Histogram,
+    pub shared_cache_hit_blocks_total: IntCounter,
+    pub shared_cache_queried_blocks_total: IntCounter,
+    pub shared_cache_beyond_blocks_total: IntCounter,
     pub non_max_overlap_selections_total: IntCounterVec,
     pub overlap_blocks_lost: HistogramVec,
 }
@@ -930,11 +946,34 @@ impl RouterRequestMetrics {
                 let kv_hit_rate = metrics
                     .create_histogram(
                         &router_metric(frontend_service::KV_HIT_RATE),
-                        "Predicted KV cache hit rate at routing time (0.0-1.0)",
+                        "Request-weighted predicted effective KV cache hit fraction at routing time (0.0-1.0); each request is observed once",
                         extra_labels,
                         Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
                     )
                     .expect("failed to create router_kv_hit_rate");
+                let kv_hit_effective_overlap_blocks_total = metrics
+                    .create_counter(
+                        &router_metric(
+                            frontend_service::KV_HIT_EFFECTIVE_OVERLAP_BLOCKS_TOTAL,
+                        ),
+                        "Cumulative predicted effective KV overlap in fractional blocks for requests observed by router_kv_hit_rate",
+                        extra_labels,
+                    )
+                    .expect("failed to create router_kv_hit_effective_overlap_blocks_total");
+                let kv_hit_device_overlap_blocks_total = metrics
+                    .create_intcounter(
+                        &router_metric(frontend_service::KV_HIT_DEVICE_OVERLAP_BLOCKS_TOTAL),
+                        "Cumulative selected-worker device-tier KV overlap in whole blocks for requests observed by router_kv_hit_rate; falls back to rounded effective overlap when per-tier provenance is unavailable",
+                        extra_labels,
+                    )
+                    .expect("failed to create router_kv_hit_device_overlap_blocks_total");
+                let kv_hit_input_blocks_total = metrics
+                    .create_intcounter(
+                        &router_metric(frontend_service::KV_HIT_INPUT_BLOCKS_TOTAL),
+                        "Cumulative input blocks for requests observed by router_kv_hit_rate; divide effective overlap blocks by this counter for a block-weighted hit fraction",
+                        extra_labels,
+                    )
+                    .expect("failed to create router_kv_hit_input_blocks_total");
                 let kv_transfer_estimated_latency_seconds = metrics
                     .create_histogram(
                         &router_metric(frontend_service::KV_TRANSFER_ESTIMATED_LATENCY_SECONDS),
@@ -946,7 +985,7 @@ impl RouterRequestMetrics {
                 let shared_cache_hit_rate = metrics
                     .create_histogram(
                         &router_metric(frontend_service::SHARED_CACHE_HIT_RATE),
-                        "Fraction of request blocks found in the shared KV cache (0.0-1.0)",
+                        "Request-weighted fraction of full input blocks found by the optional external shared-cache lookup (0.0-1.0); this is separate from selected-worker KV overlap",
                         extra_labels,
                         Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
                     )
@@ -959,6 +998,27 @@ impl RouterRequestMetrics {
                         Some(prometheus::exponential_buckets(1.0, 2.0, 12).unwrap()),
                     )
                     .expect("failed to create router_shared_cache_beyond_blocks");
+                let shared_cache_hit_blocks_total = metrics
+                    .create_intcounter(
+                        &router_metric(frontend_service::SHARED_CACHE_HIT_BLOCKS_TOTAL),
+                        "Cumulative full input blocks found by the optional external shared-cache lookup",
+                        extra_labels,
+                    )
+                    .expect("failed to create router_shared_cache_hit_blocks_total");
+                let shared_cache_queried_blocks_total = metrics
+                    .create_intcounter(
+                        &router_metric(frontend_service::SHARED_CACHE_QUERIED_BLOCKS_TOTAL),
+                        "Cumulative full input blocks checked by the optional external shared-cache lookup; divide hit blocks by this counter for a block-weighted shared-cache hit fraction",
+                        extra_labels,
+                    )
+                    .expect("failed to create router_shared_cache_queried_blocks_total");
+                let shared_cache_beyond_blocks_total = metrics
+                    .create_intcounter(
+                        &router_metric(frontend_service::SHARED_CACHE_BEYOND_BLOCKS_TOTAL),
+                        "Cumulative shared-cache hit blocks beyond selected-worker device-tier overlap",
+                        extra_labels,
+                    )
+                    .expect("failed to create router_shared_cache_beyond_blocks_total");
                 let non_max_overlap_selections_total = metrics
                     .create_intcountervec(
                         &router_metric(frontend_service::NON_MAX_OVERLAP_SELECTIONS_TOTAL),
@@ -985,9 +1045,15 @@ impl RouterRequestMetrics {
                     input_sequence_tokens,
                     output_sequence_tokens,
                     kv_hit_rate,
+                    kv_hit_effective_overlap_blocks_total,
+                    kv_hit_device_overlap_blocks_total,
+                    kv_hit_input_blocks_total,
                     kv_transfer_estimated_latency_seconds,
                     shared_cache_hit_rate,
                     shared_cache_beyond_blocks,
+                    shared_cache_hit_blocks_total,
+                    shared_cache_queried_blocks_total,
+                    shared_cache_beyond_blocks_total,
                     non_max_overlap_selections_total,
                     overlap_blocks_lost,
                 })

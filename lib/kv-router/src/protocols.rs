@@ -1494,17 +1494,24 @@ pub struct SharedCacheHits {
     pub ranges: Vec<Range<u32>>,
     /// Total number of hits (sum of range lengths).
     pub total_hits: u32,
+    /// Number of block positions actually checked by the shared-cache lookup.
+    pub queried_blocks: Option<u32>,
 }
 
 impl SharedCacheHits {
-    /// Create from sorted, non-overlapping ranges.
+    /// Create from sorted, non-overlapping ranges without query-size provenance.
     pub fn from_ranges(ranges: Vec<Range<u32>>) -> Self {
         let total_hits = ranges.iter().map(|r| r.end - r.start).sum();
-        Self { ranges, total_hits }
+        Self {
+            ranges,
+            total_hits,
+            queried_blocks: None,
+        }
     }
 
     /// Create from a boolean hit vector (convenience for tests and simple backends).
-    /// Coalesces consecutive `true` entries into ranges.
+    /// Coalesces consecutive `true` entries into ranges and records the vector
+    /// length as the number of queried blocks.
     pub fn from_hits(hits: &[bool]) -> Self {
         let mut ranges = Vec::new();
         let mut i = 0;
@@ -1519,7 +1526,9 @@ impl SharedCacheHits {
                 i += 1;
             }
         }
-        Self::from_ranges(ranges)
+        let mut result = Self::from_ranges(ranges);
+        result.queried_blocks = Some(hits.len() as u32);
+        result
     }
 
     /// Count hits at positions >= `from_position`.
@@ -2303,21 +2312,28 @@ mod tests {
         let hits = SharedCacheHits::from_hits(&[true, true, true, true]);
         assert_eq!(hits.ranges, vec![0..4]);
         assert_eq!(hits.total_hits, 4);
+        assert_eq!(hits.queried_blocks, Some(4));
 
         // Sparse hits
         let hits = SharedCacheHits::from_hits(&[true, false, true, true, false, true]);
         assert_eq!(hits.ranges, vec![0..1, 2..4, 5..6]);
         assert_eq!(hits.total_hits, 4);
+        assert_eq!(hits.queried_blocks, Some(6));
 
         // No hits
         let hits = SharedCacheHits::from_hits(&[false, false, false]);
         assert!(hits.ranges.is_empty());
         assert_eq!(hits.total_hits, 0);
+        assert_eq!(hits.queried_blocks, Some(3));
 
         // Empty
         let hits = SharedCacheHits::from_hits(&[]);
         assert!(hits.ranges.is_empty());
         assert_eq!(hits.total_hits, 0);
+        assert_eq!(hits.queried_blocks, Some(0));
+
+        let skipped = SharedCacheHits::default();
+        assert_eq!(skipped.queried_blocks, None);
     }
 
     #[test]

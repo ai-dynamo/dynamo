@@ -346,7 +346,13 @@ where
 
             if let Some(ref tracker) = request.tracker {
                 let isl_blocks = routing_parts.token_ids.len().div_ceil(block_size);
-                tracker.record_kv_hit(selection.effective_overlap_blocks, isl_blocks);
+                let first_kv_observation =
+                    tracker.record_kv_hit(selection.effective_overlap_blocks, isl_blocks);
+                if first_kv_observation
+                    && let Some(observation) = selection.request_metrics_observation.take()
+                {
+                    observation.observe(guard.request_metrics(), true);
+                }
                 tracker.record_isl(routing_parts.token_ids.len(), Some(selection.cached_tokens));
                 tracker.record_worker(
                     selection.worker.worker_id,
@@ -354,8 +360,13 @@ where
                     self.chooser.worker_type(),
                 );
                 tracker.record_router_queue_depth(self.chooser.pending_count());
-                if let Some(hit_rate) = tracker.kv_hit_rate() {
-                    guard.request_metrics().kv_hit_rate.observe(hit_rate);
+            } else if let Some(observation) = selection.request_metrics_observation.take() {
+                let first_migration_observation = request
+                    .migration_state
+                    .as_ref()
+                    .is_none_or(|state| state.claim_router_metrics_observation());
+                if first_migration_observation {
+                    observation.observe(guard.request_metrics(), true);
                 }
             }
             guard
@@ -749,9 +760,13 @@ mod tests {
     use super::*;
     use crate::{
         http::service::metrics::Metrics,
+        kv_router::{RouterRequestMetricsObservation, SharedCacheMetricsObservation},
         local_model::runtime_config::ModelRuntimeConfig,
         migration::Migration,
-        protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+        protocols::common::{
+            extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+            timing::RequestTracker,
+        },
     };
 
     fn request() -> PreprocessedRequest {
@@ -959,6 +974,160 @@ mod tests {
             .await
             .unwrap();
         (request, selection, guard)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn trackerless_request_observes_router_kv_blocks() {
+        let (router, runtime) = router(None).await;
+        let before = router.request_metrics.kv_hit_input_blocks_total.get();
+
+        let (request, selection, mut guard) = track_request(&router, false).await;
+
+        assert!(request.tracker.is_none());
+        assert!(selection.request_metrics_observation.is_none());
+        assert_eq!(
+            router.request_metrics.kv_hit_input_blocks_total.get(),
+            before + 1
+        );
+
+        guard.abort().await;
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn trackerless_migration_observes_router_kv_blocks_once() {
+        let (router, runtime) = router(None).await;
+        let before = router.request_metrics.kv_hit_input_blocks_total.get();
+        let mut input = request();
+        input.migration_state = Some(Default::default());
+        let request = Context::new(input);
+
+        for attempt in 0..2 {
+            let (mut selection, _) = router
+                .select_with_affinity(&request, RequestPhase::Aggregated, false)
+                .await
+                .unwrap();
+            let mut guard = router
+                .track_selection(&request, &mut selection, false)
+                .await
+                .unwrap();
+
+            assert!(request.tracker.is_none());
+            assert!(selection.request_metrics_observation.is_none());
+            assert_eq!(
+                router.request_metrics.kv_hit_input_blocks_total.get(),
+                before + 1,
+                "migration attempt {attempt} must not add another observation"
+            );
+            guard.abort().await;
+        }
+
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn decode_first_observation_includes_shared_cache_metrics() {
+        let (router, runtime) = router(None).await;
+        let tracker = Arc::new(RequestTracker::new());
+        let phase_permit = tracker.set_phase(RequestPhase::Decode).await;
+        let mut input = request();
+        input.tracker = Some(tracker);
+        let request = Context::new(input);
+        let (mut selection, _) = router
+            .select_with_affinity(&request, RequestPhase::Decode, false)
+            .await
+            .unwrap();
+        selection.request_metrics_observation = Some(RouterRequestMetricsObservation {
+            effective_overlap_blocks: 1.0,
+            device_overlap_blocks: 1,
+            input_blocks: 1,
+            shared_cache: Some(SharedCacheMetricsObservation {
+                hit_blocks: 1,
+                queried_blocks: 1,
+                beyond_device_blocks: Some(1),
+            }),
+        });
+        let hit_blocks_before = router.request_metrics.shared_cache_hit_blocks_total.get();
+
+        let mut guard = router
+            .track_selection(&request, &mut selection, false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            router.request_metrics.shared_cache_hit_blocks_total.get(),
+            hit_blocks_before + 1
+        );
+
+        guard.abort().await;
+        drop(phase_permit);
+        drop(router);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn shared_cache_beyond_metrics_require_device_provenance() {
+        let (router, runtime) = router(None).await;
+        let hit_blocks_before = router.request_metrics.shared_cache_hit_blocks_total.get();
+        let queried_blocks_before = router
+            .request_metrics
+            .shared_cache_queried_blocks_total
+            .get();
+        let beyond_count_before = router
+            .request_metrics
+            .shared_cache_beyond_blocks
+            .get_sample_count();
+        let beyond_blocks_before = router
+            .request_metrics
+            .shared_cache_beyond_blocks_total
+            .get();
+
+        RouterRequestMetricsObservation {
+            effective_overlap_blocks: 1.0,
+            device_overlap_blocks: 1,
+            input_blocks: 1,
+            shared_cache: Some(SharedCacheMetricsObservation {
+                hit_blocks: 1,
+                queried_blocks: 1,
+                beyond_device_blocks: None,
+            }),
+        }
+        .observe(&router.request_metrics, true);
+
+        assert_eq!(
+            router.request_metrics.shared_cache_hit_blocks_total.get(),
+            hit_blocks_before + 1
+        );
+        assert_eq!(
+            router
+                .request_metrics
+                .shared_cache_queried_blocks_total
+                .get(),
+            queried_blocks_before + 1
+        );
+        assert_eq!(
+            router
+                .request_metrics
+                .shared_cache_beyond_blocks
+                .get_sample_count(),
+            beyond_count_before
+        );
+        assert_eq!(
+            router
+                .request_metrics
+                .shared_cache_beyond_blocks_total
+                .get(),
+            beyond_blocks_before
+        );
+
+        drop(router);
+        runtime.shutdown();
     }
 
     #[tokio::test]
