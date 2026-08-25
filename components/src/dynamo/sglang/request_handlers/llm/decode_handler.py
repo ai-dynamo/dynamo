@@ -156,6 +156,26 @@ def _extract_sglang_stop_reason(
     return None
 
 
+def _completion_usage_from_sglang_meta(
+    meta_info: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Project SGLang's terminal usage into Dynamo's common output shape."""
+    input_tokens = meta_info.get("prompt_tokens")
+    completion_tokens = meta_info.get("completion_tokens")
+    if input_tokens is None or completion_tokens is None:
+        return None
+
+    usage: dict[str, Any] = {
+        "prompt_tokens": input_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": input_tokens + completion_tokens,
+    }
+    cached_tokens = meta_info.get("cached_tokens")
+    if cached_tokens is not None and cached_tokens > 0:
+        usage["prompt_tokens_details"] = {"cached_tokens": cached_tokens}
+    return usage
+
+
 class DecodeWorkerHandler(BaseWorkerHandler):
     """Handler for decode workers in both aggregated and disaggregated serving modes."""
 
@@ -418,7 +438,21 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 context,
                 priority,
             )
-            async for output in self._process_native_generate_stream(stream, context):
+            sampling_params = native_payload.get("sampling_params")
+            native_user_stop_token_ids = (
+                {
+                    token_id
+                    for token_id in sampling_params.get("stop_token_ids", [])
+                    if isinstance(token_id, int) and not isinstance(token_id, bool)
+                }
+                if isinstance(sampling_params, Mapping)
+                else set()
+            )
+            async for output in self._process_native_generate_stream(
+                stream,
+                context,
+                user_stop_token_ids=native_user_stop_token_ids,
+            ):
                 yield output
             return
 
@@ -575,21 +609,42 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         self,
         stream_source: AsyncIterator[Dict[str, Any]],
         context: Context,
+        user_stop_token_ids: set[int] | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        """Forward opaque SGLang chunks while retaining engine cancellation."""
+        """Forward opaque chunks and project common internal observability fields."""
         request_id_future: asyncio.Future[str] = asyncio.Future()
         first_output_seen = False
         async with self._cancellation_monitor(request_id_future, context):
             async for chunk in stream_source:
                 native_response = chunk["engine_data"]["sglang_response"]
+                meta_info = native_response.get("meta_info", {})
                 if not request_id_future.done():
-                    sglang_request_id = native_response.get("meta_info", {}).get("id")
+                    sglang_request_id = meta_info.get("id")
                     if sglang_request_id:
                         request_id_future.set_result(sglang_request_id)
                         logging.debug(f"New SGLang Request ID: {sglang_request_id}")
-                if not first_output_seen and (
-                    native_response.get("output_ids") or native_response.get("text")
-                ):
+
+                # These top-level fields are consumed only by Dynamo's shared router and
+                # request-end observers. The public /generate renderer removes and emits
+                # sglang_response verbatim, so its SSE payload stays engine-native.
+                output_ids = native_response.get("output_ids") or []
+                chunk["token_ids"] = output_ids
+                chunk["index"] = native_response.get("index", 0)
+                finish_reason = meta_info.get("finish_reason")
+                if finish_reason:
+                    chunk["finish_reason"] = normalize_finish_reason(
+                        finish_reason["type"]
+                    )
+                    stop_reason = _extract_sglang_stop_reason(
+                        finish_reason, user_stop_token_ids
+                    )
+                    if stop_reason is not None:
+                        chunk["stop_reason"] = stop_reason
+                    completion_usage = _completion_usage_from_sglang_meta(meta_info)
+                    if completion_usage is not None:
+                        chunk["completion_usage"] = completion_usage
+
+                if not first_output_seen and (output_ids or native_response.get("text")):
                     first_output_seen = True
                     context.notify_first_token()
                 if not context.is_stopped():
@@ -690,22 +745,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     )
                     if prompt_payload is not None and metadata_uploader is None:
                         engine_data["prompt_logprobs"] = prompt_payload
-                    input_tokens = meta_info.get("prompt_tokens")
-                    completion_tokens = meta_info.get("completion_tokens")
-                    cached_tokens = meta_info.get("cached_tokens")
-                    prefill_prompt_tokens_details = None
-                    if cached_tokens is not None and cached_tokens > 0:
-                        prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
-                    if input_tokens is not None and completion_tokens is not None:
-                        completion_usage = {
-                            "prompt_tokens": input_tokens,
-                            "completion_tokens": completion_tokens,
-                            "total_tokens": input_tokens + completion_tokens,
-                        }
-                        if prefill_prompt_tokens_details is not None:
-                            completion_usage[
-                                "prompt_tokens_details"
-                            ] = prefill_prompt_tokens_details
+                    completion_usage = _completion_usage_from_sglang_meta(meta_info)
+                    if completion_usage is not None:
                         out["completion_usage"] = completion_usage
                     if metadata_uploader is not None:
                         try:
