@@ -17,6 +17,7 @@ from dynamo.profiler.utils.config import (
     get_component_name_by_type,
     get_main_container,
     get_worker_component_from_config,
+    is_mocker_container,
     parse_override_engine_args,
     remove_valued_arguments,
     setup_worker_component_resources,
@@ -221,6 +222,8 @@ def enable_trtllm_chunked_prefill(config: dict) -> dict:
         )
         if not isinstance(main_container, dict):
             continue
+        if is_mocker_container(main_container):
+            continue
 
         shell_command = _get_shell_form_command(main_container)
         if shell_command is not None:
@@ -261,6 +264,11 @@ def enable_trtllm_chunked_prefill(config: dict) -> dict:
 
 class TrtllmConfigModifier(BaseConfigModifier):
     BACKEND = "trtllm"
+
+    @classmethod
+    def apply_runtime_defaults(cls, config: dict) -> dict:
+        """Enable the chunked-prefill runtime mode required by profiler DGDs."""
+        return enable_trtllm_chunked_prefill(config)
 
     @classmethod
     def load_default_config(cls, mode: str = "disagg") -> dict:

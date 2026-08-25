@@ -90,6 +90,7 @@ def _ensure_safe_prefill_cuda_graph_bs(args: list[str]) -> list[str]:
 
 class SGLangConfigModifier(BaseConfigModifier):
     BACKEND = "sglang"
+    REMOTE_CODE_TRUST_FLAG = "--trust-remote-code"
 
     @classmethod
     def load_default_config(cls, mode: str = "disagg") -> dict:

@@ -187,6 +187,13 @@ def get_main_container_dict(component: dict[str, Any]) -> dict[str, Any] | None:
     )
 
 
+def is_mocker_container(container: dict[str, Any]) -> bool:
+    """Return whether a raw container launches ``dynamo.mocker``."""
+    command = container.get("command") or []
+    args = container.get("args") or []
+    return "dynamo.mocker" in " ".join(str(token) for token in [*command, *args])
+
+
 def break_arguments(args: list[str] | None) -> list[str]:
     ans: list[str] = []
     if args is None:

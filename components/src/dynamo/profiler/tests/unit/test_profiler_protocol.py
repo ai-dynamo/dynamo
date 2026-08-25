@@ -112,6 +112,23 @@ def test_build_dgd_config_preserves_type_meta(backend: str, mode: str) -> None:
     assert dgd_config["kind"] == "DynamoGraphDeployment"
 
 
+def test_build_dgd_config_applies_backend_runtime_defaults() -> None:
+    dgd_config = CONFIG_MODIFIERS["trtllm"].build_dgd_config(
+        mode="agg",
+        model_name="test/model",
+        image="example/trtllm:test",
+    )
+
+    worker = next(
+        component
+        for component in dgd_config["spec"]["components"]
+        if component.get("type") == "worker"
+    )
+    args = _main_container(worker)["args"]
+    index = args.index("--trtllm.enable_chunked_prefill")
+    assert args[index + 1] == "true"
+
+
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
 def test_get_port_defaults_when_frontend_has_no_main_container(backend: str) -> None:
     config = {

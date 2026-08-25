@@ -113,6 +113,7 @@ def _finalize_disagg_cli_args(args: list[str], role: SubComponentType) -> list[s
 
 class VllmV1ConfigModifier(BaseConfigModifier):
     BACKEND = "vllm"
+    REMOTE_CODE_TRUST_FLAG = "--trust-remote-code"
     # vllm uses a different arg for model path
     WORKER_MODEL_PATH_ARG = "--model"
 
