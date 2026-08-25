@@ -473,6 +473,50 @@ def test_disagg_run_keeps_the_aggregated_engine_args_empty(
     assert "aic_nextn" not in seen["native_kwargs"]["prefill_engine_args"]
 
 
+def test_aggregated_run_wires_the_speculation_flags_into_the_engine_args(
+    monkeypatch,
+) -> None:
+    # The helper-level cases call _with_aic_speculation directly, so a break
+    # between the parser and the merge would leave the flags dropped again,
+    # which is the bug this change exists to fix. This drives the same path the
+    # disaggregated case above covers, for the aggregated slot.
+    seen: dict = {}
+    _stub_cli_dependencies(monkeypatch, seen)
+
+    def run_synthetic(*args, **kwargs):
+        seen["native_kwargs"] = kwargs
+        return ReplayReport(
+            summary={"completed_requests": 1}, per_request=[], coverage={}, planner=None
+        )
+
+    monkeypatch.setattr(replay_main, "run_synthetic_trace_replay", run_synthetic)
+
+    assert (
+        replay_main.main(
+            [
+                "--input-tokens",
+                "8",
+                "--output-tokens",
+                "4",
+                "--request-count",
+                "1",
+                "--replay-concurrency",
+                "1",
+                "--aic-nextn",
+                "5",
+                "--aic-nextn-accept-rates",
+                "1,1,1,1,1",
+            ]
+        )
+        == 0
+    )
+
+    # No --extra-engine-args, so the aggregated slot is created from the flags.
+    extra = seen["native_kwargs"]["extra_engine_args"]
+    assert '"aic_nextn": 5' in extra
+    assert '"aic_nextn_accept_rates": "1,1,1,1,1"' in extra
+
+
 def test_accept_rates_without_nextn_is_a_usage_error(monkeypatch) -> None:
     # The engine args validator rejects the pair, but it raises from
     # MockEngineArgs.from_json, outside the handling that produces a usage

@@ -102,8 +102,8 @@ def _with_aic_speculation(raw: dict | None, args) -> dict | None:
     per worker type. Returns ``raw`` untouched when neither flag was given, so
     a run with no engine args and no speculation keeps passing ``None``.
     """
-    nextn = getattr(args, "aic_nextn", None)
-    accept_rates = getattr(args, "aic_nextn_accept_rates", None)
+    nextn = args.aic_nextn
+    accept_rates = args.aic_nextn_accept_rates
     if nextn is None and accept_rates is None:
         return raw
 
@@ -148,7 +148,15 @@ def _load_engine_args(raw_args: str | None):
             else:
                 del raw["planner_profile_data"]
     _resolve_aic_num_gpu_blocks(raw)
-    return MockEngineArgs.from_json(json.dumps(raw))
+    try:
+        return MockEngineArgs.from_json(json.dumps(raw))
+    except Exception as exc:
+        # The engine validators live in Rust and reach Python through PyO3 as a
+        # bare `Exception`, so there is no narrower type to catch. Convert here,
+        # at the one call that produces them, rather than widening the caller's
+        # handler: everything this function raises is then a bad-input error and
+        # the caller can keep reporting exactly that as a usage error.
+        raise ValueError(str(exc)) from exc
 
 
 def _load_aic_perf_config(args: argparse.Namespace):
