@@ -38,7 +38,7 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 
-#[cfg(feature = "custom-policy")]
+#[cfg(any(feature = "custom-policy", feature = "select-service"))]
 use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
 use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicyFactory};
 use dynamo_llm::entrypoint::RouterConfig;
@@ -293,45 +293,15 @@ pub(crate) fn worker_selection_policy_factory(
 }
 
 #[cfg(feature = "select-service")]
-pub(crate) fn warn_if_standalone_ignores_stage_policies(
-    config: &KvRouterConfig,
-) -> anyhow::Result<()> {
-    if config.has_explicit_stage_worker_selection_policy()? {
-        tracing::warn!(
-            "prefill, decode, and encode worker-selection policies are ignored by aggregated standalone selection hosts"
-        );
-    }
-    Ok(())
-}
-
-#[cfg(feature = "select-service")]
-/// Resolve only the aggregated policy used by standalone selection hosts.
-pub(crate) fn standalone_worker_selection_policy_factory(
-    config: &KvRouterConfig,
-) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>> {
-    warn_if_standalone_ignores_stage_policies(config)?;
-
+pub(crate) fn linked_worker_selection_policy_registry() -> Option<WorkerSelectionPolicyRegistry> {
     #[cfg(feature = "custom-policy")]
     {
-        Ok(WORKER_SELECTION_POLICY_REGISTRY
-            .get()
-            .map(|registry| {
-                registry.resolve_for_worker_type(config, dynamo_kv_router::WorkerType::Aggregated)
-            })
-            .transpose()?
-            .flatten())
+        WORKER_SELECTION_POLICY_REGISTRY.get().cloned()
     }
 
     #[cfg(not(feature = "custom-policy"))]
     {
-        if let Some(instance) = config.selected_worker_selection_policy_instance_for(
-            dynamo_kv_router::WorkerType::Aggregated,
-        )? {
-            anyhow::bail!(
-                "worker-selection instance {instance:?} is configured, but this Dynamo build has no linked worker-selection policy catalog; rebuild with --features custom-policy"
-            );
-        }
-        Ok(None)
+        None
     }
 }
 
@@ -420,10 +390,7 @@ fn run_slot_tracker(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
 fn run_select_service(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let argv = argv.unwrap_or_default();
     py.allow_threads(move || {
-        llm::kv::run_select_service_cli_with_worker_selection_policy_factory(
-            argv,
-            standalone_worker_selection_policy_factory,
-        )
+        llm::kv::run_select_service_cli(argv, linked_worker_selection_policy_registry())
     })
     .map_err(standalone_to_pyerr)
 }

@@ -1183,12 +1183,13 @@ impl KvRouterConfig {
         })
     }
 
-    /// Return whether a custom stage-specific worker-selection setting was configured.
+    /// Return whether a custom worker-selection setting was configured for another worker role.
     ///
-    /// Standalone hosts use this to warn that prefill, decode, and encode settings only apply to
-    /// typed worker pools in the embedded frontend.
-    pub fn has_explicit_stage_worker_selection_policy(
+    /// Single-role hosts use this to warn about policy settings that their selection service does
+    /// not consume.
+    pub fn has_explicit_worker_selection_policy_for_other_worker_types(
         &self,
+        worker_type: WorkerType,
     ) -> Result<bool, WorkerSelectionPolicyConfigError> {
         fn is_custom(value: Option<&str>) -> bool {
             value.is_some_and(|name| {
@@ -1197,12 +1198,24 @@ impl KvRouterConfig {
             })
         }
 
+        let configured_for_other_worker_type = |configured_worker_type, value| {
+            configured_worker_type != worker_type && is_custom(value)
+        };
         let policy_config = self
             .worker_selection_config()
             .map_err(|source| WorkerSelectionPolicyConfigError::Config { source })?;
-        Ok(is_custom(self.router_prefill_policy.as_deref())
-            || is_custom(self.router_decode_policy.as_deref())
-            || policy_config.is_some_and(|config| config.has_explicit_stage_selection()))
+        Ok(configured_for_other_worker_type(
+            WorkerType::Prefill,
+            self.router_prefill_policy.as_deref(),
+        ) || configured_for_other_worker_type(
+            WorkerType::Decode,
+            self.router_decode_policy.as_deref(),
+        ) || policy_config.is_some_and(|config| {
+            configured_for_other_worker_type(WorkerType::Aggregated, config.aggregated_instance())
+                || configured_for_other_worker_type(WorkerType::Prefill, config.prefill_instance())
+                || configured_for_other_worker_type(WorkerType::Decode, config.decode_instance())
+                || configured_for_other_worker_type(WorkerType::Encode, config.encode_instance())
+        }))
     }
 
     #[cfg(test)]
@@ -1959,7 +1972,16 @@ worker_selection:
             }
         );
 
-        assert!(config.has_explicit_stage_worker_selection_policy().unwrap());
+        assert!(
+            config
+                .has_explicit_worker_selection_policy_for_other_worker_types(WorkerType::Aggregated)
+                .unwrap()
+        );
+        assert!(
+            config
+                .has_explicit_worker_selection_policy_for_other_worker_types(WorkerType::Prefill)
+                .unwrap()
+        );
 
         assert_eq!(
             config
@@ -1969,10 +1991,14 @@ worker_selection:
         );
 
         config.router_policy_config = None;
-        assert!(config.has_explicit_stage_worker_selection_policy().unwrap());
+        assert!(
+            config
+                .has_explicit_worker_selection_policy_for_other_worker_types(WorkerType::Aggregated)
+                .unwrap()
+        );
         assert!(
             !KvRouterConfig::default()
-                .has_explicit_stage_worker_selection_policy()
+                .has_explicit_worker_selection_policy_for_other_worker_types(WorkerType::Aggregated)
                 .unwrap()
         );
 
@@ -1995,7 +2021,22 @@ worker_selection:
         };
         assert!(
             !default_config
-                .has_explicit_stage_worker_selection_policy()
+                .has_explicit_worker_selection_policy_for_other_worker_types(WorkerType::Aggregated)
+                .unwrap()
+        );
+
+        let prefill_only_config = KvRouterConfig {
+            router_prefill_policy: Some("custom".to_string()),
+            ..Default::default()
+        };
+        assert!(
+            prefill_only_config
+                .has_explicit_worker_selection_policy_for_other_worker_types(WorkerType::Aggregated)
+                .unwrap()
+        );
+        assert!(
+            !prefill_only_config
+                .has_explicit_worker_selection_policy_for_other_worker_types(WorkerType::Prefill)
                 .unwrap()
         );
     }

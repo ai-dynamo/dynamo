@@ -21,7 +21,7 @@ use crate::Endpoint;
 ))]
 use clap::Parser;
 #[cfg(feature = "select-service")]
-use dynamo_kv_router::TrackingHashAlgorithm;
+use dynamo_kv_router::{TrackingHashAlgorithm, WorkerType};
 #[cfg(feature = "custom-policy")]
 use dynamo_kv_router::WorkerSelectionPolicy;
 use dynamo_kv_router::WorkerSelectionPolicyFactory;
@@ -37,7 +37,7 @@ use dynamo_kv_router::services::selection::{
     self, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest, SelectAndReserveRequest,
     SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig, SelectionError,
     SelectionService as RustSelectionService, SelectionServiceBuilder, SelectionServiceConfig,
-    WorkerPatchRequest, WorkerRequest,
+    WorkerPatchRequest, WorkerRequest, WorkerSelectionPolicyRegistry,
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
@@ -454,14 +454,13 @@ where
 }
 
 #[cfg(feature = "select-service")]
-pub(crate) fn run_select_service_cli_with_worker_selection_policy_factory<I, T, F>(
+pub(crate) fn run_select_service_cli<I, T>(
     args: I,
-    resolve_policy: F,
+    policy_registry: Option<WorkerSelectionPolicyRegistry>,
 ) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString>,
-    F: FnOnce(&KvRouterConfig) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>>,
 {
     let cli = SelectServiceCli::try_parse_from(
         std::iter::once(OsString::from("python -m dynamo.select_service"))
@@ -499,7 +498,8 @@ where
     };
     let builder = config
         .service_builder()
-        .resolved_worker_selection_policy_factory(resolve_policy(&config.kv_router_config)?);
+        .worker_type(WorkerType::Aggregated)
+        .worker_selection_policy_registry(policy_registry);
     let rt = tokio::runtime::Runtime::new()?;
     let service = rt.block_on(builder.build())?;
     rt.block_on(selection::run_server_with_service(config.port, service))
@@ -597,13 +597,12 @@ impl SelectionService {
         }
         let kv_router_config =
             try_kv_router_config_from_dynamo_env().map_err(PyValueError::new_err)?;
-        let factory = crate::standalone_worker_selection_policy_factory(&kv_router_config)
-            .map_err(to_pyerr)?;
         let mut builder = SelectionServiceBuilder::new(kv_router_config)
+            .worker_type(WorkerType::Aggregated)
+            .worker_selection_policy_registry(crate::linked_worker_selection_policy_registry())
             .indexer_threads(indexer_threads)
             .indexer_peers(indexer_peers.unwrap_or_default())
-            .selection_cache(selection_cache.unwrap_or_default().inner)
-            .resolved_worker_selection_policy_factory(factory);
+            .selection_cache(selection_cache.unwrap_or_default().inner);
         if let Some(port) = replica_sync_port {
             builder = builder.replica_sync(port, replica_sync_peers);
         }

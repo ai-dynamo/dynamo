@@ -130,12 +130,6 @@ impl Selector {
         kv_router_config: KvRouterConfig,
         policy_registry: Option<WorkerSelectionPolicyRegistry>,
     ) -> Result<Self> {
-        if kv_router_config.has_explicit_stage_worker_selection_policy()? {
-            tracing::warn!(
-                "worker_selection.prefill, worker_selection.decode, worker_selection.encode, DYN_ROUTER_PREFILL_POLICY, and DYN_ROUTER_DECODE_POLICY are ignored by aggregated EPP selection"
-            );
-        }
-
         let replication = Self::replication(cfg).await?;
         let mut builder = SelectionServiceBuilder::new(kv_router_config)
             .worker_type(WorkerType::Aggregated)

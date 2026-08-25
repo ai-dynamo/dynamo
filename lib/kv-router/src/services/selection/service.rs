@@ -92,7 +92,7 @@ impl SelectionServiceBuilder {
         self
     }
 
-    pub fn worker_selection_policy_factory<F>(self, factory: F) -> Self
+    pub fn worker_selection_policy_factory<F>(mut self, factory: F) -> Self
     where
         F: for<'a> Fn(
                 &KvRouterConfig,
@@ -103,15 +103,7 @@ impl SelectionServiceBuilder {
             + Sync
             + 'static,
     {
-        self.resolved_worker_selection_policy_factory(Some(Arc::new(factory)))
-    }
-
-    /// Use a factory already resolved from worker-selection configuration.
-    pub fn resolved_worker_selection_policy_factory(
-        mut self,
-        factory: Option<WorkerSelectionPolicyFactory>,
-    ) -> Self {
-        self.worker_selection_policy_factory = factory;
+        self.worker_selection_policy_factory = Some(Arc::new(factory));
         self
     }
 
@@ -119,6 +111,15 @@ impl SelectionServiceBuilder {
         self.kv_router_config
             .validate_config()
             .map_err(anyhow::Error::msg)?;
+        if self
+            .kv_router_config
+            .has_explicit_worker_selection_policy_for_other_worker_types(self.worker_type)?
+        {
+            tracing::warn!(
+                worker_type = %self.worker_type,
+                "worker-selection policies configured for other worker types are ignored by this selection service"
+            );
+        }
         let worker_selection_policy_factory = match (
             self.worker_selection_policy_factory,
             self.worker_selection_policy_registry.as_ref(),
