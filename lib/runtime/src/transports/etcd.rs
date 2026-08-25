@@ -103,7 +103,11 @@ impl Client {
     ) -> Result<(Arc<Connector>, u64)> {
         let token = runtime.primary_token();
         let timeout = config.startup_connect_timeout;
-        let deadline = Instant::now() + timeout;
+        let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+            anyhow::anyhow!(
+                "etcd startup connection timeout {timeout:?} exceeds the supported duration"
+            )
+        })?;
         let mut backoff = STARTUP_CONNECT_INITIAL_BACKOFF;
 
         loop {
@@ -1157,6 +1161,33 @@ mod unit_tests {
             .unwrap();
 
         assert_eq!(options.startup_connect_timeout, timeout);
+    }
+
+    #[test]
+    fn rejects_unrepresentable_startup_connect_timeout() {
+        let runtime = Runtime::single_threaded().unwrap();
+        let runtime_for_connect = runtime.clone();
+        let options = Client::builder()
+            .etcd_url(vec!["http://127.0.0.1:1".to_string()])
+            .startup_connect_timeout(Duration::from_secs(u64::MAX))
+            .build()
+            .unwrap();
+
+        let result = runtime
+            .primary()
+            .block_on(Client::connect_with_startup_retry(
+                &options,
+                runtime_for_connect,
+            ));
+        let error = match result {
+            Ok(_) => panic!("unrepresentable startup timeout unexpectedly succeeded"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains("exceeds the supported duration"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[test]
