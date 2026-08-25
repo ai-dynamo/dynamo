@@ -1006,15 +1006,12 @@ jobs:
   # Harbor's sibling task containers.
   agent-harness-nightly:
     name: Agent harness / ${{ matrix.id }}
-    needs: [compute-release-mode, resolve-source-sha, sglang-copy-to-acr]
+    needs: [compute-release-mode, resolve-source-sha, sglang-build]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     runs-on: aws-dev-02-tester-amd-gpu-v2
     timeout-minutes: 360
     container:
-      image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.sglang-copy-to-acr.outputs.image_tag }}
-      credentials:
-        username: ${{ secrets.AZURE_ACR_USER }}
-        password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.resolve-source-sha.outputs.source_sha }}-${{ needs.sglang-build.outputs.target_tag_plain }}-nightly-test
       env:
         HOME: /__w/dynamo/dynamo
         USER: dynamo
@@ -1047,7 +1044,7 @@ jobs:
     env:
       HARBOR_VERSION: '0.21.0'
       MODEL_ALIAS: agent-nightly
-      RUNTIME_IMAGE: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.sglang-copy-to-acr.outputs.image_tag }}
+      RUNTIME_IMAGE: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.resolve-source-sha.outputs.source_sha }}-${{ needs.sglang-build.outputs.target_tag_plain }}-nightly-test
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
