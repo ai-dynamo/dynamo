@@ -9,6 +9,7 @@ import shlex
 import pytest
 
 from dynamo.profiler.utils.config_modifiers.trtllm import (
+    TrtllmConfigModifier,
     _merge_overrides_into_args,
     enable_trtllm_chunked_prefill,
 )
@@ -117,8 +118,8 @@ def test_enable_chunked_prefill_updates_generated_trtllm_workers():
         }
     }
 
-    result = enable_trtllm_chunked_prefill(config)
-    result = enable_trtllm_chunked_prefill(result)
+    result = TrtllmConfigModifier.apply_runtime_defaults(config)
+    result = TrtllmConfigModifier.apply_runtime_defaults(result)
 
     containers = _main_containers_by_name(result)
     prefill_args = containers["prefill"]["args"]

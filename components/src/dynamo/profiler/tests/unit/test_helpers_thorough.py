@@ -22,11 +22,9 @@ pytestmark = [
 ]
 
 try:
-    from dynamo.profiler.thorough import (
-        _enable_chunked_prefill_for_trtllm_candidates,
-        _pick_thorough_best_config,
-    )
+    from dynamo.profiler.thorough import _pick_thorough_best_config
     from dynamo.profiler.utils.aic_dataframe import build_decode_row, build_prefill_row
+    from dynamo.profiler.utils.config_modifiers.trtllm import TrtllmConfigModifier
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         HardwareSpec,
@@ -106,7 +104,7 @@ def _mock_result():
 # ---------------------------------------------------------------------------
 
 
-def test_profile_candidates_enable_trtllm_chunked_prefill():
+def test_trtllm_runtime_defaults_enable_chunked_prefill():
     prefill = SimpleNamespace(
         dgd_config={
             "spec": {
@@ -138,7 +136,10 @@ def test_profile_candidates_enable_trtllm_chunked_prefill():
         }
     )
 
-    _enable_chunked_prefill_for_trtllm_candidates([prefill], [decode])
+    for candidate in (prefill, decode):
+        candidate.dgd_config = TrtllmConfigModifier.apply_runtime_defaults(
+            candidate.dgd_config
+        )
 
     for candidate in (prefill, decode):
         worker = candidate.dgd_config["spec"]["components"][0]
