@@ -644,7 +644,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     if completion_usage is not None:
                         chunk["completion_usage"] = completion_usage
 
-                if not first_output_seen and (output_ids or native_response.get("text")):
+                if not first_output_seen and (
+                    output_ids or native_response.get("text")
+                ):
                     first_output_seen = True
                     context.notify_first_token()
                 if not context.is_stopped():
