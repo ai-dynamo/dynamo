@@ -584,13 +584,36 @@ fn run_random_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> 
             .get_current_load_at(now)
             .into_iter()
             .collect();
+        let active_loras: HashSet<&str> = active_loads
+            .iter()
+            .map(|(lora_name, _)| lora_name.as_str())
+            .collect();
+        let inactive_pins: HashMap<String, WorkerWithDpRank> = state_tracker
+            .list_loras()
+            .into_iter()
+            .filter(|lora_name| !active_loras.contains(lora_name.as_str()))
+            .filter_map(|lora_name| {
+                state_tracker
+                    .get_loaded_workers(&lora_name)
+                    .into_iter()
+                    .filter(|worker| workers.contains(worker))
+                    .min_by_key(|worker| (worker.worker_id, worker.dp_rank))
+                    .map(|worker| (lora_name, worker))
+            })
+            .collect();
 
-        let curr_snapshot = compute_random_snapshot(
+        let mut curr_snapshot = compute_random_snapshot(
             &mut random_allocator,
             &active_loads,
             &workers,
             config.slots_per_backend,
         );
+        // A resident adapter whose load has aged out of the window remains a cold-start target in
+        // the controller. Retain one live warm worker for it so Random measures the same routing
+        // entry lifecycle without consuming a new slot or replacing the resident adapter.
+        for (lora_name, worker) in &inactive_pins {
+            curr_snapshot.insert(lora_name.clone(), vec![*worker]);
+        }
         for lora_name in routing_table.list_loras() {
             if !curr_snapshot.contains_key(&lora_name) {
                 routing_table.remove_lora(&lora_name);
@@ -604,7 +627,7 @@ fn run_random_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> 
                     replica_factor: replica_set.len(),
                     replica_set: replica_set.clone(),
                     updated_at: Instant::now(),
-                    is_active: true,
+                    is_active: !inactive_pins.contains_key(lora_name),
                 },
             );
         }
