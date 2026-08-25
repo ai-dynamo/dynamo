@@ -60,11 +60,6 @@ impl SelectionServiceBuilder {
         self
     }
 
-    /// Register workers before peer index recovery begins.
-    ///
-    /// The listener readiness gate remains closed until [`Self::build`] finishes
-    /// recovery, so their SUB sockets can accumulate the peer dump's live tail
-    /// before normal batch application starts.
     pub fn initial_workers(mut self, initial_workers: Vec<WorkerRequest>) -> Self {
         self.initial_workers = initial_workers;
         self
@@ -134,8 +129,6 @@ impl SelectionServiceBuilder {
             tracking_hash,
         ));
 
-        let requires_peer_recovery =
-            !self.initial_workers.is_empty() && !self.indexer_peers.is_empty();
         for worker in self.initial_workers {
             let worker_id = worker.worker_id;
             let record = core.upsert_worker(worker).await.map_err(|error| {
@@ -152,22 +145,10 @@ impl SelectionServiceBuilder {
         if !self.indexer_peers.is_empty() {
             match core.recover_indexer_from_peers(&self.indexer_peers).await {
                 Ok(true) => tracing::info!("Selection indexer recovery completed"),
-                Ok(false) if requires_peer_recovery => {
-                    anyhow::bail!(
-                        "no selection indexer peers were reachable during required startup recovery"
-                    );
-                }
-                Ok(false) => {
-                    tracing::warn!(
-                        "No reachable selection indexer peers; starting with empty state"
-                    )
-                }
-                Err(error) if requires_peer_recovery => {
-                    anyhow::bail!("selection indexer recovery failed: {error}");
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "Selection indexer recovery failed; starting with empty state")
-                }
+                Ok(false) => anyhow::bail!(
+                    "no selection indexer peers were reachable during startup recovery"
+                ),
+                Err(error) => anyhow::bail!("selection indexer recovery failed: {error}"),
             }
         }
         core.signal_indexer_ready();
