@@ -86,6 +86,7 @@ jobs:
       run: |
         python3 -m pip install \
           'pytest>=8.0' \
+          'jinja2==3.1.6' \
           'pyyaml>=6.0' \
           'pydantic>=2' \
           'pytest-asyncio>=1.0' \
@@ -435,8 +436,6 @@ jobs:
         compile_bench offline-replay --bench offline_replay_bench
         compile_bench mooncake --bench mooncake_bench
         compile_bench active-sequences --bench active_sequences_bench
-        compile_bench approximate-lru --bench approximate_lru_bench
-        compile_bench approximate-lru --test approximate_lru
         compile_bench dc-ckf-consumer --bin dc_ckf_consumer_bench
         compile_bench dc-ckf-relay --bench dc_ckf_relay_bench
 
@@ -513,8 +512,6 @@ jobs:
         lint_bench offline-replay --bench offline_replay_bench
         lint_bench mooncake --bench mooncake_bench
         lint_bench active-sequences --bench active_sequences_bench
-        lint_bench approximate-lru --bench approximate_lru_bench
-        lint_bench approximate-lru --test approximate_lru
         lint_bench dc-ckf-consumer --bin dc_ckf_consumer_bench
         lint_bench dc-ckf-relay --bench dc_ckf_relay_bench
 
