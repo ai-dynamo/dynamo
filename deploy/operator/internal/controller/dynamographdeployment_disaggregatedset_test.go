@@ -208,12 +208,10 @@ func TestDeleteStaleDisaggregatedSetServicesRemovesUndesiredModelService(t *test
 		consts.KubeLabelDynamoComponent:           "removed",
 	})
 	staleModel := controlledService(dynamo.GenerateServiceName("removed-model"), map[string]string{
-		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-		consts.KubeLabelDynamoBaseModelHash:       dynamo.HashModelName("removed-model"),
+		consts.KubeLabelDynamoBaseModelHash: dynamo.HashModelName("removed-model"),
 	})
 	foreignModel := controlledService(dynamo.GenerateServiceName("foreign-model"), map[string]string{
-		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-		consts.KubeLabelDynamoBaseModelHash:       dynamo.HashModelName("foreign-model"),
+		consts.KubeLabelDynamoBaseModelHash: dynamo.HashModelName("foreign-model"),
 	})
 	foreignModel.OwnerReferences = nil
 

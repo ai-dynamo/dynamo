@@ -91,3 +91,15 @@ func TestModelServiceReconciliationCharacterization(t *testing.T) {
 	require.Equal(t, dgd.UID, service.OwnerReferences[0].UID)
 	require.True(t, *service.OwnerReferences[0].Controller)
 }
+
+func TestGenerateModelServiceForGraphIsPrivateToGraph(t *testing.T) {
+	first := GenerateModelServiceForGraph("inference", "llama-3", "graph-a", nil)
+	second := GenerateModelServiceForGraph("inference", "llama-3", "graph-b", nil)
+
+	require.NotEqual(t, first.Name, second.Name)
+	require.Equal(t, "graph-a", first.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+	require.Equal(t, "graph-a", first.Spec.Selector[commonconsts.KubeLabelDynamoGraphDeploymentName])
+	require.Equal(t, HashModelName("llama-3"), first.Labels[commonconsts.KubeLabelDynamoBaseModelHash])
+	require.LessOrEqual(t, len(first.Name), 63)
+	require.LessOrEqual(t, len(second.Name), 63)
+}

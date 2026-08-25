@@ -244,15 +244,6 @@ func workloadRoutingAnnotationsChanged(update event.UpdateEvent) bool {
 		annotationValue(oldDGD, consts.KubeAnnotationEnableGrove) != annotationValue(newDGD, consts.KubeAnnotationEnableGrove)
 }
 
-func dgdOwnedServiceEventPredicate() predicate.Predicate {
-	return predicate.Funcs{
-		CreateFunc:  func(ce event.CreateEvent) bool { return false },
-		DeleteFunc:  func(de event.DeleteEvent) bool { return true },
-		UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
-		GenericFunc: func(ge event.GenericEvent) bool { return true },
-	}
-}
-
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := mgr.GetFieldIndexer().IndexField(
@@ -294,7 +285,6 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
-		Owns(&corev1.Service{}, builder.WithPredicates(dgdOwnedServiceEventPredicate())).
 		Owns(&nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the adapter
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },

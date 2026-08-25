@@ -15,6 +15,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -141,6 +142,98 @@ var _ = Describe("DisaggregatedSet envtest semantics", func() {
 
 		Expect(current.Annotations[consts.KubeAnnotationWorkloadProvider]).To(Equal(consts.WorkloadProviderComponent))
 		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: disaggregatedSetName(current), Namespace: current.Namespace}, newDisaggregatedSetObject()))).To(BeTrue())
+	})
+
+	It("does not rewrite API-defaulted stable Services on a no-op reconcile", func() {
+		ctx := context.Background()
+		dgd := newEnvtestDSHappyPathDGD("demo-ds-service-idempotence")
+		for i := range dgd.Spec.Components {
+			dgd.Spec.Components[i].ModelRef = &nvidiacomv1beta1.ModelReference{Name: "llama-3"}
+		}
+		Expect(k8sClient.Create(ctx, dgd)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, dgd) })
+
+		reconciler := newEnvtestDSReconcilers()
+		By("creating the DisaggregatedSet and its graph-level Services")
+		_, current := reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
+
+		services := &corev1.ServiceList{}
+		Expect(k8sClient.List(ctx, services, client.InNamespace(current.Namespace))).To(Succeed())
+		Expect(services.Items).NotTo(BeEmpty())
+		resourceVersions := make(map[string]string, len(services.Items))
+		for i := range services.Items {
+			resourceVersions[services.Items[i].Name] = services.Items[i].ResourceVersion
+		}
+
+		By("reconciling the unchanged graph again")
+		_, current = reconcileCurrentDGDProgram(ctx, reconciler, dgd.Name, dgd.Namespace)
+		Expect(k8sClient.List(ctx, services, client.InNamespace(current.Namespace))).To(Succeed())
+		for i := range services.Items {
+			Expect(services.Items[i].ResourceVersion).To(Equal(resourceVersions[services.Items[i].Name]), services.Items[i].Name)
+		}
+	})
+
+	It("scopes model Services to each graph and cleans only removed references", func() {
+		ctx := context.Background()
+		first := newEnvtestDSHappyPathDGD("demo-ds-model-first")
+		second := newEnvtestDSHappyPathDGD("demo-ds-model-second")
+		for i := range first.Spec.Components {
+			first.Spec.Components[i].ModelRef = &nvidiacomv1beta1.ModelReference{Name: "llama-3"}
+			second.Spec.Components[i].ModelRef = &nvidiacomv1beta1.ModelReference{Name: "llama-3"}
+		}
+		Expect(k8sClient.Create(ctx, first)).To(Succeed())
+		Expect(k8sClient.Create(ctx, second)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, first); _ = k8sClient.Delete(ctx, second) })
+
+		reconciler := newEnvtestDSReconcilers()
+		By("reconciling both graphs with the same model reference")
+		_, firstCurrent := reconcileCurrentDGDProgram(ctx, reconciler, first.Name, first.Namespace)
+		_, secondCurrent := reconcileCurrentDGDProgram(ctx, reconciler, second.Name, second.Namespace)
+		markDisaggregatedSetReady(ctx, firstCurrent)
+		markDisaggregatedSetReady(ctx, secondCurrent)
+		_, firstCurrent = reconcileCurrentDGDProgram(ctx, reconciler, first.Name, first.Namespace)
+		_, secondCurrent = reconcileCurrentDGDProgram(ctx, reconciler, second.Name, second.Namespace)
+
+		services := &corev1.ServiceList{}
+		Expect(k8sClient.List(ctx, services, client.InNamespace(first.Namespace))).To(Succeed())
+		modelServices := map[string]corev1.Service{}
+		for i := range services.Items {
+			service := services.Items[i]
+			if service.Labels[consts.KubeLabelDynamoBaseModelHash] == dynamo.HashModelName("llama-3") &&
+				service.Labels[consts.KubeLabelDynamoGraphDeploymentName] != "" {
+				modelServices[service.Labels[consts.KubeLabelDynamoGraphDeploymentName]] = service
+			}
+		}
+		Expect(modelServices).To(HaveLen(2))
+		Expect(modelServices[first.Name].Name).NotTo(Equal(modelServices[second.Name].Name))
+		firstService := modelServices[first.Name]
+		secondService := modelServices[second.Name]
+		Expect(metav1.IsControlledBy(&firstService, firstCurrent)).To(BeTrue())
+		Expect(metav1.IsControlledBy(&secondService, secondCurrent)).To(BeTrue())
+
+		By("removing the first graph's final model references")
+		for i := range firstCurrent.Spec.Components {
+			firstCurrent.Spec.Components[i].ModelRef = nil
+		}
+		Expect(k8sClient.Update(ctx, firstCurrent)).To(Succeed())
+		_, firstCurrent = reconcileCurrentDGDProgram(ctx, reconciler, first.Name, first.Namespace)
+		markDisaggregatedSetReady(ctx, firstCurrent)
+		_, _ = reconcileCurrentDGDProgram(ctx, reconciler, first.Name, first.Namespace)
+
+		firstServiceKey := types.NamespacedName{Name: modelServices[first.Name].Name, Namespace: first.Namespace}
+		secondServiceKey := types.NamespacedName{Name: modelServices[second.Name].Name, Namespace: second.Namespace}
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, firstServiceKey, &corev1.Service{}))).To(BeTrue())
+		Expect(k8sClient.Get(ctx, secondServiceKey, &corev1.Service{})).To(Succeed())
+
+		By("removing the final remaining model reference")
+		for i := range secondCurrent.Spec.Components {
+			secondCurrent.Spec.Components[i].ModelRef = nil
+		}
+		Expect(k8sClient.Update(ctx, secondCurrent)).To(Succeed())
+		_, secondCurrent = reconcileCurrentDGDProgram(ctx, reconciler, second.Name, second.Namespace)
+		markDisaggregatedSetReady(ctx, secondCurrent)
+		_, _ = reconcileCurrentDGDProgram(ctx, reconciler, second.Name, second.Namespace)
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, secondServiceKey, &corev1.Service{}))).To(BeTrue())
 	})
 
 	It("keeps the selected DisaggregatedSet when later intent is unsupported", func() {

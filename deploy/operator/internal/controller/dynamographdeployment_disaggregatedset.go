@@ -42,6 +42,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -729,7 +730,7 @@ func (r *disaggregatedSetWorkloadsReconciler) reconcileDisaggregatedSetSideResou
 	sort.Strings(modelNamesSorted)
 	for _, modelName := range modelNamesSorted {
 		annotations := maps.Clone(dgd.Spec.Annotations)
-		service := dynamo.GenerateModelServiceForModel(dgd.Namespace, modelName, annotations)
+		service := dynamo.GenerateModelServiceForGraph(dgd.Namespace, modelName, dgd.Name, annotations)
 		if err := r.syncDGDStableService(ctx, dgd, service); err != nil {
 			return nil, fmt.Errorf("failed to reconcile model service for %q: %w", modelName, err)
 		}
@@ -773,8 +774,41 @@ func (r *disaggregatedSetWorkloadsReconciler) syncDGDStableService(
 	}
 
 	updated := existing.DeepCopy()
-	if err := commoncontroller.CopySpec(desired, updated); err != nil {
-		return err
+	updated.Spec = *desired.Spec.DeepCopy()
+	// The apiserver defaults these fields even when the rendered object leaves
+	// them empty. Apply the typed defaults before comparing so a subsequent
+	// reconcile does not continually overwrite the server-defaulted values.
+	if updated.Spec.Type == "" {
+		updated.Spec.Type = corev1.ServiceTypeClusterIP
+	}
+	if updated.Spec.SessionAffinity == "" {
+		updated.Spec.SessionAffinity = corev1.ServiceAffinityNone
+	}
+	if updated.Spec.SessionAffinity == corev1.ServiceAffinityNone {
+		updated.Spec.SessionAffinityConfig = nil
+	}
+	if updated.Spec.Type == corev1.ServiceTypeNodePort || updated.Spec.Type == corev1.ServiceTypeLoadBalancer {
+		if updated.Spec.ExternalTrafficPolicy == "" {
+			updated.Spec.ExternalTrafficPolicy = corev1.ServiceExternalTrafficPolicyTypeCluster
+		}
+	}
+	if updated.Spec.InternalTrafficPolicy == nil &&
+		(updated.Spec.Type == corev1.ServiceTypeClusterIP ||
+			updated.Spec.Type == corev1.ServiceTypeNodePort ||
+			updated.Spec.Type == corev1.ServiceTypeLoadBalancer) {
+		updated.Spec.InternalTrafficPolicy = ptr.To(corev1.ServiceInternalTrafficPolicyCluster)
+	}
+	for i := range updated.Spec.Ports {
+		port := &updated.Spec.Ports[i]
+		if port.Protocol == "" {
+			port.Protocol = corev1.ProtocolTCP
+		}
+		if port.TargetPort == intstr.FromInt32(0) || port.TargetPort == intstr.FromString("") {
+			port.TargetPort = intstr.FromInt32(port.Port)
+		}
+	}
+	if updated.Spec.Type == corev1.ServiceTypeLoadBalancer && updated.Spec.AllocateLoadBalancerNodePorts == nil {
+		updated.Spec.AllocateLoadBalancerNodePorts = ptr.To(true)
 	}
 	updated.Labels = maps.Clone(existing.Labels)
 	if updated.Labels == nil {
@@ -910,9 +944,7 @@ func (r *disaggregatedSetWorkloadsReconciler) deleteStaleDisaggregatedSetService
 	desiredServiceNames map[string]struct{},
 ) error {
 	serviceList := &corev1.ServiceList{}
-	if err := r.List(ctx, serviceList, client.InNamespace(dgd.Namespace), client.MatchingLabels{
-		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-	}); err != nil {
+	if err := r.List(ctx, serviceList, client.InNamespace(dgd.Namespace)); err != nil {
 		return fmt.Errorf("failed to list DisaggregatedSet Services: %w", err)
 	}
 
@@ -921,9 +953,8 @@ func (r *disaggregatedSetWorkloadsReconciler) deleteStaleDisaggregatedSetService
 		if !isControlledByBetaDGD(service, dgd) {
 			continue
 		}
-		// Only the Services this pathway adopts are candidates: per-component
-		// discovery Services carry the component label and headless model
-		// Services carry the base-model hash label.
+		// The controller owner is the authoritative scope; labels only classify
+		// the owned Service as a component or model endpoint.
 		componentName := service.Labels[consts.KubeLabelDynamoComponent]
 		modelHash := service.Labels[consts.KubeLabelDynamoBaseModelHash]
 		if componentName == "" && modelHash == "" {
