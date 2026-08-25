@@ -60,7 +60,7 @@ def test_materialize_dgd_applies_transforms_once_in_fixed_order(monkeypatch) -> 
 
     class _Modifier:
         @staticmethod
-        def apply_model_runtime_constraints(config, _model):
+        def finalize_dgd(config, _model):
             return _append_step(config, "runtime")
 
     monkeypatch.setattr(

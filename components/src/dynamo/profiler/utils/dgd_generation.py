@@ -46,7 +46,7 @@ from dynamo.profiler.utils.config import (
     set_argument_value,
     set_unique_env_value,
 )
-from dynamo.profiler.utils.config_modifiers.trtllm import enable_trtllm_chunked_prefill
+from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.dgd_template import load_dgd_template
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
@@ -139,8 +139,9 @@ def assemble_final_config(
     kv_router = is_kv_router_enabled(dgdr)
     profile = needs_profile_data(dgdr)
 
-    if not mocker and resolved_backend == "trtllm":
-        enable_trtllm_chunked_prefill(dgd_config)
+    modifier = CONFIG_MODIFIERS.get(resolved_backend) if resolved_backend else None
+    if not mocker and modifier is not None:
+        dgd_config = modifier.apply_runtime_defaults(dgd_config)
 
     if not mocker and not planner:
         if kv_router:

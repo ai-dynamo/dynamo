@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import shlex
+from collections.abc import Iterator
 from typing import Protocol, Tuple
 from uuid import uuid4
 
@@ -29,6 +30,7 @@ from dynamo.profiler.utils.config import (
     get_component_by_name,
     get_component_name_by_type,
     get_main_container,
+    get_main_container_dict,
     sanitize_cli_args,
     set_unique_argument_value,
     setup_worker_component_resources,
@@ -41,6 +43,32 @@ logger = logging.getLogger(__name__)
 
 
 class ConfigModifierProtocol(Protocol):
+    @classmethod
+    def apply_runtime_defaults(cls, config: dict) -> dict:
+        ...
+
+    @classmethod
+    def apply_model_runtime_constraints(
+        cls, config: dict, model_name_or_path: str | None
+    ) -> dict:
+        ...
+
+    @classmethod
+    def finalize_dgd(cls, config: dict, model_name_or_path: str | None = None) -> dict:
+        ...
+
+    @classmethod
+    def supports_remote_code_trust(cls) -> bool:
+        ...
+
+    @classmethod
+    def has_remote_code_trust(cls, config: dict) -> bool:
+        ...
+
+    @classmethod
+    def enable_remote_code_trust(cls, config: dict) -> dict:
+        ...
+
     @classmethod
     def convert_config(
         cls,
@@ -162,6 +190,106 @@ class BaseConfigModifier:
 
     # Subclasses should override, e.g. "vllm" / "sglang" / "trtllm"
     BACKEND: str = ""
+    REMOTE_CODE_TRUST_FLAG: str | None = None
+
+    @classmethod
+    def apply_runtime_defaults(cls, config: dict) -> dict:
+        """Apply idempotent backend defaults required by every deployment."""
+        return config
+
+    @classmethod
+    def apply_model_runtime_constraints(
+        cls, config: dict, model_name_or_path: str | None
+    ) -> dict:
+        """Apply idempotent constraints derived from the selected model."""
+        return config
+
+    @classmethod
+    def finalize_dgd(cls, config: dict, model_name_or_path: str | None = None) -> dict:
+        """Apply backend defaults and model constraints at the DGD boundary."""
+        config = cls.apply_runtime_defaults(config)
+        return cls.apply_model_runtime_constraints(config, model_name_or_path)
+
+    @classmethod
+    def supports_remote_code_trust(cls) -> bool:
+        """Return whether this backend expresses remote-code trust as a CLI flag."""
+        return cls.REMOTE_CODE_TRUST_FLAG is not None
+
+    @classmethod
+    def _worker_containers(cls, config: dict) -> Iterator[dict]:
+        """Yield main containers for worker components in a DGD."""
+        components = config.get("spec", {}).get("components", [])
+        if not isinstance(components, list):
+            return
+        for component in components:
+            if not isinstance(component, dict) or component.get("type") not in {
+                "worker",
+                "prefill",
+                "decode",
+            }:
+                continue
+            main_container = get_main_container_dict(component)
+            if main_container is not None:
+                yield main_container
+
+    @staticmethod
+    def _is_mocker_container(container: dict) -> bool:
+        command = container.get("command") or []
+        args = container.get("args") or []
+        return "dynamo.mocker" in " ".join(str(token) for token in [*command, *args])
+
+    @staticmethod
+    def _is_shell_command(container: dict) -> bool:
+        command = container.get("command") or []
+        args = container.get("args") or []
+        return (
+            isinstance(command, list)
+            and len(command) >= 2
+            and command[0] in ("/bin/sh", "sh")
+            and command[1] == "-c"
+            and len(args) == 1
+            and isinstance(args[0], str)
+        )
+
+    @classmethod
+    def _container_has_flag(cls, container: dict, flag: str) -> bool:
+        args = container.get("args") or []
+        if cls._is_shell_command(container):
+            return flag in args[0]
+        return flag in args
+
+    @classmethod
+    def has_remote_code_trust(cls, config: dict) -> bool:
+        """Return whether every real worker already enables remote-code trust."""
+        flag = cls.REMOTE_CODE_TRUST_FLAG
+        if flag is None:
+            return False
+
+        workers = list(cls._worker_containers(config))
+        return bool(workers) and all(
+            cls._is_mocker_container(container)
+            or cls._container_has_flag(container, flag)
+            for container in workers
+        )
+
+    @classmethod
+    def enable_remote_code_trust(cls, config: dict) -> dict:
+        """Enable remote-code trust on real workers without changing shell form."""
+        flag = cls.REMOTE_CODE_TRUST_FLAG
+        if flag is None:
+            return config
+
+        for container in cls._worker_containers(config):
+            if cls._is_mocker_container(container) or cls._container_has_flag(
+                container, flag
+            ):
+                continue
+            args = container.get("args") or []
+            if cls._is_shell_command(container):
+                args[0] = f"{args[0]} {flag}"
+            else:
+                container["args"] = [*args, flag]
+        return config
 
     @classmethod
     def load_default_config(cls, mode: str = "disagg") -> dict:
@@ -586,7 +714,7 @@ class BaseConfigModifier:
                 model_path=effective_model_path,
             )
 
-        return result
+        return cls.finalize_dgd(result, effective_model_path)
 
     @classmethod
     def _resolve_component_name(
