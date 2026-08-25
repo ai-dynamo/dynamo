@@ -55,6 +55,7 @@ from tests.utils.payloads import (
     LoraTestChatPayload,
     ResponsesPayload,
     ResponsesStreamPayload,
+    SGLangDisaggRouterMetricsPayload,
     VideoGenerationPayload,
 )
 from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
@@ -227,12 +228,19 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
-            # Disagg workers expose fewer sglang:* metrics; check the
-            # prefill worker's endpoint (mirrors disaggregated_same_gpu).
-            metric_payload_default(
+            # The router distributes these requests across both prefill
+            # workers, so validate the aggregate instead of requiring one
+            # worker to observe all six requests.
+            SGLangDisaggRouterMetricsPayload(
+                body={},
+                expected_response=[],
+                expected_log=[],
                 min_num_requests=6,
-                backend="sglang_disagg",
                 port=DefaultPort.SYSTEM1.value,
+                system_ports=[
+                    DefaultPort.SYSTEM1.value,
+                    DefaultPort.SYSTEM2.value,
+                ],
             ),
         ],
     ),

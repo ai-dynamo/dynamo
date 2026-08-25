@@ -2159,6 +2159,71 @@ class SGLangDisaggMetricsPayload(SGLangMetricsPayload):
 
 
 @dataclass
+class SGLangDisaggRouterMetricsPayload(SGLangDisaggMetricsPayload):
+    """Validate request accounting across disaggregated prefill workers."""
+
+    def _get_common_metric_checks(self) -> list[MetricCheck]:
+        request_counter_name = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.work_handler.REQUESTS_TOTAL}"
+        )
+        return [
+            check
+            for check in super()._get_common_metric_checks()
+            if check.name != request_counter_name
+        ]
+
+    def validate(self, response: Any, content: str) -> None:
+        # Validate the full metrics surface on the primary prefill worker, but
+        # account for routed requests across every configured prefill worker.
+        super().validate(response, content)
+
+        assert self.system_ports, "No prefill worker metrics ports were configured"
+
+        counter_name = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.work_handler.REQUESTS_TOTAL}"
+        )
+        labels = {
+            prometheus_names.labels.COMPONENT: "prefill",
+            prometheus_names.labels.ENDPOINT: "generate",
+        }
+        counts: dict[int, float] = {}
+
+        for port in self.system_ports:
+            worker_content = content
+            if port != self.port:
+                worker_response = requests.get(
+                    f"http://{self.host}:{port}/metrics",
+                    timeout=self.timeout,
+                )
+                worker_response.raise_for_status()
+                worker_content = worker_response.text
+
+            samples = find_metric_samples(worker_content, counter_name, labels)
+            assert samples, (
+                f"Metric {counter_name} with labels {labels} was not found "
+                f"on prefill worker metrics port {port}"
+            )
+            counts[port] = sum(samples)
+
+        total_requests = sum(counts.values())
+        per_worker = ", ".join(
+            f"port {port}={count:g}" for port, count in counts.items()
+        )
+        assert total_requests >= self.min_num_requests, (
+            f"{counter_name} has aggregate count {total_requests:g}, less than "
+            f"required {self.min_num_requests} across prefill workers ({per_worker})"
+        )
+        logger.info(
+            "SUCCESS: Found %s with aggregate count %g across prefill workers (%s)",
+            counter_name,
+            total_requests,
+            per_worker,
+        )
+
+
+@dataclass
 class TRTLLMMetricsPayload(MetricsPayload):
     """Metrics validation for TensorRT-LLM backend"""
 
