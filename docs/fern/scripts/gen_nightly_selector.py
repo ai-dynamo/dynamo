@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Generate the nightly dimension of the install selectors.
 
@@ -38,6 +38,7 @@ import json
 import re
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import date
@@ -57,6 +58,9 @@ NIGHTLY_VERSIONS_BACK = 3
 MAX_TAGS = 120
 
 TIMEOUT = 30
+# Endpoint-unreachable failures degrade gracefully (skip the backend); anything
+# else -- a malformed or unexpected response -- must fail the generation run.
+TRANSPORT_ERRORS = (urllib.error.URLError, TimeoutError)
 
 
 @dataclass(frozen=True)
@@ -140,17 +144,18 @@ def base_version_at(sha: str) -> str | None:
 # --------------------------------------------------------------------------- #
 def ngc_tag_list(repo: str) -> list[str]:
     token_url = f"https://nvcr.io/proxy_auth?scope=repository:{repo}:pull"
-    token = json.load(urllib.request.urlopen(token_url, timeout=TIMEOUT))["token"]
+    with urllib.request.urlopen(token_url, timeout=TIMEOUT) as resp:
+        token = json.load(resp)["token"]
     url = f"https://nvcr.io/v2/{repo}/tags/list?n=1000"
     tags: list[str] = []
     while url:
-        resp = urllib.request.urlopen(
+        with urllib.request.urlopen(
             urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"}),
             timeout=TIMEOUT,
-        )
-        tags += json.load(resp).get("tags") or []
-        # Docker Registry v2 paginates via `Link: <...>; rel="next"`.
-        m = re.search(r'<([^>]+)>;\s*rel="next"', resp.headers.get("Link", ""))
+        ) as resp:
+            tags += json.load(resp).get("tags") or []
+            # Docker Registry v2 paginates via `Link: <...>; rel="next"`.
+            m = re.search(r'<([^>]+)>;\s*rel="next"', resp.headers.get("Link", ""))
         url = f"https://nvcr.io{m.group(1)}" if m else None
     return tags
 
@@ -160,9 +165,12 @@ def dated_tags(image: str) -> list[tuple[str, str]]:
     repo = f"{NGC_NAMESPACE}/{image}-runtime-nightly"
     try:
         tags = ngc_tag_list(repo)
-    except Exception as exc:  # noqa: BLE001 - any network failure degrades the same way
+    except TRANSPORT_ERRORS as exc:
         warn(f"NGC tag list for {repo} failed: {exc}")
         return []
+    except Exception as exc:
+        warn(f"NGC tag list for {repo} returned an unexpected response: {exc}")
+        raise
     found = {}
     for tag in tags:
         m = re.fullmatch(r"(\d{8})-([0-9a-f]{7,40})", tag)
@@ -177,14 +185,14 @@ def dated_tags(image: str) -> list[tuple[str, str]]:
 def published_wheels() -> set[str] | None:
     """Published ``ai-dynamo`` dev versions; ``None`` when the index is unreachable."""
     try:
-        html = (
-            urllib.request.urlopen(f"{PYPI}/ai-dynamo/", timeout=TIMEOUT)
-            .read()
-            .decode()
-        )
-    except Exception as exc:  # noqa: BLE001
+        with urllib.request.urlopen(f"{PYPI}/ai-dynamo/", timeout=TIMEOUT) as resp:
+            html = resp.read().decode()
+    except TRANSPORT_ERRORS as exc:
         warn(f"pypi.nvidia.com index fetch failed: {exc}; wheel commands omitted")
         return None
+    except Exception as exc:
+        warn(f"pypi.nvidia.com index returned an unexpected response: {exc}")
+        raise
     return set(re.findall(r"ai_dynamo-(\d+\.\d+\.\d+\.dev\d{8})", html))
 
 

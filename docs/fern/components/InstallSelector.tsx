@@ -160,14 +160,16 @@ export function InstallSelector({ hardware = "all" }: { hardware?: "all" | "nvid
     : channel === "nightly"
       ? entry?.latest
         ? "Latest nightly"
-        : `Nightly ${entry?.dynamo}`
+        : `Nightly ${entry?.dynamo ?? entry?.backend_version}`
       : "Build Dynamo from source";
   const role = channel === "stable"
     ? "Latest stable release that supports this version"
     : channel === "nightly"
       ? entry?.latest
         ? "Latest nightly build"
-        : "Pinned nightly wheel build"
+        : entry?.dynamo
+          ? "Pinned nightly wheel build"
+          : "Pinned nightly container build"
       : "Intel XPU local runtime";
   const hardwareLabel = activeHardware === "nvidia" ? "NVIDIA GPU" : "Intel XPU";
   const versionRowLabel = `${INSTALL_DATA[backend].label} version`;

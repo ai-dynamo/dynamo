@@ -191,10 +191,11 @@ export function KubernetesContainerSelector() {
     // setting worker images by hand, which the emitted variables do not cover.
     .filter((candidate) => channel !== "nightly" || candidate.latest);
   const entry = entries[versionIndex] ?? entries[0];
-  const command = commandFor(hardware, backend, channel, entry?.dynamo, registry);
+  const unavailable = !entry;
+  const command = unavailable ? null : commandFor(hardware, backend, channel, entry?.dynamo, registry);
   const hardwareLabel = hardware === "nvidia" ? "NVIDIA GPU" : "Intel XPU";
   const registryNeeded = hardware === "intel";
-  const canCopy = !registryNeeded || registryIsValid(registry);
+  const canCopy = !unavailable && (!registryNeeded || registryIsValid(registry));
   const badge = channel === "stable" ? "Stable" : channel === "nightly" ? "Nightly" : "Source";
   const title = channel === "stable"
     ? `Dynamo ${entry?.dynamo}`
@@ -241,7 +242,7 @@ export function KubernetesContainerSelector() {
   }
 
   async function copyCommand() {
-    if (!canCopy) return;
+    if (!canCopy || !command) return;
     if (!navigator.clipboard?.writeText) {
       setCopyLabel("Copy failed");
       resetCopyLabel();
@@ -341,13 +342,15 @@ export function KubernetesContainerSelector() {
 
         <div className="lqs-output">
           <div className={`lqs-rec lqs-rec--${channel}`}>
-            <div className="lqs-eyebrow">{role}</div>
+            <div className="lqs-eyebrow">{unavailable ? "Not currently available" : role}</div>
             <div className="lqs-title">
               <span className="lqs-badge">{badge}</span>
-              {title}
+              {unavailable ? "No matching build" : title}
             </div>
             <div className="lqs-support">
-              {hardwareLabel} · {INSTALL_DATA[backend].label} {entry?.backend_version}
+              {unavailable
+                ? `No ${INSTALL_DATA[backend].label} ${badge.toLowerCase()} build is currently published for this combination.`
+                : `${hardwareLabel} · ${INSTALL_DATA[backend].label} ${entry?.backend_version}`}
             </div>
           </div>
           <div className="lqs-command">
@@ -356,7 +359,11 @@ export function KubernetesContainerSelector() {
                 {copyLabel}
               </button>
             )}
-            <pre>{command}</pre>
+            {unavailable ? (
+              <p className="lqs-hint">No install command is available for this selection.</p>
+            ) : (
+              <pre>{command}</pre>
+            )}
           </div>
         </div>
       </section>

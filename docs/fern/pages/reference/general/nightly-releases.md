@@ -30,7 +30,7 @@ Every night, the [Nightly CI pipeline](https://github.com/ai-dynamo/dynamo/blob/
 
 Each nightly image repository is separate from its stable counterpart: the nightly planner is `dynamo-planner-nightly`, not a `nightly` tag on `dynamo-planner`.
 
-Nightly deliberately does **not** publish EFA image variants, Helm charts, or Rust crates. For those, use a [stable or pre-release build](release-artifacts.mdx).
+Nightly deliberately does **not** publish EFA image variants, Helm charts, or Rust crates. For those, use a [stable or prerelease build](release-artifacts.mdx).
 
 ## Installing Nightly Containers
 
