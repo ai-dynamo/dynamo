@@ -1,23 +1,23 @@
 # Stateful Agent Traffic Runtime
 
 **Status:** Draft
-**Scope:** A composition model for stateful OpenAI Responses traffic, external tools, and Dynamo inference.
+**Scope:** A composition model for native OpenAI Responses and Anthropic Messages traffic, external tools, and Dynamo inference.
 **Decision horizon:** First prove direct Dynamo locally; then add the Dynamo GAIE/EPP Kubernetes path.
 
 ## Decision
 
-Build `agent-rt` as an optional stateful module in the existing **Responses frontend**. It owns response-chain state, continuation hydration, and coordination of external tools. It is not a second public gateway, an engine adapter, an EPP extension, or a Dynamo concept.
+Build `agent-rt` as an optional stateful module used by the existing **protocol frontends**. It owns durable turn state, protocol-specific continuation materialization, and coordination of external tools. It is not a second public gateway, an engine adapter, an EPP extension, or a Dynamo concept.
 
 Dynamo remains responsible for request preprocessing, `UnifiedRequest` conversion, `AgentContext` creation, routing, EPP, engine selection, and inference. `agent-rt` invokes Dynamo through one narrow `InferenceInvoker` boundary:
 
 - **Direct Dynamo invoker** for the local/non-EPP path.
 - **Private Gateway/EPP invoker** for Kubernetes GAIE deployments.
 
-The same `agent-rt` core is used in both paths. It has no vLLM, SGLang, or TRT-LLM-specific code.
+The same `agent-rt` core is used in both paths and across supported frontend protocols. It has no vLLM, SGLang, or TRT-LLM-specific code and does not define a lossy universal agent-request IR.
 
 ## Why This Exists
 
-For a continuation request, Dynamo cannot infer on `previous_response_id` directly: a stateful component must authorize the checkpoint, load the prior model-visible items, append the new input, and send a complete request to inference. The same component must coordinate any server-owned tool call and durably commit the next checkpoint.
+For a Responses continuation request, Dynamo cannot infer on `previous_response_id` directly: a stateful component must authorize the checkpoint, load the prior model-visible items, append the new input, and send a complete request to inference. Anthropic clients such as Claude Code already send their complete Messages history, so their ordinary client-owned tool loop remains passthrough; the runtime is selected only for trusted durable-state policy or runtime-owned tools. The same component must coordinate any server-owned tool call and durably commit the next checkpoint.
 
 This does **not** make Dynamo an agent framework. Putting response storage, MCP transports, sandbox credentials, tool retries, and workflow recovery in `dynamo-llm` would couple the normal stateless path to durable application state and external execution systems.
 
@@ -27,7 +27,7 @@ Two components are called “frontend” in a GAIE deployment. They have differe
 
 | Term | Meaning |
 | --- | --- |
-| **Responses frontend** | Our public application/ingress service. It parses the Responses API, authenticates callers, optionally calls `agent-rt`, and serializes the public response. |
+| **Protocol frontend** | Our public application/ingress service. It parses a native API such as OpenAI Responses or Anthropic Messages, authenticates callers, optionally calls `agent-rt`, and serializes the same native protocol. |
 | **Dynamo frontend sidecar** | The per-worker Dynamo frontend selected by EPP. In GAIE it runs in `--router-mode direct` and forwards to its colocated worker; it does not run `agent-rt`. |
 | **EPP** | Dynamo’s Rust Endpoint Picker Plugin. It receives a complete inference request through Envoy `ext_proc`, renders/tokenizes it for KV-aware worker selection, and injects routing headers. |
 | **Dynamo carrier** | An approved, Dynamo-owned request-metadata handle forwarded by the invocation implementation. `agent-rt` neither parses nor constructs it. |
@@ -35,6 +35,8 @@ Two components are called “frontend” in a GAIE deployment. They have differe
 ## Goals
 
 - Support durable OpenAI Responses continuations beginning with `store` and `previous_response_id`.
+- Preserve native Anthropic Messages requests for Claude Code; do not translate them through Responses or a universal agent IR.
+- Keep Claude Code's complete-history, client-owned tool loop on the normal stateless path unless trusted server policy selects the runtime.
 - Preserve Dynamo invocation metadata across every model step without making it part of the runtime domain model.
 - Keep stateless requests off the state-store and agent-runtime path.
 - Keep server-owned tools outside Dynamo, with separate credentials, egress, execution budgets, and recovery semantics.
@@ -53,9 +55,9 @@ Two components are called “frontend” in a GAIE deployment. They have differe
 
 ## Ownership Boundary
 
-| Area | Responses frontend | `agent-rt` | Dynamo / EPP | External tool workers |
+| Area | Protocol frontend | `agent-rt` | Dynamo / EPP | External tool workers |
 | --- | --- | --- | --- | --- |
-| Public Responses wire parsing and serialization | Own | Consume normalized request/events | No | No |
+| Public native wire parsing and serialization | Own | Consume native typed requests/results | No | No |
 | Caller authentication | Own | Consume trusted authorization | No | Connector-specific auth only |
 | Checkpoint authorization | Issue trusted scope | Enforce it for every read/write | No | No |
 | Response/checkpoint persistence | No | Own | No | No |
@@ -71,17 +73,28 @@ Two components are called “frontend” in a GAIE deployment. They have differe
 
 ### Dynamo Boundary
 
-The ordinary Dynamo Responses path remains:
+The ordinary Dynamo native-protocol path remains:
 
 ```text
-NvCreateResponse
+native Responses or Anthropic request
   -> UnifiedRequest
-  -> NvCreateChatCompletionRequest
+  -> backend request
   -> selected engine
   -> vLLM, SGLang, or TRT-LLM
 ```
 
-`agent-rt` produces a fully materialized native Responses request before this path. It does not replace `UnifiedRequest` and does not lower directly to an engine protocol.
+`agent-rt` produces a fully materialized request in the same native frontend protocol before this path. It does not replace `UnifiedRequest`, translate Anthropic through Responses, or lower directly to an engine protocol.
+
+### Native Protocol Families
+
+`AgentProtocol` is a compile-time bundle of native request, replay-item, response, and stream-event DTOs. It is not a shared message schema. `CheckpointStore`, `RequestMaterializer`, `InferenceInvoker`, and `OutputInterpreter` are parameterized by that family.
+
+| Family | Normal selection | Materialization |
+| --- | --- | --- |
+| OpenAI Responses | `store=true`, `previous_response_id`, explicit durable policy, or runtime-owned tools | Authorize and hydrate the response chain, clear model-facing lineage, and invoke Dynamo with complete native Responses input. |
+| Anthropic Messages / Claude Code | Passthrough for ordinary complete-history requests and client-owned tools; select only for explicit durable policy or runtime-owned tools | Preserve the complete native Messages request. Runtime tool rounds append native assistant/tool-result Messages blocks. External Responses-style continuation chains are not invented. |
+
+Output interpretation is protocol-specific. Responses output items become Responses replay items; Anthropic responses become native assistant Messages. Tool ownership remains trusted deployment policy rather than an inference from client-supplied tool names.
 
 At Dynamo ingress, headers are decoded into Dynamo’s `AgentContext`. That context is recomputed for each model step because fields such as input trigger and session-final lifecycle intent are step-specific. `agent-rt` never constructs or stores `AgentContext`.
 
@@ -94,7 +107,7 @@ CheckpointStore
   claim / load / commit durable response-chain state
 
 InferenceInvoker
-  invoke a complete native Responses request through Dynamo
+  invoke a complete request in its native frontend protocol through Dynamo
   - DirectDynamoInvoker
   - EppGatewayInvoker
 
@@ -119,7 +132,7 @@ DynamoInvocationHandle
 
 ```mermaid
 flowchart LR
-  C["Client"] --> F["Responses frontend\nHTTP, auth, serialization"]
+  C["Client"] --> F["Protocol frontend\nHTTP, auth, native serialization"]
   F -->|"stateless"| D["Dynamo frontend\nResponses -> UnifiedRequest -> router"]
   F -->|"stateful"| R["agent-rt"]
   R --> S["Checkpoint store"]
@@ -129,24 +142,24 @@ flowchart LR
   R -. "later" .-> T["External tool workers"]
 ```
 
-This is the first proof-of-concept topology. The invoker calls Dynamo’s normal Responses ingress over a private HTTP or equivalent Dynamo-owned in-process boundary. It must preserve the approved carrier and never call the public Responses dispatch path recursively.
+This is the first proof-of-concept topology. The invoker calls Dynamo’s matching native ingress over a private HTTP or equivalent Dynamo-owned in-process boundary. It must preserve the approved carrier and never call the public stateful dispatch path recursively.
 
 ### Stateful Request Flow
 
-1. The Responses frontend authenticates the caller and creates `RuntimeAuthorization`.
+1. The protocol frontend authenticates the caller and creates `RuntimeAuthorization`.
 2. It invokes `agent-rt` for requests with persistent state, `previous_response_id`, or runtime-owned tools. Stateless requests invoke Dynamo directly.
 3. `agent-rt` claims the response chain, validates checkpoint access, hydrates prior model-visible items, resolves inherited tool definitions/tool choice, and appends the new input. Instructions are per-turn and do not carry across `previous_response_id`.
 4. It clears `previous_response_id` only on the model-facing request. Storage retains the response lineage.
 5. `DirectDynamoInvoker` invokes Dynamo with the complete native request and the approved carrier.
 6. Dynamo derives `AgentContext`, lowers through `UnifiedRequest`, applies its normal routing policy, and invokes the selected engine.
-7. `agent-rt` commits the durable state transition and returns typed Responses events through the frontend.
+7. `agent-rt` commits the durable state transition and returns native typed results/events through the frontend.
 
 ## Dynamo GAIE/EPP Kubernetes Path
 
 ```mermaid
 flowchart LR
   C["Client"] --> G1["Public Gateway route"]
-  G1 --> F["Responses frontend\nagent-rt embedded"]
+  G1 --> F["Protocol frontend\nagent-rt embedded"]
   F --> S["Shared checkpoint store"]
   F -. "tool work" .-> T["External tool workers"]
   F -->|"full materialized inference request"| G2["Private inference route\nInferencePool"]
@@ -157,8 +170,8 @@ flowchart LR
 
 The public and private routes are intentionally different:
 
-- **Public route:** Client to the Responses frontend. It can invoke `agent-rt`.
-- **Private inference route:** Responses frontend to an `InferencePool`. It enters EPP and cannot re-enter public stateful dispatch.
+- **Public route:** Client to the matching protocol frontend. It can invoke `agent-rt`.
+- **Private inference route:** Protocol frontend to an `InferencePool`. It enters EPP and cannot re-enter public stateful dispatch.
 
 The private route is the `EppGatewayInvoker` implementation. It sends every model step as a complete, materialized native request. EPP then selects the engine worker. The selected Dynamo frontend sidecar is in direct mode because EPP already made the selection.
 
@@ -223,7 +236,7 @@ Required rules:
 
 ### Streaming and Cancellation
 
-The frontend remains the authority for client-facing protocol events. `agent-rt` consumes and produces a normalized event stream.
+The frontend remains the authority for client-facing protocol events. `agent-rt` consumes and produces events typed by the selected native protocol family.
 
 - Model deltas may stream immediately through bounded channels.
 - The terminal `response.completed` event is emitted only after the final checkpoint commit.
@@ -305,11 +318,13 @@ Our difference is not a claim that their placement is wrong. We compose state ha
 
 ### Phase 0: direct-Dynamo continuation POC
 
-- Run `agent-rt` in the Responses frontend.
+- Build the protocol-generic runtime in `frontend-crates`, parameterized by native DTO families rather than a universal request IR.
+- Run `agent-rt` from the existing protocol frontend.
 - Route only `store=true` and `previous_response_id` requests through it.
 - Implement `RuntimeAuthorization`, atomic turn claim, checkpoint persistence, hydration, and terminal commit gating.
 - Implement `DirectDynamoInvoker` through normal Dynamo Responses ingress.
 - Support text and client-owned functions only.
+- Prove Anthropic Messages/Claude Code stays native end to end and bypasses the runtime for its ordinary complete-history client-tool loop.
 - Verify carrier handling across one response chain; no durable carrier snapshot and no runtime-owned tools yet.
 
 ### Phase 1: production state semantics
@@ -341,6 +356,7 @@ Our difference is not a claim that their placement is wrong. We compose state ha
 ## POC Success Criteria
 
 - A two-turn Responses continuation returns correct model-visible history without client replay.
+- A Claude Code Messages request remains native Anthropic input/output and takes the stateless path unless trusted policy selects runtime work.
 - Dynamo receives a fully materialized native request and derives `AgentContext` at normal ingress for every model step.
 - Stateless requests incur no state-store lookup or `agent-rt` execution.
 - A client-owned function call persists a wait state and resumes correctly with submitted tool output.
