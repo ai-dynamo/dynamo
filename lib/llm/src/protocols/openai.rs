@@ -10,6 +10,7 @@ use super::{
     ContentProvider,
     common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
 };
+use crate::preprocessor::invalid_argument_error;
 use crate::protocols::common::extensions::NvExt;
 use crate::protocols::openai::common_ext::CommonExtProvider;
 use crate::types::TokenIdType;
@@ -172,9 +173,18 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
         ) {
             Ok(options) => options,
             Err(e) => {
-                // Handle the validation error (log, return error, etc.)
+                // A caller sending two constraints is an expected outcome with a known
+                // reason, not an internal fault, so it leaves here typed. Without the
+                // `InvalidArgument` marker the HTTP layer has nothing to branch on and
+                // falls through to its internal-error path, which is how this surfaced
+                // as `500 Internal Server Error`.
+                //
+                // `ValidateRequest::validate` now runs the same check at the request
+                // boundary, so an HTTP request is rejected before reaching here. This
+                // arm still matters for entry points that build sampling options
+                // without that boundary, and as the invariant guard for this function.
                 tracing::error!("Invalid guided decoding options: {:?}", e);
-                return Err(e);
+                return Err(invalid_argument_error(e.to_string()));
             }
         };
         Ok(common::SamplingOptions {
