@@ -64,7 +64,7 @@ These recipes demonstrate aggregated or disaggregated serving:
 
 **Legend:**
 - **Deployment**: ✅ = Complete `deploy.yaml` manifest available
-- **Benchmark**: ✅ = Includes `perf.yaml` for running AIPerf benchmarks
+- **Benchmark**: ✅ = Includes an AIPerf benchmark manifest
 
 ### Functional Recipes (Not Yet Benchmarked)
 
