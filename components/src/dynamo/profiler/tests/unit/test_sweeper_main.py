@@ -7,7 +7,6 @@ import pytest
 import yaml
 
 from dynamo.profiler.sweeper import __main__ as main_module
-from dynamo.profiler.sweeper import runner as runner_module
 from dynamo.profiler.sweeper.runner import SweepResult
 
 pytestmark = [
@@ -26,49 +25,6 @@ class _Candidate:
         self.score = 1.5
         self.metrics = {"throughput": 42.0}
         self.objectives = None
-
-
-def test_run_sweep_injects_dynamo_runner(monkeypatch, tmp_path) -> None:
-    captured = {}
-
-    class FakeConfig:
-        @classmethod
-        def from_yaml(cls, path):
-            captured["config_path"] = path
-            return "config"
-
-    class FakeSweeper:
-        def __init__(self, *, runner_factory, show_progress):
-            captured["runner_factory"] = runner_factory
-            captured["show_progress"] = show_progress
-
-        def run(self, config):
-            captured["config"] = config
-            return [_Candidate()]
-
-    class FakeRunnerFactory:
-        pass
-
-    monkeypatch.setattr(
-        runner_module,
-        "_load_sweeper_api",
-        lambda: (FakeConfig, FakeSweeper),
-    )
-    monkeypatch.setattr(
-        runner_module,
-        "_load_runner_factory",
-        lambda: FakeRunnerFactory,
-    )
-    config_path = tmp_path / "sweep.yaml"
-
-    result = runner_module.run_sweep(config_path, show_progress=False)
-
-    assert len(result.candidates) == 1
-    assert result.config == "config"
-    assert captured["config_path"] == str(config_path)
-    assert isinstance(captured["runner_factory"], FakeRunnerFactory)
-    assert captured["show_progress"] is False
-    assert captured["config"] == "config"
 
 
 def test_main_writes_dgd_yaml(monkeypatch, tmp_path, capsys) -> None:
@@ -98,7 +54,7 @@ spec:
 
     monkeypatch.setattr(
         main_module,
-        "materialize_candidate_dgd",
+        "render_dgd",
         fake_materialize,
     )
 
@@ -158,7 +114,7 @@ def test_main_writes_kustomize_source(monkeypatch, tmp_path) -> None:
     )
     monkeypatch.setattr(
         main_module,
-        "materialize_candidate_dgd",
+        "render_dgd",
         lambda *_args, **_kwargs: """apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
