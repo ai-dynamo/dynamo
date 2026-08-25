@@ -485,13 +485,15 @@ impl<T> PolicyQueue<T> {
         self.classes[class_index].stats
     }
 
-    pub(crate) fn recheck_worker(&mut self, worker: WorkerWithDpRank) {
+    /// Make an exact-placement worker lane eligible for another admission check.
+    pub fn recheck_worker(&mut self, worker: WorkerWithDpRank) {
         for class in &mut self.classes {
             class.recheck_worker(worker);
         }
     }
 
-    pub(crate) fn recheck_all_workers(&mut self) {
+    /// Make all blocked exact-placement worker lanes eligible for another admission check.
+    pub fn recheck_all_workers(&mut self) {
         for class in &mut self.classes {
             class.recheck_all_workers();
         }

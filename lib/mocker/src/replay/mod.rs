@@ -6,6 +6,9 @@ mod entrypoints;
 pub(crate) mod offline;
 mod online;
 mod router_shared;
+mod session_affinity;
+#[cfg(test)]
+mod session_affinity_tests;
 mod validate;
 
 use std::collections::VecDeque;
@@ -29,6 +32,7 @@ pub use artifacts::native_g1_parent_chain_artifact;
 pub use artifacts::{
     ReplayTimedKvEvent, ReplayTimedOutputSignal, ReplayTimedRequest, ReplayWorkerArtifacts,
 };
+pub use session_affinity::{ReplayKvObservationMode, ReplaySessionAffinityMode};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReplayRouterMode {
     RoundRobin,
@@ -101,8 +105,9 @@ pub use entrypoints::{
     simulate_loaded_trace_live_with_router_mode_and_options,
     simulate_loaded_trace_with_router_mode_and_capture_options,
     simulate_loaded_trace_with_router_mode_and_options,
-    simulate_loaded_trace_with_router_mode_and_options_and_scaling_policy, simulate_trace_file,
-    simulate_trace_file_disagg_with_router_mode,
+    simulate_loaded_trace_with_router_mode_and_options_and_scaling_policy,
+    simulate_session_affinity_workload, simulate_session_affinity_workload_with_options,
+    simulate_trace_file, simulate_trace_file_disagg_with_router_mode,
     simulate_trace_file_disagg_with_router_mode_and_format,
     simulate_trace_file_disagg_with_router_mode_and_format_and_scaling_policy,
     simulate_trace_file_with_router_mode, simulate_trace_file_with_router_mode_and_format,

@@ -177,6 +177,65 @@ impl DefaultWorkerSelector {
             picker,
         }
     }
+
+    /// Return the preferred worker's deterministic selector-cost regret, in blocks, relative to the least-cost eligible worker for the same request snapshot.
+    pub fn cost_regret_for_worker<C: WorkerConfigLike>(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        request: &SchedulingRequest,
+        eligibility: RoutingEligibility<'_>,
+        block_size: u32,
+        preferred_worker: WorkerWithDpRank,
+    ) -> Result<Option<f64>, KvSchedulerError> {
+        eligibility.validate_pinned_worker_allowed()?;
+        if !eligibility.has_eligible_worker(
+            workers
+                .iter()
+                .map(|(&worker_id, config)| (worker_id, config)),
+        ) {
+            if eligibility.has_eligible_worker_ignoring_overload(
+                workers
+                    .iter()
+                    .map(|(&worker_id, config)| (worker_id, config)),
+            ) {
+                return Err(KvSchedulerError::AllEligibleWorkersOverloaded);
+            }
+            return Err(KvSchedulerError::NoEndpoints);
+        }
+
+        let weights = selection_weights(&self.kv_router_config, request);
+        let input = WorkerSelectionInput::new(
+            workers,
+            request,
+            eligibility,
+            block_size,
+            weights,
+            WorkerInputs::ALL
+                | WorkerInputs::MIN_ACTIVE_PREFILL_TOKENS
+                | WorkerInputs::DEFAULT_POLICY_CACHE,
+        );
+        let scorer = DefaultWorkerScorer {
+            kv_router_config: &self.kv_router_config,
+            worker_type: self.worker_type,
+        };
+        let mut best_cost = f64::INFINITY;
+        let mut preferred_cost = None;
+        eligibility.for_each_eligible_worker_rank(workers, |worker, config| {
+            let preferred_taint_multiplier = request
+                .routing_constraints
+                .preferred_taint_multiplier(config.taints());
+            let cost = scorer.worker_cost(
+                &input.context,
+                &input.row(worker, preferred_taint_multiplier, WorkerInputs::ALL),
+            );
+            best_cost = best_cost.min(cost);
+            if worker == preferred_worker {
+                preferred_cost = Some(cost);
+            }
+        });
+
+        Ok(preferred_cost.map(|cost| (cost - best_cost).max(0.0)))
+    }
 }
 
 #[cfg(test)]
@@ -899,6 +958,57 @@ mod tests {
             request.router_config_override = Some(config_override);
             assert_eq!(select(&request), cold_worker, "{name} override was ignored");
         }
+    }
+
+    #[test]
+    fn cost_regret_combines_kv_overlap_and_decode_load() {
+        use crate::test_utils::SimpleWorkerConfig;
+
+        let selector = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                overlap_score_credit: 1.0,
+                prefill_load_scale: 1.0,
+                router_temperature: 0.0,
+                ..Default::default()
+            }),
+            "test",
+        );
+        let workers = HashMap::from([
+            (0, SimpleWorkerConfig::default()),
+            (1, SimpleWorkerConfig::default()),
+        ]);
+        let worker0 = WorkerWithDpRank::from_worker_id(0);
+        let worker1 = WorkerWithDpRank::from_worker_id(1);
+        let mut request = base_request(64);
+        request
+            .overlap
+            .effective_overlap_blocks
+            .extend([(worker0, 4.0), (worker1, 2.0)]);
+        request
+            .overlap
+            .effective_cached_tokens
+            .extend([(worker0, 64), (worker1, 32)]);
+        request.worker_loads.insert(
+            worker1,
+            crate::sequences::WorkerLoadProjection {
+                active_decode_blocks: 3,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            selector
+                .cost_regret_for_worker(&workers, &request, request.eligibility(), 16, worker1,)
+                .unwrap(),
+            Some(5.0),
+            "two uncached blocks plus three decode blocks should cost five blocks"
+        );
+        assert_eq!(
+            selector
+                .cost_regret_for_worker(&workers, &request, request.eligibility(), 16, worker0,)
+                .unwrap(),
+            Some(0.0),
+        );
     }
 
     #[test]

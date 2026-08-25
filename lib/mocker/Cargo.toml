@@ -35,6 +35,7 @@ bytes = { workspace = true }
 dashmap = { workspace = true }
 derive_builder = { workspace = true }
 futures = { workspace = true }
+lru = { workspace = true }
 parking_lot = { workspace = true }
 rmp-serde = { workspace = true }
 serde = { workspace = true }

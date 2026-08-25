@@ -13,8 +13,9 @@ use super::validate::{
     validate_online_concurrency_args, validate_online_replay_args,
 };
 use super::{
-    OfflineDisaggReplayConfig, ReplayCaptureOptions, ReplayPrefillLoadEstimator, ReplayRouterMode,
-    ReplayWorkerArtifacts, SlaThresholds, TraceSimulationReport,
+    OfflineDisaggReplayConfig, ReplayCaptureOptions, ReplayKvObservationMode,
+    ReplayPrefillLoadEstimator, ReplayRouterMode, ReplaySessionAffinityMode, ReplayWorkerArtifacts,
+    SlaThresholds, TraceSimulationReport,
 };
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::loadgen::{AgenticTrace, Trace, TraceFileFormat};
@@ -1728,6 +1729,54 @@ pub fn simulate_trace_workload_with_router_mode(
         router_mode,
         false,
         None,
+        sla,
+    )
+}
+
+/// Run a cumulative multi-turn workload through deterministic offline KV routing with an experimental session-affinity policy.
+pub fn simulate_session_affinity_workload(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    trace: Trace,
+    num_workers: usize,
+    session_affinity_mode: ReplaySessionAffinityMode,
+    record_per_request: bool,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    simulate_session_affinity_workload_with_options(
+        args,
+        router_config,
+        trace,
+        num_workers,
+        session_affinity_mode,
+        ReplayKvObservationMode::Complete,
+        record_per_request,
+        sla,
+    )
+}
+
+/// Run the session-affinity A/B simulation with explicit control over the router's KV-event observation.
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_session_affinity_workload_with_options(
+    args: MockEngineArgs,
+    router_config: Option<KvRouterConfig>,
+    trace: Trace,
+    num_workers: usize,
+    session_affinity_mode: ReplaySessionAffinityMode,
+    kv_observation_mode: ReplayKvObservationMode,
+    record_per_request: bool,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    let args = args.normalized()?;
+    validate_offline_replay_args(&args, num_workers, ReplayRouterMode::KvRouter, false)?;
+    crate::replay::offline::simulate_session_affinity_workload_with_options(
+        args,
+        router_config,
+        trace,
+        num_workers,
+        session_affinity_mode,
+        kv_observation_mode,
+        record_per_request,
         sla,
     )
 }
