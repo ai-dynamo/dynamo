@@ -13,17 +13,19 @@
 //!
 //! Run with: `cargo test --test lora_simulation -- --nocapture`
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dynamo_llm::kv_router::protocols::WorkerWithDpRank;
 use dynamo_llm::lora::config::LoraAllocationConfig;
 use dynamo_llm::lora::controller::LoraController;
+use dynamo_llm::lora::filter::LoraFilter;
 use dynamo_llm::lora::load_estimator::{LoadEstimator, LoadEstimatorConfig};
 use dynamo_llm::lora::routing::AllocationAlgorithmType;
-use dynamo_llm::lora::routing::table::LoraRoutingTable;
+use dynamo_llm::lora::routing::table::{LoraReplicaConfig, LoraRoutingTable};
 use dynamo_llm::lora::state_tracker::LoraStateTracker;
+use dynamo_llm::model_card::LoraInfo;
 
 use rand::SeedableRng;
 use rand::prelude::*;
@@ -98,6 +100,111 @@ impl RandomAllocator {
 
 /// Snapshot of the allocation state at a given tick
 type AllocationSnapshot = HashMap<String, Vec<WorkerWithDpRank>>;
+
+#[derive(Default)]
+struct RequestMetrics {
+    adapter_loads: usize,
+    adapter_unloads: usize,
+    requests: usize,
+    hits: usize,
+}
+
+/// Deterministic, capacity-bounded LRU residency model for simulated workers.
+struct ResidencyModel {
+    adapters: HashMap<WorkerWithDpRank, VecDeque<String>>,
+    next_candidate: HashMap<String, usize>,
+}
+
+impl ResidencyModel {
+    fn new(workers: &[WorkerWithDpRank]) -> Self {
+        Self {
+            adapters: workers
+                .iter()
+                .copied()
+                .map(|worker| (worker, VecDeque::new()))
+                .collect(),
+            next_candidate: HashMap::new(),
+        }
+    }
+
+    fn serve_tick(
+        &mut self,
+        schedules: &[LoraLoadSchedule],
+        tick: usize,
+        filter: &LoraFilter,
+        workers: &[WorkerWithDpRank],
+        state_tracker: &LoraStateTracker,
+        slots_per_backend: usize,
+    ) -> RequestMetrics {
+        let available_ids: Vec<u64> = workers.iter().map(|worker| worker.worker_id).collect();
+        let worker_by_id: HashMap<u64, WorkerWithDpRank> = workers
+            .iter()
+            .copied()
+            .map(|worker| (worker.worker_id, worker))
+            .collect();
+        let mut metrics = RequestMetrics::default();
+
+        for schedule in schedules {
+            for _ in 0..schedule.load_at_tick(tick) {
+                metrics.requests += 1;
+                let candidates =
+                    filter.filter_worker_ids_for_lora(Some(&schedule.lora_name), &available_ids);
+                let cursor = self
+                    .next_candidate
+                    .entry(schedule.lora_name.clone())
+                    .or_insert(0);
+                let candidate = candidates
+                    .get(*cursor % candidates.len())
+                    .copied()
+                    .expect("simulation requires at least one available worker");
+                *cursor += 1;
+                let worker = worker_by_id[&candidate];
+                let resident = self.adapters.entry(worker).or_default();
+
+                if state_tracker.is_loaded(&schedule.lora_name, &worker) {
+                    metrics.hits += 1;
+                    if let Some(position) =
+                        resident.iter().position(|name| name == &schedule.lora_name)
+                    {
+                        let name = resident.remove(position).expect("position came from deque");
+                        resident.push_back(name);
+                    }
+                    continue;
+                }
+
+                if resident.len() >= slots_per_backend {
+                    let evicted = resident
+                        .pop_front()
+                        .expect("full resident deque is non-empty");
+                    state_tracker.handle_mdc_removal(worker, &evicted);
+                    metrics.adapter_unloads += 1;
+                }
+                resident.push_back(schedule.lora_name.clone());
+                state_tracker.handle_mdc_addition(
+                    worker,
+                    &LoraInfo {
+                        name: schedule.lora_name.clone(),
+                        max_gpu_lora_count: Some(slots_per_backend as u32),
+                    },
+                );
+                metrics.adapter_loads += 1;
+            }
+        }
+
+        metrics
+    }
+}
+
+fn record_request_metrics(metrics: &mut ChurnMetrics, request_metrics: RequestMetrics) {
+    metrics
+        .per_tick_adapter_loads
+        .push(request_metrics.adapter_loads);
+    metrics
+        .per_tick_adapter_unloads
+        .push(request_metrics.adapter_unloads);
+    metrics.per_tick_requests.push(request_metrics.requests);
+    metrics.per_tick_hits.push(request_metrics.hits);
+}
 
 /// Compute churn between two allocation snapshots
 fn compute_churn(prev: &AllocationSnapshot, curr: &AllocationSnapshot) -> (usize, usize) {
@@ -299,6 +406,8 @@ fn run_hrw_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
     for &worker in &workers {
         state_tracker.set_worker_capacity(worker, config.slots_per_backend as u32);
     }
+    let filter = LoraFilter::new(routing_table.clone(), state_tracker.clone());
+    let mut residency = ResidencyModel::new(&workers);
 
     let mut metrics = ChurnMetrics::new("HRW");
     let mut prev_snapshot: AllocationSnapshot = HashMap::new();
@@ -348,6 +457,20 @@ fn run_hrw_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
             *replica_dist.entry(replica_set.len()).or_insert(0) += 1;
         }
         metrics.per_tick_replica_dist.push(replica_dist);
+        let request_metrics = residency.serve_tick(
+            schedules,
+            tick,
+            &filter,
+            &workers,
+            &state_tracker,
+            config.slots_per_backend,
+        );
+        record_request_metrics(&mut metrics, request_metrics);
+        for schedule in schedules {
+            for _ in 0..schedule.load_at_tick(tick) {
+                load_estimator.decrement_load_at(&schedule.lora_name, now);
+            }
+        }
 
         prev_snapshot = curr_snapshot;
     }
@@ -364,6 +487,13 @@ fn run_random_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> 
     let workers: Vec<WorkerWithDpRank> = (0..config.num_backends)
         .map(|i| WorkerWithDpRank::new(i as u64, 0))
         .collect();
+    let routing_table = LoraRoutingTable::new();
+    let state_tracker = LoraStateTracker::new();
+    for &worker in &workers {
+        state_tracker.set_worker_capacity(worker, config.slots_per_backend as u32);
+    }
+    let filter = LoraFilter::new(routing_table.clone(), state_tracker.clone());
+    let mut residency = ResidencyModel::new(&workers);
 
     let mut metrics = ChurnMetrics::new("Random");
     let mut prev_snapshot: AllocationSnapshot = HashMap::new();
@@ -386,6 +516,23 @@ fn run_random_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> 
             &workers,
             config.slots_per_backend,
         );
+        for lora_name in routing_table.list_loras() {
+            if !curr_snapshot.contains_key(&lora_name) {
+                routing_table.remove_lora(&lora_name);
+            }
+        }
+        for (lora_name, replica_set) in &curr_snapshot {
+            routing_table.update_allocation(
+                lora_name.clone(),
+                LoraReplicaConfig {
+                    lora_name: lora_name.clone(),
+                    replica_factor: replica_set.len(),
+                    replica_set: replica_set.clone(),
+                    updated_at: Instant::now(),
+                    is_active: true,
+                },
+            );
+        }
         // Compute churn
         let (loads, unloads) = compute_churn(&prev_snapshot, &curr_snapshot);
         let tick_churn = loads + unloads;
@@ -407,6 +554,17 @@ fn run_random_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> 
             *replica_dist.entry(replica_set.len()).or_insert(0) += 1;
         }
         metrics.per_tick_replica_dist.push(replica_dist);
+        record_request_metrics(
+            &mut metrics,
+            residency.serve_tick(
+                schedules,
+                tick,
+                &filter,
+                &workers,
+                &state_tracker,
+                config.slots_per_backend,
+            ),
+        );
 
         prev_snapshot = curr_snapshot;
     }
@@ -450,6 +608,8 @@ fn run_mcf_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
     for &worker in &workers {
         state_tracker.set_worker_capacity(worker, config.slots_per_backend as u32);
     }
+    let filter = LoraFilter::new(routing_table.clone(), state_tracker.clone());
+    let mut residency = ResidencyModel::new(&workers);
 
     let mut metrics = ChurnMetrics::new("MCF");
     let mut prev_snapshot: AllocationSnapshot = HashMap::new();
@@ -492,6 +652,20 @@ fn run_mcf_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
             *replica_dist.entry(replica_set.len()).or_insert(0) += 1;
         }
         metrics.per_tick_replica_dist.push(replica_dist);
+        let request_metrics = residency.serve_tick(
+            schedules,
+            tick,
+            &filter,
+            &workers,
+            &state_tracker,
+            config.slots_per_backend,
+        );
+        record_request_metrics(&mut metrics, request_metrics);
+        for schedule in schedules {
+            for _ in 0..schedule.load_at_tick(tick) {
+                load_estimator.decrement_load_at(&schedule.lora_name, now);
+            }
+        }
 
         prev_snapshot = curr_snapshot;
     }

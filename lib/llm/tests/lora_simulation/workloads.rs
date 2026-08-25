@@ -112,6 +112,14 @@ struct ChurnMetrics {
     /// Per-tick replica distribution: `per_tick_replica_dist[tick]` is a map from
     /// replica_count → number of LoRAs with that replica count at that tick.
     per_tick_replica_dist: Vec<HashMap<usize, usize>>,
+    /// Physical adapter loads observed on request routing misses.
+    per_tick_adapter_loads: Vec<usize>,
+    /// Physical adapter unloads caused by capacity-bounded LRU eviction.
+    per_tick_adapter_unloads: Vec<usize>,
+    /// Requests issued through the LoRA filter.
+    per_tick_requests: Vec<usize>,
+    /// Requests routed to a worker where the adapter was already resident.
+    per_tick_hits: Vec<usize>,
 }
 
 impl ChurnMetrics {
@@ -130,6 +138,10 @@ impl ChurnMetrics {
             per_tick_lora_removals: Vec::new(),
             total_lora_additions: 0,
             total_lora_removals: 0,
+            per_tick_adapter_loads: Vec::new(),
+            per_tick_adapter_unloads: Vec::new(),
+            per_tick_requests: Vec::new(),
+            per_tick_hits: Vec::new(),
         }
     }
 

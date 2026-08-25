@@ -112,6 +112,34 @@ fn test_windowed_load_keeps_sparse_lora_routable() {
 }
 
 #[test]
+fn test_request_path_measures_residency_hit_after_cold_load() {
+    let config = SimConfig {
+        num_backends: 1,
+        slots_per_backend: 1,
+        total_loras: 1,
+        concurrent_loras: 1,
+        total_ticks: 2,
+        ..Default::default()
+    };
+    let schedules = vec![LoraLoadSchedule {
+        lora_name: "warm-after-first-request".to_string(),
+        active_window: (0, config.total_ticks),
+        peak_load: 1,
+        ramp_up: 0,
+        steady: 0,
+        ramp_down: 0,
+        per_tick_loads: Some(vec![1, 1]),
+    }];
+
+    let metrics = run_hrw_simulation(&config, &schedules);
+
+    assert_eq!(metrics.per_tick_adapter_loads, vec![1, 0]);
+    assert_eq!(metrics.per_tick_adapter_unloads, vec![0, 0]);
+    assert_eq!(metrics.per_tick_requests, vec![1, 1]);
+    assert_eq!(metrics.per_tick_hits, vec![0, 1]);
+}
+
+#[test]
 fn test_random_baseline_matches_overflow_routability() {
     // Three active LoRAs share only two resident slots. All controllers still retain one route
     // target per LoRA: two budgeted targets plus one soft-overflow fallback target.
