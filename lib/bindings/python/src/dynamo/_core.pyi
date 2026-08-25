@@ -2803,6 +2803,13 @@ class KvDcRelay:
         publication_threshold: int = 16,
         publication_delay_ms: int = 1,
         recovery_attempt_timeout_ms: int = 30_000,
+        *,
+        namespaces: Optional[List[str]] = None,
+        endpoint_prefixes: Optional[List[str]] = None,
+        watch_all: Optional[bool] = None,
+        expected_unique_blocks: int = 1_048_576,
+        bind: Optional[str] = None,
+        tuning: Optional[Dict[str, int]] = None,
     ) -> None:
         ...
 

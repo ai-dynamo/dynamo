@@ -329,6 +329,10 @@ impl DirtyWindow {
 #[derive(Debug)]
 struct PublicationWindow {
     dirty: DirtyWindow,
+    /// Whether publication boundaries materialize bucket-image payloads. The relay disables
+    /// materialization until a consumer lease attaches, so pools without WAN subscribers pay
+    /// for dirty tracking but never for payload vectors.
+    materialization_enabled: bool,
     pending_events: usize,
 }
 
@@ -336,6 +340,7 @@ impl PublicationWindow {
     fn new(bucket_count: usize) -> Result<Self, CkfBuildError> {
         Ok(Self {
             dirty: DirtyWindow::new(bucket_count)?,
+            materialization_enabled: true,
             pending_events: 0,
         })
     }
@@ -713,6 +718,7 @@ impl DcCkfState {
             .saturating_add(replacement.telemetry.physical_touches);
         replacement.telemetry.distinct_touched_buckets = self.telemetry.distinct_touched_buckets;
         replacement.telemetry.emitted_images = self.telemetry.emitted_images;
+        replacement.publication.materialization_enabled = self.publication.materialization_enabled;
         replacement.telemetry.net_reverted_buckets = self.telemetry.net_reverted_buckets;
         *self = replacement;
         Ok(self.drain_publication())
@@ -720,6 +726,11 @@ impl DcCkfState {
 
     pub fn flush(&mut self) -> Option<DcCkfPublicationBatch> {
         self.drain_publication()
+    }
+
+    /// Controls whether publication boundaries materialize bucket-image payloads.
+    pub fn set_publication_materialization_enabled(&mut self, enabled: bool) {
+        self.publication.materialization_enabled = enabled;
     }
 
     pub fn has_pending_publication(&self) -> bool {
@@ -1197,17 +1208,17 @@ impl DcCkfState {
             return None;
         }
         let distinct_touched = self.publication.dirty.buckets.len() as u64;
-        let mut emitted_images = 0usize;
+        let mut changed_buckets = 0usize;
         for (index, &bucket) in self.publication.dirty.buckets.iter().enumerate() {
             if self.filter.load_bucket(bucket).0 != self.publication.dirty.originals[index] {
-                emitted_images += 1;
+                changed_buckets += 1;
             }
         }
         // The dirty scratch is reserved for worst-case rollback (candidates * (max_kicks + 1)
         // touches), so the payload is materialized into an exact-size vector in a second pass
         // instead of letting that capacity escape into the fan-out queue with the batch.
-        let images = (emitted_images > 0).then(|| {
-            let mut images = Vec::with_capacity(emitted_images);
+        let images = (self.publication.materialization_enabled && changed_buckets > 0).then(|| {
+            let mut images = Vec::with_capacity(changed_buckets);
             for (index, &bucket) in self.publication.dirty.buckets.iter().enumerate() {
                 let value = self.filter.load_bucket(bucket).0;
                 if value != self.publication.dirty.originals[index] {
@@ -1216,6 +1227,7 @@ impl DcCkfState {
             }
             images
         });
+        let emitted_images = images.as_ref().map_or(0, Vec::len);
         self.publication.dirty.clear();
         self.telemetry.distinct_touched_buckets = self
             .telemetry
@@ -1228,7 +1240,7 @@ impl DcCkfState {
         self.telemetry.net_reverted_buckets = self
             .telemetry
             .net_reverted_buckets
-            .saturating_add(distinct_touched.saturating_sub(emitted_images as u64));
+            .saturating_add(distinct_touched.saturating_sub(changed_buckets as u64));
         self.publication.pending_events = 0;
         Some(DcCkfPublicationBatch { images: images? })
     }
@@ -2190,6 +2202,27 @@ mod tests {
         let second = state.apply_event(removed(worker, 2, &[7]));
         assert!(second.publication().is_none());
         assert_eq!(state.stats().aggregation().unique_block_count(), 0);
+    }
+
+    #[test]
+    fn disabled_publication_materialization_does_not_count_unshipped_images() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let mut state = DcCkfState::new(CkfConfig::new(32)).unwrap();
+        state.set_publication_materialization_enabled(false);
+
+        let first = state.apply_event(stored(worker, 1, &[7]));
+        assert!(first.publication_boundary());
+        assert!(first.publication().is_none());
+        assert_eq!(state.stats().publication().emitted_images(), 0);
+
+        let recovered = state.replace_rank(worker, replacement(&[7])).unwrap();
+        assert!(recovered.is_none());
+
+        state.set_publication_materialization_enabled(true);
+        let next = state.apply_event(stored_with_parent(worker, 2, 7, &[8]));
+        assert!(next.publication_boundary());
+        assert!(next.publication().is_some());
+        assert!(state.stats().publication().emitted_images() > 0);
     }
 
     #[test]

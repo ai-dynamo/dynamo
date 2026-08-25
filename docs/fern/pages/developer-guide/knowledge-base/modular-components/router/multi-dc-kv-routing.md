@@ -2,176 +2,263 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Multi-DC KV Routing and the DC Relay
-subtitle: Aggregate exact KV ownership in each DC and publish compact state to a global consumer
+subtitle: Publish endpoint-local KV pools and namespace-wide serving topology from each data center
 ---
 
-**Experimental.** NVIDIA Dynamo includes the DC-local Relay, Cuckoo-filter publication protocol,
-and global consumer data structure. The current end-to-end integration uses an in-process adapter.
-Non-local gRPC transport and cross-DC request forwarding remain follow-up integration work.
+**Experimental.** NVIDIA Dynamo includes a data-center-local Relay and a versioned Cuckoo-filter
+(CKF) publication contract. The Relay exports facts for each Dynamo pool over a plaintext gRPC
+listener. Deployments that cross a trust boundary terminate Transport Layer Security (TLS) in a
+proxy before forwarding traffic to the Relay. A consumer decides which pools to compare and how to
+use those facts.
 
-Multi-DC KV routing needs a compact answer to this question: which data center is likely to have
-the longest reusable prefix for a request? Sending every worker's full KV event stream to a global
-router would duplicate exact ownership state across the wide-area boundary. The DC KV Relay
-instead resolves exact events locally and publishes a lossy, read-optimized Cuckoo-filter (CKF)
-projection.
+Sending every worker's full key-value (KV) event stream across a wide-area boundary would duplicate
+exact ownership state outside its data center. The Relay keeps exact ownership local and publishes a
+compact CKF projection for each pool.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph DC1["DC 1"]
-        W1["Workers and DP ranks"] -->|"ordered KV events"| R1["DC Relay pool actor\nexact ownership + refcounts + CKF"]
+    subgraph DC["One data center"]
+        E1["Serving endpoint A"] -->|"ordered KV events"| A1["Pool actor A\nexact ownership + CKF"]
+        E2["Serving endpoint B"] -->|"ordered KV events"| A2["Pool actor B\nexact ownership + CKF"]
+        E1 -->|"model cards + availability"| T["Namespace topology\n(namespace, model)"]
+        E2 -->|"model cards + availability"| T
+        A1 --> P["Catalog, pool, topology,\nand load publication"]
+        A2 --> P
+        T --> P
     end
-    subgraph DC2["DC 2"]
-        W2["Workers and DP ranks"] -->|"ordered KV events"| R2["DC Relay pool actor\nexact ownership + refcounts + CKF"]
-    end
-    R1 -->|"barrier snapshot + sequenced absolute bucket images"| T["Protocol boundary\nlocal adapter today; gRPC intended"]
-    R2 -->|"barrier snapshot + sequenced absolute bucket images"| T
-    T --> I["Lane-sticky ingestion"]
-    I --> G["Global transposed CKF\none lane per DC pool"]
-    G --> Q["Global routing decision\nfollow-up integration"]
+    P -->|"plaintext gRPC on loopback"| S["TLS or mutual TLS (mTLS) proxy"]
+    S -->|"protected gRPC"| C["Pool-fact consumer"]
 ```
 
-The architecture separates mutation semantics from global search:
+The Relay maintains these boundaries:
 
-- The **DC Relay** discovers KV-event publishers and supervises one actor-owned CKF producer for
-  each local pool.
-- The **producer** owns exact member state, full-hash refcounts, the mutable CKF, dirty tracking,
-  publication sequence, and barrier snapshots.
-- The **protocol boundary** carries a full snapshot followed by sequenced deltas containing
-  absolute images of changed packed buckets.
-- The **global consumer** stores the same logical CKF layout transposed across DC lanes for
-  concurrent prefix queries.
-- A future **global router** resolves the selected pool to a serving endpoint and forwards the
-  request. Native runtime endpoint identity is not part of the CKF wire identity.
+- One serving endpoint with an active KV event source contributes one atomic pool, actor, and
+  physical KV stream.
+- Independent endpoints stay separate even when they advertise the same canonical model.
+- The pool actor owns exact worker/rank membership, full-hash refcounts, CKF mutation, and
+  publication sequencing.
+- The catalog is endpoint-local. Serving topology is grouped independently by
+  `(namespace, canonical_model_id)` and links members to pools by stable `PoolId`.
+- Catalog, topology readiness, and load are separate projections. Their recovery does not mutate
+  CKF state.
+- A publication hub exists only after the first client subscribes to that pool.
 
-## Domains, pools, and lanes
+Combining KV state from independent endpoints would make a hit ambiguous: a consumer could choose
+one endpoint while the matching prefix exists only in another. Separate streams preserve the
+physical routing boundary and let the consumer apply its own policy.
 
-An indexer domain identifies caches that may be compared as one logical routing namespace. It
-combines cache semantics, such as compatible event hashing and KV block size, with an isolation
-scope. Deployments can use explicit identity material; otherwise Dynamo derives the identity from
-the current deployment metadata and warns when a multi-DC join relies on defaults.
+The Relay materializes an endpoint pool only while all of these conditions hold:
 
-A pool adds one stable logical DC to that domain:
+- The endpoint membership has an indexer domain, at least one valid model registration, and no
+  structural conflict.
+- The endpoint's runtime configuration resolves one unambiguous KV-state endpoint.
+- At least one expected worker/rank advertises an active KV event source.
+
+If any condition stops holding, the Relay withdraws the pool before actor teardown. The endpoint
+can remain in serving topology while its member link changes from a `PoolId` to no pool link.
+
+## Pool and Producer Identity
+
+An indexer domain combines cache semantics with a routing-isolation scope. The normal derived
+routing scope includes the Dynamo endpoint identity, so two endpoints produce different domains.
+An explicit indexer identity can override that derivation.
+
+A pool adds the logical data-center identity to one indexer domain:
 
 ```text
-PoolId = (IndexerDomainId, DcId)
+PoolId = (identity_version, IndexerDomainId, DcId)
 ```
 
-A pool is exactly one DC-local producer and publication stream. `DcId` stays stable across Relay
-restarts, scaling, endpoint replacement, and producer generations. It is not a runtime endpoint
-identifier and has meaning only within its indexer domain.
+`PoolId` identifies the stable logical pool. The serving `namespace.component.endpoint` is carried
+separately in the pool descriptor so a consumer can resolve the stream to the endpoint that owns
+it. It is not an inference ingress. The descriptor also carries the endpoint's declared worker
+roles. `ProducerIdentity` identifies one physical CKF generation for that pool. If two live
+endpoints resolve to the same `PoolId`, the Relay treats ownership as ambiguous, fences the identity,
+and withdraws it from the catalog instead of aggregating both endpoints.
 
-One global CKF consumer is scoped to one indexer domain. Its lanes are distinct pools, normally one
-per DC. The manifest rejects mixed domains, duplicate pools, and duplicate DC lanes. Query results
-identify pools; the runtime resolves those pools to serving endpoints afterward.
+The wire contract uses typed lifecycle identities:
 
-## What the Relay aggregates
+- `RelayIdentity` contains the Dynamo runtime instance ID and a random Relay incarnation generated
+  by each `KvDcRelay::start` call.
+- `ProducerIdentity` contains the complete `PoolId`, producer incarnation, layout generation, and
+  CKF format.
 
-KV events identify a member by worker and data-parallel rank and carry full block hashes. For each
-pool, the Relay records the exact hashes owned by every member and a DC-wide refcount for each full
-hash.
+Consumers reject Relay, producer, layout, or format drift before applying payload bytes. A new
+producer generation starts a new sequence space and requires a new snapshot.
+
+## Canonical Models and LoRA
+
+Each endpoint pool has one canonical base-model target. Additional registrations can expose
+Low-Rank Adaptation (LoRA) adapters backed by that model. Every registration includes:
+
+- the canonical request model ID;
+- a target that is either the pool's base model or a LoRA adapter with that backing base model;
+- zero or more aliases.
+
+LoRA adapters share the KV domain of their backing base model. They remain nested registrations on
+that pool and do not create separate CKF streams. In the topology projection an adapter is nested
+under its base model instead of creating a top-level entry, so the base model can be ready while a
+specific adapter is unavailable.
+
+The Relay does not flatten descriptors into model-to-pool or alias-to-model indexes. A consumer can
+derive the lookup shape it needs from catalog snapshots. Two endpoints that register the same
+canonical model therefore remain two candidate descriptors with independent producer identities.
+
+## Aggregated, Prefill/Decode (PD), and Encode/Prefill/Decode (EPD) Topologies
+
+An aggregated deployment normally contributes one KV-publishing endpoint, one pool, and one
+`AGGREGATED` topology member. Prefill/decode (PD) disaggregation contributes separate Prefill and
+Decode endpoints and therefore separate physical pools. Both CKFs are meaningful: the Prefill CKF
+describes prefill-side prefix reuse, while the Decode CKF describes decode-side reuse. Consumers
+must hash a request separately for each pool using its own `query_semantics`; the two endpoints can
+use different hash formats.
+
+Encode/prefill/decode (EPD) adds an `ENCODE` topology dependency. Encode is required for base-model
+readiness but is not an adapter-bearing role; Low-Rank Adaptation membership is evaluated only for
+Prefill, Decode, and Aggregated roles. An Encode-only endpoint remains an `ENCODE` topology member,
+but its `pool_id` is present only while the Relay observes an active KV event source. Without one,
+the Relay allocates no CKF or load state. If an Encode implementation starts publishing KV events,
+the Relay materializes its endpoint-local pool and updates the topology link. Removing that source
+withdraws the pool and changes the member's `pool_id` from present to absent.
+
+## WAN API
+
+The protobuf package is `dynamo.kvrelay.v1`. Every top-level request and response carries the v1
+contract marker, and every response carries protocol version `1` and a typed Relay identity.
+
+| RPC | Contract |
+| --- | --- |
+| `GetRelayInfo` | Returns the protocol version and current `RelayIdentity`. |
+| `WatchKvPoolCatalog` | Sends the current revisioned catalog snapshot, then a new complete snapshot after each observed catalog change. |
+| `SubscribeKvPool` | Selects one exact `ProducerIdentity` from the catalog; sends an initial chunked CKF snapshot, contiguous deltas, and application heartbeats. |
+| `SubscribeServingReadiness` | Sends the current namespace topology projection, updates on revision changes, and repeats it on heartbeats. |
+| `SubscribeKvPoolLoad` | Sends the current complete load window, then complete windows for all active pools. |
+
+Each streaming request includes a non-empty subscriber ID of at most 128 bytes. Subscriber limits
+are finite for every stream type. Pool subscriber queues have independent message and byte limits;
+a client that falls behind receives `RESOURCE_EXHAUSTED` and must resubscribe. Load stream lag uses
+the same resubscribe boundary. Reconnecting one stream does not reset the others.
+The initial snapshot path also bounds per-frame progress independently of client polling. A client
+that stops draining snapshot chunks causes its snapshot producer to stop and release encoder
+admission at the deadline without fencing the pool's producer generation. The stream reports
+`RESOURCE_EXHAUSTED` after gRPC resumes polling it. A client that never resumes can retain one of the
+bounded total pool-stream slots until its transport disconnects or the Relay shuts down.
+
+A pool subscription carries the complete `ProducerIdentity` from a catalog snapshot. An absent
+pool returns `NOT_FOUND`. If that pool now has a different producer generation, the Relay returns
+`FAILED_PRECONDITION` without initializing the replacement generation's publication hub. Refresh
+the catalog before retrying either response.
+
+## CKF Publication
+
+For each pool, ordered KV events identify an owner by `(worker_id, dp_rank)` and carry full block
+hashes. The Relay tracks each owner's exact hashes and a pool-wide refcount for every full hash.
 
 | Ownership change | Relay behavior |
 | --- | --- |
-| First owner of a full hash | Insert one CKF fingerprint |
-| Another owner of the same full hash | Increment the refcount only |
-| One of several owners removes it | Decrement the refcount only |
-| Final owner removes it | Remove one CKF fingerprint |
+| First owner of a full hash | Insert one CKF fingerprint. |
+| Another owner of the same full hash | Increment the refcount only. |
+| One of several owners removes it | Decrement the refcount only. |
+| Final owner removes it | Remove one CKF fingerprint. |
 
-This gives one CKF contribution per distinct full hash, independent of how many workers or ranks
-own it. Two different full hashes can map to the same CKF representation; the Relay still preserves
-their physical multiplicity. An unknown `(member, full_hash)` removal is a no-op and never deletes
-state merely because a fingerprint matches.
+Full hashes remain authoritative because a fingerprint is lossy, can collide, and has no owner
+identity. The CKF projection can return false positives. A capacity failure before mutation commit
+can also leave an observable omission without corrupting exact ownership.
 
-The exact state is authoritative. The CKF is probabilistic and can return false positives. Under
-capacity pressure, a failed insertion is also allowed to remain an observable omission, which can
-produce a stable false negative for that block while the Relay continues processing other events.
+The first `SubscribeKvPool` call for a generation initializes its publication hub:
 
-## Why two publication stages use different data
+1. The hub acquires one actor publication lease and copies a complete CKF snapshot.
+2. The subscriber captures that snapshot cut and a bounded delta queue.
+3. Snapshot encoding runs outside async worker threads under a finite concurrency limit.
+4. Ordered deltas follow the snapshot sequence.
+5. Later subscribers reuse the same hub and receive their own snapshot cut and bounded queue.
 
-The two stages solve different recovery and distribution problems.
+Before the first subscription, the Relay allocates no publication hub or full CKF mirror. Once
+initialized, both remain until the producer generation retires, even with no active subscribers. A
+terminal hub failure fences and withdraws the owning producer generation so later discovery can
+bind a fresh generation.
 
-### Stage 1: worker KV events into the DC Relay
+`FilterUpdate.payload` uses Cuckoo Bucket Images v1 (CBI1). A snapshot contains ordered chunks of
+dense `u64` bucket words. A delta contains absolute `(bucket, value)` images and the base sequence it
+extends. Absolute images are idempotent at the bucket level. Sequence numbers detect gaps but do
+not make a multi-bucket update atomic.
 
-Within a DC, ordered KV events carry full hashes and exact ownership changes. The Relay uses the
-same worker-query recovery framework as the normal Dynamo indexer:
+## Serving Readiness
 
-1. Each `(worker, dp_rank)` source has an ordered event stream and generation fence.
-2. Small gaps can be recovered from the worker's event history.
-3. Initial discovery, old gaps, or source replacement can install the worker's current tree state.
-4. Rank reset and replacement are completion barriers before events from a new source generation
-   become active.
+Readiness answers whether a canonical model in one Dynamo namespace has an authoritative serving
+topology with the required live roles. Each entry is keyed by
+`(namespace, canonical_model_id)`; producer replacement does not change that key.
 
-This stage must retain full hashes. A CKF fingerprint can collide and has no owner identity, so it
-cannot prove which exact edge a remove intended to delete. Moving only fingerprints into the Relay
-would make safe removal and shared-owner refcounting impossible. Moving all exact ownership into
-the global consumer would defeat DC-local aggregation.
+- `READY` means at least one worker is live and Dynamo's namespace-wide dependency disjunctive
+  normal form (DNF) is satisfied.
+- `UNAVAILABLE` means availability is authoritative but a declared role is absent or no worker is
+  live.
+- `UNKNOWN` means at least one participating endpoint has not produced an authoritative
+  availability snapshot.
 
-### Stage 2: pool bucket images into the global consumer
+`TopologyEntry.members` lists each endpoint, its declared roles, and an optional stable
+`PoolId`. Consumers resolve the current `ProducerIdentity` through the catalog. Any legacy model
+card activates Dynamo's compatibility fallback—ready when any worker is live—and sets
+`legacy_fallback_active`. `duplicate_role_endpoints` lists each typed Prefill or Decode role that is
+advertised by more than one endpoint for the key. This is an observable topology fact, not a
+version-independent conclusion that serving is degraded or that local Prefill/Decode rendezvous is
+disabled. Consumers decide how to interpret it for their Dynamo version and deployment policy.
 
-After applying exact mutations, the Relay publishes only the resulting CKF projection:
+For a LoRA target, the nested adapter status also requires adapter membership with the advertised
+backing base model on each applicable role. Readiness is a serving fact, not a CKF hit guarantee.
+The Relay does not publish a request ingress; mapping a topology key to an ingress remains consumer
+or deployment policy.
 
-- A **barrier snapshot** contains every packed bucket and the producer's terminal publication
-  sequence.
-- A **delta** contains a contiguous sequence pair and absolute `u64` images for buckets dirtied
-  since an earlier publication.
-- A **lease** binds the stream to one consumer instance and physical lane.
+## Pool Load
 
-Absolute images make delivery idempotent at the bucket level and keep the global side independent
-of the producer's relocation choices. Sequence numbers detect missing or reordered batches; they
-do not count events or make a multi-bucket update atomic.
+The load stream publishes one atomic update per configured window. Each pool entry reports
+worker-authoritative used and total KV blocks with observed-rank and expected-rank counts. The
+aggregate is authoritative only after every declared rank reports KV use and every rank has a known,
+nonzero capacity.
 
-The intended non-local integration runs this protocol over gRPC. A connection or lane failure
-retires the old lease. Reconnection creates a new lease, installs a fresh barrier snapshot, and
-then resumes with the next contiguous delta. The current in-process adapter exercises the same
-assignment, snapshot, delta, drain, and resnapshot state machines without a network transport.
+Missing observations remain missing; the Relay does not convert partial coverage or unknown
+capacity into zero load. Consumers treat either condition as unavailable load evidence and use their
+configured fallback. Router-local decode and prefill scheduler events are not exported because they
+lack the publisher identity needed for safe aggregation across router replicas. `window_sequence`
+orders complete windows, while local receive time determines freshness across data centers.
 
-## Two CKF roles
+## Recovery Boundaries
 
-The producer and consumer share addressing and packed-bucket format, but their layouts and
-concurrency differ.
+| Failure | Recovery boundary |
+| --- | --- |
+| Worker event gap or source replacement | Rebuild the affected worker rank before activating its replacement source. |
+| Suspect exact pool state or duplicate `PoolId` | Withdraw and fence the producer generation, then materialize a fresh generation when discovery is valid. |
+| Catalog disconnect | Reopen `WatchKvPoolCatalog` and replace the local catalog with its first snapshot. |
+| Pool stream lag, sequence gap, identity drift, or malformed CBI1 | Retire only that consumer pool state, reopen `SubscribeKvPool`, and install a complete snapshot. |
+| Topology disconnect | Reopen `SubscribeServingReadiness` and replace the complete topology projection. |
+| Load lag or disconnect | Reopen `SubscribeKvPoolLoad` and accept the next complete window. |
 
-| Role | Layout and ownership | Purpose |
-| --- | --- | --- |
-| DC producer | One ordinary packed table owned by one Relay actor | Apply exact mutations, refcounts, relocation, dirty tracking, and snapshots |
-| Global consumer | Bucket-major transposed table with one atomic packed word per lane | Search the same candidate buckets across as many as 16 DC pools |
+A fenced pool is withdrawn before actor teardown begins, so the catalog does not advertise a
+generation whose recovery is draining.
 
-The producer actor serializes complete commands. Each publication batch is sampled after a
-complete event, rank clear, or relocation, although one batch can coalesce several commands.
+## Transport
 
-On the consumer, one lane-sticky ingestion worker serializes snapshots, deltas, and drain markers
-for a lane. Different lanes and queries can run concurrently. Each packed bucket is atomic as one
-`u64`, but a live query can observe a mixture while several bucket images are being applied. The
-consumer intentionally does not use a lane-wide lock, reader retry, seqlock, or double buffer.
+Setting `--bind` enables the plaintext gRPC server on the specified socket address. The Relay does
+not provide encryption, server authentication, or client authentication. The listener fails startup
+if it cannot bind the socket. Omit `--bind` to run the local producer without a gRPC listener.
 
-## Failure and recovery boundaries
+For a protected listener, bind Relay to `127.0.0.1` or `::1` and place a gRPC-capable proxy or
+sidecar on the same host or in the same pod. Configure the proxy's external listener for TLS or
+mutual TLS (mTLS), forward HTTP/2 gRPC to the loopback Relay address without retries or buffering,
+and expose only the proxy port. Restrict direct access to the plaintext port with a firewall or
+Kubernetes NetworkPolicy. Certificate validation, authorization, rotation, and expiry monitoring
+belong to the proxy.
 
-Failures recover at the narrowest state boundary whose completion is uncertain:
+> [!WARNING]
+> Do not expose `--bind 0.0.0.0:<port>` directly to a wide-area, untrusted, or shared network. If a
+> non-loopback bind is unavoidable, isolate the plaintext hop so only the security proxy can reach
+> it.
 
-- A worker event gap or source replacement recovers that worker rank into the Relay producer.
-- Suspect exact producer state rebuilds the pool's producer generation.
-- A delivery gap or uncertain publisher stream retires the affected consumer lane and installs a
-  new barrier snapshot from the still-authoritative producer.
-- A malformed or partially applied consumer update recovers only the consumer lane.
-- A pre-commit CKF capacity omission is reported but does not trigger producer or consumer
-  recovery.
+The server applies finite message sizes, subscriber counts, publication queue sizes, snapshot
+encoding concurrency, HTTP/2 keepalive, and heartbeat intervals. A terminal transport task failure
+cancels the Relay and appears in its health response.
 
-While a lane is retired, queries exclude it from new results. A query that already captured the
-old ready set may finish under the documented weak-read contract.
-
-## Current component scope
-
-Start one Relay process with a control-plane-stable DC name:
-
-```bash
-python -m dynamo.kv_dc_relay --dc-id <stable-dc-id>
-```
-
-The Relay discovers compatible local endpoints, consumes their KV events, and exposes health.
-Diagnostic builds can also expose aggregation and producer-snapshot information. The component
-does not proxy inference requests, and its diagnostic snapshot endpoint is not the cross-DC
-publication protocol.
-
-For component flags and endpoint behavior, see the
-[DC KV Relay README](https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/kv_dc_relay).
+For launcher configuration and examples, see the
+[DC KV Relay README](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/kv_dc_relay/README.md).
