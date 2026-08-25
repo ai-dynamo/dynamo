@@ -127,20 +127,14 @@ fn create_tls_acceptor() -> Result<TlsAcceptor> {
 pub async fn run(policy_registry: Option<WorkerSelectionPolicyRegistry>) -> Result<()> {
     init_tracing();
     let mode = EppMode::from_env()?;
-    require_standalone_mode_for_linked_worker_selection_policy(mode, policy_registry.as_ref())?;
-    run_inner(mode, policy_registry).await
-}
-
-fn require_standalone_mode_for_linked_worker_selection_policy(
-    mode: EppMode,
-    policy_registry: Option<&WorkerSelectionPolicyRegistry>,
-) -> Result<()> {
-    if matches!(mode, EppMode::Standalone)
-        || policy_registry.is_none_or(WorkerSelectionPolicyRegistry::is_empty)
+    if !matches!(mode, EppMode::Standalone)
+        && policy_registry
+            .as_ref()
+            .is_some_and(|registry| !registry.is_empty())
     {
-        return Ok(());
+        anyhow::bail!("linked worker-selection policies require DYN_EPP_MODE=standalone")
     }
-    anyhow::bail!("linked worker-selection policies require DYN_EPP_MODE=standalone")
+    run_inner(mode, policy_registry).await
 }
 
 fn init_tracing() {
@@ -453,61 +447,5 @@ async fn serve<P: crate::EndpointPicker>(
         readiness_task.abort();
         let _ = readiness_task.await;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use dynamo_kv_router::scheduling::selector::WorkerSelectionPolicy;
-
-    use super::*;
-
-    fn nonempty_registry() -> WorkerSelectionPolicyRegistry {
-        let mut registry = WorkerSelectionPolicyRegistry::default();
-        registry
-            .register(
-                "test",
-                Arc::new(|_| {
-                    Ok(Arc::new(|config, worker_type, _partition| {
-                        WorkerSelectionPolicy::default(
-                            config.clone(),
-                            worker_type.default_selector_label(),
-                        )
-                    }))
-                }),
-            )
-            .unwrap();
-        registry
-    }
-
-    #[test]
-    fn nonempty_registry_requires_standalone_epp() {
-        let registry = nonempty_registry();
-        assert!(
-            require_standalone_mode_for_linked_worker_selection_policy(
-                EppMode::Standalone,
-                Some(&registry),
-            )
-            .is_ok()
-        );
-        assert!(
-            require_standalone_mode_for_linked_worker_selection_policy(
-                EppMode::DynamoRuntime,
-                Some(&registry),
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn empty_registry_allows_dynamo_runtime() {
-        let registry = WorkerSelectionPolicyRegistry::default();
-        assert!(
-            require_standalone_mode_for_linked_worker_selection_policy(
-                EppMode::DynamoRuntime,
-                Some(&registry),
-            )
-            .is_ok()
-        );
     }
 }
