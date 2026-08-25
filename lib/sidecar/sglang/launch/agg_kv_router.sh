@@ -118,11 +118,11 @@ CUDA_VISIBLE_DEVICES="$SGLANG_WORKER2_GPU" \
 OTEL_SERVICE_NAME=dynamo-worker-1 \
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
     dynamo-sglang-sidecar \
-    --sglang-endpoint "${SGLANG_HOST}:${SGLANG_WORKER1_GRPC_PORT}" &
+    --grpc-endpoint "${SGLANG_HOST}:${SGLANG_WORKER1_GRPC_PORT}" &
 
 OTEL_SERVICE_NAME=dynamo-worker-2 \
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
     dynamo-sglang-sidecar \
-    --sglang-endpoint "${SGLANG_HOST}:${SGLANG_WORKER2_GRPC_PORT}" &
+    --grpc-endpoint "${SGLANG_HOST}:${SGLANG_WORKER2_GRPC_PORT}" &
 
 wait_any_exit

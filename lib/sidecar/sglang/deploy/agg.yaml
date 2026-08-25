@@ -95,7 +95,7 @@ spec:
           command:
           - dynamo-sglang-sidecar
           args:
-          - --sglang-endpoint
+          - --grpc-endpoint
           - 127.0.0.1:30001
           envFrom:
           - secretRef:

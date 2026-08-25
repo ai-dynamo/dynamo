@@ -78,7 +78,7 @@ fn fast_engine_args() -> MockEngineArgs {
 async fn sidecar(endpoint: &str, mode: DisaggregationMode) -> SglangSidecarEngine {
     let mut argv = vec![
         "dynamo-sglang-sidecar".to_string(),
-        "--sglang-endpoint".to_string(),
+        "--grpc-endpoint".to_string(),
         endpoint.to_string(),
         "--grpc-connections".to_string(),
         "1".to_string(),
