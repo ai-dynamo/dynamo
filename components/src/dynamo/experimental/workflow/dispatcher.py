@@ -17,8 +17,12 @@ from dynamo.experimental.workflow.plan import (
     RemoteBinding,
 )
 from dynamo.experimental.workflow.remote import RemoteStageClient
-from dynamo.experimental.workflow.runtime import StageContext, StageRunner, WorkflowExecutionError
-from dynamo.experimental.workflow.types import WorkflowValidationError
+from dynamo.experimental.workflow.runtime import (
+    StageContext,
+    StageRunner,
+    WorkflowExecutionError,
+)
+from dynamo.experimental.workflow.types import StageContract, WorkflowValidationError
 
 
 @runtime_checkable
@@ -31,6 +35,8 @@ class RemoteStageInvoker(Protocol):
         contract: StageContract,
         inputs: Mapping[str, Any],
         context: StageContext,
+        *,
+        request_context: Any = None,
     ) -> Mapping[str, Any]:
         ...
 
@@ -156,6 +162,8 @@ class StageDispatcher:
         stage_id: str,
         inputs: Mapping[str, Any],
         context: StageContext,
+        *,
+        request_context: Any = None,
     ) -> dict[str, Any]:
         """Invoke one stage and validate its complete input/output contract."""
 
@@ -176,7 +184,11 @@ class StageDispatcher:
             )
         else:
             result = await self._remote_clients[binding.endpoint_id].run(
-                stage_id, contract, frozen_inputs, context
+                stage_id,
+                contract,
+                frozen_inputs,
+                context,
+                request_context=request_context,
             )
         if not isinstance(result, Mapping):
             raise WorkflowExecutionError(
