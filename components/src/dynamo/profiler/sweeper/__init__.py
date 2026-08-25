@@ -3,11 +3,11 @@
 
 """Dynamo composition for AI Simulate Sweeper candidates."""
 
-from dynamo.profiler.sweeper.dgd import (
+from dynamo.profiler.sweeper.renderers import (
     CandidateMaterializationError,
     DGDMaterializationOptions,
     DGDRenderer,
-    materialize_candidate_dgd,
+    render_dgd,
 )
 from dynamo.profiler.sweeper.runner import SweepResult, run_sweep
 
@@ -16,6 +16,6 @@ __all__ = [
     "DGDMaterializationOptions",
     "DGDRenderer",
     "SweepResult",
-    "materialize_candidate_dgd",
+    "render_dgd",
     "run_sweep",
 ]
