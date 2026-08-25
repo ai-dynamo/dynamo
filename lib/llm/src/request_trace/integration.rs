@@ -31,13 +31,29 @@ pub(crate) struct RequestEndTraceState {
 /// Protocol-neutral observations shared by request-end trace producers.
 #[derive(Clone)]
 pub(crate) struct RequestEndTraceObserver {
-    request_tracker: Arc<RequestTracker>,
+    request_tracker: Option<Arc<RequestTracker>>,
     finish_reason_metadata: Option<SharedFinishReasonMetadata>,
 }
 
 impl RequestEndTraceObserver {
+    pub(crate) fn from_legacy_parts(
+        request_tracker: Option<Arc<RequestTracker>>,
+        record_tokens: bool,
+        finish_reason_metadata: Option<SharedFinishReasonMetadata>,
+    ) -> Option<Self> {
+        if !record_tokens && finish_reason_metadata.is_none() {
+            return None;
+        }
+        Some(Self {
+            request_tracker: record_tokens.then_some(request_tracker).flatten(),
+            finish_reason_metadata,
+        })
+    }
+
     pub(crate) fn tracker(&self) -> &RequestTracker {
-        &self.request_tracker
+        self.request_tracker
+            .as_deref()
+            .expect("request-end trace state always has a request tracker")
     }
 
     pub(crate) fn records_finish_reason_metadata(&self) -> bool {
@@ -60,7 +76,7 @@ impl RequestEndTraceObserver {
             stop_reason,
         );
         super::record_llm_metric_tokens(
-            Some(&self.request_tracker),
+            self.request_tracker.as_deref(),
             input_tokens,
             output_tokens,
             cached_tokens,
@@ -74,7 +90,7 @@ impl RequestEndTraceObserver {
         cached_tokens: Option<usize>,
     ) {
         super::record_llm_metric_tokens(
-            Some(&self.request_tracker),
+            self.request_tracker.as_deref(),
             input_tokens,
             output_tokens,
             cached_tokens,
@@ -144,7 +160,7 @@ impl RequestEndTraceState {
 
     pub(crate) fn observer(&self) -> RequestEndTraceObserver {
         RequestEndTraceObserver {
-            request_tracker: self.request.request_tracker.clone(),
+            request_tracker: Some(self.request.request_tracker.clone()),
             finish_reason_metadata: self
                 .agent
                 .as_ref()

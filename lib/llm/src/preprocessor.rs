@@ -3787,7 +3787,35 @@ impl OpenAIPreprocessor {
         })
     }
 
-    pub(crate) fn transform_postprocessor_stream<S, Resp>(
+    pub fn transform_postprocessor_stream<S, Resp>(
+        stream: S,
+        generator: Box<dyn DeltaGeneratorExt<Resp>>,
+        context: Arc<dyn AsyncEngineContext>,
+        emit_payload_usage_chunk: bool,
+        trace_tokens_enabled: bool,
+        trace_finish_reason_metadata: Option<crate::request_trace::SharedFinishReasonMetadata>,
+        mm_counts: MultimodalCounts,
+    ) -> impl Stream<Item = Annotated<Resp>> + Send
+    where
+        S: Stream<Item = Annotated<BackendOutput>> + Send + 'static,
+        Resp: Send + Sync + Clone + 'static + std::fmt::Debug,
+    {
+        let trace_observer = crate::request_trace::RequestEndTraceObserver::from_legacy_parts(
+            generator.tracker(),
+            trace_tokens_enabled,
+            trace_finish_reason_metadata,
+        );
+        Self::transform_postprocessor_stream_with_observer(
+            stream,
+            generator,
+            context,
+            emit_payload_usage_chunk,
+            trace_observer,
+            mm_counts,
+        )
+    }
+
+    fn transform_postprocessor_stream_with_observer<S, Resp>(
         stream: S,
         generator: Box<dyn DeltaGeneratorExt<Resp>>,
         context: Arc<dyn AsyncEngineContext>,
@@ -5680,7 +5708,7 @@ impl
 
         // transform the postprocessor stream. Legacy `/v1/completions` is
         // text-only, so multimodal counts are always zero here.
-        let stream = Self::transform_postprocessor_stream(
+        let stream = Self::transform_postprocessor_stream_with_observer(
             response_stream,
             response_generator,
             context.clone(),
