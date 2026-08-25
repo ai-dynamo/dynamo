@@ -198,19 +198,18 @@ reachable.
 
 ### Internal control and diagnostic interfaces
 
-Several of Dynamo's internal control and diagnostic interfaces **do not
-authenticate callers** — including the worker system server (`/engine/*` on
-`DYN_SYSTEM_PORT`), the planner live dashboard, and the standalone KV router
-services (indexer, selection, and slot tracker). Several bind on all interfaces.
+Dynamo's internal control and diagnostic interfaces — for example the worker
+system server (`/engine/*` on `DYN_SYSTEM_PORT`), the planner live dashboard and
+plugin registration, and the standalone KV router services (indexer, selection,
+and slot tracker) — are designed to be used within the trusted network boundary.
+While some provide their own authentication, many do not, and several bind on all
+interfaces.
 
 **Keep every such interface on the trusted network**, expose only the routes a
-deployment uses, and disable the ones you don't need. Some surfaces add their own
-authentication on top of that isolation — for example, planner plugin registration
-authenticates callers and is fail-closed by default (it refuses to start until you
-configure a `trusted_sources` auth source, so avoid `allow_unauthenticated` outside
-development). Treat that as defense in depth, not a replacement for network
-isolation. See each component's documentation for its specific listeners and
-controls.
+deployment uses, and disable the ones you don't need. Where an interface offers its
+own authentication, enable it as defense in depth — but treat it as additional
+hardening within the boundary, not a replacement for network isolation. See each
+component's documentation for its specific listeners and controls.
 
 ## Securing Model and Backend Code
 
