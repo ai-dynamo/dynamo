@@ -23,6 +23,7 @@ import (
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	admissionv1 "k8s.io/api/admission/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -145,5 +146,37 @@ func TestDGDRDefaulter_Default(t *testing.T) {
 				t.Errorf("after Default(): spec.image = %q, want %q", dgdr.Spec.Image, tt.expectedImage)
 			}
 		})
+	}
+}
+
+func TestDGDRDefaulter_DefaultsNativeV1Beta1Fields(t *testing.T) {
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
+	if err := NewDGDRDefaulter("1.1.0", "").Default(makeAdmissionCtx(admissionv1.Create), dgdr); err != nil {
+		t.Fatalf("Default() error = %v", err)
+	}
+
+	if dgdr.Spec.Backend != nvidiacomv1beta1.BackendTypeAuto {
+		t.Errorf("spec.backend = %q, want %q", dgdr.Spec.Backend, nvidiacomv1beta1.BackendTypeAuto)
+	}
+	if dgdr.Spec.SearchStrategy != nvidiacomv1beta1.SearchStrategyRapid {
+		t.Errorf("spec.searchStrategy = %q, want %q", dgdr.Spec.SearchStrategy, nvidiacomv1beta1.SearchStrategyRapid)
+	}
+	if dgdr.Spec.AutoApply == nil || !*dgdr.Spec.AutoApply {
+		t.Errorf("spec.autoApply = %v, want true", dgdr.Spec.AutoApply)
+	}
+}
+
+func TestDGDRDefaulter_DoesNotDefaultV1Beta2Envelope(t *testing.T) {
+	dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+			V1Beta2: &apiextensionsv1.JSON{Raw: []byte(`{"modelRef":{"name":"test"}}`)},
+		},
+	}
+	if err := NewDGDRDefaulter("1.1.0", "").Default(makeAdmissionCtx(admissionv1.Create), dgdr); err != nil {
+		t.Fatalf("Default() error = %v", err)
+	}
+
+	if dgdr.Spec.Backend != "" || dgdr.Spec.SearchStrategy != "" || dgdr.Spec.AutoApply != nil || dgdr.Spec.Image != "" {
+		t.Fatalf("envelope received native defaults: %#v", dgdr.Spec)
 	}
 }

@@ -264,6 +264,11 @@ func restoreDGDRSpokeStatus(raw string) (DynamoGraphDeploymentRequestStatus, boo
 // ConvertFromDynamoGraphDeploymentRequestSpec converts the DGDR spec from
 // v1alpha1 to v1beta1.
 func ConvertFromDynamoGraphDeploymentRequestSpec(src *DynamoGraphDeploymentRequestSpec, dst *v1beta1.DynamoGraphDeploymentRequestSpec, restored *v1beta1.DynamoGraphDeploymentRequestSpec, save *DynamoGraphDeploymentRequestSpec) error {
+	if restored != nil && restored.V1Beta2 != nil {
+		dst.V1Beta2 = restored.V1Beta2.DeepCopy()
+		return nil
+	}
+
 	dst.Model = src.Model
 	dst.RuntimeVersionOverride = src.RuntimeVersionOverride
 	autoApply := src.AutoApply
@@ -609,6 +614,10 @@ func restoreDGDRAlphaOnlySpec(restored *DynamoGraphDeploymentRequestSpec, dst *D
 
 func saveDGDRHubOnlySpec(src *v1beta1.DynamoGraphDeploymentRequestSpec, save *v1beta1.DynamoGraphDeploymentRequestSpec) {
 	if src == nil || save == nil {
+		return
+	}
+	if src.V1Beta2 != nil {
+		save.V1Beta2 = src.V1Beta2.DeepCopy()
 		return
 	}
 	if src.Hardware != nil {
@@ -1003,6 +1012,11 @@ func projectProfilingJobToProfilingConfig(src *v1beta1.DynamoGraphDeploymentRequ
 // ConvertFromDynamoGraphDeploymentRequestStatus converts the DGDR status from
 // v1alpha1 to v1beta1.
 func ConvertFromDynamoGraphDeploymentRequestStatus(src *DynamoGraphDeploymentRequestStatus, dst *v1beta1.DynamoGraphDeploymentRequestStatus, restored *v1beta1.DynamoGraphDeploymentRequestStatus, save *DynamoGraphDeploymentRequestStatus) {
+	if restored != nil && restored.V1Beta2 != nil {
+		dst.V1Beta2 = restored.V1Beta2.DeepCopy()
+		return
+	}
+
 	dst.Phase = dgdrStateToPhase(string(src.State), src.Deployment)
 	dst.ObservedGeneration = src.ObservedGeneration
 	dst.Conditions = slices.Clone(src.Conditions)
@@ -1091,6 +1105,10 @@ func restoreDGDRAlphaOnlyStatus(restored *DynamoGraphDeploymentRequestStatus, ds
 
 func saveDGDRHubOnlyStatus(src *v1beta1.DynamoGraphDeploymentRequestStatus, dst *DynamoGraphDeploymentRequestStatus, save *v1beta1.DynamoGraphDeploymentRequestStatus) {
 	if src == nil || save == nil {
+		return
+	}
+	if src.V1Beta2 != nil {
+		save.V1Beta2 = src.V1Beta2.DeepCopy()
 		return
 	}
 	if src.Phase == v1beta1.DGDRPhaseDeployed && dgdrStateToPhase(string(dst.State), dst.Deployment) != src.Phase {

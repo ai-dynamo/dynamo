@@ -537,7 +537,6 @@ spec:
               description: Spec defines the desired state for this deployment request.
               properties:
                 autoApply:
-                  default: true
                   description: |-
                     AutoApply indicates whether to automatically create a DynamoGraphDeployment
                     after profiling completes. If false, the generated spec is stored in status
@@ -555,7 +554,6 @@ spec:
                         - sglang
                         - trtllm
                         - vllm
-                  default: auto
                   description: Backend specifies the inference backend to use for profiling and deployment.
                   type: string
                 features:
@@ -9256,7 +9254,6 @@ spec:
                     - enum:
                         - rapid
                         - thorough
-                  default: rapid
                   description: |-
                     SearchStrategy controls the profiling search depth.
                     "rapid" performs a fast sweep; "thorough" explores more configurations.
@@ -9284,6 +9281,12 @@ spec:
                       description: TTFT is the Time To First Token target in milliseconds.
                       type: number
                   type: object
+                v1beta2:
+                  description: |-
+                    V1Beta2 losslessly preserves a native v1beta2 spec while this object is
+                    represented through v1beta1. It is mutually exclusive with native fields.
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
                 workload:
                   description: Workload defines the expected workload characteristics for SLA-based profiling.
                   properties:
@@ -9310,9 +9313,12 @@ spec:
                         planner is disabled, the profiler uses its default maximum-throughput selection.
                       type: number
                   type: object
-              required:
-                - model
               type: object
+              x-kubernetes-validations:
+                - message: exactly one of native v1beta1 fields or v1beta2 must be specified
+                  rule: has(self.v1beta2) != has(self.model)
+                - message: v1beta2 is mutually exclusive with native v1beta1 fields
+                  rule: '!has(self.v1beta2) || !(has(self.backend) || has(self.image) || has(self.modelCache) || has(self.hardware) || has(self.workload) || has(self.sla) || has(self.overrides) || has(self.features) || has(self.searchStrategy) || has(self.autoApply))'
             status:
               description: Status reflects the current observed state of this deployment request.
               properties:
@@ -9455,7 +9461,16 @@ spec:
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
                   type: object
+                v1beta2:
+                  description: |-
+                    V1Beta2 losslessly preserves a native v1beta2 status while this object is
+                    represented through v1beta1.
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
               type: object
+              x-kubernetes-validations:
+                - message: v1beta2 is mutually exclusive with native v1beta1 status fields
+                  rule: '!has(self.v1beta2) || !(has(self.phase) || has(self.profilingPhase) || has(self.dgdName) || has(self.profilingJobName) || has(self.conditions) || has(self.profilingResults) || has(self.deploymentInfo) || has(self.observedGeneration))'
           type: object
       served: true
       storage: true
@@ -9497,7 +9512,9 @@ spec:
             metadata:
               type: object
             spec:
-              description: DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
+              description: |-
+                DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
+                Native v1beta2 fields and the V1Beta1 conversion envelope are mutually exclusive.
               properties:
                 backends:
                   description: Backends lists one or more inference backends searched by Sweeper and used by generated candidates.
@@ -18193,6 +18210,12 @@ spec:
                   required:
                     - budget
                   type: object
+                v1beta1:
+                  description: |-
+                    V1Beta1 losslessly preserves a native v1beta1 spec while this object is
+                    represented through v1beta2. It is mutually exclusive with native fields.
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
                 workload:
                   description: Workload defines exactly one traffic model used for every candidate evaluation.
                   properties:
@@ -18296,15 +18319,12 @@ spec:
                   x-kubernetes-validations:
                     - message: exactly one of trace or static must be specified
                       rule: has(self.trace) != has(self.static)
-              required:
-                - backends
-                - hardware
-                - image
-                - modelRef
-                - objective
-                - search
-                - workload
               type: object
+              x-kubernetes-validations:
+                - message: exactly one of native v1beta2 fields or v1beta1 must be specified
+                  rule: has(self.v1beta1) != (has(self.modelRef) && has(self.backends) && has(self.image) && has(self.hardware) && has(self.workload) && has(self.objective) && has(self.search))
+                - message: v1beta1 is mutually exclusive with native v1beta2 fields
+                  rule: '!has(self.v1beta1) || !(has(self.modelRef) || has(self.backends) || has(self.image) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.search) || has(self.recommendation) || has(self.rerun) || has(self.overrides))'
             status:
               description: DynamoGraphDeploymentRequestStatus represents reconciliation of persistent search intent.
               properties:
@@ -18404,7 +18424,16 @@ spec:
                     type: object
                     x-kubernetes-map-type: atomic
                   type: array
+                v1beta1:
+                  description: |-
+                    V1Beta1 losslessly preserves a native v1beta1 status while this object is
+                    represented through v1beta2.
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
               type: object
+              x-kubernetes-validations:
+                - message: v1beta1 is mutually exclusive with native v1beta2 status fields
+                  rule: '!has(self.v1beta1) || !(has(self.observedGeneration) || has(self.activeRunRef) || has(self.recentRunRefs) || has(self.conditions))'
           required:
             - spec
           type: object

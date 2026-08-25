@@ -56,7 +56,9 @@ spec:
             metadata:
               type: object
             spec:
-              description: DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
+              description: |-
+                DynamoGraphDeploymentRequestSpec defines persistent desired search intent.
+                Native v1beta2 fields and the V1Beta1 conversion envelope are mutually exclusive.
               properties:
                 backends:
                   description: Backends lists one or more inference backends searched by Sweeper and used by generated candidates.
@@ -8752,6 +8754,12 @@ spec:
                   required:
                     - budget
                   type: object
+                v1beta1:
+                  description: |-
+                    V1Beta1 losslessly preserves a native v1beta1 spec while this object is
+                    represented through v1beta2. It is mutually exclusive with native fields.
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
                 workload:
                   description: Workload defines exactly one traffic model used for every candidate evaluation.
                   properties:
@@ -8855,15 +8863,12 @@ spec:
                   x-kubernetes-validations:
                     - message: exactly one of trace or static must be specified
                       rule: has(self.trace) != has(self.static)
-              required:
-                - backends
-                - hardware
-                - image
-                - modelRef
-                - objective
-                - search
-                - workload
               type: object
+              x-kubernetes-validations:
+                - message: exactly one of native v1beta2 fields or v1beta1 must be specified
+                  rule: has(self.v1beta1) != (has(self.modelRef) && has(self.backends) && has(self.image) && has(self.hardware) && has(self.workload) && has(self.objective) && has(self.search))
+                - message: v1beta1 is mutually exclusive with native v1beta2 fields
+                  rule: '!has(self.v1beta1) || !(has(self.modelRef) || has(self.backends) || has(self.image) || has(self.hardware) || has(self.workload) || has(self.objective) || has(self.search) || has(self.recommendation) || has(self.rerun) || has(self.overrides))'
             status:
               description: DynamoGraphDeploymentRunStatus represents one search execution's observed state.
               properties:
