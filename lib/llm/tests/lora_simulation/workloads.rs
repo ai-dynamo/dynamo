@@ -37,6 +37,12 @@ struct SimConfig {
     lifetime_stddev: f64,
     /// Random seed for reproducibility
     seed: u64,
+    /// Seconds represented by each simulation tick.
+    timestep_secs: u64,
+    /// Multiplier used to derive the controller's sliding rate window.
+    rate_window_multiplier: u64,
+    /// Number of control ticks to defer scale-down decisions.
+    scale_down_cooldown_ticks: u32,
 }
 
 impl SimConfig {
@@ -65,6 +71,9 @@ impl Default for SimConfig {
             lifetime_mean: 0,
             lifetime_stddev: 0.0,
             seed: 42,
+            timestep_secs: 3,
+            rate_window_multiplier: 30,
+            scale_down_cooldown_ticks: 3,
         }
     }
 }

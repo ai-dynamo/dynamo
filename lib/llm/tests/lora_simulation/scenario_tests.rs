@@ -159,6 +159,7 @@ fn test_mcf_simulation_is_repeatable() {
         lifetime_mean: 0,
         lifetime_stddev: 0.0,
         seed: 42,
+        ..Default::default()
     };
     let schedules =
         generate_zipf_poisson_schedules(config.total_loras, config.total_ticks, 1.0, 40.0, 42);
@@ -195,6 +196,7 @@ fn test_simulation_lora_pool_fits_resident_slots() {
         lifetime_mean: 0,
         lifetime_stddev: 0.0,
         seed: 42,
+        ..Default::default()
     };
     let schedules =
         generate_zipf_poisson_schedules(config.total_loras, config.total_ticks, 1.0, 40.0, 42);

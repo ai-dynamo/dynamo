@@ -15,11 +15,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use dynamo_llm::kv_router::protocols::WorkerWithDpRank;
 use dynamo_llm::lora::config::LoraAllocationConfig;
 use dynamo_llm::lora::controller::LoraController;
-use dynamo_llm::lora::load_estimator::LoadEstimator;
+use dynamo_llm::lora::load_estimator::{LoadEstimator, LoadEstimatorConfig};
 use dynamo_llm::lora::routing::AllocationAlgorithmType;
 use dynamo_llm::lora::routing::table::LoraRoutingTable;
 use dynamo_llm::lora::state_tracker::LoraStateTracker;
@@ -30,9 +31,6 @@ use rand::rngs::StdRng;
 
 // Workload configuration and generators are kept separate from allocation runners.
 include!("workloads.rs");
-
-/// Keep allocator comparisons free of the controller's separate scale-down policy.
-const COMPARISON_SCALE_DOWN_COOLDOWN_TICKS: u32 = 0;
 
 // ============================================================================
 // Random Allocator (for baseline comparison)
@@ -270,17 +268,20 @@ fn run_hrw_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
     let alloc_config = LoraAllocationConfig {
         enabled: true,
         algorithm: AllocationAlgorithmType::Hrw,
-        timestep_secs: 1, // Not used in sync mode
-        // The benchmark isolates routing-target selection. Hysteresis is a separate policy
-        // that the random baseline does not implement and would confound the comparison.
-        scale_down_cooldown_ticks: COMPARISON_SCALE_DOWN_COOLDOWN_TICKS,
-        rate_window_multiplier: 5,
+        timestep_secs: config.timestep_secs,
+        scale_down_cooldown_ticks: config.scale_down_cooldown_ticks,
+        rate_window_multiplier: config.rate_window_multiplier,
         ..Default::default()
     };
 
     let routing_table = LoraRoutingTable::new();
     let state_tracker = LoraStateTracker::new();
-    let load_estimator = Arc::new(LoadEstimator::new());
+    let load_estimator = Arc::new(LoadEstimator::with_config(
+        LoadEstimatorConfig::from_controller_timestep(
+            config.timestep_secs,
+            config.rate_window_multiplier,
+        ),
+    ));
     let mut controller = LoraController::new(
         alloc_config,
         routing_table.clone(),
@@ -301,35 +302,21 @@ fn run_hrw_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
 
     let mut metrics = ChurnMetrics::new("HRW");
     let mut prev_snapshot: AllocationSnapshot = HashMap::new();
+    let base = Instant::now();
 
     for tick in 0..config.total_ticks {
-        // Fully clear the previous tick's load signal. `decrement_load` only touches the in-flight
-        // counter, not the windowed rate counter the controller actually reads via
-        // `get_current_load()`; since the whole simulation runs in one real-time instant, without
-        // `remove_lora` the rate counter would accumulate across ticks and the controller would see
-        // ever-growing load instead of this tick's pattern.
-        for name in load_estimator
-            .get_current_load()
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-        {
-            load_estimator.remove_lora(&name);
-        }
+        let now = base + Duration::from_secs(tick as u64 * config.timestep_secs);
 
-        // The controller unions adapter names from the load estimator with discovery state, so
-        // active adapters do not need synthetic MDC registrations. Registering them on an
-        // arbitrary worker would consume that worker's simulated slots for HRW but not MCF.
-        // Set only this tick's demand to keep the compared allocators capacity-equivalent.
+        // The controller learns active adapters from the estimator. Virtual time gives its
+        // windowed signal the same three-second control cadence as production.
         for schedule in schedules {
             let load = schedule.load_at_tick(tick);
             for _ in 0..load {
-                load_estimator.increment_load(&schedule.lora_name);
+                load_estimator.increment_load_at(&schedule.lora_name, now);
             }
         }
 
-        // Recompute allocations
-        controller.recompute_now();
+        controller.recompute_now_at(now);
 
         // Snapshot current allocation
         let mut curr_snapshot: AllocationSnapshot = HashMap::new();
@@ -433,16 +420,20 @@ fn run_mcf_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
     let alloc_config = LoraAllocationConfig {
         enabled: true,
         algorithm: AllocationAlgorithmType::MinCostFlow,
-        timestep_secs: 1,
-        // See run_hrw_simulation: keep the comparison focused on routing-target selection.
-        scale_down_cooldown_ticks: COMPARISON_SCALE_DOWN_COOLDOWN_TICKS,
-        rate_window_multiplier: 5,
+        timestep_secs: config.timestep_secs,
+        scale_down_cooldown_ticks: config.scale_down_cooldown_ticks,
+        rate_window_multiplier: config.rate_window_multiplier,
         ..Default::default()
     };
 
     let routing_table = LoraRoutingTable::new();
     let state_tracker = LoraStateTracker::new();
-    let load_estimator = Arc::new(LoadEstimator::new());
+    let load_estimator = Arc::new(LoadEstimator::with_config(
+        LoadEstimatorConfig::from_controller_timestep(
+            config.timestep_secs,
+            config.rate_window_multiplier,
+        ),
+    ));
     let mut controller = LoraController::new(
         alloc_config,
         routing_table.clone(),
@@ -462,28 +453,18 @@ fn run_mcf_simulation(config: &SimConfig, schedules: &[LoraLoadSchedule]) -> Chu
 
     let mut metrics = ChurnMetrics::new("MCF");
     let mut prev_snapshot: AllocationSnapshot = HashMap::new();
+    let base = Instant::now();
     for tick in 0..config.total_ticks {
-        // Fully clear the previous tick's load signal (see run_hrw_simulation: `decrement_load`
-        // leaves the windowed rate counter, which would otherwise accumulate across ticks).
-        for name in load_estimator
-            .get_current_load()
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>()
-        {
-            load_estimator.remove_lora(&name);
-        }
+        let now = base + Duration::from_secs(tick as u64 * config.timestep_secs);
 
-        // See run_hrw_simulation: use the load estimator as the active-adapter source instead of
-        // synthetic loaded locations, which would give HRW and MCF different capacity inputs.
         for schedule in schedules {
             let load = schedule.load_at_tick(tick);
             for _ in 0..load {
-                load_estimator.increment_load(&schedule.lora_name);
+                load_estimator.increment_load_at(&schedule.lora_name, now);
             }
         }
 
-        controller.recompute_now();
+        controller.recompute_now_at(now);
 
         let mut curr_snapshot: AllocationSnapshot = HashMap::new();
         for lora_name in routing_table.list_loras() {
@@ -550,8 +531,8 @@ fn print_simulation_header(config: &SimConfig) {
     }
     println!("  Max Load/LoRA:       {}", config.max_load_per_lora);
     println!(
-        "  Scale-Down Cooldown: {} (comparison mode)",
-        COMPARISON_SCALE_DOWN_COOLDOWN_TICKS
+        "  Scale-Down Cooldown: {} ticks",
+        config.scale_down_cooldown_ticks
     );
     println!("  Seed:                {}", config.seed);
     println!();

@@ -56,6 +56,7 @@ fn test_export_csv() {
         lifetime_mean: 0,
         lifetime_stddev: 0.0,
         seed: 42,
+        ..Default::default()
     };
     all_runs.push(("hot_lora_poisson", zipf_config.clone(), zipf_schedules));
 
@@ -90,6 +91,7 @@ fn test_export_csv() {
         lifetime_mean: 0,
         lifetime_stddev: 0.0,
         seed: 42,
+        ..Default::default()
     };
     all_runs.push(("daily", diurnal_config.clone(), diurnal_schedules));
 
@@ -125,6 +127,7 @@ fn test_export_csv() {
         lifetime_mean: 0,
         lifetime_stddev: 0.0,
         seed: 42,
+        ..Default::default()
     };
     all_runs.push(("spike", flash_config.clone(), flash_schedules));
 
@@ -162,6 +165,7 @@ fn test_export_csv() {
         lifetime_mean: 0,
         lifetime_stddev: 0.0,
         seed: 42,
+        ..Default::default()
     };
     all_runs.push(("mmpp", mmpp_config.clone(), mmpp_schedules));
 
@@ -362,7 +366,7 @@ fn test_export_csv() {
         writeln!(
             f,
             "scale_down_cooldown_ticks,{}",
-            COMPARISON_SCALE_DOWN_COOLDOWN_TICKS
+            config.scale_down_cooldown_ticks
         )
         .unwrap();
         writeln!(f, "seed,{}", config.seed).unwrap();
