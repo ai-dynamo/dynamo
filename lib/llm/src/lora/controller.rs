@@ -1986,6 +1986,8 @@ mod tests {
 
         controller.recompute_now();
 
+        assert_eq!(controller.last_overflow_count(), 1);
+
         let entries = rt.snapshot_configs();
         assert_eq!(
             entries.len(),

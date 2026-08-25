@@ -112,6 +112,57 @@ fn test_windowed_load_keeps_sparse_lora_routable() {
 }
 
 #[test]
+fn test_random_baseline_keeps_sparse_lora_in_rate_window() {
+    let config = SimConfig {
+        num_backends: 1,
+        slots_per_backend: 1,
+        total_loras: 1,
+        concurrent_loras: 1,
+        total_ticks: 2,
+        ..Default::default()
+    };
+    let schedules = vec![LoraLoadSchedule {
+        lora_name: "sparse-random-lora".to_string(),
+        active_window: (0, config.total_ticks),
+        peak_load: 1,
+        ramp_up: 0,
+        steady: 0,
+        ramp_down: 0,
+        per_tick_loads: Some(vec![1, 0]),
+    }];
+
+    let metrics = run_random_simulation(&config, &schedules);
+
+    assert_eq!(metrics.per_tick_lora_removals, vec![0, 0]);
+}
+
+#[test]
+fn test_request_path_handles_empty_worker_set() {
+    let config = SimConfig {
+        num_backends: 0,
+        slots_per_backend: 1,
+        total_loras: 1,
+        concurrent_loras: 1,
+        total_ticks: 1,
+        ..Default::default()
+    };
+    let schedules = vec![LoraLoadSchedule {
+        lora_name: "unroutable-lora".to_string(),
+        active_window: (0, config.total_ticks),
+        peak_load: 1,
+        ramp_up: 0,
+        steady: 0,
+        ramp_down: 0,
+        per_tick_loads: Some(vec![1]),
+    }];
+
+    let metrics = run_random_simulation(&config, &schedules);
+
+    assert_eq!(metrics.per_tick_requests, vec![1]);
+    assert_eq!(metrics.per_tick_hits, vec![0]);
+}
+
+#[test]
 fn test_request_path_measures_residency_hit_after_cold_load() {
     let config = SimConfig {
         num_backends: 1,
