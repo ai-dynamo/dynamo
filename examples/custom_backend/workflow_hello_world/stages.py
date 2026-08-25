@@ -19,7 +19,6 @@ class HelloStage:
     async def run(
         self, inputs: Mapping[str, Any], context: StageContext
     ) -> Mapping[str, Any]:
-        context.raise_if_cancelled()
         return {"text": "Hello, "}
 
 
@@ -33,7 +32,6 @@ class WorldStage:
     async def run(
         self, inputs: Mapping[str, Any], context: StageContext
     ) -> Mapping[str, Any]:
-        context.raise_if_cancelled()
         return {"text": "World!"}
 
 
@@ -47,7 +45,6 @@ class MergeStage:
     async def run(
         self, inputs: Mapping[str, Any], context: StageContext
     ) -> Mapping[str, Any]:
-        context.raise_if_cancelled()
         return {
             "chunk": {
                 "token_ids": [],

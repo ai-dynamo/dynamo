@@ -10,8 +10,8 @@ import pytest
 from dynamo.workflow import (
     RemoteBinding,
     RemoteStageServer,
+    WorkflowEndpointHandler,
     WorkflowOrchestrator,
-    WorkflowTokenEngine,
 )
 from examples.custom_backend.workflow_hello_world.stages import STAGES
 from examples.custom_backend.workflow_hello_world.workflow import (
@@ -100,7 +100,7 @@ async def test_orchestrator_worker_calls_three_remote_stages() -> None:
 
     chunks = [
         chunk
-        async for chunk in WorkflowTokenEngine(orchestrator).generate(
+        async for chunk in WorkflowEndpointHandler(orchestrator).generate(
             {"token_ids": [1]},
             _RequestContext(),
         )

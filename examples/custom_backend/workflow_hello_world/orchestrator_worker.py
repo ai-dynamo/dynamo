@@ -6,20 +6,14 @@
 import asyncio
 import os
 
-from dynamo.llm import (
-    EngineType,
-    EntrypointArgs,
-    PythonAsyncEngine,
-    make_engine,
-    run_input,
-)
+from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
-from dynamo.workflow import WorkflowOrchestrator, WorkflowTokenEngine
+from dynamo.workflow import WorkflowEndpointHandler, WorkflowOrchestrator
 from examples.custom_backend.workflow_hello_world.workflow import (
     compile_remote_workflow,
 )
 
-ORCHESTRATOR_ENDPOINT = "dyn://workflow-hello-world.orchestrator.generate"
+ORCHESTRATOR_ENDPOINT = "workflow-hello-world.orchestrator.generate"
 MODEL_NAME = "hello-world"
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 
@@ -30,22 +24,17 @@ async def worker(runtime: DistributedRuntime) -> None:
         compile_remote_workflow(),
         runtime=runtime,
     )
-    loop = asyncio.get_running_loop()
-    token_engine = PythonAsyncEngine(
-        WorkflowTokenEngine(orchestrator).generate,
-        loop,
+    endpoint = runtime.endpoint(ORCHESTRATOR_ENDPOINT)
+    await register_model(
+        ModelInput.Tokens,
+        ModelType.Chat,
+        endpoint,
+        os.environ.get("DYN_MODEL", DEFAULT_MODEL),
+        model_name=MODEL_NAME,
+        worker_type=WorkerType.Aggregated,
+        ignore_weights=True,
     )
-    engine = await make_engine(
-        runtime,
-        EntrypointArgs(
-            EngineType.InProcessTokens,
-            model_path=os.environ.get("DYN_MODEL", DEFAULT_MODEL),
-            model_name=MODEL_NAME,
-            endpoint_id=ORCHESTRATOR_ENDPOINT,
-            in_process_token_engine=token_engine,
-        ),
-    )
-    await run_input(runtime, ORCHESTRATOR_ENDPOINT, engine)
+    await endpoint.serve_endpoint(WorkflowEndpointHandler(orchestrator).generate)
 
 
 def main() -> None:
