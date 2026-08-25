@@ -63,9 +63,7 @@ def publish_sglang_structural_tag_reasoning_policy(
     detect the boundary, and an engine whose ``async_generate`` predates the
     argument silently drops the gate (see ``_compat.require_reasoning_kwargs``).
     """
-    supported = engine is not None and bool(
-        getattr(server_args, "reasoning_parser", None)
-    )
+    supported = engine is not None and bool(server_args.reasoning_parser)
     if supported:
         supported = "require_reasoning" in filter_supported_async_generate_kwargs(
             engine, {"require_reasoning": True}
