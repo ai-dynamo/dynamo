@@ -218,7 +218,12 @@ async fn dispatch_audio_transcription(
         false,
         &request_id,
     );
+    // Treat an unexpectedly dropped unary request as cancelled unless a
+    // concrete backend or protocol error below gives us a more specific
+    // classification. This mirrors the streaming and audio-speech paths.
+    inflight.mark_error(ErrorType::Cancelled);
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&metric_model);
+    let request_context = request.context();
     let engine = state
         .manager()
         .get_transcriptions_engine(&model)
@@ -239,7 +244,9 @@ async fn dispatch_audio_transcription(
                 .inc_rejection(&metric_model, Endpoint::Transcriptions);
         }
         let response = ErrorMessage::from_anyhow(error, "Failed to transcribe audio");
-        inflight.mark_error(if is_validation {
+        inflight.mark_error(if request_context.is_stopped() {
+            ErrorType::Cancelled
+        } else if is_validation {
             ErrorType::Validation
         } else {
             extract_error_type_from_response(&response)
@@ -263,7 +270,9 @@ async fn dispatch_audio_transcription(
                 anyhow::Error::new(error),
                 "Failed to fold transcription response",
             );
-            inflight.mark_error(if is_validation {
+            inflight.mark_error(if request_context.is_stopped() {
+                ErrorType::Cancelled
+            } else if is_validation {
                 ErrorType::Validation
             } else {
                 extract_error_type_from_response(&response)

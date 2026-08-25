@@ -10,7 +10,11 @@ use std::time::Duration;
 use anyhow::Error;
 use base64::Engine as _;
 use dynamo_llm::endpoint_type::EndpointType;
-use dynamo_llm::http::service::service_v2::HttpService;
+use dynamo_llm::http::service::{
+    Metrics,
+    metrics::{Endpoint, ErrorType as MetricErrorType, RequestType, Status},
+    service_v2::HttpService,
+};
 use dynamo_llm::protocols::Annotated;
 use dynamo_llm::protocols::openai::transcriptions::{
     NvAudioTranscriptionResponse, NvCreateAudioTranscriptionRequest,
@@ -130,6 +134,7 @@ impl
 struct TestService {
     base_url: String,
     client: reqwest::Client,
+    metrics: Arc<Metrics>,
     cancel: CancellationToken,
     join: tokio::task::JoinHandle<anyhow::Result<()>>,
 }
@@ -166,6 +171,7 @@ impl TestService {
             .model_manager()
             .add_transcriptions_model(MODEL, "0", engine)
             .expect("failed to register transcription model");
+        let metrics = service.state_clone().metrics_clone();
 
         let cancel = CancellationToken::new();
         let join = service.spawn_with_listener(cancel.clone(), listener).await;
@@ -194,6 +200,7 @@ impl TestService {
         Self {
             base_url,
             client,
+            metrics,
             cancel,
             join,
         }
@@ -267,6 +274,31 @@ async fn client_disconnect_cancels_transcription() {
     })
     .await
     .expect("client disconnect did not cancel transcription inference");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while service.metrics.get_request_counter(
+            MODEL,
+            &Endpoint::Transcriptions,
+            &RequestType::Unary,
+            &Status::Error,
+            &MetricErrorType::Cancelled,
+        ) != 1
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("client disconnect was not recorded as a cancelled request");
+    assert_eq!(
+        service.metrics.get_request_counter(
+            MODEL,
+            &Endpoint::Transcriptions,
+            &RequestType::Unary,
+            &Status::Error,
+            &MetricErrorType::Internal,
+        ),
+        0,
+    );
 
     service.shutdown().await;
 }

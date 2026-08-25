@@ -52,12 +52,12 @@ where
     let mut response = None;
 
     while let Some(item) = stream.next().await {
-        if let Some(data) = item.into_data()? {
-            if response.replace(data).is_some() {
-                return Err(DynamoError::msg(
-                    "unary response stream produced more than one data item",
-                ));
-            }
+        if let Some(data) = item.into_data()?
+            && response.replace(data).is_some()
+        {
+            return Err(DynamoError::msg(
+                "unary response stream produced more than one data item",
+            ));
         }
     }
 
