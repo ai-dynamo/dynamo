@@ -1,57 +1,124 @@
-# DeepSeek-V4-Pro-0813
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 
-Recipes for the `deepseek-ai/DeepSeek-V4-Pro-0813` checkpoint.
+# DeepSeek-V4-Pro-0813 Recipes
 
+Recipes for [DeepSeek-V4-Pro-0813](https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813).
+
+> [!NOTE]
 > This is a **different checkpoint** from `deepseek-ai/DeepSeek-V4-Pro` used by the sibling
-> `../deepseek-v4-pro` recipes. Do not mix the two model caches or deploy configs.
+> [`../deepseek-v4-pro`](../deepseek-v4-pro) recipes. Do not share a model cache between them.
 
-## Layout
+## Configurations
 
-```
-deepseek-v4-pro-0813/
-├── model-cache/
-│   ├── model-cache.yaml       # PVC (1200Gi; checkpoint is ~832 GiB)
-│   └── model-download.yaml    # populates the PVC from HF
-└── vllm/
-    ├── agg-h200-agentic/       # 8x H200,  64K agentic
-    ├── disagg-h200-agentic/    # 16x H200, 64K agentic  (best density)
-    ├── agg-h200-1m/            # 8x H200,  1M context   (batch)
-    └── disagg-h200-1m/         # 16x H200, 1M context   (batch)
-```
+Dynamo + vLLM deployment profiles. GB200 profiles are a separate contribution and are not
+filled in yet.
 
-## Config matrix
+|                          | H200 aggregated agentic | H200 disaggregated agentic       | H200 aggregated 1M      | H200 disaggregated 1M            | GB200 aggregated | GB200 disaggregated |
+| ------------------------ | ----------------------- | -------------------------------- | ----------------------- | -------------------------------- | ---------------- | ------------------- |
+| **GPU** (per worker)     | 8x H200                 | 8x H200 prefill + 8x H200 decode  | 8x H200                 | 8x H200 prefill + 8x H200 decode  | TBD              | TBD                 |
+| **Mode**                 | Aggregated              | Prefill/decode disaggregated      | Aggregated              | Prefill/decode disaggregated      | TBD              | TBD                 |
+| **Framework**            | vLLM                    | vLLM                              | vLLM                    | vLLM                              | TBD              | TBD                 |
+| **Precision**            | MXFP4 experts + FP8 KV  | MXFP4 experts + FP8 KV            | MXFP4 experts + FP8 KV  | MXFP4 experts + FP8 KV            | TBD              | TBD                 |
+| **Parallelism**          | TP8/EP8                 | TP8/EP8 prefill / TP8/EP8 decode  | TP8/EP8                 | TP8/EP8 prefill / TP8/EP8 decode  | TBD              | TBD                 |
+| **Routing**              | KV-aware                | KV-aware                          | KV-aware                | KV-aware                          | TBD              | TBD                 |
+| **Speculative decoding** | None                    | None                              | None                    | None                              | TBD              | TBD                 |
+| **Context length**       | 86,016                  | 86,016                            | 1,048,576               | 1,048,576                         | TBD              | TBD                 |
+| **KV cache offloading**  | None                    | None                              | `SimpleCPUOffload` (CPU)| `SimpleCPUOffload` (CPU, decode)  | TBD              | TBD                 |
+| **KV transfer**          | N/A                     | NIXL                              | N/A                     | NIXL (via `MultiConnector`)       | TBD              | TBD                 |
 
-|                | Aggregated (8x H200)                    | Disaggregated (16x H200)                  |
-|----------------|-----------------------------------------|-------------------------------------------|
-| **Agentic 64K**| `agg-h200-agentic` <br> C=2, E2E 56.40 tok/s/user, 11.85 tok/s/GPU | `disagg-h200-agentic` <br> C~7.95, E2E 50, ~24 tok/s/GPU |
-| **1M context** | `agg-h200-1m` <br> 998,218 tokens, TTFT ~202 s | `disagg-h200-1m` <br> 1,033,872 tokens, TTFT ~146 s |
+## Supported features
 
-Agentic workload is 64K ISL / 400 OSL / 90% prefix reuse; the SLA gate is
-E2E >= 50 tok/s/user **and** TTFT p50 < 5 s, jointly, where
-`E2E = OSL / (TTFT + OSL x ITL)`. The 1M configs are a batch capability, not
-interactive -- time-to-first-token is minutes at that length.
+- Modalities: **Text** (this checkpoint is `DeepseekV4ForCausalLM`; it has no vision tower — image input is **not** supported)
+- Reasoning
+- Tool calling
 
-Accuracy on the agentic configs: `gpqa_diamond` 88.26 (agg) / 88.38 (disagg),
-`ifeval` 94.48 (agg) / 94.29 (disagg) -- disaggregation does not cost accuracy.
+## Prerequisites
 
-## Quick start
+1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).
+2. **Hugging Face token** with access to `deepseek-ai/DeepSeek-V4-Pro-0813`.
+3. For the **1M context** recipes, worker nodes need **~1.4 TB of host RAM** for the CPU KV
+   offload tier, in addition to the 8 GPUs.
+
+## Quick Start
+
+### 1. Create namespace and secret
 
 ```bash
-kubectl apply -f model-cache/model-cache.yaml
-kubectl apply -f model-download.yaml   # requires an hf-token-secret in the namespace
-kubectl wait --for=condition=complete job/model-download --timeout=6h
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" \
+  -n ${NAMESPACE}
 ```
 
-The download job pulls the default revision. The H200 configs in this directory were validated
-against revision `72e1d3230f6c080a530b0a1d46f8eb4602340597`; pin `--revision` in the deploy if
-you need to reproduce those numbers exactly.
+### 2. Create storage
 
-## Status
+> [!NOTE]
+> Edit `model-cache/model-cache.yaml` and set `storageClassName` to a ReadWriteMany storage
+> class available on the target cluster. The checkpoint is ~832 GiB.
 
-| SKU | Topology | Workload | State |
-|-----|----------|----------|-------|
-| H200 x8  | agg    | agentic 64K | validated |
-| H200 x16 | disagg | agentic 64K | validated |
-| H200 x8  | agg    | 1M context  | validated |
-| H200 x16 | disagg | 1M context  | validated |
-| GB200    | -      | -           | separate contribution |
+```bash
+kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
+```
+
+### 3. Download the model
+
+```bash
+kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
+```
+
+### 4. Deploy the DGD
+
+```bash
+MODE=agg        # or disagg
+WORKLOAD=agentic # or 1m
+kubectl apply -f vllm/${MODE}-h200-${WORKLOAD}/deploy.yaml -n ${NAMESPACE}
+```
+
+### 5. Benchmark
+
+See [perf/README.md](perf/README.md) for the full benchmark workflow — trace staging on the
+PVC, running the AIPerf trace-replay Job, running a concurrency sweep, and fetching artifacts.
+
+## Optimization targets
+
+| Workload | Median ISL | Median OSL | KV cache hit rate | User output tok/s |
+| -------- | ---------- | ---------- | ----------------- | ----------------- |
+| Agentic  | 64k        | 400        | 90%               | 50                |
+
+The gate is **joint**: E2E ≥ 50 tok/s/user **and** TTFT p50 < 5 s, where
+`E2E = OSL / (TTFT + OSL × ITL)` — the per-user rate *including* time-to-first-token.
+
+Modified Mooncake traces are provided to showcase the value of KV-aware routing and CPU
+offloading, see [perf/README.md](perf/README.md) for details.
+
+## Performance results
+
+| Workload | Recipe | SKU | Concurrency | System output tok/s/gpu | User output tok/s (P50) | TTFT P50 (ms) |
+| -------- | ------ | --- | ----------- | ----------------------- | ----------------------- | ------------- |
+
+> [!NOTE]
+> Not yet populated. No Mooncake trace-replay results have been collected for this checkpoint.
+> The operating points referenced in the deploy configs were measured with AIPerf's **synthetic**
+> agentic profile, which replays a different length distribution and is not directly comparable
+> to the trace numbers other recipes report here. Run `perf/perf.yaml` to populate this table.
+
+## Limitations
+
+- **Text only.** No image or audio input.
+- **Context length is 86,016 by default.** The 1M recipes reach 1,048,576 via CPU KV offload and
+  are a **batch capability, not interactive** — TTFT is ~146–202 s at 1M.
+- **1M requires ~1.4 TB host RAM** per worker for the offload tier.
+- **No speculative decoding.** DSpark measured a large regression on this checkpoint and is not
+  enabled in any recipe.
+- **vLLM 0.27.1 is not supported** for this checkpoint (`CUDA_ERROR_ILLEGAL_ADDRESS` in DeepGEMM
+  `sm90_fp8_mqa_logits`). The recipes pin `vllm-runtime:1.4.0` (vLLM 0.26.0).
+- **DP8+EP is not viable** on 8x H200: the KV cache ceiling is 28,416 tokens, far below the 64K
+  agentic workload.
+- **DeepEP has no effect** at TP8/DP1. vLLM only constructs an all2all manager when
+  `data_parallel_size > 1`, so `--all2all-backend` is inert in these recipes regardless of value.
+- **GB200 profiles are not included** in this directory yet.

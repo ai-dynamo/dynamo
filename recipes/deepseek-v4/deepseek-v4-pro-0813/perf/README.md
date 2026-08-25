@@ -61,6 +61,16 @@ latency the user actually experiences.
 The 1M variants are a **batch capability, not interactive** (TTFT is minutes at
 that length) and are not gated on throughput.
 
+## Results
+
+| Workload | Recipe | SKU | Concurrency | System output tok/s/gpu | User output tok/s (P50) | TTFT P50 (ms) |
+| -------- | ------ | --- | ----------- | ----------------------- | ----------------------- | ------------- |
+
+> [!NOTE]
+> Not yet populated -- no Mooncake trace-replay results have been collected for this
+> checkpoint. Run the Job above and fill this in, then mirror it into the top-level
+> [`../README.md`](../README.md).
+
 ## Note on comparability
 
 The operating points quoted in the deploy configs were measured with AIPerf's
