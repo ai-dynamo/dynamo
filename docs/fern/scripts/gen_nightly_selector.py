@@ -206,6 +206,19 @@ def wheel_for(yyyymmdd: str, sha: str, published: set[str] | None) -> str | None
     return version
 
 
+def newest_published(published: set[str] | None) -> str | None:
+    """The newest ``ai-dynamo`` dev wheel on PyPI, independent of any NGC tag."""
+    if not published:
+        return None
+
+    def key(version: str) -> tuple[str, tuple[int, int, int]]:
+        base, _, yyyymmdd = version.partition(".dev")
+        major, minor, patch = (int(part) for part in base.split("."))
+        return (yyyymmdd, (major, minor, patch))
+
+    return max(published, key=key)
+
+
 # --------------------------------------------------------------------------- #
 # assembly
 # --------------------------------------------------------------------------- #
@@ -259,18 +272,28 @@ def build() -> list[dict]:
 
         for index, version in enumerate(order):
             nights = runs[version]
-            # Prefer the newest night that also published a wheel, so the container
-            # and wheel commands describe the same build. Fall back to the newest
-            # night, which still has an immutable container tag.
-            chosen = None
-            for yyyymmdd, sha in nights:
-                wheel = wheel_for(yyyymmdd, sha, published)
-                if wheel:
-                    chosen = (yyyymmdd, sha, wheel)
-                    break
-            if chosen is None:
-                chosen = (nights[0][0], nights[0][1], None)
-            yyyymmdd, sha, wheel = chosen
+            if index == 0:
+                # Latest row: the container side already points at the rolling
+                # *-runtime-nightly:latest NGC tag, independent of this pick. Give
+                # the wheel the same independence -- the newest wheel PyPI has
+                # published, whether or not that night's container has landed on
+                # NGC yet, instead of requiring both to share one commit.
+                yyyymmdd, sha = nights[0]
+                wheel = newest_published(published)
+            else:
+                # Pinned rows describe one immutable build, so the wheel has to
+                # come from the exact commit the container tag names. Fall back to
+                # the newest night in the group, which still has an immutable
+                # container tag, when none of its nights published a wheel.
+                chosen = None
+                for yyyymmdd, sha in nights:
+                    wheel = wheel_for(yyyymmdd, sha, published)
+                    if wheel:
+                        chosen = (yyyymmdd, sha, wheel)
+                        break
+                if chosen is None:
+                    chosen = (nights[0][0], nights[0][1], None)
+                yyyymmdd, sha, wheel = chosen
             rows.append(
                 {
                     "backend": fw.backend,
