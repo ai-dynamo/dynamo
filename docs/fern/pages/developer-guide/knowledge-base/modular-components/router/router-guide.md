@@ -140,7 +140,7 @@ When using KV routing, the router needs to know what each worker has cached. The
 |------------|---------------|-------------|
 | **ZMQ (local indexer)** | Router default (no router flag) | Workers maintain a local indexer and publish KV events via ZMQ PUB sockets; the router recovers state by querying live workers. This is the default event plane for all backends |
 | **NATS Core (local indexer)** | `--event-plane nats` (or `DYN_EVENT_PLANE=nats`) | Same local-indexer model, but events flow over NATS Core instead of ZMQ. |
-| **Approximate (no events)** | `--no-router-kv-events` | No events consumed; router predicts cache state from its own routing decisions with TTL-based expiration |
+| **Approximate (no events)** | `--no-router-kv-events` | No events consumed; router predicts cache state from its own routing decisions. Retention defaults to TTL; experimental `--router-approximate-cache-policy lru` uses advertised per-rank KV capacity. |
 
 ### Aggregated vs. Disaggregated Topology
 

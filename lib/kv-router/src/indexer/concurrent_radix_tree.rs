@@ -30,8 +30,8 @@ use std::collections::VecDeque;
 #[cfg(feature = "bench")]
 use super::WorkerObservationState;
 use super::{
-    EventKind, EventWarningKind, KvIndexerMetrics, PreBoundEventCounters, SyncIndexer,
-    WorkerLookupStats, WorkerTask,
+    EventKind, EventWarningKind, KvIndexerMetrics, KvRouterError, PreBoundEventCounters,
+    SyncIndexer, WorkerLookupStats, WorkerTask,
 };
 use crate::active_set::reconcile_active_workers;
 use crate::cleanup::{self, CleanableNode, CleanupGuard, CleanupState};
@@ -587,6 +587,9 @@ impl SyncIndexer for ConcurrentRadixTree {
                     }
                     let _ = resp.send(applied);
                 }
+                WorkerTask::ApproximateLru(task) => task.complete(Err(KvRouterError::Unsupported(
+                    "approximate LRU requires ConcurrentRadixTreeCompressed".to_string(),
+                ))),
                 #[cfg(feature = "bench")]
                 WorkerTask::InstallObservation { writer, resp } => {
                     observation.install(writer, resp);

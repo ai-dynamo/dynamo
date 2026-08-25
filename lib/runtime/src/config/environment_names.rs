@@ -689,6 +689,10 @@ pub mod router {
 
 /// Request plane transport environment variables
 pub mod request_plane {
+    /// Request-plane transport selection: `"tcp"` (default) or `"nats"`. Read by the
+    /// runtime in `distributed.rs` and by the Python launch layer.
+    pub const DYN_REQUEST_PLANE: &str = "DYN_REQUEST_PLANE";
+
     /// Preferred payload codec advertised by every request-plane endpoint in this process.
     /// The process-wide value is cached on first use and defaults to "msgpack". Outbound requests
     /// use the destination endpoint's advertised codec, or "json" for a legacy destination.
@@ -999,6 +1003,7 @@ mod tests {
             router::DYN_ROUTER_QUEUE_POLICY,
             router::DYN_ROUTER_POLICY_CONFIG,
             router::DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
+            request_plane::DYN_REQUEST_PLANE,
             request_plane::DYN_REQUEST_PLANE_CODEC,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
