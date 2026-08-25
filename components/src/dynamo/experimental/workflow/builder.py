@@ -8,8 +8,8 @@ from __future__ import annotations
 import keyword
 from typing import cast
 
-from dynamo.workflow.ir import StageIR, WorkflowIR
-from dynamo.workflow.types import (
+from dynamo.experimental.workflow.ir import StageIR, WorkflowIR
+from dynamo.experimental.workflow.types import (
     StageContract,
     ValueRef,
     WorkflowValidationError,

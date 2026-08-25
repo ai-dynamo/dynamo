@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import FrozenSet, Mapping, Optional, Sequence, Tuple, TypeVar, cast
 
-from dynamo.workflow.types import (
+from dynamo.experimental.workflow.types import (
     StageContract,
     ValueRef,
     WorkflowValidationError,

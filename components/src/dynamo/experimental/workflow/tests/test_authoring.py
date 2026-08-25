@@ -7,7 +7,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from dynamo.workflow import (
+from dynamo.experimental.workflow import (
     StageContract,
     StageIR,
     ValueRef,
