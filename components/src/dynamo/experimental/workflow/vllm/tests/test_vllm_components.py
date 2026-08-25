@@ -3,9 +3,9 @@
 
 import pytest
 
-from dynamo.vllm.workflow.components import DynamoVllmStage
-from dynamo.workflow import GenerateEndpointBinding
-from dynamo.workflow.plan import validate_binding_contract
+from dynamo.experimental.workflow import GenerateEndpointBinding
+from dynamo.experimental.workflow.plan import validate_binding_contract
+from dynamo.experimental.workflow.vllm import DynamoVllmStage
 
 pytestmark = [
     pytest.mark.unit,

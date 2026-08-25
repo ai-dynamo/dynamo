@@ -3,7 +3,7 @@
 
 """Contract for a stock Dynamo vLLM workflow stage."""
 
-from dynamo.workflow import StageContract
+from dynamo.experimental.workflow import StageContract
 
 
 class DynamoVllmStage:
