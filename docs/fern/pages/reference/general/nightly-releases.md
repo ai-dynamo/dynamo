@@ -25,7 +25,6 @@ Dynamo publishes nightly builds from `main`. Nightlies let you try the latest fe
 Every night, the [Nightly CI pipeline](https://github.com/ai-dynamo/dynamo/blob/main/.github/workflows/nightly-ci.yml) builds `main` and publishes:
 
 - **Container images (CUDA 13):** `vllm-runtime-nightly`, `sglang-runtime-nightly`, `tensorrtllm-runtime-nightly`, `dynamo-frontend-nightly`, `kubernetes-operator-nightly`, and `dynamo-planner-nightly` to NGC.
-- **EFA image variants:** the three runtime images also publish an EFA build under a `-efa` tag suffix.
 - **Helm chart:** `dynamo-platform-nightly` to NGC, published when the operator image was staged in the same run.
 - **Python wheels:** `ai-dynamo`, `ai-dynamo-runtime`, and `kvbm` to the NVIDIA prerelease index at [pypi.nvidia.com](https://pypi.nvidia.com/).
 
@@ -33,10 +32,10 @@ Nightly deliberately does **not** publish `snapshot-agent` or Rust crates. For t
 
 ## Installing Nightly Containers
 
-Nightly images live in their own `-nightly` NGC repositories so they cannot be pulled accidentally in place of a stable image. Runtime containers use a floating `:latest` tag for the most recent nightly build.
+Nightly images live in their own `-nightly` NGC repositories so they cannot be pulled accidentally in place of a stable image. Every nightly image carries a floating `:latest` tag for the most recent build, and an immutable `:YYYYMMDD-<shortsha>` tag for the specific build.
 
 ```bash
-# Always the latest nightly
+# Latest nightly. This tag moves every night.
 docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:latest
 docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime-nightly:latest
 docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-nightly:latest
@@ -44,11 +43,11 @@ docker pull nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:latest
 docker pull nvcr.io/nvidia/ai-dynamo/kubernetes-operator-nightly:latest
 docker pull nvcr.io/nvidia/ai-dynamo/dynamo-planner-nightly:latest
 
-# EFA variant of a runtime image
-docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:latest-efa
+# A specific nightly, pinned. Use this for anything reproducible.
+docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20260825-f7de8eb
 ```
 
-The old nightly docs also described immutable `:YYYYMMDD-<shortsha>` container tags. Those tags are not currently visible for the recent NGC nightly images, so use `:latest` unless you have a specific tag from the publish job.
+Pin the immutable tag for CI jobs, benchmarks, and bug reports, so the build under test does not change overnight. Browse the **Tags** tab on a nightly repository to find the tag you want.
 
 ## Installing Nightly Wheels
 
