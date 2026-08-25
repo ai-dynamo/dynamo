@@ -18,23 +18,19 @@ inputs:
     required: false
     default: 0.0.0-g28a7d5ad
   storage_size:
-    description: 'Checkpoint PVC size for agentMount mode'
+    description: 'Checkpoint PVC size'
     required: false
     default: 1Gi
-  storage_access_mode:
-    description: 'How the snapshot-agent accesses checkpoint storage'
-    required: false
-    default: podMount
   storage_pvc_name:
-    description: 'Checkpoint PVC name used by snapshot metadata'
+    description: 'Shared checkpoint PVC mounted by every snapshot-agent pod'
     required: false
     default: snapshot-pvc
-  storage_pvc_access_mode:
-    description: 'Checkpoint PVC Kubernetes access mode'
+  storage_class:
+    description: 'RWX-capable storage class for the checkpoint PVC'
     required: false
-    default: ReadWriteOnce
+    default: azurefile-csi
   storage_base_path:
-    description: 'Checkpoint PVC mount path inside checkpoint and restore pods'
+    description: 'Checkpoint PVC mount path inside snapshot-agent pods'
     required: false
     default: /checkpoints
 
@@ -51,16 +47,52 @@ runs:
         chmod 600 "${{ github.workspace }}/.kubeconfig-snapshot"
         echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig-snapshot" >> "$GITHUB_ENV"
 
+    # Post-v0.1.0-alpha.1 charts (snapshot PR #61) drop podMount mode: every
+    # agent pod mounts the shared checkpoint PVC directly, so the claim must
+    # exist before the DaemonSet starts and must support ReadWriteMany.
+    - name: Create checkpoint PVC
+      shell: bash
+      env:
+        NAMESPACE: ${{ inputs.namespace }}
+        STORAGE_SIZE: ${{ inputs.storage_size }}
+        STORAGE_PVC_NAME: ${{ inputs.storage_pvc_name }}
+        STORAGE_CLASS: ${{ inputs.storage_class }}
+      run: |
+        echo "::group::Create checkpoint PVC"
+        set -euo pipefail
+
+        # PVC access modes are immutable, and reused vClusters can hold a stale
+        # ReadWriteOnce claim under this name from podMount-era runs (the
+        # operator's checkpoint.storage used the same name). Recreate it.
+        EXISTING_MODES="$(kubectl get pvc "${STORAGE_PVC_NAME}" -n "${NAMESPACE}" \
+          -o jsonpath='{.spec.accessModes[*]}' 2>/dev/null || true)"
+        if [[ -n "${EXISTING_MODES}" && "${EXISTING_MODES}" != *ReadWriteMany* ]]; then
+          echo "Deleting stale PVC ${NAMESPACE}/${STORAGE_PVC_NAME} with accessModes '${EXISTING_MODES}'"
+          kubectl delete pvc "${STORAGE_PVC_NAME}" -n "${NAMESPACE}" --wait --timeout=120s
+        fi
+
+        kubectl apply --server-side --force-conflicts --field-manager=ci-setup -f - <<EOF
+        apiVersion: v1
+        kind: PersistentVolumeClaim
+        metadata:
+          name: ${STORAGE_PVC_NAME}
+          namespace: ${NAMESPACE}
+        spec:
+          accessModes: [ReadWriteMany]
+          storageClassName: ${STORAGE_CLASS}
+          resources:
+            requests:
+              storage: ${STORAGE_SIZE}
+        EOF
+        echo "::endgroup::"
+
     - name: Install snapshot-agent
       shell: bash
       env:
         NAMESPACE: ${{ inputs.namespace }}
         RELEASE_NAME: ${{ inputs.release_name }}
         CHART_VERSION: ${{ inputs.chart_version }}
-        STORAGE_SIZE: ${{ inputs.storage_size }}
-        STORAGE_ACCESS_MODE: ${{ inputs.storage_access_mode }}
         STORAGE_PVC_NAME: ${{ inputs.storage_pvc_name }}
-        STORAGE_PVC_ACCESS_MODE: ${{ inputs.storage_pvc_access_mode }}
         STORAGE_BASE_PATH: ${{ inputs.storage_base_path }}
       run: |
         echo "::group::Install snapshot-agent"
@@ -68,20 +100,20 @@ runs:
 
         # Install the externally published github.com/ai-dynamo/snapshot chart
         # at a pinned version, using its own default (pinned-to-chart-appVersion)
-        # images.
+        # images. The images are public, so drop the chart's default ngc-secret
+        # pull secret, which does not exist in the vCluster.
+        # Keep the helm timeout well under the job's timeout-minutes so the
+        # debug step still runs when the rollout stalls.
         helm upgrade --install "${RELEASE_NAME}" oci://ghcr.io/ai-dynamo/snapshot/snapshot \
           --version "${CHART_VERSION}" \
           --namespace "${NAMESPACE}" \
           --create-namespace \
           --wait \
-          --timeout 15m \
-          --set rbac.namespaceRestricted=true \
-          --set storage.accessMode="${STORAGE_ACCESS_MODE}" \
-          --set storage.pvc.name="${STORAGE_PVC_NAME}" \
-          --set storage.pvc.accessMode="${STORAGE_PVC_ACCESS_MODE}" \
-          --set storage.pvc.basePath="${STORAGE_BASE_PATH}" \
+          --timeout 8m \
           --set storage.pvc.create=false \
-          --set storage.pvc.size="${STORAGE_SIZE}" \
+          --set storage.pvc.name="${STORAGE_PVC_NAME}" \
+          --set storage.pvc.basePath="${STORAGE_BASE_PATH}" \
+          --set-json 'daemonset.imagePullSecrets=[]' \
           --debug
 
         DAEMONSET_NAME="$(kubectl get daemonset \
@@ -93,11 +125,13 @@ runs:
           exit 1
         fi
 
+        # Post-#61 agents watch pods cluster-wide; a RESTRICTED_NAMESPACE env
+        # var means an old podMount-era chart slipped in.
         RESTRICTED_NAMESPACE_FIELD="$(kubectl get daemonset "${DAEMONSET_NAME}" \
           -n "${NAMESPACE}" \
           -o jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].env[?(@.name=="RESTRICTED_NAMESPACE")].valueFrom.fieldRef.fieldPath}')"
-        if [[ "${RESTRICTED_NAMESPACE_FIELD}" != "metadata.namespace" ]]; then
-          echo "::error::snapshot-agent is not configured for namespace-restricted pod watching"
+        if [[ -n "${RESTRICTED_NAMESPACE_FIELD}" ]]; then
+          echo "::error::snapshot-agent is namespace-restricted; expected a cluster-scoped agent (chart older than snapshot PR #61?)"
           kubectl get daemonset "${DAEMONSET_NAME}" -n "${NAMESPACE}" -o yaml
           exit 1
         fi
@@ -114,7 +148,7 @@ runs:
 
         kubectl rollout status "daemonset/${DAEMONSET_NAME}" \
           -n "${NAMESPACE}" \
-          --timeout=900s
+          --timeout=120s
         kubectl get daemonset,pods,pvc \
           -n "${NAMESPACE}" \
           -l app.kubernetes.io/name=snapshot \
@@ -130,6 +164,9 @@ runs:
         set +e
         echo "::group::Snapshot-agent status"
         kubectl get daemonset,pods,pvc -n "${NAMESPACE}" -o wide
+        echo "::endgroup::"
+        echo "::group::Checkpoint PVC describe"
+        kubectl describe pvc -n "${NAMESPACE}"
         echo "::endgroup::"
         echo "::group::Snapshot-agent describe"
         kubectl describe daemonset -n "${NAMESPACE}" -l app.kubernetes.io/name=snapshot

@@ -80,7 +80,9 @@ inputs:
   checkpoint_storage_access_mode:
     description: 'Checkpoint PVC access mode created by the operator'
     required: false
-    default: ReadWriteOnce
+    # Post-v0.1.0-alpha.1 snapshot charts mount the shared checkpoint PVC from
+    # every agent pod, so the claim must be ReadWriteMany.
+    default: ReadWriteMany
 
 outputs:
   namespace:
