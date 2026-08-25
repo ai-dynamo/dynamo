@@ -174,6 +174,10 @@ vllm_omni_configs = {
             pytest.mark.xpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(1200),
+            pytest.mark.profiled_vram_gib(15.0),  # 14,843 MiB observed peak
+            pytest.mark.requested_vllm_kv_cache_bytes(
+                4_294_967_296
+            ),  # 4 GiB per stage; the TTS pipeline launches two stages
         ],
         model="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
         request_payloads=[
