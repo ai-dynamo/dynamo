@@ -170,10 +170,11 @@ rejection:
 - `dynamo_frontend_model_rejection_total` increases for the affected `model` and `endpoint`.
 
 The worker-side hard cap is verified differently: the refused request fails rather than returning a
-particular status, and the worker logs `Worker at capacity (engine limit and queue both full),
-rejecting request` with the shed request's `request_id`. The backend admission gate exports no
-counter of its own; `dynamo_rejection_request_total` counts only TCP request-plane pool rejections
-and does not move when the gate sheds a request.
+particular status, and `dynamo_backend_admission_rejections_total` increases with
+`reason="queue_full"` or `reason="queue_timeout"`. The worker also logs `Worker at capacity (engine
+limit and queue both full), rejecting request` with the shed request's `request_id`. Do not look at
+`dynamo_rejection_request_total` for this: it counts only TCP request-plane pool rejections and does
+not move when the gate sheds a request.
 
 For all metric fields and labels, see
 [Cancellation and Rejection](../../reference/observability/metrics-catalog.mdx#cancellation-and-rejection).

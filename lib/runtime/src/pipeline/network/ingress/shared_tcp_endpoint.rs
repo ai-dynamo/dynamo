@@ -67,7 +67,7 @@ struct ActiveTaskGuard;
 impl ActiveTaskGuard {
     fn new() -> Self {
         WORK_HANDLER_POOL_ACTIVE_TASKS.inc();
-        // `dynamo_engine_request`: requests dispatched to a pool task.
+        // `dynamo_engine_request`: requests currently in the engine.
         ENGINE_REQUEST_GAUGE.inc();
         Self
     }

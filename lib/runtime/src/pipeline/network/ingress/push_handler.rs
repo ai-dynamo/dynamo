@@ -109,6 +109,10 @@ impl WorkHandlerMetrics {
             metrics_labels,
         )?;
 
+        // The gate admits on this endpoint's behalf, so expose its family here
+        // too. Idempotent: the gate is process-global and every endpoint asks.
+        admission_gate::register_metrics(endpoint.get_metrics_registry());
+
         Ok(Self::new(
             request_counter,
             request_duration,

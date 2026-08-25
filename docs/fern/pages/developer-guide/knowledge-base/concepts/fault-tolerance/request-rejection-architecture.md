@@ -201,14 +201,16 @@ The TCP request plane keeps its own worker pool, sized by `DYN_TCP_WORKER_POOL_S
 gate and no longer changes with the engine-admission settings. The two use the same numeric defaults
 by coincidence, not by sharing constants.
 
-The TCP worker pool exports:
+The two controls report separately. The pre-existing `dynamo_rejection_request_total`,
+`dynamo_engine_request` and `dynamo_request_queue` count TCP request-plane pool activity. The gate
+has its own independent family:
 
-- `dynamo_rejection_request_total`
-- `dynamo_engine_request`
-- `dynamo_request_queue`
-
-These count TCP request-plane pool activity only. The backend admission gate does not yet export
-metrics of its own; its resolved limit, queue length and each shed request appear in the worker log.
+- `dynamo_backend_admission_active_requests` and `dynamo_backend_admission_queue_depth` — current
+  occupancy of the limit and the FIFO queue.
+- `dynamo_backend_admission_concurrency_limit` and `dynamo_backend_admission_queue_capacity` — the
+  sizing actually in force, including a limit resized by a late capacity hint.
+- `dynamo_backend_admission_rejections_total` — refusals, labelled `reason` as `queue_full` or
+  `queue_timeout`. A request cancelled while queued is not a rejection and is counted under neither.
 
 See [Cancellation and Rejection](../../../../reference/observability/metrics-catalog.mdx#cancellation-and-rejection)
 for metric types and labels.

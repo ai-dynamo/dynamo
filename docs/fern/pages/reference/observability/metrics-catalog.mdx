@@ -235,18 +235,40 @@ Emitted by backend workers (`python -m dynamo.vllm`, `python -m dynamo.sglang`, 
   Total requests cancelled by the work handler. Carries the hierarchy labels. Records cancellation *signals* received by the worker, not whether the engine actually aborted — deduplicated so a control message plus a socket close for the same request counts once. See [Request Cancellation Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-cancellation-architecture.md).
 </ParamField>
 
-The following worker-side gauges and counter track the TCP request-plane worker pool, sized by `DYN_TCP_WORKER_POOL_SIZE` and `DYN_TCP_WORK_QUEUE_SIZE`. They do not track the backend admission gate, which has no metrics of its own; see [Worker-Side Request Admission](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md#worker-side-request-admission).
+The following worker-side gauges and counter appear only when a hard concurrency cap is set with `--engine-request-limit`; see [Worker-Side Request Admission](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md#worker-side-request-admission).
 
 <ParamField path="dynamo_rejection_request_total" type="counter">
-  Cumulative requests rejected because the TCP worker pool and its work queue were both full.
+  Cumulative requests rejected because the worker was at capacity (engine in-flight limit and Dynamo queue both full).
 </ParamField>
 
 <ParamField path="dynamo_engine_request" type="gauge">
-  Current requests dispatched to a TCP worker-pool task.
+  Current requests being handled by the engine.
 </ParamField>
 
 <ParamField path="dynamo_request_queue" type="gauge">
-  Current requests sitting in the TCP work queue, not yet dispatched.
+  Current requests queued in Dynamo, not yet in the engine.
+</ParamField>
+
+The `dynamo_backend_admission_*` family below is emitted by the backend admission gate, which bounds concurrent backend work for the whole worker process across every transport. It is independent of the worker-pool metrics above and is always present; see [Worker-Side Request Admission](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md#worker-side-request-admission).
+
+<ParamField path="dynamo_backend_admission_active_requests" type="gauge">
+  Requests currently holding an admitted backend slot.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_queue_depth" type="gauge">
+  Requests currently waiting in the admission queue.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_concurrency_limit" type="gauge">
+  Effective concurrent-request limit. Changes if a model card reports a capacity hint after startup.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_queue_capacity" type="gauge">
+  Configured admission-queue length. Static for the life of the process.
+</ParamField>
+
+<ParamField path="dynamo_backend_admission_rejections_total" type="counter">
+  Cumulative requests the gate refused, labelled `reason`: `queue_full` when the limit was busy and the queue was full, `queue_timeout` when the request waited past the queue delay. A request cancelled while queued is not a rejection and is not counted under either reason.
 </ParamField>
 
 Specialized components expose additional families under their own prefix, e.g. `dynamo_preprocessor_*` for preprocessor components.

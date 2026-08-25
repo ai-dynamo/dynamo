@@ -90,6 +90,7 @@ use crate::engine::{
     AsyncEngineContext, AsyncEngineContextProvider, AsyncEngineStream, Data, EngineStream,
 };
 use crate::error::{DynamoError, ErrorType};
+use crate::metrics::backend_admission::BackendAdmissionMetrics;
 
 /// Overrides the gate's concurrent-request limit. Surfaced to operators as
 /// `--engine-request-limit`.
@@ -261,6 +262,12 @@ fn reject(rejection: Rejection, context: Option<&dyn AsyncEngineContext>) -> Dyn
         .build()
 }
 
+/// Expose the process-global gate's metrics for scraping. Idempotent.
+pub(crate) fn register_metrics(registry: &crate::MetricsRegistry) {
+    static REGISTERED: OnceLock<()> = OnceLock::new();
+    REGISTERED.get_or_init(|| global().metrics.register(registry));
+}
+
 /// A queued request, oldest first. The sender is the outcome handoff.
 struct Waiter {
     id: u64,
@@ -290,12 +297,20 @@ struct GateState {
     /// Bumped under this lock whenever the oldest entry changes, so the one
     /// expiry driver re-reads the head and re-arms its single timer.
     head_generation: watch::Sender<u64>,
+    metrics: Arc<BackendAdmissionMetrics>,
 }
 
 impl GateState {
     /// Identity of the oldest live entry: which ticket it is and when it is due.
     fn head(&self) -> Option<(u64, Instant)> {
         self.waiters.front().map(|waiter| (waiter.id, waiter.due))
+    }
+
+    /// Publish the occupancy gauges from the authoritative counts, rather than
+    /// stepping them per transition: direct admission, enqueue, grant, removal,
+    /// expiry, release and resizing then cannot drift them.
+    fn publish_occupancy(&self) {
+        self.metrics.set_occupancy(self.active, self.waiters.len());
     }
 
     /// Deadline for a request enqueued at `now`. Constructed checked, so an
@@ -313,6 +328,9 @@ impl GateState {
     /// mutation can slip between its read and its wait. An enqueue behind an
     /// unchanged head leaves the generation alone: the fixed delay budget makes
     /// later deadlines nondecreasing, so the armed timer is still the earliest.
+    /// Every FIFO mutation — and `wake_waiters`, which also moves `active` —
+    /// runs through here, so republishing the gauges once at the end covers all
+    /// of them.
     fn with_head_watch<R>(&mut self, mutate: impl FnOnce(&mut Self) -> R) -> R {
         let before = self.head();
         let result = mutate(self);
@@ -320,6 +338,7 @@ impl GateState {
             self.head_generation
                 .send_modify(|generation| *generation = generation.wrapping_add(1));
         }
+        self.publish_occupancy();
         result
     }
 
@@ -421,6 +440,7 @@ impl GateState {
         }
         let previous = self.limit;
         self.limit = resolved;
+        self.metrics.set_concurrency_limit(resolved);
         if resolved > previous {
             // Growth releases queued work immediately.
             self.wake_waiters();
@@ -505,6 +525,8 @@ pub(crate) struct BackendAdmissionGate {
     state: Arc<Mutex<GateState>>,
     /// Guards the one-time start of the expiry driver.
     expiry_driver: OnceLock<()>,
+    /// Shared with [`GateState`], which publishes the occupancy gauges.
+    metrics: Arc<BackendAdmissionMetrics>,
 }
 
 impl BackendAdmissionGate {
@@ -547,6 +569,10 @@ impl BackendAdmissionGate {
             }
         };
         let (head_generation, _) = watch::channel(0);
+        // Sizing is published as the metrics are constructed; the concurrency
+        // limit is republished by `recompute_limit` when a capacity hint lands.
+        // Occupancy starts at zero and every transition republishes it.
+        let metrics = Arc::new(BackendAdmissionMetrics::new(limit, queue_capacity));
         Arc::new(Self {
             state: Arc::new(Mutex::new(GateState {
                 env_override,
@@ -558,8 +584,10 @@ impl BackendAdmissionGate {
                 waiters: VecDeque::new(),
                 next_ticket: 0,
                 head_generation,
+                metrics: Arc::clone(&metrics),
             })),
             expiry_driver: OnceLock::new(),
+            metrics,
         })
     }
 
@@ -669,6 +697,8 @@ impl BackendAdmissionGate {
             // carries a queue deadline.
             if state.active < state.limit && state.waiters.is_empty() {
                 state.active += 1;
+                // The only `active` change outside `with_head_watch`.
+                state.publish_occupancy();
                 Decision::Granted
             } else if state.waiters.len() < state.queue_capacity {
                 let id = state.next_ticket;
@@ -690,7 +720,10 @@ impl BackendAdmissionGate {
             Decision::Granted => Ok(ActiveSlot {
                 gate: Arc::clone(self),
             }),
-            Decision::Rejected => Err(reject(Rejection::QueueFull, context)),
+            Decision::Rejected => {
+                self.metrics.rejected_queue_full();
+                Err(reject(Rejection::QueueFull, context))
+            }
             Decision::Queued(id, rx) => {
                 // The queue is only reachable from an async caller, so this is
                 // the first point at which a runtime is guaranteed to exist.
@@ -863,10 +896,15 @@ impl AdmissionTicket {
             }
             Some(Handoff::Expired) => {
                 // The gate popped this entry before sending, so there is no
-                // queue slot to release and no capacity to refund.
+                // queue slot to release and no capacity to refund. Counted here
+                // rather than where the entry was drained, so a request that
+                // walked away before collecting its outcome is not reported as
+                // a timeout rejection it never saw.
                 self.taken = true;
+                self.gate.metrics.rejected_queue_timeout();
                 Err(reject(Rejection::Expired, context))
             }
+            // A cancellation is the caller leaving; not counted as a rejection.
             None => Err(reject(Rejection::Cancelled, context)),
         }
     }
@@ -1219,6 +1257,8 @@ mod tests {
             .expect("waiter completes");
         assert!(is_cancelled(&admission));
         assert_eq!(gate.queued(), 0, "cancellation frees the queue slot");
+        assert_eq!(refusals(&gate), (0, 0));
+        assert_eq!(published(&gate), (1, 0, 1, 4));
     }
 
     ///////////////////// LATE HINTS AND RESIZING /////////////////////
@@ -1796,5 +1836,102 @@ mod tests {
         assert_eq!(rejection.message(), CANCELLED_MESSAGE);
         assert_eq!(gate.active(), 0, "no slot was taken");
         assert_eq!(gate.queued(), 0, "and nothing was queued");
+    }
+
+    ///////////////////// METRICS /////////////////////
+
+    /// Published as (active, queued, limit, capacity).
+    fn published(gate: &Arc<BackendAdmissionGate>) -> (i64, i64, i64, i64) {
+        gate.metrics.published()
+    }
+
+    /// Refusals as (queue_full, queue_timeout).
+    fn refusals(gate: &Arc<BackendAdmissionGate>) -> (u64, u64) {
+        gate.metrics.refusals()
+    }
+
+    /// Gauges come from the gate's own counts, so they follow every transition,
+    /// and the limit follows a late hint.
+    #[tokio::test]
+    async fn the_gauges_follow_occupancy_and_sizing() {
+        let gate = gate(1, 4);
+        assert_eq!(published(&gate), (0, 0, 1, 4));
+        let held = permit(gate.acquire(None).await);
+        assert_eq!(published(&gate), (1, 0, 1, 4), "direct admission");
+        let waiter = spawn_queued_admit(&gate).await;
+        assert_eq!(published(&gate), (1, 1, 1, 4), "enqueue");
+        drop(held);
+        let granted = permit(waiter.await.expect("waiter completes"));
+        assert_eq!(published(&gate), (1, 0, 1, 4), "grant");
+        drop(granted);
+        assert_eq!(published(&gate), (0, 0, 1, 4), "release");
+
+        let hinted = hint_sized_gate(4);
+        hinted.record_capacity_report(Some(2), Some(1));
+        assert_eq!(published(&hinted), (0, 0, 3, 4), "late hint");
+    }
+
+    /// Only the two refusal reasons count. A timeout counts where the waiting
+    /// request receives it, so a cancellation and a request that walked away
+    /// first both add nothing.
+    #[tokio::test]
+    async fn rejections_are_counted_by_reason_only() {
+        use crate::pipeline::context::Controller;
+
+        let gate = gate(1, 0);
+        let _held = permit(gate.acquire(None).await);
+        assert!(is_queue_full(&gate.acquire(None).await));
+        let controller = Arc::new(Controller::default());
+        controller.stop_generating();
+        let context: Arc<dyn AsyncEngineContext> = controller;
+        assert!(is_cancelled(&gate.acquire(Some(context.as_ref())).await));
+        assert_eq!(refusals(&gate), (1, 0), "a cancellation is not a refusal");
+
+        // Expiry, collected by the waiter it happened to.
+        let expiring = gate_with_delay(1, 4, Duration::from_millis(1));
+        let _busy = permit(expiring.acquire(None).await);
+        let waiter = spawn_queued_admit(&expiring).await;
+        assert!(is_expired(&waiter.await.expect("waiter completes")));
+        assert_eq!(refusals(&expiring), (0, 1));
+        assert_eq!(published(&expiring), (1, 0, 1, 4));
+
+        // The same expiry, handed off successfully but never collected: the
+        // ticket is dropped without ever calling `wait`. The receiver is live
+        // through the drain, so this catches counting inside `drain_expired`,
+        // `expire_due` or `Drop` — not merely a failed handoff.
+        // `push_waiter_for_test` takes `next_ticket`, which is 0 on a fresh gate.
+        let orphaned = gate_with_delay(1, 4, Duration::from_millis(1));
+        let now = Instant::now();
+        let ticket = AdmissionTicket {
+            gate: Arc::clone(&orphaned),
+            id: 0,
+            rx: Some(orphaned.push_waiter_for_test(now - Duration::from_millis(1))),
+            taken: false,
+        };
+        assert_eq!(
+            orphaned.expire_due_for_test(now),
+            1,
+            "the entry was drained"
+        );
+        drop(ticket);
+        assert_eq!(orphaned.queued(), 0, "its queue place is freed");
+        assert_eq!(
+            refusals(&orphaned),
+            (0, 0),
+            "an uncollected expiry is not counted"
+        );
+    }
+
+    /// Collectors are per gate: one gate's counts are invisible to another. The
+    /// family a gate registers is covered in
+    /// [`crate::metrics::backend_admission`].
+    #[tokio::test]
+    async fn each_gate_owns_its_collectors() {
+        let one = gate(1, 0);
+        let two = gate(1, 0);
+        let _held = permit(one.acquire(None).await);
+        assert!(is_queue_full(&one.acquire(None).await));
+        assert_eq!((refusals(&one), refusals(&two)), ((1, 0), (0, 0)));
+        assert_eq!(published(&two), (0, 0, 1, 0));
     }
 }

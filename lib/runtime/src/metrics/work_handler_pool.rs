@@ -16,36 +16,33 @@ fn work_handler_metric_name(suffix: &str) -> String {
     format!("{}_{}", name_prefix::WORK_HANDLER, suffix)
 }
 
-/// Requests shed because the TCP request-plane pool was at capacity: all worker
-/// permits (`DYN_TCP_WORKER_POOL_SIZE`) held AND the work queue
-/// (`DYN_TCP_WORK_QUEUE_SIZE`) full.
-///
-/// This does not cover the backend admission gate ([`crate::admission_gate`]),
-/// which sheds on its own limit and reports that only in the worker log.
+/// Requests shed because the worker was at capacity: all engine in-flight slots
+/// (`--engine-request-limit`) held AND the overflow queue
+/// (`--dynamo-request-queue-limit`) full.
 pub static REJECTION_REQUEST_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
     IntCounter::new(
         format!("{}_request_total", name_prefix::REJECTION),
-        "Requests rejected because the TCP worker pool and its work queue are both full",
+        "Requests rejected because the worker is at capacity (engine in-flight limit and Dynamo queue both full)",
     )
     .expect("rejection_request_total counter")
 });
 
-/// Requests dispatched to a TCP worker-pool task (pool permits in use). Driven
-/// from `ActiveTaskGuard`, alongside `WORK_HANDLER_POOL_ACTIVE_TASKS`.
+/// Requests currently in the engine (worker-pool permits in use). Driven from
+/// `ActiveTaskGuard`, alongside `WORK_HANDLER_POOL_ACTIVE_TASKS`.
 pub static ENGINE_REQUEST_GAUGE: Lazy<IntGauge> = Lazy::new(|| {
     IntGauge::new(
         "dynamo_engine_request",
-        "Current number of requests dispatched to a TCP worker-pool task (DYN_TCP_WORKER_POOL_SIZE)",
+        "Current number of requests being handled by the engine (--engine-request-limit)",
     )
     .expect("dynamo_engine_request gauge")
 });
 
-/// Requests sitting in the TCP work queue, not yet dispatched. Driven alongside
+/// Requests queued in Dynamo but not yet in the engine. Driven alongside
 /// `WORK_HANDLER_QUEUE_DEPTH` (inc on enqueue, dec on dispatcher recv).
 pub static REQUEST_QUEUE_GAUGE: Lazy<IntGauge> = Lazy::new(|| {
     IntGauge::new(
         "dynamo_request_queue",
-        "Current number of requests in the TCP work queue awaiting dispatch (DYN_TCP_WORK_QUEUE_SIZE)",
+        "Current number of requests queued in Dynamo not yet in the engine (--dynamo-request-queue-limit)",
     )
     .expect("dynamo_request_queue gauge")
 });
