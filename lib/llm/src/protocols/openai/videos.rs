@@ -46,6 +46,10 @@ pub struct NvCreateVideoRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_format: Option<String>,
 
+    /// Model-specific parameters passed to a supporting backend
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_params: Option<serde_json::Map<String, serde_json::Value>>,
+
     /// Whether to stream the video generation (default: false)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
@@ -219,6 +223,7 @@ mod tests {
             user: None,
             response_format: None,
             output_format: None,
+            extra_params: None,
             stream: None,
             nvext: None,
         };
@@ -238,6 +243,35 @@ mod tests {
         let json = r#"{"prompt":"cat","model":"wan","output_format":"mp4"}"#;
         let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.output_format.as_deref(), Some("mp4"));
+    }
+
+    #[test]
+    fn video_request_extra_params_round_trip() {
+        let json = r#"{
+            "prompt":"cat",
+            "model":"video-model",
+            "extra_params":{
+                "task":"t2va",
+                "target":{"duration_seconds":10.0,"aspect_ratio":"16:9"}
+            }
+        }"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        let extra = req.extra_params.as_ref().unwrap();
+        assert_eq!(extra["task"], "t2va");
+        assert_eq!(extra["target"]["duration_seconds"], 10.0);
+
+        let out = serde_json::to_value(&req).unwrap();
+        assert_eq!(out["extra_params"], serde_json::json!(extra));
+    }
+
+    #[test]
+    fn video_request_extra_params_rejects_non_object() {
+        let json = r#"{
+            "prompt":"cat",
+            "model":"video-model",
+            "extra_params":["not","an","object"]
+        }"#;
+        assert!(serde_json::from_str::<NvCreateVideoRequest>(json).is_err());
     }
 
     // --- VideoData ---

@@ -49,6 +49,8 @@ class OmniDiffusionKwargs:
     cache_config: Optional[str] = None
     enable_cache_dit_summary: bool = False
     enable_cpu_offload: bool = False
+    task_type: Optional[str] = None
+    diffusion_attention_backend: Optional[str] = None
     enforce_eager: bool = False
 
 
@@ -183,6 +185,20 @@ class OmniArgGroup(ArgGroup):
             env_var="DYN_OMNI_ENABLE_CPU_OFFLOAD",
             default=False,
             help="Enable CPU offloading for diffusion models to reduce GPU memory usage.",
+        )
+        add_argument(
+            g,
+            flag_name="--task-type",
+            env_var="DYN_OMNI_TASK_TYPE",
+            default=None,
+            help="Model-defined task or checkpoint partition selected at startup.",
+        )
+        add_argument(
+            g,
+            flag_name="--diffusion-attention-backend",
+            env_var="DYN_OMNI_DIFFUSION_ATTENTION_BACKEND",
+            default=None,
+            help="vLLM-Omni diffusion attention backend.",
         )
         add_negatable_bool_argument(
             g,

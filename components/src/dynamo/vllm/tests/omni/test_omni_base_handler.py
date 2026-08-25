@@ -108,6 +108,19 @@ class TestDiffusionParallelConfigCoverage:
 
         assert kwargs["output_modalities"] == ["image"]
 
+    def test_model_defined_diffusion_fields_forwarded_to_async_omni(self):
+        config = _make_config()
+        config.diffusion = dataclasses.replace(
+            OmniDiffusionKwargs(),
+            task_type="t2va",
+            diffusion_attention_backend="TRTLLM_ATTN",
+        )
+
+        kwargs = _build_kwargs(config)
+
+        assert kwargs["task_type"] == "t2va"
+        assert kwargs["diffusion_attention_backend"] == "TRTLLM_ATTN"
+
     def test_lora_disabled_resolves_no_capacity(self):
         config = _make_config()
         handler = BaseOmniHandler.__new__(BaseOmniHandler)

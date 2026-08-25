@@ -26,6 +26,14 @@ from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
 logger = logging.getLogger(__name__)
 
 
+def validate_video_extra_params(request: dict[str, Any]) -> None:
+    """Reject vLLM-Omni model parameters on the SGLang backend."""
+    if request.get("extra_params"):
+        raise ValueError(
+            "extra_params is only supported by the vLLM-Omni video backend"
+        )
+
+
 class VideoGenerationWorkerHandler(BaseGenerativeHandler):
     """Handler for video generation (T2V/I2V).
 
@@ -94,6 +102,7 @@ class VideoGenerationWorkerHandler(BaseGenerativeHandler):
             logger.debug(f"Video generation request with trace: {trace_header}")
 
         try:
+            validate_video_extra_params(request)
             req = CreateVideoRequest(**request)
             nvext = req.nvext or VideoNvExt()
 
