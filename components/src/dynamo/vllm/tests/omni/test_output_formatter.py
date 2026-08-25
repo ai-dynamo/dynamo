@@ -3,9 +3,12 @@
 
 """Tests for output_formatter.py — modality-specific formatters."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
+import torch
 
 try:
     from dynamo.vllm.omni.output_formatter import (
@@ -210,7 +213,7 @@ class TestDiffusionFormatterImage:
 
 class TestDiffusionFormatterVideo:
     @pytest.mark.asyncio
-    async def test_empty_frames_returns_none(self):
+    async def test_empty_frames_returns_video_error(self):
         from dynamo.common.utils.output_modalities import RequestType
 
         f = _make_diffusion_formatter()
@@ -219,7 +222,9 @@ class TestDiffusionFormatterVideo:
         result = await f.format(
             stage, "req-1", request_type=RequestType.VIDEO_GENERATION
         )
-        assert result is None
+        assert result["object"] == "video"
+        assert result["status"] == "failed"
+        assert "No video outputs" in result["error"]
 
     @pytest.mark.asyncio
     async def test_error_returns_failed_status(self):
@@ -233,6 +238,272 @@ class TestDiffusionFormatterVideo:
             chunk = await f._encode_video([MagicMock()], "req-1", fps=16)
         assert chunk["status"] == "failed"
         assert "boom" in chunk["error"]
+
+    @pytest.mark.asyncio
+    async def test_muxes_video_audio_and_reports_metadata(self):
+        from dynamo.common.utils.output_modalities import RequestType
+
+        f = _make_diffusion_formatter()
+        stage = SimpleNamespace(
+            images=[np.zeros((2, 4, 4, 3), dtype=np.float32)],
+            multimodal_output={
+                "audio": np.zeros((1, 2, 128), dtype=np.float32),
+                "fps": 24,
+                "audio_sample_rate": 32000,
+            },
+        )
+        with patch(
+            "dynamo.vllm.omni.output_formatter.mux_video_audio_bytes",
+            return_value=b"muxed-mp4",
+        ) as mux:
+            result = await f.format(
+                stage,
+                "req-video-audio",
+                request_type=RequestType.VIDEO_GENERATION,
+                response_format="b64_json",
+            )
+
+        assert result["status"] == "completed"
+        assert result["data"][0]["fps"] == 24
+        assert result["data"][0]["audio_sample_rate"] == 32000
+        assert result["data"][0]["b64_json"] is not None
+        assert mux.call_count == 1
+        assert mux.call_args.kwargs["fps"] == 24.0
+        assert mux.call_args.kwargs["audio_sample_rate"] == 32000
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("sample_rate_key", "sample_rate"),
+        [("sample_rate", 22050), ("sampling_rate", 44100), ("sr", 16000)],
+    )
+    async def test_uses_audio_sample_rate_aliases(self, sample_rate_key, sample_rate):
+        from dynamo.common.utils.output_modalities import RequestType
+
+        f = _make_diffusion_formatter()
+        stage = SimpleNamespace(
+            images=[np.zeros((2, 4, 4, 3), dtype=np.float32)],
+            multimodal_output={
+                "audio": np.zeros((1, 2, 128), dtype=np.float32),
+                sample_rate_key: sample_rate,
+            },
+        )
+        with patch(
+            "dynamo.vllm.omni.output_formatter.mux_video_audio_bytes",
+            return_value=b"muxed-mp4",
+        ) as mux:
+            result = await f.format(
+                stage,
+                "req-video-audio",
+                request_type=RequestType.VIDEO_GENERATION,
+                response_format="b64_json",
+            )
+
+        assert result["data"][0]["audio_sample_rate"] == sample_rate
+        assert mux.call_args.kwargs["audio_sample_rate"] == sample_rate
+
+    @pytest.mark.asyncio
+    async def test_uses_model_audio_sample_rate_then_generic_fallback(self):
+        configured = DiffusionFormatter(
+            model_name="test-model",
+            media_fs=None,
+            media_http_url=None,
+            model_config=SimpleNamespace(
+                audio_vae=SimpleNamespace(config=SimpleNamespace(sampling_rate=48000))
+            ),
+        )
+        audio = {"audio": np.zeros((1, 2, 128), dtype=np.float32)}
+        video = [np.zeros((2, 4, 4, 3), dtype=np.float32)]
+
+        with patch(
+            "dynamo.vllm.omni.output_formatter.mux_video_audio_bytes",
+            return_value=b"muxed-mp4",
+        ) as mux:
+            configured_result = await configured._encode_video(
+                video,
+                "req-configured-rate",
+                fps=24,
+                multimodal_output=audio,
+                response_format="b64_json",
+            )
+            fallback_result = await _make_diffusion_formatter()._encode_video(
+                video,
+                "req-fallback-rate",
+                fps=24,
+                multimodal_output=audio,
+                response_format="b64_json",
+            )
+
+        assert configured_result["data"][0]["audio_sample_rate"] == 48000
+        assert fallback_result["data"][0]["audio_sample_rate"] == 24000
+        assert [call.kwargs["audio_sample_rate"] for call in mux.call_args_list] == [
+            48000,
+            24000,
+        ]
+
+    @pytest.mark.asyncio
+    async def test_returns_every_generated_video(self):
+        from dynamo.common.utils.output_modalities import RequestType
+
+        f = _make_diffusion_formatter()
+        videos = [np.zeros((2, 4, 4, 3), dtype=np.float32) for _ in range(2)]
+        stage = SimpleNamespace(
+            images=videos,
+            multimodal_output={
+                "audio": np.zeros((2, 2, 128), dtype=np.float32),
+                "metadata": {
+                    "video": {"fps": 24},
+                    "audio": {"sample_rate": 32000},
+                },
+            },
+        )
+        with patch(
+            "dynamo.vllm.omni.output_formatter.mux_video_audio_bytes",
+            return_value=b"muxed-mp4",
+        ) as mux:
+            result = await f.format(
+                stage,
+                "req-video-audio",
+                request_type=RequestType.VIDEO_GENERATION,
+                response_format="b64_json",
+            )
+
+        assert len(result["data"]) == 2
+        assert mux.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_silent_video_keeps_vp9_encoder(self):
+        f = _make_diffusion_formatter()
+        with (
+            patch(
+                "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+                return_value=b"vp9-mp4",
+            ) as vp9,
+            patch("dynamo.vllm.omni.output_formatter.mux_video_audio_bytes") as mux,
+        ):
+            result = await f._encode_video(
+                [np.zeros((4, 4, 3), dtype=np.float32)],
+                "req-silent",
+                fps=16,
+                response_format="b64_json",
+            )
+
+        assert result["status"] == "completed"
+        assert result["data"][0]["audio_sample_rate"] is None
+        vp9.assert_called_once()
+        mux.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unsupported_output_format_hint_falls_back_to_mp4(self):
+        f = _make_diffusion_formatter()
+        with patch(
+            "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+            return_value=b"vp9-mp4",
+        ) as encode:
+            result = await f._encode_video(
+                [np.zeros((4, 4, 3), dtype=np.float32)],
+                "req-output-hint",
+                fps=16,
+                response_format="b64_json",
+                output_format="webm",
+            )
+
+        assert result["status"] == "completed"
+        assert result["data"][0]["output_format"] == "mp4"
+        assert encode.call_args.kwargs["output_format"] == "mp4"
+
+    @pytest.mark.asyncio
+    async def test_normalizes_direct_fchw_torch_video(self):
+        f = _make_diffusion_formatter()
+        video = torch.zeros((2, 3, 8, 10), dtype=torch.float32)
+
+        with patch(
+            "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+            return_value=b"vp9-mp4",
+        ) as encode:
+            result = await f._encode_video(
+                video,
+                "req-tensor",
+                fps=16,
+                response_format="b64_json",
+            )
+
+        assert result["status"] == "completed"
+        frames = encode.call_args.args[0]
+        assert frames.shape == (2, 8, 10, 3)
+        assert frames.dtype == np.uint8
+
+    @pytest.mark.asyncio
+    async def test_splits_direct_bfchw_torch_videos(self):
+        f = _make_diffusion_formatter()
+        videos = torch.zeros((2, 2, 3, 8, 10), dtype=torch.float32)
+
+        with patch(
+            "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+            return_value=b"vp9-mp4",
+        ) as encode:
+            result = await f._encode_video(
+                videos,
+                "req-tensor-batch",
+                fps=16,
+                response_format="b64_json",
+            )
+
+        assert result["status"] == "completed"
+        assert len(result["data"]) == 2
+        assert encode.call_count == 2
+        assert all(
+            call.args[0].shape == (2, 8, 10, 3) for call in encode.call_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_splits_list_wrapped_bfhwc_numpy_videos(self):
+        f = _make_diffusion_formatter()
+        videos = [np.zeros((2, 2, 8, 10, 3), dtype=np.float32)]
+
+        with patch(
+            "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+            return_value=b"vp9-mp4",
+        ) as encode:
+            result = await f._encode_video(
+                videos,
+                "req-numpy-batch",
+                fps=16,
+                response_format="b64_json",
+            )
+
+        assert result["status"] == "completed"
+        assert len(result["data"]) == 2
+        assert encode.call_count == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("as_tensor", [False, True])
+    @pytest.mark.parametrize("num_frames", [1, 3, 4, 8])
+    async def test_normalizes_cfhw_negative_one_to_one_video(
+        self, as_tensor, num_frames
+    ):
+        f = _make_diffusion_formatter()
+        video = np.linspace(-1.0, 1.0, num=3 * num_frames * 16 * 16, dtype=np.float32)
+        video = video.reshape(3, num_frames, 16, 16)
+        if as_tensor:
+            video = torch.from_numpy(video)
+
+        with patch(
+            "dynamo.vllm.omni.output_formatter.encode_to_video_bytes",
+            return_value=b"vp9-mp4",
+        ) as encode:
+            result = await f._encode_video(
+                video,
+                "req-cfhw",
+                fps=16,
+                response_format="b64_json",
+            )
+
+        assert result["status"] == "completed"
+        frames = encode.call_args.args[0]
+        assert frames.shape == (num_frames, 16, 16, 3)
+        assert frames.dtype == np.uint8
+        assert frames.min() == 0
+        assert frames.max() == 255
 
 
 class TestBuildCompletionUsage:

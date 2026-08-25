@@ -68,6 +68,14 @@ pub struct VideoData {
     /// Base64-encoded video (if response_format is "b64_json")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub b64_json: Option<String>,
+
+    /// Actual video frame rate when reported by the model
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fps: Option<i32>,
+
+    /// Muxed audio sample rate when the generated video contains audio
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_sample_rate: Option<i32>,
 }
 
 /// Response structure for video generation
@@ -254,6 +262,8 @@ mod tests {
             output_format: "mp4".into(),
             url: None,
             b64_json: Some("abc==".into()),
+            fps: None,
+            audio_sample_rate: None,
         };
         let json = serde_json::to_string(&d).unwrap();
         assert!(!json.contains("url"));
@@ -266,11 +276,28 @@ mod tests {
             output_format: "webm".into(),
             url: Some("http://x/v.webm".into()),
             b64_json: None,
+            fps: None,
+            audio_sample_rate: None,
         };
         let json = serde_json::to_string(&d).unwrap();
         let d2: VideoData = serde_json::from_str(&json).unwrap();
         assert_eq!(d2.output_format, "webm");
         assert_eq!(d2.url.as_deref(), Some("http://x/v.webm"));
         assert!(d2.b64_json.is_none());
+    }
+
+    #[test]
+    fn video_data_round_trip_with_media_metadata() {
+        let d = VideoData {
+            output_format: "mp4".into(),
+            url: Some("http://x/v.mp4".into()),
+            b64_json: None,
+            fps: Some(24),
+            audio_sample_rate: Some(32000),
+        };
+        let json = serde_json::to_string(&d).unwrap();
+        let d2: VideoData = serde_json::from_str(&json).unwrap();
+        assert_eq!(d2.fps, Some(24));
+        assert_eq!(d2.audio_sample_rate, Some(32000));
     }
 }
