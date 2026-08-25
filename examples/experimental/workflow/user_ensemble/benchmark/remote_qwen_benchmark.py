@@ -315,11 +315,21 @@ def validate_cell(
         raise BenchmarkAuditError(f"invalid client wall time in {wall_path}") from error
     if wall_seconds <= 0:
         raise BenchmarkAuditError("client wall time must be positive")
+    server_text = server_log.read_text(encoding="utf-8", errors="replace")
+    if "(use_kv_events=True)" not in server_text:
+        raise BenchmarkAuditError("vLLM KV-event publication is not enabled")
+    if "Worker reading KV events for dp_rank=" not in server_text:
+        raise BenchmarkAuditError("Dynamo KV-event reader did not start")
     return {
         "full_client_process_wall_s": wall_seconds,
         "full_client_process_throughput_req_s": MEASURED_REQUESTS / wall_seconds,
         "aiperf": validate_profile(profile_path, expected_requests=MEASURED_REQUESTS),
         "encoder": audit_encoder_log(server_log),
+        "kv_cache": {
+            "prefix_caching": True,
+            "event_publishing": True,
+            "event_reader_started": True,
+        },
         "gpu": _parse_gpu_telemetry(gpu_telemetry),
     }
 
@@ -355,6 +365,10 @@ def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
     if args.request_rate != REQUEST_RATE:
         raise BenchmarkAuditError(
             f"request rate is {args.request_rate}; expected {REQUEST_RATE}"
+        )
+    if not args.prefix_caching or not args.kv_event_publishing:
+        raise BenchmarkAuditError(
+            "qualification requires prefix caching and KV-event publication"
         )
     packages: dict[str, str] = {}
     for package in ("ai-dynamo", "aiperf", "torch", "transformers", "vllm"):
@@ -393,6 +407,9 @@ def capture_metadata(args: argparse.Namespace) -> dict[str, Any]:
             "max_num_seqs": 64,
             "max_model_len": 2048,
             "gpu_memory_utilization": 0.4,
+            "prefix_caching": bool(args.prefix_caching),
+            "kv_event_publishing": bool(args.kv_event_publishing),
+            "kv_event_port": args.kv_event_port,
             "max_batch_patches": 41_472,
             "max_batch_items": 64,
             "batching_policy": "block for first item, then eager-drain queued work",
@@ -644,6 +661,11 @@ def _build_parser() -> argparse.ArgumentParser:
     metadata.add_argument("--torch-gpu-count", type=int, required=True)
     metadata.add_argument("--request-rate", type=int, required=True)
     metadata.add_argument("--aiperf-version", required=True)
+    metadata.add_argument("--prefix-caching", type=int, choices=(0, 1), required=True)
+    metadata.add_argument(
+        "--kv-event-publishing", type=int, choices=(0, 1), required=True
+    )
+    metadata.add_argument("--kv-event-port", type=int, required=True)
 
     cell = subparsers.add_parser("validate-cell")
     cell.add_argument("--profile", type=Path, required=True)

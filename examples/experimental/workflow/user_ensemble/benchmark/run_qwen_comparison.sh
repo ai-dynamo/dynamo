@@ -21,6 +21,10 @@ WARMUP_INPUT="$WORKLOAD_ROOT/warmup/image_custom_20_textisl644.jsonl"
 SERVER_PID=""
 SAMPLER_PID=""
 REQUEST_RATE="${DYN_BENCH_REQUEST_RATE:-50}"
+KV_EVENT_PORT="${DYN_BENCH_KV_EVENT_PORT:-20080}"
+KV_EVENTS_CONFIG="$(printf \
+    '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:%s","enable_kv_cache_events":true}' \
+    "$KV_EVENT_PORT")"
 DEFAULT_CELL_PLAN="1:remote 2:remote 3:remote"
 CELL_PLAN="${DYN_BENCH_CELL_PLAN:-$DEFAULT_CELL_PLAN}"
 
@@ -112,7 +116,10 @@ python -m examples.experimental.workflow.user_ensemble.benchmark.remote_qwen_ben
     --gpu-info "$GPU_INFO" \
     --torch-gpu-count "$TORCH_GPU_COUNT" \
     --request-rate "$REQUEST_RATE" \
-    --aiperf-version "$AIPERF_VERSION"
+    --aiperf-version "$AIPERF_VERSION" \
+    --prefix-caching 1 \
+    --kv-event-publishing 1 \
+    --kv-event-port "$KV_EVENT_PORT"
 
 sha256sum \
     "$REPO_ROOT/examples/experimental/workflow/user_ensemble/workflow.py" \
@@ -149,7 +156,11 @@ launch_topology() {
     local topology="$1"
     local output_dir="$2"
     local launch_script="$LAUNCH_ROOT/examples/experimental/workflow/user_ensemble/remote/launch.sh"
-    local launch_args=(--max-num-seqs 64 --no-enable-prefix-caching)
+    local launch_args=(
+        --max-num-seqs 64
+        --enable-prefix-caching
+        --kv-events-config "$KV_EVENTS_CONFIG"
+    )
 
     if [[ "$topology" != remote ]]; then
         echo >&2 "unknown topology: $topology"

@@ -189,4 +189,7 @@ def test_runner_omits_measured_concurrency_limit() -> None:
     assert '--request-rate "$REQUEST_RATE"' in measured
     assert "--request-rate-mode constant" in measured
     assert "--concurrency" not in measured
+    assert "--enable-prefix-caching" in runner
+    assert "--no-enable-prefix-caching" not in runner
+    assert '--kv-events-config "$KV_EVENTS_CONFIG"' in runner
     assert 'DEFAULT_CELL_PLAN="1:remote 2:remote 3:remote"' in runner
