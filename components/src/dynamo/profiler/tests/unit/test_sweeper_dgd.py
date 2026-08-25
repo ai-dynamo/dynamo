@@ -211,7 +211,7 @@ spec:
         "ConfigMap",
         "DynamoGraphDeployment",
     ]
-    assert documents[1]["metadata"]["name"] == "sweeper-candidate-001"
+    assert documents[1]["metadata"]["name"] == "sweeper-dgd-001"
 
 
 @pytest.mark.parametrize(

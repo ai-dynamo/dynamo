@@ -75,7 +75,7 @@ def _load_generator_api() -> tuple[Any, Any]:
 def _load_direct_renderer_api() -> tuple[type[Exception], Any]:
     """Load the v1 config-modifier adapter only when explicitly selected."""
     try:
-        materializer = importlib.import_module("dynamo.profiler.v2.materializer")
+        materializer = importlib.import_module("dynamo.profiler.sweeper.direct")
         return (
             materializer.MaterializationError,
             materializer.materialize_dgd_from_candidate,

@@ -25,7 +25,7 @@ pytestmark = [
 ]
 
 try:
-    from dynamo.profiler.v2.materializer import (
+    from dynamo.profiler.sweeper.direct import (
         MaterializationError,
         materialize_dgd_from_candidate,
     )
