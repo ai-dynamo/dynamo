@@ -48,7 +48,12 @@ class _FixedPrefillCapacity:
 
 class _ThroughputScalingHarness(ThroughputScalingMixin):
     def __init__(self, engine_rps: float):
-        self._config = SimpleNamespace(ttft_ms=200.0, min_endpoint=1)
+        self._config = SimpleNamespace(
+            ttft_ms=200.0,
+            min_endpoint=1,
+            prefill_min_endpoint=None,
+            decode_min_endpoint=None,
+        )
         self._prefill_regression = _FixedPrefillCapacity(engine_rps)
         self._diag_throughput_reason = None
         self._diag_engine_rps_prefill = None
@@ -206,6 +211,22 @@ def test_frontend_metric_with_partial_data():
     assert metric.instance is None
     assert metric.job is None
     assert metric.pod is None
+
+
+@patch("dynamo.planner.monitoring.traffic_metrics.PrometheusConnect")
+def test_prometheus_client_configures_request_timeout(mock_prometheus_connect):
+    PrometheusAPIClient(
+        "http://localhost:9090",
+        "test_namespace",
+        request_timeout_seconds=2.5,
+    )
+
+    mock_prometheus_connect.assert_called_once_with(
+        url="http://localhost:9090",
+        disable_ssl=True,
+        retry=0,
+        timeout=2.5,
+    )
 
 
 def test_get_average_metric_none_result():

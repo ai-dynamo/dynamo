@@ -8,7 +8,12 @@ from unittest.mock import Mock
 import pytest
 
 from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY
+from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.vllm.capacity import get_metrics_model_name, get_spec_decode_runtime_data
+from dynamo.vllm.engine_generate import (
+    VLLM_GENERATE_CAPABILITY,
+    publish_engine_generate_capability,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -61,6 +66,36 @@ def test_vllm_token_budget_matches_rejection_policy():
         "reject_prompt_overflow": True,
         "reject_total_overflow": True,
     }
+
+
+@pytest.mark.parametrize(
+    ("model_input", "model_type", "worker_type", "expected"),
+    [
+        (ModelInput.Tokens, ModelType.Prefill, WorkerType.Prefill, True),
+        (ModelInput.Tokens, ModelType.Chat, WorkerType.Decode, True),
+        (ModelInput.Tokens, ModelType.Completions, WorkerType.Aggregated, True),
+        (ModelInput.Tokens, ModelType.Empty, WorkerType.Prefill, False),
+        (ModelInput.Tokens, ModelType.Empty, WorkerType.Decode, False),
+        (ModelInput.Text, ModelType.Chat, WorkerType.Aggregated, False),
+        (ModelInput.Tokens, ModelType.Embedding, WorkerType.Aggregated, False),
+    ],
+)
+def test_vllm_generate_capability_publication(
+    model_input, model_type, worker_type, expected
+):
+    runtime_config = SimpleNamespace(set_engine_specific=Mock())
+
+    published = publish_engine_generate_capability(
+        runtime_config, model_input, model_type, worker_type
+    )
+
+    assert published is expected
+    if expected:
+        runtime_config.set_engine_specific.assert_called_once_with(
+            VLLM_GENERATE_CAPABILITY, json.dumps(True)
+        )
+    else:
+        runtime_config.set_engine_specific.assert_not_called()
 
 
 def test_spec_decode_runtime_data_falls_back_to_engine_args_json():

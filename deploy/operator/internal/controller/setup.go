@@ -14,7 +14,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/scale"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
@@ -31,7 +30,6 @@ type DynamoComponentDeploymentSetupOptions struct {
 type DynamoGraphDeploymentSetupOptions struct {
 	SetupOptions
 	DockerSecretRetriever DockerSecretRetriever
-	ScaleClient           scale.ScalesGetter
 	RBACManager           RBACManager
 	SSHKeyManager         *secret.SSHKeyManager
 }
@@ -74,7 +72,7 @@ func (o DynamoModelSetupOptions) modelEndpointClient() *modelendpoint.Client {
 func SetupDynamoComponentDeployment(mgr ctrl.Manager, opts DynamoComponentDeploymentSetupOptions) error {
 	if err := (&DynamoComponentDeploymentReconciler{
 		Client:                mgr.GetClient(),
-		Recorder:              mgr.GetEventRecorderFor("dynamocomponentdeployment"),
+		Recorder:              mgr.GetEventRecorder("dynamocomponentdeployment"),
 		Config:                opts.Config,
 		RuntimeConfig:         opts.RuntimeConfig,
 		DockerSecretRetriever: opts.DockerSecretRetriever,
@@ -87,12 +85,11 @@ func SetupDynamoComponentDeployment(mgr ctrl.Manager, opts DynamoComponentDeploy
 func SetupDynamoGraphDeployment(mgr ctrl.Manager, opts DynamoGraphDeploymentSetupOptions) error {
 	if err := (&DynamoGraphDeploymentReconciler{
 		Client:                mgr.GetClient(),
-		Recorder:              mgr.GetEventRecorderFor("dynamographdeployment"),
+		Recorder:              mgr.GetEventRecorder("dynamographdeployment"),
 		Config:                opts.Config,
 		RuntimeConfig:         opts.RuntimeConfig,
 		RestConfig:            mgr.GetConfig(),
 		DockerSecretRetriever: opts.DockerSecretRetriever,
-		ScaleClient:           opts.ScaleClient,
 		SSHKeyManager:         opts.SSHKeyManager,
 		RBACManager:           opts.RBACManager,
 	}).SetupWithManager(mgr); err != nil {
@@ -105,7 +102,7 @@ func SetupDynamoGraphDeploymentScalingAdapter(mgr ctrl.Manager, opts SetupOption
 	if err := (&DynamoGraphDeploymentScalingAdapterReconciler{
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
-		Recorder:      mgr.GetEventRecorderFor("dgdscalingadapter"),
+		Recorder:      mgr.GetEventRecorder("dgdscalingadapter"),
 		Config:        opts.Config,
 		RuntimeConfig: opts.RuntimeConfig,
 	}).SetupWithManager(mgr); err != nil {
@@ -118,7 +115,7 @@ func SetupDynamoGraphDeploymentRequest(mgr ctrl.Manager, opts DynamoGraphDeploym
 	if err := (&DynamoGraphDeploymentRequestReconciler{
 		Client:                  mgr.GetClient(),
 		APIReader:               mgr.GetAPIReader(),
-		Recorder:                mgr.GetEventRecorderFor("dynamographdeploymentrequest"),
+		Recorder:                mgr.GetEventRecorder("dynamographdeploymentrequest"),
 		Config:                  opts.Config,
 		RuntimeConfig:           opts.RuntimeConfig,
 		GPUDiscoveryCache:       opts.gpuDiscoveryCache(),
@@ -135,7 +132,7 @@ func SetupDynamoGraphDeploymentRequest(mgr ctrl.Manager, opts DynamoGraphDeploym
 func SetupDynamoModel(mgr ctrl.Manager, opts DynamoModelSetupOptions) error {
 	if err := (&DynamoModelReconciler{
 		Client:         mgr.GetClient(),
-		Recorder:       mgr.GetEventRecorderFor("dynamomodel"),
+		Recorder:       mgr.GetEventRecorder("dynamomodel"),
 		EndpointClient: opts.modelEndpointClient(),
 		Config:         opts.Config,
 		RuntimeConfig:  opts.RuntimeConfig,
@@ -145,26 +142,17 @@ func SetupDynamoModel(mgr ctrl.Manager, opts DynamoModelSetupOptions) error {
 	return nil
 }
 
+// SetupDynamoCheckpoint always registers the reconciler so existing checkpoint finalizers can
+// converge when Checkpoint is disabled. CheckpointReconciler.SetupWithManager omits the external
+// PodSnapshot watch unless the resolved Checkpoint gate is enabled.
 func SetupDynamoCheckpoint(mgr ctrl.Manager, opts SetupOptions) error {
 	if err := (&CheckpointReconciler{
 		Client:        mgr.GetClient(),
 		Config:        opts.Config,
 		RuntimeConfig: opts.RuntimeConfig,
-		Recorder:      mgr.GetEventRecorderFor("checkpoint"),
+		Recorder:      mgr.GetEventRecorder("checkpoint"),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoCheckpoint controller: %w", err)
-	}
-	return nil
-}
-
-func SetupPodSnapshot(mgr ctrl.Manager, opts SetupOptions) error {
-	if err := (&PodSnapshotReconciler{
-		Client:        mgr.GetClient(),
-		Config:        opts.Config,
-		RuntimeConfig: opts.RuntimeConfig,
-		Recorder:      mgr.GetEventRecorderFor("snapshot"),
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create PodSnapshot controller: %w", err)
 	}
 	return nil
 }
@@ -172,7 +160,7 @@ func SetupPodSnapshot(mgr ctrl.Manager, opts SetupOptions) error {
 func SetupFailoverCascade(mgr ctrl.Manager) error {
 	if err := (&failoverCascadeReconciler{
 		Client:   mgr.GetClient(),
-		recorder: mgr.GetEventRecorderFor("gms-failover-cascade"),
+		recorder: mgr.GetEventRecorder("gms-failover-cascade"),
 	}).setupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create failover cascade controller: %w", err)
 	}
@@ -196,7 +184,7 @@ func SetupTopologyLabel(mgr ctrl.Manager, opts SetupOptions) error {
 		NodeReader:    mgr.GetAPIReader(),
 		Config:        opts.Config,
 		RuntimeConfig: opts.RuntimeConfig,
-		Recorder:      mgr.GetEventRecorderFor("topology-label"),
+		Recorder:      mgr.GetEventRecorder("topology-label"),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create TopologyLabel controller: %w", err)
 	}

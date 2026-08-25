@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine as _FakeRoutedEngine
+from _thinking_parity import THINKING_PARITY_CASES
 from _tool_guidance_parity import (
     TOOL_GUIDANCE_PARITY_CASES,
     assistant_response_format,
@@ -22,10 +23,14 @@ from _tool_guidance_parity import (
     tool_choice_value,
 )
 from transformers import AutoTokenizer
-from vllm.sampling_params import StructuredOutputsParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
 from dynamo.frontend import prepost as prepost_module
-from dynamo.frontend.prepost import _prepare_request, build_tool_call_guided_decoding
+from dynamo.frontend.prepost import (
+    StreamingPostProcessor,
+    _prepare_request,
+    build_tool_call_guided_decoding,
+)
 from dynamo.llm.exceptions import InvalidArgument
 
 # NOTE: dynamo.frontend.vllm_processor is imported lazily inside the tests that
@@ -92,6 +97,301 @@ TOOL_REQUEST = {
         }
     ],
 }
+
+
+class TestDynamoJsonToolCallFallback:
+    """Dynamo's forced-choice JSON fallback must emit OpenAI tool calls."""
+
+    def _post_processor(
+        self,
+        tokenizer,
+        *,
+        tool_choice,
+        stream_response,
+        parallel_tool_calls=None,
+        tool_parameters=None,
+    ):
+        request = json.loads(json.dumps(TOOL_REQUEST))
+        request["tool_choice"] = tool_choice
+        if parallel_tool_calls is not None:
+            request["parallel_tool_calls"] = parallel_tool_calls
+        if tool_parameters is not None:
+            request["tools"][0]["function"]["parameters"] = tool_parameters
+        request, _, _, _, _ = _prepare_request(
+            request,
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        return StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=request,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=[],
+            tool_parser=None,
+            reasoning_parser_class=None,
+            chat_template_kwargs={},
+            stream_response=stream_response,
+            uses_dynamo_json_tool_call_fallback=True,
+        )
+
+    def test_streaming_required_choice_converts_json_to_tool_calls(self, tokenizer):
+        post = self._post_processor(
+            tokenizer, tool_choice="required", stream_response=True
+        )
+
+        assert (
+            post.process_output(
+                SimpleNamespace(
+                    index=0,
+                    text='[{"name":"get_weather","parameters":',
+                    token_ids=[],
+                    finish_reason=None,
+                    logprobs=None,
+                )
+            )
+            is None
+        )
+
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text='{"city":"Paris"}}]',
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice["finish_reason"] == "tool_calls"
+        assert "content" not in choice["delta"]
+        tool_call = choice["delta"]["tool_calls"][0]
+        assert tool_call["function"] == {
+            "name": "get_weather",
+            "arguments": '{"city":"Paris"}',
+        }
+
+    def test_non_streaming_named_choice_converts_json_to_tool_calls(self, tokenizer):
+        post = self._post_processor(
+            tokenizer,
+            tool_choice={
+                "type": "function",
+                "function": {"name": "get_weather"},
+            },
+            stream_response=False,
+        )
+
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text='{"city":"Paris"}',
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice["finish_reason"] == "tool_calls"
+        assert "content" not in choice["delta"]
+        assert choice["delta"]["tool_calls"][0]["function"] == {
+            "name": "get_weather",
+            "arguments": '{"city":"Paris"}',
+        }
+
+    def test_invalid_fallback_output_is_returned_as_content(self, tokenizer):
+        post = self._post_processor(
+            tokenizer, tool_choice="required", stream_response=True
+        )
+
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text='[{"name":"get_weather","parameters":',
+                token_ids=[],
+                finish_reason="length",
+                logprobs=None,
+            )
+        )
+
+        assert choice["finish_reason"] == "length"
+        assert choice["delta"] == {
+            "role": "assistant",
+            "content": '[{"name":"get_weather","parameters":',
+        }
+
+    def test_multiple_fallback_tool_calls_respect_parallel_setting(self, tokenizer):
+        post = self._post_processor(
+            tokenizer,
+            tool_choice="required",
+            stream_response=False,
+            parallel_tool_calls=False,
+        )
+        text = (
+            '[{"name":"get_weather","parameters":{"city":"Paris"}},'
+            '{"name":"get_weather","parameters":{"city":"London"}}]'
+        )
+
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=text,
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice["finish_reason"] == "stop"
+        assert choice["delta"] == {"role": "assistant", "content": text}
+
+    def test_non_finite_fallback_arguments_are_returned_as_content(self, tokenizer):
+        post = self._post_processor(
+            tokenizer, tool_choice="required", stream_response=False
+        )
+        text = '[{"name":"get_weather","parameters":{"temperature":NaN}}]'
+
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=text,
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice is not None
+        assert choice["finish_reason"] == "stop"
+        assert choice["delta"] == {"role": "assistant", "content": text}
+
+    def test_invalid_fallback_does_not_leave_partial_tool_state(self, tokenizer):
+        post = self._post_processor(
+            tokenizer, tool_choice="required", stream_response=False
+        )
+        text = (
+            '[{"name":"get_weather","parameters":{"city":"Paris"}},'
+            '{"name":"unknown","parameters":{}}]'
+        )
+
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=text,
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice is not None
+        assert choice["finish_reason"] == "stop"
+        assert choice["delta"] == {"role": "assistant", "content": text}
+        assert post.in_progress_tool_calls == {}
+
+    def test_named_choice_accepts_array_arguments(self, tokenizer):
+        post = self._post_processor(
+            tokenizer,
+            tool_choice={
+                "type": "function",
+                "function": {"name": "get_weather"},
+            },
+            stream_response=False,
+            tool_parameters={"type": "array", "items": {"type": "string"}},
+        )
+
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text='["Paris","Seoul"]',
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice is not None
+        assert choice["delta"]["tool_calls"][0]["function"]["arguments"] == (
+            '["Paris","Seoul"]'
+        )
+
+    def test_required_choice_accepts_null_arguments(self, tokenizer):
+        post = self._post_processor(
+            tokenizer,
+            tool_choice="required",
+            stream_response=False,
+            tool_parameters={"type": "null"},
+        )
+
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text='[{"name":"get_weather","parameters":null}]',
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice is not None
+        assert choice["delta"]["tool_calls"][0]["function"]["arguments"] == "null"
+
+    def test_missing_parameters_are_returned_as_content(self, tokenizer):
+        post = self._post_processor(
+            tokenizer, tool_choice="required", stream_response=False
+        )
+        text = '[{"name":"get_weather"}]'
+
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=text,
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice is not None
+        assert choice["delta"] == {"role": "assistant", "content": text}
+
+    def test_streaming_choices_keep_independent_json_buffers(self, tokenizer):
+        post = self._post_processor(
+            tokenizer, tool_choice="required", stream_response=True
+        )
+
+        for index in (0, 1):
+            assert (
+                post.process_output(
+                    SimpleNamespace(
+                        index=index,
+                        text='[{"name":"get_weather","parameters":{"city":"',
+                        token_ids=[],
+                        finish_reason=None,
+                        logprobs=None,
+                    )
+                )
+                is None
+            )
+
+        choices = [
+            post.process_output(
+                SimpleNamespace(
+                    index=index,
+                    text=f'{city}"}}}}]',
+                    token_ids=[],
+                    finish_reason="stop",
+                    logprobs=None,
+                )
+            )
+            for index, city in ((1, "Seoul"), (0, "Paris"))
+        ]
+
+        for choice, (index, city) in zip(choices, ((1, "Seoul"), (0, "Paris"))):
+            assert choice is not None
+            assert choice["index"] == index
+            assert choice["finish_reason"] == "tool_calls"
+            assert choice["delta"]["tool_calls"][0]["function"]["arguments"] == (
+                f'{{"city":"{city}"}}'
+            )
 
 
 @pytest.fixture(scope="module")
@@ -465,6 +765,105 @@ async def test_prepare_mm_routing_skips_single_modality_transfer_for_mixed_featu
 
 
 @pytest.mark.asyncio
+async def test_prepare_mm_routing_does_not_forward_hashes_without_exact_routing(
+    vllm_processor_module,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "build_mm_routing_info_from_features",
+        lambda *_, **__: None,
+    )
+
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+    processor.block_size = 16
+    processor.nixl_mm_enabled = False
+    processor.use_shm_transfer = True
+    processor._sender = None
+
+    vllm_preproc = SimpleNamespace(
+        prompt_token_ids=list(range(16)),
+        mm_features=[
+            SimpleNamespace(
+                modality="image",
+                mm_hash="a" * 64,
+                data=object(),
+                mm_position=SimpleNamespace(offset=0, length=16),
+            )
+        ],
+    )
+    dynamo_preproc = {}
+
+    mm_routing_info, cleanup_items, transferred = await processor._prepare_mm_routing(
+        vllm_preproc,
+        dynamo_preproc,
+    )
+
+    assert mm_routing_info is None
+    assert cleanup_items == []
+    assert transferred is False
+    assert "mm_hashes" not in dynamo_preproc["extra_args"]
+    assert "mm_hashes_by_modality" not in dynamo_preproc["extra_args"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_mm_routing_processor_kwargs_keep_transfer_but_skip_exact_routing(
+    vllm_processor_module,
+    monkeypatch,
+):
+    def fail_routing(*args, **kwargs):
+        raise AssertionError("processor kwargs must disable exact MM routing")
+
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "build_mm_routing_info_from_features",
+        fail_routing,
+    )
+
+    processor = vllm_processor_module.VllmProcessor.__new__(
+        vllm_processor_module.VllmProcessor
+    )
+    processor.block_size = 16
+    processor.nixl_mm_enabled = True
+    processor.use_shm_transfer = True
+    processor._sender = SimpleNamespace(
+        prepare=AsyncMock(
+            return_value=({"mm_kwargs_shm": {"modality": "image"}}, ["cleanup"])
+        )
+    )
+
+    vllm_preproc = SimpleNamespace(
+        prompt_token_ids=list(range(16)),
+        mm_features=[
+            SimpleNamespace(
+                modality="image",
+                mm_hash="a" * 64,
+                data=object(),
+                mm_position=SimpleNamespace(offset=0, length=16),
+            )
+        ],
+    )
+    dynamo_preproc = {}
+
+    mm_routing_info, cleanup_items, transferred = await processor._prepare_mm_routing(
+        vllm_preproc,
+        dynamo_preproc,
+        mm_processor_kwargs={"max_pixels": 4096},
+    )
+
+    assert mm_routing_info is None
+    assert cleanup_items == ["cleanup"]
+    assert transferred is True
+    assert "mm_hashes" not in dynamo_preproc["extra_args"]
+    assert "mm_hashes_by_modality" not in dynamo_preproc["extra_args"]
+    assert dynamo_preproc["extra_args"]["mm_kwargs_shm"] == {"modality": "image"}
+    assert dynamo_preproc["extra_args"]["mm_placeholders"] == [(0, 16)]
+    assert dynamo_preproc["extra_args"]["expanded_token_ids"] == list(range(16))
+
+
+@pytest.mark.asyncio
 @pytest.mark.multimodal
 async def test_prepare_mm_routing_opaque_uuid_skips_routing_and_transfer(
     vllm_processor_module,
@@ -521,31 +920,42 @@ class TestReasoningParserMetadata:
     def test_no_reasoning_parser_returns_none(self):
         from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
 
-        assert _build_reasoning_parser_metadata(
+        metadata = _build_reasoning_parser_metadata(
             None,
             object(),
             {},
             SimpleNamespace(include_reasoning=True),
             [1, 2, 3],
-        ) == (None, None)
+        )
 
-    def test_include_reasoning_false_marks_reasoning_ended(self):
+        assert metadata.engine_reasoning_ended is None
+        assert metadata.response_reasoning_ended is None
+        assert metadata.parser_kwargs is None
+
+    def test_include_reasoning_false_only_marks_engine_reasoning_ended(self):
         from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
 
-        class ParserShouldNotBeBuilt:
-            def __init__(self, *args, **kwargs):
-                raise AssertionError("parser should not be constructed")
+        class FakeReasoningParser:
+            def __init__(self, tokenizer, *, chat_template_kwargs):
+                self.tokenizer = tokenizer
+                self.chat_template_kwargs = chat_template_kwargs
 
-        reasoning_ended, parser_kwargs = _build_reasoning_parser_metadata(
-            ParserShouldNotBeBuilt,
+            def is_reasoning_end(self, prompt_token_ids):
+                return prompt_token_ids == [9, 9]
+
+        metadata = _build_reasoning_parser_metadata(
+            FakeReasoningParser,
             object(),
             {"reasoning_effort": "low"},
             SimpleNamespace(include_reasoning=False),
             [1, 2, 3],
         )
 
-        assert reasoning_ended is True
-        assert parser_kwargs == {"chat_template_kwargs": {"reasoning_effort": "low"}}
+        assert metadata.engine_reasoning_ended is True
+        assert metadata.response_reasoning_ended is False
+        assert metadata.parser_kwargs == {
+            "chat_template_kwargs": {"reasoning_effort": "low"}
+        }
 
     def test_parser_receives_chat_template_kwargs(self):
         from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
@@ -559,7 +969,7 @@ class TestReasoningParserMetadata:
                 return prompt_token_ids == [9, 9]
 
         tokenizer = object()
-        reasoning_ended, parser_kwargs = _build_reasoning_parser_metadata(
+        metadata = _build_reasoning_parser_metadata(
             FakeReasoningParser,
             tokenizer,
             {"reasoning_effort": "high"},
@@ -567,8 +977,11 @@ class TestReasoningParserMetadata:
             [9, 9],
         )
 
-        assert reasoning_ended is True
-        assert parser_kwargs == {"chat_template_kwargs": {"reasoning_effort": "high"}}
+        assert metadata.engine_reasoning_ended is True
+        assert metadata.response_reasoning_ended is True
+        assert metadata.parser_kwargs == {
+            "chat_template_kwargs": {"reasoning_effort": "high"}
+        }
 
     def test_kv_router_copies_reasoning_metadata_to_extra_args(self):
         from dynamo.frontend.vllm_processor import _inject_routing_metadata
@@ -743,7 +1156,7 @@ async def test_generator_preserves_zero_top_logprobs(
     caplog,
 ):
     class RequestForSampling(SimpleNamespace):
-        model_fields = {}
+        model_fields = frozenset()
 
     monkeypatch.setattr(
         vllm_processor_module,
@@ -804,6 +1217,166 @@ async def test_generator_preserves_zero_top_logprobs(
         "Logprobs requested but not supported in distributed inference mode"
         in caplog.messages
     )
+
+
+@pytest.mark.asyncio
+async def test_include_reasoning_false_keeps_response_parser_active(
+    vllm_processor_module,
+    monkeypatch,
+):
+    class RequestForSampling(SimpleNamespace):
+        model_fields = frozenset()
+
+    class FakeReasoningParser:
+        engine_based_streaming = False
+
+        def __init__(self, tokenizer, *, chat_template_kwargs):
+            self.tokenizer = tokenizer
+            self.chat_template_kwargs = chat_template_kwargs
+            self.adjusted_prompt_token_ids = None
+
+        def is_reasoning_end(self, prompt_token_ids):
+            return False
+
+        def adjust_initial_state_from_prompt(self, prompt_token_ids):
+            self.adjusted_prompt_token_ids = prompt_token_ids
+
+        def extract_reasoning_streaming(
+            self,
+            previous_text,
+            current_text,
+            delta_text,
+            previous_token_ids,
+            current_token_ids,
+            delta_token_ids,
+        ):
+            if "</think>" in delta_text:
+                return prepost_module.DeltaMessage(
+                    reasoning="hidden tail",
+                    content="visible answer",
+                )
+            return prepost_module.DeltaMessage(reasoning="hidden reasoning")
+
+        def is_reasoning_end_streaming(self, current_token_ids, delta_token_ids):
+            return 3 in delta_token_ids
+
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "preprocess_chat_request",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                request_for_sampling=RequestForSampling(
+                    max_completion_tokens=None,
+                    max_tokens=1,
+                    logprobs=None,
+                    top_logprobs=None,
+                    cache_salt=None,
+                    mm_processor_kwargs=None,
+                    include_reasoning=False,
+                ),
+                tool_parser=None,
+                chat_template_kwargs={"reasoning_effort": "low"},
+                engine_prompt={"prompt": "Hello"},
+                prompt_token_ids=[1],
+                guided_decoding=None,
+                uses_dynamo_json_tool_call_fallback=False,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        vllm_processor_module.InputProcessor,
+        "assign_request_id",
+        lambda request: None,
+    )
+
+    def process_inputs(request_id, engine_inputs, sampling_params, supported_tasks):
+        return SimpleNamespace(sampling_params=sampling_params, mm_features=None)
+
+    input_processor = SimpleNamespace(
+        generation_config_fields={},
+        renderer=SimpleNamespace(process_for_engine_async=AsyncMock(return_value={})),
+        process_inputs=process_inputs,
+    )
+    processor = vllm_processor_module.VllmProcessor(
+        tokenizer=SimpleNamespace(eos_token_id=2, all_special_tokens=[]),
+        input_processor=input_processor,
+        output_processor=object(),
+        tool_parser_class=None,
+        reasoning_parser_class=FakeReasoningParser,
+        routed_engine=object(),
+    )
+    monkeypatch.setattr(
+        processor,
+        "_prepare_mm_routing",
+        AsyncMock(return_value=(None, [], False)),
+    )
+
+    captured = {}
+
+    async def capture_generate_and_stream(
+        request_id,
+        request,
+        dynamo_preproc,
+        tokens,
+        vllm_preproc,
+        post_processors,
+        *,
+        mm_routing_info,
+        context,
+    ):
+        captured["dynamo_preproc"] = dynamo_preproc
+        captured["post_processor"] = post_processors[0]
+        yield {"captured": True}
+
+    monkeypatch.setattr(
+        processor,
+        "_generate_and_stream",
+        capture_generate_and_stream,
+    )
+
+    results = [
+        item
+        async for item in processor._generator_inner(
+            {
+                "model": "test",
+                "messages": [{"role": "user", "content": "Hello"}],
+            }
+        )
+    ]
+
+    assert results == [{"captured": True}]
+    assert captured["dynamo_preproc"]["reasoning_ended"] is True
+    post_processor = captured["post_processor"]
+    assert post_processor.reasoning_is_done is False
+    assert isinstance(post_processor.reasoning_parser, FakeReasoningParser)
+    assert post_processor.reasoning_parser.adjusted_prompt_token_ids == [1]
+
+    reasoning_choice = post_processor.process_output(
+        SimpleNamespace(
+            index=0,
+            text="<think>hidden reasoning",
+            token_ids=[2],
+            finish_reason=None,
+            logprobs={"tokens": ["hidden"]},
+        )
+    )
+    assert reasoning_choice is None
+
+    content_choice = post_processor.process_output(
+        SimpleNamespace(
+            index=0,
+            text="</think>visible answer",
+            token_ids=[3],
+            finish_reason="stop",
+            logprobs={"tokens": ["hidden", "visible"]},
+        )
+    )
+    assert content_choice == {
+        "index": 0,
+        "delta": {"role": "assistant", "content": "visible answer"},
+        "finish_reason": "stop",
+        "logprobs": None,
+    }
 
 
 def _make_processor(module, routed_engine):
@@ -1180,6 +1753,20 @@ class TestToolCallGuidedDecoding:
         assert set(guided) == {"json"}
         assert parser.requests == []
 
+    def test_required_choice_disables_parallel_calls_in_json_guidance(self, tokenizer):
+        guided = build_tool_call_guided_decoding(
+            self._request(
+                tokenizer,
+                tool_choice="required",
+                parallel_tool_calls=False,
+            ),
+            tool_parser=None,
+        )
+
+        assert guided is not None
+        assert guided["json"]["type"] == "array"
+        assert guided["json"]["maxItems"] == 1
+
     # Parsers that require native tool syntax must not get a forced JSON schema.
     @pytest.mark.parametrize(
         "tool_choice",
@@ -1247,6 +1834,62 @@ class TestToolCallGuidedDecoding:
         )
 
         assert result.guided_decoding == {"grammar": 'root ::= "<tool_call>"'}
+        assert result.uses_dynamo_json_tool_call_fallback is False
+
+    @pytest.mark.parametrize(
+        "tool_parser_class",
+        [None, _FakePassthroughToolParser],
+        ids=["no-parser", "parser-without-guidance"],
+    )
+    @pytest.mark.asyncio
+    async def test_generic_json_guidance_enables_matching_postprocessor(
+        self, tokenizer, tool_parser_class
+    ):
+        result = await prepost_module.preprocess_chat_request(
+            {**TOOL_REQUEST, "tool_choice": "required"},
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1]})
+                )
+            ),
+            tool_parser_class=tool_parser_class,
+            structural_tag_mode="off",
+        )
+
+        assert result.guided_decoding is not None
+        assert set(result.guided_decoding) == {"json"}
+        assert result.uses_dynamo_json_tool_call_fallback is True
+
+        post = StreamingPostProcessor(
+            tokenizer=tokenizer,
+            request_for_sampling=result.request_for_sampling,
+            sampling_params=SamplingParams(),
+            prompt_token_ids=result.prompt_token_ids,
+            tool_parser=result.tool_parser,
+            reasoning_parser_class=None,
+            chat_template_kwargs=result.chat_template_kwargs,
+            stream_response=False,
+            uses_dynamo_json_tool_call_fallback=(
+                result.uses_dynamo_json_tool_call_fallback
+            ),
+        )
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text='[{"name":"get_weather","parameters":{"city":"Paris"}}]',
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+
+        assert choice is not None
+        assert choice["finish_reason"] == "tool_calls"
+        assert choice["delta"]["tool_calls"][0]["function"] == {
+            "name": "get_weather",
+            "arguments": '{"city":"Paris"}',
+        }
 
     # Explicit assistant constraints must override automatic tool-call guidance.
     @pytest.mark.parametrize(
@@ -1402,6 +2045,56 @@ class TestToolCallGuidedDecoding:
                 tool_parser_class=_FakePassthroughToolParser,
                 structural_tag_mode="on",
             )
+
+    # On the DYN_VLLM_SKIP_REQUEST_VALIDATION fast path, an already-typed `tools`
+    # list means the request is never re-validated, so `tool_choice` stays a raw
+    # dict. vLLM branches on the typed named param: get_json_schema_from_tools
+    # returns None for a dict (no constraint at all) and get_structural_tag raises
+    # AttributeError on .model_dump(). Normalize once at the validation boundary.
+    def _fast_path_named_request(self, tokenizer):
+        typed_tools = _prepare_request(
+            TOOL_REQUEST, tokenizer=tokenizer, tool_parser_class=None
+        )[0].tools
+        return prepost_module._validate_chat_completion_request(
+            {
+                **TOOL_REQUEST,
+                "tools": typed_tools,
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_weather"},
+                },
+            }
+        )
+
+    def test_raw_named_tool_choice_is_normalized_at_the_boundary(self, tokenizer):
+        request = self._fast_path_named_request(tokenizer)
+        assert not isinstance(request.tool_choice, dict)
+        assert request.tool_choice.function.name == "get_weather"
+
+    def test_normalized_named_choice_still_builds_json_schema(self, tokenizer):
+        guided = build_tool_call_guided_decoding(
+            self._fast_path_named_request(tokenizer), None
+        )
+        assert guided is not None, "named forced choice must still be constrained"
+        assert "json" in guided
+
+    def test_normalized_named_choice_does_not_break_structural_tag(self, tokenizer):
+        # Regression: a raw dict reached vLLM's structural-tag registry and raised
+        # AttributeError on .model_dump(), surfacing as a 500 rather than a
+        # constraint. Uses the REAL hermes parser -- a fake never reaches the
+        # registry, so it cannot reproduce this.
+        from vllm.tool_parsers import ToolParserManager
+
+        hermes_cls = ToolParserManager.get_tool_parser("hermes")
+        request = self._fast_path_named_request(tokenizer)
+        parser = hermes_cls(tokenizer, request.tools)
+
+        guided = build_tool_call_guided_decoding(
+            request, parser, structural_tag_mode="on"
+        )
+
+        assert guided is not None
+        assert "structural_tag" in guided
 
     # A malformed tool_choice object is not a named tool choice, so it must not be
     # treated as forced and must not trigger the forced-choice conflict check.
@@ -1830,3 +2523,19 @@ def test_ensure_chat_template_preserves_existing_hf_template(
     vllm_processor_module._ensure_chat_template(tokenizer, str(tmp_path), None)
 
     assert tokenizer.chat_template == existing
+
+
+class TestThinkingControlParity:  # FRONTEND.10
+    # Keep vLLM's thinking kwargs aligned with the shared backend matrix.
+    @pytest.mark.parametrize("case", THINKING_PARITY_CASES, ids=lambda case: case.name)
+    def test_shared_thinking_policy(self, tokenizer, case):
+        _, _, kwargs, _, _ = _prepare_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                **case.request,
+            },
+            tokenizer=tokenizer,
+            tool_parser_class=None,
+        )
+        assert kwargs == case.expected

@@ -67,8 +67,8 @@ spec:
             runAsUser: 0
             capabilities:
               add: ["IPC_LOCK", "SYS_RESOURCE"]
-          # vllm-rs has no gRPC health method (see agg.yaml), so these probes only
-          # confirm the port accepts a connection. readiness drops a dead engine.
+          # The socket probes cover container lifecycle. The Dynamo sidecar also
+          # checks both services through the standard gRPC health API.
           startupProbe:
             exec:
               command:
@@ -137,8 +137,6 @@ spec:
           args:
           - --vllm-endpoint
           - 127.0.0.1:50051
-          - --model-path
-          - Qwen/Qwen3-0.6B
           - --disaggregation-mode
           - prefill
           envFrom:
@@ -163,8 +161,8 @@ spec:
             runAsUser: 0
             capabilities:
               add: ["IPC_LOCK", "SYS_RESOURCE"]
-          # vllm-rs has no gRPC health method (see agg.yaml), so these probes only
-          # confirm the port accepts a connection. readiness drops a dead engine.
+          # The socket probes cover container lifecycle. The Dynamo sidecar also
+          # checks both services through the standard gRPC health API.
           startupProbe:
             exec:
               command:
@@ -230,8 +228,6 @@ spec:
           args:
           - --vllm-endpoint
           - 127.0.0.1:50051
-          - --model-path
-          - Qwen/Qwen3-0.6B
           - --disaggregation-mode
           - decode
           envFrom:

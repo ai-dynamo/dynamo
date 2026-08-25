@@ -74,6 +74,7 @@ struct FunctionCallState {
     item_id: String,
     call_id: String,
     name: String,
+    namespace: Option<String>,
     accumulated_args: String,
     pending_arg_deltas: Vec<String>,
     output_index: Option<u32>,
@@ -390,7 +391,17 @@ impl ResponseStreamConverter {
 
             // Handle tool call deltas
             if let Some(tool_calls) = &delta.tool_calls {
-                if !tool_calls.is_empty() {
+                // Match the chat-completions post-parse fallback: when the
+                // caller disables parallel tool calls, retain only tool-call
+                // index 0. Filter before starting the reasoning boundary or
+                // allocating converter state so suppressed calls cannot emit
+                // any Responses API events at finish or EOF.
+                let enforce_single_tool_call = self.params.parallel_tool_calls == Some(false);
+                let mut tool_calls = tool_calls
+                    .iter()
+                    .filter(|tc| !enforce_single_tool_call || tc.index == 0)
+                    .peekable();
+                if tool_calls.peek().is_some() {
                     // Starting a tool call is also an explicit reasoning phase
                     // boundary, independent of this chunk's finish reason.
                     self.append_reasoning_done_events(events, OutputStatus::Completed);
@@ -404,6 +415,7 @@ impl ResponseStreamConverter {
                             item_id: format!("fc_{}", Uuid::new_v4().simple()),
                             call_id: String::new(),
                             name: String::new(),
+                            namespace: None,
                             accumulated_args: String::new(),
                             pending_arg_deltas: Vec::new(),
                             output_index: None,
@@ -419,6 +431,8 @@ impl ResponseStreamConverter {
                     if let Some(func) = &tc.function {
                         if let Some(name) = &func.name {
                             self.function_call_items[tc_index].name = name.clone();
+                            self.function_call_items[tc_index].namespace =
+                                self.params.namespace_for_function(name);
                         }
                         if let Some(args) = &func.arguments {
                             self.function_call_items[tc_index]
@@ -456,6 +470,7 @@ impl ResponseStreamConverter {
                                 state.item_id.clone(),
                                 state.call_id.clone(),
                                 state.name.clone(),
+                                state.namespace.clone(),
                                 output_index,
                             ))
                         } else {
@@ -475,7 +490,7 @@ impl ResponseStreamConverter {
                         )
                     };
 
-                    if let Some((item_id, call_id, name, output_index)) = item_added {
+                    if let Some((item_id, call_id, name, namespace, output_index)) = item_added {
                         let item_added = ResponseStreamEvent::ResponseOutputItemAdded(
                             ResponseOutputItemAddedEvent {
                                 sequence_number: self.next_seq(),
@@ -483,7 +498,7 @@ impl ResponseStreamConverter {
                                 item: OutputItem::FunctionCall(FunctionToolCall {
                                     id: Some(item_id),
                                     call_id,
-                                    namespace: None,
+                                    namespace,
                                     name,
                                     arguments: String::new(),
                                     status: Some(OutputStatus::InProgress),
@@ -595,15 +610,16 @@ impl ResponseStreamConverter {
                     fc.item_id.clone(),
                     fc.call_id.clone(),
                     fc.name.clone(),
+                    fc.namespace.clone(),
                     fc.output_index
                         .expect("started function call is missing an output index"),
                     fc.accumulated_args.clone(),
                 )
             })
             .collect();
-        pending.sort_unstable_by_key(|(_, _, _, output_index, _)| *output_index);
+        pending.sort_unstable_by_key(|(_, _, _, _, output_index, _)| *output_index);
 
-        for (item_id, call_id, fc_name, output_index, accumulated_args) in pending {
+        for (item_id, call_id, fc_name, namespace, output_index, accumulated_args) in pending {
             let args_done = ResponseStreamEvent::ResponseFunctionCallArgumentsDone(
                 ResponseFunctionCallArgumentsDoneEvent {
                     sequence_number: self.next_seq(),
@@ -622,7 +638,7 @@ impl ResponseStreamConverter {
                     item: OutputItem::FunctionCall(FunctionToolCall {
                         id: Some(item_id),
                         call_id,
-                        namespace: None,
+                        namespace,
                         name: fc_name,
                         arguments: accumulated_args,
                         status: Some(output_status),
@@ -688,7 +704,7 @@ impl ResponseStreamConverter {
                     OutputItem::FunctionCall(FunctionToolCall {
                         id: Some(function_call.item_id.clone()),
                         call_id: function_call.call_id.clone(),
-                        namespace: None,
+                        namespace: function_call.namespace.clone(),
                         name: function_call.name.clone(),
                         arguments: function_call.accumulated_args.clone(),
                         status: Some(output_status),
@@ -1363,6 +1379,49 @@ mod tests {
     }
 
     #[test]
+    fn test_function_call_preserves_namespace() {
+        let params = ResponseParams {
+            tools: Some(
+                serde_json::from_value(serde_json::json!([{
+                    "type": "namespace",
+                    "name": "agents",
+                    "description": "Subagent tools",
+                    "tools": [{"type": "function", "name": "spawn_agent"}],
+                }]))
+                .unwrap(),
+            ),
+            ..default_params()
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+        let added_events = conv.process_chunk(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("spawn_agent"),
+            Some(r#"{"agent_type":"worker"}"#),
+        ));
+        let done_events = conv.process_chunk(&finish_chunk(FinishReason::ToolCalls));
+
+        for (events, expected_type) in [
+            (&added_events, "response.output_item.added"),
+            (&done_events, "response.output_item.done"),
+        ] {
+            let event = events
+                .iter()
+                .find(|event| event_type(event) == expected_type)
+                .unwrap();
+            assert!(
+                format!("{event:?}").contains(r#"\"namespace\":\"agents\""#),
+                "{expected_type} did not preserve the namespace"
+            );
+        }
+
+        let OutputItem::FunctionCall(call) = &conv.completed_output()[0] else {
+            panic!("expected function call");
+        };
+        assert_eq!(call.namespace.as_deref(), Some("agents"));
+    }
+
+    #[test]
     fn test_length_finish_reason_marks_open_tool_call_incomplete() {
         let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
         let _ = conv.process_chunk(&tool_call_chunk(
@@ -1922,6 +1981,55 @@ mod tests {
             0,
             "finish-reason item completion must not repeat at EOF: {end_types:?}"
         );
+    }
+
+    #[test]
+    fn test_parallel_tool_calls_false_emits_only_first_call() {
+        let params = ResponseParams {
+            parallel_tool_calls: Some(false),
+            ..default_params()
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+        let _ = conv.emit_start_events();
+
+        let first_types = event_types(&conv.process_chunk(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("get_weather"),
+            Some("{\"city\":\"SF\"}"),
+        )));
+        assert_eq!(
+            first_types,
+            vec![
+                "response.output_item.added".to_string(),
+                "response.function_call_arguments.delta".to_string(),
+            ]
+        );
+
+        let second_types = event_types(&conv.process_chunk(&tool_call_chunk(
+            1,
+            Some("call-2"),
+            Some("get_time"),
+            Some("{\"tz\":\"PST\"}"),
+        )));
+        assert!(second_types.is_empty());
+
+        let finish_types = event_types(&conv.process_chunk(&finish_chunk(FinishReason::ToolCalls)));
+        assert_eq!(
+            finish_types,
+            vec![
+                "response.function_call_arguments.done".to_string(),
+                "response.output_item.done".to_string(),
+            ]
+        );
+
+        let output = conv.completed_output();
+        assert_eq!(output.len(), 1);
+        let OutputItem::FunctionCall(call) = &output[0] else {
+            panic!("expected function call, got {:?}", output[0]);
+        };
+        assert_eq!(call.call_id, "call-1");
+        assert_eq!(call.name, "get_weather");
     }
 
     #[test]

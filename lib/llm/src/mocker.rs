@@ -34,6 +34,7 @@ use dynamo_mocker::services::bootstrap::{
     ParticipantRegistration, connect_to_prefill,
 };
 use dynamo_mocker::services::zmq_events::ZmqKvEventSink;
+use dynamo_protocols::types::{CompletionUsage, PromptTokensDetails};
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::protocols::annotated::Annotated;
@@ -188,6 +189,29 @@ impl KvCacheEventSink for KvEventSinkAdapter {
         self.0
             .publish_batch_with_storage_tiers(events)
             .map_err(|e| anyhow::anyhow!("Failed to send KV event batch: {}", e))
+    }
+}
+
+/// Cumulative usage snapshot carrying the scheduler's admission cache truth
+/// in `prompt_tokens_details.cached_tokens`.
+fn usage_with_cached_tokens(
+    prompt_tokens: usize,
+    completion_tokens: usize,
+    cached_tokens: usize,
+) -> CompletionUsage {
+    // Saturate rather than panic on pathological token counts.
+    fn to_u32(value: usize) -> u32 {
+        value.try_into().unwrap_or(u32::MAX)
+    }
+    CompletionUsage {
+        prompt_tokens: to_u32(prompt_tokens),
+        completion_tokens: to_u32(completion_tokens),
+        total_tokens: to_u32(prompt_tokens.saturating_add(completion_tokens)),
+        prompt_tokens_details: Some(PromptTokensDetails {
+            audio_tokens: None,
+            cached_tokens: Some(to_u32(cached_tokens)),
+        }),
+        completion_tokens_details: None,
     }
 }
 
@@ -599,7 +623,7 @@ impl MockerExecutionContext {
         Vec<Arc<Semaphore>>,
     )> {
         let args = &self.engine_args;
-        let mut engines = Vec::<LiveEngine>::with_capacity(args.dp_size as usize);
+        let mut engine_configs = Vec::with_capacity(args.dp_size as usize);
         let mut relay_publishers = Vec::with_capacity(args.dp_size as usize);
         let mut handoff_session_permits = Vec::with_capacity(args.dp_size as usize);
 
@@ -684,33 +708,18 @@ impl MockerExecutionContext {
                 None => (KvEventPublishers::default(), None),
             };
 
-            let engine = match LiveEngine::start_with_config(
-                args.clone(),
-                dp_rank,
-                LiveEngineConfig {
-                    kv_event_publishers,
-                    fpm_publisher,
-                },
-            ) {
-                Ok(engine) => engine,
-                Err(error) => {
-                    for engine in &engines {
-                        if let Err(shutdown_error) = engine.shutdown().await {
-                            tracing::error!(
-                                %shutdown_error,
-                                "failed to shut down live Mocker engine after startup error"
-                            );
-                        }
-                    }
-                    return Err(error);
-                }
-            };
-
-            engines.push(engine);
+            engine_configs.push(LiveEngineConfig {
+                kv_event_publishers,
+                fpm_publisher,
+            });
             relay_publishers.push(relay_publisher);
             handoff_session_permits
                 .push(Arc::new(Semaphore::new(args.effective_handoff_capacity())));
         }
+        // One logical worker owns one attention-DP generalized engine. The
+        // returned rank-scoped LiveEngine handles share its single actor and
+        // grouped pass barrier.
+        let engines = LiveEngine::start_grouped_with_configs(args.clone(), engine_configs)?;
         Ok((engines, relay_publishers, handoff_session_permits))
     }
 
@@ -845,6 +854,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             .request_timing(&request.model, dp_rank, is_prefill, request_start)
             .await;
 
+        let prompt_tokens_count = request.token_ids.len();
         // Convert PreprocessedRequest to DirectRequest for scheduler
         let direct_request = DirectRequest {
             tokens: request.token_ids.clone(),
@@ -1004,6 +1014,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // Spawn a task to handle the complex async logic
         let response_task = async move {
             let mut token_count = 0;
+            let mut cached_prefix_tokens: Option<usize> = None;
             let mut source_completion_rx = source_completion_rx;
             let mut source_handoff_complete = source_completion_rx.is_none();
             let mut destination_error_rx = destination_error_rx;
@@ -1092,6 +1103,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             break;
                         }
 
+                        if let Some(cached) = signal.cached_tokens {
+                            cached_prefix_tokens = Some(cached);
+                        }
+
                         // Generate a token (with thinking boundaries if configured)
                         let token_id = if has_planned_output_tokens {
                             signal.token_id.unwrap_or_else(generate_random_token)
@@ -1104,9 +1119,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         };
                         token_count += 1;
 
+                        // The first chunk carries the admission cache truth; the
+                        // final chunk repeats cumulative totals (OpenAI convention).
                         let output = LLMEngineOutput {
                             token_ids: vec![token_id],
                             disaggregated_params: is_prefill.then(|| serde_json::json!("dummy")),
+                            completion_usage: signal.cached_tokens.map(|cached| {
+                                usage_with_cached_tokens(prompt_tokens_count, token_count, cached)
+                            }),
                             ..Default::default()
                         };
 
@@ -1186,13 +1206,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                 }
                             }
 
-                            if !send_response(
-                                &stream_tx,
-                                LLMEngineOutput::length(),
-                                &async_context,
-                            )
-                            .await
-                            {
+                            let mut final_output = LLMEngineOutput::length();
+                            if let Some(cached) = cached_prefix_tokens {
+                                final_output.completion_usage = Some(usage_with_cached_tokens(
+                                    prompt_tokens_count,
+                                    token_count,
+                                    cached,
+                                ));
+                            }
+                            if !send_response(&stream_tx, final_output, &async_context).await {
                                 break;
                             }
                             native_timing.record_normal_completion();
@@ -1248,7 +1270,7 @@ pub async fn make_mocker_engine(
     let engine = Arc::new(MockerExecutionContext::new(args));
     let startup_engine = Arc::clone(&engine);
     let cancel_token = distributed_runtime.primary_token();
-    tokio::spawn(async move {
+    distributed_runtime.runtime().primary().spawn(async move {
         let component = loop {
             if cancel_token.is_cancelled() {
                 tracing::debug!("Mocker engine startup cancelled");
@@ -1382,9 +1404,21 @@ mod tests {
         assert_eq!(token.token_ids.len(), 1);
         assert!(token.finish_reason.is_none());
         assert_eq!(
-            stream.next().await.unwrap().data.unwrap(),
-            LLMEngineOutput::length()
+            token.completion_usage,
+            Some(CompletionUsage {
+                prompt_tokens: 3,
+                completion_tokens: 1,
+                total_tokens: 4,
+                prompt_tokens_details: Some(PromptTokensDetails {
+                    audio_tokens: None,
+                    cached_tokens: Some(0),
+                }),
+                completion_tokens_details: None,
+            })
         );
+        let mut expected_finish = LLMEngineOutput::length();
+        expected_finish.completion_usage = Some(usage_with_cached_tokens(3, 1, 0));
+        assert_eq!(stream.next().await.unwrap().data.unwrap(), expected_finish);
         assert!(stream.next().await.is_none());
     }
 

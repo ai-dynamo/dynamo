@@ -248,6 +248,7 @@ mod tests {
     }
 
     fn stored(worker: WorkerWithDpRank, event_id: u64, hash: u64) -> RouterEvent {
+        const EXTERNAL_MASK: u64 = 0xC1F1_001D_5EED_7788;
         RouterEvent::new(
             worker.worker_id,
             KvCacheEvent {
@@ -256,7 +257,7 @@ mod tests {
                     parent_hash: None,
                     start_position: None,
                     blocks: vec![KvCacheStoredBlockData {
-                        block_hash: ExternalSequenceBlockHash(hash),
+                        block_hash: ExternalSequenceBlockHash(hash ^ EXTERNAL_MASK),
                         tokens_hash: LocalBlockHash(hash),
                         mm_extra_info: None,
                     }],

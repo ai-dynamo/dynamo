@@ -98,6 +98,8 @@ SGLang RadixAttention includes a per-image `pad_value` token in its prefix-cache
 
 The frontend selects this behavior automatically when the worker's `ModelDeploymentCard` reports `backend_framework="sglang"`.
 
+Step 4 needs an SGLang build that accepts `mm_hashes`. Dynamo's SGLang image carries the upstream patch that adds it; a custom build without it is still supported, but Dynamo detects the missing argument when the worker starts and routes on the text prefix alone, so image identity no longer contributes to cache overlap.
+
 Launch an aggregated deployment with multimodal KV routing:
 
 ```bash
@@ -120,7 +122,7 @@ The launcher configures KV events on each worker and sets `--router-mode kv` wit
 The Dynamo SGLang image includes both routing prerequisites:
 
 - Dynamo is built with the `mm-routing` Rust feature.
-- SGLang 0.5.13 or later includes `GenerateReqInput.mm_hashes` support. Dynamo currently pins 0.5.16.
+- SGLang 0.5.13 or later includes `GenerateReqInput.mm_hashes` support. Dynamo currently pins 0.5.17.
 
 Custom installations on SGLang 0.5.12 or earlier need the `mm_hashes` change
 from [sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300).
@@ -549,7 +551,7 @@ Controls how many threads the encoder uses to fetch and load images concurrently
 export SGLANG_ENCODER_MM_LOAD_WORKERS=16
 ```
 
-Only applies to the EPD encode worker (which uses [SGLang's MMEncoder](https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/disaggregation/encode_server.py) internally).
+Only applies to the EPD encode worker (which uses [SGLang's MMEncoder](https://github.com/sgl-project/sglang/blob/v0.5.17/python/sglang/srt/disaggregation/encode_server.py) internally).
 
 ## Profiling
 

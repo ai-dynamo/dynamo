@@ -17,15 +17,17 @@ from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST
 from sglang.srt.managers.io_struct import ProfileReq
 
 import dynamo.sglang._compat as sglang_compat
+import dynamo.sglang.args as sglang_args
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.sglang._compat import (
     ensure_sglang_tensor_image_size,
-    ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
+    override_server_args,
     require_reasoning_kwargs,
 )
 from dynamo.sglang.args import (
+    _diffusion_generator_kwargs,
     _forward_pass_metrics_source,
     _normalize_multimodal_disaggregation_args,
     parse_args,
@@ -67,6 +69,50 @@ pytestmark = [
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
 
 
+def test_diffusion_generator_kwargs_maps_nccl_port_to_master_port():
+    kwargs = _diffusion_generator_kwargs(
+        SimpleNamespace(
+            model_path="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+            tp_size=2,
+            dp_size=1,
+            dist_timeout=120,
+            nccl_port=23456,
+        )
+    )
+
+    assert kwargs == {
+        "model_path": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+        "num_gpus": 2,
+        "tp_size": 2,
+        "dp_size": 1,
+        "dist_timeout": 120,
+        "master_port": 23456,
+    }
+
+
+def test_diffusion_generator_kwargs_omits_unset_master_port():
+    kwargs = _diffusion_generator_kwargs(
+        SimpleNamespace(model_path="Tongyi-MAI/Z-Image-Turbo")
+    )
+
+    assert kwargs["num_gpus"] == 1
+    assert "master_port" not in kwargs
+
+
+def test_override_server_args_supports_legacy_xpu_pin():
+    server_args = SimpleNamespace(enable_memory_saver=False)
+
+    override_server_args(
+        server_args,
+        "dynamo.test",
+        enable_memory_saver=True,
+        load_format="legacy-loader",
+    )
+
+    assert server_args.enable_memory_saver is True
+    assert server_args.load_format == "legacy-loader"
+
+
 @pytest.fixture(autouse=True)
 def _cpu_engine_when_no_accelerator(monkeypatch):
     """Honor the file's gpu_0 contract on hosts with no accelerator.
@@ -97,13 +143,14 @@ def _cpu_engine_when_no_accelerator(monkeypatch):
     _sgl_common.get_device.cache_clear()
 
 
-def test_configured_engine_route_cannot_replace_built_in_route():
+@pytest.mark.parametrize(
+    "reserved_path", ["control/start_profile", "update/model_taints"]
+)
+def test_configured_engine_route_cannot_replace_built_in_route(reserved_path):
     handler = object.__new__(DecodeWorkerHandler)
     handler.engine = SimpleNamespace(custom_method=lambda: None)
     handler.config = SimpleNamespace(
-        dynamo_args=SimpleNamespace(
-            engine_routes=["control/start_profile=custom_method"]
-        )
+        dynamo_args=SimpleNamespace(engine_routes=[f"{reserved_path}=custom_method"])
     )
 
     registered_routes = []
@@ -115,13 +162,71 @@ def test_configured_engine_route_cannot_replace_built_in_route():
     with pytest.raises(
         ValueError,
         match=(
-            "Configured SGLang engine route /engine/control/start_profile "
-            "collides with a built-in route"
+            rf"Configured SGLang engine route /engine/{reserved_path} "
+            r"collides with a built-in route"
         ),
     ):
         handler.register_engine_routes(Runtime())
 
     assert registered_routes == []
+
+
+@pytest.mark.parametrize(
+    ("input_name", "output_name", "worker_name", "expected"),
+    [
+        ("Tokens", "Prefill", "Prefill", True),
+        ("Tokens", "Chat", "Decode", True),
+        ("Tokens", "Completions", "Aggregated", True),
+        ("Tokens", "Empty", "Prefill", False),
+        ("Tokens", "Empty", "Decode", False),
+        ("Text", "Chat", "Aggregated", False),
+        ("Tokens", "Embedding", "Aggregated", False),
+    ],
+)
+def test_engine_generate_capability_registration_gate(
+    input_name, output_name, worker_name, expected
+):
+    if sglang_register is None:
+        pytest.skip("dynamo.sglang.register is unavailable")
+
+    assert (
+        sglang_register._supports_engine_generate(
+            getattr(sglang_register.ModelInput, input_name),
+            getattr(sglang_register.ModelType, output_name),
+            getattr(sglang_register.WorkerType, worker_name),
+        )
+        is expected
+    )
+
+
+def test_builtin_engine_routes_include_model_taint_update(monkeypatch):
+    handler = object.__new__(DecodeWorkerHandler)
+    handler.engine = SimpleNamespace()
+    handler.generate_endpoint = object()
+    handler.config = SimpleNamespace(dynamo_args=SimpleNamespace(engine_routes=[]))
+
+    registered_routes = []
+    taint_route_endpoints = []
+
+    class Runtime:
+        def register_engine_route(self, path, route_handler):
+            registered_routes.append((path, route_handler))
+
+    runtime = Runtime()
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.handler_base.register_model_taint_route",
+        lambda candidate_runtime, endpoint: taint_route_endpoints.append(
+            (candidate_runtime, endpoint)
+        ),
+    )
+
+    handler.register_engine_routes(runtime)
+
+    assert taint_route_endpoints == [(runtime, handler.generate_endpoint)]
+    assert {path for path, _ in registered_routes} >= {
+        "control/start_profile",
+        "control/stop_profile",
+    }
 
 
 def _make_sglang_config(**overrides):
@@ -144,40 +249,6 @@ def _make_sglang_config(**overrides):
     for key, value in overrides.items():
         setattr(config, key, value)
     return config
-
-
-def test_compat_restores_sglang_top_level_exports():
-    """Dynamo supports SGLang builds that omit top-level Engine/ServerArgs."""
-    import sglang as sgl
-    from sglang.srt.entrypoints.engine import Engine
-    from sglang.srt.server_args import ServerArgs
-
-    missing = object()
-    original_engine = getattr(sgl, "Engine", missing)
-    original_server_args = getattr(sgl, "ServerArgs", missing)
-
-    try:
-        if hasattr(sgl, "Engine"):
-            delattr(sgl, "Engine")
-        if hasattr(sgl, "ServerArgs"):
-            delattr(sgl, "ServerArgs")
-
-        ensure_sglang_top_level_exports()
-
-        assert sgl.Engine is Engine
-        assert sgl.ServerArgs is ServerArgs
-    finally:
-        if original_engine is missing:
-            if hasattr(sgl, "Engine"):
-                delattr(sgl, "Engine")
-        else:
-            sgl.Engine = original_engine
-
-        if original_server_args is missing:
-            if hasattr(sgl, "ServerArgs"):
-                delattr(sgl, "ServerArgs")
-        else:
-            sgl.ServerArgs = original_server_args
 
 
 def test_compat_supports_tensor_image_sizes_and_is_idempotent(caplog, monkeypatch):
@@ -206,6 +277,10 @@ def test_compat_supports_tensor_image_sizes_and_is_idempotent(caplog, monkeypatc
 
         processor = object.__new__(ConcreteMultimodalProcessor)
         processor._processor = Processor()
+        # SGLang 0.5.17 resolves the processor and tokenizer together before
+        # handling raw multimodal items. This test stubs the processing path,
+        # so a tokenizer is not exercised, but the attribute must exist.
+        processor._tokenizer = None
         processor.use_cuda_ipc = False
         image_token_id = 99
         processor._process_and_collect_mm_items = lambda **kwargs: (
@@ -519,6 +594,32 @@ async def test_start_profile_forwards_profile_request():
     assert tokenizer_manager.request.start_step == body["start_step"]
     assert tokenizer_manager.request.num_steps == body["num_steps"]
     assert response == {"status": "ok", "message": "Profiling started"}
+
+
+@pytest.mark.asyncio
+async def test_update_weight_version_uses_tokenizer_manager_control_api():
+    class TokenizerManager:
+        updated_version = None
+
+        def _update_weight_version_if_provided(self, version):
+            self.updated_version = version
+
+    tokenizer_manager = TokenizerManager()
+    handler = SimpleNamespace(
+        engine=SimpleNamespace(tokenizer_manager=tokenizer_manager)
+    )
+
+    response = await BaseWorkerHandler.update_weight_version(
+        handler,
+        {"new_version": "step-42", "abort_all_requests": False},
+    )
+
+    assert tokenizer_manager.updated_version == "step-42"
+    assert response == {
+        "success": True,
+        "message": "Weight version updated to step-42",
+        "new_version": "step-42",
+    }
 
 
 @pytest.mark.asyncio
@@ -1038,12 +1139,15 @@ async def test_disagg_config_preserves_bootstrap_port(tmp_path, mock_sglang_cli)
 
 
 @pytest.mark.asyncio
-async def test_disagg_config_rejects_dynamo_keys(tmp_path, mock_sglang_cli, capfd):
+async def test_disagg_config_rejects_dynamo_keys(
+    tmp_path, mock_sglang_cli, capfd, monkeypatch
+):
     """Disagg config should only accept SGLang-native keys."""
     config_path = tmp_path / "disagg.yaml"
     config_path.write_text(
         yaml.safe_dump({"prefill": {"store-kv": "mem"}}), encoding="utf-8"
     )
+    monkeypatch.setattr(sglang_args.tempfile, "tempdir", str(tmp_path))
 
     mock_sglang_cli(
         "--model",
@@ -1059,6 +1163,7 @@ async def test_disagg_config_rejects_dynamo_keys(tmp_path, mock_sglang_cli, capf
 
     out, err = capfd.readouterr()
     assert "unrecognized arguments: --store-kv mem" in err
+    assert not list(tmp_path.glob("dynamo_config_*.yaml"))
 
 
 def test_disagg_health_check_payload_includes_bootstrap_info():
@@ -1155,7 +1260,8 @@ async def test_register_model_uses_metadata_only_for_sglang_modelexpress(monkeyp
         model_path="Qwen/Qwen3-0.6B",
         served_model_name="Qwen/Qwen3-0.6B",
         context_length=4096,
-        page_size=1,
+        page_size=64,
+        dcp_size=8,
         load_format="remote_instance",
         remote_instance_weight_loader_backend="modelexpress",
     )
@@ -1175,6 +1281,7 @@ async def test_register_model_uses_metadata_only_for_sglang_modelexpress(monkeyp
 
     assert result is True
     assert captured["kwargs"]["ignore_weights"] is True
+    assert captured["kwargs"]["kv_cache_block_size"] == 512
 
 
 @pytest.mark.asyncio
@@ -1332,6 +1439,7 @@ async def test_lora_registration_model_type_gate(
     config.serving_mode = DisaggregationMode(serving_mode)
     config.server_args.model_path = "/models/base"
     config.server_args.page_size = 16
+    config.server_args.dcp_size = 2
     config.dynamo_args.endpoint_types = endpoint_types
     handler.config = config
 
@@ -1354,5 +1462,6 @@ async def test_lora_registration_model_type_gate(
         str(captured["worker_type"]) == expected_worker_type
     ), f"worker_type {captured['worker_type']} != expected {expected_worker_type}"
     assert captured["lora_name"] == "test_lora"
+    assert captured["kv_cache_block_size"] == 32
     assert captured["runtime_config"] is lora_runtime_config
     assert "token_budget" in captured["runtime_config"].runtime_data

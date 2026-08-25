@@ -99,9 +99,35 @@ Create storage, download the checkpoint (~865 GB, 1.5–3 h first apply), then a
 
 ```bash
 kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro/model-cache/model-cache.yaml -n ${NAMESPACE}
-kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro/model-cache/model-download.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=14400s
 ```
+
+There is one download Job per checkpoint, because each checkpoint is ~865 GB and the PVC holds one, not both. B200 serves the NVFP4 checkpoint; every other variant serves the public FP8 one.
+
+<div data-sku="b200">
+
+```bash
+kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro/model-cache/model-download-nvfp4.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download-nvfp4 -n ${NAMESPACE} --timeout=14400s
+```
+
+</div>
+
+<div data-sku="h200">
+
+```bash
+kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro/model-cache/model-download-fp8.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download-fp8 -n ${NAMESPACE} --timeout=14400s
+```
+
+</div>
+
+<Warning>
+The workers mount the PVC read-only with `HF_HUB_OFFLINE=1`, so they cannot fetch a checkpoint the Job did not download. Downloading the checkpoint for the other SKU leaves the worker unable to start.
+</Warning>
+
+<Note>
+To switch a populated PVC to the other checkpoint: stop the workers, delete the PVC, re-apply `model-cache.yaml`, then apply the other Job. The two Jobs have distinct names, so applying the second one does not collide with the first.
+</Note>
 
 <div data-sku="b200" data-variant="agg">
 

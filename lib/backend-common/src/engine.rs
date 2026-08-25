@@ -21,6 +21,7 @@ use tokio::sync::watch;
 
 use crate::error::DynamoError;
 
+pub use dynamo_llm::first_token::FirstTokenNotifier;
 pub use dynamo_llm::kv_router::publisher::KvEventPublisher;
 pub use dynamo_llm::protocols::common::llm_backend::{
     LLMEngineOutput, LogProbs, TopLogprob, TopLogprobs,
@@ -39,9 +40,7 @@ pub use dynamo_runtime::engine::AsyncEngineContext;
 /// `dyn AsyncEngineContext` so engine code uses it transparently.
 pub struct GenerateContext {
     inner: Arc<dyn AsyncEngineContext>,
-    /// Decode-mode first-token signal. `Some` only on decode-mode requests;
-    /// `None` otherwise.
-    first_token: Option<watch::Sender<bool>>,
+    first_token: Option<FirstTokenNotifier>,
     metadata: BTreeMap<String, String>,
 }
 
@@ -52,7 +51,7 @@ impl GenerateContext {
     ) -> Self {
         Self {
             inner,
-            first_token,
+            first_token: FirstTokenNotifier::for_request(first_token, None, "", None),
             metadata: BTreeMap::new(),
         }
     }
@@ -60,6 +59,19 @@ impl GenerateContext {
     pub fn with_metadata(
         inner: Arc<dyn AsyncEngineContext>,
         first_token: Option<watch::Sender<bool>>,
+        metadata: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            inner,
+            first_token: FirstTokenNotifier::for_request(first_token, None, "", None),
+            metadata,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn with_first_token_notifier(
+        inner: Arc<dyn AsyncEngineContext>,
+        first_token: Option<FirstTokenNotifier>,
         metadata: BTreeMap<String, String>,
     ) -> Self {
         Self {
@@ -75,21 +87,25 @@ impl GenerateContext {
         self.inner.clone()
     }
 
-    /// Fire the first-token signal. Idempotent; no-op on non-decode
-    /// requests. Engines normally don't need this — the framework
-    /// auto-fires on the first non-empty chunk. Use only when first-token
-    /// is observable via a side channel before the main stream yields.
+    /// Fire the shared first-token notifier. This idempotently releases a decode worker's
+    /// deferred abort and publishes worker-side prefill completion when configured. Engines
+    /// normally don't need this because the framework auto-fires on the first non-empty chunk.
     pub fn notify_first_token(&self) {
-        if let Some(tx) = &self.first_token {
-            let _ = tx.send(true);
+        if let Some(notifier) = &self.first_token {
+            notifier.notify();
         }
     }
 
-    /// Framework-internal: borrow the underlying Sender for cross-boundary
-    /// threading (PyO3 mirrors this handle into Python's `Context` so
-    /// `notify_first_token()` fires the same signal). Rust engines should
-    /// call [`notify_first_token`](Self::notify_first_token) instead.
+    /// Framework-internal compatibility accessor for the decode abort sender. Lifecycle-aware
+    /// bridges must clone [`Self::first_token_notifier`] so all actions share the same gate.
     pub fn first_token_sender(&self) -> Option<&watch::Sender<bool>> {
+        self.first_token
+            .as_ref()
+            .and_then(FirstTokenNotifier::abort_sender)
+    }
+
+    #[doc(hidden)]
+    pub fn first_token_notifier(&self) -> Option<&FirstTokenNotifier> {
         self.first_token.as_ref()
     }
 
@@ -144,15 +160,17 @@ pub struct LlmRegistration {
 ///
 /// `Worker` consumes this to build a `ModelDeploymentCard` and register the
 /// model with discovery. The neutral fields (`model`, `served_model_name`,
-/// `runtime_data`) apply to every modality; the token-pipeline metadata lives
-/// in the optional [`llm`](Self::llm) sub-record, which raw media engines
-/// leave `None`.
+/// `model_aliases`, `runtime_data`) apply to every modality; the token-pipeline
+/// metadata lives in the optional [`llm`](Self::llm) sub-record, which raw
+/// media engines leave `None`.
 #[derive(Clone, Debug, Default)]
 pub struct EngineConfig {
     /// Canonical model identifier (e.g. HF repo name).
     pub model: String,
     /// Public-facing model name advertised to clients. Defaults to `model`.
     pub served_model_name: Option<String>,
+    /// Additional public-facing model names accepted by the engine.
+    pub model_aliases: Vec<String>,
     /// Engine-specific metadata copied into `ModelRuntimeConfig.runtime_data`.
     pub runtime_data: HashMap<String, serde_json::Value>,
     /// Token-pipeline registration metadata (KV cache, DP, bootstrap).
@@ -332,7 +350,24 @@ pub trait LLMEngine: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
+    /// Validate an engine-control request before the Backend SDK applies any
+    /// discovery lifecycle policy. Implementations must not mutate engine
+    /// state. Override this for controls whose request fields can be rejected
+    /// before an `UnregisterBefore` transition.
+    fn validate_engine_control(
+        &self,
+        _control: &str,
+        _body: &serde_json::Value,
+    ) -> Result<(), DynamoError> {
+        Ok(())
+    }
+
     /// Handle one semantic engine-control request.
+    ///
+    /// Wake/resume controls whose Backend SDK policy re-registers the serving
+    /// endpoint must return `is_sleeping: true` whenever the engine is not yet
+    /// serving-ready (for example, after a partial wake). A non-error response
+    /// without that field is treated as ready and allows endpoint registration.
     async fn engine_control(
         &self,
         control: String,
@@ -529,7 +564,7 @@ pub struct MetricsCtx<'a> {
     pub metrics: &'a crate::metrics::EngineMetrics,
 }
 
-/// Invoked once with a freshly-built [`SnapshotPublisher`]; engine drives
+/// Invoked once with a freshly-built [`SnapshotPublisher`](crate::SnapshotPublisher); engine drives
 /// `publish(rank, snapshot)` from its own stat-logger threads thereafter.
 ///
 /// Mirror of [`OnPublisherReady`] for the KV-event Push flavor — same
@@ -634,6 +669,20 @@ pub fn usage(prompt_tokens: u32, completion_tokens: u32) -> CompletionUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_token_notifier_is_one_shot() {
+        let (tx, mut rx) = watch::channel(false);
+        let notifier =
+            FirstTokenNotifier::for_request(Some(tx), None, "", None).expect("abort action exists");
+
+        notifier.notify();
+        assert!(rx.has_changed().unwrap());
+        assert!(*rx.borrow_and_update());
+
+        notifier.notify();
+        assert!(!rx.has_changed().unwrap());
+    }
 
     #[test]
     fn chunk_token_sets_only_token_ids() {

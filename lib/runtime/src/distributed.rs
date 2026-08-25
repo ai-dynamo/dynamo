@@ -12,7 +12,7 @@ use crate::service::{ServiceClient, ServiceSet};
 use crate::storage::kv;
 use crate::{discovery, system_status_server, transports};
 use crate::{
-    discovery::Discovery,
+    discovery::{Discovery, DiscoverySpec, EndpointRegistrationLease, EndpointRegistrationManager},
     metrics::PrometheusUpdateCallback,
     metrics::{MetricsHierarchy, MetricsRegistry},
     transports::{etcd, nats, tcp},
@@ -62,6 +62,7 @@ pub struct DistributedRuntime {
 
     // Service discovery client
     discovery_client: Arc<dyn discovery::Discovery>,
+    endpoint_registrations: Arc<EndpointRegistrationManager>,
 
     // Discovery metadata (only used for Kubernetes backend)
     // Shared with system status server to expose via /metadata endpoint
@@ -200,6 +201,11 @@ impl DistributedRuntime {
             request_plane,
         );
 
+        let endpoint_registrations = EndpointRegistrationManager::new(
+            discovery_client.clone(),
+            runtime.secondary(),
+            runtime.primary_token(),
+        );
         let distributed_runtime = Self {
             runtime,
             network_manager: Arc::new(network_manager),
@@ -207,6 +213,7 @@ impl DistributedRuntime {
             tcp_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
+            endpoint_registrations,
             discovery_metadata,
             component_registry,
             endpoint_discovery_sources: Arc::new(Mutex::new(HashMap::new())),
@@ -372,6 +379,14 @@ impl DistributedRuntime {
         self.discovery_client.clone()
     }
 
+    /// Register an endpoint until the last runtime-wide owner drops its lease.
+    pub async fn register_endpoint_lease(
+        &self,
+        spec: DiscoverySpec,
+    ) -> Result<EndpointRegistrationLease> {
+        self.endpoint_registrations.register(spec).await
+    }
+
     pub async fn tcp_server(&self) -> Result<Arc<tcp::server::TcpStreamServer>> {
         Ok(self
             .tcp_server
@@ -446,7 +461,7 @@ impl DistributedRuntime {
     /// The value is resolved once at construction time by `DiscoveryBackend::resolve_event_transport_kind`:
     /// if `DYN_EVENT_PLANE` is set explicitly that value wins; otherwise the default is ZMQ.
     ///
-    /// Use this instead of [`EventTransportKind::from_env_or_default`] wherever you have
+    /// Use this instead of `EventTransportKind::from_env_or_default` wherever you have
     /// access to a `DistributedRuntime`.
     pub fn default_event_transport_kind(&self) -> crate::discovery::EventTransportKind {
         self.event_transport_kind
@@ -817,7 +832,7 @@ impl RequestPlaneMode {
     /// Get the request plane mode from environment variable (uncached)
     /// Reads from `DYN_REQUEST_PLANE` environment variable.
     fn from_env() -> Self {
-        std::env::var("DYN_REQUEST_PLANE")
+        std::env::var(crate::config::environment_names::request_plane::DYN_REQUEST_PLANE)
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or_default()

@@ -15,7 +15,7 @@ use crate::services::common::replica_sync::{
 };
 use crate::tracking_hash::TrackingHashContext;
 
-use super::core::{SelectionCore, SelectionServiceConfig, SelectionWorkerPolicyFactory};
+use super::core::{SelectionCore, SelectionServiceConfig};
 use super::error::SelectionError;
 use super::pending::SelectionCacheConfig;
 use super::types::{
@@ -23,6 +23,7 @@ use super::types::{
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
     SelectResponse, WorkerCatalogRecord, WorkerPatchRequest, WorkerRequest,
 };
+use crate::{WorkerSelectionPolicyFactory, WorkerType};
 
 pub struct SelectionServiceBuilder {
     kv_router_config: KvRouterConfig,
@@ -31,7 +32,7 @@ pub struct SelectionServiceBuilder {
     replica_sync_port: Option<u16>,
     replica_sync_peers: Vec<String>,
     selection_cache: SelectionCacheConfig,
-    worker_selection_policy_factory: Option<SelectionWorkerPolicyFactory>,
+    worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
 }
 
 impl SelectionServiceBuilder {
@@ -68,18 +69,26 @@ impl SelectionServiceBuilder {
         self
     }
 
-    pub fn worker_selection_policy_factory<F>(mut self, factory: F) -> Self
+    pub fn worker_selection_policy_factory<F>(self, factory: F) -> Self
     where
         F: for<'a> Fn(
                 &KvRouterConfig,
-                &'static str,
+                WorkerType,
                 RoutingPartitionRef<'a>,
             ) -> WorkerSelectionPolicy
             + Send
             + Sync
             + 'static,
     {
-        self.worker_selection_policy_factory = Some(Box::new(factory));
+        self.resolved_worker_selection_policy_factory(Some(Arc::new(factory)))
+    }
+
+    /// Use a factory already resolved from worker-selection configuration.
+    pub fn resolved_worker_selection_policy_factory(
+        mut self,
+        factory: Option<WorkerSelectionPolicyFactory>,
+    ) -> Self {
+        self.worker_selection_policy_factory = factory;
         self
     }
 

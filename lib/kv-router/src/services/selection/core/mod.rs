@@ -21,7 +21,7 @@ use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::selector::WorkerSelectionPolicy;
 use crate::scheduling::{
     KvSchedulerError, LocalScheduler, OverlapAnalysis, OverlapSignals, PotentialLoad, ScheduleMode,
-    ScheduleRequest, TieredOverlapRefresher, effective_prefill_tokens,
+    ScheduleRequest, SessionContext, TieredOverlapRefresher, effective_prefill_tokens,
     prefill_load_hint_from_effective_tokens,
 };
 use crate::sequences::{
@@ -46,16 +46,8 @@ use super::types::{
     SelectResponse, SelectionWorkerConfig, WORKER_TYPE, WorkerCatalogRecord, WorkerLifecycle,
     WorkerPatchRequest, WorkerRequest,
 };
-
-pub(crate) type SelectionWorkerPolicyFactory = Box<
-    dyn for<'a> Fn(
-            &crate::config::KvRouterConfig,
-            &'static str,
-            crate::identity::RoutingPartitionRef<'a>,
-        ) -> WorkerSelectionPolicy
-        + Send
-        + Sync,
->;
+use crate::WorkerSelectionPolicyFactory;
+use crate::WorkerType;
 
 type SelectionScheduler = LocalScheduler<
     ScopedSequencePublisher,
@@ -125,7 +117,7 @@ pub struct SelectionCore {
     entries: RwLock<HashMap<RoutingPartitionId, Arc<OnceCell<Arc<SelectionEntry>>>>>,
     indexer_registry: Arc<WorkerRegistry>,
     kv_router_config: crate::config::KvRouterConfig,
-    worker_selection_policy_factory: Option<SelectionWorkerPolicyFactory>,
+    worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
     cancel_token: CancellationToken,
     replica_config: Option<ReplicaSyncConfig>,
     /// Booking inputs captured by `select`, keyed by `selection_id`, so a later
@@ -207,7 +199,7 @@ impl SelectionCore {
         indexer_threads: usize,
         cancel_token: CancellationToken,
         replica_config: Option<ReplicaSyncConfig>,
-        worker_selection_policy_factory: Option<SelectionWorkerPolicyFactory>,
+        worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
         cache_config: SelectionCacheConfig,
         tracking_hash: Arc<TrackingHashContext>,
     ) -> Self {
@@ -229,7 +221,7 @@ impl SelectionCore {
         indexer_threads: usize,
         cancel_token: CancellationToken,
         replica_config: Option<ReplicaSyncConfig>,
-        worker_selection_policy_factory: Option<SelectionWorkerPolicyFactory>,
+        worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
         signal_indexer_ready: bool,
         cache_config: SelectionCacheConfig,
         tracking_hash: Arc<TrackingHashContext>,
@@ -513,7 +505,7 @@ impl SelectionCore {
                 ));
                 let selector = self.worker_selection_policy_factory.as_ref().map_or_else(
                     || WorkerSelectionPolicy::default(self.kv_router_config.clone(), WORKER_TYPE),
-                    |factory| factory(&self.kv_router_config, WORKER_TYPE, key.as_ref()),
+                    |factory| factory(&self.kv_router_config, WorkerType::Aggregated, key.as_ref()),
                 );
                 let profile = self
                     .kv_router_config
@@ -803,7 +795,8 @@ impl SelectionCore {
             priority_jump,
             strict_priority,
             policy_class,
-            session_id,
+            session_context: session_id
+                .map(|session_id| SessionContext::new(session_id, None, None, None, None)),
             expected_output_tokens,
             pinned_worker,
             allowed_worker_ids,
@@ -1589,6 +1582,64 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn lifecycle_operations_find_reservation_in_later_entry() {
+        let mut config = test_config(false);
+        config.router_track_prefill_tokens = true;
+        let core = SelectionCore::new_local(
+            config,
+            1,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        );
+
+        for (worker_id, routing_group) in [(1, "group-a"), (2, "group-b")] {
+            let mut request = worker(worker_id);
+            request.routing_group = routing_group.to_string();
+            core.upsert_worker(request).await.expect("worker upsert");
+        }
+
+        let entries = core.initialized_entries();
+        assert_eq!(entries.len(), 2);
+        let target = &entries[1];
+        let target_group = target.key.routing_group.clone();
+        let target_worker = *target
+            .workers_tx
+            .borrow()
+            .keys()
+            .next()
+            .expect("target worker");
+
+        let mut request = reserve_request("later-entry-reservation");
+        request.routing_group = target_group.clone();
+        core.select_and_reserve(request)
+            .await
+            .expect("reserve in later entry");
+
+        let load = || {
+            core.loads(Some("model"), Some(&target_group))[0]
+                .loads
+                .iter()
+                .find(|load| load.worker_id == target_worker)
+                .expect("target load")
+                .potential_prefill_tokens
+        };
+        assert_eq!(load(), 4);
+
+        core.prefill_complete("later-entry-reservation")
+            .await
+            .expect("complete prefill in later entry");
+        assert_eq!(load(), 0);
+
+        core.free_reservation("later-entry-reservation")
+            .await
+            .expect("free reservation in later entry");
+        assert!(matches!(
+            core.add_output_block("later-entry-reservation", None),
+            Err(SelectionError::NotFound(_))
+        ));
+    }
+
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn queued_selection_returns_refreshed_overlap_snapshot() {
         let mut config = test_config(false);
@@ -1610,7 +1661,8 @@ mod tests {
         entry
             .indexer
             .apply_event_routed(store_event(1, 0, 1, &[], &[11], StorageTier::Device))
-            .await;
+            .await
+            .unwrap();
         entry.indexer.dump_events().await.expect("flush indexer");
 
         for worker_id in [1, 2] {
@@ -1674,7 +1726,8 @@ mod tests {
         entry
             .indexer
             .apply_event_routed(store_event(2, 0, 1, &[], &[11, 12], StorageTier::Device))
-            .await;
+            .await
+            .unwrap();
         entry.indexer.dump_events().await.expect("flush indexer");
         tokio::time::advance(Duration::from_secs(11)).await;
         core.free_reservation("occupy-2")

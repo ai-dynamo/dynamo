@@ -8,14 +8,14 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use dynamo_runtime::engine::{AsyncEngine, Data};
+use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
 use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
 use dynamo_runtime::{component::Endpoint, protocols::EndpointId};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    discovery::KvWorkerMonitor,
+    discovery::{KvWorkerMonitor, allocator::AllocatorTrimOnDrop},
     kv_router::{EncoderRouter, prefill_router::PrefillRouterLifecycle},
     model_card::ModelDeploymentCard,
     types::{
@@ -33,6 +33,45 @@ use crate::{
 };
 
 type StreamingEngine<Req, Resp> = Arc<dyn AsyncEngine<SingleIn<Req>, ManyOut<Resp>, Error>>;
+
+struct RequestLifetimeEngine<Req, Resp>
+where
+    Req: AsyncEngineContextProvider + Send + 'static,
+    Resp: AsyncEngineContextProvider + 'static,
+{
+    inner: Arc<dyn AsyncEngine<Req, Resp, Error>>,
+    teardown: Arc<AllocatorTrimOnDrop>,
+}
+
+#[async_trait]
+impl<Req, Resp> AsyncEngine<Req, Resp, Error> for RequestLifetimeEngine<Req, Resp>
+where
+    Req: AsyncEngineContextProvider + Send + 'static,
+    Resp: AsyncEngineContextProvider + 'static,
+{
+    async fn generate(&self, request: Req) -> Result<Resp, Error> {
+        request.context().retain(self.teardown.clone());
+        let response = self.inner.generate(request).await?;
+        response.context().retain(self.teardown.clone());
+        Ok(response)
+    }
+}
+
+fn retain_teardown_until_requests_finish<Req, Resp>(
+    engine: Option<Arc<dyn AsyncEngine<Req, Resp, Error>>>,
+    teardown: &Arc<AllocatorTrimOnDrop>,
+) -> Option<Arc<dyn AsyncEngine<Req, Resp, Error>>>
+where
+    Req: AsyncEngineContextProvider + Send + 'static,
+    Resp: AsyncEngineContextProvider + 'static,
+{
+    engine.map(|inner| {
+        Arc::new(RequestLifetimeEngine {
+            inner,
+            teardown: teardown.clone(),
+        }) as Arc<dyn AsyncEngine<Req, Resp, Error>>
+    })
+}
 
 struct LoraContextEngine<Req: Data, Resp: Data> {
     inner: StreamingEngine<Req, Resp>,
@@ -137,6 +176,10 @@ pub struct WorkerSet {
 
     /// Cancels background work created while materializing this WorkerSet.
     lifecycle_cancellation: Option<CancellationToken>,
+
+    /// Drops after engine fields and after every active request context releases it.
+    allocator_trim: Option<Arc<AllocatorTrimOnDrop>>,
+    allocator_trim_wrapped: bool,
 }
 
 impl WorkerSet {
@@ -163,6 +206,8 @@ impl WorkerSet {
             encoder_router: None,
             instance_count_rx: None,
             lifecycle_cancellation: None,
+            allocator_trim: None,
+            allocator_trim_wrapped: false,
         }
     }
 
@@ -321,6 +366,36 @@ impl WorkerSet {
         self.lifecycle_cancellation = Some(cancellation);
     }
 
+    pub(crate) fn initialize_allocator_trim_on_teardown(&mut self) -> Arc<AllocatorTrimOnDrop> {
+        self.allocator_trim
+            .get_or_insert_with(|| Arc::new(AllocatorTrimOnDrop::new()))
+            .clone()
+    }
+
+    pub(crate) fn enable_allocator_trim_on_teardown(&mut self) {
+        if self.allocator_trim_wrapped {
+            return;
+        }
+        let teardown = self.initialize_allocator_trim_on_teardown();
+        macro_rules! retain_for_requests {
+            ($field:ident) => {
+                self.$field = retain_teardown_until_requests_finish(self.$field.take(), &teardown);
+            };
+        }
+        retain_for_requests!(chat_engine);
+        retain_for_requests!(completions_engine);
+        retain_for_requests!(embeddings_engine);
+        retain_for_requests!(classify_engine);
+        retain_for_requests!(pooling_engine);
+        retain_for_requests!(images_engine);
+        retain_for_requests!(videos_engine);
+        retain_for_requests!(audios_engine);
+        retain_for_requests!(tensor_engine);
+        retain_for_requests!(realtime_engine);
+        retain_for_requests!(generate_engine);
+        self.allocator_trim_wrapped = true;
+    }
+
     pub(crate) fn adapter_view(&self, card: ModelDeploymentCard) -> Self {
         let lora_name = card
             .lora
@@ -334,7 +409,7 @@ impl WorkerSet {
                 lora_name: lora_name.clone(),
             }) as GenerateStreamingEngine
         });
-        Self {
+        let mut view = Self {
             namespace: self.namespace.clone(),
             endpoint_id: self.endpoint_id.clone(),
             topology_endpoint: self.topology_endpoint.clone(),
@@ -358,7 +433,13 @@ impl WorkerSet {
             encoder_router: self.encoder_router.clone(),
             instance_count_rx: self.instance_count_rx.clone(),
             lifecycle_cancellation: None,
+            allocator_trim: None,
+            allocator_trim_wrapped: false,
+        };
+        if self.allocator_trim.is_some() {
+            view.enable_allocator_trim_on_teardown();
         }
+        view
     }
 }
 
