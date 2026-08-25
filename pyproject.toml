@@ -130,6 +130,9 @@ vllm_tests = "dynamo.vllm.tests.conftest"
 trtllm_tests = "dynamo.trtllm.tests.conftest"
 sglang_tests = "dynamo.sglang.tests.conftest"
 
+[project.scripts]
+dynamo-profiler-sweeper = "dynamo.profiler.sweeper.__main__:main"
+
 [project.entry-points."aisimulate.sweep_config_providers"]
 "dynamo.planner" = "dynamo.planner.simulation:create_provider"
 "dynamo.router" = "dynamo.router.simulation:create_provider"
