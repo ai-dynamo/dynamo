@@ -183,7 +183,7 @@ mod tests {
     #[tokio::test]
     async fn channel_close_clears_selector_topology() {
         let selector = Arc::new(
-            Selector::new(&config())
+            Selector::new(&config(), None)
                 .await
                 .expect("selector should build"),
         );

@@ -118,6 +118,7 @@ pub struct SelectionCore {
     indexer_registry: Arc<WorkerRegistry>,
     kv_router_config: crate::config::KvRouterConfig,
     worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
+    worker_type: WorkerType,
     cancel_token: CancellationToken,
     replica_config: Option<ReplicaSyncConfig>,
     /// Booking inputs captured by `select`, keyed by `selection_id`, so a later
@@ -188,6 +189,7 @@ impl SelectionCore {
             cancel_token,
             None,
             None,
+            WorkerType::Aggregated,
             true,
             cache_config,
             tracking_hash,
@@ -200,6 +202,7 @@ impl SelectionCore {
         cancel_token: CancellationToken,
         replica_config: Option<ReplicaSyncConfig>,
         worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
+        worker_type: WorkerType,
         cache_config: SelectionCacheConfig,
         tracking_hash: Arc<TrackingHashContext>,
     ) -> Self {
@@ -209,6 +212,7 @@ impl SelectionCore {
             cancel_token,
             replica_config,
             worker_selection_policy_factory,
+            worker_type,
             false,
             cache_config,
             tracking_hash,
@@ -222,6 +226,7 @@ impl SelectionCore {
         cancel_token: CancellationToken,
         replica_config: Option<ReplicaSyncConfig>,
         worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
+        worker_type: WorkerType,
         signal_indexer_ready: bool,
         cache_config: SelectionCacheConfig,
         tracking_hash: Arc<TrackingHashContext>,
@@ -240,6 +245,7 @@ impl SelectionCore {
             indexer_registry,
             kv_router_config,
             worker_selection_policy_factory,
+            worker_type,
             cancel_token,
             replica_config,
             selection_cache: SelectionCache::new(&cache_config),
@@ -505,7 +511,7 @@ impl SelectionCore {
                 ));
                 let selector = self.worker_selection_policy_factory.as_ref().map_or_else(
                     || WorkerSelectionPolicy::default(self.kv_router_config.clone(), WORKER_TYPE),
-                    |factory| factory(&self.kv_router_config, WorkerType::Aggregated, key.as_ref()),
+                    |factory| factory(&self.kv_router_config, self.worker_type, key.as_ref()),
                 );
                 let profile = self
                     .kv_router_config

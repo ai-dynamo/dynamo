@@ -18,6 +18,7 @@ use crate::tracking_hash::TrackingHashContext;
 use super::core::{SelectionCore, SelectionServiceConfig};
 use super::error::SelectionError;
 use super::pending::SelectionCacheConfig;
+use super::policy_registry::WorkerSelectionPolicyRegistry;
 use super::types::{
     ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
@@ -32,6 +33,8 @@ pub struct SelectionServiceBuilder {
     replica_sync_port: Option<u16>,
     replica_sync_peers: Vec<String>,
     selection_cache: SelectionCacheConfig,
+    worker_type: WorkerType,
+    worker_selection_policy_registry: Option<WorkerSelectionPolicyRegistry>,
     worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
 }
 
@@ -44,6 +47,8 @@ impl SelectionServiceBuilder {
             replica_sync_port: None,
             replica_sync_peers: Vec::new(),
             selection_cache: SelectionCacheConfig::default(),
+            worker_type: WorkerType::Aggregated,
+            worker_selection_policy_registry: None,
             worker_selection_policy_factory: None,
         }
     }
@@ -66,6 +71,24 @@ impl SelectionServiceBuilder {
 
     pub fn selection_cache(mut self, config: SelectionCacheConfig) -> Self {
         self.selection_cache = config;
+        self
+    }
+
+    /// Set the role of the worker pool this service owns.
+    ///
+    /// The role is passed to a custom worker-selection policy factory when a
+    /// routing partition is first created. It defaults to aggregated workers.
+    pub fn worker_type(mut self, worker_type: WorkerType) -> Self {
+        self.worker_type = worker_type;
+        self
+    }
+
+    /// Resolve the configured custom policy for this service's worker role.
+    pub fn worker_selection_policy_registry(
+        mut self,
+        registry: Option<WorkerSelectionPolicyRegistry>,
+    ) -> Self {
+        self.worker_selection_policy_registry = registry;
         self
     }
 
@@ -96,6 +119,30 @@ impl SelectionServiceBuilder {
         self.kv_router_config
             .validate_config()
             .map_err(anyhow::Error::msg)?;
+        let worker_selection_policy_factory = match (
+            self.worker_selection_policy_factory,
+            self.worker_selection_policy_registry.as_ref(),
+        ) {
+            (Some(_), Some(_)) => anyhow::bail!(
+                "worker-selection policy factory and policy registry cannot both be configured"
+            ),
+            (Some(factory), None) => Some(factory),
+            (None, Some(registry)) => registry
+                .resolve_for_worker_type(&self.kv_router_config, self.worker_type)
+                .map_err(anyhow::Error::from)?,
+            (None, None) => {
+                if let Some(instance) = self
+                    .kv_router_config
+                    .selected_worker_selection_policy_instance_for(self.worker_type)?
+                {
+                    anyhow::bail!(
+                        "worker-selection instance {instance:?} is configured for {}, but no linked worker-selection policy registry was supplied",
+                        self.worker_type
+                    );
+                }
+                None
+            }
+        };
         let tracking_hash = Arc::new(TrackingHashContext::from_config(&self.kv_router_config)?);
         let cancel_token = CancellationToken::new();
         let mut startup_guard = StartupGuard::new(cancel_token.clone());
@@ -117,7 +164,8 @@ impl SelectionServiceBuilder {
             self.indexer_threads,
             cancel_token.clone(),
             replica_config,
-            self.worker_selection_policy_factory,
+            worker_selection_policy_factory,
+            self.worker_type,
             self.selection_cache,
             tracking_hash,
         ));
@@ -439,6 +487,42 @@ mod tests {
             .local_addr()
             .unwrap()
             .port()
+    }
+
+    #[tokio::test]
+    async fn configured_custom_policy_requires_registry_at_construction() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            r#"
+worker_selection:
+  prefill: custom
+  instances:
+    - name: custom
+      type: acme
+      parameters: {}
+"#,
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..test_config()
+        };
+
+        let error = match SelectionServiceBuilder::new(config)
+            .worker_type(WorkerType::Prefill)
+            .build()
+            .await
+        {
+            Ok(_) => panic!("a configured custom policy needs a linked registry"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("no linked worker-selection policy registry"),
+            "{error}"
+        );
     }
 
     async fn build_on_port(port: u16) -> SelectionService {

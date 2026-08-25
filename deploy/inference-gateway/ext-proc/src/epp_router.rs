@@ -26,7 +26,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::sync::Semaphore;
 
-use dynamo_kv_router::services::selection::SelectionService;
+use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
 use dynamo_llm::protocols::common::extensions::{
     AgentHints, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, resolve_request_priority,
 };
@@ -68,24 +68,11 @@ pub struct EppRouter {
 
 impl EppRouter {
     /// Assemble the standalone runtime from the validated selector config.
-    pub async fn from_selector(cfg: EppStandaloneConfig) -> Result<Self> {
-        let selector = Arc::new(Selector::new(&cfg).await?);
-        let (renderer, reflector, reflector_ready) = Self::dependencies(&cfg).await?;
-        Ok(Self::from_selector_parts(
-            cfg,
-            renderer,
-            reflector,
-            reflector_ready,
-            selector,
-        ))
-    }
-
-    /// Assemble a custom EPP image around a prebuilt selection service.
-    pub async fn from_selection_service(
+    pub async fn from_selector(
         cfg: EppStandaloneConfig,
-        service: SelectionService,
+        policy_registry: Option<WorkerSelectionPolicyRegistry>,
     ) -> Result<Self> {
-        let selector = Arc::new(Selector::from_service(&cfg, service).await?);
+        let selector = Arc::new(Selector::new(&cfg, policy_registry).await?);
         let (renderer, reflector, reflector_ready) = Self::dependencies(&cfg).await?;
         Ok(Self::from_selector_parts(
             cfg,
