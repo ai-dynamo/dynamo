@@ -1,12 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Disaggregated 1P1D, 16x H200, 1M context. Batch capability: TTFT ~146 s at 1M.
-# Verified by needle-in-haystack to 1,033,872 tokens.
-# The KV transport slot is held by NIXL, so the offload tier is stacked via MultiConnector
-# on the DECODE worker only; prefill stays NIXL-only.
-# NOTE prefill needs mnbt 4096 + gpu-mu 0.97: at mnbt 16384 it cannot start (24.06 GiB KV
-# needed for one 1M request vs 20.75 GiB available). That check is GPU-KV only -- the host
-# tier extends what you can HOLD, not whether the engine will START.
+# DeepSeek-V4-Pro-0813 - disaggregated 1P1D, 16x H200, 1M context.
+# CPU KV offload is stacked with NIXL via MultiConnector on the decode worker.
+# Requires ~1.4 TB host RAM per worker.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -44,6 +40,8 @@ spec:
     replicas: 1
     podTemplate:
       spec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-H200
         containers:
         - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
@@ -72,6 +70,7 @@ spec:
               --max-num-seqs 16 \
               --max-num-batched-tokens 4096 \
               --gpu-memory-utilization 0.97 \
+              --disaggregation-mode prefill \
               --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
               --compilation-config '{"mode":0,"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,10,12,16,32,64,80,96,128],"max_cudagraph_capture_size":128}'
           env:
@@ -110,6 +109,8 @@ spec:
     replicas: 1
     podTemplate:
       spec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-H200
         containers:
         - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
@@ -138,6 +139,7 @@ spec:
               --max-num-seqs 128 \
               --max-num-batched-tokens 4096 \
               --gpu-memory-utilization 0.95 \
+              --disaggregation-mode decode \
               --kv-transfer-config '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_both"},{"kv_connector":"SimpleCPUOffloadConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":1400000000000}}]}}' \
               --compilation-config '{"mode":0,"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,10,12,16,32,64,80,96,128],"max_cudagraph_capture_size":128}'
           env:

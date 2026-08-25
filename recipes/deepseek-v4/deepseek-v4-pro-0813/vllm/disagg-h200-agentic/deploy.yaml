@@ -1,9 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Disaggregated 1P1D, 16x H200. Agentic workload: 64K ISL / 400 OSL / 90% prefix reuse.
-# SLA crossing at C ~ 7.95: E2E 50 tok/s/user at ~24 tok/s/GPU, ~2x the aggregated density.
-# Gate holds at C=5,6,7; cliff is C=7->8.
-# gpqa_diamond 88.38 / ifeval 94.29 -- matches aggregated, so the NIXL KV path is clean.
+# DeepSeek-V4-Pro-0813 - disaggregated 1P1D, 16x H200, agentic workload (64K ISL / 400 OSL).
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -41,6 +38,8 @@ spec:
     replicas: 1
     podTemplate:
       spec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-H200
         containers:
         - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
@@ -69,6 +68,7 @@ spec:
               --max-num-seqs 16 \
               --max-num-batched-tokens 16384 \
               --gpu-memory-utilization 0.95 \
+              --disaggregation-mode prefill \
               --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
               --compilation-config '{"mode":0,"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,10,12,16,32,64,80,96,128],"max_cudagraph_capture_size":128}'
           env:
@@ -107,6 +107,8 @@ spec:
     replicas: 1
     podTemplate:
       spec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-H200
         containers:
         - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
@@ -135,6 +137,7 @@ spec:
               --max-num-seqs 128 \
               --max-num-batched-tokens 4096 \
               --gpu-memory-utilization 0.95 \
+              --disaggregation-mode decode \
               --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
               --compilation-config '{"mode":0,"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,10,12,16,32,64,80,96,128],"max_cudagraph_capture_size":128}'
           env:

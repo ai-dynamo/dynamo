@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Aggregated, 8x H200, 1M context. Batch capability, NOT interactive: TTFT ~202 s at 1M.
-# Verified by needle-in-haystack to 998,218 tokens.
-# CPU offload is MANDATORY here: GPU-resident KV caps at 86,016 tokens on 8x H200.
-# Requires ~1.4 TB host RAM for the offload tier; size the node accordingly.
+# DeepSeek-V4-Pro-0813 - aggregated, 8x H200, 1M context via CPU KV offload.
+# Requires ~1.4 TB host RAM per worker.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -41,6 +39,8 @@ spec:
     replicas: 1
     podTemplate:
       spec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-H200
         containers:
         - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1

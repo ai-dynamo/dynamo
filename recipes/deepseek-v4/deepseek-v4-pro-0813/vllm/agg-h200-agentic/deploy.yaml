@@ -1,9 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Aggregated, 8x H200. Agentic workload: 64K ISL / 400 OSL / 90% prefix reuse.
-# Validated operating point C=2: E2E 56.40 tok/s/user, TTFT 1.64 s, 11.85 tok/s/GPU.
-# The joint SLA gate (E2E >= 50 tok/s/user AND TTFT p50 < 5 s) fails at C=4.
-# gpqa_diamond 88.26 / ifeval 94.48 measured on this exact config.
+# DeepSeek-V4-Pro-0813 - aggregated, 8x H200, agentic workload (64K ISL / 400 OSL).
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -41,6 +38,8 @@ spec:
     replicas: 1
     podTemplate:
       spec:
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-H200
         containers:
         - name: main
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
