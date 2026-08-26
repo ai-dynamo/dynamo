@@ -5,7 +5,10 @@
 //!
 //! Final-session removal, an LRU session cap, and a lineage-depth cap bound retention.
 
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, HashMap},
+};
 
 use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -196,14 +199,12 @@ impl SessionPrefixIndexer {
         matched_hash: ExternalSequenceBlockHash,
     ) -> Result<bool, SessionPrefixIndexError> {
         let mut state = self.state.write();
-        let parent = state
-            .sessions
-            .get(session_id)
-            .filter(|entry| entry.frontiers.len() == 1)
-            .and_then(|entry| entry.frontiers.iter().next().copied());
+        let continuation = state.deepest_frontier(session_id);
         let node = match state.hash_to_node.get(&matched_hash).copied() {
             Some(node) => {
-                if let Some(parent) = parent
+                let already_reached = state.session_has_reached(session_id, node);
+                if let Some(parent) = continuation
+                    && !already_reached
                     && state.nodes[node].parent.is_none()
                     && !state.is_ancestor_or_self(node, parent)
                 {
@@ -212,9 +213,9 @@ impl SessionPrefixIndexer {
                 }
                 node
             }
-            None => state.insert_node(matched_hash, parent),
+            None => state.insert_node(matched_hash, continuation),
         };
-        Ok(state.advance_frontier(session_id, node))
+        Ok(state.advance_match_frontier(session_id, node, continuation))
     }
 
     /// Records a stored block chain and reports whether the frontier advanced.
@@ -414,15 +415,51 @@ impl IndexState {
         false
     }
 
-    // Keep only the deepest frontier on each chain.
-    fn advance_frontier(&mut self, session_id: &str, node: NodeId) -> bool {
-        let already_reached = self.sessions.get(session_id).is_some_and(|entry| {
+    fn session_has_reached(&self, session_id: &str, node: NodeId) -> bool {
+        self.sessions.get(session_id).is_some_and(|entry| {
             entry
                 .frontiers
                 .iter()
                 .any(|&frontier| self.is_ancestor_or_self(node, frontier))
-        });
-        if already_reached {
+        })
+    }
+
+    fn deepest_frontier(&self, session_id: &str) -> Option<NodeId> {
+        self.sessions.get(session_id).and_then(|entry| {
+            entry.frontiers.iter().copied().max_by_key(|&frontier| {
+                (
+                    self.path_to_root(frontier).len(),
+                    Reverse(self.nodes[frontier].block_hash),
+                )
+            })
+        })
+    }
+
+    fn advance_match_frontier(
+        &mut self,
+        session_id: &str,
+        node: NodeId,
+        continuation: Option<NodeId>,
+    ) -> bool {
+        let advanced = self.advance_frontier(session_id, node);
+        if !advanced {
+            return false;
+        }
+
+        if let Some(continuation) = continuation
+            && self
+                .sessions
+                .get_mut(session_id)
+                .is_some_and(|entry| entry.frontiers.remove(&continuation))
+        {
+            self.release_frontier(continuation);
+        }
+        true
+    }
+
+    // Keep only the deepest frontier on each chain.
+    fn advance_frontier(&mut self, session_id: &str, node: NodeId) -> bool {
+        if self.session_has_reached(session_id, node) {
             // Repeated matches still refresh LRU order.
             self.touch_session(session_id);
             return false;
@@ -554,6 +591,43 @@ mod tests {
 
         assert_eq!(indexer.get_session_frontiers("s1").len(), 1);
         assert_eq!(lineage_of(&indexer, "s1"), vec![chain]);
+    }
+
+    #[test]
+    fn route_matches_replace_one_of_multiple_frontiers() {
+        let trunk = hashes(vec![1]);
+        let shallow = hashes(vec![2]);
+        let deep = hashes(vec![3, 4]);
+        let unrelated = hashes(vec![5, 6]);
+        let next = hashes(vec![7]);
+        let indexer = SessionPrefixIndexer::new();
+
+        indexer
+            .update_session_from_stored_blocks("s1", None, &trunk)
+            .unwrap();
+        indexer
+            .update_session_from_stored_blocks("s1", Some(trunk[0]), &shallow)
+            .unwrap();
+        indexer
+            .update_session_from_stored_blocks("s1", Some(trunk[0]), &deep)
+            .unwrap();
+        indexer
+            .update_session_from_stored_blocks("other", None, &unrelated)
+            .unwrap();
+
+        indexer
+            .update_session_from_match("s1", unrelated[1])
+            .unwrap();
+        indexer.update_session_from_match("s1", next[0]).unwrap();
+
+        assert_eq!(indexer.get_session_frontiers("s1").len(), 2);
+        assert_eq!(
+            lineage_of(&indexer, "s1"),
+            vec![
+                vec![trunk[0], shallow[0]],
+                vec![unrelated[0], unrelated[1], next[0]],
+            ]
+        );
     }
 
     #[test]

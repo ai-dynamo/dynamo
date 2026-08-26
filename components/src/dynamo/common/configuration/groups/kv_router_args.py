@@ -682,6 +682,7 @@ class KvRouterArgGroup(ArgGroup):
             flag_name="--router-session-prefix-index-max-sessions",
             env_var="DYN_ROUTER_SESSION_PREFIX_INDEX_MAX_SESSIONS",
             default=_DEFAULT_SESSION_PREFIX_INDEX_MAX_SESSIONS,
+            dest="session_prefix_index_max_sessions",
             help=(
                 "[EXPERIMENTAL] KV Router: Maximum sessions retained by the logical "
                 "prefix index before least-recently-used eviction. Zero is clamped "
