@@ -80,10 +80,15 @@ in `knowledge-consult.md` matches the on-disk `<EXP_ROOT>/analysis/search-calibr
 the ledger moved after submission), then validate completeness and evidence class against the ledger — not the
 consult file, which carries only the delta: every lever family carries a terminal disposition per the ledger's own vocabulary (`tested`, `ruled-out`,
 `not-applicable`, or `deferred`; an answered ask resolves into one of these), every `ruled-out` row cites a measurement, a sourced
-hard constraint, a confirmed incompatibility, or an explicit operator decision, no family with medium-or-higher
-recorded expected upside remains merely `deferred` while more than half of any granted budget remains (reject the
-stop-request and return that family as the required follow-up), and the stop-request's draft recommendation at
-`<EXP_ROOT>/final/recommended_config.md` carries its required `Correctness status:` line. Append the verdict to
+hard constraint, a confirmed incompatibility, or an explicit operator decision, every `deferred` row is terminal on a recorded ground: upside below the primary series' measured minimum
+detectable effect (read from `series_noise_floor` and `minimum_detectable_effect` in the current
+`performance_analysis.json`, the authoritative source per `run-artifacts.md`), or a cited cost-estimate-vs-remaining-budget arithmetic (reject a stop-request whose
+deferred family with above-MDE upside lacks that arithmetic, or whose estimate actually fits the remaining
+budget, and return that family as the required follow-up), for a throughput-class objective the recommendation carries saturation evidence (top of the measured
+operating-point curve flat within the series' noise floor) or a recorded budget/operator reason in
+`known_limitations.md` (reject "still rising at the top of the grid" as terminal), and all three Finalize files EXIST ON DISK at `<EXP_ROOT>/final/` — `recommended_config.md` (carrying its
+required `Correctness status:` line), `reproduced_commands.sh`, and `known_limitations.md` — verified by path,
+not by the submitter's claim (reject a stop-request whose recommendation exists only in conversation). Append the verdict to
 `challenger-reviews.jsonl` as for any review, and state in it that this is procedural validation, not independent
 adversarial assurance.
 
