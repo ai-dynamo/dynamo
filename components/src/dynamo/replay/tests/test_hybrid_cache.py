@@ -136,3 +136,40 @@ def test_store_batch_larger_than_cpu_pool_is_rejected() -> None:
     assert result.cpu_store_offers == 23
     assert result.cpu_admissions == 0
     assert result.cpu_occupancy_slots == 0
+
+
+def test_cpu_slot_bytes_are_validated_before_capacity_conversion() -> None:
+    with pytest.raises(ValueError, match="cpu_slot_bytes must be greater than zero"):
+        _deepseek_config(
+            cpu_capacity_slots=None,
+            cpu_capacity_bytes=1000,
+            cpu_slot_bytes=0,
+        )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {
+            "request": {
+                "request_id": "request-1",
+                "output_tokens": None,
+                "replay": {
+                    "input_length": 4,
+                    "input_sequence_hashes": ["hash"],
+                },
+            }
+        },
+        {
+            "request_id": "request-1",
+            "input_length": 4,
+            "output_length": None,
+            "output_tokens": 7,
+            "lineage": ["hash"],
+        },
+    ],
+)
+def test_null_output_length_is_zero(raw) -> None:
+    request = HybridCacheRequest.from_dict(raw)
+
+    assert request.output_length == 0

@@ -67,6 +67,8 @@ class HybridCacheConfig:
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> HybridCacheConfig:
         slot_bytes = int(raw["cpu_slot_bytes"])
+        if slot_bytes <= 0:
+            raise ValueError("cpu_slot_bytes must be greater than zero")
         if raw.get("cpu_capacity_slots") is not None:
             capacity_slots = int(raw["cpu_capacity_slots"])
         elif raw.get("cpu_capacity_bytes") is not None:
@@ -148,12 +150,18 @@ class HybridCacheRequest:
             replay = request["replay"]
             request_id = str(request["request_id"])
             input_length = int(replay["input_length"])
-            output_length = int(request.get("output_tokens", 0))
+            output_tokens = request.get("output_tokens")
+            output_length = int(output_tokens) if output_tokens is not None else 0
             lineage = replay["input_sequence_hashes"]
         else:
             request_id = str(raw["request_id"])
             input_length = int(raw["input_length"])
-            output_length = int(raw.get("output_length", raw.get("output_tokens", 0)))
+            output_tokens = (
+                raw["output_length"]
+                if "output_length" in raw
+                else raw.get("output_tokens")
+            )
+            output_length = int(output_tokens) if output_tokens is not None else 0
             lineage = raw.get("lineage", raw.get("lineage_b4"))
         if not isinstance(lineage, list):
             raise TypeError("request must contain cumulative input lineage hashes")
