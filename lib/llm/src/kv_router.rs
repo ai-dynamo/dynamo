@@ -1266,6 +1266,7 @@ where
                 request_id: context_id.map(str::to_string),
             },
         };
+        let query_only = matches!(&mode, ScheduleMode::QueryOnly { .. });
         let isl_tokens = tokens.len();
         let hash_options = BlockHashOptions {
             block_mm_infos,
@@ -1361,7 +1362,7 @@ where
                 || session
                     .kv_hints()
                     .is_some_and(|hints| hints.evict_session());
-            if session_over {
+            if session_over && !query_only {
                 index.remove_session(session.session_id());
             }
         }

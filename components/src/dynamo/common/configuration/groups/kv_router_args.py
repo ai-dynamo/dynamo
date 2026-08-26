@@ -661,8 +661,8 @@ class KvRouterArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--enable-session-prefix-index",
-            env_var="DYN_ENABLE_SESSION_PREFIX_INDEX",
+            flag_name="--router-session-prefix-index",
+            env_var="DYN_ROUTER_SESSION_PREFIX_INDEX",
             default=False,
             help=(
                 "[EXPERIMENTAL] KV Router: Track per-session block lineage in a logical "

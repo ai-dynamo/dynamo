@@ -206,12 +206,12 @@ def test_session_prefix_index_is_opt_in_and_reaches_the_binding() -> None:
     assert default_kwargs["enable_session_prefix_index"] is False
 
     enabled_kwargs = KvRouterConfigBase.from_cli_args(
-        parser.parse_args(["--enable-session-prefix-index"])
+        parser.parse_args(["--router-session-prefix-index"])
     ).kv_router_kwargs()
     assert enabled_kwargs["enable_session_prefix_index"] is True
 
     disabled_kwargs = KvRouterConfigBase.from_cli_args(
-        parser.parse_args(["--no-enable-session-prefix-index"])
+        parser.parse_args(["--no-router-session-prefix-index"])
     ).kv_router_kwargs()
     assert disabled_kwargs["enable_session_prefix_index"] is False
 
@@ -221,7 +221,7 @@ def test_session_prefix_index_is_opt_in_and_reaches_the_binding() -> None:
 def test_session_prefix_index_environment_flows_to_binding_kwargs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("DYN_ENABLE_SESSION_PREFIX_INDEX", "true")
+    monkeypatch.setenv("DYN_ROUTER_SESSION_PREFIX_INDEX", "true")
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
 
@@ -229,7 +229,7 @@ def test_session_prefix_index_environment_flows_to_binding_kwargs(
     assert kwargs["enable_session_prefix_index"] is True
 
     overridden = KvRouterConfigBase.from_cli_args(
-        parser.parse_args(["--no-enable-session-prefix-index"])
+        parser.parse_args(["--no-router-session-prefix-index"])
     ).kv_router_kwargs()
     assert overridden["enable_session_prefix_index"] is False
 

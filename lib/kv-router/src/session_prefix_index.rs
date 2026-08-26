@@ -191,7 +191,24 @@ impl SessionPrefixIndexer {
         matched_hash: ExternalSequenceBlockHash,
     ) -> Result<bool, SessionPrefixIndexError> {
         let mut state = self.state.write();
-        let node = state.resolve_or_insert_root(matched_hash);
+        let parent = state
+            .sessions
+            .get(session_id)
+            .filter(|entry| entry.frontiers.len() == 1)
+            .and_then(|entry| entry.frontiers.iter().next().copied());
+        let node = match state.hash_to_node.get(&matched_hash).copied() {
+            Some(node) => {
+                if let Some(parent) = parent
+                    && state.nodes[node].parent.is_none()
+                    && !state.is_ancestor_or_self(node, parent)
+                {
+                    state.nodes[node].parent = Some(parent);
+                    state.nodes[parent].child_count += 1;
+                }
+                node
+            }
+            None => state.insert_node(matched_hash, parent),
+        };
         Ok(state.advance_frontier(session_id, node))
     }
 
@@ -500,6 +517,19 @@ mod tests {
             "a repeated match must not grow the arena"
         );
         assert_eq!(indexer.get_session_frontiers("s1").len(), 1);
+    }
+
+    #[test]
+    fn sequential_matches_extend_one_lineage() {
+        let chain = hashes(vec![1, 2, 3]);
+        let indexer = SessionPrefixIndexer::new();
+
+        for &block_hash in &chain {
+            assert!(indexer.update_session_from_match("s1", block_hash).unwrap());
+        }
+
+        assert_eq!(indexer.get_session_frontiers("s1").len(), 1);
+        assert_eq!(lineage_of(&indexer, "s1"), vec![chain]);
     }
 
     #[test]
