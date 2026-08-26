@@ -1708,6 +1708,111 @@ class TestPreprocessRawRequestControls:
         assert "thinking_mode" not in result.chat_template_kwargs
 
 
+class _FakeStructuralTagReasoningParser:
+    """A reasoning parser that rewrites the caller's constraint.
+
+    Mirrors a real text-grammar parser converting response_format into the
+    structural tag its model actually speaks.
+    """
+
+    def __init__(self, tokenizer, chat_template_kwargs=None):
+        del tokenizer, chat_template_kwargs
+
+    def adjust_request(self, request):
+        request.skip_special_tokens = False
+        request.structured_outputs = StructuredOutputsParams(
+            structural_tag='{"format": "reasoning"}'
+        )
+        return request
+
+
+class _FakePassthroughReasoningParser(_FakeStructuralTagReasoningParser):
+    def adjust_request(self, request):
+        return request
+
+
+class TestReasoningParserGuidanceForwarding:
+    """A reasoning parser's guidance must be recomputed and forwarded.
+
+    Regression: parser_guided_decoding was gated on `tool_parser is not None`, and
+    build_tool_call_guided_decoding returns early when there is no tool-call
+    guidance to build. A reasoning parser that rewrote the caller's constraint
+    therefore never surfaced: the request carried the adjusted constraint while the
+    engine received the pre-adjustment copy captured before _prepare_request ran.
+    """
+
+    @staticmethod
+    def _request(**overrides):
+        """A fresh request each call, so no test can perturb another's input."""
+        return {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "response_format": {"type": "json_object"},
+            **overrides,
+        }
+
+    @staticmethod
+    def _renderer():
+        return SimpleNamespace(
+            render_messages_async=AsyncMock(
+                return_value=(None, {"prompt_token_ids": [1]})
+            )
+        )
+
+    async def _preprocess(self, tokenizer, *, request=None, **kwargs):
+        return await prepost_module.preprocess_chat_request(
+            request if request is not None else self._request(),
+            tokenizer=tokenizer,
+            renderer=self._renderer(),
+            tool_parser_class=None,
+            **kwargs,
+        )
+
+    @pytest.mark.asyncio
+    async def test_rewrite_is_forwarded_without_a_tool_parser(self, tokenizer):
+        """The whole point: no tool parser anywhere in the request."""
+        result = await self._preprocess(
+            tokenizer,
+            reasoning_parser_class=_FakeStructuralTagReasoningParser,
+        )
+
+        assert result.guided_decoding == {"structural_tag": '{"format": "reasoning"}'}
+        # The pre-adjustment copy must not win.
+        assert result.guided_decoding != {"json": {"type": "object"}}
+
+    @pytest.mark.asyncio
+    async def test_passthrough_parser_keeps_the_caller_constraint(self, tokenizer):
+        """adjust_request that changes nothing must not disturb the caller."""
+        result = await self._preprocess(
+            tokenizer,
+            reasoning_parser_class=_FakePassthroughReasoningParser,
+        )
+
+        assert result.guided_decoding == {"json": {"type": "object"}}
+
+    @pytest.mark.asyncio
+    async def test_no_reasoning_parser_keeps_the_caller_constraint(self, tokenizer):
+        result = await self._preprocess(tokenizer, reasoning_parser_class=None)
+
+        assert result.guided_decoding == {"json": {"type": "object"}}
+
+    @pytest.mark.asyncio
+    async def test_thinking_disabled_does_not_recompute(self, tokenizer):
+        """The gate is off, so no parser runs and nothing may be recomputed.
+
+        Recomputing here would forward a constraint from a parser that the
+        postprocessor will not build.
+        """
+        result = await self._preprocess(
+            tokenizer,
+            request=self._request(chat_template_kwargs={"enable_thinking": False}),
+            reasoning_parser_class=_FakeStructuralTagReasoningParser,
+        )
+
+        assert result.guided_decoding == {"json": {"type": "object"}}
+        assert result.request_for_sampling.skip_special_tokens is not False
+
+
 class TestToolCallGuidedDecoding:
     def _request(self, tokenizer, **overrides):
         raw_request = {**TOOL_REQUEST, "tool_choice": "auto", **overrides}

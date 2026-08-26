@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, TypeGuard, cast
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -414,6 +414,28 @@ def _validate_chat_completion_request(
     return validated_request
 
 
+def _reasoning_parser_enabled(
+    reasoning_parser_class: type[ReasoningParser] | None,
+    chat_template_kwargs: dict[str, Any],
+) -> TypeGuard[type[ReasoningParser]]:
+    """Whether a reasoning parser runs for this request.
+
+    Single-sourced because three call sites must agree: _prepare_request (which
+    lets the parser adjust the sampling request), preprocess_chat_request (which
+    must know whether that parser could have rewritten the request's guidance),
+    and StreamingPostProcessor (which builds the parser that consumes the result).
+    If they drift, the sampling params get adjusted for a parser that then does not
+    exist and the model's control markers reach the client as visible text.
+
+    See https://github.com/ai-dynamo/dynamo/issues/8636 for the enable_thinking
+    half: when the chat template runs with enable_thinking=False the reasoning
+    tags live in the prompt and the generated output carries none.
+    """
+    return reasoning_parser_class is not None and (
+        chat_template_kwargs.get("enable_thinking") is not False
+    )
+
+
 def _prepare_request(
     request: dict[str, Any] | ChatCompletionRequest,
     *,
@@ -508,9 +530,7 @@ def _prepare_request(
     #
     # ReasoningParser.adjust_request is `return request` by default, so this is a no-op
     # for parsers that do not need it.
-    if reasoning_parser_class is not None and (
-        chat_template_kwargs.get("enable_thinking") is not False
-    ):
+    if _reasoning_parser_enabled(reasoning_parser_class, chat_template_kwargs):
         request_for_sampling = reasoning_parser_class(
             tokenizer,
             chat_template_kwargs=chat_template_kwargs,
@@ -600,9 +620,18 @@ async def preprocess_chat_request(
     adjusted_structured_guidance = _guided_decoding_from_structured_outputs(
         request_for_sampling.structured_outputs
     )
+    # Either parser's adjust_request() may rewrite the caller's constraint into the
+    # form the model actually speaks -- a reasoning parser converting
+    # response_format into a structural tag, say. Gating this recompute on
+    # tool_parser alone dropped a reasoning parser's rewrite on the floor: the
+    # request carried the adjusted constraint but the pre-adjustment copy was
+    # forwarded to the engine.
     parser_guided_decoding = (
         adjusted_structured_guidance
-        if tool_parser is not None
+        if (
+            tool_parser is not None
+            or _reasoning_parser_enabled(reasoning_parser_class, chat_template_kwargs)
+        )
         and adjusted_structured_guidance != client_structured_guidance
         else None
     )
@@ -631,11 +660,30 @@ async def preprocess_chat_request(
             "tool_choice forces a tool call and cannot be combined with an "
             "explicit guided_* or structured_outputs constraint."
         )
-    guided_decoding = (
-        assistant_guided_decoding
-        if assistant_guided_decoding is not None and not is_forced_tool_choice
-        else tool_guided_decoding
+    # A rewrite that only the reasoning parser can have made. With no tool parser
+    # there is no other adjust_request in this request, so the change is
+    # attributable, and tool_guided_decoding cannot carry it out either:
+    # build_tool_call_guided_decoding returns early when the request has no tools.
+    # Without this the request ends up holding the parser's structural tag while
+    # the engine is handed the pre-adjustment copy captured before
+    # _prepare_request ran.
+    #
+    # Scoped to that case on purpose. When a tool parser is also active the change
+    # is not attributable to either parser, and parser-vs-assistant precedence is
+    # already settled there -- the caller's explicit constraint wins, pinned by
+    # test_assistant_guidance_takes_precedence_over_auto_tool_guidance and the
+    # response-format-precedence row of TOOL_GUIDANCE_PARITY_CASES. Revisiting that
+    # policy is a separate change.
+    reasoning_only_guided_decoding = (
+        parser_guided_decoding if tool_parser is None else None
     )
+    guided_decoding: dict[str, Any] | None
+    if reasoning_only_guided_decoding is not None and not is_forced_tool_choice:
+        guided_decoding = reasoning_only_guided_decoding
+    elif assistant_guided_decoding is not None and not is_forced_tool_choice:
+        guided_decoding = assistant_guided_decoding
+    else:
+        guided_decoding = tool_guided_decoding
     # build_tool_call_guided_decoding falls back to Dynamo's generic JSON schema
     # when a forced tool choice has no parser-provided grammar.  That can happen
     # both without a parser and with parsers (for example Hermes) whose
@@ -704,14 +752,12 @@ class StreamingPostProcessor:
         # `enable_thinking` is the convention adopted across the modern
         # reasoning-capable model families that vLLM supports; templates
         # that don't honor it simply leave it unset (no effect here).
-        thinking_disabled = chat_template_kwargs.get("enable_thinking") is False
         self.reasoning_parser = (
             reasoning_parser_class(
                 tokenizer,
                 chat_template_kwargs=chat_template_kwargs,
             )
-            if reasoning_parser_class
-            and not thinking_disabled
+            if _reasoning_parser_enabled(reasoning_parser_class, chat_template_kwargs)
             and response_reasoning_ended is not True
             else None
         )
