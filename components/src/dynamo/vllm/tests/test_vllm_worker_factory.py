@@ -6,6 +6,7 @@
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -1072,22 +1073,33 @@ class TestPrefillRegistrationContract:
 async def test_prefill_worker_wires_stat_logger_and_seeds_kv_gauges(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: dict = {}
     stop_after_register = RuntimeError("stop-after-register")
 
     class RecordingStatLoggerFactory:
         def __init__(self, *, endpoint, component_gauges=None):
-            captured["factory_endpoint"] = endpoint
-            captured["component_gauges"] = component_gauges
+            captured.factory_endpoint = endpoint
+            captured.component_gauges = component_gauges
             self.num_gpu_blocks: list[int] = []
             self.init_publish_calls = 0
-            captured["factory"] = self
+            captured.factory = self
 
         def set_num_gpu_blocks_all(self, num_blocks: int) -> None:
             self.num_gpu_blocks.append(num_blocks)
 
         def init_publish(self) -> None:
             self.init_publish_calls += 1
+
+    @dataclass
+    class PrefillCapture:
+        factory_endpoint: object | None = None
+        component_gauges: object | None = None
+        factory: RecordingStatLoggerFactory | None = None
+        model_input: ModelInput | None = None
+        model_type: ModelType | None = None
+        worker_type: WorkerType | None = None
+        needs: list[list[WorkerType]] | None = None
+
+    captured = PrefillCapture()
 
     async def fake_register_vllm_model(
         model_input,
@@ -1099,10 +1111,10 @@ async def test_prefill_worker_wires_stat_logger_and_seeds_kv_gauges(
         worker_type,
         needs,
     ) -> None:
-        captured["model_input"] = model_input
-        captured["model_type"] = model_type
-        captured["worker_type"] = worker_type
-        captured["needs"] = needs
+        captured.model_input = model_input
+        captured.model_type = model_type
+        captured.worker_type = worker_type
+        captured.needs = needs
         raise stop_after_register
 
     engine_client = Mock()
@@ -1175,19 +1187,20 @@ async def test_prefill_worker_wires_stat_logger_and_seeds_kv_gauges(
             [],
         )
 
-    recording_factory = captured["factory"]
+    recording_factory = captured.factory
+    assert recording_factory is not None
     setup_vllm_engine.assert_called_once_with(
         config,
         recording_factory,
         fpm_worker_id="cid",
     )
-    assert captured["factory_endpoint"] is endpoint
+    assert captured.factory_endpoint is endpoint
     assert recording_factory.num_gpu_blocks == [4]
     assert recording_factory.init_publish_calls == 1
-    assert captured["model_input"] == ModelInput.Tokens
-    assert captured["model_type"] == ModelType.Prefill
-    assert captured["worker_type"] == WorkerType.Prefill
-    assert captured["needs"] == [[WorkerType.Decode]]
+    assert captured.model_input == ModelInput.Tokens
+    assert captured.model_type == ModelType.Prefill
+    assert captured.worker_type == WorkerType.Prefill
+    assert captured.needs == [[WorkerType.Decode]]
 
 
 @pytest.mark.asyncio
