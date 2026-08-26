@@ -13,6 +13,7 @@ docs:
   - agent-docs/references/definitions.md
 rules:
   - agent-docs/rules/execution/deployment.md
+  - agent-docs/rules/execution/gpu-hold.md
   - agent-docs/rules/execution/logging.md
   - agent-docs/rules/execution/run-artifacts.md
   - agent-docs/rules/execution/user-workload.md
@@ -210,8 +211,10 @@ outcomes for `no-proposal` are exactly one of:
   ledger path and the SHA256 of the submitted ledger state alongside the consultation; the challenger's verdict
   binds to that SHA256.
 
-While a stop-request awaits challenger validation and operator grant (`STOP_REQUESTED`), continue confirmatory
-runs, cleanup, and any still-testable work; launch no new candidate families. If the challenger or operator returns
+While a stop-request awaits challenger validation and operator grant (`STOP_REQUESTED`), continue cleanup, any
+still-testable work, and confirmatory runs that were already authorized and remain decision-relevant; launch no
+new candidate families, and do not start discretionary GPU spend merely because validation is pending (see
+`gpu-hold.md`: review time never justifies holding an allocation). If the challenger or operator returns
 objections, re-enter `ACTIVE`.
 
 Stop only when the operator grants a validated stop-request (`STOP_GRANTED`), the authorized budget is exhausted
