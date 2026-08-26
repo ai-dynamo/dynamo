@@ -148,13 +148,13 @@ fn otlp_exporter_enabled() -> bool {
 }
 
 /// Get the service name from environment or use default
-fn get_service_name() -> String {
+pub(crate) fn get_service_name() -> String {
     std::env::var(env_logging::otlp::OTEL_SERVICE_NAME)
         .unwrap_or_else(|_| DEFAULT_OTEL_SERVICE_NAME.to_string())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OtlpProtocol {
+pub(crate) enum OtlpProtocol {
     Grpc,
     HttpProtobuf,
 }
@@ -187,7 +187,7 @@ fn parse_otlp_protocol(value: Option<&str>) -> OtlpProtocol {
     parse_otlp_protocol_for_env(value, env_logging::otlp::OTEL_EXPORTER_OTLP_PROTOCOL)
 }
 
-fn otlp_protocol_from_env() -> OtlpProtocol {
+pub(crate) fn otlp_protocol_from_env() -> OtlpProtocol {
     parse_otlp_protocol(
         std::env::var(env_logging::otlp::OTEL_EXPORTER_OTLP_PROTOCOL)
             .ok()
@@ -195,7 +195,7 @@ fn otlp_protocol_from_env() -> OtlpProtocol {
     )
 }
 
-fn resolve_signal_otlp_protocol(
+pub(crate) fn resolve_signal_otlp_protocol(
     generic_protocol: OtlpProtocol,
     signal_protocol: Option<&str>,
     signal_protocol_env: &str,
@@ -214,7 +214,7 @@ fn append_otlp_http_path(endpoint: &str, path: &str) -> String {
     format!("{endpoint}{path}")
 }
 
-fn resolve_otlp_endpoint(
+pub(crate) fn resolve_otlp_endpoint(
     protocol: OtlpProtocol,
     signal_endpoint: Option<String>,
     generic_endpoint: Option<String>,
@@ -260,7 +260,7 @@ fn trace_sample_ratio_from_env() -> Option<f64> {
     )
 }
 
-fn otel_runtime_handle() -> std::io::Result<tokio::runtime::Handle> {
+pub(crate) fn otel_runtime_handle() -> std::io::Result<tokio::runtime::Handle> {
     // Keep our own long-lived runtime for the exporter. Using the ambient one
     // (Handle::try_current) pins the exporter to whatever runtime is live at init,
     // since INIT (Once) runs setup once. If that's a #[tokio::test] runtime, export

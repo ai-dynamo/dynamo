@@ -254,6 +254,28 @@ pub async fn spawn_system_status_server(
     };
     let (listener, actual_address) = listener;
 
+    // Opt-in OTLP metrics export runs alongside /metrics and shares its
+    // lifetime. Both read the same registry, so the two surfaces agree.
+    match crate::metrics::otlp_export::ExportConfig::from_env() {
+        Ok(Some(config)) => {
+            tracing::info!(
+                endpoint = %config.endpoint,
+                interval_ms = config.interval.as_millis(),
+                "exporting metrics over OTLP"
+            );
+            let registry = server_state.drt().get_metrics_registry().clone();
+            tokio::spawn(crate::metrics::otlp_export::run(
+                registry,
+                config,
+                cancel_token.child_token(),
+            ));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::error!(%error, "OTLP metrics export is misconfigured; not exporting");
+        }
+    }
+
     let observer = cancel_token.child_token();
     // Spawn the server in the background and return the handle
     let handle = tokio::spawn(async move {

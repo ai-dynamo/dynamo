@@ -11,6 +11,10 @@
 //! Deliberately free of any runtime types: the same mapping serves an
 //! out-of-process scraper.
 
+use crate::config::environment_names::logging::otlp as env_otlp;
+use crate::metrics::MetricsRegistry;
+use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_client::MetricsServiceClient;
 use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value};
 use opentelemetry_proto::tonic::metrics::v1::{
     AggregationTemporality, Gauge, Histogram, HistogramDataPoint, Metric, NumberDataPoint,
@@ -19,7 +23,8 @@ use opentelemetry_proto::tonic::metrics::v1::{
 };
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use prometheus::proto::{MetricFamily, MetricType};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio_util::sync::CancellationToken;
 
 const SCOPE_NAME: &str = "dynamo.runtime.metrics";
 
@@ -200,6 +205,117 @@ fn unix_nanos(time: SystemTime) -> u64 {
         .unwrap_or_default()
 }
 
+/// Resolved OTLP metrics export settings.
+pub struct ExportConfig {
+    pub endpoint: String,
+    pub interval: Duration,
+    pub service_name: String,
+}
+
+impl ExportConfig {
+    /// `None` unless `OTEL_METRICS_EXPORTER=otlp`. Prometheus scraping is
+    /// unaffected either way.
+    pub fn from_env() -> anyhow::Result<Option<Self>> {
+        let Ok(exporter) = std::env::var(env_otlp::OTEL_METRICS_EXPORTER) else {
+            return Ok(None);
+        };
+        if !exporter.trim().eq_ignore_ascii_case("otlp") {
+            return Ok(None);
+        }
+
+        let protocol = crate::logging::resolve_signal_otlp_protocol(
+            crate::logging::otlp_protocol_from_env(),
+            std::env::var(env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL)
+                .ok()
+                .as_deref(),
+            env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL,
+        );
+        // Only gRPC is implemented. Failing loudly beats silently exporting
+        // over the wrong transport, or silently not exporting at all.
+        if protocol != crate::logging::OtlpProtocol::Grpc {
+            anyhow::bail!(
+                "{}=http/protobuf is not supported for metrics; use grpc",
+                env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL
+            );
+        }
+
+        Ok(Some(Self {
+            endpoint: crate::logging::resolve_otlp_endpoint(
+                protocol,
+                std::env::var(env_otlp::OTEL_EXPORTER_OTLP_METRICS_ENDPOINT).ok(),
+                std::env::var(env_otlp::OTEL_EXPORTER_OTLP_ENDPOINT).ok(),
+                "/v1/metrics",
+            ),
+            interval: export_interval(),
+            service_name: crate::logging::get_service_name(),
+        }))
+    }
+}
+
+fn export_interval() -> Duration {
+    const DEFAULT_MS: u64 = 60_000;
+    let millis = std::env::var(env_otlp::OTEL_METRIC_EXPORT_INTERVAL)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|millis| *millis > 0)
+        .unwrap_or(DEFAULT_MS);
+    Duration::from_millis(millis)
+}
+
+/// Collect and export until `cancel` fires.
+///
+/// Collection reads through a TTL cache because expfmt callbacks take the
+/// Python GIL and `/metrics` is scraped independently. Export failures are
+/// logged and retried on the next tick: metrics are resendable, so a
+/// transient collector outage should not tear down the task.
+pub async fn run(registry: MetricsRegistry, config: ExportConfig, cancel: CancellationToken) {
+    let mut client = match MetricsServiceClient::connect(config.endpoint.clone()).await {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::error!(%error, endpoint = %config.endpoint, "OTLP metrics exporter failed to connect");
+            return;
+        }
+    };
+
+    let attrs = vec![KeyValue {
+        key: "service.name".to_string(),
+        value: Some(AnyValue {
+            value: Some(any_value::Value::StringValue(config.service_name)),
+        }),
+    }];
+    // Fixed for the process lifetime; a moving start time reads as a counter
+    // reset on every export.
+    let start_time = SystemTime::now();
+    // Half the interval keeps a near-simultaneous scrape from forcing a second
+    // GIL-taking collection, without serving stale data to the exporter.
+    let ttl = config.interval / 2;
+
+    let mut ticker = tokio::time::interval(config.interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = ticker.tick() => {}
+        }
+
+        let families = match registry.metric_families_cached(ttl) {
+            Ok(families) => families,
+            Err(error) => {
+                tracing::warn!(%error, "OTLP metrics collection failed");
+                continue;
+            }
+        };
+
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: vec![to_resource_metrics(&families, attrs.clone(), start_time)],
+        };
+        if let Err(error) = client.export(request).await {
+            tracing::warn!(%error, endpoint = %config.endpoint, "OTLP metrics export failed");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +383,43 @@ d_requests_total{model="a"} 17
             Some(number_data_point::Value::AsDouble(17.0))
         );
         assert_eq!(sum.data_points[0].attributes[0].key, "model");
+    }
+
+    /// Export is opt-in, and an unsupported protocol must fail loudly rather
+    /// than silently not export.
+    #[test]
+    fn config_is_opt_in_and_rejects_unsupported_protocol() {
+        temp_env::with_vars([(env_otlp::OTEL_METRICS_EXPORTER, None::<&str>)], || {
+            assert!(ExportConfig::from_env().expect("disabled").is_none())
+        });
+
+        temp_env::with_vars(
+            [
+                (env_otlp::OTEL_METRICS_EXPORTER, Some("otlp")),
+                (
+                    env_otlp::OTEL_EXPORTER_OTLP_METRICS_ENDPOINT,
+                    Some("http://collector:4317"),
+                ),
+            ],
+            || {
+                let config = ExportConfig::from_env()
+                    .expect("enabled")
+                    .expect("some config");
+                assert_eq!(config.endpoint, "http://collector:4317");
+                assert_eq!(config.interval, Duration::from_millis(60_000));
+            },
+        );
+
+        temp_env::with_vars(
+            [
+                (env_otlp::OTEL_METRICS_EXPORTER, Some("otlp")),
+                (
+                    env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL,
+                    Some("http/protobuf"),
+                ),
+            ],
+            || assert!(ExportConfig::from_env().is_err()),
+        );
     }
 
     /// Summaries only survive because we bypass the SDK, whose data model has
