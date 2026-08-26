@@ -14,11 +14,11 @@ For the full walkthrough of cluster prerequisites, accelerator support, optional
 The enterprise images are public. Anonymous `docker pull` works from any host with network access to `nvcr.io`. Environments that require authenticated pulls (a bastion registry, an air-gapped mirror, or a policy that blocks anonymous access to `nvcr.io`) can configure an NGC API key on the pulling host; see the [NGC User Guide](https://docs.nvidia.com/ngc/ngc-catalog-user-guide/index.html) for the API-key workflow.
 
 ```bash
-docker pull nvcr.io/nvidia/dynamo-enterprise/sglang-runtime-enterprise:1.4.1
-docker pull nvcr.io/nvidia/dynamo-enterprise/tensorrtllm-runtime-enterprise:1.4.1
-docker pull nvcr.io/nvidia/dynamo-enterprise/vllm-runtime-enterprise:1.4.1
-docker pull nvcr.io/nvidia/dynamo-enterprise/dynamo-frontend-enterprise:1.4.1
-docker pull nvcr.io/nvidia/dynamo-enterprise/kubernetes-operator-enterprise:1.4.1
+docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime-enterprise:1.4.1
+docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-enterprise:1.4.1
+docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-enterprise:1.4.1
+docker pull nvcr.io/nvidia/ai-dynamo/dynamo-frontend-enterprise:1.4.1
+docker pull nvcr.io/nvidia/ai-dynamo/kubernetes-operator-enterprise:1.4.1
 ```
 
 Kubernetes clusters that already pull from `nvcr.io` need no additional pull secret for the enterprise images. Air-gapped and internal-mirror installs should retag these into the internal registry using the same repository names and versions to keep the manifests portable.
@@ -31,7 +31,7 @@ The enterprise Helm chart installs the Dynamo Operator, using the enterprise Ope
 export NAMESPACE=dynamo-system
 export RELEASE_VERSION=1.4.1
 
-helm fetch https://helm.ngc.nvidia.com/nvidia/dynamo-enterprise/charts/dynamo-platform-enterprise-$RELEASE_VERSION.tgz
+helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-enterprise-$RELEASE_VERSION.tgz
 helm install dynamo-platform dynamo-platform-enterprise-$RELEASE_VERSION.tgz \
   --namespace $NAMESPACE \
   --create-namespace
@@ -48,7 +48,7 @@ The expected CRDs and pods are the same as in the open-source install; see the [
 
 ## Runtime Images in Deployments
 
-The Dynamo Operator watches `DynamoGraphDeployment` (DGD) resources. Deployments that must run on the enterprise runtime images reference them by their full `dynamo-enterprise` path in the DGD spec. A minimal example:
+The Dynamo Operator watches `DynamoGraphDeployment` (DGD) resources. Deployments that must run on the enterprise runtime images reference them by their full `-enterprise` image path in the DGD spec. A minimal example:
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -65,7 +65,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/dynamo-enterprise/dynamo-frontend-enterprise:1.4.1
+              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-enterprise:1.4.1
     - name: VllmWorker
       type: worker
       replicas: 1
@@ -73,7 +73,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/dynamo-enterprise/vllm-runtime-enterprise:1.4.1
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-enterprise:1.4.1
               envFrom:
                 - secretRef:
                     name: hf-token-secret
@@ -90,6 +90,6 @@ For the full DGD walkthrough (choosing a model, sizing parallelism, applying and
 
 ## Differences from the Open-Source Install
 
-- **Image references.** Enterprise images resolve under `nvcr.io/nvidia/dynamo-enterprise/`; open-source images resolve under `nvcr.io/nvidia/ai-dynamo/`. The enterprise repository names also carry an `-enterprise` suffix.
+- **Image references.** Enterprise and open-source images both resolve under `nvcr.io/nvidia/ai-dynamo/`. The enterprise repository names carry an `-enterprise` suffix, which is the only difference.
 - **Helm chart.** Enterprise chart: `dynamo-platform-enterprise`. Open-source chart: `dynamo-platform`. The values schema is the same.
 - **Support scope.** Only the images and chart listed above are eligible for commercial support. The Python wheels, Rust crates, and non-listed component containers in the same release remain community-supported.
