@@ -458,6 +458,62 @@ mod tests {
 
     #[serial_test::serial]
     #[tokio::test]
+    async fn s3_source_uses_shared_credentials_and_endpoint_url() {
+        let mut server = mockito::Server::new_async().await;
+        let list = server
+            .mock("GET", "/bucket")
+            .match_query(Matcher::AllOf(vec![
+                Matcher::UrlEncoded("list-type".into(), "2".into()),
+                Matcher::UrlEncoded("prefix".into(), "adapter".into()),
+            ]))
+            .match_header("authorization", Matcher::Regex("Credential=profile-access-key/".into()))
+            .with_status(200)
+            .with_header("content-type", "application/xml")
+            .with_body(
+                r#"<ListBucketResult><Contents><Key>adapter/adapter_config.json</Key></Contents></ListBucketResult>"#,
+            )
+            .create_async()
+            .await;
+
+        let temp = TempDir::new().unwrap();
+        let credentials_path = temp.path().join("credentials");
+        let config_path = temp.path().join("config");
+        fs::write(
+            &credentials_path,
+            "[profile]\naws_access_key_id = profile-access-key\naws_secret_access_key = profile-secret-key\n",
+        )
+        .unwrap();
+        fs::write(&config_path, "[profile profile]\nregion = us-east-1\n").unwrap();
+
+        let exists = temp_env::async_with_vars(
+            [
+                ("AWS_ACCESS_KEY_ID", None),
+                ("AWS_SECRET_ACCESS_KEY", None),
+                ("AWS_SESSION_TOKEN", None),
+                ("AWS_REGION", None),
+                ("AWS_DEFAULT_REGION", None),
+                ("AWS_ENDPOINT", None),
+                ("AWS_SHARED_CREDENTIALS_FILE", credentials_path.to_str()),
+                ("AWS_CONFIG_FILE", config_path.to_str()),
+                ("AWS_PROFILE", Some("profile")),
+                ("AWS_ENDPOINT_URL", Some(server.url().as_str())),
+                ("AWS_ALLOW_HTTP", Some("true")),
+                ("AWS_EC2_METADATA_DISABLED", Some("true")),
+            ],
+            async {
+                let source = S3LoRASource::from_env().unwrap();
+                source.exists("s3://bucket/adapter").await
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(exists);
+        list.assert_async().await;
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
     async fn hf_source_reuses_valid_native_snapshot_in_offline_mode() {
         let temp = TempDir::new().unwrap();
         let repo_dir = temp.path().join("models--org--adapter");
