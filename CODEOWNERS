@@ -465,6 +465,7 @@ pyproject.toml                                                               @ai
 /tests/docs/                                                                 @ai-dynamo/dynamo-docs-codeowners
 /tests/deploy/                                                               @ai-dynamo/dynamo-operator-codeowners
 /tests/router/                                                               @ai-dynamo/dynamo-router-codeowners
+/tests/wheels/                                                               @ai-dynamo/dynamo-ops-codeowners
 /tests/lmcache/                                                              @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/kv/                                                             @ai-dynamo/dynamo-kv-memory-codeowners
 /tests/frontend/                                                             @ai-dynamo/dynamo-frontend-codeowners
@@ -528,6 +529,7 @@ pyproject.toml                                                               @ai
 /tests/fault_tolerance/hardware/                                             @ai-dynamo/dynamo-fault-tolerance-codeowners
 /components/src/dynamo/common/rl/                                            @ai-dynamo/dynamo-rl-codeowners
 /components/src/dynamo/vllm/omni/                                            @ai-dynamo/dynamo-multimodal-codeowners
+/lib/bindings/kvbm/pyproject.toml                                            @ai-dynamo/dynamo-ops-codeowners
 /lib/llm/src/block_manager/block/                                            @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager/state/                                            @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/kv_router/publisher/                                            @ai-dynamo/dynamo-router-codeowners
@@ -587,7 +589,6 @@ pyproject.toml                                                               @ai
 /agent-docs/                                                                 @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
 /.lycheeignore                                                               @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-docs-codeowners
 /tests/deploy/                                                               @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
-/tests/wheels/                                                               @ai-dynamo/dynamo-ops-codeowners
 /docs/fern/agents/                                                           @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-agents-codeowners
 /benchmarks/router/                                                          @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners
 /deploy/power-agent/                                                         @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-planner-codeowners
@@ -616,10 +617,8 @@ pyproject.toml                                                               @ai
 /components/src/dynamo/vllm/omni/                                            @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /deploy/operator/**/*podsnapshot*                                            @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-gms-codeowners
 /dev/docker-observability-xpu.yml                                            @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-xpu-codeowners
-/lib/bindings/kvbm/pyproject.toml                                            @ai-dynamo/dynamo-ops-codeowners
 /lib/kvbm-config/src/messenger.rs                                            @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/src/system_health.rs                                            @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
-/tests/serve/multimodal_profiles/                                            @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /lib/backend-common/src/metrics.rs                                           @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /benchmarks/frontend/dgd/templates/                                          @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-operator-codeowners
 /components/src/dynamo/vllm/main.py                                          @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
@@ -648,6 +647,7 @@ pyproject.toml                                                               @ai
 /lib/mocker/src/replay/planner_handle.rs                                     @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-planner-codeowners
 /lib/runtime/src/system_status_server.rs                                     @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-observability-codeowners
 /tests/dependencies/test_kvbm_imports.py                                     @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
+/tests/serve/multimodal_profiles/vllm.py                                     @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/sglang/protocol.py                                    @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /components/src/dynamo/sglang/snapshot.py                                    @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-gms-codeowners
 /components/src/dynamo/trtllm/multimodal/                                    @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
@@ -663,12 +663,14 @@ pyproject.toml                                                               @ai
 /components/src/dynamo/trtllm/publisher.py                                   @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /deploy/operator/internal/gpu/discovery.go                                   @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/llm/src/block_manager/metrics_kvbm.rs                                   @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
+/tests/serve/multimodal_profiles/README.md                                   @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners
+/tests/serve/multimodal_profiles/sglang.py                                   @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/thunderagent_router/                                  @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-agents-codeowners
 /components/src/dynamo/vllm/health_check.py                                  @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-observability-codeowners
 /lib/llm/src/http/service/busy_threshold.rs                                  @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/http/service/clear_kv_blocks.rs                                 @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /tests/fault_tolerance/cancellation/utils.py                                 @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-observability-codeowners
-/tests/serve/multimodal_profiles/vllm_xpu.py                                 @ai-dynamo/dynamo-xpu-codeowners
+/tests/serve/multimodal_profiles/__init__.py                                 @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/sglang/health_check.py                                @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/trtllm/health_check.py                                @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/vllm/engine_monitor.py                                @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-observability-codeowners

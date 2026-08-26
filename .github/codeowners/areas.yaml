@@ -345,9 +345,11 @@ areas:
   - dev/sanity_check.py
   - dynamo.code-workspace
   - hatch_build.py
+  - lib/bindings/kvbm/pyproject.toml
   - pyproject.toml
   - rust-toolchain.toml
   - scripts/
+  - tests/wheels/
 - label: docs
   github_team: '@ai-dynamo/dynamo-docs-codeowners'
   path_globs:
@@ -1130,13 +1132,22 @@ shared:
   owners:
   - runtime
   - diffusion
-- glob: tests/serve/multimodal_profiles/
+- glob: tests/serve/multimodal_profiles/README.md
   owners:
   - runtime
   - multimodal
-- glob: tests/serve/multimodal_profiles/vllm_xpu.py
+- glob: tests/serve/multimodal_profiles/__init__.py
   owners:
-  - xpu
+  - runtime
+  - multimodal
+- glob: tests/serve/multimodal_profiles/sglang.py
+  owners:
+  - runtime
+  - multimodal
+- glob: tests/serve/multimodal_profiles/vllm.py
+  owners:
+  - runtime
+  - multimodal
 - glob: tests/test_kustomize_matrix.py
   owners:
   - runtime
@@ -1145,16 +1156,10 @@ shared:
   owners:
   - runtime
   - ops
-- glob: tests/wheels/
-  owners:
-  - ops
 - glob: tests/dependencies/test_kvbm_imports.py
   owners:
   - runtime
   - kv-memory
-- glob: lib/bindings/kvbm/pyproject.toml
-  owners:
-  - ops
 classify:
   filetype_rules:
   - pattern: '*Dockerfile*'
