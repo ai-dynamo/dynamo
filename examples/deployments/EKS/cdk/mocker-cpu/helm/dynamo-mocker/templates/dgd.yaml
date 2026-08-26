@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: {{ required "deployment.name is required" .Values.deployment.name | quote }}
+  labels:
+    app.kubernetes.io/name: dynamo-mocker
+    app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      metadata:
+        labels:
+          app.kubernetes.io/name: dynamo-mocker-frontend
+      spec:
+        nodeSelector:
+{{ toYaml .Values.placement.nodeSelector | indent 10 }}
+        affinity:
+          nodeAffinity:
+{{ toYaml .Values.placement.nodeAffinity | indent 12 }}
+        containers:
+        - name: main
+          image: {{ required "image is required" .Values.image | quote }}
+          imagePullPolicy: IfNotPresent
+          resources:
+{{ toYaml .Values.frontend.resources | indent 12 }}
+  - name: decode
+    type: decode
+    replicas: {{ .Values.mocker.replicas }}
+    podTemplate:
+      metadata:
+        labels:
+          app.kubernetes.io/name: dynamo-mocker-worker
+      spec:
+        nodeSelector:
+{{ toYaml .Values.placement.nodeSelector | indent 10 }}
+        affinity:
+          nodeAffinity:
+{{ toYaml .Values.placement.nodeAffinity | indent 12 }}
+          podAntiAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    nvidia.com/dynamo-component: decode
+                    nvidia.com/dynamo-graph-deployment-name: {{ .Values.deployment.name | quote }}
+                topologyKey: kubernetes.io/hostname
+        containers:
+        - name: main
+          image: {{ required "image is required" .Values.image | quote }}
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          command:
+          - python3
+          - -m
+          - dynamo.mocker
+          args:
+          - --model-path
+          - {{ required "model.name is required" .Values.model.name | quote }}
+          - --model-name
+          - {{ .Values.model.name | quote }}
+          - --num-workers
+          - "1"
+          - --speedup-ratio
+          - {{ .Values.mocker.speedup_ratio | quote }}
+          resources:
+{{ toYaml .Values.worker.resources | indent 12 }}

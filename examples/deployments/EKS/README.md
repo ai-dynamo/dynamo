@@ -21,6 +21,8 @@ Supported manifests and cluster templates for the EKS deployment guide.
 | `automode-np-gpu.yaml` | GPU NodePool for EKS Auto Mode |
 | `manifests/vllm/` | vLLM `v1beta1` DGD manifests |
 | `manifests/model-download/` | Kustomize overlay for model-download Jobs |
+| `terraform/mocker-cpu/` | Terraform template for a single-AZ CPU Mocker deployment |
+| `cdk/mocker-cpu/` | AWS CDK v2 template for single-subnet CPU node pools and independently configured Mocker DGDs |
 
 ## Working Directory
 

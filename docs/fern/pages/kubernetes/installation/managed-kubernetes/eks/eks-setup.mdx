@@ -7,6 +7,18 @@ subtitle: Deploys the Dynamo platform on Amazon EKS, including cluster creation,
 
 This guide demonstrates the Dynamo platform on Amazon Elastic Kubernetes Service (EKS).
 
+<Note>
+For a CPU-only simulation, use the
+[Terraform Mocker template](https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/EKS/terraform/mocker-cpu)
+or use the
+[AWS CDK Mocker template](https://github.com/ai-dynamo/dynamo/tree/main/examples/deployments/EKS/cdk/mocker-cpu).
+Both create EKS cluster subnets across two Availability Zones. The Terraform template pins one node
+group and DGD to one selected Availability Zone. The AWS CDK template creates single-subnet
+infrastructure pools; each DGD references one or more pools. A DGD is constrained to one subnet
+when it references exactly one pool. Multiple pool references expand scheduling eligibility and do
+not guarantee balanced placement.
+</Note>
+
 <Steps toc={true}>
 <Step title="Clone the repository and set working directory" id="clone-the-repository-and-set-working-directory">
 Manifest and template paths in this guide are relative to `examples/deployments/EKS/` in the Dynamo repository.
