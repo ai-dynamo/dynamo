@@ -129,3 +129,8 @@ Modified Mooncake traces are provided to showcase the value of KV-aware routing 
   can be misreported. This is fixed in newer versions of dynamo by setting the
   `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS` env var to e.g. a value of 500. However, at time of writing,
   it is not yet included in the latest dynamo release (v1.4.0).
+- Certain video codecs (e.g. AV1) are not included in the runtime image. If you need such support,
+  please extend the image to include it.
+- `media_io_kwargs` is an overloaded term; at the time of writing (08/26/2026), it is only meant
+  to be used when frontend decoding is enabled. When it is disabled, it is not passed properly to
+  the frameworks.
