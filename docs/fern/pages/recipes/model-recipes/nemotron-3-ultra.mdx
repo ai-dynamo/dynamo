@@ -160,10 +160,10 @@ frontend endpoint, context, reference concurrency, GPU count, and worker count b
 
 ```bash
 kubectl apply \
-  -f recipes/nemotron-3-ultra/perf/refresh-runner.configmap.yaml \
+  -f recipes/nemotron-3-ultra/perf/runner.configmap.yaml \
   -n ${NAMESPACE}
 kubectl apply \
-  -f recipes/nemotron-3-ultra/perf/refresh-perf.yaml \
+  -f recipes/nemotron-3-ultra/perf/perf.yaml \
   -n ${NAMESPACE}
 ```
 

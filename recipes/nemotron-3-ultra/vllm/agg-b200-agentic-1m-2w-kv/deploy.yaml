@@ -19,10 +19,10 @@ metadata:
   name: ultra-agg-b200-1m-2w-kv
   labels:
     app.kubernetes.io/part-of: nemotron-3-ultra
-    nemotron-ultra-refresh.nvidia.com/sku: b200
-    nemotron-ultra-refresh.nvidia.com/context: 1m
-    nemotron-ultra-refresh.nvidia.com/topology: agg-2worker
-    nemotron-ultra-refresh.nvidia.com/routing: kv-aware
+    nemotron-ultra.nvidia.com/sku: b200
+    nemotron-ultra.nvidia.com/context: 1m
+    nemotron-ultra.nvidia.com/topology: agg-2worker
+    nemotron-ultra.nvidia.com/routing: kv-aware
 spec:
   backendFramework: vllm
   env:
@@ -71,8 +71,8 @@ spec:
     podTemplate:
       metadata:
         labels:
-          nemotron-ultra-refresh.nvidia.com/role: frontend
-          nemotron-ultra-refresh.nvidia.com/routing: kv-aware
+          nemotron-ultra.nvidia.com/role: frontend
+          nemotron-ultra.nvidia.com/routing: kv-aware
       spec:
         containers:
         - name: main
@@ -127,9 +127,9 @@ spec:
     podTemplate:
       metadata:
         labels:
-          nemotron-ultra-refresh.nvidia.com/role: aggregate-worker
-          nemotron-ultra-refresh.nvidia.com/workload: agentic
-          nemotron-ultra-refresh.nvidia.com/routing: kv-aware
+          nemotron-ultra.nvidia.com/role: aggregate-worker
+          nemotron-ultra.nvidia.com/workload: agentic
+          nemotron-ultra.nvidia.com/routing: kv-aware
       spec:
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-B200

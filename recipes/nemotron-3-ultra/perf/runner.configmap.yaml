@@ -16,7 +16,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: nemotron-ultra-refresh-aiperf-runner
+  name: nemotron-ultra-aiperf-runner
   labels:
     app.kubernetes.io/part-of: nemotron-3-ultra
 data:

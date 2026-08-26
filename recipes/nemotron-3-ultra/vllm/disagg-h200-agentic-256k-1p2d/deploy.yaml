@@ -18,17 +18,17 @@ kind: DynamoGraphDeployment
 metadata:
   name: ultra-disagg-h200-256k-1p2d
   annotations:
-    nemotron-ultra-refresh.nvidia.com/mtp: disabled
-    nemotron-ultra-refresh.nvidia.com/prefix-caching: enabled
-    nemotron-ultra-refresh.nvidia.com/async-scheduling: enabled
+    nemotron-ultra.nvidia.com/mtp: disabled
+    nemotron-ultra.nvidia.com/prefix-caching: enabled
+    nemotron-ultra.nvidia.com/async-scheduling: enabled
   labels:
     app.kubernetes.io/name: ultra-disagg-h200-256k-1p2d
     app.kubernetes.io/part-of: nemotron-3-ultra
-    nemotron-ultra-refresh.nvidia.com/sku: h200
-    nemotron-ultra-refresh.nvidia.com/backend: vllm
-    nemotron-ultra-refresh.nvidia.com/topology: 1p2d-tp8
-    nemotron-ultra-refresh.nvidia.com/context: 256k
-    nemotron-ultra-refresh.nvidia.com/workload: agentic
+    nemotron-ultra.nvidia.com/sku: h200
+    nemotron-ultra.nvidia.com/backend: vllm
+    nemotron-ultra.nvidia.com/topology: 1p2d-tp8
+    nemotron-ultra.nvidia.com/context: 256k
+    nemotron-ultra.nvidia.com/workload: agentic
 spec:
   backendFramework: vllm
   env:
@@ -87,9 +87,9 @@ spec:
     podTemplate:
       metadata:
         labels:
-          nemotron-ultra-refresh.nvidia.com/role: frontend
-          nemotron-ultra-refresh.nvidia.com/topology: 1p2d-tp8
-          nemotron-ultra-refresh.nvidia.com/recipe: ultra-disagg-h200-256k-1p2d
+          nemotron-ultra.nvidia.com/role: frontend
+          nemotron-ultra.nvidia.com/topology: 1p2d-tp8
+          nemotron-ultra.nvidia.com/recipe: ultra-disagg-h200-256k-1p2d
       spec:
         containers:
         - name: main
@@ -146,9 +146,9 @@ spec:
     podTemplate:
       metadata:
         labels:
-          nemotron-ultra-refresh.nvidia.com/role: prefill
-          nemotron-ultra-refresh.nvidia.com/topology: 1p2d-tp8
-          nemotron-ultra-refresh.nvidia.com/recipe: ultra-disagg-h200-256k-1p2d
+          nemotron-ultra.nvidia.com/role: prefill
+          nemotron-ultra.nvidia.com/topology: 1p2d-tp8
+          nemotron-ultra.nvidia.com/recipe: ultra-disagg-h200-256k-1p2d
       spec:
         runtimeClassName: nvidia
         nodeSelector:
@@ -291,9 +291,9 @@ spec:
     podTemplate:
       metadata:
         labels:
-          nemotron-ultra-refresh.nvidia.com/role: decode
-          nemotron-ultra-refresh.nvidia.com/topology: 1p2d-tp8
-          nemotron-ultra-refresh.nvidia.com/recipe: ultra-disagg-h200-256k-1p2d
+          nemotron-ultra.nvidia.com/role: decode
+          nemotron-ultra.nvidia.com/topology: 1p2d-tp8
+          nemotron-ultra.nvidia.com/recipe: ultra-disagg-h200-256k-1p2d
       spec:
         runtimeClassName: nvidia
         nodeSelector:

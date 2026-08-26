@@ -11,7 +11,7 @@ model:
   precision: NVFP4 + FP8
 status: experimental
 targets:
-- id: refresh-b200-256k
+- id: agg-b200-256k
   recommended: true
   hardware:
     gpu: B200
@@ -32,10 +32,10 @@ targets:
     asset: recipes/nemotron-3-ultra/vllm/agg-b200-agentic-256k-2w-kv/deploy.yaml
   benchmark:
     tool: aiperf
-    asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
     available: false
-- id: refresh-b200-1m
+- id: agg-b200-1m
   recommended: true
   hardware:
     gpu: B200
@@ -55,10 +55,10 @@ targets:
     asset: recipes/nemotron-3-ultra/vllm/agg-b200-agentic-1m-2w-kv/deploy.yaml
   benchmark:
     tool: aiperf
-    asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
     available: false
-- id: refresh-gb200-256k
+- id: agg-gb200-256k
   recommended: true
   hardware:
     gpu: GB200
@@ -79,10 +79,10 @@ targets:
     asset: recipes/nemotron-3-ultra/vllm/agg-gb200-agentic-256k-2w-kv/deploy.yaml
   benchmark:
     tool: aiperf
-    asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
     available: false
-- id: refresh-gb200-1m
+- id: agg-gb200-1m
   recommended: true
   hardware:
     gpu: GB200
@@ -102,10 +102,10 @@ targets:
     asset: recipes/nemotron-3-ultra/vllm/agg-gb200-agentic-1m-2w-kv/deploy.yaml
   benchmark:
     tool: aiperf
-    asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
     available: false
-- id: refresh-h200-256k
+- id: agg-h200-256k
   recommended: true
   hardware:
     gpu: H200
@@ -126,10 +126,10 @@ targets:
     asset: recipes/nemotron-3-ultra/vllm/agg-h200-agentic-256k-2w-kv/deploy.yaml
   benchmark:
     tool: aiperf
-    asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
     available: false
-- id: refresh-h200-1m
+- id: agg-h200-1m
   recommended: true
   hardware:
     gpu: H200
@@ -149,10 +149,10 @@ targets:
     asset: recipes/nemotron-3-ultra/vllm/agg-h200-agentic-1m-2w-kv/deploy.yaml
   benchmark:
     tool: aiperf
-    asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
     available: false
-- id: refresh-disagg-b200-256k
+- id: disagg-b200-256k
   recommended: true
   hardware:
     gpu: B200
@@ -174,10 +174,10 @@ targets:
     asset: recipes/nemotron-3-ultra/vllm/disagg-b200-agentic-256k-1p2d/deploy.yaml
   benchmark:
     tool: aiperf
-    asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
     available: false
-- id: refresh-disagg-b200-1m
+- id: disagg-b200-1m
   recommended: true
   hardware:
     gpu: B200
@@ -199,10 +199,10 @@ targets:
     asset: recipes/nemotron-3-ultra/vllm/disagg-b200-agentic-1m-1p1d/deploy.yaml
   benchmark:
     tool: aiperf
-    asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
     available: false
-- id: refresh-disagg-gb200-256k
+- id: disagg-gb200-256k
   recommended: true
   hardware:
     gpu: GB200
@@ -224,10 +224,10 @@ targets:
     asset: recipes/nemotron-3-ultra/vllm/disagg-gb200-agentic-256k-1p2d/deploy.yaml
   benchmark:
     tool: aiperf
-    asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
     available: false
-- id: refresh-disagg-gb200-1m
+- id: disagg-gb200-1m
   recommended: true
   hardware:
     gpu: GB200
@@ -249,10 +249,10 @@ targets:
     asset: recipes/nemotron-3-ultra/vllm/disagg-gb200-agentic-1m-1p1d/deploy.yaml
   benchmark:
     tool: aiperf
-    asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
     available: false
-- id: refresh-disagg-h200-256k
+- id: disagg-h200-256k
   recommended: true
   hardware:
     gpu: H200
@@ -274,10 +274,10 @@ targets:
     asset: recipes/nemotron-3-ultra/vllm/disagg-h200-agentic-256k-1p2d/deploy.yaml
   benchmark:
     tool: aiperf
-    asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
     available: false
-- id: refresh-disagg-h200-1m
+- id: disagg-h200-1m
   recommended: true
   hardware:
     gpu: H200
@@ -299,14 +299,14 @@ targets:
     asset: recipes/nemotron-3-ultra/vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml
   benchmark:
     tool: aiperf
-    asset: recipes/nemotron-3-ultra/perf/refresh-perf.yaml
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
     available: false
 related_benchmarks: []
 maintainer: null
 gaps:
 - no related Feature Benchmark page exists for this model
-- no SLA/goodput target in source (refresh-perf.yaml has no goodput flags)
+- no SLA/goodput target in source (perf.yaml has no goodput flags)
 - 'Dynamo 1.4.0 structured output: reasoning-enabled response_format json_object or json_schema may return malformed JSON with HTTP 200 with the bundled OSS vLLM; fixed upstream by vLLM PR #44993'
 - 'Dynamo 1.4.0 tool calling: reasoning-enabled required or named tool_choice may omit structured tool_calls with the bundled OSS vLLM; fixed upstream by vLLM PR #44993'
 - maintainer unknown

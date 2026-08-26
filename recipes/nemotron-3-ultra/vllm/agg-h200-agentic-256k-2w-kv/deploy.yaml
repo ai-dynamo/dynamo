@@ -20,10 +20,10 @@ metadata:
   labels:
     app.kubernetes.io/name: ultra-agg-h200-256k-2w-kv
     app.kubernetes.io/part-of: nemotron-3-ultra
-    nemotron-ultra-refresh.nvidia.com/backend: vllm
-    nemotron-ultra-refresh.nvidia.com/topology: agg-2worker
-    nemotron-ultra-refresh.nvidia.com/workload: agentic
-    nemotron-ultra-refresh.nvidia.com/routing: kv-aware
+    nemotron-ultra.nvidia.com/backend: vllm
+    nemotron-ultra.nvidia.com/topology: agg-2worker
+    nemotron-ultra.nvidia.com/workload: agentic
+    nemotron-ultra.nvidia.com/routing: kv-aware
 spec:
   backendFramework: vllm
   env:
@@ -80,9 +80,9 @@ spec:
     podTemplate:
       metadata:
         labels:
-          nemotron-ultra-refresh.nvidia.com/role: frontend
-          nemotron-ultra-refresh.nvidia.com/workload: agentic
-          nemotron-ultra-refresh.nvidia.com/routing: kv-aware
+          nemotron-ultra.nvidia.com/role: frontend
+          nemotron-ultra.nvidia.com/workload: agentic
+          nemotron-ultra.nvidia.com/routing: kv-aware
       spec:
         containers:
         - name: main
@@ -138,9 +138,9 @@ spec:
     podTemplate:
       metadata:
         labels:
-          nemotron-ultra-refresh.nvidia.com/role: aggregate-worker
-          nemotron-ultra-refresh.nvidia.com/workload: agentic
-          nemotron-ultra-refresh.nvidia.com/routing: kv-aware
+          nemotron-ultra.nvidia.com/role: aggregate-worker
+          nemotron-ultra.nvidia.com/workload: agentic
+          nemotron-ultra.nvidia.com/routing: kv-aware
       spec:
         runtimeClassName: nvidia
         nodeSelector:
