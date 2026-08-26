@@ -26,10 +26,12 @@
 #
 # Replication: each EPP replica runs its own in-process selector. To keep the
 # load-aware routing view consistent, replicas discover each other from this
-# Deployment's own Service (EndpointSlices) and sync admission/prefill-complete/
-# free over ZMQ. This is enabled by DYN_EPP_PEER_SERVICE below; set replicas: 1
-# and drop that env for a single, fully-local replica. (A freshly started replica
-# has an empty KV index and re-warms from live traffic + replay.)
+# Deployment's own Service (EndpointSlices), sync admission/prefill-complete/free over
+# ZMQ, and recover the KV index at startup. A replica registers its initial workers,
+# recovers a Ready sibling's HTTP dump, then drains its queued KV traffic. This is
+# enabled by DYN_EPP_PEER_SERVICE below; set replicas: 1 and drop that env for a
+# fully-local replica. Without a Ready sibling, it starts with an empty KV index and
+# warms from live traffic + replay.
 #
 # Prerequisites:
 #   - Gateway API and GAIE CRDs.
@@ -258,10 +260,10 @@ spec:
             # the vLLM engine's --max-num-batched-tokens.
             - name: DYN_EPP_MAX_NUM_BATCHED_TOKENS
               value: "8192"
-            # Replication: watch THIS Deployment's own Service
-            # (EndpointSlices) to find sibling EPP replicas and sync active load
-            # over its required named replica-agg port. Omit this env to run a
-            # single fully-local replica (and set replicas: 1).
+            # Replication: watch THIS Deployment's own Service (EndpointSlices) to find
+            # sibling EPP replicas, sync active load over its named replica-agg port,
+            # and recover KV-index snapshots over selection-http. Omit this env to run
+            # a single fully-local replica (and set replicas: 1).
             - name: DYN_EPP_PEER_SERVICE
               value: dynamo-epp
             # The reflector watches pods in the EPP's own namespace.
@@ -282,6 +284,8 @@ spec:
             # ZMQ replica-sync between EPP replicas (embedded replication).
             - name: replica-agg
               containerPort: 9092
+            - name: selection-http
+              containerPort: 9090
           readinessProbe:
             grpc:
               port: 9003
@@ -295,7 +299,7 @@ spec:
               drop:
                 - ALL
 ---
-# GAIE calls the gRPC port. EPP replicas use `replica-agg` for load-state sync.
+# GAIE calls gRPC; EPP replicas use `replica-agg` for load sync and `selection-http` for KV-index recovery.
 apiVersion: v1
 kind: Service
 metadata:
@@ -311,6 +315,9 @@ spec:
     - name: replica-agg
       port: 9092
       targetPort: replica-agg
+    - name: selection-http
+      port: 9090
+      targetPort: selection-http
 ---
 # InferencePool selects the raw vLLM pods and delegates endpoint selection to
 # the EPP. The EPP reads this object (read-only) to learn the pod selector and

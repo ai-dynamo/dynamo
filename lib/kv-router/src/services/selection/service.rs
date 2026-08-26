@@ -29,6 +29,7 @@ pub struct SelectionServiceBuilder {
     kv_router_config: KvRouterConfig,
     indexer_threads: usize,
     indexer_peers: Vec<String>,
+    initial_workers: Vec<WorkerRequest>,
     replica_sync_port: Option<u16>,
     replica_sync_peers: Vec<String>,
     selection_cache: SelectionCacheConfig,
@@ -41,6 +42,7 @@ impl SelectionServiceBuilder {
             kv_router_config,
             indexer_threads: 4,
             indexer_peers: Vec::new(),
+            initial_workers: Vec::new(),
             replica_sync_port: None,
             replica_sync_peers: Vec::new(),
             selection_cache: SelectionCacheConfig::default(),
@@ -55,6 +57,11 @@ impl SelectionServiceBuilder {
 
     pub fn indexer_peers(mut self, indexer_peers: Vec<String>) -> Self {
         self.indexer_peers = indexer_peers;
+        self
+    }
+
+    pub fn initial_workers(mut self, initial_workers: Vec<WorkerRequest>) -> Self {
+        self.initial_workers = initial_workers;
         self
     }
 
@@ -122,17 +129,26 @@ impl SelectionServiceBuilder {
             tracking_hash,
         ));
 
+        for worker in self.initial_workers {
+            let worker_id = worker.worker_id;
+            let record = core.upsert_worker(worker).await.map_err(|error| {
+                anyhow::anyhow!("registering initial worker {worker_id}: {error}")
+            })?;
+            if record.lifecycle != super::types::WorkerLifecycle::Schedulable {
+                anyhow::bail!(
+                    "initial worker {worker_id} is not schedulable: {:?}",
+                    record.not_schedulable_reasons
+                );
+            }
+        }
+
         if !self.indexer_peers.is_empty() {
             match core.recover_indexer_from_peers(&self.indexer_peers).await {
                 Ok(true) => tracing::info!("Selection indexer recovery completed"),
-                Ok(false) => {
-                    tracing::warn!(
-                        "No reachable selection indexer peers; starting with empty state"
-                    )
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "Selection indexer recovery failed; starting with empty state")
-                }
+                Ok(false) => anyhow::bail!(
+                    "no selection indexer peers were reachable during startup recovery"
+                ),
+                Err(error) => anyhow::bail!("selection indexer recovery failed: {error}"),
             }
         }
         core.signal_indexer_ready();
@@ -433,6 +449,17 @@ mod tests {
         }
     }
 
+    fn initial_worker(worker_id: WorkerId) -> WorkerRequest {
+        WorkerRequest {
+            worker_id,
+            model_name: "model".to_string(),
+            endpoint: Some(format!("http://worker-{worker_id}:8000")),
+            block_size: Some(4),
+            max_num_batched_tokens: Some(1024),
+            ..Default::default()
+        }
+    }
+
     fn reserve_tcp_port() -> u16 {
         StdTcpListener::bind("127.0.0.1:0")
             .unwrap()
@@ -500,7 +527,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn startup_waits_for_indexer_recovery() {
+    async fn initial_workers_wait_for_indexer_recovery() {
         let gate = RecoveryGate {
             requested: Arc::new(Notify::new()),
             release: Arc::new(Notify::new()),
@@ -515,6 +542,7 @@ mod tests {
         let build = tokio::spawn(
             SelectionServiceBuilder::new(test_config())
                 .indexer_threads(1)
+                .initial_workers(vec![initial_worker(7)])
                 .indexer_peers(vec![peer_url])
                 .build(),
         );
@@ -525,6 +553,7 @@ mod tests {
 
         gate.release.notify_one();
         let service = build.await.unwrap().unwrap();
+        assert_eq!(service.ready().schedulable_workers, 1);
         service.shutdown().await;
         server.abort();
     }

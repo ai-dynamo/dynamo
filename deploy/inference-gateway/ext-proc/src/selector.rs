@@ -119,6 +119,37 @@ impl Selector {
         Self::new_with_kv_router_config(cfg, kv_router_config_from_dynamo_env()).await
     }
 
+    /// Build a selector after registering the initial worker snapshot behind
+    /// SelectionService's indexer readiness gate.
+    pub(crate) async fn new_with_initial_workers(
+        cfg: &EppStandaloneConfig,
+        initial_workers: Vec<WorkerRegistration>,
+        indexer_peers: Vec<String>,
+    ) -> Result<Self> {
+        let mut seen = HashSet::with_capacity(initial_workers.len());
+        for registration in &initial_workers {
+            if !seen.insert(registration.worker_id) {
+                anyhow::bail!("duplicate initial worker_id {}", registration.worker_id);
+            }
+        }
+
+        let service = Self::build_selection_service_with_initial_workers(
+            cfg,
+            initial_workers.iter().map(Self::worker_request).collect(),
+            indexer_peers,
+        )
+        .await?;
+        let selector = Self::from_service(cfg, service).await?;
+        {
+            let mut state = selector.reconcile_state.lock().await;
+            for registration in initial_workers {
+                state.tracked_worker_ids.insert(registration.worker_id);
+                state.converged.insert(registration.worker_id, registration);
+            }
+        }
+        Ok(selector)
+    }
+
     /// Build a selection service using the custom policy compiled into this EPP image.
     pub(crate) async fn build_selection_service_with_worker_selection_policy_factory(
         cfg: &EppStandaloneConfig,
@@ -163,7 +194,33 @@ impl Selector {
             .map_err(|e| anyhow!("building embedded selection service: {e}"))
     }
 
-    /// Wrap a prebuilt selection service for use by a custom EPP image.
+    /// Build a selection service after registering a static worker snapshot.
+    async fn build_selection_service_with_initial_workers(
+        cfg: &EppStandaloneConfig,
+        initial_workers: Vec<CoreWorkerRequest>,
+        indexer_peers: Vec<String>,
+    ) -> Result<SelectionService> {
+        let kv_router_config = kv_router_config_from_dynamo_env();
+        let queueing_enabled = kv_router_config
+            .queueing_enabled(Some(&cfg.model_name))
+            .map_err(|e| anyhow!("resolving router policy for model {}: {e}", cfg.model_name))?;
+        Self::validate_queueing_requirements(cfg, queueing_enabled)?;
+
+        let mut builder = SelectionServiceBuilder::new(kv_router_config)
+            .indexer_threads(cfg.selector_threads)
+            .initial_workers(initial_workers)
+            .indexer_peers(indexer_peers);
+        let replication = Self::replication(cfg).await?;
+        if let Some((_, peer_sync_port)) = &replication {
+            builder = builder.replica_sync(*peer_sync_port, Vec::new());
+        }
+
+        builder
+            .build()
+            .await
+            .map_err(|e| anyhow!("building embedded selection service: {e}"))
+    }
+
     pub(crate) async fn from_service(
         cfg: &EppStandaloneConfig,
         service: SelectionService,
@@ -243,6 +300,14 @@ impl Selector {
             reconcile_state: Mutex::new(ReconcileState::default()),
             peer_ready,
         })
+    }
+
+    pub(crate) fn selection_service(&self) -> Arc<SelectionService> {
+        self.service.clone()
+    }
+
+    pub(crate) fn cancellation_token(&self) -> CancellationToken {
+        self.cancel.clone()
     }
 
     pub fn peer_ready(&self) -> Option<Arc<AtomicBool>> {
@@ -760,6 +825,27 @@ models:
             .prefill_complete("never-booked")
             .await
             .expect("prefill-complete of an unknown id is a no-op");
+    }
+
+    #[tokio::test]
+    async fn initial_workers_seed_reconcile_state() {
+        let initial = schedulable_registration(7);
+        let selector =
+            Selector::new_with_initial_workers(&test_config(), vec![initial.clone()], Vec::new())
+                .await
+                .expect("initial selector build should succeed");
+
+        assert!(selector.any_ready().await);
+        assert_eq!(
+            selector.reconcile_state.lock().await.converged.get(&7),
+            Some(&initial),
+            "the first live topology reconcile must not re-upsert the bootstrap worker"
+        );
+
+        selector
+            .reconcile(&[initial])
+            .await
+            .expect("the matching live snapshot should reconcile");
     }
 
     #[tokio::test]

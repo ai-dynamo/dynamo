@@ -7,8 +7,12 @@
 //! in-process [`SelectionService`] as sibling EPP replicas join or leave.
 
 use std::collections::BTreeSet;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use axum::{Json, Router, extract::State, routing::get};
+use tokio::net::TcpListener;
 
 use anyhow::{Context, Result};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
@@ -22,6 +26,9 @@ const SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
 
 /// Named Service/EndpointSlice port used for aggregated replica synchronization.
 pub const REPLICA_AGG_PORT_NAME: &str = "replica-agg";
+
+/// TCP port used by sibling EPPs for startup KV-index dump recovery.
+pub const SELECTION_HTTP_PORT: u16 = 9090;
 
 type Store = kube::runtime::reflector::Store<EndpointSlice>;
 
@@ -108,7 +115,95 @@ fn replica_sync_port<'a>(slices: impl Iterator<Item = &'a EndpointSlice>) -> Res
     Ok(*resolved.first().expect("validated one resolved port"))
 }
 
-/// Starts peer discovery for the EPP's own Kubernetes Service, keeping
+/// Resolve a static set of sibling HTTP dump URLs from the initial EndpointSlice
+/// LIST. The long-lived replica-sync watch is started separately after recovery.
+pub async fn resolve_indexer_peers(
+    namespace: &str,
+    service_name: &str,
+    self_ip: &str,
+) -> Result<Vec<String>> {
+    use kube::{Api, Client, api::ListParams};
+
+    let client = Client::try_default()
+        .await
+        .context("building Kubernetes client for EPP peer recovery")?;
+    let slices: Api<EndpointSlice> = Api::namespaced(client, namespace);
+    let list = slices
+        .list(&ListParams::default().labels(&format!("{SERVICE_NAME_LABEL}={service_name}")))
+        .await
+        .with_context(|| {
+            format!("listing EndpointSlices for EPP peer Service {namespace}/{service_name}")
+        })?;
+    Ok(static_recovery_peer_urls(list.items.iter(), self_ip))
+}
+
+/// Construct the one-shot peer dump set from Ready, non-terminating siblings only.
+/// The replica-sync watch intentionally has broader membership so it can retain
+/// draining peers until their final load events arrive.
+fn static_recovery_peer_urls<'a>(
+    slices: impl Iterator<Item = &'a EndpointSlice>,
+    self_ip: &str,
+) -> Vec<String> {
+    let want_ipv6 = is_ipv6(self_ip);
+    let mut ips = BTreeSet::new();
+    for slice in slices {
+        if slice.address_type.eq_ignore_ascii_case("IPv6") != want_ipv6 {
+            continue;
+        }
+        for endpoint in &slice.endpoints {
+            let ready = endpoint.conditions.as_ref().is_some_and(|conditions| {
+                conditions.ready == Some(true) && conditions.terminating != Some(true)
+            });
+            if !ready {
+                continue;
+            }
+            for address in &endpoint.addresses {
+                if !address.is_empty() {
+                    ips.insert(address.clone());
+                }
+            }
+        }
+    }
+    ips.remove(self_ip);
+    ips.into_iter()
+        .map(|ip| format!("http://{}", authority(&ip, SELECTION_HTTP_PORT)))
+        .collect()
+}
+
+/// Bind the sibling HTTP endpoint used to export this EPP's KV-index dump.
+pub(crate) async fn spawn_indexer_dump_server(
+    service: Arc<SelectionService>,
+    pod_ip: IpAddr,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let address = dump_listener_addr(pod_ip);
+    let listener = TcpListener::bind(address)
+        .await
+        .with_context(|| format!("binding EPP peer dump server on {address}"))?;
+    let app = Router::new().route("/dump", get(dump)).with_state(service);
+    tokio::spawn(async move {
+        if let Err(error) = axum::serve(listener, app)
+            .with_graceful_shutdown(cancel.cancelled_owned())
+            .await
+        {
+            tracing::error!(%error, "EPP peer dump server exited");
+        }
+    });
+    Ok(())
+}
+
+fn dump_listener_addr(pod_ip: IpAddr) -> SocketAddr {
+    match pod_ip {
+        IpAddr::V4(_) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, SELECTION_HTTP_PORT)),
+        IpAddr::V6(_) => SocketAddr::from((Ipv6Addr::UNSPECIFIED, SELECTION_HTTP_PORT)),
+    }
+}
+
+async fn dump(State(service): State<Arc<SelectionService>>) -> Json<serde_json::Value> {
+    Json(service.indexer_snapshot().await)
+}
+
+/// Starts peer discovery for the EPP's own Kubernetes `Service`, keeping
 /// replica-sync peers registered on `service` and excluding `self_ip`.
 ///
 /// Returns a readiness flag that becomes `true` after the initial reconciliation.
@@ -410,6 +505,32 @@ mod tests {
         let v6 = peer_ips(slices.iter(), true);
         assert_eq!(v6.len(), 1);
         assert!(v6.contains("fd00::1"));
+    }
+
+    #[test]
+    fn static_recovery_peers_require_ready_nonterminating_siblings() {
+        let mut ready = slice_with(&["10.0.0.2"], false, "IPv4");
+        ready.endpoints[0].conditions = Some(EndpointConditions {
+            ready: Some(true),
+            terminating: Some(false),
+            ..Default::default()
+        });
+        let mut not_ready = slice_with(&["10.0.0.3"], false, "IPv4");
+        not_ready.endpoints[0].conditions = Some(EndpointConditions {
+            ready: Some(false),
+            ..Default::default()
+        });
+        let mut terminating = slice_with(&["10.0.0.4"], true, "IPv4");
+        terminating.endpoints[0].conditions = Some(EndpointConditions {
+            ready: Some(true),
+            terminating: Some(true),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            static_recovery_peer_urls([ready, not_ready, terminating].iter(), "10.0.0.1"),
+            vec!["http://10.0.0.2:9090"]
+        );
     }
 
     #[test]

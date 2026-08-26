@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::Semaphore;
 
 use dynamo_kv_router::services::selection::SelectionService;
@@ -36,7 +36,7 @@ use crate::epp_standalone_config::EppStandaloneConfig;
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
 use crate::pod_discovery::PodDiscovery;
 use crate::selector::{SelectRequest, Selector};
-use crate::topology_adapter::{RegistrationDefaults, TopologyAdapter};
+use crate::topology_adapter::{RegistrationDefaults, TopologyAdapter, registrations};
 use crate::vllm_render_client::{VllmRenderClient, VllmRenderError};
 
 /// Standalone endpoint picker backed by the standalone selection service.
@@ -69,8 +69,37 @@ pub struct EppRouter {
 impl EppRouter {
     /// Assemble the standalone runtime from the validated selector config.
     pub async fn from_selector(cfg: EppStandaloneConfig) -> Result<Self> {
-        let selector = Arc::new(Selector::new(&cfg).await?);
         let (renderer, reflector, reflector_ready) = Self::dependencies(&cfg).await?;
+        while !reflector_ready.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        let defaults = RegistrationDefaults::from_config(&cfg);
+        let initial_workers = registrations(reflector.as_ref(), &defaults);
+        let (indexer_peers, dump_server_ip) = match &cfg.peer_service {
+            Some(service_name) => {
+                let (self_ip, pod_ip) = Self::pod_ip_from_env()?;
+                let peers = crate::peer_discovery::resolve_indexer_peers(
+                    &cfg.namespace,
+                    service_name,
+                    &self_ip,
+                )
+                .await?;
+                (peers, Some(pod_ip))
+            }
+            None => (Vec::new(), None),
+        };
+        let selector = Arc::new(
+            Selector::new_with_initial_workers(&cfg, initial_workers, indexer_peers).await?,
+        );
+        if let Some(pod_ip) = dump_server_ip {
+            crate::peer_discovery::spawn_indexer_dump_server(
+                selector.selection_service(),
+                pod_ip,
+                selector.cancellation_token(),
+            )
+            .await?;
+        }
         Ok(Self::from_selector_parts(
             cfg,
             renderer,
@@ -86,6 +115,15 @@ impl EppRouter {
         service: SelectionService,
     ) -> Result<Self> {
         let selector = Arc::new(Selector::from_service(&cfg, service).await?);
+        if cfg.peer_service.is_some() {
+            let (_, pod_ip) = Self::pod_ip_from_env()?;
+            crate::peer_discovery::spawn_indexer_dump_server(
+                selector.selection_service(),
+                pod_ip,
+                selector.cancellation_token(),
+            )
+            .await?;
+        }
         let (renderer, reflector, reflector_ready) = Self::dependencies(&cfg).await?;
         Ok(Self::from_selector_parts(
             cfg,
@@ -192,6 +230,19 @@ impl EppRouter {
         self.reflector.ready_worker_ids_matching(|endpoint| {
             endpoint_in_subset(endpoint, &candidates, &candidate_ips)
         })
+    }
+    fn pod_ip_from_env() -> Result<(String, IpAddr)> {
+        let pod_ip = std::env::var("POD_IP")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("DYN_EPP_PEER_SERVICE is set but POD_IP is unavailable")
+            })?;
+        let address = pod_ip
+            .parse()
+            .with_context(|| format!("parsing POD_IP {pod_ip:?}"))?;
+        Ok((pod_ip, address))
     }
 }
 
