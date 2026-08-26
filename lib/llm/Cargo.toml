@@ -38,6 +38,7 @@ request-trace-bench = []
 # S3 destination for the request-trace sink, reusing the existing object_store client.
 request-trace-s3 = []
 agent-rt-poc = [
+    "dep:agent-rt-sandbox",
     "dep:dynamo-agent-rt",
     "dep:dynamo-agent-rt-store",
     "dep:dynamo-agent-tools",
@@ -70,6 +71,7 @@ required-features = ["request-trace-bench"]
 [dependencies]
 # repo
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
+agent-rt-sandbox = { workspace = true, features = ["http-client"], optional = true }
 dynamo-agent-rt = { workspace = true, optional = true }
 dynamo-agent-rt-store = { workspace = true, features = ["duckdb"], optional = true }
 dynamo-agent-tools = { workspace = true, optional = true }
