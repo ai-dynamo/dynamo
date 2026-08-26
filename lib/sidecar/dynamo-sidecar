@@ -30,8 +30,16 @@ case "$engine" in
         shift
         exec dynamo-trtllm-sidecar "$@"
         ;;
-    help | -h | --help | "")
+    help | -h | --help)
         usage
+        ;;
+    "")
+        # A container that sets `command:` but omits `args:` lands here, because
+        # Kubernetes drops the image CMD once command is overridden. Exit non-zero
+        # so that misconfiguration surfaces instead of looking like a clean exit.
+        echo "dynamo-sidecar: no engine given" >&2
+        usage >&2
+        exit 2
         ;;
     *)
         echo "dynamo-sidecar: unknown engine: $engine" >&2
