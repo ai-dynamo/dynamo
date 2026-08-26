@@ -21,6 +21,7 @@ from dynamo.sglang.health_check import (
     SglangPrefillHealthCheckPayload,
 )
 from dynamo.sglang.publisher import (
+    finish_worker_teardown,
     handle_non_leader_node,
     set_forward_pass_metrics_worker_id,
     setup_sgl_metrics,
@@ -144,6 +145,7 @@ async def init_decode(
             "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
+    body_failed = True
     try:
         gather_tasks = [
             generate_endpoint.serve_endpoint(
@@ -185,17 +187,15 @@ async def init_decode(
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
+    else:
+        body_failed = False
     finally:
-        metrics_task.cancel()
-        try:
-            await metrics_task
-        except asyncio.CancelledError:
-            logging.info("Metrics task successfully cancelled")
-            pass
-        handler.cleanup()
-        if run_deferred_handlers is not None:
-            logging.info("Running deferred handlers")
-            await run_deferred_handlers()
+        await finish_worker_teardown(
+            metrics_task,
+            handler.cleanup,
+            run_deferred_handlers,
+            body_failed=body_failed,
+        )
 
 
 async def init_prefill(
@@ -281,6 +281,7 @@ async def init_prefill(
 
     ready_event = asyncio.Event()
 
+    body_failed = True
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
@@ -329,14 +330,12 @@ async def init_prefill(
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
+    else:
+        body_failed = False
     finally:
-        metrics_task.cancel()
-        try:
-            await metrics_task
-        except asyncio.CancelledError:
-            logging.info("Metrics task successfully cancelled")
-            pass
-        handler.cleanup()
-        if run_deferred_handlers is not None:
-            logging.info("Running deferred handlers")
-            await run_deferred_handlers()
+        await finish_worker_teardown(
+            metrics_task,
+            handler.cleanup,
+            run_deferred_handlers,
+            body_failed=body_failed,
+        )

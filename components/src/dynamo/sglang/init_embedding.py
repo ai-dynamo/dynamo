@@ -14,6 +14,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.health_check import SglangHealthCheckPayload
 from dynamo.sglang.publisher import (
+    finish_worker_teardown,
     set_forward_pass_metrics_worker_id,
     setup_sgl_metrics,
 )
@@ -73,6 +74,8 @@ async def init_embedding(
     ).to_dict()
 
     register_model_taint_route(runtime, generate_endpoint)
+
+    body_failed = True
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
@@ -96,14 +99,12 @@ async def init_embedding(
     except Exception as e:
         logging.error(f"Failed to serve embedding endpoints: {e}")
         raise
+    else:
+        body_failed = False
     finally:
-        metrics_task.cancel()
-        try:
-            await metrics_task
-        except asyncio.CancelledError:
-            logging.info("Metrics task successfully cancelled")
-            pass
-        handler.cleanup()
-        if run_deferred_handlers is not None:
-            logging.info("Running deferred handlers")
-            await run_deferred_handlers()
+        await finish_worker_teardown(
+            metrics_task,
+            handler.cleanup,
+            run_deferred_handlers,
+            body_failed=body_failed,
+        )
