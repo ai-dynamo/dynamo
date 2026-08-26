@@ -7,14 +7,13 @@ from typing import Any
 import pytest
 
 from dynamo.experimental.workflow import (
-    DeploymentSpec,
     GenerateEndpointBinding,
     StageContext,
     StageContract,
     Workflow,
     WorkflowExecutionError,
+    WorkflowOrchestrator,
     WorkflowValidationError,
-    compile_workflow,
 )
 from dynamo.experimental.workflow.dispatcher import StageDispatcher
 from dynamo.experimental.workflow.generate import (
@@ -51,21 +50,18 @@ def _workflow(generator_contract: StageContract = GENERATOR) -> Workflow:
     return workflow
 
 
-def test_generate_binding_compiles_for_request_only_contract() -> None:
-    plan = compile_workflow(
+async def test_generate_binding_accepts_request_only_contract() -> None:
+    endpoint_id = "models.decoder.generate"
+    orchestrator = await WorkflowOrchestrator.bind(
         _workflow(),
-        DeploymentSpec(
-            {"generator": GenerateEndpointBinding("models.decoder.generate")}
-        ),
+        bindings={"generator": GenerateEndpointBinding(endpoint_id)},
+        runtime=_Runtime({endpoint_id: _Client([])}),
     )
 
-    assert plan.remote
-    assert plan.bindings == {
-        "generator": GenerateEndpointBinding("models.decoder.generate")
-    }
+    assert orchestrator.workflow_ir == _workflow().build()
 
 
-def test_generate_binding_rejects_a_non_generate_stage_contract() -> None:
+async def test_generate_binding_rejects_a_non_generate_stage_contract() -> None:
     incompatible = StageContract(
         id="generator",
         inputs=GENERATOR.inputs,
@@ -73,11 +69,10 @@ def test_generate_binding_rejects_a_non_generate_stage_contract() -> None:
     )
 
     with pytest.raises(WorkflowValidationError, match="stage output"):
-        compile_workflow(
+        await WorkflowOrchestrator.bind(
             _workflow(incompatible),
-            DeploymentSpec(
-                {"generator": GenerateEndpointBinding("models.decoder.generate")}
-            ),
+            bindings={"generator": GenerateEndpointBinding("models.decoder.generate")},
+            runtime=_Runtime({"models.decoder.generate": _Client([])}),
         )
 
 
@@ -228,17 +223,14 @@ async def test_generate_invoker_cancels_owned_stream_on_collection_error() -> No
 
 
 async def test_dispatcher_binds_generate_protocol_for_stock_endpoint() -> None:
-    plan = compile_workflow(
-        _workflow(),
-        DeploymentSpec(
-            {"generator": GenerateEndpointBinding("models.decoder.generate")}
-        ),
-    )
+    workflow = _workflow().build()
+    bindings = {"generator": GenerateEndpointBinding("models.decoder.generate")}
     generator_client = _Client(
         [{"token_ids": [42], "index": 0, "finish_reason": "stop"}]
     )
     dispatcher = await StageDispatcher.bind(
-        plan,
+        workflow,
+        bindings,
         runtime=_Runtime({"models.decoder.generate": generator_client}),
     )
     request = _request()
