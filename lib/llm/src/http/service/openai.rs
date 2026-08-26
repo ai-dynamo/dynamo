@@ -3214,7 +3214,9 @@ pub(super) async fn responses(
 ) -> Result<Response, ErrorResponse> {
     match responses_inner(state, template, request, stream_handle, false).await? {
         ResponsesExecution::Http(response) => Ok(response),
-        ResponsesExecution::Native(_) => unreachable!("HTTP Responses requested native output"),
+        ResponsesExecution::Native(_) => Err(ErrorMessage::internal_server_error(
+            "HTTP Responses execution returned a native stream",
+        )),
     }
 }
 
@@ -3246,25 +3248,33 @@ fn native_responses_stream(
     inflight_guard.mark_error(ErrorType::Cancelled);
     Box::pin(async_stream::stream! {
         tokio::pin!(stream);
+        let mut saw_terminal = false;
         while let Some(event) = stream.next().await {
             // agent-rt deliberately stops polling a model step as soon as it
             // observes the terminal typed event. Disarm before yielding that
             // event so dropping the exhausted step is not misclassified as a
             // client disconnect. A drop before a terminal event remains armed
             // and cancels the active engine context.
-            if matches!(
-                event,
+            match event {
                 ResponseStreamEvent::ResponseCompleted(_)
-                    | ResponseStreamEvent::ResponseFailed(_)
-                    | ResponseStreamEvent::ResponseIncomplete(_)
-            ) {
-                inflight_guard.mark_ok();
-                stream_handle.disarm();
+                | ResponseStreamEvent::ResponseIncomplete(_) => {
+                    saw_terminal = true;
+                    inflight_guard.mark_ok();
+                    stream_handle.disarm();
+                }
+                ResponseStreamEvent::ResponseFailed(_) => {
+                    saw_terminal = true;
+                    inflight_guard.mark_error(ErrorType::Internal);
+                    stream_handle.disarm();
+                }
+                _ => {}
             }
             yield event;
         }
-        inflight_guard.mark_ok();
-        stream_handle.disarm();
+        if !saw_terminal {
+            inflight_guard.mark_error(ErrorType::Internal);
+            stream_handle.disarm();
+        }
     })
 }
 
