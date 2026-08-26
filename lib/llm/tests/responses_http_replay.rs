@@ -876,3 +876,50 @@ async fn input_tokens_tolerates_tool_shapes_it_cannot_model() {
     })
     .await;
 }
+
+/// A trailing slash on `DYN_HTTP_SVC_RESPONSES_PATH` must not leak into the
+/// derived subroute.
+///
+/// `/custom/` is a working parent configuration — axum matches `POST /custom/`
+/// — but appending naively would register `/custom//input_tokens`, which axum
+/// does not treat as equivalent to the `/custom/input_tokens` a client calls.
+#[tokio::test]
+#[serial]
+async fn input_tokens_path_normalizes_a_trailing_slash_parent() {
+    temp_env::async_with_vars(
+        [
+            (DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0")),
+            ("DYN_HTTP_SVC_RESPONSES_PATH", Some("/custom/")),
+        ],
+        async {
+            let svc = HarnessService::start([]).await;
+
+            let response = svc
+                .client
+                .post(format!("{}/custom/input_tokens", svc.base_url))
+                .json(&json!({"model": "m", "input": "Hello, world!"}))
+                .send()
+                .await
+                .expect("POST /custom/input_tokens failed");
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(
+                response.json::<Value>().await.unwrap()["object"],
+                "response.input_tokens"
+            );
+
+            // The doubled-slash form is what the bug produced; it must not be
+            // what got registered instead.
+            let doubled = svc
+                .client
+                .post(format!("{}/custom//input_tokens", svc.base_url))
+                .json(&json!({"model": "m", "input": "Hello, world!"}))
+                .send()
+                .await
+                .expect("POST /custom//input_tokens failed");
+            assert_eq!(doubled.status(), reqwest::StatusCode::NOT_FOUND);
+
+            svc.shutdown().await;
+        },
+    )
+    .await;
+}
