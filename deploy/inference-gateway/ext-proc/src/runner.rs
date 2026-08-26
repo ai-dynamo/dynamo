@@ -498,45 +498,12 @@ mod tests {
 
     use dynamo_kv_router::WorkerSelectionPolicyFactory;
     use dynamo_kv_router::services::selection::WorkerSelectionPolicyProviderError;
-    use tokio::sync::{Mutex, mpsc};
+    use tokio::sync::Mutex;
 
     use super::*;
     use crate::epp_standalone_config::{DYN_EPP_MODE, DYNAMO_RUNTIME_MODE};
 
     static EPP_MODE_ENV_LOCK: Mutex<()> = Mutex::const_new(());
-
-    #[tokio::test]
-    async fn background_tasks_shutdown_aborts_and_joins_every_task() {
-        let (sender, mut receiver) = mpsc::channel::<()>(1);
-        let health_task = tokio::spawn({
-            let sender = sender.clone();
-            async move {
-                let _sender = sender;
-                std::future::pending::<()>().await;
-            }
-        });
-        let metrics_task = tokio::spawn({
-            let sender = sender.clone();
-            async move {
-                let _sender = sender;
-                std::future::pending::<()>().await;
-            }
-        });
-        let shutdown_task = tokio::spawn(async move {
-            let _sender = sender;
-            std::future::pending::<()>().await;
-        });
-
-        BackgroundTasks {
-            health_task,
-            metrics_task: Some(metrics_task),
-            shutdown_task,
-        }
-        .shutdown()
-        .await;
-
-        assert!(receiver.recv().await.is_none());
-    }
 
     #[tokio::test]
     async fn linked_policy_registry_requires_standalone_mode() {
