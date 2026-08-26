@@ -56,7 +56,7 @@ jobs:
         run: |
           echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
       - name: Create and bootstrap fresh K8s builder
-        uses: ./.github/actions/bootstrap-buildkit
+        uses: $/.github/actions/bootstrap-buildkit
         with:
           builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
           buildkit_worker_addresses: ''
@@ -250,7 +250,7 @@ jobs:
   vllm-build:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [create-fresh-builder, resolve-source-sha]
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: vllm
       target: runtime
@@ -274,7 +274,7 @@ jobs:
   sglang-build:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [create-fresh-builder, resolve-source-sha]
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: sglang
       target: runtime
@@ -295,7 +295,7 @@ jobs:
   trtllm-build:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [create-fresh-builder, resolve-source-sha]
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
       target: runtime
@@ -341,7 +341,7 @@ jobs:
         # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
       - name: Build and push operator (nightly tag)
         id: build
-        uses: ./.github/actions/build-deploy-component
+        uses: $/.github/actions/build-deploy-component
         with:
           component: operator
           image_tag: ${{ github.sha }}-operator-nightly
@@ -360,7 +360,7 @@ jobs:
   planner-build:
     name: dynamo-planner
     needs: [create-fresh-builder, resolve-source-sha]
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
       target: planner
@@ -398,7 +398,7 @@ jobs:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [vllm-build, resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
@@ -425,7 +425,7 @@ jobs:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [vllm-build, resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
@@ -450,7 +450,7 @@ jobs:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [vllm-build, resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
@@ -476,7 +476,7 @@ jobs:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [sglang-build, resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
@@ -505,7 +505,7 @@ jobs:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [sglang-build, resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
@@ -527,7 +527,7 @@ jobs:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [sglang-build, resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
@@ -553,7 +553,7 @@ jobs:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [trtllm-build, resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
@@ -581,7 +581,7 @@ jobs:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [trtllm-build, resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
@@ -603,7 +603,7 @@ jobs:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [trtllm-build, resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
@@ -633,7 +633,7 @@ jobs:
     name: vllm-xpu
     needs: [resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/xpu-ci.yaml
+    uses: $/.github/workflows/xpu-ci.yaml
     with:
       framework: vllm
       pytest_markers: 'vllm'
@@ -645,7 +645,7 @@ jobs:
   dynamo-pipeline:
     name: dynamo-runtime
     needs: [create-fresh-builder, compute-dev-version, resolve-source-sha]
-    uses: ./.github/workflows/dynamo-pipeline.yml
+    uses: $/.github/workflows/dynamo-pipeline.yml
     with:
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       fresh_builder: true
@@ -772,7 +772,7 @@ jobs:
         && needs.dynamo-pipeline.result == 'success'
         && (needs.manual-release-approval.result == 'success'
             || needs.manual-release-approval.result == 'skipped') }}
-    uses: ./.github/workflows/release.yml
+    uses: $/.github/workflows/release.yml
     with:
       commit_sha: ${{ needs.resolve-source-sha.outputs.source_sha }}
       nightly: true
@@ -1005,7 +1005,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Register K8s builder context (skip bootstrap)
-        uses: ./.github/actions/bootstrap-buildkit
+        uses: $/.github/actions/bootstrap-buildkit
         continue-on-error: true
         with:
           builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
@@ -1023,7 +1023,7 @@ jobs:
     permissions:
       contents: read
       actions: read   # grant the reusable notifier read access to list this run's jobs
-    uses: ./.github/workflows/notify-slack.yml
+    uses: $/.github/workflows/notify-slack.yml
     with:
       pipeline_name: Nightly
       runs_on: prod-default-v2
