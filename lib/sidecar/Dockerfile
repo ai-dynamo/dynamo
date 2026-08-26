@@ -11,7 +11,11 @@
 # ---- common builder ---------------------------------------------------------
 FROM rust:1.96.1-bookworm AS builder-base
 
-# Superset of the build dependencies required by all sidecar crates.
+# Superset of the build dependencies required by all sidecar crates:
+# aws-lc-sys/ring need cmake and a C toolchain (plus perl); bindgen needs
+# libclang; tonic-build (build.rs) needs protoc, and libprotobuf-dev supplies
+# the well-known protos the engine .proto files import (vllm_grpc.proto pulls
+# in google/protobuf/struct.proto). gcc, make, and git come with the rust image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         cmake \
         clang \
@@ -31,10 +35,16 @@ FROM builder-base AS vllm-builder
 
 ARG TARGETARCH
 
-# sharing=locked: cargo's .package-cache lock lives outside these mounts, so it
-# cannot serialize the concurrent cargo processes a multi-platform build starts.
-RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+# The three builders share one target cache per architecture, so each backend
+# reuses the dependency artifacts the previous one compiled. sharing=locked
+# serializes them, which is required for correctness — cargo's .package-cache
+# lock lives in $CARGO_HOME, outside these mounts, so it cannot coordinate
+# separate build containers — and is also what bounds peak memory, since
+# codegen-units=1 plus LTO makes each release link expensive on its own.
+# Every id is per-architecture so the amd64 and arm64 halves of a multi-platform
+# build do not serialize against each other.
+RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH},target=/src/target,sharing=locked \
     cargo build --release --locked -p dynamo-vllm-sidecar \
     && strip target/release/dynamo-vllm-sidecar \
@@ -45,8 +55,8 @@ FROM builder-base AS sglang-builder
 
 ARG TARGETARCH
 
-RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH},target=/src/target,sharing=locked \
     cargo build --release --locked -p dynamo-sglang-sidecar \
     && strip target/release/dynamo-sglang-sidecar \
@@ -57,8 +67,8 @@ FROM builder-base AS trtllm-builder
 
 ARG TARGETARCH
 
-RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=dynamo-sidecar-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH},target=/src/target,sharing=locked \
     cargo build --release --locked -p dynamo-trtllm-sidecar \
     && strip target/release/dynamo-trtllm-sidecar \
