@@ -1,6 +1,6 @@
 # Stateful Agent Traffic Runtime
 
-**Status:** Draft
+**Status:** Direct-path production vertical slice implemented; GAIE/EPP integration and production-cluster acceptance remain
 **Scope:** A composition model for native OpenAI Responses and Anthropic Messages traffic, durable state, external tools, Kubernetes-native sandboxes, and Dynamo inference.
 **Decision horizon:** Productionize the direct Dynamo path first; preserve the same boundaries for Dynamo GAIE/EPP Kubernetes deployments.
 
@@ -14,6 +14,8 @@ Dynamo remains responsible for request preprocessing, `UnifiedRequest` conversio
 - **Private Gateway/EPP invoker** for Kubernetes GAIE deployments.
 
 The same `agent-rt` core is used in both paths and across supported frontend protocols. It has no vLLM, SGLang, or TRT-LLM-specific code and does not define a lossy universal agent-request IR.
+
+The durable seams are trait-based: `AgentProtocol`, `CheckpointStore`, `InferenceInvoker`, `ToolRouter`, `ToolJournal`, `ToolExecutor`, `ToolFailurePolicy`, and `SandboxProvider`. Deployment assembly is intentionally concrete. The Dynamo Responses frontend currently composes Brave web search and an external sandbox provider in a small executor mux; adding a provider does not add an engine integration or change the runtime protocol.
 
 ## Why This Exists
 
@@ -130,6 +132,21 @@ DynamoInvocationHandle
 ```
 
 `RuntimeAuthorization` is not a bearer token, raw header map, or `AgentContext`. `DynamoInvocationHandle` is opaque to `agent-rt`; its Dynamo implementation owns carrier serialization, field allowlisting, compatibility, and encryption if recovery needs durable data.
+
+### Current Implementation Snapshot
+
+The direct-path vertical slice is split by responsibility rather than by engine:
+
+| Component | Current implementation |
+| --- | --- |
+| Runtime contracts and orchestration | `frontend-crates/agent-rt`: native Responses materialization, pull-based stream observation, public response identity, tool rounds, checkpoint gating, and the traits above. |
+| Durable response/tool state | `frontend-crates/agent-rt-store`: embedded DuckDB and shared PostgreSQL implementations. |
+| Read-only server tools | `frontend-crates/agent-tools`: bounded Brave web search behind `ToolExecutor`. |
+| Sandbox contract and adapters | `frontend-crates/agent-sandbox`: `SandboxProvider`, HTTP provider client, Kubernetes Agent Sandbox control plane, sandboxd data plane, and the durable execution supervisor. |
+| Sandbox service | `frontend-crates/agent-sandbox-service`: authenticated HTTP service, PostgreSQL execution fencing, operator catalog, container images, and Kubernetes manifests. It is deployed separately from Dynamo. |
+| Dynamo composition | `dynamo-llm`'s optional `agent-rt-poc` feature: trusted ingress scope, filtered Dynamo carrier, native typed streaming/SSE ownership, DuckDB runtime construction, and deployment-selected web-search/sandbox routes. |
+
+The current Dynamo sandbox route is enabled only when `DYN_AGENT_RT_SANDBOX_ENDPOINT` and a bearer token of at least 32 bytes are configured. `DYN_AGENT_RT_SANDBOX_PROFILE` selects an operator-known profile and `DYN_AGENT_RT_SANDBOX_TOOL_NAME` selects the model-visible name; the model cannot choose an image, namespace, executable, RuntimeClass, or network policy. Plain HTTP requires the explicit local/service-mesh opt-in `DYN_AGENT_RT_SANDBOX_ALLOW_HTTP=true`. `RuntimeAuthorization.permitted_connectors` must independently allow `sandbox`, so endpoint configuration alone does not authorize execution.
 
 ## Direct Dynamo: Local and Non-EPP Path
 
@@ -302,7 +319,7 @@ Before dispatch, `agent-rt` writes a durable tool journal record keyed by respon
 
 ```text
 agent-rt ToolExecutor
-  -> sandbox executor service
+  -> authenticated sandbox executor service
       -> SandboxProvider
           -> Kubernetes Agent Sandbox provider
           -> Agent Substrate provider (future)
@@ -310,7 +327,25 @@ agent-rt ToolExecutor
           -> Modal provider (external deployment option)
 ```
 
-The Kubernetes reference provider targets the Kubernetes SIG Apps Agent Sandbox APIs: `SandboxTemplate` defines an operator-approved image and security policy, `SandboxWarmPool` bounds prewarmed capacity, and a tenant-scoped `SandboxClaim` obtains one stable sandbox. Command/file traffic goes through the sandbox router data plane rather than granting `agent-rt` Kubernetes credentials. The provider uses an allowlisted `RuntimeClass`: gVisor by default and Kata Containers when VM-grade isolation is required.
+The Kubernetes reference provider targets the Kubernetes SIG Apps Agent Sandbox APIs: `SandboxTemplate` defines an operator-approved image and security policy, `SandboxWarmPool` bounds prewarmed capacity, and a tenant-scoped `SandboxClaim` obtains one stable sandbox. Agent Sandbox is the Kubernetes lifecycle/control plane; it does not itself provide the container-isolation boundary. The template therefore selects an operator-allowlisted `RuntimeClass`: gVisor by default and Kata Containers when VM-grade isolation is required.
+
+The implemented request path is:
+
+```text
+Dynamo Responses frontend
+  -> HttpSandboxProvider (scoped bearer-authenticated request)
+  -> agent-rt-sandbox-service
+      -> PostgreSQL execution claim + lease + fence
+      -> tenant/profile catalog lookup
+      -> Kubernetes SandboxClaim API
+      -> bound Sandbox status.serviceFQDN
+      -> sandboxd gRPC process API and bounded REST file API
+      -> atomic terminal execution + artifact commit
+```
+
+Only the executor service has narrowly scoped Kubernetes credentials. Dynamo and `agent-rt` do not. The service can create/get/delete `SandboxClaim`s and get the bound `Sandbox` only in operator-configured tenant namespaces. The current provider connects directly to the bound Sandbox service because the service is already inside the trusted cluster execution plane; ingress to sandboxd is restricted to the executor-service identity by NetworkPolicy. The upstream sandbox router or agentgateway can be added when a deployment needs a separately scalable proxy/authorization hop, but neither is the isolation mechanism.
+
+The execution store uses database time, per-execution PostgreSQL advisory locks, row locks, renewable leases, and fencing tokens. An expired pending claim may be taken over; an expired running claim becomes `OutcomeUnknown` and is never blindly redispatched. Cancellation written by any service replica is observed by the lease owner and propagated to sandboxd. Terminal state and captured artifacts commit in one transaction before they become readable.
 
 Every reference template is fail-closed:
 
@@ -321,15 +356,19 @@ Every reference template is fail-closed:
 - No host paths, Docker socket, device mounts, host namespaces, host credentials, or arbitrary client-selected images/runtime classes.
 - Execution IDs are authorization-scoped and idempotent. The service supports create-or-get, outcome lookup, cancellation, and artifact retrieval so `ToolJournal` recovery never blindly repeats a command.
 
+The operator catalog is the capability boundary. It maps authenticated tenant IDs to namespaces and trusted profile names to warm pools, allowed executable, workspace TTL, and maximum timeout/output/artifact sizes. Client and model payloads can only reduce these ceilings. Claim metadata uses the upstream allowlisted `sandbox.users.io` label domain and a non-propagated workspace fingerprint annotation; callers cannot forge system selector labels.
+
+The local Kind overlay is deliberately an orchestration proof, not an isolation certification. It validates service authentication, PostgreSQL durability, claim/warm-pool binding, sandboxd execution, idempotent lookup, artifact recovery, cancellation, foreground cleanup, and pool replenishment. It removes gVisor because the stock Kind node does not provide that RuntimeClass, and stock Kind networking must not be treated as proof that NetworkPolicy is enforced. Production acceptance therefore requires a cluster with an enforcing CNI plus the selected gVisor/Kata RuntimeClass and negative tests for host escape, cross-tenant/internal/metadata egress, resource exhaustion, cancellation, and cleanup.
+
 Provider assessment:
 
 | Project | Role in this design | Decision |
 | --- | --- | --- |
-| Kubernetes SIG Agent Sandbox | Kubernetes CRD/claim/template/warm-pool lifecycle plus router/client contract; supports gVisor or Kata | Reference in-cluster provider. |
-| Agent Substrate | Kubernetes worker pools with actor multiplexing, suspend/resume, snapshots, gVisor/microVM support | Future high-density provider; upstream declares itself early and not production-ready. |
-| AgentENV | Firecracker microVMs, snapshots/forks, E2B-compatible API, Kubernetes multi-node deployment | Future strong-isolation provider; do not use as the reference control plane until tenant authorization and distributed-control-plane maturity improve. |
+| Kubernetes SIG Agent Sandbox | Kubernetes CRD/claim/template/warm-pool lifecycle; isolation is supplied by the configured runtime and policy | Reference in-cluster provider and implemented control plane. |
+| Agent Substrate | Takes actor placement off the Kubernetes API hot path, multiplexes actors onto workers, and supports snapshots plus gVisor/microVM classes | Future high-density `SandboxProvider` when its control plane and operational contract fit our tenancy requirements. |
+| AgentENV | Firecracker environments, snapshots, E2B-compatible API, and Kubernetes deployment | Future strong-isolation provider. Current upstream warns that the public API has no authorization, and first-class multi-tenancy remains open, so it must sit behind our authenticated service boundary. |
 | agentgateway | Kubernetes Gateway API routing/auth/policy for LLM, HTTP, and MCP backends | Optional ingress in front of sandbox/MCP services, not a sandbox isolation provider. |
-| Modal Sandboxes | Managed gVisor/VM sandbox API with exec, filesystem, lifecycle, timeout, reconnect, and artifact patterns | External provider and API-behavior benchmark; not the Kubernetes-native reference. |
+| Modal Sandboxes | Hosted sandbox API with exec, files, lifecycle, timeout, termination, and filesystem/memory snapshot facilities | External `SandboxProvider` and API-behavior benchmark; not the Kubernetes-native reference. |
 
 ## Persistent State
 
@@ -374,20 +413,41 @@ Agentic API provides that stateful stage as a standalone gateway and invokes a c
 
 Our difference is not a claim that their placement is wrong. We compose state handling into the existing Responses frontend from the outset, make inference a narrow injected boundary, and keep Dynamo-specific request context/routing in Dynamo. We learn from Agentic API’s Responses compatibility and failure cases but define our own store, tool policy, state machine, and frontend/Dynamo contract.
 
+| Question | vLLM Agentic API today | This design |
+| --- | --- | --- |
+| First public hop | Standalone Agentic API service receives traffic before the configured vLLM/llm-d endpoint. | Existing native protocol frontend receives traffic; `agent-rt` is an optional module in that frontend. |
+| Consumption unit | Primarily the service as a whole. | Traits and protocol-family modules are reusable; the external sandbox is independently deployable. |
+| Inference boundary | HTTP `llm_api_base`/gateway adapter. | Injected `InferenceInvoker`; direct in-process Dynamo now, private Gateway/EPP next hop in GAIE. |
+| Gateway/EPP placement | Agentic API hydrates first and sends the full request to the downstream gateway. | Same required ordering. The public frontend hydrates first, then the private InferencePool route/EPP sees the full model-visible request. |
+| Streaming | Standalone service owns its client connection and transport. | Dynamo's protocol frontend owns typed event conversion, SSE, backpressure, metrics, and disconnect cancellation; `agent-rt` only observes/orchestrates. |
+| Dynamo context | No Dynamo-owned carrier/`AgentContext` boundary. | Dynamo receives a filtered ephemeral carrier and creates `AgentContext` at each normal inference ingress. |
+| Side effects | Persistence and tool facilities are service features. | A fenced turn store plus a separate tool journal; sandbox execution adds its own fenced provider store and lookup contract. |
+
+This agrees with the desired “responses next-hop proxy” shape without making the runtime itself an Envoy extension. In GAIE, the native stateful frontend is the public responses-enablement stage; the private Gateway/EPP path is its only inference next hop. An `ext_proc`/endpoint-picker deployment can select that stage, but hydration and server-tool orchestration do not run inside EPP or a worker sidecar.
+
 ## Delivery Plan
 
 ### Phase 0: validated direct-Dynamo continuation POC — complete
 
 - Protocol-generic `agent-rt`, in-process Dynamo Responses invoker, scoped continuation/idempotency semantics, client-owned Codex tool round-trip, and Qwen3.8-27B-FP8 validation are complete on the POC branches.
 
-### Phase 1: production direct-Dynamo vertical slice
+### Phase 1: production direct-Dynamo vertical slice — implementation complete, acceptance in progress
 
-- Split Dynamo Responses conversion into native typed events followed by Dynamo-owned SSE/WebSocket serialization.
-- Add pull-based `agent-rt` stream observation, public identity rewriting, multi-model-step coordination, disconnect propagation, and checkpoint-gated terminal events without a new queue.
-- Add trusted authorization scope plumbing, typed HTTP failures, and a filtered Dynamo invocation carrier.
-- Implement DuckDB and PostgreSQL checkpoint/tool-journal backends with semantic parity and backend-specific concurrency guarantees.
-- Wire one real read-only web-search executor through the durable tool loop.
-- Implement the external Kubernetes Agent Sandbox provider and empirically validate isolation, network, limits, cancellation, idempotent lookup, artifacts, and cleanup.
+Implemented:
+
+- Dynamo converts engine output into native typed Responses events, owns SSE serialization/keepalive/backpressure/disconnect context, and withholds the terminal completion event until the runtime commits it.
+- `agent-rt` observes the pull-based stream, rewrites public identity, coordinates multiple model/tool steps, and owns no socket, SSE encoder, or token queue.
+- Trusted local/proxy authorization, typed non-leaking HTTP failures, a filtered non-durable Dynamo invocation carrier, and connector authorization are wired at ingress.
+- DuckDB and PostgreSQL implement checkpoint and tool-journal contracts with their intended single-process versus multi-replica guarantees; PostgreSQL integration tests exercise two independent store clients and stale-owner fencing.
+- Brave web search runs through the durable tool loop with a deployment-owned credential, read-only recovery, timeout/concurrency/output limits, and normalized results.
+- The authenticated external sandbox service, PostgreSQL execution store, Kubernetes Agent Sandbox provider, sandboxd adapter, hardened base manifests, images, and disposable Kind proof are implemented. Kind currently proves execution, lookup, artifacts, cancellation, and cleanup—not gVisor/Kata or CNI isolation.
+
+Remaining acceptance work, in order:
+
+1. Run the production sandbox manifest on an enforcing-CNI cluster with gVisor and, where required, Kata; execute the negative isolation/network/resource suite.
+2. Run the full Dynamo Responses path against the local sandbox service so a model emits the trusted Python tool, receives its normalized result, and completes a second inference step.
+3. Validate the same stream/tool path with Codex against Qwen3.8-27B-FP8 on `try6767`, including TTFT, disconnect cancellation, restart recovery, idempotent replay, and commit-failure-without-false-completion.
+4. Exercise one live Brave request when deployment credentials are available.
 
 ### Phase 2: Dynamo GAIE/EPP path
 
@@ -419,10 +479,10 @@ Our difference is not a claim that their placement is wrong. We compose state ha
 
 ## Open Decisions
 
-1. What exact `RuntimeAuthorization` capability format is issued by the Responses frontend?
+1. What production capability/token format replaces the current local or trusted-proxy construction of `RuntimeAuthorization`?
 2. What retention/compaction policy and artifact store are acceptable for DuckDB/PostgreSQL deployments?
 3. What later use case justifies adding resumable SSE beyond live streaming plus final-result retrieval?
-4. What minimum stable Dynamo affinity metadata, if any, needs durable carrier recovery for a tool loop?
+4. Does any stable Dynamo affinity metadata need durable recovery beyond the current per-request filtered carrier? The default decision remains no until a measured recovery case requires it.
 5. What is the endpoint-neutral renderer/tokenizer contract used by Rust EPP for native Responses requests?
 6. Which Kubernetes clusters and RuntimeClasses are required for the first gVisor/Kata integration matrix?
 
@@ -438,7 +498,9 @@ Our difference is not a claim that their placement is wrong. We compose state ha
 - [vLLM Agentic API KV-affine routing plan](https://github.com/vllm-project/agentic-api/issues/69)
 - [vLLM Agentic API exact Responses/llm-d routing plan](https://github.com/vllm-project/agentic-api/issues/73)
 - [Kubernetes SIG Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/)
+- [Agent Sandbox threat model](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/security/threat_model.md)
 - [Agent Substrate](https://github.com/agent-substrate/substrate)
 - [AgentENV](https://github.com/kvcache-ai/AgentENV)
+- [AgentENV multi-tenancy gap](https://github.com/kvcache-ai/AgentENV/issues/10)
 - [agentgateway Kubernetes MCP routing](https://agentgateway.dev/docs/kubernetes/latest/quickstart/mcp/)
 - [Modal Sandboxes](https://modal.com/docs/guide/sandboxes)
