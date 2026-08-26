@@ -2061,6 +2061,14 @@ mod namespace_scoping_tests {
     /// process-global `OnceLock`, so the first namespace to initialize won and every
     /// other namespace's traffic was counted under its label.
     #[tokio::test]
+    // CI's integration jobs still have no NATS, and `create_test_drt_async`
+    // hard-requires one -- discovery is memory-backed but `nats_config` is not
+    // optional -- so this panics with "Connection refused" there. Same reason
+    // and same treatment as `publisher::tests::test_metrics_publishing_behavior`.
+    // Run locally against a NATS server:
+    //   nats-server -js &
+    //   cargo test -p dynamo-llm --features integration --lib namespace_scoping -- --ignored
+    #[ignore = "requires a running NATS server; CI integration jobs do not provide one"]
     async fn router_request_metrics_are_scoped_per_namespace() {
         let drt = create_test_drt_async().await;
         let comp_a = drt
@@ -2103,6 +2111,14 @@ mod namespace_scoping_tests {
     }
 
     #[tokio::test]
+    // CI's integration jobs still have no NATS, and `create_test_drt_async`
+    // hard-requires one -- discovery is memory-backed but `nats_config` is not
+    // optional -- so this panics with "Connection refused" there. Same reason
+    // and same treatment as `publisher::tests::test_metrics_publishing_behavior`.
+    // Run locally against a NATS server:
+    //   nats-server -js &
+    //   cargo test -p dynamo-llm --features integration --lib namespace_scoping -- --ignored
+    #[ignore = "requires a running NATS server; CI integration jobs do not provide one"]
     async fn router_worker_status_metrics_are_scoped_per_namespace() {
         let drt = create_test_drt_async().await;
         let comp_a = drt
