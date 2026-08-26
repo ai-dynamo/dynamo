@@ -138,7 +138,6 @@ spec:
         spec:
           imagePullSecrets:
             - name: nvcr-secret
-          runtimeClassName: nvidia
           nodeSelector:
             nvidia.com/gpu.product: NVIDIA-B200
           tolerations:
@@ -295,7 +294,6 @@ spec:
         spec:
           imagePullSecrets:
             - name: nvcr-secret
-          runtimeClassName: nvidia
           nodeSelector:
             nvidia.com/gpu.product: NVIDIA-B200
           tolerations:
