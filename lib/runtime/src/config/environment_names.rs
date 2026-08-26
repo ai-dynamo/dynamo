@@ -78,6 +78,19 @@ pub mod logging {
     }
 }
 
+/// Request-lifecycle tracing environment variables.
+pub mod lifecycle_tracing {
+    /// Enable the native request-lifecycle OpenTelemetry span convention.
+    ///
+    /// This is independent from `DYN_LOG`: lifecycle spans are exported through
+    /// the OpenTelemetry tracing layer only.
+    pub const DYN_LIFECYCLE_TRACE_ENABLED: &str = "DYN_LIFECYCLE_TRACE_ENABLED";
+
+    /// Backend disaggregation role, shared with backend-common's CLI
+    /// configuration. It selects the worker response-streaming timing span.
+    pub const DYN_DISAGGREGATION_MODE: &str = "DYN_DISAGGREGATION_MODE";
+}
+
 /// Runtime configuration environment variables
 ///
 /// These control the Tokio runtime, system health/metrics server, and worker behavior

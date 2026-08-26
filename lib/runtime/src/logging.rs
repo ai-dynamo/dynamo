@@ -98,6 +98,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::environment_names::logging as env_logging;
+use crate::telemetry::{LIFECYCLE_TARGET, lifecycle_tracing_enabled};
 
 /// Default log level
 const DEFAULT_FILTER_LEVEL: &str = "info";
@@ -1209,7 +1210,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
 fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let fmt_filter_layer = filters(load_config());
     let trace_filter_layer = filters(load_config());
-    let otel_filter_layer = filters(load_config());
+    let otel_filter_layer = otel_filters(load_config(), lifecycle_tracing_enabled());
     let otel_logs_filter_layer = filters(load_config());
     let console_format = console_log_format();
     let legacy_jsonl_enabled = legacy_jsonl_logging_enabled();
@@ -1494,6 +1495,20 @@ impl<S> Filter<S> for LoggingFilter {
 enum TargetsFilterFallback {
     Dynamic,
     Other,
+}
+
+/// Build the OpenTelemetry-layer filter.
+///
+/// Lifecycle spans bypass `DYN_LOG` only in the OTel layer. The console
+/// formatter keeps its normal filter, so enabling lifecycle tracing does not
+/// increase stderr logging volume.
+fn otel_filters(mut config: LoggingConfig, lifecycle_enabled: bool) -> LoggingFilter {
+    if lifecycle_enabled {
+        config
+            .log_filters
+            .insert(LIFECYCLE_TARGET.to_string(), "info".to_string());
+    }
+    filters(config)
 }
 
 fn filters(config: LoggingConfig) -> LoggingFilter {
