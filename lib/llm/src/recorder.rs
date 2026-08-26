@@ -157,12 +157,11 @@ where
             });
 
             loop {
-                // Check time limit if set
-                if let Some(deadline) = max_time_deadline
+                if !closing_clone.is_cancelled()
+                    && let Some(deadline) = max_time_deadline
                     && Instant::now() >= deadline
                 {
                     tracing::info!("Recorder reached max time limit, shutting down");
-                    // Flush and cancel
                     if let Err(e) = writer.flush().await {
                         tracing::error!("Failed to flush on time limit shutdown: {}", e);
                     }
@@ -173,9 +172,12 @@ where
                 tokio::select! {
                     biased;
 
-                    // Graceful close disables this higher-priority abrupt path.
                     _ = cancel_clone.cancelled(), if !closing_clone.is_cancelled() => {
-                        // Flush any pending writes before shutting down
+                        // Select guards are evaluated once, so close must be checked again here.
+                        if closing_clone.is_cancelled() {
+                            continue;
+                        }
+
                         if let Err(e) = writer.flush().await {
                             tracing::error!("Failed to flush on shutdown: {}", e);
                         }
@@ -273,23 +275,21 @@ where
                                 }
                             }
 
-                        // Update event count
                         let mut count = event_count_clone.lock().await;
                         *count += 1;
 
-                        // Check if we've reached the maximum count
                         if let Some(max) = options.max_count
-                            && *count >= max {
-                                tracing::info!("Recorder reached max event count ({}), shutting down", max);
-                                // Flush buffer before shutting down
-                                if let Err(e) = writer.flush().await {
-                                    tracing::error!("Failed to flush on count limit shutdown: {}", e);
-                                }
-                                // Drop the lock before cancelling
-                                drop(count);
-                                cancel_clone.cancel();
-                                return;
+                            && *count >= max
+                            && !closing_clone.is_cancelled()
+                        {
+                            tracing::info!("Recorder reached max event count ({}), shutting down", max);
+                            if let Err(e) = writer.flush().await {
+                                tracing::error!("Failed to flush on count limit shutdown: {}", e);
                             }
+                            drop(count);
+                            cancel_clone.cancel();
+                            return;
+                        }
                     }
                 }
             }
