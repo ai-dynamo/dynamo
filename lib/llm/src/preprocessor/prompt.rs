@@ -517,12 +517,10 @@ pub(crate) fn apply_continue_final_message(
         let trimmed = final_text.trim();
         let (rel, len) = match haystack.rfind(final_text) {
             Some(idx) => (idx, final_text.len()),
-            None if !trimmed.is_empty() && trimmed != final_text => {
-                match haystack.rfind(trimmed) {
-                    Some(idx) => (idx, trimmed.len()),
-                    None => anyhow::bail!(CONTINUE_FINAL_MESSAGE_NOT_FOUND),
-                }
-            }
+            None if !trimmed.is_empty() && trimmed != final_text => match haystack.rfind(trimmed) {
+                Some(idx) => (idx, trimmed.len()),
+                None => anyhow::bail!(CONTINUE_FINAL_MESSAGE_NOT_FOUND),
+            },
             None => anyhow::bail!(CONTINUE_FINAL_MESSAGE_NOT_FOUND),
         };
         search_from + rel + len
@@ -659,11 +657,7 @@ fn message_text(message: &ChatCompletionRequestMessage) -> Option<&str> {
 }
 
 fn non_empty_str(text: &str) -> Option<&str> {
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
+    if text.is_empty() { None } else { Some(text) }
 }
 
 #[cfg(test)]
@@ -785,8 +779,7 @@ mod tests {
     ) -> dynamo_renderer::RenderedPrompt {
         use dynamo_protocols::types::ChatCompletionRequestMessage;
 
-        let messages: Vec<ChatCompletionRequestMessage> =
-            serde_json::from_value(messages).unwrap();
+        let messages: Vec<ChatCompletionRequestMessage> = serde_json::from_value(messages).unwrap();
         super::apply_continue_final_message(prompt, Some(&messages)).unwrap()
     }
 

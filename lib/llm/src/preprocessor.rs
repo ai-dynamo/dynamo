@@ -8604,9 +8604,8 @@ mod tests {
         }))
         .unwrap();
 
-        let err = crate::engines::ValidateRequest::validate(&request).expect_err(
-            "omitted add_generation_prompt must conflict with continue_final_message",
-        );
+        let err = crate::engines::ValidateRequest::validate(&request)
+            .expect_err("omitted add_generation_prompt must conflict with continue_final_message");
         assert!(
             err.to_string()
                 .contains("Cannot set both `continue_final_message` and `add_generation_prompt`"),
