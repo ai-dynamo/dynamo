@@ -40,8 +40,8 @@ class EncoderStage:
 
     contract = StageContract(
         id="dynamo-vision-encoder",
-        inputs={"request"},
-        outputs={"encoder_features", "encoder_metadata"},
+        inputs=frozenset({"request"}),
+        outputs=frozenset({"encoder_features", "encoder_metadata"}),
     )
 
     def __init__(
@@ -211,8 +211,8 @@ class ExternalEncoderRequestStage:
 
     contract = StageContract(
         id="dynamo-external-encoder-request",
-        inputs={"request", "encoder_features", "encoder_metadata"},
-        outputs={"request"},
+        inputs=frozenset({"request", "encoder_features", "encoder_metadata"}),
+        outputs=frozenset({"request"}),
     )
 
     async def run(
@@ -258,6 +258,6 @@ class DynamoVllmStage:
 
     request_complete_contract = StageContract(
         id="dynamo-vllm-request-complete",
-        inputs={"request"},
-        outputs={"completion"},
+        inputs=frozenset({"request"}),
+        outputs=frozenset({"completion"}),
     )
