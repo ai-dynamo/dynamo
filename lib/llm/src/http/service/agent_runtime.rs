@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, LazyLock};
 
 use axum::body::to_bytes;
@@ -19,14 +19,18 @@ use dynamo_protocols::types::responses::{
     ResponseCompletedEvent, ResponseCreatedEvent, ResponseInProgressEvent,
     ResponseOutputItemDoneEvent, ResponseStreamEvent, Status,
 };
-use dynamo_runtime::pipeline::AsyncEngineContextProvider;
+use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use futures::{Stream, StreamExt, stream};
 use thiserror::Error;
 
 use super::disconnect::create_connection_monitor;
 use super::metrics::{CancellationLabels, Endpoint};
-use super::{openai, service_v2};
-use crate::protocols::common::extensions::NvExt;
+use super::{metadata, openai, service_v2};
+use crate::protocols::agents::{agent_context_header_values, session_affinity_header_value};
+use crate::protocols::common::extensions::{
+    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, NvExt, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
+};
+use crate::protocols::common::input_trigger::classify_response_request;
 use crate::protocols::openai::responses::stream_converter::ResponseEventSerializer;
 use crate::protocols::openai::responses::{NvCreateResponse, NvResponse, ResponseParams};
 use crate::request_template::{RequestTemplate, resolve_request_model};
@@ -65,31 +69,85 @@ pub(super) fn new_responses_runtime() -> Arc<ResponsesAgentRuntime> {
     ))
 }
 
-/// Ephemeral Dynamo ingress state forwarded across model steps.
+/// Dynamo-owned, explicitly filtered ingress data forwarded across model steps.
 ///
-/// Raw headers remain request-scoped and are never written to checkpoints.
+/// Authorization credentials, caller-supplied identity, routing headers, and
+/// lifecycle-finalization hints are intentionally absent. The carrier is
+/// ephemeral and is never written to agent runtime checkpoints.
+#[derive(Clone)]
+struct DynamoInvocationCarrier {
+    metadata: BTreeMap<String, String>,
+    agent_context: Option<crate::protocols::agents::AgentContextHeaderValues>,
+    session_affinity: Option<SessionAffinityId>,
+    trace_request_id: Option<String>,
+}
+
+impl DynamoInvocationCarrier {
+    fn from_headers(headers: &HeaderMap) -> Result<Self, metadata::MetadataHeaderError> {
+        let metadata = metadata::extract_metadata_from_http(headers)?;
+        let agent_context = agent_context_header_values(headers).map(|mut values| {
+            // Agent-runtime turns do not own Dynamo session lifecycle. In
+            // particular, an external session-final hint must not evict KV
+            // state on every internal model step.
+            values.session_final = None;
+            values
+        });
+        let session_affinity = session_affinity_header_value(headers).map(SessionAffinityId::new);
+        let trace_request_id = crate::request_trace::is_enabled()
+            .then(|| header_value(headers, "x-request-id"))
+            .flatten();
+        Ok(Self {
+            metadata,
+            agent_context,
+            session_affinity,
+            trace_request_id,
+        })
+    }
+
+    fn context(&self, request: NvCreateResponse, request_id: String) -> Context<NvCreateResponse> {
+        let input_trigger = classify_response_request(&request);
+        let mut request = Context::with_id_and_metadata(request, request_id, self.metadata.clone());
+        if let Some(trace_request_id) = &self.trace_request_id {
+            request.insert(
+                crate::request_trace::X_REQUEST_ID_CONTEXT_KEY,
+                trace_request_id.clone(),
+            );
+        }
+        if let Some(values) = &self.agent_context {
+            let mut agent_context = AgentContext::from(values.clone());
+            agent_context.input_trigger = Some(input_trigger);
+            request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
+        }
+        if let Some(session_affinity) = &self.session_affinity {
+            request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity.clone());
+        }
+        request
+    }
+}
+
+/// Ephemeral Dynamo ingress state forwarded across model steps.
 #[derive(Clone)]
 pub(super) struct DynamoResponsesContext {
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
     request_id: String,
-    headers: HeaderMap,
+    carrier: DynamoInvocationCarrier,
     nvext: Option<NvExt>,
 }
 
 impl DynamoResponsesContext {
-    pub(super) fn new(
+    fn new(
         state: Arc<service_v2::State>,
         template: Option<RequestTemplate>,
         request_id: String,
-        headers: HeaderMap,
+        carrier: DynamoInvocationCarrier,
         nvext: Option<NvExt>,
     ) -> Self {
         Self {
             state,
             template,
             request_id,
-            headers,
+            carrier,
             nvext,
         }
     }
@@ -110,6 +168,8 @@ pub(super) async fn handle_responses(
         .as_deref()
         .map(ResponseId::from);
     let request_id = openai::get_or_create_request_id(&headers);
+    let carrier = DynamoInvocationCarrier::from_headers(&headers)
+        .map_err(|error| openai::ErrorMessage::request_headers_too_large(&error.to_string()))?;
     let idempotency_key = header_value(&headers, "idempotency-key")
         .or_else(|| header_value(&headers, "x-idempotency-key"))
         .unwrap_or_else(|| request_id.clone());
@@ -124,7 +184,7 @@ pub(super) async fn handle_responses(
         limits: RuntimeLimits::default(),
     };
     let invocation_context =
-        DynamoResponsesContext::new(state.clone(), template, request_id, headers, request.nvext);
+        DynamoResponsesContext::new(state.clone(), template, request_id, carrier, request.nvext);
     let step_kind = if parent_response_id.is_some() {
         ModelStepKind::ClientToolContinuation
     } else {
@@ -274,13 +334,89 @@ fn sse_response(
 #[cfg(test)]
 mod tests {
     use axum::body::to_bytes;
+    use axum::http::HeaderMap;
 
     use futures::stream;
 
+    use crate::protocols::common::extensions::{
+        AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, SESSION_AFFINITY_CONTEXT_KEY,
+        SessionAffinityId,
+    };
     use crate::protocols::openai::responses::ResponseParams;
     use crate::protocols::openai::responses::stream_converter::ResponseEventSerializer;
 
-    use super::{committed_response_events, sse_response};
+    use super::{DynamoInvocationCarrier, committed_response_events, sse_response};
+
+    #[test]
+    fn invocation_carrier_forwards_only_typed_ingress_data() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer client-secret".parse().unwrap());
+        headers.insert("x-dynamo-tenant-id", "spoofed-tenant".parse().unwrap());
+        headers.insert("thread-id", "thread-123".parse().unwrap());
+        headers.insert("x-codex-parent-thread-id", "thread-parent".parse().unwrap());
+        headers.insert("x-dynamo-session-final", "true".parse().unwrap());
+        headers.insert("x-dynamo-meta-policy-class", "latency".parse().unwrap());
+        headers.insert(
+            "x-dynamo-meta-authorization",
+            "Bearer nested-secret".parse().unwrap(),
+        );
+
+        let carrier = DynamoInvocationCarrier::from_headers(&headers).unwrap();
+        assert_eq!(
+            carrier.metadata.get("policy-class").map(String::as_str),
+            Some("latency")
+        );
+        assert!(!carrier.metadata.contains_key("authorization"));
+        assert_eq!(
+            carrier
+                .agent_context
+                .as_ref()
+                .map(|context| context.session_id.as_str()),
+            Some("thread-123")
+        );
+        assert_eq!(
+            carrier
+                .agent_context
+                .as_ref()
+                .and_then(|context| context.parent_session_id.as_deref()),
+            Some("thread-parent")
+        );
+        assert_eq!(
+            carrier
+                .agent_context
+                .as_ref()
+                .and_then(|context| context.session_final),
+            None
+        );
+        assert_eq!(
+            carrier
+                .session_affinity
+                .as_ref()
+                .map(SessionAffinityId::as_str),
+            Some("thread-123")
+        );
+
+        let request = serde_json::from_value(serde_json::json!({
+            "model": "model",
+            "input": "hello"
+        }))
+        .unwrap();
+        let context = carrier.context(request, "request-1".to_string());
+        assert_eq!(
+            context.metadata().get("policy-class").map(String::as_str),
+            Some("latency")
+        );
+        let agent_context = context
+            .get::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+            .expect("agent context attached");
+        assert_eq!(agent_context.session_final, None);
+        assert_eq!(agent_context.kv_hints, None);
+        assert_eq!(agent_context.input_trigger, Some(InputTrigger::UserMessage));
+        let affinity = context
+            .get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY)
+            .expect("session affinity attached");
+        assert_eq!(affinity.as_str(), "thread-123");
+    }
 
     #[tokio::test]
     async fn completed_response_is_exposed_as_codex_compatible_sse() {
@@ -353,20 +489,13 @@ impl InferenceInvoker<OpenAiResponses> for DynamoResponsesInvoker {
                 request.context.template.as_ref(),
             )
             .to_owned();
-            let pipeline_request = openai::context_from_headers(
+            let pipeline_request = request.context.carrier.context(
                 NvCreateResponse {
                     inner,
                     nvext: request.context.nvext.clone(),
                 },
                 request.context.request_id.clone(),
-                &request.context.headers,
-            )
-            .map_err(|(status, message)| {
-                DynamoResponsesInvocationError::Dynamo(format!(
-                    "failed to rebuild Dynamo request context ({status}): {}",
-                    message.message()
-                ))
-            })?;
+            );
             let engine_context = pipeline_request.context();
             let labels = CancellationLabels {
                 model: request
