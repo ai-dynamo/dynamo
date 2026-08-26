@@ -228,13 +228,20 @@ ungated.
 
 ## 7. Finalize
 
-Before recommending, the top-level loop agent runs a correctness regression check whenever the recommended configuration differs from the
-user-provided baseline in an output-affecting dimension (parallelism or reduction order, speculative decoding,
-quantization, attention or MoE backend, KV dtype or reuse): replay 8-16 fixed representative prompts with frozen
-continuations through both configurations and compare teacher-forced per-token log-probabilities, calibrating the
-tolerance with a baseline-versus-baseline repeat; require zero request failures, malformed responses, non-finite
-scores, and no unexpected truncation. Run it against the currently deployed recommended configuration; run the
-baseline side only when the baseline is still live or can be redeployed within remaining budget. If no such check
+Correctness evidence is captured opportunistically, not by redeployment. Before deploying the FIRST candidate that
+differs from the baseline in an output-affecting dimension (parallelism or reduction order, speculative decoding,
+quantization, attention or MoE backend, KV dtype or reuse) — that is, while the baseline side is still live and
+capturable — capture and store the baseline's side of the correctness check: 8-16 fixed representative prompts with
+frozen continuations, teacher-forced per-token log-probabilities where the API exposes them, plus a
+baseline-versus-baseline repeat to calibrate tolerance, under `EXP_ROOT/analysis/correctness/`. (An engagement
+whose candidate families are all output-preserving never pays this cost.) Before tearing down any output-affecting
+candidate, capture its side against the same frozen prompt set.
+
+Before recommending, the top-level loop agent runs the correctness regression check whenever the recommended
+configuration differs from the user-provided baseline in an output-affecting dimension: compare the
+already-captured evidence from both sides; require zero request failures, malformed responses, non-finite
+scores, and no unexpected truncation. Redeploy a side only when its captured artifacts are missing or incompatible
+AND the redeploy fits the remaining budget. If no such check
 is possible, record an ask; report a waived check as
 `correctness: unverified`, never as a pass. Record the correctness status in `recommended_config.md`.
 
