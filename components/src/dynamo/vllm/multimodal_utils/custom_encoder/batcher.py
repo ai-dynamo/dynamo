@@ -13,10 +13,11 @@ thread, coalescing items from concurrent async ``submit()`` calls into batches.
   captured and replayed on the same thread;
 - **eager batching by default**: whenever the worker is free it drains everything
   queued and runs it as one ``fn`` call, then repeats (no timer) — a lone item
-  runs the next loop, and batch size auto-scales with load. Pass ``max_batch_cost``
-  to **micro-batch** instead: the drained items are partitioned by opaque
-  compatibility key, then split by summed ``cost`` and ``max_batch_items``.
-  Item shape is never inspected. There is no timed coalescing hold.
+  runs the next loop, and batch size auto-scales with load. Set
+  ``max_queue_delay_us`` to hold the first item for a bounded coalescing window.
+  Pass ``max_batch_cost`` to **micro-batch** instead: the collected items are
+  partitioned by opaque compatibility key, then split by summed ``cost`` and
+  ``max_batch_items``. Item shape is never inspected.
 
 The caller speaks in opaque items plus an optional per-item scalar ``cost``
 (computed off-thread, see ``Preprocessed``), so all model knowledge stays in the
@@ -38,6 +39,7 @@ import concurrent.futures
 import logging
 import queue
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -97,6 +99,10 @@ class ThreadedMicroBatcher(Generic[T, R]):
             runs as one ``fn`` call (``cost`` ignored).
         max_batch_items: Optional independent item-count cap (>= 1). ``None``
             leaves item count unconstrained.
+        max_queue_delay_us: Maximum time after the first item arrives to collect
+            more work before dispatch. ``0`` (default) preserves eager draining.
+            A finite ``max_batch_items`` ends the hold as soon as that many items
+            have been collected.
         on_start: Optional callable run once on the worker thread before serving
             (model build / warmup); its failure surfaces from ``start()``.
         on_stop: Optional callable run once on the worker thread at teardown (after
@@ -112,6 +118,7 @@ class ThreadedMicroBatcher(Generic[T, R]):
         *,
         max_batch_cost: Optional[int] = None,
         max_batch_items: Optional[int] = None,
+        max_queue_delay_us: int = 0,
         on_start: Optional[Callable[[], None]] = None,
         on_stop: Optional[Callable[[], None]] = None,
         name: str = "micro-batcher",
@@ -121,9 +128,16 @@ class ThreadedMicroBatcher(Generic[T, R]):
             raise ValueError("max_batch_cost must be >= 1 (or None for pass-through)")
         if max_batch_items is not None and max_batch_items < 1:
             raise ValueError("max_batch_items must be >= 1 (or None for no cap)")
+        if (
+            not isinstance(max_queue_delay_us, int)
+            or isinstance(max_queue_delay_us, bool)
+            or max_queue_delay_us < 0
+        ):
+            raise ValueError("max_queue_delay_us must be a non-negative integer")
         self._fn = fn
         self._max_batch_cost = max_batch_cost
         self._max_batch_items = max_batch_items
+        self._max_queue_delay_us = max_queue_delay_us
         self._on_start = on_start
         self._on_stop = on_stop
         self._name = name
@@ -338,14 +352,36 @@ class ThreadedMicroBatcher(Generic[T, R]):
             )
 
     def _collect(self) -> Optional[List[_Work]]:
-        """Block for one item, then eager-drain everything else already queued.
+        """Block for one item, then collect until the configured dispatch edge.
 
-        No timed hold: pull only what is immediately available, then run."""
+        The default keeps the original eager-drain behavior. With a positive
+        queue delay, the deadline starts when the first item is claimed and the
+        hold ends on that deadline or ``max_batch_items``, whichever comes first.
+        """
         first = self._queue.get()
         if first is _SHUTDOWN:
             return None
         works: List[_Work] = [first]
-        # Eager drain: pull everything immediately available, then run.
+        if self._max_queue_delay_us == 0:
+            return self._drain_available(works)
+
+        deadline_ns = time.monotonic_ns() + self._max_queue_delay_us * 1_000
+        while self._max_batch_items is None or len(works) < self._max_batch_items:
+            remaining_ns = deadline_ns - time.monotonic_ns()
+            if remaining_ns <= 0:
+                break
+            try:
+                item = self._queue.get(timeout=remaining_ns / 1_000_000_000)
+            except queue.Empty:
+                break
+            if item is _SHUTDOWN:
+                self._queue.put(_SHUTDOWN)
+                break
+            works.append(item)
+        return works
+
+    def _drain_available(self, works: List[_Work]) -> List[_Work]:
+        """Append all work immediately available without waiting."""
         while True:
             try:
                 item = self._queue.get_nowait()

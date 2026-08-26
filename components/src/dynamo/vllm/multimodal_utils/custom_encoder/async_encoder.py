@@ -119,6 +119,7 @@ class AsyncVisionEncoder(Generic[RawT, ItemT, ArtifactT]):
                 self._backend.forward_batch,
                 max_batch_cost=self._backend.max_batch_cost,
                 max_batch_items=self._backend.max_batch_items,
+                max_queue_delay_us=self._backend.max_queue_delay_us,
                 on_start=lambda: self._backend.build(model_id),
                 on_stop=self._backend.close,
                 name=self._name,

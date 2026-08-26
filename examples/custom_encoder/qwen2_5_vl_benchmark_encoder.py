@@ -80,6 +80,17 @@ def _parse_positive_int_env(name: str, default: int) -> int:
     return value
 
 
+def _parse_nonnegative_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a non-negative integer, got {raw!r}") from exc
+    if value < 0:
+        raise ValueError(f"{name} must be a non-negative integer, got {raw!r}")
+    return value
+
+
 def _decoder_hidden_size(config: Any) -> int:
     text_config = getattr(config, "text_config", None)
     value = getattr(text_config, "hidden_size", None)
@@ -382,6 +393,9 @@ class Qwen2_5VLBenchmarkEncoder(QwenVisionEncoderBackend):
     max_batch_items = _parse_positive_int_env(
         "DYN_QWEN2_VL_MAX_BATCH_ITEMS", _GRAPH_BATCH_BUCKETS[-1]
     )
+    max_queue_delay_us = _parse_nonnegative_int_env(
+        "DYN_QWEN2_VL_MAX_QUEUE_DELAY_US", 1_000
+    )
 
     def __init__(self) -> None:
         self._device: torch.device
@@ -480,10 +494,11 @@ class Qwen2_5VLBenchmarkEncoder(QwenVisionEncoderBackend):
             del outputs, warmup_item
         logger.info(
             "[Qwen2_5VLBenchmarkEncoder] warmup complete: buckets=%s "
-            "max_batch_patches=%d max_batch_items=%d graphs=%d",
+            "max_batch_patches=%d max_batch_items=%d queue_delay_us=%d graphs=%d",
             self.buckets,
             self.max_batch_cost,
             self.max_batch_items,
+            self.max_queue_delay_us,
             len(self._graphs),
         )
 

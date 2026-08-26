@@ -47,6 +47,8 @@ Attributes read **once at setup** (never per-request):
   default) ⇒ **pass-through**: no cap (the author owns sizing).
 - ``max_batch_items`` — an optional independent item-count ceiling for backends
   with finite graph-batch capacity. ``None`` leaves the count unconstrained.
+- ``max_queue_delay_us`` — bounded coalescing hold after the first item arrives.
+  ``0`` preserves eager draining with no timer.
 - ``buckets`` — sorted graph ladder, forward-compatible (unused until CUDA-graph
   batching is supported). ``None``/empty ⇒ eager.
 - ``preprocess_concurrency`` — size of the off-thread pool Dynamo runs
@@ -148,6 +150,11 @@ class VisionEncoderBackend(ABC, Generic[RawT, ItemT, ArtifactT]):
     #: this for a finite graph-count capacity; keep scalar compute/resource work
     #: in ``max_batch_cost``.
     max_batch_items: Optional[int] = None
+
+    #: Bounded coalescing hold after the first queued item arrives. ``0`` keeps
+    #: eager draining; positive values trade up to this much queueing latency for
+    #: fuller batches. A finite ``max_batch_items`` ends the hold early.
+    max_queue_delay_us: int = 0
 
     #: Sorted graph ladder (the captured rungs), **forward-compatible** — unused
     #: until CUDA-graph batching is supported. ``None``/empty ⇒ eager.

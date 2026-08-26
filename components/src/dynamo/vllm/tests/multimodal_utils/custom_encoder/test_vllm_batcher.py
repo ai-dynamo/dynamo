@@ -14,7 +14,9 @@ caller, and the shutdown lifecycle behaves.
 """
 
 import asyncio
+import queue
 import threading
+from collections import deque
 from typing import Callable
 
 import pytest
@@ -209,6 +211,55 @@ async def test_bucket_keys_partition_and_item_cap_round_robin():
 def test_nonpositive_item_cap_rejected():
     with pytest.raises(ValueError, match="max_batch_items"):
         ThreadedMicroBatcher(_echo, max_batch_items=0)
+
+
+class _FakeCollectQueue:
+    def __init__(self, items):
+        self.items = deque(items)
+        self.timeouts: list[float | None] = []
+
+    def get(self, timeout=None):
+        self.timeouts.append(timeout)
+        if self.items:
+            return self.items.popleft()
+        raise queue.Empty
+
+    def get_nowait(self):
+        if self.items:
+            return self.items.popleft()
+        raise queue.Empty
+
+    def put(self, item):
+        self.items.append(item)
+
+
+def test_timed_collect_waits_only_until_deadline():
+    b = ThreadedMicroBatcher(_echo, max_queue_delay_us=1_000)
+    fake_queue = _FakeCollectQueue(["first"])
+    b._queue = fake_queue
+
+    assert b._collect() == ["first"]
+    assert fake_queue.timeouts[0] is None
+    assert 0 < fake_queue.timeouts[1] <= 0.001
+
+
+def test_timed_collect_dispatches_at_item_cap():
+    b = ThreadedMicroBatcher(
+        _echo,
+        max_batch_items=8,
+        max_queue_delay_us=1_000,
+    )
+    fake_queue = _FakeCollectQueue(list(range(9)))
+    b._queue = fake_queue
+
+    assert b._collect() == list(range(8))
+    assert list(fake_queue.items) == [8]
+
+
+@pytest.mark.parametrize("value", [-1, True, 1.5])
+def test_invalid_queue_delay_rejected(value):
+    with pytest.raises(ValueError, match="max_queue_delay_us"):
+        ThreadedMicroBatcher(_echo, max_queue_delay_us=value)
 
 
 async def test_max_batch_cost_none_is_passthrough():

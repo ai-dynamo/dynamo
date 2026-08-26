@@ -261,6 +261,18 @@ def test_preprocess_concurrency_zero_disables_pool():
         enc.shutdown()
 
 
+def test_backend_queue_delay_is_forwarded_to_batcher():
+    class _TimedBackend(_FakeBackend):
+        max_queue_delay_us = 1_000
+
+    enc = AsyncVisionEncoder(_TimedBackend())
+    enc.load("m")
+    try:
+        assert enc._batcher._max_queue_delay_us == 1_000
+    finally:
+        enc.shutdown()
+
+
 def test_overridden_preprocess_with_zero_concurrency_raises():
     """A backend that overrides preprocess but declares no pool would silently
     never run it — rejected at construction."""
