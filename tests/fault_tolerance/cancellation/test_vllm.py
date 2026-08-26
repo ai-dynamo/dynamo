@@ -42,20 +42,15 @@ CANCELLATION_MAX_TOKENS = 2048
 PREFILL_CANCELLATION_MAX_TOKENS = 128
 XPU_CANCELLATION_MAX_TOKENS = 2096
 
-# Startup budgets differ per phase: the decode worker additionally waits on the
-# frontend listing the model and answering a generate health check.
+DECODE_CANCEL_FRONTEND_STARTUP_ALLOWANCE_S = 60
 DECODE_CANCEL_PREFILL_STARTUP_TIMEOUT_S = 180
 DECODE_CANCEL_DECODE_STARTUP_TIMEOUT_S = 270
-# Covers the test body's bounded polls (~46s worst case), the streaming read,
-# and teardown of frontend plus two workers.
 DECODE_CANCEL_BEHAVIORAL_ALLOWANCE_S = 90
-# Strictly greater than the sum, so an unhealthy worker trips its own startup
-# budget (naming the failed health-check URL) rather than the pytest wall clock.
 DECODE_CANCEL_TEST_TIMEOUT_S = (
-    DECODE_CANCEL_PREFILL_STARTUP_TIMEOUT_S
+    DECODE_CANCEL_FRONTEND_STARTUP_ALLOWANCE_S
+    + DECODE_CANCEL_PREFILL_STARTUP_TIMEOUT_S
     + DECODE_CANCEL_DECODE_STARTUP_TIMEOUT_S
     + DECODE_CANCEL_BEHAVIORAL_ALLOWANCE_S
-    + 60
 )
 
 
@@ -403,41 +398,11 @@ def test_request_cancellation_vllm_aggregated(
 def test_request_cancellation_vllm_decode_cancel(
     request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
-    """
-    End-to-end test for request cancellation during decode phase.
+    """Verify that decode-side work stops after a disaggregated request is cancelled."""
 
-    This test verifies that when a request is cancelled by the client during the decode phase,
-    the system properly handles the cancellation and cleans up resources
-    on the decode worker side in a disaggregated setup.
-
-    Budgets (requires 2 GPUs; values in the DECODE_CANCEL_* constants above):
-    - Prefill startup: the prefill worker waits only on its own /health.
-    - Decode startup: larger, because the decode worker waits on its own
-      /health and on the frontend both listing the model and answering a
-      generate health check. DynamoFrontendProcess registers no health checks
-      of its own, so frontend readiness is spent out of this budget.
-    - Behavioral allowance: the post-request polls below, the streaming read,
-      and teardown.
-    - The pytest.mark.timeout marker is the sum of the three plus slack, so a
-      worker that never becomes healthy fails at its own startup budget with
-      the failing health-check URL named, instead of being killed anonymously
-      by the wall clock. A worker that exits instead of hanging is caught much
-      earlier, by ManagedProcess._check_process_alive.
-
-    The post-cancel polls stay in the low seconds: their job is to fail fast
-    when abort behavior is missing. The decode-worker runtime metric is the one
-    exception and is polled, because that counter increments in
-    lib/runtime/src/pipeline/network/tcp/client.rs only after the response
-    reader loop exits, which is strictly later than the "Aborted Request ID"
-    log line polled for above it. The prefill-worker scrape stays unpolled: it
-    asserts a count of 0, which a poll would satisfy on its first read anyway.
-    """
-
-    # Step 1: Start the frontend (allocates its own frontend_port)
     with DynamoFrontendProcess(request) as frontend:
         logger.info("Frontend started successfully")
 
-        # Step 2: Start the prefill worker (allocates its own system_port)
         with DynamoWorkerProcess(
             request,
             frontend.frontend_port,
@@ -446,7 +411,6 @@ def test_request_cancellation_vllm_decode_cancel(
         ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
 
-            # Step 3: Start the decode worker (allocates its own system_port)
             with DynamoWorkerProcess(
                 request,
                 frontend.frontend_port,
@@ -455,19 +419,16 @@ def test_request_cancellation_vllm_decode_cancel(
             ) as decode_worker:
                 logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
 
-                # Step 4: Test request cancellation for streaming scenario
                 logger.info(
                     "Testing chat completion stream request cancellation in decode worker (decode phase)..."
                 )
 
-                # Send streaming request (non-blocking)
                 cancellable_req = send_cancellable_request(
                     frontend.frontend_port,
                     "chat_completion_stream",
                     max_tokens=CANCELLATION_MAX_TOKENS,
                 )
 
-                # Poll for "Decode Request ID" pattern in decode worker (vLLM v2 pattern)
                 request_id, decode_log_offset = poll_for_pattern(
                     process=decode_worker,
                     pattern="Decode Request ID: ",
@@ -477,20 +438,16 @@ def test_request_cancellation_vllm_decode_cancel(
                     cancellable_request=cancellable_req,
                 )
 
-                # Verify same request ID reached prefill worker (as "Prefill Request ID")
-                _, prefill_log_offset = poll_for_pattern(
+                poll_for_pattern(
                     process=prefill_worker,
                     pattern=f"Prefill Request ID: {request_id}",
                 )
 
-                # Read 5 streaming responses (decode phase)
                 read_streaming_responses(cancellable_req, expected_count=5)
 
-                # Now cancel the request
                 cancellable_req.cancel()
                 logger.info(f"Cancelled request ID: {request_id}")
 
-                # Poll for "Aborted Request ID" in decode worker
                 _, decode_log_offset = poll_for_pattern(
                     process=decode_worker,
                     pattern=f"Aborted Request ID: {request_id}",
@@ -499,8 +456,7 @@ def test_request_cancellation_vllm_decode_cancel(
                     poll_interval_ms=50,
                 )
 
-                # Verify frontend log has kill message
-                _, frontend_log_offset = poll_for_pattern(
+                poll_for_pattern(
                     process=frontend,
                     pattern="issued control message control_msg=Kill",
                     max_wait_ms=5000,
@@ -511,7 +467,6 @@ def test_request_cancellation_vllm_decode_cancel(
                     "Chat completion stream cancellation in decode phase detected successfully"
                 )
 
-                # Verify cancellation metrics
                 verify_frontend_cancellation_metrics(
                     frontend_port=frontend.frontend_port,
                     request_type="chat_completion_stream",
