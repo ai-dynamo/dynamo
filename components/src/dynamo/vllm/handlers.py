@@ -1060,9 +1060,7 @@ async def _translate_vllm_client_errors(
     generator: AsyncIterator[ResponseT],
 ) -> AsyncIterator[ResponseT]:
     """Keep request-side vLLM errors client-visible on worker endpoints."""
-    from vllm.exceptions import VLLMClientError
-
-    from .errors import vllm_client_error_to_http_error
+    from .errors import VLLMClientError, vllm_client_error_to_http_error
 
     try:
         async for chunk in generator:
