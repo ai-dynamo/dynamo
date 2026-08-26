@@ -653,6 +653,10 @@ sglang_configs = {
             pytest.mark.requested_sglang_kv_tokens(8736),
             pytest.mark.timeout(390),
             pytest.mark.pre_merge,
+            # TODO: Enable media-ffmpeg in the SGLang container build, then
+            # remove this skip. Frontend video decoding requires the Dynamo
+            # binding to be built with media-ffmpeg support.
+            pytest.mark.skip(reason="SGLang container lacks media-ffmpeg support"),
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=[
