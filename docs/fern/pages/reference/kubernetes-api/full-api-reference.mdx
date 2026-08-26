@@ -2175,6 +2175,11 @@ RuntimeNamespace is the effective Dynamo runtime namespace for this component. W
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
+<ParamField path="gpuCountPerPod" type="integer">
+GPUCountPerPod is the number of GPUs requested by the main container in each Pod, resolved from scalar resources or DRA ResourceClaims.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="replicas" type="integer">
 Replicas is the total number of non-terminated replicas. Required for all component kinds.
 **Validation:** Minimum: 0
@@ -2527,6 +2532,11 @@ componentNames is the list of underlying Kubernetes resource names for this Dyna
 <ParamField path="runtimeNamespace" type="string">
 runtimeNamespace is the effective Dynamo runtime namespace for this component. Worker components may include a generation suffix; non-workers use the base namespace. During rolling updates, worker status keeps the old active revision namespace until cutover completes.
 **Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="gpuCountPerPod" type="integer">
+gpuCountPerPod is the number of GPUs requested by the main container in each Pod, resolved from scalar resources or DRA ResourceClaims.
+**Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="replicas" type="integer">
