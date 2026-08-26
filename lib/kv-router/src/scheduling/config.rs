@@ -190,6 +190,15 @@ fn log_env_config(config: &KvRouterConfig) {
         conditional_disagg_prefill_busy_threshold = ?config.conditional_disagg_prefill_busy_threshold,
         conditional_disagg_decode_busy_threshold = ?config.conditional_disagg_decode_busy_threshold,
         router_predicted_ttl_secs = ?config.router_predicted_ttl_secs,
+        router_ttl_secs = config.router_ttl_secs,
+        router_event_threads = config.router_event_threads,
+        router_queue_policy = %config.router_queue_policy,
+        use_remote_indexer = config.use_remote_indexer,
+        shared_cache_multiplier = config.shared_cache_multiplier,
+        shared_cache_type = %config.shared_cache_type,
+        host_cache_hit_weight = config.host_cache_hit_weight,
+        disk_cache_hit_weight = config.disk_cache_hit_weight,
+        router_prefill_load_model = %config.router_prefill_load_model,
         router_approximate_cache_policy = %config.router_approximate_cache_policy,
         "KvRouterConfig initialized (DYN_* env overrides applied)"
     );
@@ -203,6 +212,10 @@ fn kv_router_config_from_lookup(
     }
 
     fn parse_usize(get_env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<usize> {
+        get_env(key).and_then(|value| value.parse().ok())
+    }
+
+    fn parse_u32(get_env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<u32> {
         get_env(key).and_then(|value| value.parse().ok())
     }
 
@@ -242,7 +255,10 @@ fn kv_router_config_from_lookup(
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_TEMPERATURE") {
         config.router_temperature = value;
     }
-    if let Some(value) = parse_bool(&get_env, "DYN_USE_KV_EVENTS") {
+    // Read the canonical name first, then the Rust-only alias for backward compatibility.
+    let use_kv_events = parse_bool(&get_env, "DYN_ROUTER_USE_KV_EVENTS")
+        .or_else(|| parse_bool(&get_env, "DYN_USE_KV_EVENTS"));
+    if let Some(value) = use_kv_events {
         config.use_kv_events = value;
     }
     if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_REPLICA_SYNC") {
@@ -315,6 +331,38 @@ fn kv_router_config_from_lookup(
     }
     if let Some(value) = get_env(DYN_ROUTER_APPROXIMATE_CACHE_POLICY) {
         config.router_approximate_cache_policy = value.parse()?;
+    }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_TTL_SECS") {
+        config.router_ttl_secs = value;
+    }
+    if let Some(value) = parse_u32(&get_env, "DYN_ROUTER_EVENT_THREADS") {
+        config.router_event_threads = value;
+    }
+    if let Some(value) = get_env("DYN_ROUTER_QUEUE_POLICY") {
+        config.router_queue_policy = value.parse()?;
+    }
+    if let Some(value) = parse_bool(&get_env, "DYN_USE_REMOTE_INDEXER") {
+        config.use_remote_indexer = value;
+    }
+    let mut shared_cache_multiplier_set = false;
+    if let Some(value) = parse_f64(&get_env, "DYN_SHARED_CACHE_MULTIPLIER") {
+        config.shared_cache_multiplier = value;
+        shared_cache_multiplier_set = true;
+    }
+    if let Some(value) = get_env("DYN_SHARED_CACHE_TYPE") {
+        config.shared_cache_type = value.parse()?;
+    }
+    if config.shared_cache_type != SharedCacheType::None && !shared_cache_multiplier_set {
+        config.shared_cache_multiplier = 0.5;
+    }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_HOST_CACHE_HIT_WEIGHT") {
+        config.host_cache_hit_weight = value;
+    }
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_DISK_CACHE_HIT_WEIGHT") {
+        config.disk_cache_hit_weight = value;
+    }
+    if let Some(value) = get_env("DYN_ROUTER_PREFILL_LOAD_MODEL") {
+        config.router_prefill_load_model = value.parse()?;
     }
 
     Ok(config)
@@ -1544,7 +1592,7 @@ mod tests {
             ("DYN_ROUTER_PREFILL_LOAD_SCALE", "2.5"),
             ("DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT", "32"),
             ("DYN_ROUTER_TEMPERATURE", "0.7"),
-            ("DYN_USE_KV_EVENTS", "false"),
+            ("DYN_ROUTER_USE_KV_EVENTS", "false"),
             ("DYN_ROUTER_REPLICA_SYNC", "yes"),
             ("DYN_ROUTER_TRACK_ACTIVE_BLOCKS", "0"),
             ("DYN_ROUTER_TRACK_OUTPUT_BLOCKS", "on"),
@@ -1557,6 +1605,15 @@ mod tests {
             ),
             ("DYN_ROUTER_TRACKING_KEY_ID", "2026-01"),
             ("DYN_ROUTER_QUEUE_THRESHOLD", "4.5"),
+            ("DYN_ROUTER_TTL_SECS", "300"),
+            ("DYN_ROUTER_EVENT_THREADS", "8"),
+            ("DYN_ROUTER_QUEUE_POLICY", "wspt"),
+            ("DYN_USE_REMOTE_INDEXER", "true"),
+            ("DYN_SHARED_CACHE_MULTIPLIER", "0.5"),
+            ("DYN_SHARED_CACHE_TYPE", "hicache"),
+            ("DYN_ROUTER_HOST_CACHE_HIT_WEIGHT", "0.6"),
+            ("DYN_ROUTER_DISK_CACHE_HIT_WEIGHT", "0.3"),
+            ("DYN_ROUTER_PREFILL_LOAD_MODEL", "aic"),
             (DYN_ROUTER_PREFILL_POLICY, "prefill-cli"),
             (DYN_ROUTER_DECODE_POLICY, "decode-cli"),
             (DYN_ROUTER_APPROXIMATE_CACHE_POLICY, "lru"),
@@ -1585,6 +1642,18 @@ mod tests {
         );
         assert_eq!(config.router_tracking_key_id.as_deref(), Some("2026-01"));
         assert_eq!(config.router_queue_threshold, Some(4.5));
+        assert_eq!(config.router_ttl_secs, 300.0);
+        assert_eq!(config.router_event_threads, 8);
+        assert_eq!(config.router_queue_policy, RouterQueuePolicy::Wspt);
+        assert!(config.use_remote_indexer);
+        assert_eq!(config.shared_cache_multiplier, 0.5);
+        assert_eq!(config.shared_cache_type, SharedCacheType::Hicache);
+        assert_eq!(config.host_cache_hit_weight, 0.6);
+        assert_eq!(config.disk_cache_hit_weight, 0.3);
+        assert_eq!(
+            config.router_prefill_load_model,
+            RouterPrefillLoadModel::Aic
+        );
         assert_eq!(
             config.router_approximate_cache_policy,
             ApproximateCachePolicyKind::Lru
@@ -1613,6 +1682,22 @@ mod tests {
         ]);
         assert_eq!(disabled.overlap_score_credit, 0.0);
         assert_eq!(disabled.prefill_load_scale, 0.0);
+    }
+
+    #[test]
+    fn dynamo_env_config_prefers_canonical_use_kv_events_name() {
+        let canonical_false = config_from_values(&[("DYN_ROUTER_USE_KV_EVENTS", "false")]);
+        assert!(!canonical_false.use_kv_events);
+
+        let legacy_false = config_from_values(&[("DYN_USE_KV_EVENTS", "false")]);
+        assert!(!legacy_false.use_kv_events);
+
+        // Canonical name wins when both are set.
+        let canonical_wins = config_from_values(&[
+            ("DYN_ROUTER_USE_KV_EVENTS", "false"),
+            ("DYN_USE_KV_EVENTS", "true"),
+        ]);
+        assert!(!canonical_wins.use_kv_events);
     }
 
     #[test]
@@ -1647,6 +1732,16 @@ mod tests {
         let error =
             try_config_from_values(&[(DYN_ROUTER_APPROXIMATE_CACHE_POLICY, "clock")]).unwrap_err();
         assert!(error.contains("expected 'ttl' or 'lru'"));
+
+        let error = try_config_from_values(&[("DYN_ROUTER_QUEUE_POLICY", "random")]).unwrap_err();
+        assert!(error.contains("expected 'fcfs', 'lcfs', or 'wspt'"));
+
+        let error = try_config_from_values(&[("DYN_SHARED_CACHE_TYPE", "rdma")]).unwrap_err();
+        assert!(error.contains("expected 'none' or 'hicache'"));
+
+        let error =
+            try_config_from_values(&[("DYN_ROUTER_PREFILL_LOAD_MODEL", "fast")]).unwrap_err();
+        assert!(error.contains("expected 'none' or 'aic'"));
 
         assert!(serde_json::to_string(&config_from_values(&[])).is_ok());
     }
@@ -1768,6 +1863,32 @@ mod tests {
 
         assert!(too_small.validate().is_err());
         assert!(too_large.validate().is_err());
+    }
+
+    #[test]
+    fn dynamo_env_config_applies_python_default_shared_cache_multiplier() {
+        let default = KvRouterConfig::default();
+
+        // Without shared cache, the multiplier stays at its Rust default (0.0).
+        let none_type = config_from_values(&[("DYN_SHARED_CACHE_TYPE", "none")]);
+        assert_eq!(none_type.shared_cache_type, SharedCacheType::None);
+        assert_eq!(
+            none_type.shared_cache_multiplier,
+            default.shared_cache_multiplier
+        );
+
+        // Enabling shared cache without an explicit multiplier matches the
+        // Python CLI default of 0.5.
+        let hicache_only = config_from_values(&[("DYN_SHARED_CACHE_TYPE", "hicache")]);
+        assert_eq!(hicache_only.shared_cache_type, SharedCacheType::Hicache);
+        assert_eq!(hicache_only.shared_cache_multiplier, 0.5);
+
+        // An explicit multiplier still wins.
+        let explicit = config_from_values(&[
+            ("DYN_SHARED_CACHE_TYPE", "hicache"),
+            ("DYN_SHARED_CACHE_MULTIPLIER", "0.3"),
+        ]);
+        assert_eq!(explicit.shared_cache_multiplier, 0.3);
     }
 
     #[test]
