@@ -5,9 +5,15 @@ use super::cache::LoRACache;
 use crate::hub::{self, HfRepoSpec};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use aws_credential_types::provider::{ProvideCredentials, SharedCredentialsProvider};
 use futures::StreamExt;
 use hf_hub::Cache;
-use object_store::{ClientOptions, ObjectStore, aws::AmazonS3Builder, path::Path as ObjectPath};
+use object_store::{
+    CredentialProvider, Error as ObjectStoreError, ObjectStore,
+    aws::{AmazonS3Builder, AwsCredential},
+    client::ClientConfigKey,
+    path::Path as ObjectPath,
+};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -152,13 +158,48 @@ impl LoRASource for LocalLoRASource {
     }
 }
 
-/// S3-based LoRA source using object_store crate
-/// Reads credentials from environment variables
-pub struct S3LoRASource {
-    access_key_id: String,
-    secret_access_key: String,
-    region: String,
-    endpoint: Option<String>,
+/// Resolves credentials from the AWS SDK provider chain for object_store.
+///
+/// This includes environment variables, shared AWS config and credentials files,
+/// web identity tokens, container credentials, and EC2 instance metadata.
+#[derive(Debug)]
+struct AwsSdkCredentialProvider {
+    credentials: SharedCredentialsProvider,
+}
+
+#[async_trait]
+impl CredentialProvider for AwsSdkCredentialProvider {
+    type Credential = AwsCredential;
+
+    async fn get_credential(&self) -> object_store::Result<Arc<Self::Credential>> {
+        let credentials = self
+            .credentials
+            .provide_credentials()
+            .await
+            .map_err(|source| ObjectStoreError::Generic {
+                store: "S3",
+                source: Box::new(source),
+            })?;
+
+        Ok(Arc::new(AwsCredential {
+            key_id: credentials.access_key_id().to_string(),
+            secret_key: credentials.secret_access_key().to_string(),
+            token: credentials.session_token().map(ToString::to_string),
+        }))
+    }
+}
+
+/// S3-based LoRA source using object_store with the AWS SDK credential provider chain.
+pub struct S3LoRASource;
+
+impl S3LoRASource {
+    /// Creates an S3 source using standard AWS configuration at request time.
+    ///
+    /// Credentials can come from environment variables, shared AWS configuration,
+    /// workload identity, container credentials, or instance metadata.
+    pub fn from_env() -> Result<Self> {
+        Ok(Self)
+    }
 }
 
 impl S3LoRASource {
@@ -231,50 +272,34 @@ impl S3LoRASource {
 }
 
 impl S3LoRASource {
-    /// Create S3 source from environment variables:
-    /// - AWS_ACCESS_KEY_ID
-    /// - AWS_SECRET_ACCESS_KEY
-    /// - AWS_REGION (optional, defaults to us-east-1)
-    /// - AWS_ENDPOINT (optional, for custom S3-compatible endpoints)
-    pub fn from_env() -> Result<Self> {
-        let access_key_id =
-            std::env::var("AWS_ACCESS_KEY_ID").context("AWS_ACCESS_KEY_ID not set")?;
-        let secret_access_key =
-            std::env::var("AWS_SECRET_ACCESS_KEY").context("AWS_SECRET_ACCESS_KEY not set")?;
-        let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string());
-        let endpoint = std::env::var("AWS_ENDPOINT").ok();
-
-        Ok(Self {
-            access_key_id,
-            secret_access_key,
-            region,
-            endpoint,
-        })
-    }
-
-    fn build_store(&self, bucket: &str) -> Result<Arc<dyn ObjectStore>> {
+    async fn build_store(&self, bucket: &str) -> Result<Arc<dyn ObjectStore>> {
         let timeout_secs: u64 = std::env::var("LORA_DOWNLOAD_TIMEOUT_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(3600);
 
-        let client_opts = ClientOptions::new().with_timeout(Duration::from_secs(timeout_secs));
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .load()
+            .await;
+        let credentials = aws_config
+            .credentials_provider()
+            .ok_or_else(|| anyhow::anyhow!("AWS credential provider is not configured"))?;
+        let region = aws_config
+            .region()
+            .map(|region| region.as_ref())
+            .unwrap_or("us-east-1");
 
-        let mut builder = AmazonS3Builder::new()
-            .with_access_key_id(&self.access_key_id)
-            .with_secret_access_key(&self.secret_access_key)
-            .with_region(&self.region)
+        let mut builder = AmazonS3Builder::from_env()
+            .with_region(region)
             .with_bucket_name(bucket)
-            .with_client_options(client_opts);
+            .with_config(
+                object_store::aws::AmazonS3ConfigKey::Client(ClientConfigKey::Timeout),
+                format!("{timeout_secs}s"),
+            )
+            .with_credentials(Arc::new(AwsSdkCredentialProvider { credentials }));
 
-        if let Some(ref endpoint) = self.endpoint {
-            builder = builder
-                .with_endpoint(endpoint)
-                .with_virtual_hosted_style_request(false);
-
-            if dynamo_runtime::config::env_is_truthy("AWS_ALLOW_HTTP") {
-                builder = builder.with_allow_http(true);
-            }
+        if std::env::var("AWS_ENDPOINT").is_ok() || std::env::var("AWS_ENDPOINT_URL").is_ok() {
+            builder = builder.with_virtual_hosted_style_request(false);
         }
 
         let store = builder.build()?;
@@ -312,7 +337,7 @@ impl LoRASource for S3LoRASource {
             prefix
         );
 
-        let bucket_store = self.build_store(&bucket)?;
+        let bucket_store = self.build_store(&bucket).await?;
         let object_prefix = ObjectPath::from(prefix.clone());
         let mut list_stream = bucket_store.list(Some(&object_prefix));
 
@@ -408,7 +433,7 @@ impl LoRASource for S3LoRASource {
     async fn exists(&self, s3_uri: &str) -> Result<bool> {
         let (bucket, prefix) = Self::parse_s3_uri(s3_uri)?;
 
-        let bucket_store = self.build_store(&bucket)?;
+        let bucket_store = self.build_store(&bucket).await?;
 
         let object_prefix = ObjectPath::from(prefix);
         let mut list_stream = bucket_store.list(Some(&object_prefix));
@@ -464,13 +489,13 @@ mod tests {
             .mock("GET", "/bucket")
             .match_query(Matcher::AllOf(vec![
                 Matcher::UrlEncoded("list-type".into(), "2".into()),
-                Matcher::UrlEncoded("prefix".into(), "adapter".into()),
+                Matcher::UrlEncoded("prefix".into(), "adapter/".into()),
             ]))
             .match_header("authorization", Matcher::Regex("Credential=profile-access-key/".into()))
             .with_status(200)
             .with_header("content-type", "application/xml")
             .with_body(
-                r#"<ListBucketResult><Contents><Key>adapter/adapter_config.json</Key></Contents></ListBucketResult>"#,
+                r#"<ListBucketResult><Contents><Key>adapter/adapter_config.json</Key><Size>2</Size><LastModified>2026-01-01T00:00:00Z</LastModified><ETag>\"etag\"</ETag></Contents></ListBucketResult>"#,
             )
             .create_async()
             .await;

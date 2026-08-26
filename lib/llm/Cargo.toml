@@ -129,6 +129,8 @@ rayon = "1"
 bincode = { version = "2.0.1", features = ["serde", "derive"] }
 
 # lora
+aws-config = "1.8.11"
+aws-credential-types = "1.2.12"
 object_store = { version = "0.12.4", features = ["aws", "gcp", "azure", "http"] }
 
 # input/text
