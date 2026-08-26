@@ -20,104 +20,174 @@ artifacts:
     release_tag: v1.3.0-nemotron-ultra-dev.1
     release_state: draft
 targets:
-- id: agg-b200-chat-mtp
+- id: agg-b200-256k
   recommended: true
   hardware:
     gpu: B200
-    count: 4
-  runtime:
-    framework: vLLM
-  topology: aggregated
-  techniques:
-  - tp4
-  - expert-parallel
-  - mtp-spec-dec
-  - kv-aware-routing
-  workload:
-    type: chat
-    traffic: 8K/1K chat Moontrace replay (70% KV reuse shape), reference concurrency 18
-  deploy:
-    asset: recipes/nemotron-3-ultra/vllm/agg-b200-chat-mtp/deploy.yaml
-  benchmark:
-    tool: aiperf
-    asset: recipes/nemotron-3-ultra/perf/perf.yaml
-  expected_performance:
-    available: true
-    summary: 52.0 tok/s/user, 201.4 tok/s/GPU @ c18 (15% raw Moontrace replay)
-- id: agg-b200-agentic-mtp
-  recommended: true
-  hardware:
-    gpu: B200
-    count: 4
-  runtime:
-    framework: vLLM
-  topology: aggregated
-  techniques:
-  - tp4
-  - expert-parallel
-  - mtp-spec-dec
-  - kv-aware-routing
-  workload:
-    type: agentic
-    traffic: 64K/400 agentic Moontrace replay (90% KV reuse shape), reference concurrency 20
-  deploy:
-    asset: recipes/nemotron-3-ultra/vllm/agg-b200-agentic-mtp/deploy.yaml
-  benchmark:
-    tool: aiperf
-    asset: recipes/nemotron-3-ultra/perf/perf.yaml
-  expected_performance:
-    available: true
-    summary: 80.6 tok/s/user, 310.8 tok/s/GPU @ c20 (15% raw Moontrace replay)
-- id: agg-h200-chat-mtp
-  recommended: true
-  hardware:
-    gpu: H200
     count: 8
   runtime:
     framework: vLLM
   topology: aggregated
   techniques:
-  - tp8
-  - expert-parallel
-  - mtp-spec-dec
+  - tp4-per-worker
+  - mtp5-spec-dec
   - kv-aware-routing
+  - fp8-kv-cache
+  - async-scheduling
   workload:
-    type: chat
-    traffic: 8K/1K chat Moontrace replay, reference concurrency 10
+    type: agentic
+    traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 94
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/agg-h200-chat-mtp/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/agg-b200-agentic-256K-kv-router/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
-    available: true
-    summary: 58.7 tok/s/user, 46.8 tok/s/GPU @ c10 (300-sample replay evidence)
-- id: agg-h200-agentic-mtp
+    available: false
+- id: agg-b200-1m
   recommended: true
   hardware:
-    gpu: H200
+    gpu: B200
     count: 8
   runtime:
     framework: vLLM
   topology: aggregated
   techniques:
-  - tp8
-  - expert-parallel
-  - mtp-spec-dec
+  - tp4-per-worker
   - kv-aware-routing
+  - fp8-kv-cache
+  - async-scheduling
   workload:
     type: agentic
-    traffic: 64K/400 agentic Moontrace replay, reference concurrency 8
+    traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 46
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/agg-h200-agentic-mtp/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/agg-b200-agentic-1M-kv-router/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
-    available: true
-    summary: 53.2 tok/s/user, 27.4 tok/s/GPU @ c8 (300-sample replay evidence)
-- id: disagg-b200-agentic
-  recommended: false
+    available: false
+- id: agg-gb200-256k
+  recommended: true
+  hardware:
+    gpu: GB200
+    count: 8
+  runtime:
+    framework: vLLM
+  topology: aggregated
+  techniques:
+  - tp4-per-worker
+  - mtp5-spec-dec
+  - kv-aware-routing
+  - fp8-kv-cache
+  - async-scheduling
+  workload:
+    type: agentic
+    traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 96
+  deploy:
+    asset: recipes/nemotron-3-ultra/vllm/agg-gb200-agentic-256K-kv-router/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
+  expected_performance:
+    available: false
+- id: agg-gb200-1m
+  recommended: true
+  hardware:
+    gpu: GB200
+    count: 8
+  runtime:
+    framework: vLLM
+  topology: aggregated
+  techniques:
+  - tp4-per-worker
+  - kv-aware-routing
+  - fp8-kv-cache
+  - async-scheduling
+  workload:
+    type: agentic
+    traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 48
+  deploy:
+    asset: recipes/nemotron-3-ultra/vllm/agg-gb200-agentic-1M-kv-router/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
+  expected_performance:
+    available: false
+- id: agg-h200-256k
+  recommended: true
+  hardware:
+    gpu: H200
+    count: 16
+  runtime:
+    framework: vLLM
+  topology: aggregated
+  techniques:
+  - tp8-per-worker
+  - mtp5-spec-dec
+  - kv-aware-routing
+  - fp8-kv-cache
+  - async-scheduling
+  workload:
+    type: agentic
+    traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 64
+  deploy:
+    asset: recipes/nemotron-3-ultra/vllm/agg-h200-agentic-256K-kv-router/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
+  expected_performance:
+    available: false
+- id: agg-h200-1m
+  recommended: true
+  hardware:
+    gpu: H200
+    count: 16
+  runtime:
+    framework: vLLM
+  topology: aggregated
+  techniques:
+  - tp8-per-worker
+  - kv-aware-routing
+  - fp8-kv-cache
+  - async-scheduling
+  workload:
+    type: agentic
+    traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 32
+  deploy:
+    asset: recipes/nemotron-3-ultra/vllm/agg-h200-agentic-1M-kv-router/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
+  expected_performance:
+    available: false
+- id: disagg-b200-256k
+  recommended: true
+  hardware:
+    gpu: B200
+    count: 12
+  runtime:
+    framework: vLLM
+  topology: disaggregated
+  techniques:
+  - 1p2d
+  - tp4-per-role
+  - kv-aware-routing
+  - pd-kv-transfer
+  - fp8-kv-cache
+  - async-scheduling
+  workload:
+    type: agentic
+    traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 144
+  deploy:
+    asset: recipes/nemotron-3-ultra/vllm/disagg-b200-agentic-256K/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
+  expected_performance:
+    available: false
+- id: disagg-b200-1m
+  recommended: true
   hardware:
     gpu: B200
     count: 8
@@ -129,23 +199,123 @@ targets:
   - tp4-per-role
   - kv-aware-routing
   - pd-kv-transfer
+  - fp8-kv-cache
+  - async-scheduling
   workload:
     type: agentic
-    traffic: 64K/400 agentic Moontrace replay, reference concurrency 32
+    traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 38
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/disagg-b200-agentic/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/disagg-b200-agentic-1M/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
   expected_performance:
-    available: true
-    summary: 61.6 tok/s/user, 231.1 tok/s/GPU @ c32, no MTP (15% raw Moontrace replay)
+    available: false
+- id: disagg-gb200-256k
+  recommended: true
+  hardware:
+    gpu: GB200
+    count: 12
+  runtime:
+    framework: vLLM
+  topology: disaggregated
+  techniques:
+  - 1p2d
+  - tp4-per-role
+  - kv-aware-routing
+  - pd-kv-transfer
+  - fp8-kv-cache
+  - async-scheduling
+  workload:
+    type: agentic
+    traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 140
+  deploy:
+    asset: recipes/nemotron-3-ultra/vllm/disagg-gb200-agentic-256K/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
+  expected_performance:
+    available: false
+- id: disagg-gb200-1m
+  recommended: true
+  hardware:
+    gpu: GB200
+    count: 8
+  runtime:
+    framework: vLLM
+  topology: disaggregated
+  techniques:
+  - 1p1d
+  - tp4-per-role
+  - kv-aware-routing
+  - pd-kv-transfer
+  - fp8-kv-cache
+  - async-scheduling
+  workload:
+    type: agentic
+    traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 48
+  deploy:
+    asset: recipes/nemotron-3-ultra/vllm/disagg-gb200-agentic-1M/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
+  expected_performance:
+    available: false
+- id: disagg-h200-256k
+  recommended: true
+  hardware:
+    gpu: H200
+    count: 24
+  runtime:
+    framework: vLLM
+  topology: disaggregated
+  techniques:
+  - 1p2d
+  - tp8-per-role
+  - kv-aware-routing
+  - pd-kv-transfer
+  - fp8-kv-cache
+  - async-scheduling
+  workload:
+    type: agentic
+    traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 72
+  deploy:
+    asset: recipes/nemotron-3-ultra/vllm/disagg-h200-agentic-256K/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
+  expected_performance:
+    available: false
+- id: disagg-h200-1m
+  recommended: true
+  hardware:
+    gpu: H200
+    count: 16
+  runtime:
+    framework: vLLM
+  topology: disaggregated
+  techniques:
+  - 1p1d
+  - tp8-per-role
+  - kv-aware-routing
+  - pd-kv-transfer
+  - fp8-kv-cache
+  - async-scheduling
+  workload:
+    type: agentic
+    traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 30
+  deploy:
+    asset: recipes/nemotron-3-ultra/vllm/disagg-h200-agentic-1M/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/nemotron-3-ultra/perf/perf.yaml
+  expected_performance:
+    available: false
 related_benchmarks: []
 maintainer: null
 gaps:
 - no related Feature Benchmark page exists for this model
 - no SLA/goodput target in source (perf.yaml has no goodput flags)
-- 'status tension: recipes/README.md lists Ultra as benchmarked, but runtime image is Day-0 dev (1.3.0-nemotron-ultra-dev.1);
-  page marks experimental'
-- single shared perf.yaml serves all targets (env-block retargeting)
+- 'Dynamo 1.4.0 structured output: reasoning-enabled response_format json_object or json_schema may return malformed JSON with HTTP 200 with the bundled OSS vLLM; fixed upstream by vLLM PR #44993'
+- 'Dynamo 1.4.0 tool calling: reasoning-enabled required or named tool_choice may omit structured tool_calls with the bundled OSS vLLM; fixed upstream by vLLM PR #44993'
 - maintainer unknown

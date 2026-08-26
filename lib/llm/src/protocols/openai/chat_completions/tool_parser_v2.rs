@@ -20,8 +20,8 @@ use std::sync::LazyLock;
 
 use async_stream::stream;
 use dynamo_protocols::types::{
-    ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk,
-    ChatCompletionToolChoiceOption, FinishReason, FunctionCallStream, FunctionType,
+    ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk, FinishReason,
+    FunctionCallStream, FunctionType,
 };
 use dynamo_runtime::config::{env_is_truthy, environment_names::llm as env_llm};
 use dynamo_runtime::protocols::annotated::Annotated;
@@ -32,9 +32,11 @@ use dynamo_parsers::tool_calling::{
     CalledFunction, ToolCallResponse, ToolCallType, ToolDefinition,
 };
 use dynamo_parsers_v2::{
-    Tool as ToolV2, ToolCallDelta, ToolParser, UnifiedEvent, UnifiedParser, UnifiedParserEvent,
-    UnifiedParserExt, create_tool_parser_for_family, create_unified_parser_for_family,
+    Tool as ToolV2, ToolCallDelta, ToolParser, UnifiedEvent, UnifiedParserEvent, UnifiedParserExt,
+    create_tool_parser_for_family, create_unified_parser_for_family,
 };
+
+use crate::protocols::openai::GuidedToolConstraint;
 
 use super::{NvCreateChatCompletionStreamResponse, stream_choice_chunk_from_template};
 
@@ -96,26 +98,6 @@ pub(crate) fn unified_family(
 ) -> Option<String> {
     let is_muse = |p: Option<&str>| UNIFIED_FAMILIES.contains(&p.unwrap_or_default());
     (is_muse(tool_call_parser) || is_muse(reasoning_parser)).then(|| "muse_glimmer".to_string())
-}
-
-/// Request-side gate for routing the **batch** finalize through v2, mirroring the
-/// streaming gate's tool_choice clause (see `preprocessor.rs`): only an unset or `auto`
-/// tool_choice is eligible. `tool_choice=required`/named and structural-tag mode are
-/// guided-decoded JSON, not the native markup the v2 parser reads, so they stay on the
-/// v1 finalize path.
-///
-/// The streaming gate's `!uses_tool_call_structural_tag` clause is intentionally not
-/// re-checked here. That flag is computed in the worker preprocessor and isn't visible
-/// to the frontend aggregator; but any request that gets structural-tag/guided decoding
-/// is parsed upstream (the worker jails it and emits `tool_calls`), so it never reaches
-/// the batch finalize with raw text. The request's tool_choice is the reachable guard.
-pub(crate) fn batch_tool_choice_eligible(
-    tool_choice: Option<&ChatCompletionToolChoiceOption>,
-) -> bool {
-    matches!(
-        tool_choice,
-        None | Some(ChatCompletionToolChoiceOption::Auto)
-    )
 }
 
 /// Map dynamo's v1 `ToolDefinition`s onto the v2 parser's `Tool` shape.
@@ -198,6 +180,68 @@ pub(crate) fn parse_complete_unified(
     Ok((tool_calls, reasoning, text))
 }
 
+/// Convert the two guided-JSON response shapes into parser-native tool calls.
+///
+/// Named guidance emits only the selected tool's argument object. Required guidance
+/// emits one call envelope or an array of envelopes. This conversion is family-neutral:
+/// Muse has no guided mode in its unified parser, while Qwen's unified parser consumes
+/// the same constraint directly so it can also recover a preceding reasoning span.
+pub(crate) fn parse_complete_guided_json(
+    content: &str,
+    constraint: &GuidedToolConstraint,
+) -> anyhow::Result<Vec<ToolCallResponse>> {
+    fn response(name: String, arguments: &serde_json::Value) -> anyhow::Result<ToolCallResponse> {
+        Ok(ToolCallResponse {
+            id: format!("call-{}", Uuid::new_v4()),
+            tp: ToolCallType::Function,
+            function: CalledFunction {
+                name,
+                arguments: serde_json::to_string(arguments)?,
+            },
+        })
+    }
+
+    let payload: serde_json::Value = serde_json::from_str(content.trim())?;
+    match constraint {
+        GuidedToolConstraint::GuidedJsonNamed { tool_name } => {
+            anyhow::ensure!(
+                payload.is_object(),
+                "named guided payload must be an object"
+            );
+            Ok(vec![response(tool_name.clone(), &payload)?])
+        }
+        GuidedToolConstraint::GuidedJsonRequired => {
+            let envelopes = match &payload {
+                serde_json::Value::Array(envelopes) => envelopes.as_slice(),
+                serde_json::Value::Object(_) => std::slice::from_ref(&payload),
+                _ => anyhow::bail!("required guided payload must be an object or array"),
+            };
+            envelopes
+                .iter()
+                .map(|envelope| {
+                    let object = envelope
+                        .as_object()
+                        .ok_or_else(|| anyhow::anyhow!("guided call envelope must be an object"))?;
+                    let name = object
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("guided call envelope has no string name")
+                        })?;
+                    let arguments = object
+                        .get("parameters")
+                        .or_else(|| object.get("arguments"))
+                        .ok_or_else(|| anyhow::anyhow!("guided call envelope has no arguments"))?;
+                    response(name.to_string(), arguments)
+                })
+                .collect()
+        }
+        GuidedToolConstraint::None | GuidedToolConstraint::StructuralTag => {
+            anyhow::bail!("request did not install guided JSON")
+        }
+    }
+}
+
 /// Map v2 per-chunk tool deltas onto OpenAI streaming tool-call chunks. The first
 /// delta for a given tool index carries the minted id, type and function name;
 /// later deltas for that index carry only argument fragments (`id`/`type`/`name`
@@ -228,24 +272,6 @@ fn emit_tool_chunks(
     Some(chunks)
 }
 
-/// Split one push/finish batch of unified deltas into the three OpenAI delta
-/// channels. Each channel is a single concatenated string on the wire, so
-/// collapsing one batch is lossless w.r.t. the schema while still emitting
-/// reasoning WHERE it occurred rather than hoisting it ahead of a call.
-fn fold_unified_deltas(deltas: Vec<UnifiedParserEvent>) -> (String, String, Vec<ToolCallDelta>) {
-    let mut reasoning = String::new();
-    let mut text = String::new();
-    let mut calls = Vec::new();
-    for delta in deltas {
-        match delta {
-            UnifiedParserEvent::Reasoning(t) => reasoning.push_str(&t),
-            UnifiedParserEvent::Text(t) => text.push_str(&t),
-            UnifiedParserEvent::ToolCall(call) => calls.push(call),
-        }
-    }
-    (reasoning, text, calls)
-}
-
 /// Per-choice streaming state: one parser plus the set of tool indices whose
 /// opening delta (id + type + function name) has already been emitted.
 struct ChoiceState {
@@ -270,29 +296,7 @@ impl ChoiceState {
     }
 }
 
-/// Per-choice UNIFIED streaming state: one unified parser plus the same
-/// tool-index opened-set as [`ChoiceState`], so the id-minting contract is
-/// shared verbatim.
-struct UnifiedChoiceState {
-    parser: Box<dyn UnifiedParser>,
-    opened: HashSet<usize>,
-}
-
-impl UnifiedChoiceState {
-    fn new(family: &str, tools: &[ToolV2]) -> anyhow::Result<Self> {
-        Ok(Self {
-            parser: create_unified_parser_for_family(family, tools)?,
-            opened: HashSet::new(),
-        })
-    }
-
-    fn emit_chunks(
-        &mut self,
-        calls: Vec<ToolCallDelta>,
-    ) -> Option<Vec<ChatCompletionMessageToolCallChunk>> {
-        emit_tool_chunks(&mut self.opened, calls)
-    }
-}
+type UnifiedChoiceState = super::unified_parser::ChoiceState;
 
 /// Finish every choice that has not received an upstream finish reason. This is
 /// called before a usage-only chunk when one exists, with EOF as a fallback.
@@ -357,8 +361,8 @@ fn finish_unterminated_choices(
 fn finish_unterminated_choices_unified(
     states: &mut HashMap<u32, UnifiedChoiceState>,
     finished: &mut HashSet<u32>,
-    tool_emitted: &mut HashSet<u32>,
     template: &NvCreateChatCompletionStreamResponse,
+    emit_tool_calls: bool,
 ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
     let mut indices: Vec<_> = states
         .keys()
@@ -373,42 +377,36 @@ fn finish_unterminated_choices_unified(
         let state = states
             .get_mut(&index)
             .expect("choice index came from parser state map");
-        let deltas = match state.parser.finish() {
-            Ok(output) => output.events,
-            Err(error) => {
-                tracing::warn!(error = %error, choice_index = index, "muse unified stream finish failed");
-                Vec::new()
-            }
-        };
-        let (reasoning, text, calls) = fold_unified_deltas(deltas);
-        let tool_calls = state.emit_chunks(calls);
-        if tool_calls.is_some() {
-            tool_emitted.insert(index);
+        let deltas = state.finish();
+        let prior_finish_reason = state.unterminated_finish_reason();
+        let mut choices = state.choices_for(
+            &super::unified_parser::empty_choice(index),
+            deltas,
+            emit_tool_calls,
+            prior_finish_reason,
+        );
+        if let Some(last) = choices.last_mut() {
+            last.finish_reason = state.unterminated_finish_reason();
         }
-        let finish_reason = if tool_emitted.contains(&index) {
-            Some(FinishReason::ToolCalls)
-        } else {
-            None
-        };
-        let content = (!text.is_empty()).then_some(ChatCompletionMessageContent::Text(text));
-        let reasoning_content = (!reasoning.is_empty()).then_some(reasoning);
-        if content.is_none()
-            && reasoning_content.is_none()
-            && tool_calls.is_none()
-            && finish_reason.is_none()
-        {
-            continue;
-        }
-        responses.push(stream_choice_chunk_from_template(
-            template,
-            index,
-            content,
-            reasoning_content,
-            tool_calls,
-            finish_reason,
-        ));
+        responses.extend(
+            choices
+                .into_iter()
+                .map(|choice| response_with_choice(template, choice)),
+        );
     }
     responses
+}
+
+fn response_with_choice(
+    template: &NvCreateChatCompletionStreamResponse,
+    choice: dynamo_protocols::types::ChatChoiceStream,
+) -> Annotated<NvCreateChatCompletionStreamResponse> {
+    let mut data = template.clone();
+    data.inner.choices = vec![choice];
+    data.inner.usage = None;
+    data.nvext = None;
+    data.llm_metrics = None;
+    Annotated::from_data(data)
 }
 
 /// Streaming path: replace the jail with the `family` v2 parser. Each upstream text
@@ -442,6 +440,13 @@ where
         let mut finished: HashSet<u32> = HashSet::new();
         // Choice indices that have emitted at least one tool-call chunk; used to flip a
         // `Stop` terminating reason to `ToolCalls` (OpenAI contract — see below).
+        //
+        // This path never receives an already-parsed chunk for a choice already in
+        // `states` (no already_parsed() detour here, unlike unified_parser.rs's
+        // apply_stream_with_constraint), so a `ChoiceState` here is never dropped
+        // mid-stream and this flag never needs to survive a gap the way
+        // unified_parser.rs's stream-scoped `tool_history` does. Do not merge the two:
+        // they track the same fact for architecturally different streams.
         let mut tool_emitted: HashSet<u32> = HashSet::new();
         // Last data response, kept (with choices cleared) as a template for the
         // end-of-stream flush when no finish_reason chunk arrived.
@@ -450,6 +455,10 @@ where
         tokio::pin!(stream_in);
 
         while let Some(mut response) = stream_in.next().await {
+            if response.is_error() {
+                yield response;
+                return;
+            }
             let Some(chat_response) = response.data.as_mut() else {
                 // Non-data annotations (errors, comments) pass through untouched.
                 yield response;
@@ -605,9 +614,6 @@ where
         let mut states: HashMap<u32, UnifiedChoiceState> = HashMap::new();
         // Choice indices whose finish() has already run (terminating chunk seen).
         let mut finished: HashSet<u32> = HashSet::new();
-        // Choice indices that have emitted at least one tool-call chunk; used to flip
-        // a `Stop` terminating reason to `ToolCalls` (OpenAI contract).
-        let mut tool_emitted: HashSet<u32> = HashSet::new();
         // Last data response, kept (with choices cleared) as a template for the
         // end-of-stream flush when no finish_reason chunk arrived.
         let mut template: Option<NvCreateChatCompletionStreamResponse> = None;
@@ -615,6 +621,10 @@ where
         tokio::pin!(stream_in);
 
         while let Some(mut response) = stream_in.next().await {
+            if response.is_error() {
+                yield response;
+                return;
+            }
             let Some(chat_response) = response.data.as_mut() else {
                 // Non-data annotations (errors, comments) pass through untouched.
                 yield response;
@@ -628,15 +638,32 @@ where
             }
             let is_empty_choices = chat_response.inner.choices.is_empty();
 
-            for choice in chat_response.inner.choices.iter_mut() {
-                let state = states.entry(choice.index).or_insert_with(|| {
+            if is_empty_choices {
+                if let Some(template) = &template {
+                    for terminal in finish_unterminated_choices_unified(
+                        &mut states,
+                        &mut finished,
+                        template,
+                        emit_tool_calls,
+                    ) {
+                        yield terminal;
+                    }
+                }
+                yield response;
+                continue;
+            }
+
+            let originals = std::mem::take(&mut chat_response.inner.choices);
+            let mut emitted = Vec::new();
+            for original in originals {
+                let state = states.entry(original.index).or_insert_with(|| {
                     // Family validated above; construction is deterministic in-process.
-                    UnifiedChoiceState::new(&family, &v2_tools)
+                    UnifiedChoiceState::new_default(&family, &v2_tools)
                         .expect("dynamo-parsers-v2 unified parser construction validated above")
                 });
 
                 // Only text content feeds the parser; multimodal parts pass through.
-                let text = match choice.delta.content.as_ref() {
+                let text = match original.delta.content.as_ref() {
                     Some(ChatCompletionMessageContent::Text(t)) => Some(t.clone()),
                     _ => None,
                 };
@@ -644,82 +671,57 @@ where
                 let mut deltas: Vec<UnifiedParserEvent> = Vec::new();
                 let mut parsed_any = false;
                 if let Some(text) = text.as_deref() {
-                    match state.parser.push(text) {
-                        Ok(mut pushed) => {
-                            deltas.append(&mut pushed);
-                            parsed_any = true;
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, family = %family, "muse unified push failed; passing chunk through");
-                        }
-                    }
+                    deltas.extend(state.push(text));
+                    parsed_any = true;
                 }
                 // Flush on the terminating chunk so a value truncated at EOF is dropped
                 // and open reasoning is promoted.
-                if choice.finish_reason.is_some() && finished.insert(choice.index) {
-                    match state.parser.finish() {
-                        Ok(mut flushed) => {
-                            deltas.append(&mut flushed.events);
-                            parsed_any = true;
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, family = %family, "muse unified finish failed");
-                        }
-                    }
+                if original.finish_reason.is_some() && finished.insert(original.index) {
+                    deltas.extend(state.finish());
+                    parsed_any = true;
                 }
 
                 if parsed_any {
-                    let (reasoning, out_text, calls) = fold_unified_deltas(deltas);
-                    // Dropped BEFORE `emit_chunks` so the index state never advances on a
-                    // call the client will not see, and so `tool_emitted` stays empty and
-                    // the finish_reason is not flipped to `ToolCalls`.
-                    let calls = if emit_tool_calls { calls } else { Vec::new() };
-                    let tool_calls = state.emit_chunks(calls);
-                    if tool_calls.is_some() {
-                        tool_emitted.insert(choice.index);
+                    let mut parsed = state.choices_for(
+                        &original,
+                        deltas,
+                        emit_tool_calls,
+                        original.finish_reason,
+                    );
+                    if parsed.is_empty() {
+                        parsed.push(super::unified_parser::empty_choice(original.index));
                     }
-                    // The parser consumed the text input, so replace every channel
-                    // from its output — raw markup must never reach the client. Role
-                    // and logprobs are preserved as-is.
-                    //
-                    // Reasoning is the exception: only FILL it, never clear it. A
-                    // topology-A worker splits the markup itself and sends
-                    // `reasoning_content` already populated, and this pass sees only
-                    // `Text` events for that chunk. Assigning unconditionally replaced
-                    // the worker's reasoning with `None` and lost the channel. The
-                    // batch path in `aggregator.rs` guards it the same way.
-                    if !reasoning.is_empty() {
-                        choice.delta.reasoning_content = Some(reasoning);
-                    }
-                    choice.delta.content = (!out_text.is_empty())
-                        .then_some(ChatCompletionMessageContent::Text(out_text));
-                    choice.delta.tool_calls = tool_calls;
-                }
-
-                // OpenAI streaming contract: once a choice has emitted tool calls, a
-                // `Stop` terminating reason must be reported as `ToolCalls`.
-                if choice.finish_reason == Some(FinishReason::Stop)
-                    && tool_emitted.contains(&choice.index)
-                {
-                    choice.finish_reason = Some(FinishReason::ToolCalls);
+                    emitted.extend(parsed);
+                } else {
+                    emitted.push(original);
                 }
             }
 
-            // OpenAI stream ordering requires a terminal finish_reason before the
-            // usage-only chunk. Finish every unterminated choice before yielding an
-            // empty-choices response; EOF below remains the fallback.
-            if is_empty_choices && let Some(template) = &template {
-                for terminal in finish_unterminated_choices_unified(
-                    &mut states,
-                    &mut finished,
-                    &mut tool_emitted,
-                    template,
-                ) {
-                    yield terminal;
+            let last = emitted.len() - 1;
+            let Some(llm_metrics_position) =
+                super::unified_parser::fanout_llm_metrics_position(&emitted)
+            else {
+                continue;
+            };
+            for (position, choice) in emitted.into_iter().enumerate() {
+                let is_last = position == last;
+                let mut data = chat_response.clone();
+                data.inner.choices = vec![choice];
+                if !is_last {
+                    data.inner.usage = None;
+                    data.nvext = None;
                 }
+                if position != llm_metrics_position {
+                    data.llm_metrics = None;
+                }
+                yield Annotated {
+                    data: Some(data),
+                    id: if is_last { response.id.take() } else { None },
+                    event: if is_last { response.event.take() } else { None },
+                    comment: if is_last { response.comment.take() } else { None },
+                    error: if is_last { response.error.take() } else { None },
+                };
             }
-
-            yield response;
         }
 
         // Backstop: the stream ended without a finish_reason for some choice.
@@ -727,8 +729,8 @@ where
             for terminal in finish_unterminated_choices_unified(
                 &mut states,
                 &mut finished,
-                &mut tool_emitted,
                 template,
+                emit_tool_calls,
             ) {
                 yield terminal;
             }
@@ -949,6 +951,26 @@ mod tests {
             final_finish_reason(&out),
             Some(FinishReason::Stop),
             "no tool calls emitted -> finish_reason stays Stop"
+        );
+    }
+
+    #[tokio::test]
+    async fn qwen3_terminal_error_suppresses_eof_recovery() {
+        let out = apply_stream(
+            stream::iter([
+                chunk("hello <tool_c", false),
+                Annotated::from_error("backend exploded"),
+            ]),
+            None,
+            "qwen3_coder".to_string(),
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let error_position = out.iter().position(Annotated::is_error).unwrap();
+        assert!(
+            out[error_position + 1..]
+                .iter()
+                .all(|response| response.data.is_none())
         );
     }
 
@@ -1216,6 +1238,27 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn muse_terminal_error_suppresses_eof_recovery() {
+        let out = apply_unified_stream(
+            stream::iter([
+                chunk("<|start|>assistant to=self<|mess", false),
+                Annotated::from_error("backend exploded"),
+            ]),
+            None,
+            "muse_glimmer".to_string(),
+            true,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let error_position = out.iter().position(Annotated::is_error).unwrap();
+        assert!(
+            out[error_position + 1..]
+                .iter()
+                .all(|response| response.data.is_none())
+        );
+    }
+
     // Missing-finish-reason backstop: the stream ends with a usage-only chunk and
     // no terminating finish_reason. The end-of-stream flush must synthesize
     // `ToolCalls` before the usage chunk so a strict client does not hang.
@@ -1370,33 +1413,41 @@ mod tests {
         assert_eq!(args["location"], "Paris");
     }
 
-    // A single push carrying reasoning, a tool call and text folds each onto its own
-    // channel (no cross-leak), and empty-string deltas stay empty (dropped downstream
-    // by `then_some`).
-    #[test]
-    fn fold_unified_deltas_routes_each_channel_and_drops_empties() {
-        let deltas = vec![
-            UnifiedParserEvent::Reasoning("think".into()),
-            UnifiedParserEvent::ToolCall(ToolCallDelta {
-                tool_index: 0,
-                name: Some("f".into()),
-                arguments: "{}".into(),
-            }),
-            UnifiedParserEvent::Text("ans".into()),
-        ];
-        let (r, t, c) = fold_unified_deltas(deltas);
-        assert_eq!(
-            r, "think",
-            "Reasoning must land on the reasoning channel only"
+    #[tokio::test]
+    async fn muse_unified_preserves_event_order_within_one_push() {
+        let turn = concat!(
+            "<|start|>assistant to=self<|message|>Look it up.<|eom|>",
+            "<|start|>assistant to=get_weather<|message|><atem:invoke name=\"get_weather\"><atem:parameter name=\"location\">Paris</atem:parameter></atem:invoke><|eom|>",
+            "<|start|>assistant to=self<|message|>Verify it.<|eom|>",
+            "<|start|>assistant to=user<|message|>It's 18C.<|eot|>"
         );
-        assert_eq!(t, "ans", "Text must land on the content channel only");
-        assert_eq!(c.len(), 1, "ToolCall must land on the calls channel only");
-        // Empty-string deltas accumulate to empty strings (dropped by then_some).
-        let (r2, t2, c2) = fold_unified_deltas(vec![
-            UnifiedParserEvent::Reasoning(String::new()),
-            UnifiedParserEvent::Text(String::new()),
-        ]);
-        assert!(r2.is_empty() && t2.is_empty() && c2.is_empty());
+        let out = apply_unified_stream(
+            stream::iter([chunk(turn, true)]),
+            None,
+            "muse_glimmer".to_string(),
+            true,
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let mut kinds = Vec::new();
+        for choice in out
+            .iter()
+            .filter_map(|response| response.data.as_ref())
+            .flat_map(|data| data.inner.choices.iter())
+        {
+            if choice.delta.reasoning_content.is_some() {
+                kinds.push("reasoning");
+            }
+            if choice.delta.tool_calls.is_some() {
+                kinds.push("tool");
+            }
+            if choice.delta.content.is_some() {
+                kinds.push("text");
+            }
+        }
+        kinds.dedup();
+        assert_eq!(kinds, ["reasoning", "tool", "reasoning", "text"]);
     }
 
     // Topology A: the worker already stripped markers, then the frontend aggregator
@@ -1502,5 +1553,42 @@ mod tests {
             "choice1 must NOT inherit choice0's call: {n1:?}"
         );
         assert_eq!(f1, Some(FinishReason::Stop), "choice1 stays Stop (no flip)");
+    }
+
+    #[tokio::test]
+    async fn muse_packed_choice_fanout_keeps_source_metrics_on_reasoning() {
+        let choice0 = format!("{MUSE_REASONING}{MUSE_ANSWER}");
+        let mut source = two_choice_chunk(&choice0, MUSE_ANSWER, false);
+        source.data.as_mut().unwrap().llm_metrics =
+            Some(crate::protocols::common::metrics::LLMMetricAnnotation {
+                chunk_tokens: 6,
+                ..Default::default()
+            });
+
+        let out = apply_unified_stream(
+            stream::iter([source]),
+            None,
+            "muse_glimmer".to_string(),
+            true,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let metric_choices: Vec<_> = out
+            .iter()
+            .filter_map(|response| response.data.as_ref())
+            .filter(|data| data.llm_metrics.is_some())
+            .flat_map(|data| data.inner.choices.iter())
+            .collect();
+
+        assert_eq!(
+            metric_choices.len(),
+            1,
+            "source metrics must be emitted once"
+        );
+        assert_eq!(metric_choices[0].index, 0);
+        assert!(
+            metric_choices[0].delta.reasoning_content.is_some(),
+            "packed choice order must not move metrics onto the later visible choice"
+        );
     }
 }

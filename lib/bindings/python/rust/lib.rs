@@ -452,21 +452,22 @@ fn lora_name_to_id(lora_name: &str) -> i32 {
 }
 
 /// Resolve the routing-side image-placeholder token id for a model using the
-/// same per-family logic the frontend's MM-aware KV routing uses (lightseek
-/// `resolve_routing_tokens`). Returns `chat_placeholder_token_id` — the exact
-/// id `OpenAIPreprocessor` substitutes `pad_value` over — so the vLLM worker's
-/// KV-event normalizer keys on the identical token (no cross-process drift).
+/// frontend's static per-family logic. Returns `chat_placeholder_token_id` —
+/// the exact id `OpenAIPreprocessor` substitutes `pad_value` over.
 ///
 /// `model_id` is the HF id (used for registry matching); `model_dir` is the
-/// local directory holding `config.json`/`tokenizer.json`. Returns `None` when
-/// the model isn't in the MM-routing registry or its config can't be read.
+/// local directory holding the model configs. Returns `None` when the
+/// placeholder, prompt layout, or image-token counter cannot be resolved, so
+/// the worker never enables image-key normalization while the frontend is
+/// limited to text-prefix routing. Request-time frontend gates are preserved
+/// because event normalization only recognizes frontend-issued canonical MM
+/// UUIDs.
 #[cfg(feature = "mm-routing")]
 #[pyfunction]
 #[pyo3(text_signature = "(model_id, model_dir)")]
 fn resolve_routing_image_token_id(model_id: &str, model_dir: &str) -> Option<u32> {
     let dir = std::path::Path::new(model_dir);
-    llm_rs::preprocessor::lightseek_mm::resolve_routing_tokens(model_id, dir)
-        .chat_placeholder_token_id
+    llm_rs::preprocessor::lightseek_mm::resolve_exact_routing_image_token_id(model_id, dir)
 }
 
 /// Create an engine and attach it to an endpoint to make it visible to the frontend.

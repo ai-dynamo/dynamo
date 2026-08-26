@@ -13,11 +13,12 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-from dynamo.llm import KvStateAttachmentOwner
+from dynamo.llm import KvStateAttachmentOwner, WorkerType
 from dynamo.runtime import Endpoint
 
 from .constants import DisaggregationMode
 from .dp_topology import get_dp_range_for_worker
+from .router_hints import resolve_router_hint_sources
 
 logger = logging.getLogger(__name__)
 
@@ -161,12 +162,20 @@ async def start_attachment_owner(
 
     events = config.engine_args.kv_events_config
     block_size = int(vllm_config.cache_config.block_size)
+    router_hint_sources = resolve_router_hint_sources(
+        config.engine_args,
+        _state_agent_worker_type(config),
+        (dp_start, dp_size),
+    )
     kv_state_endpoint = config.kv_state_endpoint or (
         f"{config.namespace}/{config.component}/{config.endpoint}"
     )
     descriptors = []
     for rank in sorted(expected_ranks):
         cache_owner_id = settings.cache_owner_ids[rank]
+        router_hint_source = (
+            router_hint_sources.get(rank) if router_hint_sources is not None else None
+        )
         descriptors.append(
             {
                 "cache_owner_id": cache_owner_id,
@@ -179,6 +188,14 @@ async def start_attachment_owner(
                 ),
                 "raw_topic": "",
                 "image_token_id": image_token_id,
+                "router_hint_source": (
+                    {
+                        "source_control_endpoint": router_hint_source.source_control_endpoint,
+                        "worker_type": router_hint_source.worker_type,
+                    }
+                    if router_hint_source is not None
+                    else None
+                ),
             }
         )
     attachment_owner = KvStateAttachmentOwner(
@@ -188,6 +205,15 @@ async def start_attachment_owner(
     )
     await attachment_owner.start()
     return attachment_owner
+
+
+def _state_agent_worker_type(config: Any) -> WorkerType:
+    mode = getattr(config, "disaggregation_mode", DisaggregationMode.AGGREGATED)
+    if mode == DisaggregationMode.PREFILL:
+        return WorkerType.Prefill
+    if mode == DisaggregationMode.DECODE:
+        return WorkerType.Decode
+    return WorkerType.Aggregated
 
 
 def _advertised_raw_endpoint(base: str, rank: int, host: str) -> str:
