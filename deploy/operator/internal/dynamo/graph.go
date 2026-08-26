@@ -1985,6 +1985,8 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 			ParentGraphDeploymentNamespace: parentContext.ParentGraphDeploymentNamespace,
 			Discovery:                      parentContext.Discovery,
 			DynamoNamespace:                parentContext.DynamoNamespace,
+			WorkerHashSuffix:               parentContext.WorkerHashSuffix,
+			RolloutCohortRouting:           parentContext.RolloutCohortRouting,
 		}
 		frontendDefaults := NewFrontendDefaults()
 		base, err := frontendDefaults.GetBaseContainer(frontendContext)
@@ -2039,7 +2041,9 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 	dynamoNamespace := v1beta1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
 	var workerHashSuffix string
 	labels := GetPodTemplateLabels(component)
-	if workerHash := labels[commonconsts.KubeLabelDynamoWorkerHash]; IsWorkerComponent(string(component.ComponentType)) && workerHash != "" {
+	annotations := GetPodTemplateAnnotations(component)
+	if workerHash := labels[commonconsts.KubeLabelDynamoWorkerHash]; workerHash != "" &&
+		(IsWorkerComponent(string(component.ComponentType)) || component.ComponentType == v1beta1.ComponentTypeFrontend) {
 		workerHashSuffix = workerHash
 	}
 
@@ -2052,6 +2056,10 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 		DynamoNamespace:                dynamoNamespace,
 		EPPConfig:                      component.EPPConfig,
 		WorkerHashSuffix:               workerHashSuffix,
+		RolloutCohortRouting: strings.EqualFold(
+			annotations[commonconsts.KubeAnnotationRolloutCohortRouting],
+			commonconsts.KubeLabelValueTrue,
+		),
 	}
 	return componentContext
 }

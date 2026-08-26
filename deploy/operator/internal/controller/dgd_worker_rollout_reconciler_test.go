@@ -212,12 +212,20 @@ func TestPlanUnsupportedWorkerHashTransitionDoesNotCommit(t *testing.T) {
 
 func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {
 	tests := []struct {
-		name             string
-		workerHashSuffix bool
+		name                   string
+		workerHashSuffix       bool
+		rolloutCohortRouting   bool
+		wantFrontendWorkerHash bool
 	}{
 		{
 			name:             "enabled",
 			workerHashSuffix: true,
+		},
+		{
+			name:                   "rollout cohort routing",
+			workerHashSuffix:       true,
+			rolloutCohortRouting:   true,
+			wantFrontendWorkerHash: true,
 		},
 		{
 			name: "disabled",
@@ -228,14 +236,23 @@ func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Build a DGD with the requested Grove worker suffix state")
 			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"worker": {ComponentType: consts.ComponentTypeWorker},
+				"frontend": {ComponentType: consts.ComponentTypeFrontend},
+				"worker":   {ComponentType: consts.ComponentTypeWorker},
 			})
+			if tt.rolloutCohortRouting {
+				if dgd.Annotations == nil {
+					dgd.Annotations = make(map[string]string)
+				}
+				dgd.Annotations[consts.KubeAnnotationRolloutCohortRouting] = consts.KubeLabelValueTrue
+			}
 
 			t.Log("Render the Grove deployment")
 			rendered, err := groveRenderDeployment(dgd, nil, tt.workerHashSuffix)
 			require.NoError(t, err)
 			worker := rendered.GetComponentByName("worker")
 			require.NotNil(t, worker)
+			frontend := rendered.GetComponentByName("frontend")
+			require.NotNil(t, frontend)
 
 			t.Log("Verify the rendered suffix and source DGD immutability")
 			if tt.workerHashSuffix {
@@ -246,7 +263,16 @@ func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {
 			} else {
 				assert.Nil(t, worker.PodTemplate)
 			}
+			if tt.wantFrontendWorkerHash {
+				wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+				require.NoError(t, err)
+				require.NotNil(t, frontend.PodTemplate)
+				assert.Equal(t, wantHash, frontend.PodTemplate.Labels[consts.KubeLabelDynamoWorkerHash])
+			} else {
+				assert.Nil(t, frontend.PodTemplate)
+			}
 			assert.Nil(t, dgd.GetComponentByName("worker").PodTemplate)
+			assert.Nil(t, dgd.GetComponentByName("frontend").PodTemplate)
 		})
 	}
 }

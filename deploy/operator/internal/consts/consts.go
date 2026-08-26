@@ -41,6 +41,9 @@ const (
 	KubeLabelDynamoSelector = "nvidia.com/selector"
 
 	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
+	// KubeAnnotationRolloutCohortRouting opts Grove frontends into exact
+	// worker-hash namespace discovery during coherent rollouts.
+	KubeAnnotationRolloutCohortRouting = "nvidia.com/rollout-cohort-routing"
 
 	// KubeAnnotationWorkloadProvider records the controller-owned immutable graph-level workload provider.
 	KubeAnnotationWorkloadProvider = "nvidia.com/workload-provider"

@@ -24,6 +24,12 @@ func NewFrontendDefaults() *FrontendDefaults {
 
 func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
 	// Frontend doesn't need backend-specific config
+	// A rollout cohort frontend uses exact namespace discovery. The worker hash
+	// is stamped on its PodTemplate by the Grove renderer so it rolls together
+	// with, and only discovers, the matching worker cohort.
+	if context.RolloutCohortRouting && context.WorkerHashSuffix != "" {
+		context.DynamoNamespace = fmt.Sprintf("%s-%s", context.DynamoNamespace, context.WorkerHashSuffix)
+	}
 	container := f.getCommonContainer(context)
 
 	// Set default command and args
@@ -76,11 +82,13 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 			Name:  "DYN_HTTP_PORT", // TODO: need to reconcile DYNAMO_PORT and DYN_HTTP_PORT
 			Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 		},
-		{
+	}...)
+	if !context.RolloutCohortRouting || context.WorkerHashSuffix == "" {
+		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  commonconsts.DynamoNamespacePrefixEnvVar,
 			Value: context.DynamoNamespace,
-		},
-	}...)
+		})
+	}
 
 	return container, nil
 }

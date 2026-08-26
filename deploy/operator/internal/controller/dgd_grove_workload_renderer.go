@@ -166,7 +166,10 @@ func applyGroveWorkerHashSuffix(
 	}
 	for i := range renderDeployment.Spec.Components {
 		component := &renderDeployment.Spec.Components[i]
-		if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
+		isWorker := dynamo.IsWorkerComponent(string(component.ComponentType))
+		isCohortFrontend := component.ComponentType == nvidiacomv1beta1.ComponentTypeFrontend &&
+			rolloutCohortRoutingEnabled(renderDeployment)
+		if !isWorker && !isCohortFrontend {
 			continue
 		}
 		if component.PodTemplate == nil {
@@ -178,6 +181,13 @@ func applyGroveWorkerHashSuffix(
 		component.PodTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 	}
 	return nil
+}
+
+func rolloutCohortRoutingEnabled(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
+	return strings.EqualFold(
+		dgd.Annotations[commonconsts.KubeAnnotationRolloutCohortRouting],
+		commonconsts.KubeLabelValueTrue,
+	)
 }
 
 func shouldRenderGroveWorkerHashSuffix(

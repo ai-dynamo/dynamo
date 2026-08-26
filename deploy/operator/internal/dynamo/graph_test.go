@@ -9492,13 +9492,15 @@ func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
 	compCtxLegacy := generateComponentContext(betaComponent(t, componentLegacy), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
 	assert.Equal(t, commonconsts.LegacyWorkerHash, compCtxLegacy.WorkerHashSuffix)
 
-	// Frontend never gets WorkerHashSuffix, even with the label
+	// A frontend stamped with the worker hash belongs to the same rollout cohort.
 	component3 := &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		ComponentType: commonconsts.ComponentTypeFrontend,
 		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"},
+		Annotations:   map[string]string{commonconsts.KubeAnnotationRolloutCohortRouting: "TRUE"},
 	}
 	compCtx3 := generateComponentContext(betaComponent(t, component3), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
-	assert.Empty(t, compCtx3.WorkerHashSuffix)
+	assert.Equal(t, "abc123", compCtx3.WorkerHashSuffix)
+	assert.True(t, compCtx3.RolloutCohortRouting)
 }
 
 func TestWorkerDefaults_WorkerHashSuffixEnvVar(t *testing.T) {
@@ -9547,6 +9549,28 @@ func TestFrontendDefaults_NamespacePrefixEnvVar(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "DYN_NAMESPACE_PREFIX should be set on frontend")
+}
+
+func TestFrontendDefaults_RolloutCohortNamespace(t *testing.T) {
+	f := NewFrontendDefaults()
+	container, err := f.GetBaseContainer(ComponentContext{
+		DynamoNamespace:      "myns-mydgd",
+		ComponentType:        commonconsts.ComponentTypeFrontend,
+		WorkerHashSuffix:     "abc123",
+		RolloutCohortRouting: true,
+	})
+	require.NoError(t, err)
+
+	foundNamespace := false
+	for _, env := range container.Env {
+		assert.NotEqual(t, commonconsts.DynamoNamespacePrefixEnvVar, env.Name,
+			"cohort routing must not use prefix discovery")
+		if env.Name == commonconsts.DynamoNamespaceEnvVar {
+			assert.Equal(t, "myns-mydgd-abc123", env.Value)
+			foundNamespace = true
+		}
+	}
+	assert.True(t, foundNamespace, "DYN_NAMESPACE should be set on frontend")
 }
 
 func TestBaseComponentDefaults_ContainerNameOnlyInContainerDiscoveryMode(t *testing.T) {
@@ -9607,6 +9631,7 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 		wantSidecarImage        string
 		wantSidecarArgs         []string
 		wantSidecarEnvVars      map[string]string
+		wantSidecarEnvAbsent    []string
 		wantSidecarEnvFrom      int
 		wantSidecarProbes       bool
 		wantSidecarPorts        bool
@@ -9669,6 +9694,28 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			wantSidecarEnvFrom: 1,
 			wantSidecarProbes:  true,
 			wantSidecarPorts:   true,
+		},
+		{
+			name: "frontendSidecar uses exact rollout cohort namespace",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Labels: map[string]string{
+					commonconsts.KubeLabelDynamoWorkerHash: "abc123",
+				},
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationRolloutCohortRouting: commonconsts.KubeLabelValueTrue,
+				},
+				FrontendSidecar: &v1alpha1.FrontendSidecarSpec{Image: "my-frontend:latest"},
+			},
+			parentDGDName:    "test-dgd",
+			namespace:        "test-ns",
+			wantSidecarCount: 2,
+			wantSidecarName:  commonconsts.FrontendSidecarContainerName,
+			wantSidecarImage: "my-frontend:latest",
+			wantSidecarEnvVars: map[string]string{
+				commonconsts.DynamoNamespaceEnvVar: "test-ns-test-dgd-abc123",
+			},
+			wantSidecarEnvAbsent: []string{commonconsts.DynamoNamespacePrefixEnvVar},
 		},
 		{
 			name: "frontendSidecar with custom env vars",
@@ -9843,6 +9890,11 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 				}
 				for k, v := range tt.wantSidecarEnvVars {
 					assert.Equal(t, v, envVars[k], "sidecar env var %s", k)
+				}
+			}
+			for _, absentName := range tt.wantSidecarEnvAbsent {
+				for _, env := range sidecar.Env {
+					assert.NotEqual(t, absentName, env.Name, "sidecar env var %s must be absent", absentName)
 				}
 			}
 
