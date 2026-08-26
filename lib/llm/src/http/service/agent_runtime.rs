@@ -5,20 +5,25 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::sync::{Arc, LazyLock};
 
+use agent_rt_sandbox::{
+    HttpSandboxProvider, HttpSandboxProviderConfig, HttpSandboxProviderError, SandboxFailurePolicy,
+    SandboxProviderExecutor, SandboxToolError, SandboxToolExecutorConfig,
+};
 use axum::body::to_bytes;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use dynamo_agent_rt::{
     AgentRuntime, AgentRuntimeError, AgentStreamRuntimeError, AgentToolRuntimeError,
-    AuthorizationScope, Blake3ToolIdempotencyKeys, CanonicalJsonFingerprinter,
+    AuthorizationScope, Blake3ToolIdempotencyKeys, BoxFuture, CanonicalJsonFingerprinter,
     ConfiguredToolRouter, IdempotencyKey, InferenceFuture, InferenceIntent, InferenceInvoker,
     InferenceOutput, InferenceRequest, MaterializationError, ModelStepKind, OpenAiResponses,
     PolicyResponsesOutputInterpreter, ResponseId, ResponsesRequestMaterializer,
     ResponsesStreamEventInterpreter, ResponsesToolAdapterError, ResponsesToolLoopAdapter,
     RoutedResponsesOutcomeError, RoutedResponsesOutcomePolicy, RunStreamResult, RunTurn,
-    RuntimeAuthorization, RuntimeLimits, SystemClock, ToolRoute, ToolRunError, ToolRunner,
-    UuidGenerator,
+    RuntimeAuthorization, RuntimeLimits, SystemClock, ToolExecutionFailure, ToolExecutionRequest,
+    ToolExecutionResult, ToolExecutor, ToolFailureDisposition, ToolFailurePolicy, ToolRoute,
+    ToolRouter, ToolRunError, ToolRunner, UuidGenerator,
 };
 use dynamo_agent_rt_store::{DuckDbStore, DuckDbStoreError, StoreInvariantError};
 use dynamo_agent_tools::{
@@ -64,6 +69,11 @@ const PRINCIPAL_HEADER: &str = "x-dynamo-principal-id";
 const DUCKDB_PATH_ENV: &str = "DYN_AGENT_RT_DUCKDB_PATH";
 const WEB_SEARCH_API_KEY_ENV: &str = "BRAVE_SEARCH_API_KEY";
 const WEB_SEARCH_TOOL_NAME_ENV: &str = "DYN_AGENT_RT_WEB_SEARCH_TOOL_NAME";
+const SANDBOX_ENDPOINT_ENV: &str = "DYN_AGENT_RT_SANDBOX_ENDPOINT";
+const SANDBOX_TOKEN_ENV: &str = "DYN_AGENT_RT_SANDBOX_TOKEN";
+const SANDBOX_ALLOW_HTTP_ENV: &str = "DYN_AGENT_RT_SANDBOX_ALLOW_HTTP";
+const SANDBOX_TOOL_NAME_ENV: &str = "DYN_AGENT_RT_SANDBOX_TOOL_NAME";
+const SANDBOX_PROFILE_ENV: &str = "DYN_AGENT_RT_SANDBOX_PROFILE";
 
 static AUTH_CONFIG: LazyLock<Result<AgentRuntimeAuthConfig, String>> =
     LazyLock::new(AgentRuntimeAuthConfig::from_environment);
@@ -225,7 +235,21 @@ fn ingress_authorization(
 }
 
 type ResponsesStore = DuckDbStore<OpenAiResponses>;
-type ResponsesRouter = ConfiguredToolRouter;
+
+#[derive(Clone, Default)]
+struct ResponsesRouter {
+    web_search: ConfiguredToolRouter,
+    sandbox: ConfiguredToolRouter,
+}
+
+impl ToolRouter for ResponsesRouter {
+    fn route(&self, tool_name: &str) -> Option<ToolRoute> {
+        self.web_search
+            .route(tool_name)
+            .or_else(|| self.sandbox.route(tool_name))
+    }
+}
+
 type ResponsesOutcomePolicy = RoutedResponsesOutcomePolicy<ResponsesRouter>;
 type ResponsesOutputInterpreter = PolicyResponsesOutputInterpreter<ResponsesOutcomePolicy>;
 type ResponsesAgentRuntimeCore = AgentRuntime<
@@ -241,10 +265,105 @@ type ResponsesAgentRuntimeCore = AgentRuntime<
 type ResponsesToolAdapter = ResponsesToolLoopAdapter<ResponsesRouter>;
 type ResponsesToolRunner = ToolRunner<
     ResponsesStore,
-    BraveWebSearchExecutor,
+    ResponsesToolExecutor,
     Blake3ToolIdempotencyKeys,
-    BraveWebSearchFailurePolicy,
+    ResponsesToolFailurePolicy,
 >;
+
+struct ResponsesToolExecutor {
+    web_search: BraveWebSearchExecutor,
+    sandbox: Option<SandboxProviderExecutor<HttpSandboxProvider>>,
+}
+
+#[derive(Debug, Error)]
+enum ResponsesToolExecutorError {
+    #[error("web search execution failed: {0}")]
+    WebSearch(#[source] BraveWebSearchError),
+    #[error("sandbox execution failed: {0}")]
+    Sandbox(#[source] SandboxToolError<HttpSandboxProviderError>),
+    #[error("tool connector is not configured: {0}")]
+    UnsupportedConnector(String),
+}
+
+impl ToolExecutor for ResponsesToolExecutor {
+    type Error = ResponsesToolExecutorError;
+
+    fn execute(
+        &self,
+        request: ToolExecutionRequest,
+    ) -> BoxFuture<'_, Result<ToolExecutionResult, Self::Error>> {
+        Box::pin(async move {
+            match request.connector.as_str() {
+                "web_search" => self
+                    .web_search
+                    .execute(request)
+                    .await
+                    .map_err(ResponsesToolExecutorError::WebSearch),
+                "sandbox" => self
+                    .sandbox
+                    .as_ref()
+                    .ok_or_else(|| {
+                        ResponsesToolExecutorError::UnsupportedConnector("sandbox".to_owned())
+                    })?
+                    .execute(request)
+                    .await
+                    .map_err(ResponsesToolExecutorError::Sandbox),
+                connector => Err(ResponsesToolExecutorError::UnsupportedConnector(
+                    connector.to_owned(),
+                )),
+            }
+        })
+    }
+
+    fn lookup(
+        &self,
+        request: &ToolExecutionRequest,
+    ) -> BoxFuture<'_, Result<Option<ToolExecutionResult>, Self::Error>> {
+        let request = request.clone();
+        Box::pin(async move {
+            match request.connector.as_str() {
+                "web_search" => self
+                    .web_search
+                    .lookup(&request)
+                    .await
+                    .map_err(ResponsesToolExecutorError::WebSearch),
+                "sandbox" => self
+                    .sandbox
+                    .as_ref()
+                    .ok_or_else(|| {
+                        ResponsesToolExecutorError::UnsupportedConnector("sandbox".to_owned())
+                    })?
+                    .lookup(&request)
+                    .await
+                    .map_err(ResponsesToolExecutorError::Sandbox),
+                connector => Err(ResponsesToolExecutorError::UnsupportedConnector(
+                    connector.to_owned(),
+                )),
+            }
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ResponsesToolFailurePolicy;
+
+impl ToolFailurePolicy<ResponsesToolExecutorError> for ResponsesToolFailurePolicy {
+    fn classify(&self, error: &ResponsesToolExecutorError) -> ToolFailureDisposition {
+        match error {
+            ResponsesToolExecutorError::WebSearch(error) => {
+                BraveWebSearchFailurePolicy.classify(error)
+            }
+            ResponsesToolExecutorError::Sandbox(error) => SandboxFailurePolicy.classify(error),
+            ResponsesToolExecutorError::UnsupportedConnector(_) => {
+                ToolFailureDisposition::Failed(ToolExecutionFailure {
+                    code: "unsupported_connector".to_owned(),
+                    message: error.to_string(),
+                    retryable: false,
+                })
+            }
+        }
+    }
+}
 
 pub(super) struct ResponsesAgentRuntime {
     runtime: Arc<ResponsesAgentRuntimeCore>,
@@ -263,7 +382,7 @@ type ResponsesRuntimeError = AgentRuntimeError<
 type ResponsesStreamRuntimeError =
     AgentStreamRuntimeError<ResponsesRuntimeError, Infallible, DuckDbStoreError>;
 
-type ResponsesToolRunError = ToolRunError<DuckDbStoreError, BraveWebSearchError>;
+type ResponsesToolRunError = ToolRunError<DuckDbStoreError, ResponsesToolExecutorError>;
 type ResponsesToolRuntimeError = AgentToolRuntimeError<
     ResponsesRuntimeError,
     ResponsesToolAdapterError,
@@ -291,7 +410,16 @@ pub(super) fn new_responses_runtime() -> Arc<ResponsesAgentRuntime> {
         }
     }
     .unwrap_or_else(|error| panic!("failed to initialize agent runtime DuckDB store: {error}"));
-    let (router, executor) = web_search_components();
+    let (web_search_router, web_search) = web_search_components();
+    let (sandbox_router, sandbox) = sandbox_components();
+    let router = ResponsesRouter {
+        web_search: web_search_router,
+        sandbox: sandbox_router,
+    };
+    let executor = ResponsesToolExecutor {
+        web_search,
+        sandbox,
+    };
     let output_interpreter =
         PolicyResponsesOutputInterpreter::new(RoutedResponsesOutcomePolicy::new(router.clone()));
     let runtime = Arc::new(AgentRuntime::new(
@@ -310,12 +438,12 @@ pub(super) fn new_responses_runtime() -> Arc<ResponsesAgentRuntime> {
             store,
             executor,
             Blake3ToolIdempotencyKeys,
-            BraveWebSearchFailurePolicy,
+            ResponsesToolFailurePolicy,
         )),
     })
 }
 
-fn web_search_components() -> (ResponsesRouter, BraveWebSearchExecutor) {
+fn web_search_components() -> (ConfiguredToolRouter, BraveWebSearchExecutor) {
     let api_key = match std::env::var(WEB_SEARCH_API_KEY_ENV) {
         Ok(api_key) => Some(api_key),
         Err(std::env::VarError::NotPresent) => None,
@@ -330,7 +458,7 @@ fn web_search_components() -> (ResponsesRouter, BraveWebSearchExecutor) {
 fn web_search_components_from_config(
     api_key: Option<String>,
     tool_name: Option<String>,
-) -> (ResponsesRouter, BraveWebSearchExecutor) {
+) -> (ConfiguredToolRouter, BraveWebSearchExecutor) {
     let Some(api_key) = api_key else {
         return (
             ConfiguredToolRouter::default(),
@@ -351,6 +479,72 @@ fn web_search_components_from_config(
     let executor = BraveWebSearchExecutor::new([(profile_name, profile)])
         .unwrap_or_else(|error| panic!("failed to initialize web-search executor: {error}"));
     (router, executor)
+}
+
+fn sandbox_components() -> (
+    ConfiguredToolRouter,
+    Option<SandboxProviderExecutor<HttpSandboxProvider>>,
+) {
+    let endpoint = match std::env::var(SANDBOX_ENDPOINT_ENV) {
+        Ok(endpoint) => Some(endpoint),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("{SANDBOX_ENDPOINT_ENV} must contain UTF-8")
+        }
+    };
+    let token = std::env::var(SANDBOX_TOKEN_ENV).ok();
+    let allow_http = std::env::var(SANDBOX_ALLOW_HTTP_ENV)
+        .ok()
+        .map(|value| {
+            value
+                .parse::<bool>()
+                .unwrap_or_else(|_| panic!("{SANDBOX_ALLOW_HTTP_ENV} must be true or false"))
+        })
+        .unwrap_or(false);
+    let tool_name = std::env::var(SANDBOX_TOOL_NAME_ENV).ok();
+    let profile = std::env::var(SANDBOX_PROFILE_ENV).ok();
+    sandbox_components_from_config(endpoint, token, allow_http, tool_name, profile)
+        .unwrap_or_else(|error| panic!("invalid sandbox deployment configuration: {error}"))
+}
+
+fn sandbox_components_from_config(
+    endpoint: Option<String>,
+    token: Option<String>,
+    allow_http: bool,
+    tool_name: Option<String>,
+    profile: Option<String>,
+) -> Result<
+    (
+        ConfiguredToolRouter,
+        Option<SandboxProviderExecutor<HttpSandboxProvider>>,
+    ),
+    String,
+> {
+    let Some(endpoint) = endpoint else {
+        return Ok((ConfiguredToolRouter::default(), None));
+    };
+    let token = token.ok_or_else(|| {
+        format!("{SANDBOX_TOKEN_ENV} is required when sandbox execution is enabled")
+    })?;
+    let tool_name = tool_name.unwrap_or_else(|| "python".to_owned());
+    let profile = profile.unwrap_or_else(|| "python-deny-egress".to_owned());
+    validate_scope_component(&tool_name)
+        .map_err(|error| format!("invalid {SANDBOX_TOOL_NAME_ENV}: {error}"))?;
+    validate_scope_component(&profile)
+        .map_err(|error| format!("invalid {SANDBOX_PROFILE_ENV}: {error}"))?;
+    let provider = HttpSandboxProvider::new(HttpSandboxProviderConfig {
+        endpoint,
+        bearer_token: token,
+        allow_http,
+        ..HttpSandboxProviderConfig::default()
+    })
+    .map_err(|error| error.to_string())?;
+    let router = ConfiguredToolRouter::new([(
+        tool_name,
+        ToolRoute::new("sandbox", "python").with_profile(profile),
+    )]);
+    let executor = SandboxProviderExecutor::new(provider, SandboxToolExecutorConfig::default());
+    Ok((router, Some(executor)))
 }
 
 /// Dynamo-owned, explicitly filtered ingress data forwarded across model steps.
@@ -637,7 +831,7 @@ fn tool_run_error_status(error: &ResponsesToolRunError) -> StatusCode {
             if *outcome_unknown || journal_error.is_some() {
                 StatusCode::SERVICE_UNAVAILABLE
             } else {
-                web_search_error_status(error)
+                tool_executor_error_status(error)
             }
         }
         ToolRunError::PersistedFailure(failure) => {
@@ -657,6 +851,14 @@ fn tool_run_error_status(error: &ResponsesToolRunError) -> StatusCode {
     }
 }
 
+fn tool_executor_error_status(error: &ResponsesToolExecutorError) -> StatusCode {
+    match error {
+        ResponsesToolExecutorError::WebSearch(error) => web_search_error_status(error),
+        ResponsesToolExecutorError::Sandbox(error) => sandbox_error_status(error),
+        ResponsesToolExecutorError::UnsupportedConnector(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
 fn web_search_error_status(error: &BraveWebSearchError) -> StatusCode {
     match error {
         BraveWebSearchError::Timeout
@@ -673,6 +875,20 @@ fn web_search_error_status(error: &BraveWebSearchError) -> StatusCode {
         | BraveWebSearchError::ResponseTooLarge { .. }
         | BraveWebSearchError::Decode(_)
         | BraveWebSearchError::Normalize(_) => StatusCode::BAD_GATEWAY,
+    }
+}
+
+fn sandbox_error_status(error: &SandboxToolError<HttpSandboxProviderError>) -> StatusCode {
+    match error {
+        SandboxToolError::UnsupportedOperation(_) | SandboxToolError::IdentityMismatch => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+        SandboxToolError::InvalidArguments(_)
+        | SandboxToolError::EmptyCommand
+        | SandboxToolError::KnownFailure { .. } => StatusCode::BAD_GATEWAY,
+        SandboxToolError::Provider(_)
+        | SandboxToolError::OutcomeUnknown
+        | SandboxToolError::WaitTimedOut(_) => StatusCode::SERVICE_UNAVAILABLE,
     }
 }
 
@@ -984,7 +1200,7 @@ mod tests {
         DynamoResponsesInvocationError, IngressAuthorizationError, LOCAL_PRINCIPAL_ENV,
         LOCAL_TENANT_ENV, PERMITTED_CONNECTORS_ENV, PRINCIPAL_HEADER, ResponsesRuntimeError,
         TENANT_HEADER, TRUSTED_PROXY_TOKEN_ENV, committed_response_events, runtime_error_response,
-        sse_response, web_search_components_from_config,
+        sandbox_components_from_config, sse_response, web_search_components_from_config,
     };
 
     #[test]
@@ -1001,6 +1217,37 @@ mod tests {
         assert_eq!(route.operation, "search");
         assert_eq!(route.profile, "brave_default");
         assert!(router.route("web_search").is_none());
+    }
+
+    #[test]
+    fn sandbox_route_requires_an_authenticated_deployment_endpoint() {
+        let (router, executor) = sandbox_components_from_config(None, None, false, None, None)
+            .expect("disabled sandbox configuration is valid");
+        assert!(router.route("python").is_none());
+        assert!(executor.is_none());
+
+        let missing_token = sandbox_components_from_config(
+            Some("https://sandbox.example.com".to_owned()),
+            None,
+            false,
+            None,
+            None,
+        );
+        assert!(matches!(missing_token, Err(error) if error.contains("SANDBOX_TOKEN")));
+
+        let (router, executor) = sandbox_components_from_config(
+            Some("http://127.0.0.1:8090".to_owned()),
+            Some("0123456789abcdef0123456789abcdef".to_owned()),
+            true,
+            Some("run_python".to_owned()),
+            Some("python-deny-egress".to_owned()),
+        )
+        .expect("explicit local HTTP sandbox configuration is valid");
+        let route = router.route("run_python").expect("route configured");
+        assert_eq!(route.connector, "sandbox");
+        assert_eq!(route.operation, "python");
+        assert_eq!(route.profile, "python-deny-egress");
+        assert!(executor.is_some());
     }
 
     #[test]
