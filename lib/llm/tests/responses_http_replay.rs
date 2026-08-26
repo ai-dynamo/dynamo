@@ -143,13 +143,10 @@ async fn streaming_backend_error_closes_partial_output_and_counts_failure() {
             })
             .expect("text fixture has no finish-reason chunk");
         script.truncate(finish_position);
-        let typed_error = DynamoError::builder()
+        let error = DynamoError::builder()
             .error_type(DynamoErrorType::Backend(BackendError::InvalidArgument))
             .message(ERROR_MESSAGE)
             .build();
-        // The tool-enabled Python adapter path serializes the typed error into
-        // a generic error message before it reaches the HTTP frontend.
-        let error = DynamoError::msg(typed_error.to_string());
         let svc = HarnessService::start_with_backend_error(script, error).await;
 
         let response = post_responses(

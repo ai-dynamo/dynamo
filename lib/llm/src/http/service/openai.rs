@@ -2266,8 +2266,6 @@ impl BackendErrorInfo {
 fn extract_backend_error_if_present<T: serde::Serialize>(
     event: &Annotated<T>,
 ) -> Option<BackendErrorInfo> {
-    const SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX: &str = "BackendInvalidArgument: ";
-
     #[derive(serde::Deserialize)]
     struct ErrorPayload {
         message: Option<String>,
@@ -2365,30 +2363,6 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
                 status: overload_status_code(),
                 sanitized: Some(SanitizedError::Overloaded),
             });
-        }
-
-        // Some adapter paths encode a typed backend error into the message of
-        // a generic DynamoError. Recover only the exact stable discriminator;
-        // unknown errors without it remain sanitized as 500s.
-        let serialized_invalid_argument = match event.error.as_ref() {
-            Some(error)
-                if matches!(
-                    error.error_type(),
-                    ErrorType::Unknown | ErrorType::Backend(BackendError::Unknown)
-                ) =>
-            {
-                error
-                    .message()
-                    .strip_prefix(SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX)
-            }
-            None => error_str.strip_prefix(SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX),
-            _ => None,
-        };
-        if let Some(message) = serialized_invalid_argument {
-            return Some(BackendErrorInfo::from_status(
-                message.to_string(),
-                StatusCode::BAD_REQUEST,
-            ));
         }
 
         return Some(BackendErrorInfo::from_status(
