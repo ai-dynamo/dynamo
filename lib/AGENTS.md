@@ -91,7 +91,7 @@ Format only the files your change touched rather than running `cargo fmt --all`,
 rewrites the whole tree and makes a diff unreviewable:
 
 ```bash
-cargo fmt -- lib/runtime/src/distributed.rs
+rustfmt lib/runtime/src/distributed.rs
 ```
 
 After changing Rust that the Python layer calls, rebuild the extension module — the
