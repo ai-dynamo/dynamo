@@ -252,14 +252,6 @@ impl SelectionService {
         self.core.upsert_worker(req).await
     }
 
-    /// Whether the configured scheduling policy enables queueing for `model_name`.
-    pub fn queueing_enabled(
-        &self,
-        model_name: &str,
-    ) -> Result<bool, crate::scheduling::RouterPolicyConfigError> {
-        self.core.queueing_enabled(model_name)
-    }
-
     /// The port this service uses for replica synchronization, if enabled.
     pub fn replica_sync_port(&self) -> Option<u16> {
         self.replica_sync_port

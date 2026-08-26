@@ -101,21 +101,6 @@ struct ReconcileState {
 }
 
 impl Selector {
-    fn validate_queueing_requirements(
-        cfg: &EppStandaloneConfig,
-        queueing_enabled: bool,
-    ) -> Result<()> {
-        if queueing_enabled && cfg.max_num_batched_tokens.unwrap_or(0) == 0 {
-            anyhow::bail!(
-                "DYN_EPP_MAX_NUM_BATCHED_TOKENS is required (and must be > 0) because the router \
-                 scheduling policy enables queueing for model {}; set it to the engine's \
-                 --max-num-batched-tokens",
-                cfg.model_name
-            );
-        }
-        Ok(())
-    }
-
     pub async fn new(
         cfg: &EppStandaloneConfig,
         policy_registry: WorkerSelectionPolicyRegistry,
@@ -130,6 +115,18 @@ impl Selector {
         kv_router_config: KvRouterConfig,
         policy_registry: WorkerSelectionPolicyRegistry,
     ) -> Result<Self> {
+        let queueing_enabled = kv_router_config
+            .queueing_enabled(Some(&cfg.model_name))
+            .map_err(|e| anyhow!("resolving router policy for model {}: {e}", cfg.model_name))?;
+        if queueing_enabled && cfg.max_num_batched_tokens.unwrap_or(0) == 0 {
+            anyhow::bail!(
+                "DYN_EPP_MAX_NUM_BATCHED_TOKENS is required (and must be > 0) because the router \
+                 scheduling policy enables queueing for model {}; set it to the engine's \
+                 --max-num-batched-tokens",
+                cfg.model_name
+            );
+        }
+
         warn_for_unserved_worker_selection_policies(&kv_router_config, &[WorkerType::Aggregated])?;
         let replication = Self::replication(cfg).await?;
         let mut builder =
@@ -144,10 +141,6 @@ impl Selector {
                 .await
                 .map_err(|e| anyhow!("building embedded selection service: {e}"))?,
         );
-        let queueing_enabled = service
-            .queueing_enabled(&cfg.model_name)
-            .map_err(|e| anyhow!("resolving router policy for model {}: {e}", cfg.model_name))?;
-        Self::validate_queueing_requirements(cfg, queueing_enabled)?;
         Self::from_service_with_replication(cfg, service, replication).await
     }
 
@@ -827,11 +820,12 @@ worker_selection:
     }
 
     #[tokio::test]
-    async fn queueing_model_requires_max_num_batched_tokens_at_startup() {
+    async fn queueing_model_rejects_missing_capacity_before_peer_discovery() {
         let policy_file = model_policy_file();
         let mut cfg = test_config();
         cfg.model_name = "queueing-model".to_string();
         cfg.max_num_batched_tokens = None;
+        cfg.peer_service = Some("unreachable-peer-service".to_string());
 
         let error = Selector::new_with_kv_router_config(
             &cfg,
