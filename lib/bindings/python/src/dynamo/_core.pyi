@@ -1287,11 +1287,11 @@ class FpmDirectPublisher:
     """
     Direct Forward Pass Metrics publisher used by in-process producers such
     as the TRT-LLM adapter. The underlying Rust publisher owns per-DP-rank
-    serialization tasks (each with its own 1s idle heartbeat timer) and a
-    single event-plane publisher task. Python callers do not manage
-    heartbeat: when ``publish`` is not called for ``IDLE_HEARTBEAT_INTERVAL``
-    (1.0s, matching vLLM's ``HEARTBEAT_INTERVAL``), the Rust side emits a
-    zeroed snapshot on that rank's channel.
+    serialization tasks and a single event-plane publisher task. Each rank's
+    idle heartbeat defaults to one second and can be set with
+    ``DYN_FPM_HEARTBEAT_INTERVAL_MS`` up to 300,000 ms. When ``publish`` is
+    idle for that interval, the Rust side emits a zeroed snapshot on the
+    rank's channel.
     """
 
     def __init__(
