@@ -110,6 +110,7 @@ def public_record(record: dict[str, Any], *, detail_chars: int) -> dict[str, Any
             "description",
             "mode",
             "pass",
+            "failure_category",
             "errors",
             "warnings",
             "agent_loop",
@@ -133,11 +134,27 @@ def public_record(record: dict[str, Any], *, detail_chars: int) -> dict[str, Any
 def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
     total = len(records)
     failed = sum(not bool(record.get("pass")) for record in records)
+    categories = {category: 0 for category in probe.FAILURE_CATEGORIES}
+    for record in records:
+        if record.get("pass"):
+            continue
+        category = record.get("failure_category")
+        if category not in categories:
+            category = "unclassified"
+        categories[str(category)] += 1
     return {
         "total": total,
         "passed": total - failed,
         "failed": failed,
         "pass_rate": None if total == 0 else round((total - failed) / total, 4),
+        "failure_categories": categories,
+        "dynamo_api_failures": categories["dynamo_api"],
+        "infrastructure_failures": categories["infrastructure"],
+        "model_quality_failures": categories["model_quality"],
+        "unclassified_failures": categories["unclassified"],
+        # Backward-compatible aliases consumed by the existing overview dashboard.
+        "dynamo_errors": categories["dynamo_api"],
+        "serving_errors": categories["dynamo_api"],
     }
 
 
@@ -182,7 +199,7 @@ def run_probe(args: argparse.Namespace) -> tuple[dict[str, Any], list[dict[str, 
             "run_id": run_id,
             "generated_at": utc_now(),
             "config": config,
-            "summary": {"total": 0, "passed": 0, "failed": 0},
+            "summary": summarize([]),
             "records": [],
         }, []
 
@@ -266,14 +283,30 @@ def json_details(title: str, value: Any) -> str:
 
 def render_html(report: dict[str, Any], records: list[dict[str, Any]]) -> str:
     summary = report["summary"]
+    categories = summary.get("failure_categories") or {}
+    category_summary = (
+        f"Dynamo/API: {int(categories.get('dynamo_api') or 0)} · "
+        f"Infrastructure: {int(categories.get('infrastructure') or 0)} · "
+        f"Model quality: {int(categories.get('model_quality') or 0)}"
+    )
+    unclassified = int(categories.get("unclassified") or 0)
+    if unclassified:
+        category_summary += f" · Unclassified: {unclassified}"
     rows = []
     for record in records:
         passed = bool(record.get("pass"))
+        failure_category = record.get("failure_category")
+        category_label = (
+            ""
+            if passed
+            else " · "
+            + html.escape(str(failure_category or "unclassified").replace("_", " "))
+        )
         rows.append(
             '<article class="record">'
             f"<h2><code>{html.escape(str(record.get('case_id')))}</code> "
             f"<span class=\"{'pass' if passed else 'fail'}\">"
-            f"{'PASS' if passed else 'FAIL'}</span></h2>"
+            f"{'PASS' if passed else 'FAIL'}</span>{category_label}</h2>"
             f"<p>{html.escape(str(record.get('mode')))}</p>"
             + json_details("Errors", record.get("errors"))
             + json_details("Request", record.get("request"))
@@ -285,9 +318,9 @@ def render_html(report: dict[str, Any], records: list[dict[str, Any]]) -> str:
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{html.escape(str(report['title']))}</title>
-<style>body{{font:14px/1.5 system-ui;margin:32px;max-width:1200px;color:#172033}}code,pre{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#f6f8fa;padding:12px;border-radius:6px;max-height:640px;overflow:auto}}details{{margin:8px 0}}summary{{cursor:pointer;color:#1358c8;font-weight:600}}.record{{border-top:1px solid #d9dee8;padding:16px 0}}.pass{{color:#166534}}.fail{{color:#b91c1c}}</style></head>
+<style>body{{font:14px/1.5 system-ui;margin:32px;max-width:1200px;color:#172033}}code,pre{{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#f6f8fa;padding:12px;border-radius:6px;max-height:640px;overflow:auto}}details{{margin:8px 0}}summary{{cursor:pointer;color:#1358c8;font-weight:600}}.record{{border-top:1px solid #d9dee8;padding:16px 0}}.pass{{color:#166534}}.fail{{color:#b91c1c}}.muted{{color:#667085}}</style></head>
 <body><h1>{html.escape(str(report['title']))}</h1>
-<p><strong>{summary['passed']}/{summary['total']}</strong> passed · <strong>{summary['failed']}</strong> failed</p>
+<p><strong>{summary['passed']}/{summary['total']}</strong> passed · <strong>{summary['failed']}</strong> failed<br><span class="muted">{html.escape(category_summary)}</span></p>
 <p><a href="artifacts/latest.json">latest.json</a> · <a href="artifacts/results.public.jsonl">results.public.jsonl</a></p>
 {''.join(rows)}</body></html>"""
 

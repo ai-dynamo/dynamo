@@ -13,6 +13,7 @@ from .cli import (
     _bfcl_cases,
     _bfcl_counts,
     _custom_selection,
+    _custom_verdict,
     _profile,
     _run_bfcl,
     _run_custom,
@@ -41,15 +42,15 @@ def test_qualification_profile_has_bounded_stratified_coverage() -> None:
     custom_selection, selection_hash = _custom_selection(
         profile["custom"], "google/gemma-4-31B-it"
     )
-    assert len(custom_selection["case_ids"]) == 25
-    assert len(custom_selection["case_groups"]["generic"]) == 25
+    assert len(custom_selection["case_ids"]) == 24
+    assert len(custom_selection["case_groups"]["generic"]) == 24
     assert custom_selection["case_groups"]["model_specific"] == []
     assert (
         sum(case_id.startswith("customer_") for case_id in custom_selection["case_ids"])
         == 8
     )
     assert "customer_truncated_tool_markup_hidden" in custom_selection["case_ids"]
-    assert custom_selection["record_count"] == 50
+    assert custom_selection["record_count"] == 48
     assert "exclude_cases" not in profile["custom"]
     assert profile["custom"]["modes"] == ["nonstream", "stream"]
     assert profile["custom"]["concurrency"] == 8
@@ -68,7 +69,7 @@ def test_all_public_profiles_resolve_to_the_same_qualification_budget() -> None:
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("generic_cases", ["only-one"], "exactly 25 generic case IDs"),
+        ("generic_cases", ["only-one"], "exactly 24 generic case IDs"),
         ("modes", ["nonstream"], "modes must be nonstream,stream"),
         ("iterations", 2, "exactly 1 iteration"),
     ],
@@ -91,14 +92,14 @@ def test_custom_selection_appends_matching_model_specific_cases() -> None:
     )
 
     assert selection["resolved_case_profile"] == "kimi_k2"
-    assert len(selection["case_groups"]["generic"]) == 25
+    assert len(selection["case_groups"]["generic"]) == 24
     assert selection["case_groups"]["model_specific"] == [
         "customer_kimi_consume_prior_tool_result",
         "customer_kimi_parallel_weather_final_answer",
     ]
-    assert selection["generic_record_count"] == 50
+    assert selection["generic_record_count"] == 48
     assert selection["model_specific_record_count"] == 4
-    assert selection["record_count"] == 54
+    assert selection["record_count"] == 52
     assert len(selection_hash) == 64
 
 
@@ -356,16 +357,16 @@ def test_custom_dry_run_uses_realistic_qualification_matrix(tmp_path: Path) -> N
     assert command[1].endswith("benchmarks/tool_calling/custom_runner.py")
     assert "--case-profile" in command
     case_ids = command[command.index("--cases") + 1].split(",")
-    assert len(case_ids) == 25
+    assert len(case_ids) == 24
     assert "--exclude-cases" not in command
     assert command[command.index("--modes") + 1] == "nonstream,stream"
     selection = json.loads((output_dir / "custom-case-ids.json").read_text())
     assert selection["case_ids"] == case_ids
     assert selection["resolved_case_profile"] == "gemma4"
     assert selection["case_groups"]["model_specific"] == []
-    assert selection["record_count"] == 50
-    assert result["coverage"]["resolved_case_count"] == 25
-    assert result["coverage"]["generic_case_count"] == 25
+    assert selection["record_count"] == 48
+    assert result["coverage"]["resolved_case_count"] == 24
+    assert result["coverage"]["generic_case_count"] == 24
     assert result["coverage"]["model_specific_case_count"] == 0
     assert result["provenance"]["selection_hash"] == selection["selection_hash"]
 
@@ -398,11 +399,11 @@ def test_custom_dry_run_appends_model_specific_matrix(tmp_path: Path) -> None:
     case_ids = command[command.index("--cases") + 1].split(",")
     assert selection["resolved_case_profile"] == "kimi_k2"
     assert selection["case_ids"] == case_ids
-    assert len(selection["case_groups"]["generic"]) == 25
+    assert len(selection["case_groups"]["generic"]) == 24
     assert len(selection["case_groups"]["model_specific"]) == 2
-    assert selection["record_count"] == 54
-    assert result["coverage"]["resolved_case_count"] == 27
-    assert result["coverage"]["generic_case_count"] == 25
+    assert selection["record_count"] == 52
+    assert result["coverage"]["resolved_case_count"] == 26
+    assert result["coverage"]["generic_case_count"] == 24
     assert result["coverage"]["model_specific_case_count"] == 2
 
 
@@ -429,7 +430,17 @@ def test_custom_normalizes_the_complete_detailed_report(
                         "modes": ["nonstream", "stream"],
                         "iterations": 1,
                     },
-                    "summary": {"passed": 49, "failed": 1, "total": 50},
+                    "summary": {
+                        "passed": 47,
+                        "failed": 1,
+                        "total": 48,
+                        "failure_categories": {
+                            "dynamo_api": 1,
+                            "infrastructure": 0,
+                            "model_quality": 0,
+                            "unclassified": 0,
+                        },
+                    },
                 }
             ),
             encoding="utf-8",
@@ -454,15 +465,88 @@ def test_custom_normalizes_the_complete_detailed_report(
     assert result["execution_status"] == "complete"
     assert result["verdict"] == "fail"
     assert result["summary"] == {
-        "passed": 49,
+        "passed": 47,
         "failed": 1,
-        "total": 50,
-        "completed": 50,
-        "score": 0.98,
+        "total": 48,
+        "completed": 48,
+        "score": 47 / 48,
+        "failure_categories": {
+            "dynamo_api": 1,
+            "infrastructure": 0,
+            "model_quality": 0,
+            "unclassified": 0,
+        },
+        "dynamo_api_failures": 1,
+        "infrastructure_failures": 0,
+        "model_quality_failures": 0,
+        "unclassified_failures": 0,
+        "dynamo_errors": 1,
+        "serving_errors": 1,
     }
     assert result["coverage"]["resolved_case_profile"] == "gemma4"
-    assert result["coverage"]["resolved_case_count"] == 25
+    assert result["coverage"]["resolved_case_count"] == 24
     assert len(result["provenance"]["selection_hash"]) == 64
+
+
+@pytest.mark.parametrize(
+    ("execution_status", "failure_categories", "expected"),
+    [
+        (
+            "complete",
+            {
+                "dynamo_api": 1,
+                "infrastructure": 0,
+                "model_quality": 0,
+                "unclassified": 0,
+            },
+            "fail",
+        ),
+        (
+            "complete",
+            {
+                "dynamo_api": 0,
+                "infrastructure": 1,
+                "model_quality": 0,
+                "unclassified": 0,
+            },
+            "inconclusive",
+        ),
+        (
+            "complete",
+            {
+                "dynamo_api": 0,
+                "infrastructure": 0,
+                "model_quality": 2,
+                "unclassified": 0,
+            },
+            "pass",
+        ),
+        (
+            "complete",
+            {
+                "dynamo_api": 0,
+                "infrastructure": 0,
+                "model_quality": 0,
+                "unclassified": 1,
+            },
+            "inconclusive",
+        ),
+        (
+            "incomplete",
+            {
+                "dynamo_api": 1,
+                "infrastructure": 0,
+                "model_quality": 0,
+                "unclassified": 0,
+            },
+            "inconclusive",
+        ),
+    ],
+)
+def test_custom_verdict_uses_failure_ownership(
+    execution_status: str, failure_categories: dict[str, int], expected: str
+) -> None:
+    assert _custom_verdict(execution_status, failure_categories) == expected
 
 
 def test_custom_rejects_a_report_with_case_selection_drift(

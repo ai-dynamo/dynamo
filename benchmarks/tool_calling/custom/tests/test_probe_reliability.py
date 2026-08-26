@@ -38,11 +38,11 @@ def qualification_case_ids(profile: str = "generic") -> tuple[str, ...]:
     )
 
 
-def test_qualification_uses_the_same_25_generic_cases_for_inline_profiles() -> None:
+def test_qualification_uses_the_same_24_generic_cases_for_inline_profiles() -> None:
     expected_ids = qualification_generic_case_ids()
 
-    assert len(expected_ids) == 25
-    assert len(set(expected_ids)) == 25
+    assert len(expected_ids) == 24
+    assert len(set(expected_ids)) == 24
     generic_cases = probe.build_cases("generic")
     assert {case.case_id for case in generic_cases} == set(expected_ids)
     assert all(case.profiles == ("generic",) for case in generic_cases)
@@ -96,6 +96,160 @@ def test_customer_regressions_are_in_the_qualification_profile() -> None:
         case_id for case_id in qualification_ids if case_id.startswith("customer_")
     }
     assert "customer_calculate_sum_auto" in customer_cases
+
+
+def test_auto_calculate_sum_prompt_explicitly_requires_the_tool() -> None:
+    case = next(
+        case
+        for case in probe.build_cases("generic")
+        if case.case_id == "customer_calculate_sum_auto"
+    )
+
+    prompt = case.messages[0]["content"]
+    assert case.tool_choice == "auto"
+    assert "Use the calculate_sum tool" in prompt
+    assert "do not calculate the answer yourself" in prompt
+
+
+def test_natural_language_fragment_matching_normalizes_unicode_dashes() -> None:
+    case = probe.Case(
+        case_id="unicode_dash",
+        description="Unicode dash variants match ASCII expected fragments",
+        messages=(),
+        expected_finish_reasons=("stop",),
+        expect_no_tool_calls=True,
+        min_tool_calls=0,
+        expected_any_content_fragments=("multi-step",),
+        expected_final_content_fragments=("multi-step",),
+    )
+    result = probe.ChatResult(
+        content="The endpoint supports streaming multi‑step tool calling.",
+        finish_reason="stop",
+    )
+
+    errors, _warnings = probe.validate_result(case, result)
+    assert errors == []
+    assert probe.validate_agent_final(case, result) == []
+
+
+def test_failure_classifier_separates_failure_ownership() -> None:
+    required_case = probe.Case(
+        case_id="required_call",
+        description="required call",
+        messages=(),
+        expected_finish_reasons=("tool_calls",),
+        tool_choice="required",
+    )
+    parallel_case = probe.Case(
+        case_id="parallel_call",
+        description="parallel calls",
+        messages=(),
+        expected_finish_reasons=("tool_calls",),
+        tool_choice="required",
+        min_tool_calls=2,
+    )
+    one_call = {
+        "id": "call-1",
+        "type": "function",
+        "function": {"name": "get_weather", "arguments": "{}"},
+    }
+
+    assert (
+        probe.classify_failure(
+            required_case,
+            probe.ChatResult(finish_reason="stop"),
+            [probe.error("unexpected_finish_reason", "stopped without a call")],
+        )
+        == "dynamo_api"
+    )
+    assert (
+        probe.classify_failure(
+            parallel_case,
+            probe.ChatResult(finish_reason="tool_calls", tool_calls=[one_call]),
+            [probe.error("too_few_tool_calls", "expected two calls")],
+        )
+        == "model_quality"
+    )
+    assert (
+        probe.classify_failure(
+            required_case,
+            probe.ChatResult(),
+            [probe.error("request_error", "connection timed out")],
+        )
+        == "infrastructure"
+    )
+    assert (
+        probe.classify_failure(
+            required_case,
+            probe.ChatResult(),
+            [probe.error("unexpected_finish_reason", "missing finish reason")],
+        )
+        == "dynamo_api"
+    )
+    assert (
+        probe.classify_failure(
+            required_case,
+            probe.ChatResult(),
+            [probe.error("new_unknown_failure", "not classified yet")],
+        )
+        == "unclassified"
+    )
+
+
+def test_failure_classifier_uses_conservative_primary_precedence() -> None:
+    case = probe.Case(
+        case_id="mixed_failure",
+        description="mixed failure",
+        messages=(),
+        expected_finish_reasons=("stop",),
+    )
+    result = probe.ChatResult(finish_reason="stop")
+
+    assert (
+        probe.classify_failure(
+            case,
+            result,
+            [
+                probe.error("wrong_tool_call_count", "model miss"),
+                probe.error("invalid_arguments_json", "parser output was invalid"),
+            ],
+        )
+        == "dynamo_api"
+    )
+    assert (
+        probe.classify_failure(
+            case,
+            result,
+            [
+                probe.error("invalid_arguments_json", "parser output was invalid"),
+                probe.error("request_error", "connection reset"),
+            ],
+        )
+        == "infrastructure"
+    )
+
+
+def test_static_summary_counts_each_failed_record_once() -> None:
+    records = [
+        {"pass": True},
+        {"pass": False, "failure_category": "dynamo_api"},
+        {"pass": False, "failure_category": "infrastructure"},
+        {"pass": False, "failure_category": "model_quality"},
+        {"pass": False, "failure_category": "unknown_future_category"},
+    ]
+
+    summary = static_report.summarize(records)
+
+    assert summary["failed"] == 4
+    assert summary["failure_categories"] == {
+        "dynamo_api": 1,
+        "infrastructure": 1,
+        "model_quality": 1,
+        "unclassified": 1,
+    }
+    assert sum(summary["failure_categories"].values()) == summary["failed"]
+    assert summary["dynamo_errors"] == 1
+    assert summary["serving_errors"] == 1
 
 
 def test_customer_marker_regressions_include_recent_native_formats() -> None:

@@ -24,11 +24,17 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_PROFILES = ROOT / "profiles.json"
 SUITES = ("custom", "bfcl", "tau2")
 CUSTOM_SELECTION_FILE = "custom-case-ids.json"
-CUSTOM_GENERIC_CASE_COUNT = 25
+CUSTOM_GENERIC_CASE_COUNT = 24
 CUSTOM_MODES = ("nonstream", "stream")
 CUSTOM_ITERATIONS = 1
 CUSTOM_GENERIC_RECORD_COUNT = (
     CUSTOM_GENERIC_CASE_COUNT * len(CUSTOM_MODES) * CUSTOM_ITERATIONS
+)
+CUSTOM_FAILURE_CATEGORIES = (
+    "dynamo_api",
+    "infrastructure",
+    "model_quality",
+    "unclassified",
 )
 BFCL_SELECTION_FILE = "bfcl-case-ids.json"
 BFCL_SELECTION_CONTAINER_PATH = (
@@ -266,6 +272,21 @@ def _custom_selection(
     return selection, selection_hash
 
 
+def _custom_verdict(
+    execution_status: str, failure_categories: Mapping[str, int]
+) -> str:
+    if execution_status != "complete":
+        return "inconclusive"
+    if failure_categories.get("dynamo_api", 0):
+        return "fail"
+    if failure_categories.get("infrastructure", 0) or failure_categories.get(
+        "unclassified", 0
+    ):
+        return "inconclusive"
+    # Model-quality misses remain visible but do not fail Dynamo compatibility.
+    return "pass"
+
+
 def _record_custom_selection(
     output_dir: Path,
     config: Mapping[str, Any],
@@ -386,6 +407,19 @@ def _run_custom(
     passed = int(raw_summary.get("passed") or 0)
     total = int(raw_summary.get("total") or 0)
     failed = int(raw_summary.get("failed") or 0)
+    raw_categories = raw_summary.get("failure_categories")
+    if isinstance(raw_categories, dict):
+        failure_categories = {
+            category: max(0, int(raw_categories.get(category) or 0))
+            for category in CUSTOM_FAILURE_CATEGORIES
+        }
+    else:
+        # Older reports had no ownership taxonomy. Do not guess their ownership.
+        failure_categories = {
+            category: failed if category == "unclassified" else 0
+            for category in CUSTOM_FAILURE_CATEGORIES
+        }
+    classified_failed = sum(failure_categories.values())
     raw_case_ids = raw_config.get("case_ids")
     actual_case_ids = (
         tuple(sorted(raw_case_ids))
@@ -413,7 +447,9 @@ def _run_custom(
         and actual_profile == selection["resolved_case_profile"]
     )
     result["execution_status"] = (
-        "complete" if matrix_matches and total == expected else "incomplete"
+        "complete"
+        if matrix_matches and total == expected and classified_failed == failed
+        else "incomplete"
     )
     if not matrix_matches:
         result["error"] = (
@@ -430,19 +466,25 @@ def _run_custom(
         result[
             "error"
         ] = f"custom report completed {total}/{expected} fixed qualification records"
-    result["verdict"] = (
-        "pass"
-        if result["execution_status"] == "complete" and failed == 0
-        else "fail"
-        if result["execution_status"] == "complete"
-        else "inconclusive"
-    )
+    elif classified_failed != failed:
+        result["error"] = (
+            "custom failure categories did not match failed records: "
+            f"classified={classified_failed}, failed={failed}"
+        )
+    result["verdict"] = _custom_verdict(result["execution_status"], failure_categories)
     result["summary"] = {
         "passed": passed,
         "failed": failed,
         "total": expected,
         "completed": total,
         "score": passed / total if total else None,
+        "failure_categories": failure_categories,
+        "dynamo_api_failures": failure_categories["dynamo_api"],
+        "infrastructure_failures": failure_categories["infrastructure"],
+        "model_quality_failures": failure_categories["model_quality"],
+        "unclassified_failures": failure_categories["unclassified"],
+        "dynamo_errors": failure_categories["dynamo_api"],
+        "serving_errors": failure_categories["dynamo_api"],
     }
     result["coverage"].update(
         {

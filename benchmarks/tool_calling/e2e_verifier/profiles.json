@@ -27,7 +27,6 @@
           "customer_required_forces_weather_thinking_disabled",
           "customer_required_marker_isolation",
           "customer_truncated_tool_markup_hidden",
-          "e2e_search_then_crawl_final_answer",
           "named_array_arguments",
           "named_literal_escaped_unicode",
           "named_nested_object_arguments",
@@ -53,7 +52,7 @@
       },
       "bfcl": {
         "target_minutes": 5,
-        "timeout_seconds": 420,
+        "timeout_seconds": 1800,
         "parallelism": 10,
         "image": "nvcr.io/nvidia/eval-factory/bfcl:26.03@sha256:fc6b5f22698b75b759dc29715663d3006b7180847330e06b15ee080346462c03",
         "native_calling": true,

@@ -35,6 +35,7 @@ import socket
 import sys
 import time
 import traceback
+import unicodedata
 import urllib.error
 import urllib.request
 from collections import Counter
@@ -81,6 +82,75 @@ RAW_TOOL_MARKERS = (
     "<|constrain|>",
     "<|message|>",
     "<|call|>",
+)
+DASH_EQUIVALENTS = str.maketrans(
+    {
+        "\N{HYPHEN}": "-",
+        "\N{NON-BREAKING HYPHEN}": "-",
+        "\N{FIGURE DASH}": "-",
+        "\N{EN DASH}": "-",
+        "\N{EM DASH}": "-",
+        "\N{HORIZONTAL BAR}": "-",
+        "\N{MINUS SIGN}": "-",
+        "\N{SMALL EM DASH}": "-",
+        "\N{SMALL HYPHEN-MINUS}": "-",
+        "\N{FULLWIDTH HYPHEN-MINUS}": "-",
+    }
+)
+FAILURE_CATEGORIES = (
+    "dynamo_api",
+    "infrastructure",
+    "model_quality",
+    "unclassified",
+)
+INFRASTRUCTURE_ERROR_KINDS = frozenset({"request_error"})
+DYNAMO_API_ERROR_KINDS = frozenset(
+    {
+        "arguments_not_object",
+        "duplicate_tool_ids",
+        "empty_arguments",
+        "finish_tool_calls_without_calls",
+        "invalid_arguments_json",
+        "malformed_choice",
+        "malformed_message",
+        "malformed_sse",
+        "malformed_stream_choice",
+        "malformed_stream_choices",
+        "malformed_stream_delta",
+        "malformed_stream_tool_delta",
+        "malformed_tool_calls",
+        "missing_choice",
+        "missing_function_name",
+        "missing_tool_id",
+        "reasoning_mangled_function_text",
+        "reasoning_mismatch",
+        "stream_json_decode",
+        "tool_id_changed",
+        "tool_name_changed",
+        "unexpected_reasoning_content",
+        "wrong_tool_type",
+    }
+)
+MODEL_QUALITY_ERROR_KINDS = frozenset(
+    {
+        "agent_loop_ended_with_tool_calls",
+        "agent_loop_missing_final_content",
+        "agent_loop_no_final_response",
+        "content_json_decode",
+        "content_pattern_mismatch",
+        "context_leak_to_content",
+        "context_leak_to_reasoning",
+        "context_leak_to_tool_arguments",
+        "missing_content",
+        "missing_reasoning_content",
+        "schema_validation",
+        "too_few_distinct_tools",
+        "too_few_tool_calls",
+        "unexpected_content",
+        "unexpected_content_json",
+        "unknown_tool_name",
+        "wrong_tool_call_count",
+    }
 )
 ECHO_SCHEMA_SENTINEL = "ECHO_SCHEMA_SENTINEL_DO_NOT_COPY_A17D"
 ECHO_SYSTEM_SENTINEL = "ECHO_SYSTEM_SENTINEL_DO_NOT_COPY_B42C"
@@ -649,7 +719,15 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
         Case(
             case_id="customer_calculate_sum_auto",
             description="customer regression: auto calculate_sum for 1+1",
-            messages=({"role": "user", "content": "Compute 1+1!"},),
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Use the calculate_sum tool to compute 1 + 1. Return the "
+                        "tool call; do not calculate the answer yourself."
+                    ),
+                },
+            ),
             tools=(calculate_sum,),
             tool_choice="auto",
             expected_tool_names=("calculate_sum",),
@@ -1060,6 +1138,7 @@ def build_cases(profile: str = "generic") -> tuple[Case, ...]:
             validate_schema=True,
             max_tokens=2048,
             request_overrides=thinking_enabled,
+            profiles=("experimental",),
         ),
         Case(
             case_id="named_no_argument_server_time",
@@ -2180,6 +2259,61 @@ class ChatResult:
     warnings: list[dict[str, Any]] = dataclasses.field(default_factory=list)
 
 
+def _tool_choice_requires_call(case: Case) -> bool:
+    return case.tool_choice == "required" or isinstance(case.tool_choice, dict)
+
+
+def _error_failure_category(
+    case: Case, result: ChatResult, finding: dict[str, Any]
+) -> str:
+    kind = str(finding.get("kind") or "")
+    details = finding.get("details") or {}
+
+    if kind in INFRASTRUCTURE_ERROR_KINDS:
+        return "infrastructure"
+    if kind == "http_error":
+        status = details.get("status") if isinstance(details, dict) else None
+        if not isinstance(status, int) or status in {408, 429} or status >= 500:
+            return "infrastructure"
+        return "dynamo_api"
+    if kind == "probe_exception":
+        return "unclassified"
+
+    if kind in DYNAMO_API_ERROR_KINDS or "marker_leaked" in kind:
+        return "dynamo_api"
+    if kind == "unexpected_finish_reason":
+        if result.finish_reason is None:
+            return "dynamo_api"
+        if _tool_choice_requires_call(case) and not result.tool_calls:
+            return "dynamo_api"
+        return "model_quality"
+    if kind == "unexpected_tool_calls":
+        return "dynamo_api" if case.tool_choice == "none" else "model_quality"
+    if kind in MODEL_QUALITY_ERROR_KINDS or kind.startswith(
+        ("missing_expected_", "too_few_")
+    ):
+        return "model_quality"
+    return "unclassified"
+
+
+def classify_failure(
+    case: Case, result: ChatResult, errors: list[dict[str, Any]]
+) -> str | None:
+    """Assign one primary ownership category to a failed request."""
+    if not errors:
+        return None
+    categories = {_error_failure_category(case, result, finding) for finding in errors}
+    for category in (
+        "infrastructure",
+        "dynamo_api",
+        "unclassified",
+        "model_quality",
+    ):
+        if category in categories:
+            return category
+    return "unclassified"
+
+
 def normalize_tool_call(tc: Any) -> dict[str, Any]:
     if not isinstance(tc, dict):
         return {"id": "", "type": "", "function": {"name": "", "arguments": ""}}
@@ -2719,9 +2853,9 @@ def validate_agent_final(
             error("agent_loop_missing_final_content", "final answer is empty")
         )
 
-    final_content = (final_result.content or "").lower()
+    final_content = normalize_content_for_match(final_result.content or "")
     for fragment in case.expected_final_content_fragments:
-        if fragment.lower() not in final_content:
+        if normalize_content_for_match(fragment) not in final_content:
             errors.append(
                 error(
                     "missing_expected_final_content_fragment",
@@ -2729,6 +2863,11 @@ def validate_agent_final(
                 )
             )
     return errors
+
+
+def normalize_content_for_match(value: str) -> str:
+    """Normalize harmless Unicode variants before natural-language matching."""
+    return unicodedata.normalize("NFKC", value).casefold().translate(DASH_EQUIVALENTS)
 
 
 def validate_executed_tools(
@@ -3052,9 +3191,9 @@ def validate_result(
         )
 
     if case.expected_any_content_fragments:
-        lower_content = (result.content or "").lower()
+        normalized_content = normalize_content_for_match(result.content or "")
         if not any(
-            fragment.lower() in lower_content
+            normalize_content_for_match(fragment) in normalized_content
             for fragment in case.expected_any_content_fragments
         ):
             errors.append(
@@ -3281,6 +3420,7 @@ def run_scripted_followup_case(
             error(
                 "http_error",
                 f"HTTP {exc.code}: {exc.reason}",
+                status=exc.code,
                 body=body[:raw_chars],
             )
         )
@@ -3307,6 +3447,7 @@ def run_scripted_followup_case(
         "description": case.description,
         "mode": mode,
         "pass": passed,
+        "failure_category": classify_failure(case, final_result, errors),
         "errors": errors,
         "warnings": warnings,
         "scripted_followup": True,
@@ -3504,6 +3645,7 @@ def run_agent_case(
             error(
                 "http_error",
                 f"HTTP {exc.code}: {exc.reason}",
+                status=exc.code,
                 body=body[:raw_chars],
             )
         )
@@ -3532,6 +3674,7 @@ def run_agent_case(
         "description": case.description,
         "mode": mode,
         "pass": passed,
+        "failure_category": classify_failure(case, final_result, errors),
         "errors": errors,
         "warnings": warnings,
         "agent_loop": True,
@@ -3675,6 +3818,7 @@ def run_case(
             error(
                 "http_error",
                 f"HTTP {exc.code}: {exc.reason}",
+                status=exc.code,
                 body=body[:raw_chars],
             )
         ]
@@ -3702,6 +3846,7 @@ def run_case(
         "description": case.description,
         "mode": mode,
         "pass": passed,
+        "failure_category": classify_failure(case, result, errors),
         "errors": errors,
         "warnings": warnings,
         "response": {
@@ -3797,6 +3942,11 @@ class ReportWriter:
         failure_kinds = Counter(
             err["kind"] for record in self.records for err in record.get("errors", [])
         )
+        failure_categories = Counter(
+            record.get("failure_category") or "unclassified"
+            for record in self.records
+            if not record["pass"]
+        )
 
         lines = [
             "# Tool Calling Probe Report",
@@ -3806,6 +3956,10 @@ class ReportWriter:
             f"- Total requests: `{total}`",
             f"- Passed: `{passed}`",
             f"- Failed: `{failed}`",
+            f"- Dynamo/API failures: `{failure_categories.get('dynamo_api', 0)}`",
+            f"- Infrastructure failures: `{failure_categories.get('infrastructure', 0)}`",
+            f"- Model-quality failures: `{failure_categories.get('model_quality', 0)}`",
+            f"- Unclassified failures: `{failure_categories.get('unclassified', 0)}`",
             f"- Results JSONL: `{self.results_path}`",
             f"- Failures JSONL: `{self.failures_path}`",
             "",
@@ -3852,18 +4006,19 @@ class ReportWriter:
                 "",
                 "## Failure Examples",
                 "",
-                "| Iteration | Case | Mode | Finish | Error Kinds | Response ID |",
-                "|---:|---|---|---|---|---|",
+                "| Iteration | Case | Mode | Category | Finish | Error Kinds | Response ID |",
+                "|---:|---|---|---|---|---|---|",
             ]
         )
         for record in failed_records[:50]:
             kinds = ", ".join(err["kind"] for err in record.get("errors", []))
             response = record.get("response", {})
             lines.append(
-                "| {iteration} | `{case}` | `{mode}` | `{finish}` | {kinds} | `{rid}` |".format(
+                "| {iteration} | `{case}` | `{mode}` | `{category}` | `{finish}` | {kinds} | `{rid}` |".format(
                     iteration=record["iteration"],
                     case=record["case_id"],
                     mode=record["mode"],
+                    category=record.get("failure_category") or "unclassified",
                     finish=response.get("finish_reason"),
                     kinds=kinds,
                     rid=response.get("id") or "",
