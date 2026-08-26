@@ -35,6 +35,7 @@ new_key_type! {
 pub struct LogicalNode {
     block_hash: ExternalSequenceBlockHash,
     parent: Option<NodeId>,
+    parent_edge_refs: u32,
     frontier_refs: u32,
     child_count: u32,
 }
@@ -82,8 +83,14 @@ pub struct SessionPrefixIndexer {
 // None distinguishes an untouched entry from touch sequence zero.
 #[derive(Debug, Default)]
 struct SessionEntry {
-    frontiers: FxHashSet<NodeId>,
+    frontiers: FxHashMap<NodeId, SessionFrontier>,
     last_touch: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SessionFrontier {
+    retained_root: NodeId,
+    len: usize,
 }
 
 #[derive(Debug)]
@@ -150,7 +157,7 @@ impl SessionPrefixIndexer {
             .read()
             .sessions
             .get(session_id)
-            .map(|entry| entry.frontiers.iter().copied().collect())
+            .map(|entry| entry.frontiers.keys().copied().collect())
             .unwrap_or_default()
     }
 
@@ -178,8 +185,8 @@ impl SessionPrefixIndexer {
         };
 
         let mut lineages = Vec::with_capacity(entry.frontiers.len());
-        for &frontier in &entry.frontiers {
-            let path = state.path_to_root(frontier);
+        for (&frontier, session_frontier) in &entry.frontiers {
+            let path = state.path_from_retained_root(frontier, *session_frontier);
             let start = match anchor_node {
                 Some(anchor) => match path.iter().position(|&node| node == anchor) {
                     Some(position) => position,
@@ -205,6 +212,7 @@ impl SessionPrefixIndexer {
     ) -> Result<bool, SessionPrefixIndexError> {
         let mut state = self.state.write();
         let continuation = state.deepest_frontier(session_id);
+        let mut attached = false;
         let node = match state.hash_to_node.get(&matched_hash).copied() {
             Some(node) => {
                 let already_reached = state.session_has_reached(session_id, node);
@@ -214,13 +222,24 @@ impl SessionPrefixIndexer {
                     && !state.is_ancestor_or_self(node, parent)
                 {
                     state.nodes[node].parent = Some(parent);
-                    state.nodes[parent].child_count += 1;
+                    state.nodes[parent].child_count = state.nodes[parent]
+                        .child_count
+                        .checked_add(1)
+                        .expect("a parent child count must not overflow");
+                    attached = true;
                 }
                 node
             }
-            None => state.insert_node(matched_hash, continuation),
+            None => {
+                attached = continuation.is_some();
+                state.insert_node(matched_hash, continuation)
+            }
         };
-        Ok(state.advance_match_frontier(session_id, node, continuation))
+        let advanced = state.advance_match_frontier(session_id, node, continuation);
+        if attached {
+            state.detach_unretained_parent_edge(node);
+        }
+        Ok(advanced)
     }
 
     /// Records a stored block chain and reports whether the frontier advanced.
@@ -240,23 +259,41 @@ impl SessionPrefixIndexer {
         state.validate_chain(parent_hash, block_hashes)?;
 
         let mut parent = parent_hash.map(|hash| state.resolve_or_insert_root(hash));
+        let mut attached_nodes = Vec::new();
         for &block_hash in block_hashes {
             let node = match state.hash_to_node.get(&block_hash).copied() {
                 Some(existing) => {
                     // Graft nodes previously known only as roots.
                     if let (None, Some(expected)) = (state.nodes[existing].parent, parent) {
                         state.nodes[existing].parent = Some(expected);
-                        state.nodes[expected].child_count += 1;
+                        state.nodes[expected].child_count = state.nodes[expected]
+                            .child_count
+                            .checked_add(1)
+                            .expect("a parent child count must not overflow");
+                        attached_nodes.push(existing);
                     }
                     existing
                 }
-                None => state.insert_node(block_hash, parent),
+                None => {
+                    let node = state.insert_node(block_hash, parent);
+                    if parent.is_some() {
+                        attached_nodes.push(node);
+                    }
+                    node
+                }
             };
             parent = Some(node);
         }
 
         let leaf = parent.expect("non-empty block chain always yields a node");
-        Ok(state.advance_frontier(session_id, leaf))
+        let advanced = state.advance_frontier(session_id, leaf);
+        if !attached_nodes.is_empty() {
+            state.refresh_session_cutoffs(session_id);
+        }
+        for node in attached_nodes {
+            state.detach_unretained_parent_edge(node);
+        }
+        Ok(advanced)
     }
 
     /// Removes a session and reclaims its unshared nodes.
@@ -283,12 +320,16 @@ impl IndexState {
         let node = self.nodes.insert(LogicalNode {
             block_hash,
             parent,
+            parent_edge_refs: 0,
             frontier_refs: 0,
             child_count: 0,
         });
         self.hash_to_node.insert(block_hash, node);
         if let Some(parent) = parent {
-            self.nodes[parent].child_count += 1;
+            self.nodes[parent].child_count = self.nodes[parent]
+                .child_count
+                .checked_add(1)
+                .expect("a parent child count must not overflow");
         }
         node
     }
@@ -336,8 +377,8 @@ impl IndexState {
         if let Some(last_touch) = entry.last_touch {
             self.lru.remove(&last_touch);
         }
-        for frontier in entry.frontiers {
-            self.release_frontier(frontier);
+        for (frontier, session_frontier) in entry.frontiers {
+            self.release_frontier(frontier, session_frontier);
         }
         true
     }
@@ -358,16 +399,16 @@ impl IndexState {
     // Enforce the cap after touching the newly recorded session.
     fn enforce_session_cap(&mut self) {
         while self.sessions.len() > self.max_sessions {
-            let Some((_, victim)) = self.lru.pop_first() else {
+            let Some(victim) = self
+                .lru
+                .first_key_value()
+                .map(|(_, session_id)| session_id.clone())
+            else {
                 // Avoid a hang if LRU bookkeeping is ever inconsistent.
                 debug_assert!(false, "lru is empty while sessions is over capacity");
                 break;
             };
-            if let Some(entry) = self.sessions.remove(&victim) {
-                for frontier in entry.frontiers {
-                    self.release_frontier(frontier);
-                }
-            }
+            self.drop_session(&victim);
             tracing::debug!(
                 session_id = %victim,
                 max_sessions = self.max_sessions,
@@ -401,6 +442,28 @@ impl IndexState {
         path
     }
 
+    fn path_from_retained_root(
+        &self,
+        frontier: NodeId,
+        session_frontier: SessionFrontier,
+    ) -> Vec<NodeId> {
+        let mut path = Vec::with_capacity(session_frontier.len);
+        let mut current = frontier;
+        for _ in 0..session_frontier.len {
+            path.push(current);
+            if current == session_frontier.retained_root {
+                break;
+            }
+            current = self.nodes[current]
+                .parent
+                .expect("a retained session interval must remain connected");
+        }
+        debug_assert_eq!(path.last(), Some(&session_frontier.retained_root));
+        debug_assert_eq!(path.len(), session_frontier.len);
+        path.reverse();
+        path
+    }
+
     fn is_ancestor_or_self(&self, candidate: NodeId, node: NodeId) -> bool {
         let limit = self.nodes.len();
         let mut current = Some(node);
@@ -422,37 +485,65 @@ impl IndexState {
 
     fn session_has_reached(&self, session_id: &str, node: NodeId) -> bool {
         self.sessions.get(session_id).is_some_and(|entry| {
-            entry
-                .frontiers
-                .iter()
-                .any(|&frontier| self.is_ancestor_or_self(node, frontier))
+            entry.frontiers.iter().any(|(&frontier, session_frontier)| {
+                self.session_frontier_contains(frontier, *session_frontier, node)
+            })
         })
     }
 
-    fn depth_to_root(&self, tail: NodeId) -> usize {
+    fn session_frontier_contains(
+        &self,
+        frontier: NodeId,
+        session_frontier: SessionFrontier,
+        candidate: NodeId,
+    ) -> bool {
+        let mut current = frontier;
+        for _ in 0..session_frontier.len {
+            if current == candidate {
+                return true;
+            }
+            if current == session_frontier.retained_root {
+                return false;
+            }
+            current = self.nodes[current]
+                .parent
+                .expect("a retained session interval must remain connected");
+        }
+        debug_assert!(false, "retained session root was not reached");
+        false
+    }
+
+    fn retained_frontier(&self, frontier: NodeId) -> SessionFrontier {
         let limit = self.nodes.len();
-        let mut depth = 0usize;
-        let mut current = Some(tail);
-        while let Some(node) = current {
-            if depth >= limit {
+        let mut retained_root = frontier;
+        let mut len = 1usize;
+        while len < self.max_session_depth {
+            let Some(parent) = self.nodes[retained_root].parent else {
+                break;
+            };
+            if len >= limit {
                 debug_assert!(false, "parent cycle in session prefix index forest");
                 tracing::error!("session prefix index parent walk exceeded the arena; truncating");
                 break;
             }
-            depth += 1;
-            current = self.nodes[node].parent;
+            retained_root = parent;
+            len += 1;
         }
-        depth
+        SessionFrontier { retained_root, len }
     }
 
     fn deepest_frontier(&self, session_id: &str) -> Option<NodeId> {
         self.sessions.get(session_id).and_then(|entry| {
-            entry.frontiers.iter().copied().max_by_key(|&frontier| {
-                (
-                    self.depth_to_root(frontier),
-                    Reverse(self.nodes[frontier].block_hash),
-                )
-            })
+            entry
+                .frontiers
+                .iter()
+                .max_by_key(|(frontier, session_frontier)| {
+                    (
+                        session_frontier.len,
+                        Reverse(self.nodes[**frontier].block_hash),
+                    )
+                })
+                .map(|(&frontier, _)| frontier)
         })
     }
 
@@ -467,13 +558,14 @@ impl IndexState {
             return false;
         }
 
-        if let Some(continuation) = continuation
-            && self
-                .sessions
+        let replaced = continuation.and_then(|continuation| {
+            self.sessions
                 .get_mut(session_id)
-                .is_some_and(|entry| entry.frontiers.remove(&continuation))
-        {
-            self.release_frontier(continuation);
+                .and_then(|entry| entry.frontiers.remove(&continuation))
+                .map(|session_frontier| (continuation, session_frontier))
+        });
+        if let Some((frontier, session_frontier)) = replaced {
+            self.release_frontier(frontier, session_frontier);
         }
         true
     }
@@ -486,68 +578,161 @@ impl IndexState {
             return false;
         }
 
-        let subsumed: Vec<NodeId> = self
+        let subsumed: Vec<(NodeId, SessionFrontier)> = self
             .sessions
             .get(session_id)
             .map(|entry| {
                 entry
                     .frontiers
                     .iter()
-                    .copied()
-                    .filter(|&frontier| self.is_ancestor_or_self(frontier, node))
+                    .filter(|(frontier, _)| self.is_ancestor_or_self(**frontier, node))
+                    .map(|(&frontier, &session_frontier)| (frontier, session_frontier))
                     .collect()
             })
             .unwrap_or_default();
 
-        for frontier in &subsumed {
-            self.nodes[*frontier].frontier_refs -= 1;
-        }
-        self.nodes[node].frontier_refs += 1;
+        let session_frontier = self.retained_frontier(node);
+        self.acquire_frontier(node, session_frontier);
 
         let entry = self.sessions.entry(session_id.to_string()).or_default();
-        for frontier in subsumed {
+        for &(frontier, _) in &subsumed {
             entry.frontiers.remove(&frontier);
         }
-        entry.frontiers.insert(node);
+        entry.frontiers.insert(node, session_frontier);
 
-        self.enforce_frontier_depth(node);
+        for (frontier, session_frontier) in subsumed {
+            self.release_frontier(frontier, session_frontier);
+        }
+
         self.touch_session(session_id);
         self.enforce_session_cap();
         true
     }
 
-    fn enforce_frontier_depth(&mut self, frontier: NodeId) {
-        let path = self.path_to_root(frontier);
-        if path.len() <= self.max_session_depth {
+    fn refresh_session_cutoffs(&mut self, session_id: &str) {
+        let changes: Vec<(NodeId, SessionFrontier, SessionFrontier)> = self
+            .sessions
+            .get(session_id)
+            .map(|entry| {
+                entry
+                    .frontiers
+                    .iter()
+                    .filter_map(|(&frontier, &old)| {
+                        let new = self.retained_frontier(frontier);
+                        (new != old).then_some((frontier, old, new))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if changes.is_empty() {
             return;
         }
 
-        let new_root = path[path.len() - self.max_session_depth];
-        let old_parent = self.nodes[new_root]
-            .parent
-            .take()
-            .expect("a truncated path has an older parent");
-        self.nodes[old_parent].child_count -= 1;
-        self.reclaim_unreferenced(Some(old_parent));
+        for &(frontier, _, new) in &changes {
+            self.acquire_frontier(frontier, new);
+        }
+        let entry = self
+            .sessions
+            .get_mut(session_id)
+            .expect("session cutoffs came from an existing session");
+        for &(frontier, _, new) in &changes {
+            entry.frontiers.insert(frontier, new);
+        }
+        for (frontier, old, _) in changes {
+            self.release_frontier(frontier, old);
+        }
     }
 
-    // Reclaim ancestors until reaching a shared frontier or parent.
-    fn release_frontier(&mut self, frontier: NodeId) {
-        self.nodes[frontier].frontier_refs -= 1;
+    fn acquire_frontier(&mut self, frontier: NodeId, session_frontier: SessionFrontier) {
+        self.nodes[frontier].frontier_refs = self.nodes[frontier]
+            .frontier_refs
+            .checked_add(1)
+            .expect("a frontier session count must not overflow");
 
-        self.reclaim_unreferenced(Some(frontier));
+        let mut child = frontier;
+        for _ in 1..session_frontier.len {
+            let parent = self.nodes[child]
+                .parent
+                .expect("a retained session interval must remain connected");
+            self.nodes[child].parent_edge_refs = self.nodes[child]
+                .parent_edge_refs
+                .checked_add(1)
+                .expect("a retained parent edge count must not overflow");
+            child = parent;
+        }
+        debug_assert_eq!(child, session_frontier.retained_root);
+    }
+
+    fn release_frontier(&mut self, frontier: NodeId, session_frontier: SessionFrontier) {
+        let mut child = frontier;
+        let mut detached_edges = Vec::new();
+        for _ in 1..session_frontier.len {
+            let parent = self.nodes[child]
+                .parent
+                .expect("a retained session interval must remain connected");
+            let edge_refs = &mut self.nodes[child].parent_edge_refs;
+            *edge_refs = edge_refs
+                .checked_sub(1)
+                .expect("a released parent edge must have a retained interval");
+            if *edge_refs == 0 {
+                detached_edges.push(child);
+            }
+            child = parent;
+        }
+        debug_assert_eq!(child, session_frontier.retained_root);
+
+        self.nodes[frontier].frontier_refs = self.nodes[frontier]
+            .frontier_refs
+            .checked_sub(1)
+            .expect("a released frontier must have a session reference");
+
+        let mut reclaim = Vec::with_capacity(detached_edges.len() + 1);
+        reclaim.push(frontier);
+        for child in detached_edges {
+            if let Some(parent) = self.detach_parent_edge(child) {
+                reclaim.push(parent);
+            }
+        }
+        for node in reclaim {
+            self.reclaim_unreferenced(Some(node));
+        }
+    }
+
+    fn detach_unretained_parent_edge(&mut self, child: NodeId) {
+        if !self.nodes.contains_key(child) || self.nodes[child].parent_edge_refs > 0 {
+            return;
+        }
+        if let Some(parent) = self.detach_parent_edge(child) {
+            self.reclaim_unreferenced(Some(parent));
+        }
+    }
+
+    fn detach_parent_edge(&mut self, child: NodeId) -> Option<NodeId> {
+        debug_assert_eq!(self.nodes[child].parent_edge_refs, 0);
+        let parent = self.nodes[child].parent.take()?;
+        self.nodes[parent].child_count = self.nodes[parent]
+            .child_count
+            .checked_sub(1)
+            .expect("a detached parent edge must have a child reference");
+        Some(parent)
     }
 
     fn reclaim_unreferenced(&mut self, mut current: Option<NodeId>) {
         while let Some(node) = current {
+            if !self.nodes.contains_key(node) {
+                break;
+            }
             let entry = self.nodes[node];
-            if entry.frontier_refs > 0 || entry.child_count > 0 {
+            if entry.frontier_refs > 0 || entry.child_count > 0 || entry.parent_edge_refs > 0 {
                 break;
             }
             self.nodes.remove(node);
             self.hash_to_node.remove(&entry.block_hash);
             if let Some(parent) = entry.parent {
-                self.nodes[parent].child_count -= 1;
+                self.nodes[parent].child_count = self.nodes[parent]
+                    .child_count
+                    .checked_sub(1)
+                    .expect("a reclaimed parent edge must have a child reference");
             }
             current = entry.parent;
         }
@@ -969,9 +1154,9 @@ mod tests {
         let chain = hashes(vec![1, 2, 3, 4, 5]);
         let indexer = SessionPrefixIndexer::with_limits(DEFAULT_MAX_SESSIONS, 3);
 
-        for &block_hash in &chain {
-            indexer.update_session_from_match("s1", block_hash).unwrap();
-        }
+        indexer
+            .update_session_from_stored_blocks("s1", None, &chain)
+            .unwrap();
 
         assert_eq!(lineage_of(&indexer, "s1"), vec![chain[2..].to_vec()]);
         assert_eq!(indexer.node_count(), 3);
@@ -981,6 +1166,79 @@ mod tests {
         for &block_hash in &chain[2..] {
             assert!(indexer.get_node_from_hash(block_hash).is_some());
         }
+    }
+
+    #[test]
+    fn one_session_cutoff_preserves_another_sessions_shared_lineage() {
+        let chain = hashes(vec![1, 2, 3, 4]);
+        let indexer = SessionPrefixIndexer::with_limits(DEFAULT_MAX_SESSIONS, 3);
+
+        indexer
+            .update_session_from_stored_blocks("s1", None, &chain[..3])
+            .unwrap();
+        indexer
+            .update_session_from_stored_blocks("s2", None, &chain[..3])
+            .unwrap();
+        indexer.update_session_from_match("s1", chain[3]).unwrap();
+
+        assert_eq!(lineage_of(&indexer, "s1"), vec![chain[1..].to_vec()]);
+        assert_eq!(lineage_of(&indexer, "s2"), vec![chain[..3].to_vec()]);
+        assert!(
+            indexer
+                .get_session_block_lineage("s1", Some(chain[0]))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            indexer
+                .get_session_block_lineage("s1", Some(chain[1]))
+                .unwrap(),
+            vec![chain[1..].to_vec()]
+        );
+
+        assert!(indexer.remove_session("s2"));
+        assert_eq!(indexer.get_node_from_hash(chain[0]), None);
+        assert_eq!(lineage_of(&indexer, "s1"), vec![chain[1..].to_vec()]);
+
+        let reverse = SessionPrefixIndexer::with_limits(DEFAULT_MAX_SESSIONS, 3);
+        reverse
+            .update_session_from_stored_blocks("s1", None, &chain[..3])
+            .unwrap();
+        reverse
+            .update_session_from_stored_blocks("s2", None, &chain[..3])
+            .unwrap();
+        reverse.update_session_from_match("s1", chain[3]).unwrap();
+
+        assert!(reverse.remove_session("s1"));
+        assert_eq!(lineage_of(&reverse, "s2"), vec![chain[..3].to_vec()]);
+        assert_eq!(reverse.get_node_from_hash(chain[3]), None);
+        assert!(reverse.remove_session("s2"));
+        assert_eq!(reverse.node_count(), 0);
+    }
+
+    #[test]
+    fn depth_one_and_sibling_branches_release_exact_intervals() {
+        let chain = hashes(vec![1, 2, 3, 4]);
+        let depth_one = SessionPrefixIndexer::with_limits(DEFAULT_MAX_SESSIONS, 1);
+        depth_one
+            .update_session_from_stored_blocks("s1", None, &chain[..3])
+            .unwrap();
+        assert_eq!(lineage_of(&depth_one, "s1"), vec![vec![chain[2]]]);
+        assert_eq!(depth_one.node_count(), 1);
+
+        let branches = SessionPrefixIndexer::with_limits(DEFAULT_MAX_SESSIONS, 3);
+        branches
+            .update_session_from_stored_blocks("s1", None, &chain[..3])
+            .unwrap();
+        branches
+            .update_session_from_stored_blocks("s1", Some(chain[1]), &chain[3..])
+            .unwrap();
+        assert_eq!(
+            lineage_of(&branches, "s1"),
+            vec![chain[..3].to_vec(), vec![chain[0], chain[1], chain[3]]]
+        );
+        assert!(branches.remove_session("s1"));
+        assert_eq!(branches.node_count(), 0);
     }
 
     #[test]
