@@ -12,12 +12,12 @@ use super::config::RouterConfigOverride;
 use super::filter::RoutingEligibility;
 use super::overlap::{OverlapSignals, SelectedWorkerTierSnapshot};
 use super::prefill_load::effective_prefill_tokens;
+use crate::kv_hints::KvTransferCandidates;
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
     LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId,
     WorkerWithDpRank,
 };
-use crate::router_hint::RouterHintRootCandidates;
 use crate::scheduling::policy_queue::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
 
@@ -113,7 +113,7 @@ pub struct SchedulingResponse {
     pub cached_tokens: usize,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
     pub target_cached_prefix_blocks: u32,
-    pub router_hint_candidates: Option<RouterHintRootCandidates>,
+    pub kv_transfer_candidates: Option<KvTransferCandidates>,
     pub potential_decode_blocks: usize,
 }
 
@@ -249,24 +249,6 @@ pub enum WorkerSelectionInputTrigger {
     Other,
 }
 
-/// KV lifecycle hints supplied with an agent request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WorkerSelectionKvHints {
-    evict_session: bool,
-}
-
-impl WorkerSelectionKvHints {
-    /// Create the KV hints passed to worker selection.
-    pub fn new(evict_session: bool) -> Self {
-        Self { evict_session }
-    }
-
-    /// Return whether the caller asked consumers to evict the session state.
-    pub fn evict_session(&self) -> bool {
-        self.evict_session
-    }
-}
-
 /// Session metadata supplied to a custom worker-selection policy.
 ///
 /// The internal request protocol supplies these values. Optional values remain
@@ -276,7 +258,6 @@ pub struct SessionContext {
     session_id: String,
     parent_session_id: Option<String>,
     session_final: Option<bool>,
-    kv_hints: Option<WorkerSelectionKvHints>,
     input_trigger: Option<WorkerSelectionInputTrigger>,
 }
 
@@ -286,14 +267,12 @@ impl SessionContext {
         session_id: String,
         parent_session_id: Option<String>,
         session_final: Option<bool>,
-        kv_hints: Option<WorkerSelectionKvHints>,
         input_trigger: Option<WorkerSelectionInputTrigger>,
     ) -> Self {
         Self {
             session_id,
             parent_session_id,
             session_final,
-            kv_hints,
             input_trigger,
         }
     }
@@ -314,11 +293,6 @@ impl SessionContext {
     /// it as continuing, and `None` means the caller supplied no marker.
     pub fn session_final(&self) -> Option<bool> {
         self.session_final
-    }
-
-    /// Return optional KV lifecycle hints from the request.
-    pub fn kv_hints(&self) -> Option<&WorkerSelectionKvHints> {
-        self.kv_hints.as_ref()
     }
 
     /// Return the event that caused this request, when supplied.
@@ -344,8 +318,8 @@ pub struct ScheduleRequest {
     pub policy_class: Option<String>,
     pub session_context: Option<SessionContext>,
     pub overlap: OverlapSignals,
-    pub router_hint_candidates: Option<RouterHintRootCandidates>,
-    pub retain_router_hint_chain: bool,
+    pub kv_transfer_candidates: Option<KvTransferCandidates>,
+    pub retain_kv_transfer_chain: bool,
     pub shared_cache_hits: Option<SharedCacheHits>,
 }
 
@@ -375,8 +349,8 @@ pub struct SchedulingRequest {
 
     // Overlap and cache signals.
     pub overlap: OverlapSignals,
-    pub router_hint_candidates: Option<RouterHintRootCandidates>,
-    pub retain_router_hint_chain: bool,
+    pub kv_transfer_candidates: Option<KvTransferCandidates>,
+    pub retain_kv_transfer_chain: bool,
     pub shared_cache_hits: Option<SharedCacheHits>,
 
     // Load state computed during admission.
@@ -549,8 +523,8 @@ mod tests {
                 effective_overlap_blocks: HashMap::default(),
                 effective_cached_tokens: HashMap::default(),
             },
-            router_hint_candidates: None,
-            retain_router_hint_chain: false,
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
             shared_cache_hits: None,
             worker_loads,
             resp_tx: None,

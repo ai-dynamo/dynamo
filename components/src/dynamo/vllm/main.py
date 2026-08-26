@@ -48,7 +48,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm.router_hints import enable_router_hint_support
+from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
@@ -741,12 +741,12 @@ async def register_vllm_model(
     dp_range = get_dp_range_for_worker(vllm_config)
     state_agent_enabled = state_agent_settings(config) is not None
     apply_data_parallel_runtime_config(runtime_config, dp_range)
-    enable_router_hint_support(
+    publish_kv_hint_capabilities(
         runtime_config,
         config.engine_args,
         worker_type,
         dp_range,
-        publish_source_endpoints=not state_agent_enabled,
+        publish_transfer_source_endpoints=not state_agent_enabled,
     )
     runtime_config.context_length = vllm_config.model_config.max_model_len
     tower_connector_lora_enabled = bool(

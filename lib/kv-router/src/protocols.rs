@@ -279,14 +279,14 @@ fn compute_seq_hash_for_block_with(
     sequence_hashes
 }
 
-/// Router-hint metadata exposed by a worker config for one global DP rank.
+/// TRANSFER hint metadata exposed by a worker config for one global DP rank.
 ///
 /// This is borrowed from the underlying worker config so candidate filtering can
 /// check capability, role compatibility, and source endpoint presence without
 /// allocating. `source_control_endpoint` is optional because targets only need
 /// to consume hints, while sources must provide an endpoint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RouterHintWorkerMetadata<'a> {
+pub struct KvHintTransferWorkerMetadata<'a> {
     pub worker_type: &'a str,
     pub source_control_endpoint: Option<&'a str>,
 }
@@ -300,16 +300,15 @@ pub trait WorkerConfigLike {
     fn max_num_batched_tokens(&self) -> Option<u64>;
     fn total_kv_blocks(&self) -> Option<u64>;
 
-    /// Router-hint capability and source metadata for a specific global DP rank.
+    /// TRANSFER capability and source metadata for a specific global DP rank.
     ///
-    /// `None` means this worker/rank does not support router hints. Backends
-    /// that support hints but cannot serve as a source may return `Some` with
-    /// `source_control_endpoint: None`. If router hints grow into a broader
-    /// multi-backend contract, move this method into a dedicated extension trait.
-    fn router_hint_metadata_for_dp_rank(
+    /// `None` means this worker/rank does not support TRANSFER. Backends that
+    /// support TRANSFER but cannot serve as a source may return `Some` with
+    /// `source_control_endpoint: None`.
+    fn kv_hint_transfer_metadata_for_dp_rank(
         &self,
         _dp_rank: DpRank,
-    ) -> Option<RouterHintWorkerMetadata<'_>> {
+    ) -> Option<KvHintTransferWorkerMetadata<'_>> {
         None
     }
 
@@ -2512,7 +2511,7 @@ mod tests {
             "Default kv_transfer_preferred_weight() should return None"
         );
         assert!(config.native_offloading_capacity_tokens().is_none());
-        assert!(config.router_hint_metadata_for_dp_rank(0).is_none());
+        assert!(config.kv_hint_transfer_metadata_for_dp_rank(0).is_none());
     }
 
     #[test]

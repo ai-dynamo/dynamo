@@ -85,8 +85,8 @@ where
             policy_class,
             session_context,
             overlap,
-            router_hint_candidates,
-            retain_router_hint_chain,
+            kv_transfer_candidates,
+            retain_kv_transfer_chain,
             shared_cache_hits,
         } = request;
         let request = SchedulingRequest {
@@ -105,8 +105,8 @@ where
             policy_class,
             session_context,
             overlap,
-            router_hint_candidates,
-            retain_router_hint_chain,
+            kv_transfer_candidates,
+            retain_kv_transfer_chain,
             shared_cache_hits,
             worker_loads: FxHashMap::default(),
             resp_tx,
@@ -474,8 +474,8 @@ where
                 effective_overlap_blocks,
                 effective_cached_tokens,
             },
-            router_hint_candidates: None,
-            retain_router_hint_chain: false,
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
             routing_constraints,
             router_config_override: router_config_override.cloned(),
             lora_name,
@@ -936,8 +936,8 @@ mod tests {
             policy_class: None,
             session_context: None,
             overlap: OverlapSignals::default(),
-            router_hint_candidates: None,
-            retain_router_hint_chain: false,
+            kv_transfer_candidates: None,
+            retain_kv_transfer_chain: false,
             shared_cache_hits: None,
         }
     }

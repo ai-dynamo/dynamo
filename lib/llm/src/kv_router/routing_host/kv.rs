@@ -175,23 +175,7 @@ where
 
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(selection.worker.dp_rank);
-        let _ = backend_input
-            .extra_args
-            .as_mut()
-            .and_then(serde_json::Value::as_object_mut)
-            .and_then(|args| args.get_mut("kv_transfer_params"))
-            .and_then(serde_json::Value::as_object_mut)
-            .and_then(|params| params.remove("router_hint"));
-        if let Some(router_hint) = selection.router_hint.as_ref()
-            && let Err(error) = backend_input.attach_router_hint(router_hint)
-        {
-            tracing::warn!(
-                request_id = %context_id,
-                worker_id = selection.worker.worker_id,
-                error = %error,
-                "Failed to attach router_hint to backend request"
-            );
-        }
+        backend_input.kv_hints = selection.kv_hints;
         let updated_request = context.map(|_| backend_input);
         guard.record_prefill_start();
 

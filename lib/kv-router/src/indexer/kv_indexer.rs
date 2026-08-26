@@ -469,7 +469,7 @@ impl KvIndexer {
                                 let matches = trie.find_match_details_with_options(
                                     req.sequence,
                                     req.early_exit,
-                                    req.retain_router_hint_chain,
+                                    req.retain_kv_transfer_chain,
                                 );
                                 let _ = req.resp.send(matches);
                             }
@@ -650,14 +650,14 @@ impl KvIndexer {
     pub async fn find_match_details_with_options(
         &self,
         sequence: Vec<LocalBlockHash>,
-        retain_router_hint_chain: bool,
+        retain_kv_transfer_chain: bool,
     ) -> Result<MatchDetails, KvRouterError> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.match_details_tx
             .send(MatchDetailsRequest::new(
                 sequence,
                 false,
-                retain_router_hint_chain,
+                retain_kv_transfer_chain,
                 resp_tx,
             ))
             .await

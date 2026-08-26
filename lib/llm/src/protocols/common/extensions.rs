@@ -61,13 +61,6 @@ where
     Ok(url.to_string())
 }
 
-/// Internal KV cache hints derived from agent lifecycle metadata.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct KvHints {
-    pub evict_session: bool,
-}
-
 /// Causal trigger that produced an incoming agent request.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -129,10 +122,6 @@ pub struct AgentContext {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<AgentCompaction>,
-
-    #[builder(default, setter(strip_option))]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kv_hints: Option<KvHints>,
 
     /// Causal trigger that produced the request, derived from inbound request content.
     #[builder(default, setter(strip_option))]
@@ -375,15 +364,11 @@ pub fn has_non_cache_salt_routing_headers(headers: &HeaderMap) -> bool {
 
 impl From<AgentContextHeaderValues> for AgentContext {
     fn from(values: AgentContextHeaderValues) -> Self {
-        let kv_hints = (values.session_final == Some(true)).then_some(KvHints {
-            evict_session: true,
-        });
         Self {
             session_id: values.session_id,
             parent_session_id: values.parent_session_id,
             session_final: values.session_final,
             compaction: values.compaction,
-            kv_hints,
             input_trigger: None,
         }
     }
@@ -1285,7 +1270,6 @@ mod tests {
                 expected_parent_session_id
             );
             assert_eq!(agent_context.session_final, None);
-            assert_eq!(agent_context.kv_hints, None);
         }
     }
 
@@ -1531,15 +1515,11 @@ mod tests {
             Some("generic-parent")
         );
         assert_eq!(agent_context.session_final, Some(true));
-        assert_eq!(
-            agent_context.kv_hints,
-            Some(KvHints {
-                evict_session: true
-            })
-        );
-
         headers.insert(HEADER_DYNAMO_SESSION_FINAL, "false".parse().unwrap());
-        assert_eq!(agent_context_from_headers(&headers).unwrap().kv_hints, None);
+        assert_eq!(
+            agent_context_from_headers(&headers).unwrap().session_final,
+            Some(false)
+        );
     }
 
     #[test]

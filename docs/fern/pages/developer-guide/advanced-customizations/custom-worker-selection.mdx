@@ -330,8 +330,6 @@ Request context and worker identity are always available. Dynamo calculates opti
 | `session_id()` | Stable reasoning or tool-session identifier |
 | `parent_session_id()` | Optional parent session for subagents |
 | `session_final()` | Optional terminal marker for lifecycle-aware policies |
-| `kv_hints()` | Optional KV lifecycle hints |
-| `kv_hints().evict_session()` | Whether the request asks consumers to evict session state |
 | `input_trigger()` | Optional `UserMessage`, `ToolResult`, or `Other` request trigger |
 
 The [custom policy examples](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/README.md) use `input_trigger()` to give tool-result turns a cache-local picker path.
