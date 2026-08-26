@@ -1113,6 +1113,48 @@ async def test_process_token_stream_treats_completion_usage_as_optional():
 
 
 @pytest.mark.asyncio
+async def test_process_token_stream_reports_request_total_completion_usage():
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop"},
+                            "prompt_tokens": 2,
+                            "completion_tokens": 1,
+                        },
+                    },
+                    {
+                        "index": 1,
+                        "output_ids": [],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop"},
+                            "prompt_tokens": 2,
+                            "completion_tokens": 2,
+                        },
+                    },
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    assert chunks[0]["completion_usage"]["completion_tokens"] == 1
+    assert chunks[1]["completion_usage"] == {
+        "prompt_tokens": 2,
+        "completion_tokens": 3,
+        "total_tokens": 5,
+    }
+
+
+@pytest.mark.asyncio
 async def test_process_token_stream_accepts_incremental_logprob_arrays():
     handler = _new_decode_handler()
 

@@ -772,6 +772,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         pending_stop_tokens_per_choice: dict[int, list[int]] = {}
         pending_log_probs_per_choice: dict[int, list[Any]] = {}
         pending_top_logprobs_per_choice: dict[int, list[Any]] = {}
+        completion_tokens_per_choice: dict[int, int] = {}
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 meta_info = res.get("meta_info", {})
@@ -894,10 +895,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     if cached_tokens is not None and cached_tokens > 0:
                         prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
                     if input_tokens is not None and completion_tokens is not None:
+                        completion_tokens_per_choice[output_idx] = completion_tokens
+                        request_completion_tokens = sum(
+                            completion_tokens_per_choice.values()
+                        )
                         completion_usage = {
                             "prompt_tokens": input_tokens,
-                            "completion_tokens": completion_tokens,
-                            "total_tokens": input_tokens + completion_tokens,
+                            "completion_tokens": request_completion_tokens,
+                            "total_tokens": input_tokens + request_completion_tokens,
                         }
                         if prefill_prompt_tokens_details is not None:
                             completion_usage[

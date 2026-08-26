@@ -387,6 +387,35 @@ mod tests {
     }
 
     #[test]
+    fn test_completion_tokens_treat_backend_usage_as_request_total() {
+        let mut request = create_test_request();
+        request.inner.n = Some(2);
+        let mut generator = request.response_generator("req-multi-choice-usage".to_string());
+
+        for index in 0..2 {
+            let mut backend_output = final_backend_output();
+            backend_output.index = Some(index);
+            backend_output.token_ids.clear();
+            backend_output.tokens.clear();
+            backend_output.completion_usage = Some(CompletionUsage {
+                prompt_tokens: 5,
+                completion_tokens: 5,
+                total_tokens: 10,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            });
+            generator
+                .choice_from_postprocessor(backend_output)
+                .expect("choice generation");
+        }
+
+        let usage = generator.get_usage();
+        assert_eq!(usage.prompt_tokens, 5);
+        assert_eq!(usage.completion_tokens, 5);
+        assert_eq!(usage.total_tokens, 10);
+    }
+
+    #[test]
     fn test_completion_tokens_keep_aggregated_count_when_backend_usage_is_zero() {
         let request = create_test_request();
         let mut generator = request.response_generator("req-backend-zero-usage".to_string());
