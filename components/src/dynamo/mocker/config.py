@@ -342,6 +342,7 @@ def build_runtime_config(
 ) -> tuple[int, ModelRuntimeConfig]:
     rc = ModelRuntimeConfig()
     rc.context_length = engine_args.max_model_len or 0
+    # MockEngineArgs defines num_gpu_blocks per independently simulated DP rank.
     rc.total_kv_blocks = engine_args.num_gpu_blocks
     rc.max_num_seqs = engine_args.max_num_seqs
     if rc.max_num_seqs is None:

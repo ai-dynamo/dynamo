@@ -88,10 +88,6 @@ const (
 	// so v1-compatible releases continue to generate new DCDs with the v1 value.
 	KubeLabelDynamoWorkerHash = "nvidia.com/dynamo-worker-hash"
 
-	// KubeAnnotationDynamoWorkerTopologySpreadScoped is a controller-owned marker
-	// for workload resources whose topology selectors are scoped by worker generation.
-	KubeAnnotationDynamoWorkerTopologySpreadScoped = "nvidia.com/dynamo-worker-topology-spread-scoped"
-
 	// CheckpointAutoAnnotation marks operator-created checkpoints whose
 	// lifecycle is tied to an owning DGD generation.
 	CheckpointAutoAnnotation = "nvidia.com/dynamo-auto-checkpoint"
