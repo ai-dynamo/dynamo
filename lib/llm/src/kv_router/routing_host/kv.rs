@@ -192,7 +192,7 @@ where
             );
         }
         let updated_request = context.map(|_| backend_input);
-        guard.record_prefill_start();
+        guard.record_prefill_start(phase);
 
         let dispatch = self
             .inner
