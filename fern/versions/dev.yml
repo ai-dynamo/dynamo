@@ -469,9 +469,6 @@ navigation:
           - page: DeepSeek-V4-Flash
             path: ../pages-dev/recipes/model-recipes/deepseek-v4-flash.mdx
             slug: deepseek-v4-flash
-          - page: DeepSeek V3.2 NVFP4
-            path: ../pages-dev/recipes/model-recipes/deepseek-v3-2-nvfp4.mdx
-            slug: deepseek-v3-2-nvfp4
           - page: GPT-OSS-120B
             path: ../pages-dev/recipes/model-recipes/gpt-oss-120b.mdx
             slug: gpt-oss-120b
@@ -487,9 +484,6 @@ navigation:
           - page: Qwen3-32B FP8
             path: ../pages-dev/recipes/model-recipes/qwen3-32b-fp8.mdx
             slug: qwen3-32b-fp8
-          - page: Llama-3.3-70B FP8
-            path: ../pages-dev/recipes/model-recipes/llama-3-3-70b-fp8.mdx
-            slug: llama-3-3-70b
       # ==================== Kubernetes Templates ====================
       - section: Kubernetes Templates
         icon: fa-brands fa-kubernetes
@@ -559,14 +553,6 @@ navigation:
           - page: Qwen3-VL Embedding Cache
             path: ../pages-dev/recipes/feature-benchmarks/qwen3-vl-embedding-cache.mdx
             slug: qwen3-vl-embedding-cache
-            hidden: true
-          - page: DeepSeek V3.2 WideEP Routing
-            path: ../pages-dev/recipes/feature-benchmarks/deepseek-v3-2-wideep-routing.mdx
-            slug: deepseek-v3-2-wideep-routing
-            hidden: true
-          - page: Llama-3.3-70B Topology
-            path: ../pages-dev/recipes/feature-benchmarks/llama-3-3-70b-topology.mdx
-            slug: llama-3-70b-topology
             hidden: true
           - page: KV Router A/B Testing
             path: ../pages-dev/recipes/feature-benchmarks/kv-router-a-b-testing.md
