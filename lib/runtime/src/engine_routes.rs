@@ -38,9 +38,8 @@ impl EngineRoutePolicy {
     /// `Denylist`. When more than one is set, the highest-precedence one takes effect and a
     /// warning names which variables were seen and which one won.
     pub fn from_env() -> Self {
-        let disable_all = std::env::var(env_engine_routes::DYN_DISABLE_ENGINE_ROUTES)
-            .ok()
-            .is_some_and(|v| is_truthy(&v));
+        let disable_all =
+            crate::config::env_is_truthy(env_engine_routes::DYN_DISABLE_ENGINE_ROUTES);
         // A *present* allow var — even empty/whitespace — is a deliberate opt-in to
         // restrictive mode: an empty allowlist serves nothing (fail closed). Only a
         // truly-unset var leaves the default `AllowAll`. An empty deny var is a no-op,
@@ -108,14 +107,6 @@ fn parse_route_set(value: &str) -> HashSet<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect()
-}
-
-/// Truthy env parsing consistent with other runtime flags (`1`/`true`/`yes`).
-fn is_truthy(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes"
-    )
 }
 
 /// Callback type for engine routes (async)

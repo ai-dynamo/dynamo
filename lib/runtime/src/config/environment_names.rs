@@ -128,8 +128,9 @@ pub mod runtime {
 
     /// `/engine/*` worker control-route policy (system-status server)
     pub mod engine_routes {
-        /// Disable all `/engine/*` control routes. Truthy values (`1`/`true`/`yes`,
-        /// case-insensitive) enable the master switch; any other value is treated as unset.
+        /// Disable all `/engine/*` control routes. Truthy values (`1`/`true`/`on`/`yes`,
+        /// case-insensitive, per `dynamo-truthy`) enable the master switch; any other value
+        /// is treated as unset.
         pub const DYN_DISABLE_ENGINE_ROUTES: &str = "DYN_DISABLE_ENGINE_ROUTES";
 
         /// Comma-separated allowlist of `/engine/*` route names (full route string, e.g.
