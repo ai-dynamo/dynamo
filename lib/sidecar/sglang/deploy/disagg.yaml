@@ -114,7 +114,6 @@ spec:
         containers:
         - name: main
           image: <your-registry>/dynamo-sidecar:1.3.0
-          # Required: an omitted command inherits the operator's /bin/sh -c.
           command:
           - dynamo-sglang-sidecar
           args:
@@ -204,7 +203,6 @@ spec:
         containers:
         - name: main
           image: <your-registry>/dynamo-sidecar:1.3.0
-          # Required: an omitted command inherits the operator's /bin/sh -c.
           command:
           - dynamo-sglang-sidecar
           args:
