@@ -203,6 +203,9 @@ impl PodDiscovery {
             tokio::pin!(reflect);
             let mut generation = 0u64;
             let mut last_counts = RoleCounts::default();
+            // Set once discovery first has a complete picture; see the census
+            // block below for why the crossed-zero log alone is not enough.
+            let mut census_logged = false;
             // The pod cache is "synced" once the reflector's initial LIST lands
             // (InitDone); readiness stays gated on this AND pool presence below.
             let mut pod_synced = false;
@@ -269,17 +272,42 @@ impl PodDiscovery {
                     Delta::Remove(pod) => remove_pod(&index_task, &pod),
                 };
 
+                // Readiness based on initial pods being synced and the pool being resolved.
+                let is_ready = pod_synced && pool_rx.borrow().is_some();
+
+                // The first iteration holding a complete picture reports every
+                // role's count, not just the ones that moved: `last_counts`
+                // starts at zeros, so a role that is empty from process start
+                // never crosses zero and `log_role_count_transitions` would say
+                // nothing about it — while the healthy role logs normally. That
+                // is the shape of the likeliest disaggregated misconfiguration
+                // (the role label misspelled on every decode pod), and it would
+                // otherwise be reported by nothing but the 503s themselves. An
+                // all-empty index does not even set `index_changed`, so the
+                // census cannot be gated on it.
+                //
+                // Gated on the role label as well as on readiness, so that under
+                // aggregated topology `first_census` is always false and this
+                // block collapses to exactly the transition-only path it had
+                // before: one catalog makes "no workers" unambiguous already,
+                // and its startup output must not change.
+                let first_census = is_ready && !census_logged && role_cfg.role_label.is_some();
+
                 // This loop is the only place with a before/after view of the
                 // index, so the crossed-zero edge is reported here rather than
                 // inside the pure mutators.
-                if index_changed {
+                if index_changed || first_census {
                     let counts = index_task.read().unwrap().counts();
-                    log_role_count_transitions(&role_cfg, last_counts, counts);
+                    if first_census {
+                        census_logged = true;
+                        log_role_census(&role_cfg, counts);
+                    } else if index_changed {
+                        log_role_count_transitions(&role_cfg, last_counts, counts);
+                    }
                     last_counts = counts;
                 }
 
-                // Readiness based on initial pods being synced and the pool being resolved.
-                ready_task.store(pod_synced && pool_rx.borrow().is_some(), Ordering::Release);
+                ready_task.store(is_ready, Ordering::Release);
                 if index_changed {
                     generation = generation.wrapping_add(1);
                     let _ = changes_tx.send(generation);
@@ -432,6 +460,39 @@ fn index_state_from(workers: Vec<RawWorker>) -> IndexState {
             .map(|worker| (worker.worker_id, WorkerEntry::from_raw(worker)))
             .collect(),
     )
+}
+
+/// The roles to report in a startup census, with the count to report for each.
+///
+/// Empty under aggregated topology: there is one catalog, "no workers" is
+/// already unambiguous, and staying silent keeps aggregated startup output
+/// byte-identical to its previous behavior. Under a role split the opposite is
+/// true — one catalog can be empty while the other logs normally, and the
+/// difference is invisible without this.
+fn role_census(cfg: &RoleDiscoveryConfig, counts: RoleCounts) -> Vec<(WorkerRole, usize)> {
+    if cfg.role_label.is_none() {
+        return Vec::new();
+    }
+    [WorkerRole::Prefill, WorkerRole::Decode]
+        .into_iter()
+        .map(|role| (role, counts.get(role)))
+        .collect()
+}
+
+/// Report every role's ready count once, when discovery first has a complete
+/// picture, so a role that is empty from the start is not silent.
+fn log_role_census(cfg: &RoleDiscoveryConfig, counts: RoleCounts) {
+    for (role, ready) in role_census(cfg, counts) {
+        if ready == 0 {
+            tracing::warn!(
+                role = role.as_str(),
+                "Role has no ready workers at startup; requests needing it will fail until one \
+                 appears. Check the worker-role label on this pool's pods."
+            );
+        } else {
+            tracing::info!(role = role.as_str(), ready, "Role has ready workers");
+        }
+    }
 }
 
 /// Log the roles whose ready count crossed zero in either direction.
@@ -752,6 +813,52 @@ mod tests {
             kv_event_port: 5557,
             replay_port: None,
         }
+    }
+
+    #[test]
+    fn the_startup_census_reports_a_role_that_was_never_populated() {
+        // The crossed-zero log cannot: `last_counts` starts at zeros, so a role
+        // that is empty from process start never crosses. Without the census a
+        // fleet whose decode pods are all mislabelled logs a healthy prefill
+        // line and nothing else, and the only remaining signal is the 503s.
+        let counts = RoleCounts {
+            aggregated: 0,
+            prefill: 2,
+            decode: 0,
+        };
+        assert_eq!(
+            role_census(&disagg_cfg(), counts),
+            vec![(WorkerRole::Prefill, 2), (WorkerRole::Decode, 0)]
+        );
+    }
+
+    #[test]
+    fn the_startup_census_is_silent_under_aggregated() {
+        // One catalog makes "no workers" unambiguous already, and aggregated
+        // startup output must stay byte-identical to its previous behavior.
+        assert!(role_census(&agg_cfg(), RoleCounts::default()).is_empty());
+        assert!(
+            role_census(
+                &agg_cfg(),
+                RoleCounts {
+                    aggregated: 3,
+                    prefill: 0,
+                    decode: 0,
+                },
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_startup_census_covers_the_all_empty_pool() {
+        // This is the case that cannot be gated on `index_changed`: an index
+        // that starts empty and stays empty never reports a change, so gating
+        // the census on one would make both roles silent.
+        assert_eq!(
+            role_census(&disagg_cfg(), RoleCounts::default()),
+            vec![(WorkerRole::Prefill, 0), (WorkerRole::Decode, 0)]
+        );
     }
 
     fn with_replay(mut cfg: RoleDiscoveryConfig, port: u16) -> RoleDiscoveryConfig {
