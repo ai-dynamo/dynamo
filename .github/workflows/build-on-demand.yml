@@ -22,11 +22,36 @@ on:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
+      readable_novolume_canary:
+        description: 'Run the readable no-volume TensorRT-LLM timing canary'
+        type: boolean
+        default: false
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
+
+  readable-novolume-canary:
+    if: inputs.readable_novolume_canary
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: trtllm
+      test_type: readable-novolume-canary
+      amd_runner: prod-tester-amd-gpu-v2
+      target_tag_plain: trtllm-runtime
+      cuda_version: '["13.1"]'
+      platform: '["amd64"]'
+      source_ref: 0d2a46844c7a2627467a8b9d394152218e49ea54
+      run_cpu_only_tests: true
+      cpu_only_test_markers: 'pre_merge and trtllm and gpu_0'
+      cpu_parallel_mode: auto
+      run_gpu_tests: true
+      gpu_test_markers: 'pre_merge and trtllm and gpu_1'
+      run_gpu_parallel_tests: true
+      gpu_parallel_max_vram_gib: '24'
+      gpu_test_timeout_minutes: 30
+    secrets: inherit
 
   init:
     runs-on: ubuntu-slim
