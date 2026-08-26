@@ -8,11 +8,10 @@
 # Build from the repository root:
 #   docker build -f lib/sidecar/Dockerfile -t dynamo-sidecar:1.3.0 .
 
-# ---- vLLM builder -----------------------------------------------------------
-FROM rust:1.96.1-bookworm AS vllm-builder
+# ---- common builder ---------------------------------------------------------
+FROM rust:1.96.1-bookworm AS builder-base
 
-ARG TARGETARCH
-
+# Superset of the build dependencies required by all sidecar crates.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         cmake \
         clang \
@@ -24,6 +23,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
+
+# ---- vLLM builder -----------------------------------------------------------
+FROM builder-base AS vllm-builder
+
+ARG TARGETARCH
+
 COPY . .
 
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry,target=/usr/local/cargo/registry \
@@ -34,21 +39,10 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry,target=/usr/local/cargo/
     && install -D target/release/dynamo-vllm-sidecar /out/dynamo-vllm-sidecar
 
 # ---- SGLang builder ---------------------------------------------------------
-FROM rust:1.96.1-bookworm AS sglang-builder
+FROM builder-base AS sglang-builder
 
 ARG TARGETARCH
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        cmake \
-        clang \
-        libclang-dev \
-        protobuf-compiler \
-        libprotobuf-dev \
-        perl \
-        pkg-config \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /src
 COPY . .
 
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry,target=/usr/local/cargo/registry \
@@ -59,21 +53,10 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry,target=/usr/local/cargo/
     && install -D target/release/dynamo-sglang-sidecar /out/dynamo-sglang-sidecar
 
 # ---- TensorRT-LLM builder ---------------------------------------------------
-FROM rust:1.96.1-bookworm AS trtllm-builder
+FROM builder-base AS trtllm-builder
 
 ARG TARGETARCH
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        cmake \
-        clang \
-        libclang-dev \
-        protobuf-compiler \
-        libprotobuf-dev \
-        perl \
-        pkg-config \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /src
 COPY . .
 
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry,target=/usr/local/cargo/registry \
