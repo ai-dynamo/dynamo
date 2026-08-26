@@ -427,6 +427,9 @@ class VllmHybridCacheSimulator:
                     victims.append(key)
                     if len(victims) == evictions:
                         break
+        # vLLM's CPUOffloadingManager.prepare_store is all-or-nothing: it
+        # returns None when the full batch cannot be allocated without
+        # evicting a protected or non-evictable block.
         if len(victims) != evictions:
             return 0, 0, offered
         for key in victims:

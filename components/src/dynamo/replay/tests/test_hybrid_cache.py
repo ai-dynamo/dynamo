@@ -126,3 +126,13 @@ def test_cpu_capacity_bytes_are_converted_to_fixed_slots() -> None:
     )
 
     assert config.cpu_capacity_slots == 3
+
+
+def test_store_batch_larger_than_cpu_pool_is_rejected() -> None:
+    simulator = VllmHybridCacheSimulator(_deepseek_config(cpu_capacity_slots=22))
+
+    result = simulator.process(_request())
+
+    assert result.cpu_store_offers == 23
+    assert result.cpu_admissions == 0
+    assert result.cpu_occupancy_slots == 0
