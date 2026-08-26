@@ -47,7 +47,7 @@ inputs:
     required: false
     default: ''
   cpu_limit:
-    description: 'Maximum number of cores available to docker'
+    description: 'Maximum number of CPU cores available to the GPU-parallel scheduler'
     required: false
     default: '10'
   nvme_dir:
@@ -117,6 +117,9 @@ runs:
         DYNAMO_TEST_TYPE: ${{ inputs.test_type }}
         DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
         DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
+        DYNAMO_TEST_SUITE_NAME: ${{ inputs.test_suite_name }}
+        NUM_CPUS: ${{ inputs.cpu_limit }}
+        PYTEST_MAX_VRAM_GIB: ${{ inputs.max_vram_gib }}
         HF_XET_HIGH_PERFORMANCE: 1
       run: |
         # Run pytest with detailed output and JUnit XML
@@ -161,6 +164,25 @@ runs:
         # to set HOME=/ by default. Pin HOME to GITHUB_WORKSPACE so downstream code
         # that reads HOME (git, getpass.getuser) gets a writable path.
         export HOME="${GITHUB_WORKSPACE}"
+
+        # BEGIN parallel CPU budget
+        # The VRAM-aware scheduler cannot infer the runner pod's intended CPU
+        # budget from os.cpu_count(), so give it the action's explicit limit.
+        # TRT-LLM starts MPI ranks and several runtime processes per test; cap
+        # only its GPU-parallel stage more conservatively to avoid overwhelming
+        # the H100 runner. Other suites keep the caller-provided CPU limit.
+        if [[ -n "${PYTEST_MAX_VRAM_GIB}" ]]; then
+          if ! [[ "${NUM_CPUS}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "❌ cpu_limit must be a positive integer; got '${NUM_CPUS}'"
+            exit 1
+          fi
+          if [[ "${DYNAMO_TEST_SUITE_NAME}" == "trtllm" && ${NUM_CPUS} -gt 4 ]]; then
+            echo "📊 TRT-LLM GPU parallelism: capping CPU-backed scheduler slots ${NUM_CPUS} -> 4"
+            NUM_CPUS=4
+            export NUM_CPUS
+          fi
+        fi
+        # END parallel CPU budget
 
 
         # XDG cache (flashinfer JIT, torch compile) → NVMe when available
