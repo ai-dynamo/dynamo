@@ -31,8 +31,10 @@ ARG TARGETARCH
 
 COPY . .
 
-RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=dynamo-sidecar-cargo-git,target=/usr/local/cargo/git \
+# sharing=locked: cargo's .package-cache lock lives outside these mounts, so it
+# cannot serialize the concurrent cargo processes a multi-platform build starts.
+RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH},target=/src/target,sharing=locked \
     cargo build --release --locked -p dynamo-vllm-sidecar \
     && strip target/release/dynamo-vllm-sidecar \
@@ -45,8 +47,8 @@ ARG TARGETARCH
 
 COPY . .
 
-RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=dynamo-sidecar-cargo-git,target=/usr/local/cargo/git \
+RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH},target=/src/target,sharing=locked \
     cargo build --release --locked -p dynamo-sglang-sidecar \
     && strip target/release/dynamo-sglang-sidecar \
@@ -59,8 +61,8 @@ ARG TARGETARCH
 
 COPY . .
 
-RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=dynamo-sidecar-cargo-git,target=/usr/local/cargo/git \
+RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH},target=/src/target,sharing=locked \
     cargo build --release --locked -p dynamo-trtllm-sidecar \
     && strip target/release/dynamo-trtllm-sidecar \

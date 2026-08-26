@@ -92,6 +92,9 @@ spec:
         # discovery env + probes by name).
         - name: main
           image: <your-registry>/dynamo-sidecar:1.3.0
+          # Required: an omitted command inherits the operator's /bin/sh -c.
+          command:
+          - /usr/local/bin/dynamo-sidecar
           args:
           - sglang
           - --sglang-endpoint
