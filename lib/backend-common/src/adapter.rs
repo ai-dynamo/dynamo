@@ -17,6 +17,7 @@ use dynamo_llm::first_token::FirstTokenSource;
 use dynamo_llm::protocols::common::llm_backend::LLMEngineOutput;
 use dynamo_llm::protocols::common::preprocessor::PreprocessedRequest;
 use dynamo_runtime::engine::AsyncEngineContext;
+use dynamo_runtime::telemetry::{LifecycleStage, LifecycleTrace};
 use dynamo_runtime::pipeline::{
     AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
 };
@@ -214,6 +215,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (request, handle) = input.into_parts();
         let ctx: Arc<dyn AsyncEngineContext> = handle.context();
+
+        let lifecycle = LifecycleTrace::from_environment();
+        let worker_operation = if self.mode.is_prefill() {
+            lifecycle.start(LifecycleStage::WorkerOperationPrefill)
+        } else if self.mode.is_decode() {
+            lifecycle.start(LifecycleStage::WorkerOperationDecode)
+        } else {
+            tracing::Span::none()
+        };
 
         // Per-request worker-side span. Nests under `handle_payload` (set up
         // by the runtime's NATS ingress) so the trace tree has a contiguous
@@ -499,6 +509,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         };
         // `stream_span.record(...)` from the closure mutates the same span
         // we just dropped — `Span` is a cheap handle, clones share storage.
+
+        let mapped = async_stream::stream! {
+            let _worker_operation = worker_operation;
+            let mut inner = Box::pin(mapped);
+            while let Some(item) = inner.next().await {
+                yield item;
+            }
+        };
 
         Ok(ResponseStream::new(Box::pin(mapped), ctx))
     }

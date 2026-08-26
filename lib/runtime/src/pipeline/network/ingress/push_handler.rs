@@ -12,6 +12,7 @@ use crate::metrics::work_handler_perf::{
 };
 use crate::pipeline::network::StreamPrologueError;
 use crate::pipeline::{ManyIn, RequestStream};
+use crate::telemetry::{LifecycleStage, LifecycleTrace};
 use futures::StreamExt;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::Deserialize;
@@ -675,6 +676,7 @@ where
         start_time: Instant,
         configured_mode: ResponsePlaneMode,
         advertised_mode: ResponsePlaneMode,
+        lifecycle: &LifecycleTrace,
         mut publisher: P,
     ) -> Result<(), PipelineError>
     where
@@ -694,16 +696,22 @@ where
 
         let request_context = request.context();
         tracing::trace!("calling generate");
+        let worker_operation = lifecycle.start_worker_operation();
         // Route backend generation through the transport-independent admission
         // boundary. Admission errors follow the existing generate error path.
-        let stream = admission_gate::global()
-            .admit(
-                Some(request_context.as_ref()),
-                self.segment
-                    .get()
-                    .expect("segment not set")
-                    .generate(request),
-            )
+        let stream = async {
+            admission_gate::global()
+                .admit(
+                    Some(request_context.as_ref()),
+                    self.segment
+                        .get()
+                        .expect("segment not set")
+                        .generate(request)
+                        .instrument(lifecycle.start(LifecycleStage::RequestDispatch)),
+                )
+                .await
+        }
+            .instrument(worker_operation.clone())
             .await
             .map_err(|error| {
                 if let Some(metrics) = self.metrics() {
@@ -768,6 +776,8 @@ where
         };
 
         self.pump_response_stream(stream, &publisher, payload_codec)
+            .instrument(lifecycle.start_worker_response_streaming())
+            .instrument(worker_operation)
             .await;
         let finish = if publisher.reset_on_stop()
             && request_context.is_stopped()
@@ -805,6 +815,7 @@ where
             .unwrap_or_default()
             .as_nanos() as u64;
         let start_time = std::time::Instant::now();
+        let lifecycle = LifecycleTrace::from_environment();
 
         // Increment inflight and ensure it's decremented on all exits via RAII guard
         let _inflight_guard = self.metrics().map(|m| {
@@ -822,12 +833,16 @@ where
             }
         });
 
+        let worker_admission = lifecycle.start(LifecycleStage::WorkerAdmission);
         let ParsedRequest {
             request,
             response_connection_info,
             frontend_send_ts_ns,
             payload_codec,
-        } = self.parse_and_build_request(payload).await?;
+        } = self
+            .parse_and_build_request(payload)
+            .instrument(worker_admission.clone())
+            .await?;
 
         // Compute network transit time (T2 - T1) using cross-process wall-clock timestamps
         if let Some(t1_ns) = frontend_send_ts_ns {
@@ -852,6 +867,7 @@ where
                     response_connection_info,
                     cancellation_counter,
                 )
+                .instrument(worker_admission.clone())
                 .await
                 .map_err(|error| {
                     if let Some(metrics) = self.metrics() {
@@ -862,12 +878,14 @@ where
                     }
                     PipelineError::Generic(format!("Failed to create response stream: {error}"))
                 })?;
+                drop(worker_admission);
                 self.generate_and_publish(
                     request,
                     payload_codec,
                     start_time,
                     configured_mode,
                     advertised_mode,
+                    &lifecycle,
                     publisher,
                 )
                 .await?;
@@ -881,6 +899,7 @@ where
                         response_connection_info,
                         cancellation_counter,
                     )
+                    .instrument(worker_admission.clone())
                     .await
                     .map_err(|error| {
                         if let Some(metrics) = self.metrics() {
@@ -893,12 +912,14 @@ where
                             "Failed to create QUIC response stream: {error}"
                         ))
                     })?;
+                drop(worker_admission);
                 self.generate_and_publish(
                     request,
                     payload_codec,
                     start_time,
                     configured_mode,
                     advertised_mode,
+                    &lifecycle,
                     publisher,
                 )
                 .await?;
