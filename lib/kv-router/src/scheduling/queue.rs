@@ -3128,7 +3128,8 @@ policy_classes:
                         ExternalSequenceBlockHash(101),
                         ExternalSequenceBlockHash(102),
                     ],
-                    owner_prefix_blocks: vec![(WorkerWithDpRank::new(1, 0), 2)],
+                    owner_prefix_blocks: vec![(WorkerWithDpRank::new(1, 0).into(), 2)],
+                    routing_snapshot: None,
                 }),
                 overlap: OverlapSignals {
                     tier_overlap_blocks: Default::default(),
@@ -3209,7 +3210,7 @@ policy_classes:
                 .router_hint_candidates
                 .as_ref()
                 .map(|candidates| candidates.owner_prefix_blocks.as_slice()),
-            Some(&[(WorkerWithDpRank::new(1, 0), 2)][..])
+            Some(&[(WorkerWithDpRank::new(1, 0).into(), 2)][..])
         );
         assert_eq!(queue.pending_count(), 0);
     }
@@ -3225,7 +3226,8 @@ policy_classes:
             response: RefreshedOverlap {
                 router_hint_candidates: Some(RouterHintRootCandidates {
                     block_hashes: vec![ExternalSequenceBlockHash(101)],
-                    owner_prefix_blocks: vec![(worker, 1)],
+                    owner_prefix_blocks: vec![(worker.into(), 1)],
+                    routing_snapshot: None,
                 }),
                 overlap: OverlapSignals {
                     tier_overlap_blocks: Default::default(),

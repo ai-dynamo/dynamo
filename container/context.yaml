@@ -99,7 +99,7 @@ vllm:
   transformers_version: "5.14.1"
   nixl_ref: v1.3.2
   max_jobs: "10"
-  enable_media_ffmpeg: "false"
+  enable_media_ffmpeg: "true"
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"
   enable_modelexpress: "true"
