@@ -28,18 +28,18 @@ hybrid KV cache management with Expert Parallelism disabled.
 
 | GPU | Context | Topology | GPU shape | Reference concurrency | Manifest |
 |---|---:|---|---|---:|---|
-| B200 | 256K | Aggregated | 2 × TP4 | 94 | `vllm/agg-b200-agentic-256k-2w-kv/deploy.yaml` |
-| B200 | 1M | Aggregated | 2 × TP4 | 46 | `vllm/agg-b200-agentic-1m-2w-kv/deploy.yaml` |
-| GB200 | 256K | Aggregated | 2 × TP4 | 96 | `vllm/agg-gb200-agentic-256k-2w-kv/deploy.yaml` |
-| GB200 | 1M | Aggregated | 2 × TP4 | 48 | `vllm/agg-gb200-agentic-1m-2w-kv/deploy.yaml` |
-| H200 | 256K | Aggregated | 2 × TP8 | 64 | `vllm/agg-h200-agentic-256k-2w-kv/deploy.yaml` |
-| H200 | 1M | Aggregated | 2 × TP8 | 32 | `vllm/agg-h200-agentic-1m-2w-kv/deploy.yaml` |
-| B200 | 256K | Disaggregated | 1P TP4 + 2D TP4 | 144 | `vllm/disagg-b200-agentic-256k-1p2d/deploy.yaml` |
-| B200 | 1M | Disaggregated | 1P TP4 + 1D TP4 | 38 | `vllm/disagg-b200-agentic-1m-1p1d/deploy.yaml` |
-| GB200 | 256K | Disaggregated | 1P TP4 + 2D TP4 | 140 | `vllm/disagg-gb200-agentic-256k-1p2d/deploy.yaml` |
-| GB200 | 1M | Disaggregated | 1P TP4 + 1D TP4 | 48 | `vllm/disagg-gb200-agentic-1m-1p1d/deploy.yaml` |
-| H200 | 256K | Disaggregated | 1P TP8 + 2D TP8 | 72 | `vllm/disagg-h200-agentic-256k-1p2d/deploy.yaml` |
-| H200 | 1M | Disaggregated | 1P TP8 + 1D TP8 | 30 | `vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml` |
+| B200 | 256K | Aggregated | 2 × TP4 | 94 | `vllm/agg-b200-agentic-256K-kv-router/deploy.yaml` |
+| B200 | 1M | Aggregated | 2 × TP4 | 46 | `vllm/agg-b200-agentic-1M-kv-router/deploy.yaml` |
+| GB200 | 256K | Aggregated | 2 × TP4 | 96 | `vllm/agg-gb200-agentic-256K-kv-router/deploy.yaml` |
+| GB200 | 1M | Aggregated | 2 × TP4 | 48 | `vllm/agg-gb200-agentic-1M-kv-router/deploy.yaml` |
+| H200 | 256K | Aggregated | 2 × TP8 | 64 | `vllm/agg-h200-agentic-256K-kv-router/deploy.yaml` |
+| H200 | 1M | Aggregated | 2 × TP8 | 32 | `vllm/agg-h200-agentic-1M-kv-router/deploy.yaml` |
+| B200 | 256K | Disaggregated | 1P TP4 + 2D TP4 | 144 | `vllm/disagg-b200-agentic-256K/deploy.yaml` |
+| B200 | 1M | Disaggregated | 1P TP4 + 1D TP4 | 38 | `vllm/disagg-b200-agentic-1M/deploy.yaml` |
+| GB200 | 256K | Disaggregated | 1P TP4 + 2D TP4 | 140 | `vllm/disagg-gb200-agentic-256K/deploy.yaml` |
+| GB200 | 1M | Disaggregated | 1P TP4 + 1D TP4 | 48 | `vllm/disagg-gb200-agentic-1M/deploy.yaml` |
+| H200 | 256K | Disaggregated | 1P TP8 + 2D TP8 | 72 | `vllm/disagg-h200-agentic-256K/deploy.yaml` |
+| H200 | 1M | Disaggregated | 1P TP8 + 1D TP8 | 30 | `vllm/disagg-h200-agentic-1M/deploy.yaml` |
 
 The B200 and GB200 256K disaggregated profiles use FlashInfer attention; the H200 256K profile uses
 FlashAttention. B200 and H200 use UCX/RDMA with `rdma/ib` resources. GB200 uses GKE multi-network
@@ -96,8 +96,8 @@ Deploy an aggregated profile:
 
 ```bash
 GPU=h200       # b200, gb200, or h200
-CONTEXT=256k   # 256k or 1m
-PROFILE=agg-${GPU}-agentic-${CONTEXT}-2w-kv
+CONTEXT=256K   # 256K or 1M
+PROFILE=agg-${GPU}-agentic-${CONTEXT}-kv-router
 
 kubectl apply \
   -f recipes/nemotron-3-ultra/vllm/${PROFILE}/deploy.yaml \
@@ -108,11 +108,7 @@ Deploy the selected disaggregated profile. The qualified 256K topology is 1P2D; 
 topology is 1P1D:
 
 ```bash
-case "${CONTEXT}" in
-  256k) SHAPE=1p2d ;;
-  1m) SHAPE=1p1d ;;
-esac
-PROFILE=disagg-${GPU}-agentic-${CONTEXT}-${SHAPE}
+PROFILE=disagg-${GPU}-agentic-${CONTEXT}
 
 kubectl apply \
   -f recipes/nemotron-3-ultra/vllm/${PROFILE}/deploy.yaml \
@@ -132,7 +128,7 @@ Forward the selected deployment's frontend service. For example:
 
 ```bash
 kubectl port-forward \
-  svc/ultra-agg-h200-256k-2w-kv-frontend 8000:8000 \
+  svc/ultra-agg-h200-256k-kv-router-frontend 8000:8000 \
   -n ${NAMESPACE}
 ```
 

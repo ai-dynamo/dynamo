@@ -42,9 +42,9 @@ spec:
         - name: JOB_NAME
           value: perf-nemotron-ultra
         - name: DGD_NAME
-          value: ultra-agg-h200-256k-2w-kv
+          value: ultra-agg-h200-256k-kv-router
         - name: ENDPOINT
-          value: ultra-agg-h200-256k-2w-kv-frontend:8000
+          value: ultra-agg-h200-256k-kv-router-frontend:8000
         - name: CONTEXT
           value: 256k
         - name: CONCURRENCY

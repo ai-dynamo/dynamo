@@ -16,14 +16,14 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: ultra-disagg-gb200-256k-1p2d
+  name: ultra-disagg-gb200-256k
   annotations:
     nemotron-ultra.nvidia.com/mtp: disabled
     nemotron-ultra.nvidia.com/prefix-caching: enabled
     nemotron-ultra.nvidia.com/transport: ucx-rdma-gke-extended-resources
     nemotron-ultra.nvidia.com/async-scheduling: enabled
   labels:
-    app.kubernetes.io/name: ultra-disagg-gb200-256k-1p2d
+    app.kubernetes.io/name: ultra-disagg-gb200-256k
     app.kubernetes.io/part-of: nemotron-3-ultra
     nemotron-ultra.nvidia.com/sku: gb200
     nemotron-ultra.nvidia.com/backend: vllm

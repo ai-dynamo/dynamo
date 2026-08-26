@@ -16,18 +16,18 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: ultra-disagg-b200-1m-1p1d
+  name: ultra-disagg-b200-256k
   annotations:
     nemotron-ultra.nvidia.com/mtp: disabled
     nemotron-ultra.nvidia.com/prefix-caching: enabled
     nemotron-ultra.nvidia.com/async-scheduling: enabled
   labels:
-    app.kubernetes.io/name: ultra-disagg-b200-1m-1p1d
+    app.kubernetes.io/name: ultra-disagg-b200-256k
     app.kubernetes.io/part-of: nemotron-3-ultra
     nemotron-ultra.nvidia.com/sku: b200
     nemotron-ultra.nvidia.com/backend: vllm
-    nemotron-ultra.nvidia.com/topology: 1p1d-tp4
-    nemotron-ultra.nvidia.com/context: 1m
+    nemotron-ultra.nvidia.com/topology: 1p2d-tp4
+    nemotron-ultra.nvidia.com/context: 256k
     nemotron-ultra.nvidia.com/workload: agentic
 spec:
   backendFramework: vllm
@@ -70,8 +70,6 @@ spec:
     value: DS
   - name: VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE
     value: '1'
-  - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
-    value: '1'
   - name: DYN_VLLM_APPEND_PREFILL_OUTPUT_TOKENS
     value: '0'
   - name: NCCL_CUMEM_ENABLE
@@ -90,8 +88,8 @@ spec:
       metadata:
         labels:
           nemotron-ultra.nvidia.com/role: frontend
-          nemotron-ultra.nvidia.com/topology: 1p1d-tp4
-          nemotron-ultra.nvidia.com/recipe: ultra-disagg-b200-1m-1p1d
+          nemotron-ultra.nvidia.com/topology: 1p2d-tp4
+          nemotron-ultra.nvidia.com/recipe: ultra-disagg-b200-256k
       spec:
         containers:
         - name: main
@@ -149,8 +147,8 @@ spec:
       metadata:
         labels:
           nemotron-ultra.nvidia.com/role: prefill
-          nemotron-ultra.nvidia.com/topology: 1p1d-tp4
-          nemotron-ultra.nvidia.com/recipe: ultra-disagg-b200-1m-1p1d
+          nemotron-ultra.nvidia.com/topology: 1p2d-tp4
+          nemotron-ultra.nvidia.com/recipe: ultra-disagg-b200-256k
       spec:
         runtimeClassName: nvidia
         nodeSelector:
@@ -195,10 +193,13 @@ spec:
               --no-enable-expert-parallel \
               --trust-remote-code \
               --kv-cache-dtype fp8 \
-              --max-model-len 1048576 \
+              --max-model-len 262144 \
               --max-num-seqs 256 \
-              --max-num-batched-tokens 49152 \
+              --max-num-batched-tokens 32768 \
               --gpu-memory-utilization 0.9 \
+              --attention-backend FLASHINFER \
+              --linear-backend cutlass \
+              --moe-backend flashinfer_trtllm \
               --block-size 64 \
               --mamba-backend triton \
               --no-enable-flashinfer-autotune \
@@ -286,14 +287,14 @@ spec:
             medium: Memory
   - name: VllmDecodeWorker
     type: decode
-    replicas: 1
+    replicas: 2
     sharedMemorySize: 64Gi
     podTemplate:
       metadata:
         labels:
           nemotron-ultra.nvidia.com/role: decode
-          nemotron-ultra.nvidia.com/topology: 1p1d-tp4
-          nemotron-ultra.nvidia.com/recipe: ultra-disagg-b200-1m-1p1d
+          nemotron-ultra.nvidia.com/topology: 1p2d-tp4
+          nemotron-ultra.nvidia.com/recipe: ultra-disagg-b200-256k
       spec:
         runtimeClassName: nvidia
         nodeSelector:
@@ -338,10 +339,13 @@ spec:
               --no-enable-expert-parallel \
               --trust-remote-code \
               --kv-cache-dtype fp8 \
-              --max-model-len 1048576 \
+              --max-model-len 262144 \
               --max-num-seqs 256 \
-              --max-num-batched-tokens 49152 \
+              --max-num-batched-tokens 32768 \
               --gpu-memory-utilization 0.9 \
+              --attention-backend FLASHINFER \
+              --linear-backend cutlass \
+              --moe-backend flashinfer_trtllm \
               --block-size 64 \
               --mamba-backend triton \
               --no-enable-flashinfer-autotune \

@@ -32,7 +32,7 @@ targets:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 94
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/agg-b200-agentic-256k-2w-kv/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/agg-b200-agentic-256K-kv-router/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
@@ -55,7 +55,7 @@ targets:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 46
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/agg-b200-agentic-1m-2w-kv/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/agg-b200-agentic-1M-kv-router/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
@@ -79,7 +79,7 @@ targets:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 96
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/agg-gb200-agentic-256k-2w-kv/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/agg-gb200-agentic-256K-kv-router/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
@@ -102,7 +102,7 @@ targets:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 48
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/agg-gb200-agentic-1m-2w-kv/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/agg-gb200-agentic-1M-kv-router/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
@@ -126,7 +126,7 @@ targets:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 64
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/agg-h200-agentic-256k-2w-kv/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/agg-h200-agentic-256K-kv-router/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
@@ -149,7 +149,7 @@ targets:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 32
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/agg-h200-agentic-1m-2w-kv/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/agg-h200-agentic-1M-kv-router/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
@@ -174,7 +174,7 @@ targets:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 144
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/disagg-b200-agentic-256k-1p2d/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/disagg-b200-agentic-256K/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
@@ -199,7 +199,7 @@ targets:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 38
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/disagg-b200-agentic-1m-1p1d/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/disagg-b200-agentic-1M/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
@@ -224,7 +224,7 @@ targets:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 140
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/disagg-gb200-agentic-256k-1p2d/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/disagg-gb200-agentic-256K/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
@@ -249,7 +249,7 @@ targets:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 48
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/disagg-gb200-agentic-1m-1p1d/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/disagg-gb200-agentic-1M/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
@@ -274,7 +274,7 @@ targets:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 256K context, reference concurrency 72
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/disagg-h200-agentic-256k-1p2d/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/disagg-h200-agentic-256K/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml
@@ -299,7 +299,7 @@ targets:
     type: agentic
     traffic: 64K/400 agentic Moontrace replay, 1M context, reference concurrency 30
   deploy:
-    asset: recipes/nemotron-3-ultra/vllm/disagg-h200-agentic-1m-1p1d/deploy.yaml
+    asset: recipes/nemotron-3-ultra/vllm/disagg-h200-agentic-1M/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/nemotron-3-ultra/perf/perf.yaml

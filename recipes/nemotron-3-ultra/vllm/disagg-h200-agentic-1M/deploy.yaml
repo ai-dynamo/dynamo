@@ -16,13 +16,13 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: ultra-disagg-h200-1m-1p1d
+  name: ultra-disagg-h200-1m
   annotations:
     nemotron-ultra.nvidia.com/mtp: disabled
     nemotron-ultra.nvidia.com/prefix-caching: enabled
     nemotron-ultra.nvidia.com/async-scheduling: enabled
   labels:
-    app.kubernetes.io/name: ultra-disagg-h200-1m-1p1d
+    app.kubernetes.io/name: ultra-disagg-h200-1m
     app.kubernetes.io/part-of: nemotron-3-ultra
     nemotron-ultra.nvidia.com/sku: h200
     nemotron-ultra.nvidia.com/backend: vllm
@@ -91,7 +91,7 @@ spec:
         labels:
           nemotron-ultra.nvidia.com/role: frontend
           nemotron-ultra.nvidia.com/topology: 1p1d-tp8
-          nemotron-ultra.nvidia.com/recipe: ultra-disagg-h200-1m-1p1d
+          nemotron-ultra.nvidia.com/recipe: ultra-disagg-h200-1m
       spec:
         containers:
         - name: main
@@ -150,7 +150,7 @@ spec:
         labels:
           nemotron-ultra.nvidia.com/role: prefill
           nemotron-ultra.nvidia.com/topology: 1p1d-tp8
-          nemotron-ultra.nvidia.com/recipe: ultra-disagg-h200-1m-1p1d
+          nemotron-ultra.nvidia.com/recipe: ultra-disagg-h200-1m
       spec:
         runtimeClassName: nvidia
         nodeSelector:
@@ -295,7 +295,7 @@ spec:
         labels:
           nemotron-ultra.nvidia.com/role: decode
           nemotron-ultra.nvidia.com/topology: 1p1d-tp8
-          nemotron-ultra.nvidia.com/recipe: ultra-disagg-h200-1m-1p1d
+          nemotron-ultra.nvidia.com/recipe: ultra-disagg-h200-1m
       spec:
         runtimeClassName: nvidia
         nodeSelector:
