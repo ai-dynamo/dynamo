@@ -1774,6 +1774,7 @@ class KvRouterConfig:
         use_remote_indexer: bool = False,
         serve_indexer: bool = False,
         enable_session_prefix_index: bool = False,
+        session_prefix_index_max_sessions: int = 16384,
         shared_cache_multiplier: float = 0.0,
         shared_cache_type: str = "none",
         router_predicted_ttl_secs: Optional[float] = None,
@@ -1851,6 +1852,7 @@ class KvRouterConfig:
             enable_session_prefix_index: Track per-session block lineage in a logical prefix index that outlives engine cache eviction (default: False).
                 The index records routing-lookup matches for inspection but does not influence routing decisions. Stored-block KV events carry no session ID, so blocks a session produced but never matched on a later lookup are not recorded.
                 The index neither holds nor restores KV cache. Each frontier retains at most 1,024 lineage nodes. Finalized query-only sessions remain until least-recently-used eviction; other finalized sessions are released, and the tracked-session cap evicts the least recently used session.
+            session_prefix_index_max_sessions: Maximum sessions retained by the logical prefix index before least-recently-used eviction (default: 16384). Zero is clamped to one.
             shared_cache_multiplier: Credit multiplier for shared cache hits beyond the device prefix (default: 0.0).
             shared_cache_type: External shared KV cache type, "none" or "hicache" (default: "none").
             conditional_disagg_enabled: Enable conditional-disagg bypass from prefill to decode (default: False).

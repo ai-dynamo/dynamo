@@ -637,6 +637,8 @@ struct KvRouterConfigSerde {
     serve_indexer: bool,
     #[serde(default)]
     enable_session_prefix_index: bool,
+    #[serde(default = "default_session_prefix_index_max_sessions")]
+    session_prefix_index_max_sessions: usize,
     shared_cache_multiplier: f64,
     shared_cache_type: SharedCacheType,
     router_predicted_ttl_secs: Option<f64>,
@@ -684,6 +686,7 @@ impl Default for KvRouterConfigSerde {
             use_remote_indexer: config.use_remote_indexer,
             serve_indexer: config.serve_indexer,
             enable_session_prefix_index: config.enable_session_prefix_index,
+            session_prefix_index_max_sessions: config.session_prefix_index_max_sessions,
             shared_cache_multiplier: config.shared_cache_multiplier,
             shared_cache_type: config.shared_cache_type,
             router_predicted_ttl_secs: config.router_predicted_ttl_secs,
@@ -837,6 +840,13 @@ pub struct KvRouterConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub enable_session_prefix_index: bool,
 
+    /// Maximum number of sessions retained by the logical prefix index.
+    #[serde(
+        default = "default_session_prefix_index_max_sessions",
+        skip_serializing_if = "is_default_session_prefix_index_max_sessions"
+    )]
+    pub session_prefix_index_max_sessions: usize,
+
     /// Multiplier for shared cache hits when scoring workers (0.0 to 1.0).
     /// Blocks available in the shared cache are less valuable than device-local blocks
     /// because they need to be fetched. A value of 0.5 means each shared cache hit
@@ -895,6 +905,14 @@ fn default_conditional_disagg_eff_isl_threshold() -> usize {
     crate::conditional_disagg::DEFAULT_CONDITIONAL_DISAGG_EFF_ISL_THRESHOLD
 }
 
+fn default_session_prefix_index_max_sessions() -> usize {
+    crate::session_prefix_index::DEFAULT_MAX_SESSIONS
+}
+
+fn is_default_session_prefix_index_max_sessions(value: &usize) -> bool {
+    *value == default_session_prefix_index_max_sessions()
+}
+
 fn default_conditional_disagg_eff_isl_ratio_threshold() -> f64 {
     crate::conditional_disagg::DEFAULT_CONDITIONAL_DISAGG_EFF_ISL_RATIO_THRESHOLD
 }
@@ -941,6 +959,7 @@ impl Default for KvRouterConfig {
             use_remote_indexer: false,
             serve_indexer: false,
             enable_session_prefix_index: false,
+            session_prefix_index_max_sessions: default_session_prefix_index_max_sessions(),
             shared_cache_multiplier: 0.0,
             shared_cache_type: SharedCacheType::default(),
             router_predicted_ttl_secs: None,
@@ -1006,6 +1025,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             use_remote_indexer: compat.use_remote_indexer,
             serve_indexer: compat.serve_indexer,
             enable_session_prefix_index: compat.enable_session_prefix_index,
+            session_prefix_index_max_sessions: compat.session_prefix_index_max_sessions,
             shared_cache_multiplier: compat.shared_cache_multiplier,
             shared_cache_type: compat.shared_cache_type,
             router_predicted_ttl_secs: compat.router_predicted_ttl_secs,

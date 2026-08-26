@@ -27,6 +27,8 @@ from dynamo.common.configuration.utils import (
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_SESSION_PREFIX_INDEX_MAX_SESSIONS = 16_384
+
 # Authoritative field list — used by kv_router_kwargs() to extract values.
 _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "overlap_score_weight",
@@ -58,6 +60,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "use_remote_indexer",
     "serve_indexer",
     "enable_session_prefix_index",
+    "session_prefix_index_max_sessions",
     "shared_cache_multiplier",
     "shared_cache_type",
     "conditional_disagg_enabled",
@@ -220,6 +223,9 @@ class KvRouterConfigBase(ConfigBase):
     use_remote_indexer: bool = False
     serve_indexer: bool = False
     enable_session_prefix_index: bool = False
+    session_prefix_index_max_sessions: int = (
+        _DEFAULT_SESSION_PREFIX_INDEX_MAX_SESSIONS
+    )
     shared_cache_multiplier: float = 0.0
     shared_cache_type: str = "none"
     conditional_disagg_enabled: bool = False
@@ -670,6 +676,18 @@ class KvRouterArgGroup(ArgGroup):
                 "index for routing decisions yet."
             ),
             dest="enable_session_prefix_index",
+        )
+        add_argument(
+            g,
+            flag_name="--router-session-prefix-index-max-sessions",
+            env_var="DYN_ROUTER_SESSION_PREFIX_INDEX_MAX_SESSIONS",
+            default=_DEFAULT_SESSION_PREFIX_INDEX_MAX_SESSIONS,
+            help=(
+                "[EXPERIMENTAL] KV Router: Maximum sessions retained by the logical "
+                "prefix index before least-recently-used eviction. Zero is clamped "
+                "to one."
+            ),
+            arg_type=int,
         )
         add_argument(
             g,

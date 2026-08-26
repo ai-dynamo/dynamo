@@ -784,9 +784,11 @@ where
             None
         };
 
-        let session_prefix_index = kv_router_config
-            .enable_session_prefix_index
-            .then(|| Arc::new(SessionPrefixIndexer::new()));
+        let session_prefix_index = kv_router_config.enable_session_prefix_index.then(|| {
+            Arc::new(SessionPrefixIndexer::with_max_sessions(
+                kv_router_config.session_prefix_index_max_sessions,
+            ))
+        });
 
         tracing::info!("KV Routing initialized");
         let cancellation_token = cancellation_guard.disarm();
