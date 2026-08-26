@@ -17,12 +17,6 @@ from dynamo.common.configuration.groups.kv_router_args import (
 )
 from dynamo.frontend.frontend_args import FrontendArgGroup, FrontendConfig
 
-# Skip collection when the optional pyo3 extension is unavailable.
-KvRouterConfig = pytest.importorskip(
-    "dynamo._core",
-    reason="the compiled dynamo._core binding is not built in this environment",
-).KvRouterConfig
-
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 
@@ -197,6 +191,11 @@ def test_decode_active_request_weight_flows_to_binding_kwargs() -> None:
 
 
 def test_session_prefix_index_is_opt_in_and_reaches_the_binding() -> None:
+    KvRouterConfig = pytest.importorskip(
+        "dynamo._core",
+        reason="the compiled dynamo._core binding is not built in this environment",
+    ).KvRouterConfig
+
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
 
