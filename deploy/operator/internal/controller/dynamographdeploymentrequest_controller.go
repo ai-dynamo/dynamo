@@ -26,9 +26,11 @@ import (
 	"io"
 	"strings"
 	"text/template"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -58,6 +60,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
 )
 
 const (
@@ -135,8 +138,13 @@ const (
 	MessageAIConfiguratorCheckFailed = "AIConfiguratorCheckFailed"
 	MessageProfilingCheckFailed      = "ProfilingCheckFailed"
 	MessageConfigMapNotFound         = "ConfigMap %s not found in namespace %s"
+	MessageDeploymentNameCollision   = "DynamoGraphDeployment %s already exists in namespace %s and was not created by this request (%s). Refusing to adopt it. Delete this DynamoGraphDeploymentRequest and create a new one whose generated deployment uses a free name."
 	MessageConfigMapKeyNotFound      = "key %s not found in ConfigMap %s"
 	MessageModelCachePVCNotFound     = "model cache PVC %s not found in namespace %s"
+
+	// ReasonDeploymentNameCollision marks the terminal failure raised when the DGD
+	// name this request generated is already taken by a deployment it does not own.
+	ReasonDeploymentNameCollision = "DeploymentNameCollision"
 )
 
 var errProfilingOutputNotReady = errors.New("profiling output is not ready")
@@ -833,6 +841,25 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingPhase(ctx contex
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+
+	// Validate the identity of a same-name DGD before this request adopts it.
+	//
+	// The generated-spec annotation is both the gate and the evidence: while it is
+	// non-empty this request has not yet confirmed a DGD of its own, and it still
+	// records what it meant to create. Once clearGeneratedSpecAnnotation empties it
+	// the DGD is confirmed ours and later spec drift is the DGD controller's business,
+	// not a collision.
+	if dgdr.Annotations[AnnotationGeneratedDGDSpec] != "" {
+		generatedDGD, err := r.generatedDGDFromAnnotation(dgdr)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		if matches, mismatchReason := resolveGeneratedDGDIdentity(dgdr, dgd, generatedDGD); !matches {
+			return r.failDeploymentNameCollision(ctx, dgdr, dgd, mismatchReason)
+		}
+	}
+
 	if err := r.clearGeneratedSpecAnnotation(ctx, dgdr); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -963,16 +990,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	logger := log.FromContext(ctx)
 
 	// Extract DGD spec from annotation (stored by generateDGDSpec)
-	dgdSpecYAML, ok := dgdr.Annotations[AnnotationGeneratedDGDSpec]
-	if !ok || dgdSpecYAML == "" {
-		return ctrl.Result{}, fmt.Errorf("generated DGD spec not found in annotation %s", AnnotationGeneratedDGDSpec)
-	}
-
-	generatedDGD, err := r.extractDGDFromYAML([]byte(dgdSpecYAML))
+	generatedDGD, err := r.generatedDGDFromAnnotation(dgdr)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to unmarshal generated deployment from annotation: %w", err)
+		return ctrl.Result{}, err
 	}
-	applyDGDRRuntimeVersionOverride(dgdr, generatedDGD)
 
 	// Determine DGD name and namespace from generated deployment
 	dgdName := generatedDGD.Name
@@ -1021,6 +1042,22 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 
 	if err := r.Create(ctx, dgd); err != nil {
 		if apierrors.IsAlreadyExists(err) {
+			// Identify the object holding the name before waiting on a watch for it.
+			existingDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
+			getErr := r.Get(ctx, types.NamespacedName{Name: dgdName, Namespace: dgdNamespace}, existingDGD)
+			if apierrors.IsNotFound(getErr) {
+				// The cache has not caught up with the object the API server rejected against.
+				logger.Info("DGD already exists but is not observable yet, requeueing", "name", dgdName)
+				return ctrl.Result{RequeueAfter: dgdCollisionRequeueDelay}, nil
+			}
+			if getErr != nil {
+				return ctrl.Result{}, getErr
+			}
+
+			if matches, mismatchReason := resolveGeneratedDGDIdentity(dgdr, existingDGD, generatedDGD); !matches {
+				return r.failDeploymentNameCollision(ctx, dgdr, existingDGD, mismatchReason)
+			}
+
 			// The DGD watch reconciles again after the object is in the informer cache.
 			logger.Info("DGD already exists, waiting for informer observation")
 			return ctrl.Result{}, nil
@@ -1044,6 +1081,123 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 
 	// Keep the generated-spec marker until a cached read observes the DGD.
 	return ctrl.Result{}, nil
+}
+
+// dgdCollisionRequeueDelay paces the retry used when the API server rejects a DGD
+// create as already existing but the cached read cannot see that object yet. The
+// foreign object carries no DGDR labels, so the DGD watch will never deliver it and
+// an explicit requeue is the only way back into the identity check.
+const dgdCollisionRequeueDelay = 5 * time.Second
+
+// generatedDGDFromAnnotation returns the DynamoGraphDeployment this request intends
+// to create, decoded from the generated-spec annotation and carrying the request's
+// runtime version override. The caller must establish that the annotation is present
+// and non-empty; an absent or unparseable annotation is returned as an error rather
+// than an empty deployment, because the two are not interchangeable here.
+//
+// The returned deployment is freshly allocated, so applying the runtime version
+// override mutates only that copy. dgdr is read but never modified.
+func (r *DynamoGraphDeploymentRequestReconciler) generatedDGDFromAnnotation(
+	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+) (*nvidiacomv1beta1.DynamoGraphDeployment, error) {
+	dgdSpecYAML := dgdr.Annotations[AnnotationGeneratedDGDSpec]
+	if dgdSpecYAML == "" {
+		return nil, fmt.Errorf("generated DGD spec not found in annotation %s", AnnotationGeneratedDGDSpec)
+	}
+
+	generatedDGD, err := r.extractDGDFromYAML([]byte(dgdSpecYAML))
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal generated deployment from annotation: %w", err)
+	}
+	applyDGDRRuntimeVersionOverride(dgdr, generatedDGD)
+
+	return generatedDGD, nil
+}
+
+// resolveGeneratedDGDIdentity reports whether liveDGD is the deployment dgdr created
+// from generatedDGD, and when it is not, a short phrase naming the half of the
+// identity contract that failed. All three arguments must be non-nil. The function is
+// read-only: it deep-copies before normalizing and never touches the live object.
+//
+// The contract has two halves and both are required.
+//
+// The tracking labels answer "who created this": they are written only by createDGD
+// and they name the exact request. Alone they are not enough, because a DGD left
+// behind by a deleted-and-recreated DGDR of the same name in the same namespace
+// carries labels that still match while its spec describes an unrelated deployment.
+//
+// The generated spec answers "is this the deployment we asked for": it distinguishes
+// a genuine crash-loop recovery, where the live spec is what this request generated,
+// from an unrelated workload that merely happens to occupy the name. Alone it is not
+// enough either, because two requests can legitimately generate identical specs, and
+// adopting on spec equality alone would let one request take over another's
+// deployment.
+func resolveGeneratedDGDIdentity(
+	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+	liveDGD *nvidiacomv1beta1.DynamoGraphDeployment,
+	generatedDGD *nvidiacomv1beta1.DynamoGraphDeployment,
+) (matches bool, mismatchReason string) {
+	// Require the tracking labels this controller writes on every DGD it creates.
+	if liveDGD.Labels[nvidiacomv1beta1.LabelDGDRName] != dgdr.Name ||
+		liveDGD.Labels[nvidiacomv1beta1.LabelDGDRNamespace] != dgdr.Namespace ||
+		liveDGD.Labels[nvidiacomv1beta1.LabelManagedBy] != nvidiacomv1beta1.LabelValueDynamoOperator {
+		return false, "it does not carry this request's tracking labels"
+	}
+
+	// Require the live spec to be the one this request generated.
+	if !generatedSpecMatches(liveDGD, generatedDGD) {
+		return false, "its spec differs from the spec this request generated"
+	}
+
+	return true, ""
+}
+
+// generatedSpecMatches reports whether liveDGD's spec is the spec generatedDGD
+// describes, tolerating the defaults admission adds on the way in. Both arguments
+// must be non-nil and neither is modified.
+//
+// A strict comparison against the raw generated spec is wrong here. liveDGD has
+// passed through the DGD mutating webhook and so carries defaulted replicas,
+// Grove minimum-available replicas, and provider-override targets that the generated
+// spec never had; comparing the two directly reports a mismatch on every legitimate
+// recovery. Normalizing both sides through the webhook's own defaulting keeps the
+// comparison honest as those defaults grow, and cannot mask a real divergence,
+// because defaulting only fills fields that are unset.
+//
+// The provider comes from the live object's controller-owned annotation rather than
+// from a guess: when it is absent, the provider-conditional defaults are suppressed
+// on both sides instead of being invented for one of them.
+func generatedSpecMatches(liveDGD, generatedDGD *nvidiacomv1beta1.DynamoGraphDeployment) bool {
+	provider, providerSelected := liveDGD.Annotations[consts.KubeAnnotationWorkloadProvider]
+
+	// Normalize copies of both sides through the same defaults before comparing.
+	normalizedLive := liveDGD.DeepCopy()
+	normalizedGenerated := generatedDGD.DeepCopy()
+	defaulting.ApplySpecDefaults(normalizedLive, provider, providerSelected)
+	defaulting.ApplySpecDefaults(normalizedGenerated, provider, providerSelected)
+
+	return apiequality.Semantic.DeepEqual(normalizedLive.Spec, normalizedGenerated.Spec)
+}
+
+// failDeploymentNameCollision drives the request terminal because the DGD name it
+// generated is held by a deployment it does not own. The status-only write preserves
+// the generated-spec annotation, so the evidence of what this request intended to
+// create survives for an operator to inspect.
+func (r *DynamoGraphDeploymentRequestReconciler) failDeploymentNameCollision(
+	ctx context.Context,
+	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+	liveDGD *nvidiacomv1beta1.DynamoGraphDeployment,
+	mismatchReason string,
+) (ctrl.Result, error) {
+	message := fmt.Sprintf(MessageDeploymentNameCollision, liveDGD.Name, dgdr.Namespace, mismatchReason)
+
+	log.FromContext(ctx).Info("Refusing to adopt an existing DGD that failed the DGDR identity contract",
+		"dgd", liveDGD.Name, "namespace", dgdr.Namespace, "reason", mismatchReason)
+	r.Recorder.Eventf(dgdr, liveDGD, corev1.EventTypeWarning, ReasonDeploymentNameCollision, "Get", "%s", message)
+
+	return r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed,
+		nvidiacomv1beta1.ConditionTypeDeploymentReady, metav1.ConditionFalse,
+		ReasonDeploymentNameCollision, message)
 }
 
 // clearGeneratedSpecAnnotation marks the DGD as observed in the informer cache.

@@ -83,6 +83,40 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	// Resolve the authoritative or creation-time provider before applying component defaults.
 	provider, providerSelected := defaultWorkloadProvider(ctx, dgd, req.Operation)
 
+	ApplySpecDefaults(dgd, provider, providerSelected)
+
+	// Stamp creation provenance independently from level-based provider defaulting.
+	if req.Operation == admissionv1.Create {
+		// Stamp operator version on creation (don't overwrite if already set)
+		if _, exists := dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; !exists {
+			dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = d.OperatorVersion
+			logger.Info("stamped operator origin version on DGD",
+				"name", dgd.Name,
+				"namespace", dgd.Namespace,
+				"version", d.OperatorVersion)
+		}
+	}
+
+	return nil
+}
+
+// ApplySpecDefaults applies every spec-level default this webhook owns to dgd, in
+// place: nil component replicas, Grove's minimum available replicas, and the
+// provider target of each provider-override context. dgd must not be nil. Pass
+// providerSelected false when the provider is unknown, which suppresses the
+// provider-conditional defaults rather than guessing at them.
+//
+// This is exported because the DGDR controller has to recognize a
+// DynamoGraphDeployment it created earlier by comparing the live object against the
+// spec it generated. The live object has been through this webhook and the
+// generated spec has not, so the controller normalizes both through this function
+// before comparing them. Keeping one implementation means a default added here
+// cannot silently turn a legitimate recovery into a name collision there.
+//
+// Every default is additive and idempotent: it fills a field that is unset and
+// leaves a set field alone. Callers may therefore apply it to an object that has
+// already passed admission.
+func ApplySpecDefaults(dgd *nvidiacomv1beta1.DynamoGraphDeployment, provider string, providerSelected bool) {
 	// Persist the root target only when this provider context resolves unambiguously.
 	if dgd.Spec.ProviderOverride != nil {
 		provideroverride.DefaultTarget(dgd.Spec.ProviderOverride, provider, provideroverride.ScopeRoot, nil)
@@ -133,20 +167,6 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 			}
 		}
 	}
-
-	// Stamp creation provenance independently from level-based provider defaulting.
-	if req.Operation == admissionv1.Create {
-		// Stamp operator version on creation (don't overwrite if already set)
-		if _, exists := dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; !exists {
-			dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = d.OperatorVersion
-			logger.Info("stamped operator origin version on DGD",
-				"name", dgd.Name,
-				"namespace", dgd.Namespace,
-				"version", d.OperatorVersion)
-		}
-	}
-
-	return nil
 }
 
 func defaultWorkloadProvider(
