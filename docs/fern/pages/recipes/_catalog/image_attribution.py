@@ -242,9 +242,12 @@ def _period_ownership(recipe_id, periods):
         if not isinstance(period, dict) or not isinstance(period.get("image"), str):
             continue
         start = period.get("effective_from")
-        if start is None or isinstance(start, str):
-            end = period.get("effective_to")
-            ownership.append((period["image"], start or "0001-01-01", end, recipe_id))
+        if isinstance(start, date):
+            start = start.isoformat()
+        elif not isinstance(start, str):
+            start = "0001-01-01"
+        end = period.get("effective_to")
+        ownership.append((period["image"], start or "0001-01-01", end, recipe_id))
     return ownership
 
 

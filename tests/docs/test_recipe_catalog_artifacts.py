@@ -302,11 +302,11 @@ def test_recipe_image_validation_rejects_duplicate_ownership() -> None:
 def _period_artifacts(
     image: str,
     revision: str,
-    start: str = "",
+    start: object = "",
     end: str = "",
     current: bool = False,
 ) -> dict[str, object]:
-    period: dict[str, str] = {"image": image, "source_revision": revision}
+    period: dict[str, object] = {"image": image, "source_revision": revision}
     if start:
         period["effective_from"] = start
     if end:
@@ -368,6 +368,19 @@ def test_recipe_image_validation_rejects_same_start_overlapping_periods() -> Non
     assert any(
         "overlapping ownership periods" in error for error in catalog_validate.ERRORS
     )
+
+
+def test_recipe_image_validation_tracks_unquoted_start_for_overlap() -> None:
+    image = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-overlap-dev.1"
+    unquoted_start = yaml.safe_load("effective_from: 2026-01-01")["effective_from"]
+    entries = {
+        "recipe-a": {"artifacts": _period_artifacts(image, "a" * 40, unquoted_start)},
+        "recipe-b": {"artifacts": _period_artifacts(image, "b" * 40, "2026-01-01")},
+    }
+
+    errors = catalog_validate._image_attribution.recipe_image_ownership_errors(entries)
+
+    assert any("overlapping ownership periods" in error for error in errors)
 
 
 def test_recipe_image_validation_rejects_empty_ownership_periods() -> None:
