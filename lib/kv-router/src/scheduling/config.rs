@@ -1205,14 +1205,26 @@ impl KvRouterConfig {
                 worker_types.push(worker_type);
             }
         };
-        if let Some(config) = policy_config {
-            push_if_custom(WorkerType::Aggregated, config.aggregated_instance());
-            push_if_custom(WorkerType::Prefill, config.prefill_instance());
-            push_if_custom(WorkerType::Decode, config.decode_instance());
-            push_if_custom(WorkerType::Encode, config.encode_instance());
-        }
-        push_if_custom(WorkerType::Prefill, self.router_prefill_policy.as_deref());
-        push_if_custom(WorkerType::Decode, self.router_decode_policy.as_deref());
+        push_if_custom(
+            WorkerType::Aggregated,
+            policy_config.and_then(|config| config.aggregated_instance()),
+        );
+        push_if_custom(
+            WorkerType::Prefill,
+            self.router_prefill_policy
+                .as_deref()
+                .or_else(|| policy_config.and_then(|config| config.prefill_instance())),
+        );
+        push_if_custom(
+            WorkerType::Decode,
+            self.router_decode_policy
+                .as_deref()
+                .or_else(|| policy_config.and_then(|config| config.decode_instance())),
+        );
+        push_if_custom(
+            WorkerType::Encode,
+            policy_config.and_then(|config| config.encode_instance()),
+        );
         Ok(worker_types)
     }
 
@@ -1971,16 +1983,6 @@ worker_selection:
         );
 
         assert_eq!(
-            config.explicit_worker_selection_policy_types().unwrap(),
-            vec![
-                WorkerType::Aggregated,
-                WorkerType::Prefill,
-                WorkerType::Decode,
-                WorkerType::Encode,
-            ]
-        );
-
-        assert_eq!(
             config
                 .selected_worker_selection_policy_instance_for(WorkerType::Encode)
                 .unwrap(),
@@ -2004,23 +2006,33 @@ worker_selection:
             router_decode_policy: Some("default".to_string()),
             ..Default::default()
         };
-        assert!(
-            default_config
-                .explicit_worker_selection_policy_types()
-                .unwrap()
-                .is_empty()
-        );
-
         let prefill_only_config = KvRouterConfig {
             router_prefill_policy: Some("custom".to_string()),
             ..Default::default()
         };
-        assert_eq!(
-            prefill_only_config
-                .explicit_worker_selection_policy_types()
-                .unwrap(),
-            vec![WorkerType::Prefill]
-        );
+        for (name, config, expected) in [
+            (
+                "stage default disables YAML policy",
+                &config,
+                vec![
+                    WorkerType::Aggregated,
+                    WorkerType::Prefill,
+                    WorkerType::Encode,
+                ],
+            ),
+            ("defaults only", &default_config, Vec::new()),
+            (
+                "prefill override only",
+                &prefill_only_config,
+                vec![WorkerType::Prefill],
+            ),
+        ] {
+            assert_eq!(
+                config.explicit_worker_selection_policy_types().unwrap(),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     #[test]

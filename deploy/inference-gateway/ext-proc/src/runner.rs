@@ -146,6 +146,51 @@ fn init_tracing() {
         .try_init();
 }
 
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use dynamo_kv_router::WorkerSelectionPolicyFactory;
+    use dynamo_kv_router::services::selection::WorkerSelectionPolicyProviderError;
+
+    use super::*;
+    use crate::epp_standalone_config::{DYN_EPP_MODE, DYNAMO_RUNTIME_MODE};
+
+    static EPP_MODE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[tokio::test]
+    async fn linked_policy_registry_requires_standalone_mode() {
+        let mut registry = WorkerSelectionPolicyRegistry::default();
+        registry
+            .register(
+                "test",
+                Arc::new(
+                    |_| -> std::result::Result<
+                        WorkerSelectionPolicyFactory,
+                        WorkerSelectionPolicyProviderError,
+                    > {
+                        Err(WorkerSelectionPolicyProviderError::new("not invoked"))
+                    },
+                ),
+            )
+            .unwrap();
+
+        let _lock = EPP_MODE_ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os(DYN_EPP_MODE);
+        unsafe { std::env::set_var(DYN_EPP_MODE, DYNAMO_RUNTIME_MODE) };
+        let result = run(Some(registry)).await;
+        match previous {
+            Some(value) => unsafe { std::env::set_var(DYN_EPP_MODE, value) },
+            None => unsafe { std::env::remove_var(DYN_EPP_MODE) },
+        }
+
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "linked worker-selection policies require DYN_EPP_MODE=standalone"
+        );
+    }
+}
+
 /// Wait for SIGTERM (kubelet pod termination) or SIGINT (Ctrl-C).
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]

@@ -238,7 +238,7 @@ impl FactoryRendezvous {
     }
 }
 
-async fn native_policy_app<F>(factory: F) -> Router
+async fn native_policy_app<F>(worker_type: crate::WorkerType, factory: F) -> Router
 where
     F: for<'a> Fn(
             &crate::config::KvRouterConfig,
@@ -250,17 +250,12 @@ where
         + 'static,
 {
     let mut policy_file = NamedTempFile::new().expect("create worker-selection policy config");
-    policy_file
-        .write_all(
-            br#"
-worker_selection:
-  aggregated: test
-  instances:
-    - name: test
-      type: test
-"#,
-        )
-        .expect("write worker-selection policy config");
+    write!(
+        policy_file,
+        "\nworker_selection:\n  {}: test\n  instances:\n    - name: test\n      type: test\n",
+        worker_type.as_str(),
+    )
+    .expect("write worker-selection policy config");
     let config = crate::config::KvRouterConfig {
         router_policy_config: Some(policy_file.path().display().to_string()),
         ..test_config()
@@ -276,7 +271,7 @@ worker_selection:
         )
         .expect("register test worker-selection policy");
 
-    let service = SelectionServiceBuilder::new(config, crate::WorkerType::Aggregated, registry)
+    let service = SelectionServiceBuilder::new(config, worker_type, registry)
         .indexer_threads(1)
         .build()
         .await
@@ -316,19 +311,22 @@ async fn custom_worker_selection_policy_is_per_partition_composes_filter_scorer_
     let partitions = Arc::clone(&factory_partitions);
     let worker_types = Arc::clone(&factory_worker_types);
     let rendezvous = Arc::clone(&factory_rendezvous);
-    let app = native_policy_app(move |config, worker_type, partition| {
-        calls.fetch_add(1, Ordering::Relaxed);
-        partitions.lock().unwrap().push(partition.into_owned());
-        worker_types.lock().unwrap().push(worker_type);
-        rendezvous.wait_for_peer();
-        WorkerSelectionPolicy::new_with_filters(
-            config.clone(),
-            worker_type.as_str(),
-            vec![Box::new(RejectWorker(1))],
-            vec![Box::new(WorkerIdScorer)],
-            Box::new(LowestCostPicker),
-        )
-    })
+    let app = native_policy_app(
+        crate::WorkerType::Prefill,
+        move |config, worker_type, partition| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            partitions.lock().unwrap().push(partition.into_owned());
+            worker_types.lock().unwrap().push(worker_type);
+            rendezvous.wait_for_peer();
+            WorkerSelectionPolicy::new_with_filters(
+                config.clone(),
+                worker_type.as_str(),
+                vec![Box::new(RejectWorker(1))],
+                vec![Box::new(WorkerIdScorer)],
+                Box::new(LowestCostPicker),
+            )
+        },
+    )
     .await;
 
     let model_registration = tokio::spawn(register_worker_id(app.clone(), 1, None));
@@ -385,20 +383,23 @@ async fn custom_worker_selection_policy_is_per_partition_composes_filter_scorer_
     assert_eq!(factory_calls.load(Ordering::Relaxed), 2);
     assert_eq!(
         *factory_worker_types.lock().unwrap(),
-        vec![crate::WorkerType::Aggregated; 2]
+        vec![crate::WorkerType::Prefill; 2]
     );
 }
 
 #[tokio::test]
 async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking() {
-    let app = native_policy_app(|config, worker_type, _partition| {
-        WorkerSelectionPolicy::new(
-            config.clone(),
-            worker_type.as_str(),
-            vec![Box::new(NonFiniteScorer)],
-            Box::new(LowestCostPicker),
-        )
-    })
+    let app = native_policy_app(
+        crate::WorkerType::Aggregated,
+        |config, worker_type, _partition| {
+            WorkerSelectionPolicy::new(
+                config.clone(),
+                worker_type.as_str(),
+                vec![Box::new(NonFiniteScorer)],
+                Box::new(LowestCostPicker),
+            )
+        },
+    )
     .await;
     assert_eq!(
         register_worker_id(app.clone(), 1, None).await.status(),
@@ -423,14 +424,17 @@ async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking(
 
 #[tokio::test]
 async fn native_worker_selection_policy_rejects_invalid_rows_before_booking() {
-    let app = native_policy_app(|config, worker_type, _partition| {
-        WorkerSelectionPolicy::new(
-            config.clone(),
-            worker_type.as_str(),
-            Vec::new(),
-            Box::new(InvalidRowPicker),
-        )
-    })
+    let app = native_policy_app(
+        crate::WorkerType::Aggregated,
+        |config, worker_type, _partition| {
+            WorkerSelectionPolicy::new(
+                config.clone(),
+                worker_type.as_str(),
+                Vec::new(),
+                Box::new(InvalidRowPicker),
+            )
+        },
+    )
     .await;
     assert_eq!(
         register_worker_id(app.clone(), 1, None).await.status(),
@@ -455,15 +459,18 @@ async fn native_worker_selection_policy_rejects_invalid_rows_before_booking() {
 
 #[tokio::test]
 async fn worker_selection_filter_returns_unavailable_without_booking() {
-    let app = native_policy_app(|config, worker_type, _partition| {
-        WorkerSelectionPolicy::new_with_filters(
-            config.clone(),
-            worker_type.as_str(),
-            vec![Box::new(RejectAllFilter)],
-            Vec::new(),
-            Box::new(LowestCostPicker),
-        )
-    })
+    let app = native_policy_app(
+        crate::WorkerType::Aggregated,
+        |config, worker_type, _partition| {
+            WorkerSelectionPolicy::new_with_filters(
+                config.clone(),
+                worker_type.as_str(),
+                vec![Box::new(RejectAllFilter)],
+                Vec::new(),
+                Box::new(LowestCostPicker),
+            )
+        },
+    )
     .await;
     assert_eq!(
         register_worker_id(app.clone(), 1, None).await.status(),

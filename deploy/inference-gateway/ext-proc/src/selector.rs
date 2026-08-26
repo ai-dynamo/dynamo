@@ -378,42 +378,15 @@ impl Drop for Selector {
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::services::selection::{
-        WorkerSelectionPolicyParameters, WorkerSelectionPolicyProviderError,
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use dynamo_kv_router::services::selection::WorkerSelectionPolicyParameters;
     use dynamo_kv_router::{
         WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
         WorkerSelectionPolicyError, WorkerSelectionPolicyFactory,
     };
 
     use super::*;
-
-    struct FirstEligiblePicker;
-
-    impl WorkerPicker for FirstEligiblePicker {
-        fn pick(
-            &mut self,
-            _context: &WorkerSelectionContext<'_>,
-            input: WorkerInputView<'_>,
-        ) -> Result<usize, WorkerSelectionPolicyError> {
-            assert!(!input.candidates().is_empty());
-            Ok(0)
-        }
-    }
-
-    fn first_eligible_provider(
-        _parameters: &WorkerSelectionPolicyParameters,
-    ) -> std::result::Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
-        Ok(Arc::new(|config, worker_type, _partition| {
-            assert_eq!(worker_type, WorkerType::Aggregated);
-            WorkerSelectionPolicy::new(
-                config.clone(),
-                worker_type.as_str(),
-                Vec::new(),
-                Box::new(FirstEligiblePicker),
-            )
-        }))
-    }
 
     fn model_policy_file() -> tempfile::NamedTempFile {
         let policy_file = tempfile::NamedTempFile::new().expect("create policy file");
@@ -550,6 +523,19 @@ models:
 
     #[tokio::test]
     async fn registered_policy_runs_through_reservation() {
+        struct FirstEligiblePicker;
+
+        impl WorkerPicker for FirstEligiblePicker {
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                assert!(!input.candidates().is_empty());
+                Ok(0)
+            }
+        }
+
         let policy_file = tempfile::NamedTempFile::new().expect("create policy file");
         std::fs::write(
             policy_file.path(),
@@ -563,9 +549,33 @@ worker_selection:
 "#,
         )
         .expect("write policy file");
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls = Arc::new(AtomicUsize::new(0));
         let mut registry = WorkerSelectionPolicyRegistry::default();
         registry
-            .register("first-eligible", Arc::new(first_eligible_provider))
+            .register(
+                "first-eligible",
+                Arc::new({
+                    let provider_calls = Arc::clone(&provider_calls);
+                    let factory_calls = Arc::clone(&factory_calls);
+                    move |_parameters: &WorkerSelectionPolicyParameters| {
+                        provider_calls.fetch_add(1, Ordering::Relaxed);
+                        let factory_calls = Arc::clone(&factory_calls);
+                        let factory: WorkerSelectionPolicyFactory =
+                            Arc::new(move |config, worker_type, _partition| {
+                                factory_calls.fetch_add(1, Ordering::Relaxed);
+                                assert_eq!(worker_type, WorkerType::Aggregated);
+                                WorkerSelectionPolicy::new(
+                                    config.clone(),
+                                    worker_type.as_str(),
+                                    Vec::new(),
+                                    Box::new(FirstEligiblePicker),
+                                )
+                            });
+                        Ok(factory)
+                    }
+                }),
+            )
             .expect("register policy provider");
         let selector = Selector::new_with_kv_router_config(
             &test_config(),
@@ -574,10 +584,13 @@ worker_selection:
         )
         .await
         .expect("custom selection service should build");
+        assert_eq!(provider_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(factory_calls.load(Ordering::Relaxed), 0);
         selector
             .reconcile(&[schedulable_registration(1)])
             .await
             .expect("worker should register");
+        assert_eq!(factory_calls.load(Ordering::Relaxed), 1);
 
         let response = selector
             .select_and_reserve(select_request("custom-policy"))
