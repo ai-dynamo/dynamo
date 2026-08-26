@@ -557,10 +557,16 @@ impl SharedTcpServer {
 
     pub async fn unregister_endpoint(&self, endpoint_path: &str, endpoint_name: &str) {
         if let Some((_, handler)) = self.handlers.remove(endpoint_path) {
-            handler
-                .system_health
-                .lock()
-                .set_endpoint_health_status(endpoint_name, crate::HealthStatus::NotReady);
+            let has_another_registration = self.handlers.iter().any(|entry| {
+                entry.endpoint_name == endpoint_name
+                    && Arc::ptr_eq(&entry.system_health, &handler.system_health)
+            });
+            if !has_another_registration {
+                handler
+                    .system_health
+                    .lock()
+                    .set_endpoint_health_status(endpoint_name, crate::HealthStatus::NotReady);
+            }
             tracing::info!(
                 endpoint_name = %endpoint_name,
                 endpoint_path = %endpoint_path,
@@ -968,6 +974,10 @@ mod tests {
 
         assert!(!server.handlers.contains_key("1/shared"));
         assert!(server.handlers.contains_key("2/shared"));
+        assert_eq!(
+            system_health.lock().get_endpoint_health_status("shared"),
+            Some(crate::HealthStatus::Ready)
+        );
 
         crate::pipeline::network::ingress::unified_server::RequestPlaneServer::unregister_endpoint(
             server.as_ref(),
@@ -976,6 +986,11 @@ mod tests {
         )
         .await
         .unwrap();
+
+        assert_eq!(
+            system_health.lock().get_endpoint_health_status("shared"),
+            Some(crate::HealthStatus::NotReady)
+        );
     }
 
     #[tokio::test]

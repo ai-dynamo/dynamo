@@ -31,9 +31,9 @@ pub struct NatsMultiplexedServer {
 }
 
 struct EndpointTask {
+    registration: Arc<()>,
     cancel_token: CancellationToken,
-    join_handle: tokio::task::JoinHandle<()>,
-    _endpoint_name: String,
+    join_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl NatsMultiplexedServer {
@@ -56,6 +56,16 @@ impl NatsMultiplexedServer {
             cancellation_token,
         })
     }
+
+    fn remove_reservation(&self, endpoint_with_id: &str, registration: &Arc<()>) {
+        if let dashmap::mapref::entry::Entry::Occupied(entry) =
+            self.handlers.entry(endpoint_with_id.to_string())
+        {
+            if Arc::ptr_eq(&entry.get().registration, registration) {
+                entry.remove();
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -77,8 +87,23 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
             "NatsMultiplexedServer::register_endpoint called"
         );
 
-        // Get the service group from the component registry
-        // Service name format matches Component::service_name(): "{namespace}_{component}" slugified
+        let endpoint_with_id = format!("{}-{:x}", endpoint_name, instance_id);
+        let registration = Arc::new(());
+        let endpoint_cancel = CancellationToken::new();
+
+        match self.handlers.entry(endpoint_with_id.clone()) {
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(EndpointTask {
+                    registration: Arc::clone(&registration),
+                    cancel_token: endpoint_cancel.clone(),
+                    join_handle: None,
+                });
+            }
+            dashmap::mapref::entry::Entry::Occupied(_) => {
+                anyhow::bail!("Endpoint '{endpoint_name}' is already registered for this instance");
+            }
+        }
+
         use crate::transports::nats::Slug;
         let service_name_raw = format!("{}_{}", namespace, component_name);
         let service_name = Slug::slugify(&service_name_raw).to_string();
@@ -89,32 +114,49 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
             "Looking up service group in registry"
         );
 
-        let registry = self.component_registry.inner.lock().await;
-        let service_group = registry
-            .services
-            .get(&service_name)
-            .map(|service| service.group(&service_name))
-            .ok_or_else(|| anyhow::anyhow!("Service '{}' not found in registry", service_name))?;
-        drop(registry);
+        let setup = async {
+            let registry = self.component_registry.inner.lock().await;
+            let service_group = registry
+                .services
+                .get(&service_name)
+                .map(|service| service.group(&service_name))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Service '{}' not found in registry", service_name)
+                })?;
+            drop(registry);
+
+            let service_endpoint =
+                service_group
+                    .endpoint(&endpoint_with_id)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to create NATS endpoint '{}': {}",
+                            endpoint_with_id,
+                            e
+                        )
+                    })?;
+
+            let push_endpoint = PushEndpoint::builder()
+                .service_handler(service_handler)
+                .cancellation_token(endpoint_cancel.clone())
+                .graceful_shutdown(true)
+                .build()
+                .map_err(|e| anyhow::anyhow!("Failed to build NATS push endpoint: {}", e))?;
+
+            Ok::<_, anyhow::Error>((service_endpoint, push_endpoint))
+        }
+        .await;
+
+        let (service_endpoint, push_endpoint) = match setup {
+            Ok(result) => result,
+            Err(error) => {
+                self.remove_reservation(&endpoint_with_id, &registration);
+                return Err(error);
+            }
+        };
 
         tracing::info!("Successfully retrieved service group");
-
-        // Construct the full NATS subject with instance ID
-        // Format: {endpoint_name}-{instance_id_hex}
-        // This matches Endpoint::name_with_id() and subject_to() format
-        let endpoint_with_id = format!("{}-{:x}", endpoint_name, instance_id);
-
-        // Create NATS service endpoint with the full subject
-        let service_endpoint = service_group
-            .endpoint(&endpoint_with_id)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to create NATS endpoint '{}': {}",
-                    endpoint_with_id,
-                    e
-                )
-            })?;
 
         tracing::info!(
             endpoint_name = %endpoint_name,
@@ -125,26 +167,12 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
             "Registering NATS endpoint"
         );
 
-        // Create cancellation token for this specific endpoint
-        let endpoint_cancel = CancellationToken::new();
-        let endpoint_cancel_clone = endpoint_cancel.clone();
-
-        // Build the push endpoint
-        let push_endpoint = PushEndpoint::builder()
-            .service_handler(service_handler)
-            .cancellation_token(endpoint_cancel_clone)
-            .graceful_shutdown(true)
-            .build()
-            .map_err(|e| anyhow::anyhow!("Failed to build NATS push endpoint: {}", e))?;
-
         tracing::info!(
             endpoint_name = %endpoint_name,
             endpoint_with_id = %endpoint_with_id,
             "Starting NATS push endpoint listener (blocking)"
         );
 
-        // Spawn task to handle this endpoint using PushEndpoint
-        // Note: PushEndpoint::start() is a blocking loop that runs until cancelled
         let endpoint_name_clone = endpoint_name.clone();
         let join_handle = tokio::spawn(async move {
             if let Err(e) = push_endpoint
@@ -171,28 +199,23 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
             }
         });
 
-        // Give the endpoint a moment to start listening
-        // This prevents a race condition where discovery registers the endpoint
-        // before NATS is actually ready to receive requests
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-        // Store task info for later cleanup
-        let task = EndpointTask {
-            cancel_token: endpoint_cancel,
-            join_handle,
-            _endpoint_name: endpoint_name.clone(),
-        };
-        let duplicate = match self.handlers.entry(endpoint_with_id.clone()) {
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                entry.insert(task);
-                None
+        match self.handlers.entry(endpoint_with_id.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(mut entry)
+                if Arc::ptr_eq(&entry.get().registration, &registration) =>
+            {
+                entry.insert(EndpointTask {
+                    registration,
+                    cancel_token: endpoint_cancel,
+                    join_handle: Some(join_handle),
+                });
             }
-            dashmap::mapref::entry::Entry::Occupied(_) => Some(task),
-        };
-        if let Some(task) = duplicate {
-            task.cancel_token.cancel();
-            let _ = task.join_handle.await;
-            anyhow::bail!("Endpoint '{endpoint_name}' is already registered for this instance");
+            _ => {
+                endpoint_cancel.cancel();
+                let _ = join_handle.await;
+                anyhow::bail!("Endpoint '{endpoint_name}' was unregistered while starting");
+            }
         }
 
         Ok(())
@@ -205,20 +228,20 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
                 endpoint_name = %endpoint_name,
                 "Unregistering NATS endpoint"
             );
-            // Cancel the token to trigger graceful shutdown
             task.cancel_token.cancel();
 
-            // Wait for the endpoint task to complete (which includes waiting for inflight requests)
             tracing::debug!(
                 endpoint_name = %endpoint_name,
                 "Waiting for NATS endpoint task to complete"
             );
-            if let Err(e) = task.join_handle.await {
-                tracing::warn!(
-                    endpoint_name = %endpoint_name,
-                    error = %e,
-                    "NATS endpoint task panicked during shutdown"
-                );
+            if let Some(join_handle) = task.join_handle {
+                if let Err(e) = join_handle.await {
+                    tracing::warn!(
+                        endpoint_name = %endpoint_name,
+                        error = %e,
+                        "NATS endpoint task panicked during shutdown"
+                    );
+                }
             }
             tracing::info!(
                 endpoint_name = %endpoint_name,
@@ -229,8 +252,6 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
     }
 
     fn address(&self) -> String {
-        // Return NATS server URL from connection info
-        // NATS client doesn't expose server info directly, return generic address
         "nats://connected".to_string()
     }
 
@@ -239,8 +260,6 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
     }
 
     fn is_healthy(&self) -> bool {
-        // Check if NATS client is connected
-        // NATS client doesn't expose connection state directly, assume healthy
         true
     }
 }
