@@ -138,6 +138,18 @@ jobs:
         cuda_version: ${{ fromJson(inputs.cuda_version) }}
     name: ${{ inputs.test_type }} ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
     runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v2' }}
+    env:
+      CONTAINER_WORKSPACE: ${{ inputs.container_workspace }}
+      TEST_SUITE_NAME: ${{ inputs.test_suite_name }}
+      PLATFORM_ARCH: ${{ matrix.platform }}
+      ENABLE_COVERAGE: ${{ inputs.enable_coverage }}
+      KVBM_MLA_BACKEND: ${{ inputs.kvbm_mla_backend }}
+      HF_XET_HIGH_PERFORMANCE: '1'
+      NVME_DIR: /scratch
+      REQUESTED_HF_HOME: /models
+      DYNAMO_TEST_PLATFORM: ${{ matrix.platform }}
+      DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
+      DYNAMO_TEST_FRAMEWORK: ${{ inputs.test_suite_name }}
     container:
       image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
@@ -182,33 +194,45 @@ jobs:
           languages: python
           api_key: ${{ secrets.DD_API_KEY }}
           site: datadoghq.com
-      # Keep all shell work in one runner step. The no-volume container hook
-      # otherwise copies its transient workspace around every composite substep.
-      - name: Run local test suites
+      # Use top-level run steps for readable status while avoiding the nested
+      # boundaries and full-repository staging of the former local action.
+      - name: Run Sanity Check on Runtime Image
+        if: ${{ inputs.run_sanity_check }}
         shell: bash
         env:
-          CONTAINER_WORKSPACE: ${{ inputs.container_workspace }}
-          TEST_SUITE_NAME: ${{ inputs.test_suite_name }}
-          PLATFORM_ARCH: ${{ matrix.platform }}
-          RUN_SANITY_CHECK: ${{ inputs.run_sanity_check }}
-          RUN_CPU_ONLY_TESTS: ${{ inputs.run_cpu_only_tests }}
-          CPU_ONLY_TEST_MARKERS: ${{ inputs.cpu_only_test_markers }}
-          CPU_ONLY_TEST_TIMEOUT_MINUTES: ${{ inputs.cpu_only_test_timeout_minutes }}
-          CPU_PARALLEL_MODE: ${{ inputs.cpu_parallel_mode }}
-          RUN_GPU_TESTS: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests }}
-          GPU_TEST_MARKERS: ${{ inputs.gpu_test_markers }}
-          GPU_TEST_TIMEOUT_MINUTES: ${{ inputs.gpu_test_timeout_minutes }}
-          RUN_GPU_PARALLEL_TESTS: ${{ inputs.run_gpu_parallel_tests }}
-          GPU_PARALLEL_MAX_VRAM_GIB: ${{ inputs.gpu_parallel_max_vram_gib }}
-          ENABLE_COVERAGE: ${{ inputs.enable_coverage }}
-          KVBM_MLA_BACKEND: ${{ inputs.kvbm_mla_backend }}
+          TEST_STAGE: sanity
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/run-local-test-suites.sh"
+
+      - name: Run CPU-only tests (parallelized)
+        if: ${{ inputs.run_cpu_only_tests }}
+        timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
+        shell: bash
+        env:
+          TEST_STAGE: cpu
+          PYTEST_MARKS: ${{ inputs.cpu_only_test_markers }}
+          PARALLEL_MODE: ${{ inputs.cpu_parallel_mode }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_XET_HIGH_PERFORMANCE: '1'
-          NVME_DIR: /scratch
-          REQUESTED_HF_HOME: /models
-          DYNAMO_TEST_PLATFORM: ${{ matrix.platform }}
-          DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
-          DYNAMO_TEST_FRAMEWORK: ${{ inputs.test_suite_name }}
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/run-local-test-suites.sh"
+
+      - name: Run GPU tests (parallel)
+        if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests && inputs.run_gpu_parallel_tests }}
+        timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
+        shell: bash
+        env:
+          TEST_STAGE: gpu-parallel
+          PYTEST_MARKS: ${{ inputs.gpu_test_markers }}
+          MAX_VRAM_GIB: ${{ inputs.gpu_parallel_max_vram_gib }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/run-local-test-suites.sh"
+
+      - name: Run GPU tests (sequential)
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && matrix.platform == 'amd64' && inputs.run_gpu_tests }}
+        timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
+        shell: bash
+        env:
+          TEST_STAGE: gpu-sequential
+          PYTEST_MARKS: ${{ inputs.run_gpu_parallel_tests && format('({0}) and not profiled_vram_gib', inputs.gpu_test_markers) || inputs.gpu_test_markers }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: bash "$GITHUB_WORKSPACE/.github/scripts/run-local-test-suites.sh"
 
       - name: Upload combined JUnit results

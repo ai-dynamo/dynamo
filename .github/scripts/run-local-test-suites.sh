@@ -39,8 +39,6 @@ if [[ ! -d "${CONTAINER_WORKSPACE}" ]]; then
 fi
 
 run_sanity_check() {
-  [[ "${RUN_SANITY_CHECK}" == true ]] || return 0
-
   echo "::group::Runtime image sanity check"
   (
     cd "${CONTAINER_WORKSPACE}"
@@ -52,8 +50,6 @@ run_sanity_check() {
 }
 
 verify_gpu_services() {
-  [[ "${RUN_GPU_TESTS}" == true ]] || return 0
-
   echo "::group::GPU and service checks"
   for attempt in $(seq 1 30); do
     if curl -sf http://localhost:9000/minio/health/live >/dev/null 2>&1; then
@@ -87,7 +83,6 @@ run_suite() {
   local marks=$2
   local parallel_mode=$3
   local max_vram_gib=$4
-  local timeout_minutes=$5
 
   local -a parallel_options
   case "${parallel_mode}" in
@@ -145,7 +140,7 @@ run_suite() {
   (
     cd "${CONTAINER_WORKSPACE}"
     DYNAMO_TEST_TYPE="${suite_name}" \
-      timeout --signal=TERM --kill-after=30s "${timeout_minutes}m" "${command[@]}"
+      "${command[@]}"
   )
   local exit_code=$?
 
@@ -160,48 +155,23 @@ run_suite() {
   return "${exit_code}"
 }
 
-run_sanity_check || exit $?
-verify_gpu_services || exit $?
-
-overall_status=0
-prerequisite_status=0
-
-if [[ "${RUN_CPU_ONLY_TESTS}" == true ]]; then
-  run_suite \
-    pre_merge_cpu \
-    "${CPU_ONLY_TEST_MARKERS}" \
-    "${CPU_PARALLEL_MODE}" \
-    '' \
-    "${CPU_ONLY_TEST_TIMEOUT_MINUTES}" || {
-      overall_status=1
-      prerequisite_status=1
-    }
-fi
-
-if
-  [[ "${prerequisite_status}" -eq 0 ]] &&
-  [[ "${RUN_GPU_TESTS}" == true ]] &&
-  [[ "${RUN_GPU_PARALLEL_TESTS}" == true ]]
-then
-  run_suite \
-    pre_merge_gpu_parallel \
-    "${GPU_TEST_MARKERS}" \
-    auto \
-    "${GPU_PARALLEL_MAX_VRAM_GIB}" \
-    "${GPU_TEST_TIMEOUT_MINUTES}" || overall_status=1
-fi
-
-if [[ "${RUN_GPU_TESTS}" == true ]]; then
-  sequential_marks="${GPU_TEST_MARKERS}"
-  if [[ "${RUN_GPU_PARALLEL_TESTS}" == true ]]; then
-    sequential_marks="(${GPU_TEST_MARKERS}) and not profiled_vram_gib"
-  fi
-  run_suite \
-    pre_merge_gpu \
-    "${sequential_marks}" \
-    none \
-    '' \
-    "${GPU_TEST_TIMEOUT_MINUTES}" || overall_status=1
-fi
-
-exit "${overall_status}"
+case "${TEST_STAGE}" in
+  sanity)
+    run_sanity_check
+    ;;
+  cpu)
+    run_suite pre_merge_cpu "${PYTEST_MARKS}" "${PARALLEL_MODE}" ''
+    ;;
+  gpu-parallel)
+    verify_gpu_services &&
+      run_suite pre_merge_gpu_parallel "${PYTEST_MARKS}" auto "${MAX_VRAM_GIB}"
+    ;;
+  gpu-sequential)
+    verify_gpu_services &&
+      run_suite pre_merge_gpu "${PYTEST_MARKS}" none ''
+    ;;
+  *)
+    echo "Unknown TEST_STAGE '${TEST_STAGE}'" >&2
+    exit 2
+    ;;
+esac
