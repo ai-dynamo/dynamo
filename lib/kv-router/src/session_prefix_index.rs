@@ -424,11 +424,27 @@ impl IndexState {
         })
     }
 
+    fn depth_to_root(&self, tail: NodeId) -> usize {
+        let limit = self.nodes.len();
+        let mut depth = 0usize;
+        let mut current = Some(tail);
+        while let Some(node) = current {
+            if depth >= limit {
+                debug_assert!(false, "parent cycle in session prefix index forest");
+                tracing::error!("session prefix index parent walk exceeded the arena; truncating");
+                break;
+            }
+            depth += 1;
+            current = self.nodes[node].parent;
+        }
+        depth
+    }
+
     fn deepest_frontier(&self, session_id: &str) -> Option<NodeId> {
         self.sessions.get(session_id).and_then(|entry| {
             entry.frontiers.iter().copied().max_by_key(|&frontier| {
                 (
-                    self.path_to_root(frontier).len(),
+                    self.depth_to_root(frontier),
                     Reverse(self.nodes[frontier].block_hash),
                 )
             })
