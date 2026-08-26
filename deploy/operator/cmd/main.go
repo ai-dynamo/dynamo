@@ -22,6 +22,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -87,6 +88,10 @@ var (
 	configScheme = k8sruntime.NewScheme()
 )
 
+// leaseCleanupTimeout bounds deletion of the namespace scope marker lease once startup
+// unwinds, so a wedged API server delays the exit by seconds rather than indefinitely.
+const leaseCleanupTimeout = 5 * time.Second
+
 // LoadAndValidateOperatorConfig loads the operator configuration from a file,
 // applies defaults via the scheme, and validates it.
 func LoadAndValidateOperatorConfig(path string) (*configv1alpha1.OperatorConfiguration, error) {
@@ -144,8 +149,19 @@ func initConfigScheme() {
 // +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update
 
-//nolint:gocyclo
 func main() {
+	if err := run(); err != nil {
+		setupLog.Error(err, "operator startup failed")
+		os.Exit(1)
+	}
+}
+
+// run carries operator startup and reports failure by returning an error rather than by
+// calling os.Exit, so that deferred cleanup registered during startup — in particular
+// release of the namespace scope marker lease — runs on every controlled failure path.
+//
+//nolint:gocyclo
+func run() error {
 	initCRDSchemes()
 	initConfigScheme()
 
@@ -175,22 +191,18 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	if configFile == "" {
-		setupLog.Error(nil, "--config flag is required")
-		os.Exit(1)
+		return errors.New("--config flag is required")
 	}
 	// Load, default, and validate operator configuration
 	operatorCfg, err := LoadAndValidateOperatorConfig(configFile)
 	if err != nil {
-		setupLog.Error(err, "failed to load operator configuration", "configFile", configFile)
-		os.Exit(1)
+		return fmt.Errorf("failed to load operator configuration from %s: %w", configFile, err)
 	}
 	setupLog.Info("Operator configuration loaded successfully", "configFile", configFile)
 
 	// Validate and normalize operator version to semver
 	if _, err := semver.NewVersion(operatorVersion); err != nil {
-		setupLog.Error(err, "operator-version is not valid semver",
-			"provided", operatorVersion, "error", err.Error())
-		os.Exit(1)
+		return fmt.Errorf("operator-version %q is not valid semver: %w", operatorVersion, err)
 	}
 	setupLog.Info("Operator version configured", "version", operatorVersion)
 
@@ -198,8 +210,7 @@ func main() {
 	switch pullPolicy {
 	case corev1.PullAlways, corev1.PullIfNotPresent, corev1.PullNever:
 	default:
-		setupLog.Error(nil, "operator-image-pull-policy is invalid", "provided", operatorImagePullPolicy)
-		os.Exit(1)
+		return fmt.Errorf("operator-image-pull-policy %q is invalid", operatorImagePullPolicy)
 	}
 
 	// Initialize runtime config (will be populated after detection)
@@ -269,13 +280,11 @@ func main() {
 		setupLog.Info("No restricted namespace configured, launching in cluster-wide mode")
 	}
 	if err := podcache.Configure(&mgrOpts.Cache); err != nil {
-		setupLog.Error(err, "unable to configure Pod cache")
-		os.Exit(1)
+		return fmt.Errorf("unable to configure Pod cache: %w", err)
 	}
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), mgrOpts)
 	if err != nil {
-		setupLog.Error(err, "unable to start manager")
-		os.Exit(1)
+		return fmt.Errorf("unable to start manager: %w", err)
 	}
 
 	// Initialize observability metrics
@@ -286,19 +295,16 @@ func main() {
 	// A direct (non-cached) client is needed because the manager's cache isn't started yet.
 	directClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: crdScheme})
 	if err != nil {
-		setupLog.Error(err, "unable to create direct client for cert management")
-		os.Exit(1)
+		return fmt.Errorf("unable to create direct client for cert management: %w", err)
 	}
 	certMgr, err := internalcert.NewCertManager(directClient, &operatorCfg.Server.Webhook)
 	if err != nil {
-		setupLog.Error(err, "unable to create cert manager")
-		os.Exit(1)
+		return fmt.Errorf("unable to create cert manager: %w", err)
 	}
 	// Auto mode runs one synchronous certificate refresh with the direct client,
 	// then registers the cert-controller with the not-yet-started manager.
 	if err = certMgr.SetupAndRunOnce(mainCtx, mgr); err != nil {
-		setupLog.Error(err, "failed to setup webhook certificate management")
-		os.Exit(1)
+		return fmt.Errorf("failed to setup webhook certificate management: %w", err)
 	}
 
 	// Initialize namespace scope mechanism
@@ -312,6 +318,8 @@ func main() {
 			"leaseDuration", operatorCfg.Namespace.Scope.LeaseDuration.Duration,
 			"renewInterval", operatorCfg.Namespace.Scope.LeaseRenewInterval.Duration)
 
+		// Starting the lease, watching it for unrecoverable errors, and releasing it are all
+		// owned by Guard below, which wraps the rest of startup.
 		leaseManager, err = namespace_scope.NewLeaseManager(
 			mgr.GetConfig(),
 			restrictedNamespace,
@@ -320,53 +328,20 @@ func main() {
 			operatorCfg.Namespace.Scope.LeaseRenewInterval.Duration,
 		)
 		if err != nil {
-			setupLog.Error(err, "unable to create namespace scope marker lease manager")
-			os.Exit(1)
+			return fmt.Errorf("unable to create namespace scope marker lease manager: %w", err)
 		}
-
-		// Start the lease manager
-		if err = leaseManager.Start(mainCtx); err != nil {
-			setupLog.Error(err, "unable to start namespace scope marker lease manager")
-			os.Exit(1)
-		}
-
-		// Monitor for fatal lease errors
-		// If lease renewal fails repeatedly, we must exit to prevent split-brain
-		go func() {
-			select {
-			case err := <-leaseManager.Errors():
-				setupLog.Error(err, "FATAL: Lease manager encountered unrecoverable error, shutting down to prevent split-brain")
-				os.Exit(1)
-			case <-mainCtx.Done():
-				// Normal shutdown, error channel monitoring no longer needed
-				return
-			}
-		}()
-
-		// Ensure lease is released on shutdown
-		defer func() {
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := leaseManager.Stop(shutdownCtx); err != nil {
-				setupLog.Error(err, "failed to stop lease manager cleanly")
-			}
-		}()
-
-		setupLog.Info("Namespace scope marker lease manager started successfully")
 	} else {
 		// Cluster-wide mode: Watch for namespace scope marker leases
 		setupLog.Info("Setting up namespace scope marker lease watcher for cluster-wide mode")
 
 		leaseWatcher, err = namespace_scope.NewLeaseWatcher(mgr.GetConfig())
 		if err != nil {
-			setupLog.Error(err, "unable to create namespace scope marker lease watcher")
-			os.Exit(1)
+			return fmt.Errorf("unable to create namespace scope marker lease watcher: %w", err)
 		}
 
 		// Start the lease watcher
 		if err = leaseWatcher.Start(mainCtx); err != nil {
-			setupLog.Error(err, "unable to start namespace scope marker lease watcher")
-			os.Exit(1)
+			return fmt.Errorf("unable to start namespace scope marker lease watcher: %w", err)
 		}
 
 		setupLog.Info("Namespace scope marker lease watcher started successfully")
@@ -375,181 +350,180 @@ func main() {
 		runtimeConfig.ExcludedNamespaces = leaseWatcher
 	}
 
-	// Register after ExcludedNamespaces is set so cluster-wide metrics skip restricted namespaces.
-	setupLog.Info("Registering resource counter")
-	if err := mgr.Add(observability.NewResourceCounter(
-		mgr.GetClient(),
-		runtimeConfig.ExcludedNamespaces,
-	)); err != nil {
-		setupLog.Error(err, "unable to register resource counter")
-		os.Exit(1)
-	}
-
-	gates, err := features.New(mainCtx, mgr, operatorCfg)
-	if err != nil {
-		setupLog.Error(err, "unable to resolve operator feature gates")
-		os.Exit(1)
-	}
-	runtimeConfig.Gate = gates
-
-	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetAPIReader(), restrictedNamespace)
-	// refresh whenever a secret is created/deleted/updated
-	// Set up informer
-	var factory informers.SharedInformerFactory
-	if restrictedNamespace == "" {
-		factory = informers.NewSharedInformerFactory(kubernetes.NewForConfigOrDie(mgr.GetConfig()), time.Hour*24)
-	} else {
-		factory = informers.NewSharedInformerFactoryWithOptions(
-			kubernetes.NewForConfigOrDie(mgr.GetConfig()),
-			time.Hour*24,
-			informers.WithNamespace(restrictedNamespace),
-		)
-	}
-	secretInformer := factory.Core().V1().Secrets().Informer()
-	// Start the informer factory
-	go factory.Start(mainCtx.Done())
-	// Wait for the initial sync
-	if !k8sCache.WaitForCacheSync(mainCtx.Done(), secretInformer.HasSynced) {
-		setupLog.Error(nil, "Failed to sync informer cache")
-		os.Exit(1)
-	}
-	setupLog.Info("Secret informer cache synced and ready")
-	_, err = secretInformer.AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			secret := obj.(*corev1.Secret)
-			if secret.Type == corev1.SecretTypeDockerConfigJson {
-				setupLog.Info("refreshing docker secrets index after secret creation...")
-				err := dockerSecretRetriever.RefreshIndex(context.Background())
-				if err != nil {
-					setupLog.Error(err, "unable to refresh docker secrets index after secret creation")
-				} else {
-					setupLog.Info("docker secrets index refreshed after secret creation")
-				}
-			}
-		},
-		UpdateFunc: func(old, new interface{}) {
-			newSecret := new.(*corev1.Secret)
-			if newSecret.Type == corev1.SecretTypeDockerConfigJson {
-				setupLog.Info("refreshing docker secrets index after secret update...")
-				err := dockerSecretRetriever.RefreshIndex(context.Background())
-				if err != nil {
-					setupLog.Error(err, "unable to refresh docker secrets index after secret update")
-				} else {
-					setupLog.Info("docker secrets index refreshed after secret update")
-				}
-			}
-		},
-		DeleteFunc: func(obj interface{}) {
-			secret := obj.(*corev1.Secret)
-			if secret.Type == corev1.SecretTypeDockerConfigJson {
-				setupLog.Info("refreshing docker secrets index after secret deletion...")
-				err := dockerSecretRetriever.RefreshIndex(context.Background())
-				if err != nil {
-					setupLog.Error(err, "unable to refresh docker secrets index after secret deletion")
-				} else {
-					setupLog.Info("docker secrets index refreshed after secret deletion")
-				}
-			}
-		},
-	})
-	if err != nil {
-		setupLog.Error(err, "unable to add event handler to secret informer")
-		os.Exit(1)
-	}
-	if err := dockerSecretRetriever.RefreshIndex(mainCtx); err != nil {
-		setupLog.Error(err, "initial docker secrets index refresh completed with errors; continuing startup")
-	} else {
-		setupLog.Info("initial docker secrets index refreshed")
-	}
-	// launch a goroutine to refresh the docker secret indexer in any case every minute
-	go func() {
-		ticker := time.NewTicker(60 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-mainCtx.Done():
-				return
-			case <-ticker.C:
-				if err := dockerSecretRetriever.RefreshIndex(mainCtx); err != nil {
-					setupLog.Error(err, "failed to refresh docker secrets index")
-				}
-			}
+	// The rest of startup runs inside the marker lease in namespace-restricted mode, so any
+	// failure below has to unwind rather than exit for the lease to be released.
+	startup := func(ctx context.Context) error {
+		// Register after ExcludedNamespaces is set so cluster-wide metrics skip restricted namespaces.
+		setupLog.Info("Registering resource counter")
+		if err := mgr.Add(observability.NewResourceCounter(
+			mgr.GetClient(),
+			runtimeConfig.ExcludedNamespaces,
+		)); err != nil {
+			return fmt.Errorf("unable to register resource counter: %w", err)
 		}
-	}()
 
-	sshKeyManager := secret.NewSSHKeyManager(mgr.GetClient(), operatorCfg.MPI)
-
-	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		setupLog.Error(err, "unable to set up health check")
-		os.Exit(1)
-	}
-	if err := mgr.AddReadyzCheck("webhook-server", webhookServer.StartedChecker()); err != nil {
-		setupLog.Error(err, "unable to set up ready check")
-		os.Exit(1)
-	}
-
-	// Register controllers synchronously before mgr.Start().
-	// Controllers don't depend on TLS certificates.
-	if err := registerControllers(
-		mgr, operatorCfg, runtimeConfig,
-		dockerSecretRetriever, sshKeyManager,
-		operatorImage, pullPolicy,
-	); err != nil {
-		setupLog.Error(err, "failed to register controllers")
-		os.Exit(1)
-	}
-
-	if err := registerWebhookHandlers(
-		mgr, operatorCfg, runtimeConfig, operatorVersion, dgdrDefaultImage, gates,
-	); err != nil {
-		setupLog.Error(err, "failed to register webhooks")
-		os.Exit(1)
-	}
-
-	// CertManager.SetupAndRunOnce has already bootstrapped auto-mode TLS secrets.
-	// Auto mode patches admission and, for cluster-wide operators, conversion CAs.
-	// Manual mode patches only cluster-wide conversion CAs; admission stays out-of-band.
-	caInjector, err := internalcert.NewCABundleInjector(directClient, operatorCfg)
-	if err != nil {
-		setupLog.Error(err, "unable to create CA bundle injector")
-		os.Exit(1)
-	}
-	if operatorCfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
-		if isClusterWide {
-			err = caInjector.InjectAll(mainCtx)
-		} else {
-			err = caInjector.InjectAdmission(mainCtx)
-		}
+		gates, err := features.New(ctx, mgr, operatorCfg)
 		if err != nil {
-			setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
-			os.Exit(1)
+			return fmt.Errorf("unable to resolve operator feature gates: %w", err)
 		}
-	} else if isClusterWide {
-		// Manual mode gets webhook CA material out-of-band. Missing ca.crt
-		// blocks startup instead of running with unauthenticated conversion.
-		if err := caInjector.InjectCRDConversionCA(mainCtx); err != nil {
-			setupLog.Error(err, "failed to inject CRD conversion CA bundle")
-			os.Exit(1)
+		runtimeConfig.Gate = gates
+
+		dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetAPIReader(), restrictedNamespace)
+		// refresh whenever a secret is created/deleted/updated
+		// Set up informer
+		var factory informers.SharedInformerFactory
+		if restrictedNamespace == "" {
+			factory = informers.NewSharedInformerFactory(kubernetes.NewForConfigOrDie(mgr.GetConfig()), time.Hour*24)
+		} else {
+			factory = informers.NewSharedInformerFactoryWithOptions(
+				kubernetes.NewForConfigOrDie(mgr.GetConfig()),
+				time.Hour*24,
+				informers.WithNamespace(restrictedNamespace),
+			)
 		}
+		secretInformer := factory.Core().V1().Secrets().Informer()
+		// Start the informer factory
+		go factory.Start(ctx.Done())
+		// Wait for the initial sync
+		if !k8sCache.WaitForCacheSync(ctx.Done(), secretInformer.HasSynced) {
+			return errors.New("failed to sync secret informer cache")
+		}
+		setupLog.Info("Secret informer cache synced and ready")
+		_, err = secretInformer.AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				secret := obj.(*corev1.Secret)
+				if secret.Type == corev1.SecretTypeDockerConfigJson {
+					setupLog.Info("refreshing docker secrets index after secret creation...")
+					err := dockerSecretRetriever.RefreshIndex(context.Background())
+					if err != nil {
+						setupLog.Error(err, "unable to refresh docker secrets index after secret creation")
+					} else {
+						setupLog.Info("docker secrets index refreshed after secret creation")
+					}
+				}
+			},
+			UpdateFunc: func(old, new interface{}) {
+				newSecret := new.(*corev1.Secret)
+				if newSecret.Type == corev1.SecretTypeDockerConfigJson {
+					setupLog.Info("refreshing docker secrets index after secret update...")
+					err := dockerSecretRetriever.RefreshIndex(context.Background())
+					if err != nil {
+						setupLog.Error(err, "unable to refresh docker secrets index after secret update")
+					} else {
+						setupLog.Info("docker secrets index refreshed after secret update")
+					}
+				}
+			},
+			DeleteFunc: func(obj interface{}) {
+				secret := obj.(*corev1.Secret)
+				if secret.Type == corev1.SecretTypeDockerConfigJson {
+					setupLog.Info("refreshing docker secrets index after secret deletion...")
+					err := dockerSecretRetriever.RefreshIndex(context.Background())
+					if err != nil {
+						setupLog.Error(err, "unable to refresh docker secrets index after secret deletion")
+					} else {
+						setupLog.Info("docker secrets index refreshed after secret deletion")
+					}
+				}
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("unable to add event handler to secret informer: %w", err)
+		}
+		if err := dockerSecretRetriever.RefreshIndex(ctx); err != nil {
+			setupLog.Error(err, "initial docker secrets index refresh completed with errors; continuing startup")
+		} else {
+			setupLog.Info("initial docker secrets index refreshed")
+		}
+		// launch a goroutine to refresh the docker secret indexer in any case every minute
+		go func() {
+			ticker := time.NewTicker(60 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := dockerSecretRetriever.RefreshIndex(ctx); err != nil {
+						setupLog.Error(err, "failed to refresh docker secrets index")
+					}
+				}
+			}
+		}()
+
+		sshKeyManager := secret.NewSSHKeyManager(mgr.GetClient(), operatorCfg.MPI)
+
+		if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+			return fmt.Errorf("unable to set up health check: %w", err)
+		}
+		if err := mgr.AddReadyzCheck("webhook-server", webhookServer.StartedChecker()); err != nil {
+			return fmt.Errorf("unable to set up ready check: %w", err)
+		}
+
+		// Register controllers synchronously before mgr.Start().
+		// Controllers don't depend on TLS certificates.
+		if err := registerControllers(
+			mgr, operatorCfg, runtimeConfig,
+			dockerSecretRetriever, sshKeyManager,
+			operatorImage, pullPolicy,
+		); err != nil {
+			return fmt.Errorf("failed to register controllers: %w", err)
+		}
+
+		if err := registerWebhookHandlers(
+			mgr, operatorCfg, runtimeConfig, operatorVersion, dgdrDefaultImage, gates,
+		); err != nil {
+			return fmt.Errorf("failed to register webhooks: %w", err)
+		}
+
+		// CertManager.SetupAndRunOnce has already bootstrapped auto-mode TLS secrets.
+		// Auto mode patches admission and, for cluster-wide operators, conversion CAs.
+		// Manual mode patches only cluster-wide conversion CAs; admission stays out-of-band.
+		caInjector, err := internalcert.NewCABundleInjector(directClient, operatorCfg)
+		if err != nil {
+			return fmt.Errorf("unable to create CA bundle injector: %w", err)
+		}
+		if operatorCfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
+			if isClusterWide {
+				err = caInjector.InjectAll(ctx)
+			} else {
+				err = caInjector.InjectAdmission(ctx)
+			}
+			if err != nil {
+				return fmt.Errorf("failed to inject CA bundles into webhook configurations: %w", err)
+			}
+		} else if isClusterWide {
+			// Manual mode gets webhook CA material out-of-band. Missing ca.crt
+			// blocks startup instead of running with unauthenticated conversion.
+			if err := caInjector.InjectCRDConversionCA(ctx); err != nil {
+				return fmt.Errorf("failed to inject CRD conversion CA bundle: %w", err)
+			}
+		}
+
+		// mgr.Start reads tls.crt and tls.key from the projected Secret volume
+		// synchronously. Secret API updates are not enough because kubelet projects
+		// them into already-running pods asynchronously.
+		if err := certMgr.WaitForMountedCertificate(ctx); err != nil {
+			return fmt.Errorf("failed waiting for mounted webhook TLS certificate: %w", err)
+		}
+
+		// Kubernetes propagates webhook configuration asynchronously, especially
+		// with HA apiservers. A missing or stale CA must fail closed during manager
+		// cache startup rather than allowing the operator to run without conversion
+		// or admission.
+		setupLog.Info("starting manager")
+		if err := mgr.Start(ctx); err != nil {
+			return fmt.Errorf("problem running manager: %w", err)
+		}
+
+		return nil
 	}
 
-	// mgr.Start reads tls.crt and tls.key from the projected Secret volume
-	// synchronously. Secret API updates are not enough because kubelet projects
-	// them into already-running pods asynchronously.
-	if err := certMgr.WaitForMountedCertificate(mainCtx); err != nil {
-		setupLog.Error(err, "failed waiting for mounted webhook TLS certificate")
-		os.Exit(1)
+	if leaseManager != nil {
+		return leaseManager.Guard(mainCtx, leaseCleanupTimeout, startup)
 	}
 
-	// Kubernetes propagates webhook configuration asynchronously, especially
-	// with HA apiservers. A missing or stale CA must fail closed during manager
-	// cache startup rather than allowing the operator to run without conversion
-	// or admission.
-	setupLog.Info("starting manager")
-	if err := mgr.Start(mainCtx); err != nil {
-		setupLog.Error(err, "problem running manager")
-		os.Exit(1)
-	}
+	return startup(mainCtx)
 }
 
 func registerControllers(
