@@ -393,7 +393,7 @@ def test_request_cancellation_vllm_aggregated(
 
 
 @pytest.mark.timeout(DECODE_CANCEL_TEST_TIMEOUT_S)
-@pytest.mark.pre_merge
+@pytest.mark.nightly
 @pytest.mark.gpu_2
 def test_request_cancellation_vllm_decode_cancel(
     request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
