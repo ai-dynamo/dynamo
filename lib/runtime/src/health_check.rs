@@ -102,9 +102,7 @@ impl HealthCheckManager {
             info!("Health check task started for: {}", endpoint_subject);
 
             loop {
-                // Wait for either timeout or activity notification
                 tokio::select! {
-                    // Cancellation wins over a timer that becomes ready in the same poll.
                     biased;
 
                     _ = token.cancelled() => {
@@ -112,20 +110,24 @@ impl HealthCheckManager {
                         break;
                     }
 
+                    _ = notifier.notified() => {
+                        debug!("Activity detected for {}, resetting health check timer", endpoint_subject);
+                        manager.drt.system_health().lock().set_endpoint_health_status(
+                            &endpoint_subject,
+                            crate::config::HealthStatus::Ready,
+                        );
+                    }
+
                     _ = tokio::time::sleep(canary_wait) => {
-                        // Timeout - send health check for this specific endpoint
                         debug!("Canary timer expired for {}, sending health check", endpoint_subject);
 
-                        // Get the health check payload for this endpoint
                         let target = manager.drt.system_health().lock().get_health_check_target(&endpoint_subject);
 
                         if let Some(target) = target {
-                            // The spawned request observes the same cancellation token.
                             if let Err(e) = manager.send_health_check_request(&endpoint_subject, &target.payload).await {
                                 error!("Failed to send health check for {}: {}", endpoint_subject, e);
                             }
                         } else {
-                            // This should never happen - targets are registered at startup and never removed
                             error!(
                                 "CRITICAL: Health check target for {} disappeared unexpectedly! This indicates a bug. Stopping health check task.",
                                 endpoint_subject
@@ -133,24 +135,12 @@ impl HealthCheckManager {
                             break;
                         }
                     }
-
-                    _ = notifier.notified() => {
-                        // Activity detected - reset timer for this endpoint only.
-                        // A notification means push_handler successfully streamed
-                        // a non-error response chunk, proving the engine is healthy.
-                        debug!("Activity detected for {}, resetting health check timer", endpoint_subject);
-                        manager.drt.system_health().lock().set_endpoint_health_status(
-                            &endpoint_subject,
-                            crate::config::HealthStatus::Ready,
-                        );
-                    }
                 }
             }
 
             info!("Health check task for {} exiting", endpoint_subject);
         });
 
-        // Store the task handle
         self.endpoint_tasks
             .lock()
             .insert(endpoint_subject.clone(), task);
