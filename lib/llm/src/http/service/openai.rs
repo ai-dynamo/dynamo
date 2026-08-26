@@ -28,10 +28,14 @@ use dynamo_runtime::{
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
 };
-use futures::{Stream, StreamExt, stream};
+#[cfg(feature = "agent-rt-poc")]
+use futures::Stream;
+use futures::{StreamExt, stream};
 use http_body_util::LengthLimitError;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+#[cfg(feature = "agent-rt-poc")]
+use super::metrics::InflightGuard;
 use super::{
     RouteDoc,
     disconnect::{
@@ -41,7 +45,7 @@ use super::{
     error::{HttpError, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
-        CancellationLabels, Endpoint, ErrorType, EventConverter, InflightGuard,
+        CancellationLabels, Endpoint, ErrorType, EventConverter,
         process_chat_response_and_observe_metrics,
         process_chat_response_using_event_converter_and_observe_metrics,
         process_response_and_observe_metrics,
@@ -88,6 +92,7 @@ use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
+#[cfg(feature = "agent-rt-poc")]
 use dynamo_protocols::types::responses::ResponseStreamEvent;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
@@ -147,6 +152,7 @@ impl ErrorMessage {
         &self.message
     }
 
+    #[cfg(feature = "agent-rt-poc")]
     pub(super) fn agent_runtime_error(code: StatusCode, message: &str) -> ErrorResponse {
         (
             code,
@@ -3214,6 +3220,7 @@ pub(super) async fn responses(
 ) -> Result<Response, ErrorResponse> {
     match responses_inner(state, template, request, stream_handle, false).await? {
         ResponsesExecution::Http(response) => Ok(response),
+        #[cfg(feature = "agent-rt-poc")]
         ResponsesExecution::Native(_) => Err(ErrorMessage::internal_server_error(
             "HTTP Responses execution returned a native stream",
         )),
@@ -3235,6 +3242,7 @@ pub(super) async fn responses_native_stream(
     }
 }
 
+#[cfg(feature = "agent-rt-poc")]
 pub(super) type NativeResponsesStream =
     std::pin::Pin<Box<dyn Stream<Item = ResponseStreamEvent> + Send + 'static>>;
 
@@ -3280,6 +3288,7 @@ fn native_responses_stream(
 
 enum ResponsesExecution {
     Http(Response),
+    #[cfg(feature = "agent-rt-poc")]
     Native(NativeResponsesStream),
 }
 
@@ -3539,6 +3548,7 @@ async fn responses_inner(
             }
         };
 
+        #[cfg(feature = "agent-rt-poc")]
         if native_output {
             return Ok(ResponsesExecution::Native(native_responses_stream(
                 typed_stream,
@@ -3546,6 +3556,8 @@ async fn responses_inner(
                 stream_handle,
             )));
         }
+        #[cfg(not(feature = "agent-rt-poc"))]
+        debug_assert!(!native_output);
 
         let full_stream =
             typed_stream.map(move |event| serializer.serialize(&event).map_err(axum::Error::new));

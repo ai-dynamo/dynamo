@@ -41,11 +41,12 @@ use super::{
 };
 use crate::engines::ValidateRequest;
 use crate::protocols::anthropic::stream_converter::{AnthropicStreamConverter, make_sse_event};
+#[cfg(feature = "agent-rt-poc")]
+use crate::protocols::anthropic::types::AnthropicStreamEvent;
 use crate::protocols::anthropic::types::{
     AnthropicContentBlock, AnthropicCountTokensRequest, AnthropicCountTokensResponse,
     AnthropicCreateMessageRequest, AnthropicErrorBody, AnthropicErrorResponse, AnthropicMessage,
-    AnthropicMessageContent, AnthropicStreamEvent, AnthropicTool, SystemContent,
-    chat_completion_to_anthropic_response,
+    AnthropicMessageContent, AnthropicTool, SystemContent, chat_completion_to_anthropic_response,
 };
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
@@ -412,6 +413,7 @@ pub(super) async fn anthropic_messages(
     .await?
     {
         AnthropicExecution::Http(response) => Ok(response),
+        #[cfg(feature = "agent-rt-poc")]
         AnthropicExecution::Native(_) => Err(anthropic_sanitized_error_with_details(
             SanitizedError::Internal,
             "HTTP Anthropic execution returned a native stream",
@@ -447,6 +449,7 @@ pub(super) async fn anthropic_messages_native_stream(
     }
 }
 
+#[cfg(feature = "agent-rt-poc")]
 pub(super) type NativeAnthropicStream =
     Pin<Box<dyn futures::Stream<Item = AnthropicStreamEvent> + Send + 'static>>;
 
@@ -486,6 +489,7 @@ fn native_anthropic_stream(
 
 enum AnthropicExecution {
     Http(Response),
+    #[cfg(feature = "agent-rt-poc")]
     Native(NativeAnthropicStream),
 }
 
