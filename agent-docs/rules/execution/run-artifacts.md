@@ -101,7 +101,10 @@ runs/<EXP_ID>/
   comparability validity checks.
 - `benchmark_summary.json`: normalized AIPerf metrics, units, benchmark inputs, and error counts without interpretation.
 - `performance_analysis.json`: target-SLO evaluation, absolute results, and applicable comparisons to the series
-  baseline, previous and best valid same-series results, and same-series history.
+  baseline, previous and best valid same-series results, and same-series history. Also carries
+  `series_noise_floor` and `minimum_detectable_effect` once a repetition pilot has produced them,
+  copied forward into every later same-series analysis; these fields are the authoritative source for
+  every MDE-gated judgment (any copy elsewhere, such as a ledger header, is a convenience mirror).
 - `performance_analysis.md`: concise human-readable findings and limitations.
 - `applied_manifests/`: one final run-scoped copy of each manifest type used. After success, these are the exact files
   that produced the successful smoke test.

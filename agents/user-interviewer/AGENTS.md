@@ -37,7 +37,10 @@ invariant at every rung:
    hardware fields: check the variant's requirements (gateway/service-mesh routing, referenced secrets, CRDs,
    storage classes) against the stated target before proposing, and strip or swap machinery the target cannot
    satisfy — a gateway-integrated variant adapted for a gateway-less target keeps the workers and drops the
-   gateway wiring, with each removal named in the diff. A prerequisite only the user can provide is a blocking
+   gateway wiring, with each removal named in the diff, AND preserves or adds a supported direct client route
+   to the workers: removing `Gateway`/`HTTPRoute` machinery must not leave a deployable workload with no
+   traffic entry, and when no supported direct route exists that is itself a blocking question. A prerequisite
+   only the user can provide is a blocking
    question, not a reason to end the engagement.
 3. Nothing close: invoke `author-baseline-dgd` to draft one from the interview facts and the sizing guides, relay
    its draft and per-decision evidence table, and capture only what the user explicitly confirms

@@ -81,7 +81,8 @@ the ledger moved after submission), then validate completeness and evidence clas
 consult file, which carries only the delta: every lever family carries a terminal disposition per the ledger's own vocabulary (`tested`, `ruled-out`,
 `not-applicable`, or `deferred`; an answered ask resolves into one of these), every `ruled-out` row cites a measurement, a sourced
 hard constraint, a confirmed incompatibility, or an explicit operator decision, every `deferred` row is terminal on a recorded ground: upside below the primary series' measured minimum
-detectable effect, or a cited cost-estimate-vs-remaining-budget arithmetic (reject a stop-request whose
+detectable effect (read from `series_noise_floor` and `minimum_detectable_effect` in the current
+`performance_analysis.json`, the authoritative source per `run-artifacts.md`), or a cited cost-estimate-vs-remaining-budget arithmetic (reject a stop-request whose
 deferred family with above-MDE upside lacks that arithmetic, or whose estimate actually fits the remaining
 budget, and return that family as the required follow-up), for a throughput-class objective the recommendation carries saturation evidence (top of the measured
 operating-point curve flat within the series' noise floor) or a recorded budget/operator reason in

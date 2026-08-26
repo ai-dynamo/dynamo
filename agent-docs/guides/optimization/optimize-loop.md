@@ -203,7 +203,10 @@ outcomes for `no-proposal` are exactly one of:
   These judgments require the primary objective series' measured noise floor and minimum detectable effect:
   when no pilot repetition has produced them by stop-request or recommendation time, running that pilot (n>=3
   on the decision-point configuration) is PRE-AUTHORIZED and required — it is part of finishing, not a new
-  candidate family. Hand the stop-request to `hypothesis-challenger` for evidence-class validation, passing the
+  candidate family. When the remaining budget cannot cover the pilot, `BUDGET_STOP` wins:
+  record the missing noise floor and the resulting unquantified-delta risk in
+  `known_limitations.md` and stop, rather than overrunning the budget or submitting a
+  recommendation the challenger must reject. Hand the stop-request to `hypothesis-challenger` for evidence-class validation, passing the
   ledger path and the SHA256 of the submitted ledger state alongside the consultation; the challenger's verdict
   binds to that SHA256.
 

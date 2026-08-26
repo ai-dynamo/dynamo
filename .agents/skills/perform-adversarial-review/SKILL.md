@@ -44,7 +44,10 @@ Require:
 - `EXP_ROOT/analysis/search-calibration.md` (and, for a stop-request, the submitted ledger SHA256 cited in
   `knowledge-consult.md`); and
 - `EXP_ROOT/analysis/hypothesis-backlog.jsonl` and `EXP_ROOT/analysis/challenger-reviews.jsonl` when present; and
-- `EXP_ROOT/manifest.yaml` (session start time, for stop-request budget arithmetic).
+- `EXP_ROOT/manifest.yaml` (session start time, for stop-request budget arithmetic); and
+- for a stop-request: the three Finalize paths under `EXP_ROOT/final/` (`recommended_config.md`,
+  `reproduced_commands.sh`, `known_limitations.md`), derived from the submitted `EXP_ROOT`, whose on-disk
+  existence the validation gate verifies.
 
 Review only a consultation whose decision is `proposed` and whose draft materialization completed successfully. For
 `no-proposal` or `blocked` that carries no stop-request, return without writing a candidate verdict. For a
@@ -59,7 +62,8 @@ returning.
 2. Validate completeness and evidence class against the ledger, not the consult file (which carries only the
    delta): every lever family carries a terminal disposition (`tested`, `ruled-out`, `not-applicable`, or `deferred` — an answered ask resolves its family into one of these; `untested-promising` and `reopened-by-new-evidence` are non-terminal); every `ruled-out` row cites a measurement, a sourced hard constraint, a confirmed incompatibility,
    or an explicit operator decision; every `deferred` row is terminal on a recorded ground - upside below the primary series' measured minimum
-   detectable effect, or a cited cost-estimate-vs-remaining-budget arithmetic (reject when an above-MDE deferred
+   detectable effect (read from `series_noise_floor` and `minimum_detectable_effect` in the current
+   `performance_analysis.json`, the authoritative source per `run-artifacts.md`), or a cited cost-estimate-vs-remaining-budget arithmetic (reject when an above-MDE deferred
    family lacks that arithmetic, or when its estimate fits the remaining budget; return that family as the
    required follow-up); for a throughput-class objective the recommendation
    carries saturation evidence or a recorded budget/operator reason in `known_limitations.md` ("still rising at
@@ -131,7 +135,9 @@ Attack the proposal from these directions:
   same workload? If so, is there specific new evidence that makes this attempt different?
 - **Frontier**: When the proposal selects or rejects a topology/config family, is the judgment made at each
   family's own SLO frontier per `tuning-hierarchy.md`? Reject a family selection argued from a single shared
-  operating point when the families' frontiers differ or the winner's frontier is unmeasured.
+  operating point when the families' frontiers differ or the winner's frontier is unmeasured. A candidate whose
+  stated purpose is to MEASURE a family's not-yet-measured frontier is exploratory and admissible; what this
+  gate rejects is an adoption or rejection CLAIM resting on a frontier that has not been measured.
 - **Priority**: Compared with the existing backlog, does this candidate have competitive information value, likely
   impact on the primary objective, reversibility, GPU cost, and risk at the target operating region?
 - **Attribution**: Does the complete diff express one independently testable knob? For a coupled bundle, is every field
