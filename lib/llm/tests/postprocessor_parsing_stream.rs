@@ -333,6 +333,8 @@ fn mock_content_chunk(content: &str) -> NvCreateChatCompletionStreamResponse {
             usage: None,
             service_tier: None,
         },
+        prompt_token_ids: None,
+        kv_transfer_params: None,
         nvext: None,
         llm_metrics: None,
     }
@@ -376,6 +378,8 @@ fn mock_multi_choice_content_chunk(
             usage: None,
             service_tier: None,
         },
+        prompt_token_ids: None,
+        kv_transfer_params: None,
         nvext: None,
         llm_metrics: None,
     }
@@ -416,6 +420,8 @@ fn mock_reasoning_only_chunk(reasoning: &str) -> NvCreateChatCompletionStreamRes
             usage: None,
             service_tier: None,
         },
+        prompt_token_ids: None,
+        kv_transfer_params: None,
         nvext: None,
         llm_metrics: None,
     }
@@ -451,6 +457,8 @@ fn mock_final_chunk() -> NvCreateChatCompletionStreamResponse {
             usage: None,
             service_tier: None,
         },
+        prompt_token_ids: None,
+        kv_transfer_params: None,
         nvext: None,
         llm_metrics: None,
     }
@@ -479,6 +487,8 @@ fn mock_usage_only_chunk() -> NvCreateChatCompletionStreamResponse {
             }),
             service_tier: None,
         },
+        prompt_token_ids: None,
+        kv_transfer_params: None,
         nvext: None,
         llm_metrics: None,
     }
@@ -519,6 +529,8 @@ fn mock_multi_choice_final_chunk(indices: &[u32]) -> NvCreateChatCompletionStrea
             usage: None,
             service_tier: None,
         },
+        prompt_token_ids: None,
+        kv_transfer_params: None,
         nvext: None,
         llm_metrics: None,
     }

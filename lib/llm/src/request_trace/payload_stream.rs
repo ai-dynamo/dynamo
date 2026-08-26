@@ -150,6 +150,8 @@ where
                         choices: vec![],
                         service_tier: None,
                     },
+                    prompt_token_ids: None,
+                    kv_transfer_params: None,
                     nvext: None,
                 };
                 final_response_to_one_chunk_stream(fallback)
@@ -242,6 +244,8 @@ pub fn final_response_to_one_chunk_stream(
             choices,
             usage: resp.inner.usage.clone(),
         },
+        prompt_token_ids: None,
+        kv_transfer_params: None,
         nvext: resp.nvext.clone(),
         llm_metrics: None,
     };
@@ -297,6 +301,8 @@ mod tests {
                 usage: None,
                 service_tier: None,
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
             llm_metrics: None,
         };
@@ -338,6 +344,8 @@ mod tests {
                 usage: None,
                 service_tier: None,
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
             llm_metrics: None,
         };
@@ -381,6 +389,8 @@ mod tests {
                 usage: None,
                 service_tier: None,
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
             llm_metrics: None,
         };
@@ -424,6 +434,8 @@ mod tests {
                 usage: None,
                 service_tier: None,
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
             llm_metrics: None,
         };
@@ -669,6 +681,8 @@ mod tests {
                     usage: None,
                     service_tier: None,
                 },
+                prompt_token_ids: None,
+                kv_transfer_params: None,
                 nvext: None,
                 llm_metrics: None,
             }),

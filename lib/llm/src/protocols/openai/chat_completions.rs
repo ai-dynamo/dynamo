@@ -123,6 +123,25 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_tokens_as_token_ids: Option<bool>,
 
+    /// When true, include the completion's token IDs on `choices[].token_ids`
+    /// in the response. Convenience alias for
+    /// `nvext.extra_fields = ["completion_token_ids"]`; the two forms are
+    /// interchangeable and normalized into `extra_fields` by
+    /// [`Self::normalize_return_token_ids`] before validation.
+    ///
+    /// Compatible with vLLM's OpenAI extension of the same name and with
+    /// downstream tools (speculators hidden-state capture, Prime-RL) that
+    /// expect to receive raw token IDs back to align server responses with
+    /// their own tensor state.
+    ///
+    /// Requires `n == 1` — the streaming aggregator accumulates a single
+    /// `Vec<TokenIdType>` per request rather than per-choice, so multiple
+    /// choices cannot be safely disambiguated (same constraint as the
+    /// existing nvext path — see
+    /// [`crate::protocols::common::extensions::validate_completion_token_ids_single_choice`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_token_ids: Option<bool>,
+
     /// Catch-all for unsupported fields - checked during validation
     #[serde(flatten, default, skip_serializing)]
     pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
@@ -214,6 +233,45 @@ impl NvCreateChatCompletionRequest {
         self.thinking = None;
         Ok(())
     }
+
+    /// Fold top-level `return_token_ids: true` into
+    /// `nvext.extra_fields = ["completion_token_ids"]`, then drop the top-level
+    /// field so the two forms don't ship twice with the risk of drifting apart
+    /// downstream. This is the vLLM/OpenAI-compatibility alias for the existing
+    /// nvext-based token-id response path; downstream plumbing
+    /// (`NvExtResponseFieldSelection::from_nvext` and the delta aggregator in
+    /// `chat_completions/delta.rs`) reads `nvext.extra_fields`, so the shim
+    /// lives here and there is no dispatch change elsewhere.
+    ///
+    /// Must run BEFORE `validate()` — the field's `n == 1` constraint is
+    /// enforced by `validate_completion_token_ids_single_choice`, which
+    /// inspects `nvext.extra_fields`. Callers already sequence
+    /// `normalize_reasoning_template_args` before validation in the HTTP
+    /// service path; this method fits the same slot.
+    pub fn normalize_return_token_ids(&mut self) -> anyhow::Result<()> {
+        // Only act on true; None and false are semantically identical for a
+        // convenience flag and must not add a member to extra_fields.
+        if self.return_token_ids != Some(true) {
+            self.return_token_ids = None;
+            return Ok(());
+        }
+
+        let nvext = self.nvext.get_or_insert_with(NvExt::default);
+        let fields = nvext.extra_fields.get_or_insert_with(Vec::new);
+        // Idempotent: if the caller already asked for it through the nvext
+        // path, do not duplicate the entry. Downstream code iterates this list
+        // linearly, so duplicates would work but a clean list is easier to
+        // reason about and matches how a caller specifying only one form
+        // would look.
+        if !fields.iter().any(|f| f == "completion_token_ids") {
+            fields.push("completion_token_ids".to_string());
+        }
+
+        // Drop the alias so the request doesn't carry two representations of
+        // the same intent past this point.
+        self.return_token_ids = None;
+        Ok(())
+    }
 }
 
 /// The two boolean dialects, in precedence order. `thinking_mode` carries the
@@ -267,6 +325,10 @@ fn openai_thinking_mode(value: &serde_json::Value) -> anyhow::Result<Option<Open
 pub struct NvCreateChatCompletionResponse {
     #[serde(flatten)]
     pub inner: dynamo_protocols::types::CreateChatCompletionResponse,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_token_ids: Option<Vec<crate::types::TokenIdType>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_transfer_params: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
 }
@@ -277,6 +339,10 @@ pub struct NvCreateChatCompletionResponse {
 pub struct NvCreateChatCompletionStreamResponse {
     #[serde(flatten)]
     pub inner: dynamo_protocols::types::CreateChatCompletionStreamResponse,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_token_ids: Option<Vec<crate::types::TokenIdType>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_transfer_params: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<serde_json::Value>,
     /// Internal frontend metrics payload. This must never be serialized to
@@ -855,6 +921,147 @@ mod tests {
             serde_json::from_value(request_json).expect("Failed to deserialize request");
 
         let err = ValidateRequest::validate(&request).expect_err("multi-choice token ids");
+        assert!(err.to_string().contains("completion_token_ids"));
+    }
+
+    // --- return_token_ids convenience alias ---
+    //
+    // vLLM's OpenAI extension accepts `return_token_ids: true` at request root
+    // for both /v1/chat/completions and /v1/completions. Dynamo's response-side
+    // machinery is keyed off `nvext.extra_fields = ["completion_token_ids"]`,
+    // so `normalize_return_token_ids` folds the alias into the existing path
+    // BEFORE `validate` runs. These tests pin that behavior and the associated
+    // n=1 constraint.
+
+    #[test]
+    fn test_return_token_ids_field_deserializes() {
+        // Field must live at request root — as the unsupported_fields catch-all
+        // would swallow it before this change and validate_no_unsupported_fields
+        // would reject it.
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "return_token_ids": true
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("return_token_ids at root parses");
+        assert_eq!(request.return_token_ids, Some(true));
+        assert!(
+            !request.unsupported_fields.contains_key("return_token_ids"),
+            "must not land in unsupported_fields catch-all"
+        );
+    }
+
+    #[test]
+    fn test_normalize_return_token_ids_folds_into_nvext_extra_fields() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "return_token_ids": true
+        });
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        request
+            .normalize_return_token_ids()
+            .expect("normalize succeeds");
+
+        // Top-level alias is consumed so downstream never sees two forms of
+        // the same intent.
+        assert_eq!(request.return_token_ids, None);
+        // Folded into the existing nvext.extra_fields path.
+        let extras = request
+            .nvext
+            .as_ref()
+            .and_then(|n| n.extra_fields.as_ref())
+            .expect("extra_fields populated");
+        assert!(
+            extras.iter().any(|f| f == "completion_token_ids"),
+            "expected completion_token_ids, got {extras:?}"
+        );
+        // And now validate() succeeds — the plumbing that used to reject the
+        // top-level field ends the request in a supported state.
+        assert!(
+            ValidateRequest::validate(&request).is_ok(),
+            "normalized request must validate"
+        );
+    }
+
+    #[test]
+    fn test_normalize_return_token_ids_is_idempotent_with_explicit_nvext() {
+        // A caller that sets BOTH forms should end up with exactly one entry —
+        // otherwise downstream code iterating extra_fields sees a duplicate
+        // that could double-report the same signal.
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "return_token_ids": true,
+            "nvext": { "extra_fields": ["completion_token_ids"] }
+        });
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        request
+            .normalize_return_token_ids()
+            .expect("normalize succeeds");
+
+        let extras = request
+            .nvext
+            .as_ref()
+            .and_then(|n| n.extra_fields.as_ref())
+            .expect("extra_fields populated");
+        let count = extras
+            .iter()
+            .filter(|f| **f == "completion_token_ids")
+            .count();
+        assert_eq!(count, 1, "expected exactly one entry, got {extras:?}");
+    }
+
+    #[test]
+    fn test_normalize_return_token_ids_false_is_noop() {
+        // false and None are semantically identical for a boolean convenience
+        // flag; neither must add anything to extra_fields.
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "return_token_ids": false
+        });
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        request
+            .normalize_return_token_ids()
+            .expect("normalize succeeds");
+
+        assert_eq!(request.return_token_ids, None);
+        assert!(
+            request
+                .nvext
+                .as_ref()
+                .and_then(|n| n.extra_fields.as_ref())
+                .is_none_or(|v| v.is_empty()),
+            "false must not populate extra_fields"
+        );
+    }
+
+    #[test]
+    fn test_return_token_ids_alias_rejected_for_multi_choice() {
+        // The n=1 constraint applies through the alias too — same validator,
+        // reached via the same nvext.extra_fields entry after normalization.
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "n": 2,
+            "return_token_ids": true
+        });
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        request
+            .normalize_return_token_ids()
+            .expect("normalize succeeds — the n=1 check is validate()'s job");
+        let err = ValidateRequest::validate(&request)
+            .expect_err("n>1 with return_token_ids must be rejected");
         assert!(err.to_string().contains("completion_token_ids"));
     }
 

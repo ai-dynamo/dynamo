@@ -156,7 +156,12 @@ impl DeltaGenerator {
             },
         };
 
-        NvCreateCompletionResponse { inner, nvext: None }
+        NvCreateCompletionResponse {
+            inner,
+            prompt_token_ids: None,
+            kv_transfer_params: None,
+            nvext: None,
+        }
     }
 
     /// Creates a final usage-only chunk for OpenAI compliance.
@@ -177,7 +182,12 @@ impl DeltaGenerator {
             usage: Some(usage),
         };
 
-        NvCreateCompletionResponse { inner, nvext: None }
+        NvCreateCompletionResponse {
+            inner,
+            prompt_token_ids: None,
+            kv_transfer_params: None,
+            nvext: None,
+        }
     }
 
     /// Check if usage tracking is enabled
@@ -272,6 +282,27 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         // rules stay in one place.
         let prompt_logprobs_payload =
             common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref());
+        if self.options.response_fields.prompt_token_ids && finish_reason.is_some() {
+            response.prompt_token_ids = delta
+                .engine_data
+                .as_ref()
+                .and_then(|d| d.get("prompt_token_ids"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_u64().and_then(|u| u32::try_from(u).ok()))
+                        .collect::<Vec<u32>>()
+                });
+        }
+        if self.options.response_fields.kv_transfer_params && finish_reason.is_some() {
+            response.kv_transfer_params = delta.disaggregated_params.clone().or_else(|| {
+                delta
+                    .engine_data
+                    .as_ref()
+                    .and_then(|d| d.get("kv_transfer_params"))
+                    .cloned()
+            });
+        }
         if let Some(nvext_response) = self.options.response_fields.build_response_nvext(
             Some(&self.tracker),
             finish_reason.is_some(),
@@ -351,6 +382,7 @@ mod tests {
             nvext: None,
             metadata: None,
             return_tokens_as_token_ids: None,
+            return_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -404,6 +436,7 @@ mod tests {
             ),
             metadata: None,
             return_tokens_as_token_ids: None,
+            return_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }

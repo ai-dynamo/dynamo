@@ -188,6 +188,8 @@ impl DeltaGenerator {
                 },
                 service_tier: self.service_tier.clone(),
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None, // Will be populated by router layer if needed
             llm_metrics: None,
         }
@@ -212,6 +214,8 @@ impl DeltaGenerator {
                 usage: Some(usage),
                 service_tier: self.service_tier.clone(),
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
             llm_metrics: None,
         }
@@ -319,6 +323,27 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         let prompt_logprobs_payload =
             common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref());
         let completion_token_ids_slice: &[u32] = &delta.token_ids;
+        if self.options.response_fields.prompt_token_ids && finish_reason.is_some() {
+            stream_response.prompt_token_ids = delta
+                .engine_data
+                .as_ref()
+                .and_then(|d| d.get("prompt_token_ids"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_u64().and_then(|u| u32::try_from(u).ok()))
+                        .collect::<Vec<u32>>()
+                });
+        }
+        if self.options.response_fields.kv_transfer_params && finish_reason.is_some() {
+            stream_response.kv_transfer_params = delta.disaggregated_params.clone().or_else(|| {
+                delta
+                    .engine_data
+                    .as_ref()
+                    .and_then(|d| d.get("kv_transfer_params"))
+                    .cloned()
+            });
+        }
         if let Some(nvext_response) = self.options.response_fields.build_response_nvext(
             Some(&self.tracker),
             finish_reason.is_some(),
@@ -411,6 +436,7 @@ mod tests {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            return_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -604,6 +630,7 @@ mod tests {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            return_token_ids: None,
             unsupported_fields: Default::default(),
         }
     }

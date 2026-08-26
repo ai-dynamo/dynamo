@@ -4577,6 +4577,8 @@ impl OpenAIPreprocessor {
                 let mut nv_chunk = Annotated {
                     data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
                         inner,
+                        prompt_token_ids: None,
+                        kv_transfer_params: None,
                         nvext: None,
                         llm_metrics,
                     }),
@@ -6330,6 +6332,8 @@ mod tests {
                 usage: None,
                 service_tier: None,
             },
+            prompt_token_ids: None,
+            kv_transfer_params: None,
             nvext: None,
             llm_metrics: None,
         })
@@ -8378,6 +8382,7 @@ mod tests {
             nvext: None,
             metadata: None,
             return_tokens_as_token_ids: None,
+            return_token_ids: None,
             unsupported_fields: Default::default(),
         };
         let next: Arc<

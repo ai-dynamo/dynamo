@@ -669,6 +669,8 @@ pub struct NvExtResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completion_token_ids: Option<Vec<TokenIdType>>,
 
+    // `prompt_token_ids` / `kv_transfer_params` are emitted top-level on the
+    // response, not here — see `NvExtResponseFieldSelection`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_logprobs: Option<PromptLogprobs>,
 }
@@ -711,6 +713,11 @@ pub(crate) fn merge_response_nvext(
 }
 
 /// Response nvext fields requested for a given request.
+///
+/// `completion_token_ids` in `nvext.extra_fields` (or the
+/// `return_token_ids: true` alias) additionally turns on `prompt_token_ids`
+/// and `kv_transfer_params`; the latter two are emitted at the response top
+/// level to match vLLM's OpenAI server, not inside `NvExtResponse`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NvExtResponseFieldSelection {
     pub worker_id: bool,
@@ -720,6 +727,8 @@ pub struct NvExtResponseFieldSelection {
     pub engine_data: bool,
     pub stop_reason: bool,
     pub completion_token_ids: bool,
+    pub prompt_token_ids: bool,
+    pub kv_transfer_params: bool,
     pub prompt_logprobs: bool,
 }
 
@@ -738,7 +747,16 @@ impl NvExtResponseFieldSelection {
                     "routed_experts" => selection.routed_experts = true,
                     "engine_data" => selection.engine_data = true,
                     "stop_reason" => selection.stop_reason = true,
-                    "completion_token_ids" => selection.completion_token_ids = true,
+                    "completion_token_ids" => {
+                        // `completion_token_ids` gates the trio a trainer /
+                        // capture client needs together: completion tokens,
+                        // prompt tokens, and disaggregated kv-transfer params.
+                        // Matches vLLM's `return_token_ids: true` semantics,
+                        // which surfaces prompt+completion IDs on the response.
+                        selection.completion_token_ids = true;
+                        selection.prompt_token_ids = true;
+                        selection.kv_transfer_params = true;
+                    }
                     "prompt_logprobs" => selection.prompt_logprobs = true,
                     _ => {}
                 }
@@ -1801,6 +1819,21 @@ mod tests {
 
         assert_eq!(out.completion_token_ids, Some(vec![101u32, 102, 103]));
         assert!(out.prompt_logprobs.is_none());
+    }
+
+    #[test]
+    fn from_nvext_completion_token_ids_gates_the_return_token_ids_trio() {
+        let ext = NvExt {
+            extra_fields: Some(vec!["completion_token_ids".to_string()]),
+            ..NvExt::default()
+        };
+        let sel = NvExtResponseFieldSelection::from_nvext(Some(&ext));
+        assert!(sel.completion_token_ids);
+        assert!(sel.prompt_token_ids);
+        assert!(sel.kv_transfer_params);
+        // Independent selectors are not turned on incidentally.
+        assert!(!sel.timing);
+        assert!(!sel.engine_data);
     }
 
     #[test]
