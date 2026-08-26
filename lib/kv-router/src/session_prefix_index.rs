@@ -3,7 +3,7 @@
 
 //! Session lineage retained independently of physical cache eviction.
 //!
-//! Final-session removal and an LRU session cap bound retention.
+//! Final-session removal, an LRU session cap, and a lineage-depth cap bound retention.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -18,6 +18,9 @@ pub type SessionId = String;
 
 /// Default tracked-session ceiling before LRU eviction.
 pub const DEFAULT_MAX_SESSIONS: usize = 16_384;
+
+/// Maximum nodes retained in any session-frontier lineage.
+pub const DEFAULT_MAX_SESSION_DEPTH: usize = 1_024;
 
 new_key_type! {
     /// Generational handle to a [`LogicalNode`] in the arena.
@@ -89,6 +92,7 @@ struct IndexState {
     lru: BTreeMap<u64, SessionId>,
     next_touch: u64,
     max_sessions: usize,
+    max_session_depth: usize,
 }
 
 impl Default for IndexState {
@@ -100,6 +104,7 @@ impl Default for IndexState {
             lru: BTreeMap::default(),
             next_touch: 0,
             max_sessions: DEFAULT_MAX_SESSIONS,
+            max_session_depth: DEFAULT_MAX_SESSION_DEPTH,
         }
     }
 }
@@ -447,16 +452,35 @@ impl IndexState {
         }
         entry.frontiers.insert(node);
 
+        self.enforce_frontier_depth(node);
         self.touch_session(session_id);
         self.enforce_session_cap();
         true
+    }
+
+    fn enforce_frontier_depth(&mut self, frontier: NodeId) {
+        let path = self.path_to_root(frontier);
+        if path.len() <= self.max_session_depth {
+            return;
+        }
+
+        let new_root = path[path.len() - self.max_session_depth];
+        let old_parent = self.nodes[new_root]
+            .parent
+            .take()
+            .expect("a truncated path has an older parent");
+        self.nodes[old_parent].child_count -= 1;
+        self.reclaim_unreferenced(Some(old_parent));
     }
 
     // Reclaim ancestors until reaching a shared frontier or parent.
     fn release_frontier(&mut self, frontier: NodeId) {
         self.nodes[frontier].frontier_refs -= 1;
 
-        let mut current = Some(frontier);
+        self.reclaim_unreferenced(Some(frontier));
+    }
+
+    fn reclaim_unreferenced(&mut self, mut current: Option<NodeId>) {
         while let Some(node) = current {
             let entry = self.nodes[node];
             if entry.frontier_refs > 0 || entry.child_count > 0 {
