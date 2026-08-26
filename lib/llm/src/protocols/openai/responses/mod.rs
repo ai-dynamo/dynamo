@@ -908,6 +908,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            prompt_cache_key: resp.inner.prompt_cache_key,
             unsupported_fields: Default::default(),
         })
     }

@@ -308,6 +308,7 @@ pub enum RequestTraceToolStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engines::ValidateRequest;
 
     #[test]
     fn request_trace_has_only_replay_fields() {
@@ -361,9 +362,12 @@ mod tests {
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model": "test-model",
             "messages": [{"role": "user", "content": "hello"}],
-            "store": true
+            "store": true,
+            "prompt_cache_key": "tenant-42"
         }))
         .unwrap();
+        assert!(request.unsupported_fields.is_empty());
+        ValidateRequest::validate(&request).unwrap();
         let response: NvCreateChatCompletionResponse = serde_json::from_value(serde_json::json!({
             "id": "chatcmpl-test",
             "object": "chat.completion",
@@ -404,6 +408,7 @@ mod tests {
         assert!(value["payload"].get("requested_streaming").is_none());
         assert_eq!(value["payload"]["payload_complete"], true);
         assert_eq!(value["payload"]["request"]["model"], "test-model");
+        assert_eq!(value["payload"]["request"]["prompt_cache_key"], "tenant-42");
         assert_eq!(
             value["payload"]["response"]["choices"][0]["message"]["content"],
             "hi"
