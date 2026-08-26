@@ -7,6 +7,7 @@
 //! with automatic label injection and hierarchical naming support.
 
 pub mod frontend_perf;
+pub mod prom_text;
 pub mod prometheus_names;
 pub mod request_plane;
 pub mod tokio_perf;

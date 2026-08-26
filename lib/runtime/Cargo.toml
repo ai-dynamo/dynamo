@@ -74,6 +74,8 @@ opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
 opentelemetry-appender-tracing = { workspace = true }
+opentelemetry-proto = { workspace = true }
+prometheus-parse = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 url = { workspace = true }

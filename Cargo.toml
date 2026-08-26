@@ -176,6 +176,14 @@ opentelemetry-otlp = { version = "0.31.0", features = [
     "reqwest-rustls",
 ] }
 opentelemetry-appender-tracing = { version = "0.31.0" }
+# OTLP metrics export bypasses the SDK metrics pipeline (its data model is
+# read-only), so we build protobuf directly. Already in the tree via
+# opentelemetry-otlp; declared here to use it as a direct dependency.
+opentelemetry-proto = { version = "0.31.0", default-features = false, features = [
+    "gen-tonic",
+    "metrics",
+] }
+prometheus-parse = { version = "0.2.5" }
 validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 url = { version = "2.5", features = ["serde"] }
