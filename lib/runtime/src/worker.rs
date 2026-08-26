@@ -38,6 +38,13 @@ use tokio::{signal, task::JoinHandle};
 /// [`Worker::ensure_process_runtime`] (environment config) runs first. Both publish into this
 /// cell rather than around it, so a process cannot end up on two runtimes.
 static RT: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
+
+/// The config [`Worker::ensure_process_runtime`] built `RT` from, kept so
+/// [`Worker::runtime_from_existing`] can attach the matching compute pool without re-reading
+/// the environment. Left empty when [`Worker::from_config`] builds `RT`, since that path has
+/// never attached one.
+static RTCONFIG: OnceCell<RuntimeConfig> = OnceCell::new();
+
 static INIT: OnceCell<Mutex<Option<tokio::task::JoinHandle<anyhow::Result<()>>>>> = OnceCell::new();
 
 use crate::config::environment_names::worker as env_worker;
@@ -93,8 +100,18 @@ impl Worker {
     /// not recover a `&'static` reference from that handle, so it built a *second* runtime:
     /// traffic on one, the configured thread counts on the other.
     pub fn runtime_from_existing() -> anyhow::Result<Runtime> {
+        // Only the caller that creates the process runtime gets the config-derived compute pool
+        // and `block_in_place` permits, matching what the old `Runtime::from_settings()`
+        // fallback did. Callers that adopt an existing runtime never had them, and attaching a
+        // pool per call would spawn a fresh set of Rayon threads for every `DistributedRuntime`.
+        let creating = RT.get().is_none();
         let rt = Self::ensure_process_runtime()?;
-        Runtime::from_handle(rt.handle().clone())
+        let handle = rt.handle().clone();
+
+        match RTCONFIG.get() {
+            Some(config) if creating => Runtime::from_handle_with_config(handle, config),
+            _ => Runtime::from_handle(handle),
+        }
     }
 
     /// Ensure a process-wide Tokio runtime exists, built from
@@ -110,12 +127,14 @@ impl Worker {
         }
 
         // If two threads arrive together, one builds and both observe the same runtime.
-        RT.get_or_try_init(|| {
+        RT.get_or_try_init(|| -> anyhow::Result<tokio::runtime::Runtime> {
             let config = RuntimeConfig::from_settings()?;
             // Without this there is no way to tell from a deployment whether DYN_RUNTIME_*
             // was honoured.
             tracing::info!("dynamo runtime configuration: {config}");
-            config.create_runtime().map_err(anyhow::Error::from)
+            let rt = config.create_runtime()?;
+            let _ = RTCONFIG.set(config);
+            Ok(rt)
         })
     }
 
