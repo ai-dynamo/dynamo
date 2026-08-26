@@ -59,21 +59,22 @@ aisimulate-core = { path = "aisimulate/crates/core", version = "0.1.0-dev.1" }
 dynamo-runtime = { path = "lib/runtime", version = "1.5.0" }
 dynamo-llm = { path = "lib/llm", version = "1.5.0" }
 dynamo-rl = { path = "lib/rl", version = "1.5.0" }
-dynamo-tokenizers = { version = "=1.8.0" }
-dynamo-renderer = { version = "=5.0.0" }
+dynamo-tokenizers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "c3fff187b0153e282250d3dab7d709a7a21db8fe" }
+dynamo-renderer = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "c3fff187b0153e282250d3dab7d709a7a21db8fe" }
 dynamo-tokens = { path = "lib/tokens", version = "1.5.0" }
 dynamo-truthy = { path = "lib/truthy", version = "1.5.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.5.0" }
 dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.5.0" }
 dynamo-memory = { path = "lib/memory", version = "1.5.0" }
-dynamo-agent-rt = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "e4bde6deec40f543c66c8891ea1977bdbbfcad19" }
-dynamo-agent-rt-store = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "e4bde6deec40f543c66c8891ea1977bdbbfcad19" }
-dynamo-agent-tools = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "e4bde6deec40f543c66c8891ea1977bdbbfcad19" }
-agent-rt-sandbox = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "e4bde6deec40f543c66c8891ea1977bdbbfcad19" }
+dynamo-agent-rt = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "c3fff187b0153e282250d3dab7d709a7a21db8fe" }
+dynamo-agent-rt-mcp = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "c3fff187b0153e282250d3dab7d709a7a21db8fe" }
+dynamo-agent-rt-store = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "c3fff187b0153e282250d3dab7d709a7a21db8fe" }
+dynamo-agent-tools = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "c3fff187b0153e282250d3dab7d709a7a21db8fe" }
+agent-rt-sandbox = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "c3fff187b0153e282250d3dab7d709a7a21db8fe" }
 dynamo-mocker = { path = "lib/mocker", version = "1.5.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.5.0" }
-dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "e4bde6deec40f543c66c8891ea1977bdbbfcad19" }
-dynamo-parsers = { version = "8.0.0" }
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "c3fff187b0153e282250d3dab7d709a7a21db8fe" }
+dynamo-parsers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "c3fff187b0153e282250d3dab7d709a7a21db8fe" }
 
 # Published on crates.io. To see all available versions:
 #   web:          https://crates.io/crates/dynamo-parsers-v2/versions
@@ -200,7 +201,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-pemfile = { version = "2" }
 
 [patch.crates-io]
-dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "e4bde6deec40f543c66c8891ea1977bdbbfcad19" }
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "c3fff187b0153e282250d3dab7d709a7a21db8fe" }
 
 [profile.dev.package]
 insta.opt-level = 3

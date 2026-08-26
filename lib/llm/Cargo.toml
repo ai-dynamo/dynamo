@@ -40,6 +40,7 @@ request-trace-s3 = []
 agent-rt-poc = [
     "dep:agent-rt-sandbox",
     "dep:dynamo-agent-rt",
+    "dep:dynamo-agent-rt-mcp",
     "dep:dynamo-agent-rt-store",
     "dep:dynamo-agent-tools",
     "dep:subtle",
@@ -73,6 +74,7 @@ required-features = ["request-trace-bench"]
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
 agent-rt-sandbox = { workspace = true, features = ["http-client"], optional = true }
 dynamo-agent-rt = { workspace = true, optional = true }
+dynamo-agent-rt-mcp = { workspace = true, optional = true }
 dynamo-agent-rt-store = { workspace = true, features = ["sqlite"], optional = true }
 dynamo-agent-tools = { workspace = true, optional = true }
 dynamo-memory = { workspace = true }
@@ -196,7 +198,7 @@ bs62 = { version = "0.1" }
 # alphabetically, diverging from Python frontends (vLLM/SGLang) which preserve
 # dict insertion order. serde_json already has its preserve_order enabled by
 # dynamo-renderer; minijinja's map is the remaining sort point.
-minijinja = { version = "2.21.0", features = ["loader", "loop_controls", "preserve_order"] }
+minijinja = { version = "2.24.0", features = ["loader", "loop_controls", "preserve_order"] }
 json-five = { version = "0.3" }
 
 # media loading in the preprocessor

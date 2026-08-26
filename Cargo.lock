@@ -11,7 +11,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 [[package]]
 name = "agent-rt-sandbox"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=e4bde6deec40f543c66c8891ea1977bdbbfcad19#e4bde6deec40f543c66c8891ea1977bdbbfcad19"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=c3fff187b0153e282250d3dab7d709a7a21db8fe#c3fff187b0153e282250d3dab7d709a7a21db8fe"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -1115,6 +1115,12 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "base64-simd"
@@ -2459,7 +2465,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 [[package]]
 name = "dynamo-agent-rt"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=e4bde6deec40f543c66c8891ea1977bdbbfcad19#e4bde6deec40f543c66c8891ea1977bdbbfcad19"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=c3fff187b0153e282250d3dab7d709a7a21db8fe#c3fff187b0153e282250d3dab7d709a7a21db8fe"
 dependencies = [
  "async-stream",
  "blake3",
@@ -2473,9 +2479,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-agent-rt-mcp"
+version = "0.1.0"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=c3fff187b0153e282250d3dab7d709a7a21db8fe#c3fff187b0153e282250d3dab7d709a7a21db8fe"
+dependencies = [
+ "dynamo-agent-rt",
+ "reqwest 0.13.4",
+ "rmcp",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "dynamo-agent-rt-store"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=e4bde6deec40f543c66c8891ea1977bdbbfcad19#e4bde6deec40f543c66c8891ea1977bdbbfcad19"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=c3fff187b0153e282250d3dab7d709a7a21db8fe#c3fff187b0153e282250d3dab7d709a7a21db8fe"
 dependencies = [
  "dynamo-agent-rt",
  "rusqlite",
@@ -2488,7 +2509,7 @@ dependencies = [
 [[package]]
 name = "dynamo-agent-tools"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=e4bde6deec40f543c66c8891ea1977bdbbfcad19#e4bde6deec40f543c66c8891ea1977bdbbfcad19"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=c3fff187b0153e282250d3dab7d709a7a21db8fe#c3fff187b0153e282250d3dab7d709a7a21db8fe"
 dependencies = [
  "dynamo-agent-rt",
  "reqwest 0.13.4",
@@ -2752,6 +2773,7 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-agent-rt",
+ "dynamo-agent-rt-mcp",
  "dynamo-agent-rt-store",
  "dynamo-agent-tools",
  "dynamo-bench",
@@ -2914,9 +2936,8 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "8.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1500b56f141d7c5e5f81011abe15ef1c4611c5495f68e4c24d2adf853c1ff5a1"
+version = "8.2.0"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=c3fff187b0153e282250d3dab7d709a7a21db8fe#c3fff187b0153e282250d3dab7d709a7a21db8fe"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2955,7 +2976,7 @@ dependencies = [
 [[package]]
 name = "dynamo-protocols"
 version = "5.4.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=e4bde6deec40f543c66c8891ea1977bdbbfcad19#e4bde6deec40f543c66c8891ea1977bdbbfcad19"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=c3fff187b0153e282250d3dab7d709a7a21db8fe#c3fff187b0153e282250d3dab7d709a7a21db8fe"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2970,9 +2991,8 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "5.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0423da7bec83734e7567b1c8895fd2e7a1a98256253a29fe128032ac01cefac1"
+version = "5.1.0"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=c3fff187b0153e282250d3dab7d709a7a21db8fe#c3fff187b0153e282250d3dab7d709a7a21db8fe"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3140,8 +3160,7 @@ dependencies = [
 [[package]]
 name = "dynamo-tokenizers"
 version = "1.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "821c767e896f1f225b6411a5ce41dba7f114c2c97db862a13fd962195665075e"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=c3fff187b0153e282250d3dab7d709a7a21db8fe#c3fff187b0153e282250d3dab7d709a7a21db8fe"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -5953,9 +5972,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja"
-version = "2.21.0"
+version = "2.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb3d648e68cea56d9858d535ee28f9538404e2dd8cb08ed0bd05dca379477f39"
+checksum = "86886cf6dbf4e614b19c9a1eec9775f021869d7eadde0fc73921a81b90c9b4c9"
 dependencies = [
  "indexmap 2.14.0",
  "memo-map",
@@ -5966,9 +5985,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja-contrib"
-version = "2.21.0"
+version = "2.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85342f6fac0be8ccd5bd00d9066be538f34f393f577b75d81b17c8398a6b43bb"
+checksum = "bd3e5f077bc2379f0f7d911e7cfdd921114ed99fc884533dca502944cb355b11"
 dependencies = [
  "minijinja",
  "serde",
@@ -7515,8 +7534,8 @@ version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
- "heck 0.4.1",
- "itertools 0.13.0",
+ "heck 0.5.0",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "once_cell",
@@ -7535,8 +7554,8 @@ version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "343d3bd7056eda839b03204e68deff7d1b13aba7af2b2fd16890697274262ee7"
 dependencies = [
- "heck 0.4.1",
- "itertools 0.13.0",
+ "heck 0.5.0",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "petgraph 0.8.3",
@@ -7557,7 +7576,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -7570,7 +7589,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27c6023962132f4b30eb4c172c91ce92d933da334c59c23cddee82358ddafb0b"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn",
@@ -8276,6 +8295,30 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rmcp"
+version = "3.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a15bc53261a9dc37e105df006e4656c598379a8f9581f8950debb130f27a7cf"
+dependencies = [
+ "base64 0.23.1",
+ "bytes",
+ "chrono",
+ "futures",
+ "http 1.4.1",
+ "indexmap 2.14.0",
+ "pin-project-lite",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "sse-stream",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -9345,6 +9388,19 @@ dependencies = [
  "nom 7.1.3",
  "serde",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "sse-stream"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c123f296ade4ec4b8b0f6162116e6629f5146922ca5ab40ca9d3c2e73ab4761e"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http-body 1.0.1",
+ "http-body-util",
+ "pin-project-lite",
 ]
 
 [[package]]
