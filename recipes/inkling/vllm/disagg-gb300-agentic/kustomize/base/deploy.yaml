@@ -42,9 +42,7 @@ spec:
         spec:
           containers:
             - name: main
-              # Temporary staging build; carries dynamo PRs 12510 + 12541.
-              # Replace with the public release image before merging.
-              image: nvcr.io/nvstaging/nim/sungsooh:inkling-gb200probe-dyn150dev-p12541-p12510-v1@sha256:801a47a82216484ccc982425bb74d788347d1780e584ecec1d58185b98971c83
+              image: nvcr.io/nvstaging/nim/sungsooh:inkling-gb200probe-dyn150dev-p12541-p12510-v1
               imagePullPolicy: Always
               command: [python3, -m, dynamo.frontend]
               args:
@@ -100,7 +98,7 @@ spec:
               resourceClaimTemplateName: inkling-vllm-gb300-disagg-agentic-compute-domain-channel
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/sungsooh:inkling-gb200probe-dyn150dev-p12541-p12510-v1@sha256:801a47a82216484ccc982425bb74d788347d1780e584ecec1d58185b98971c83
+              image: nvcr.io/nvstaging/nim/sungsooh:inkling-gb200probe-dyn150dev-p12541-p12510-v1
               imagePullPolicy: Always
               command: [/bin/bash, -lc]
               args:
@@ -208,7 +206,7 @@ spec:
               resourceClaimTemplateName: inkling-vllm-gb300-disagg-agentic-compute-domain-channel
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/sungsooh:inkling-gb200probe-dyn150dev-p12541-p12510-v1@sha256:801a47a82216484ccc982425bb74d788347d1780e584ecec1d58185b98971c83
+              image: nvcr.io/nvstaging/nim/sungsooh:inkling-gb200probe-dyn150dev-p12541-p12510-v1
               imagePullPolicy: Always
               command: [/bin/bash, -lc]
               args:
