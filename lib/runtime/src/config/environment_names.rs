@@ -437,6 +437,13 @@ pub mod llm {
     /// stays as an SSE error frame. Setting to `0` also disables the peek.
     pub const DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS: &str = "DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS";
 
+    /// Hysteresis duration in milliseconds for decode overload detection.
+    ///
+    /// When a decode signal exceeds its threshold, the worker remains overloaded
+    /// for at least this long. Later above-threshold signals refresh the deadline.
+    /// Default: 5000 ms.
+    pub const DYN_DECODE_OVERLOAD_HYSTERESIS_MS: &str = "DYN_DECODE_OVERLOAD_HYSTERESIS_MS";
+
     /// Enable the LoRA allocation controller (set to "true" to enable)
     pub const DYN_LORA_ALLOCATION_ENABLED: &str = "DYN_LORA_ALLOCATION_ENABLED";
 
@@ -954,6 +961,7 @@ mod tests {
             llm::DYN_HTTP_OVERLOAD_STATUS_CODE,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
             llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
+            llm::DYN_DECODE_OVERLOAD_HYSTERESIS_MS,
             llm::DYN_LORA_ENABLED,
             llm::DYN_LORA_PATH,
             llm::DYN_ENABLE_ANTHROPIC_API,
