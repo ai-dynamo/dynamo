@@ -172,6 +172,23 @@ pub struct ListenerRecord {
     runtime: Mutex<ListenerRuntime>,
 }
 
+struct ListenerSnapshotEntry {
+    generation: u64,
+    record: Arc<ListenerRecord>,
+}
+
+pub(super) struct ListenerSnapshot {
+    entries: Vec<ListenerSnapshotEntry>,
+}
+
+impl ListenerSnapshot {
+    pub(super) fn mark_snapshot_bootstrapped(self) {
+        for entry in self.entries {
+            entry.record.mark_snapshot_bootstrapped(entry.generation);
+        }
+    }
+}
+
 impl ListenerRecord {
     fn new(
         endpoint: String,
@@ -328,9 +345,14 @@ impl ListenerRecord {
         true
     }
 
-    pub(super) fn mark_snapshot_bootstrapped(&self) {
+    pub(super) fn mark_snapshot_bootstrapped(&self, generation: u64) -> bool {
+        let runtime = self.runtime.lock();
+        if runtime.generation != generation || runtime.cancel_token.is_none() {
+            return false;
+        }
         self.snapshot_bootstrap_first_batch
             .store(true, std::sync::atomic::Ordering::Release);
+        true
     }
 
     pub(super) fn try_mark_failed(&self, generation: u64, error: impl Into<String>) {
@@ -438,12 +460,24 @@ impl WorkerRegistry {
         *self.ready_rx.borrow()
     }
 
-    pub fn mark_current_listeners_snapshot_bootstrapped(&self) {
+    pub(super) fn snapshot_buffering_listeners(&self) -> ListenerSnapshot {
+        let mut entries = Vec::new();
         for worker in self.workers.iter() {
             for record in worker.listeners.values() {
-                record.mark_snapshot_bootstrapped();
+                let runtime = record.runtime.lock();
+                if matches!(
+                    runtime.status,
+                    ListenerStatus::Buffering | ListenerStatus::CatchingUp | ListenerStatus::Active
+                ) && runtime.cancel_token.is_some()
+                {
+                    entries.push(ListenerSnapshotEntry {
+                        generation: runtime.generation,
+                        record: record.clone(),
+                    });
+                }
             }
         }
+        ListenerSnapshot { entries }
     }
 
     pub async fn wait_for_listeners_buffering(&self) -> Result<()> {
@@ -1077,9 +1111,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_bootstrap_marks_current_streams_only() {
+    async fn snapshot_bootstrap_marks_only_captured_listener_generations() {
         let registry = test_registry();
         register_test_listener(&registry, 5, 0).await;
+        register_test_listener(&registry, 7, 0).await;
         registry.wait_for_listeners_buffering().await.unwrap();
 
         let record = registry
@@ -1093,11 +1128,39 @@ mod tests {
                 .load(Ordering::Acquire)
         );
 
-        registry.mark_current_listeners_snapshot_bootstrapped();
+        let snapshot = registry.snapshot_buffering_listeners();
+        registry.pause_listener(7, 0).unwrap();
+        registry.resume_listener(7, 0).await.unwrap();
+        register_test_listener(&registry, 6, 0).await;
+        registry.wait_for_listeners_buffering().await.unwrap();
+        let later_record = registry
+            .workers
+            .get(&6)
+            .and_then(|worker| worker.listeners.get(&0).cloned())
+            .expect("later test listener should be registered");
+        let restarted_record = registry
+            .workers
+            .get(&7)
+            .and_then(|worker| worker.listeners.get(&0).cloned())
+            .expect("restarted test listener should be registered");
+
+        snapshot.mark_snapshot_bootstrapped();
         assert!(
             record
                 .snapshot_bootstrap_first_batch()
                 .load(Ordering::Acquire)
+        );
+        assert!(
+            !later_record
+                .snapshot_bootstrap_first_batch()
+                .load(Ordering::Acquire),
+            "a listener registered after the dump snapshot must keep normal gap recovery"
+        );
+        assert!(
+            !restarted_record
+                .snapshot_bootstrap_first_batch()
+                .load(Ordering::Acquire),
+            "a restarted listener generation must keep normal gap recovery"
         );
         registry.root_cancel_token.cancel();
     }

@@ -551,6 +551,11 @@ async fn run_listener(
         snapshot_bootstrap_first_batch,
     );
     listener.drain_buffered().await?;
+    listener
+        .indexer
+        .flush_pending()
+        .await
+        .map_err(|error| format!("failed to flush buffered indexer events: {error}"))?;
     if !record.try_mark_active(generation) {
         return Ok(());
     }

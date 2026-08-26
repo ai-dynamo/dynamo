@@ -902,30 +902,24 @@ async fn peer_dump_is_applied_before_buffered_zmq_removal() {
         .await
         .expect("listener should drain buffered events before active");
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let response = client
-            .post(format!("{base_url}/query_by_hash"))
-            .json(&query)
-            .send()
-            .await
-            .expect("query after listener drain")
-            .json::<serde_json::Value>()
-            .await
-            .expect("parse drained query");
-        if response["instances"][INSTANCE_ID.to_string()]["gpu"]
+    // Active is a visibility barrier, not merely an enqueue barrier: the
+    // buffered remove must be observable immediately, without eventual polling.
+    let response = client
+        .post(format!("{base_url}/query_by_hash"))
+        .json(&query)
+        .send()
+        .await
+        .expect("query after listener drain")
+        .json::<serde_json::Value>()
+        .await
+        .expect("parse drained query");
+    assert_eq!(
+        response["instances"][INSTANCE_ID.to_string()]["gpu"]
             .as_u64()
-            .unwrap_or(0)
-            == 0
-        {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "queued removal did not win after listener drain: {response}"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+            .unwrap_or(0),
+        0,
+        "queued removal must be visible when the listener becomes active: {response}"
+    );
 
     server_cancel.cancel();
     server_task.await.expect("server task join");

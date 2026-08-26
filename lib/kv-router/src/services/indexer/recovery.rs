@@ -65,9 +65,15 @@ pub async fn recover_from_peers(peers: &[String], registry: &WorkerRegistry) -> 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     for peer_url in peers {
+        // Freeze the exact connected listener attempts covered by this dump
+        // request. Topology reconciliation may add or restart listeners while
+        // the HTTP response is in flight; those attempts must retain normal
+        // first-batch gap detection because the snapshot cannot prove that it
+        // contains their history.
+        let listener_snapshot = registry.snapshot_buffering_listeners();
         match try_recover_from_peer(&client, peer_url, registry).await {
             Ok(()) => {
-                registry.mark_current_listeners_snapshot_bootstrapped();
+                listener_snapshot.mark_snapshot_bootstrapped();
                 tracing::info!(peer = %peer_url, "recovery from peer succeeded");
                 return Ok(true);
             }
@@ -157,6 +163,11 @@ async fn try_recover_from_peer(
                 .context("peer recovery event was rejected by the local indexer")?;
             total_events += 1;
         }
+
+        indexer
+            .flush_pending()
+            .await
+            .context("failed to flush peer recovery events")?;
     }
 
     // An empty dump is a valid recovery. Recovery candidates are restricted to
