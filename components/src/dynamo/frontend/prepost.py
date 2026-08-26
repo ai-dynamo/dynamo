@@ -742,8 +742,16 @@ class StreamingPostProcessor:
         # control token (`<|not_a_real_special_token|>`) is ordinary generated
         # text and must survive. Built once: it cannot change for the lifetime of
         # this postprocessor, and compiled once per process (see the memo above).
+        #
+        # Gate on the CONFIGURED parser, not on `self.reasoning_parser`. What forces
+        # skip_special_tokens=false is the deployment's parser NAME --
+        # preprocessor.rs::parser_requires_special_tokens (PRE.1) matches static
+        # names only, and vLLM's ParserEngine.adjust_request likewise -- so neither
+        # sees this request's enable_thinking or response_reasoning_ended. Those are
+        # exactly what null self.reasoning_parser just above, so an instance-keyed
+        # gate is a no-op precisely on the requests that still receive raw markers.
         self._marker_strip_re: re.Pattern[str] | None = None
-        if self.reasoning_parser is not None or self.tool_parser is not None:
+        if reasoning_parser_class is not None or self.tool_parser is not None:
             # A tool parser's own markers are its wire format, consumed
             # downstream; removing them here would blind the tool-start scan.
             owned = set(self._tool_start_markers()) | set(self._tool_end_markers())

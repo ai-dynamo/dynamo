@@ -1723,6 +1723,18 @@ class _PassthroughStreamingToolParser(ToolParser):
         return None
 
 
+class _InactiveReasoningParser:
+    """A configured reasoning parser that never becomes active on a request.
+
+    `enable_thinking=False` and `response_reasoning_ended=True` both leave
+    StreamingPostProcessor.reasoning_parser None, so this is only ever passed as a
+    class -- constructing it is the bug this fake exists to catch.
+    """
+
+    def __init__(self, tokenizer, *, chat_template_kwargs):
+        raise AssertionError("must not be constructed for an inactive request")
+
+
 class _MarkerOwningToolParser(_PassthroughStreamingToolParser):
     """A tool parser that owns two of the tokenizer's special tokens."""
 
@@ -1743,7 +1755,14 @@ class TestControlMarkerStrip:
     """
 
     @staticmethod
-    def _post(tokenizer, *, tool_parser=None):
+    def _post(
+        tokenizer,
+        *,
+        tool_parser=None,
+        reasoning_parser_class=None,
+        response_reasoning_ended=None,
+        chat_template_kwargs=None,
+    ):
         request = json.loads(json.dumps(TOOL_REQUEST))
         request.pop("tools", None)
         request, _, _, _, _ = _prepare_request(
@@ -1755,8 +1774,9 @@ class TestControlMarkerStrip:
             sampling_params=SamplingParams(),
             prompt_token_ids=[],
             tool_parser=tool_parser,
-            reasoning_parser_class=None,
-            chat_template_kwargs={},
+            reasoning_parser_class=reasoning_parser_class,
+            chat_template_kwargs=chat_template_kwargs or {},
+            response_reasoning_ended=response_reasoning_ended,
             stream_response=True,
         )
 
@@ -1803,11 +1823,39 @@ class TestControlMarkerStrip:
         # A special token it does not own is still removed.
         assert post._strip_control_markers("<|endoftext|>x") == "x"
 
-    def test_no_parser_active_is_passthrough(self, tokenizer):
-        """Only a parser forces skip_special_tokens off, so only it needs this."""
+    def test_no_parser_configured_is_passthrough(self, tokenizer):
+        """Only a *configured* parser forces skip_special_tokens off."""
         post = self._post(tokenizer)
         assert post.tool_parser is None and post.reasoning_parser is None
         assert self._content(post, "<|im_end|>408") == "<|im_end|>408"
+
+    @pytest.mark.parametrize(
+        "inactive_kwargs",
+        [
+            {"response_reasoning_ended": True},
+            {"chat_template_kwargs": {"enable_thinking": False}},
+        ],
+        ids=["reasoning-already-ended", "thinking-disabled"],
+    )
+    def test_configured_but_inactive_reasoning_parser_still_strips(
+        self, tokenizer, inactive_kwargs
+    ):
+        """The CONFIGURED parser forces skip_special_tokens off, not the instance.
+
+        preprocessor.rs::parser_requires_special_tokens keys the
+        skip_special_tokens=false default off the deployment's configured
+        reasoning_parser NAME; it never sees this request's enable_thinking or
+        response_reasoning_ended. But this class leaves self.reasoning_parser None on
+        exactly those requests, so gating the strip on the instance made it a no-op
+        precisely where markers still arrive undecoded.
+        """
+        post = self._post(
+            tokenizer,
+            reasoning_parser_class=_InactiveReasoningParser,
+            **inactive_kwargs,
+        )
+        assert post.reasoning_parser is None
+        assert self._content(post, "<|im_end|>408<|im_end|>") == "408"
 
 
 class TestToolCallGuidedDecoding:
