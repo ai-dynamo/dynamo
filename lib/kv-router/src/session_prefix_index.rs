@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Session lineage retained independently of physical cache eviction.
+//! Hash-keyed nodes and parent edges are shared across sessions, so a lineage may contain ancestors learned from another session and does not prove this session matched every block.
 //!
 //! Final-session removal, an LRU session cap, and a lineage-depth cap bound retention.
 
@@ -162,6 +163,7 @@ impl SessionPrefixIndexer {
     }
 
     /// Returns root-first chains, optionally filtered and truncated at an anchor.
+    /// Hash-keyed nodes and parent edges are shared, so a chain may include ancestors learned from another session and does not prove this session matched every block.
     pub fn get_session_block_lineage(
         &self,
         session_id: &str,
