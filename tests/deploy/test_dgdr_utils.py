@@ -6,6 +6,7 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import pytest
 from kubernetes_asyncio import config
 
@@ -194,6 +195,45 @@ async def test_lifecycle_uses_deployment_timeout_after_profiling() -> None:
     )
 
     manager.wait_for_phase.assert_awaited_once_with("request", "Deployed", 11)
+
+
+@pytest.mark.timeout(30)
+async def test_wait_for_phase_retries_transient_api_connection_errors(
+    monkeypatch,
+) -> None:
+    manager = initialized_manager()
+    manager.get = AsyncMock(
+        side_effect=[
+            aiohttp.ClientConnectionError("vCluster tunnel unavailable"),
+            {"status": {"phase": "Ready"}},
+        ]
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr("tests.deploy.dgdr_utils.asyncio.sleep", sleep)
+
+    result = await manager.wait_for_phase("request", "Ready", timeout=30)
+
+    assert result == {"status": {"phase": "Ready"}}
+    assert manager.get.await_count == 2
+    sleep.assert_awaited_once_with(5)
+
+
+@pytest.mark.timeout(30)
+async def test_wait_for_phase_limits_transient_api_connection_retries(
+    monkeypatch,
+) -> None:
+    manager = initialized_manager()
+    manager.get = AsyncMock(
+        side_effect=aiohttp.ClientConnectionError("vCluster tunnel unavailable")
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr("tests.deploy.dgdr_utils.asyncio.sleep", sleep)
+
+    with pytest.raises(aiohttp.ClientConnectionError, match="tunnel unavailable"):
+        await manager.wait_for_phase("request", "Ready", timeout=30)
+
+    assert manager.get.await_count == 4
+    assert sleep.await_count == 3
 
 
 async def test_cleanup_reports_all_failures_and_retains_failed_names() -> None:

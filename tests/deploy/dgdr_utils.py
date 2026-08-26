@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+import aiohttp
 import yaml
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
@@ -38,6 +39,8 @@ _MAX_DGDR_NAME_LENGTH = (
 )
 _MAX_LABEL_VALUE_LENGTH = 63
 _NAME_DIGEST_LENGTH = 6
+_PHASE_POLL_INTERVAL_SECONDS = 5
+_TRANSIENT_API_RETRY_LIMIT = 3
 
 PHASE_ORDER = {
     "Pending": 0,
@@ -380,8 +383,29 @@ class ManagedDGDR:
         timeout = timeout or self.config.profiling_timeout
         deadline = time.monotonic() + timeout
         last_phase: str | None = None
+        transient_api_failures = 0
         while time.monotonic() < deadline:
-            result = await self.get(name)
+            # Give the vCluster watchdog a bounded window to restore its tunnel.
+            try:
+                result = await self.get(name)
+            except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as error:
+                transient_api_failures += 1
+                if transient_api_failures > _TRANSIENT_API_RETRY_LIMIT:
+                    raise
+                logger.warning(
+                    "Transient Kubernetes API error while waiting for DGDR %s/%s; "
+                    "retrying in %ss (%s/%s): %s",
+                    self.config.namespace,
+                    name,
+                    _PHASE_POLL_INTERVAL_SECONDS,
+                    transient_api_failures,
+                    _TRANSIENT_API_RETRY_LIMIT,
+                    error,
+                )
+                await asyncio.sleep(_PHASE_POLL_INTERVAL_SECONDS)
+                continue
+
+            transient_api_failures = 0
             phase = result.get("status", {}).get("phase") if result else None
             if phase != last_phase:
                 logger.info("DGDR %s/%s phase: %s", self.config.namespace, name, phase)
@@ -401,7 +425,7 @@ class ManagedDGDR:
                 )
             ):
                 return result
-            await asyncio.sleep(5)
+            await asyncio.sleep(_PHASE_POLL_INTERVAL_SECONDS)
         raise TimeoutError(
             f"Timed out after {timeout}s waiting for DGDR "
             f"{self.config.namespace}/{name} to reach {target}; last phase={last_phase}"
