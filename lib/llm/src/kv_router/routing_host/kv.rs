@@ -3,6 +3,35 @@
 
 use super::*;
 
+/// Whether a request may still be handed to its selected worker after the client
+/// has disconnected.
+///
+/// Post-prefill decode is the one phase that must be dispatched regardless. By the
+/// time the decode leg runs, the prefill worker has already staged KV blocks for
+/// one specific decode worker, and only that worker's own KV-transfer-complete
+/// path releases them. Dropping the dispatch leaves the transfer without a
+/// receiver and leaks those blocks for the lifetime of the worker, so the request
+/// is carried through purely to let that cleanup run — the response stream is
+/// still torn down immediately for the stopped client. Every other phase has no
+/// such staged remote state, so a disconnected client should stop the request
+/// before it ever reaches a worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchCancellation {
+    /// Skip the dispatch when the context is already stopped.
+    CancelWhenStopped,
+    /// Issue the dispatch even when the context is already stopped.
+    DispatchWhenStopped,
+}
+
+impl DispatchCancellation {
+    fn for_phase(phase: RequestPhase) -> Self {
+        match phase {
+            RequestPhase::Decode => Self::DispatchWhenStopped,
+            RequestPhase::Prefill | RequestPhase::Aggregated => Self::CancelWhenStopped,
+        }
+    }
+}
+
 impl<Sel> RoutingHost<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
@@ -205,19 +234,21 @@ where
                     .direct(updated_request, selection.worker.worker_id)
                     .await
             }
-        };
-        let dispatch_result = cancel_on_stop(
-            request_context.as_ref(),
-            dispatch.instrument(tracing::info_span!(
-                "kv_router.route_request",
-                request_id = %context_id,
-                worker_id = selection.worker.worker_id,
-                dp_rank = selection.worker.dp_rank,
-                overlap_blocks = selection.overlap_amount,
-                phase = ?phase,
-            )),
-        )
-        .await
+        }
+        .instrument(tracing::info_span!(
+            "kv_router.route_request",
+            request_id = %context_id,
+            worker_id = selection.worker.worker_id,
+            dp_rank = selection.worker.dp_rank,
+            overlap_blocks = selection.overlap_amount,
+            phase = ?phase,
+        ));
+        let dispatch_result = match DispatchCancellation::for_phase(phase) {
+            DispatchCancellation::CancelWhenStopped => {
+                cancel_on_stop(request_context.as_ref(), dispatch).await
+            }
+            DispatchCancellation::DispatchWhenStopped => Ok(dispatch.await),
+        }
         .and_then(|result| result);
         let response_stream = match dispatch_result {
             Ok(stream) => stream,

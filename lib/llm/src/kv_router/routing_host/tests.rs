@@ -34,7 +34,10 @@ use crate::{
     local_model::runtime_config::ModelRuntimeConfig,
     lora::{LoraReplicaConfig, LoraRoutingTable, LoraStateTracker},
     migration::Migration,
-    protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+    protocols::common::{
+        extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+        timing::RequestTracker,
+    },
 };
 
 fn request() -> PreprocessedRequest {
@@ -669,6 +672,205 @@ async fn router_with_worker_configs(
         .override_discovered_instances(worker_ids.clone());
     router.inner.client.override_instance_avail(worker_ids);
     (router, runtime)
+}
+
+/// A dispatch plane that is not ready on its first poll.
+///
+/// [`CompletedBuiltinDispatch`] resolves without ever yielding, which no real
+/// dispatch does — a request to a worker is always pending at least once while
+/// the transport makes progress. That distinction is the whole subject of these
+/// tests: `cancel_on_stop` polls the operation first, so a dispatch that happens
+/// to be immediately ready survives an already-stopped context while a realistic
+/// one is dropped. Recording after the yield makes a recorded worker id mean the
+/// dispatch was actually carried through rather than merely started.
+#[derive(Default)]
+struct PendingThenCompletedDispatch {
+    worker_ids: Mutex<Vec<u64>>,
+}
+
+#[async_trait]
+impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
+    for PendingThenCompletedDispatch
+{
+    async fn generate(
+        &self,
+        request: SingleIn<AddressedRequest<PreprocessedRequest>>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        tokio::task::yield_now().await;
+        let (addressed, context) = request.transfer(());
+        let (_, _, instance) = addressed.into_parts();
+        self.worker_ids
+            .lock()
+            .unwrap()
+            .push(instance.expect("selected worker instance").id());
+        let output = Annotated::from_data(LLMEngineOutput {
+            finish_reason: Some(FinishReason::Stop),
+            ..Default::default()
+        });
+        Ok(ResponseStream::new(
+            Box::pin(stream::once(async move { output })),
+            context.context(),
+        ))
+    }
+
+    async fn generate_bidirectional(
+        &self,
+        _instance: Instance,
+        _address: String,
+        _input: ManyIn<PreprocessedRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        unreachable!("the routing host dispatches unary requests")
+    }
+}
+
+/// Build a KV routing host whose dispatch plane is the recording mock, so a test
+/// can observe whether the selected worker was actually asked to serve the request.
+async fn router_with_recorded_dispatch(
+    namespace: &str,
+) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace(namespace.to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let client = endpoint.client().await.unwrap();
+    endpoint.register_endpoint_instance().await.unwrap();
+    let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+    let workers = HashMap::from([(worker_id, ModelRuntimeConfig::default())]);
+    let (_workers_tx, workers) = watch::channel(workers);
+    let config = KvRouterConfig {
+        skip_initial_worker_wait: true,
+        use_kv_events: false,
+        router_track_active_blocks: false,
+        ..Default::default()
+    };
+    let chooser = KvRouter::new(
+        endpoint,
+        client.clone(),
+        workers,
+        None,
+        16,
+        DefaultWorkerSelector::new(Some(config.clone()), "decode"),
+        Some(config),
+        None,
+        "decode",
+        None,
+        false,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let dispatch = Arc::new(PendingThenCompletedDispatch::default());
+    let inner = PushRouter::from_client_with_dispatch(
+        client,
+        RouterMode::KV,
+        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+    )
+    .await
+    .unwrap();
+    let router = RoutingHost::new(inner, Arc::new(chooser), None).unwrap();
+    (router, dispatch, worker_id, runtime)
+}
+
+/// Select and admit a request in the given phase, then stop its context, leaving
+/// the request poised at the dispatch stage with an already-cancelled context.
+async fn admitted_request_stopped_before_dispatch(
+    router: &RoutingHost,
+    context_id: &str,
+    phase: RequestPhase,
+) -> (SingleIn<PreprocessedRequest>, WorkerSelection, RequestGuard) {
+    let tracker = Arc::new(RequestTracker::new());
+    // The permit only serializes further phase changes; the phase itself sticks
+    // once set, and `dispatch_selection` reads it back off the tracker.
+    drop(tracker.set_phase(phase).await);
+    let mut input = request();
+    input.tracker = Some(Arc::clone(&tracker));
+    let request = Context::with_id_and_metadata(input, context_id.to_string(), Default::default());
+
+    let (mut selection, _) = router
+        .select_with_affinity(&request, phase, false)
+        .await
+        .unwrap();
+    let guard = router
+        .track_selection(&request, &mut selection, false)
+        .await
+        .unwrap();
+
+    // The client went away while the request was in flight upstream — for the
+    // decode leg, while remote prefill was still running.
+    request.context().stop();
+    assert!(request.context().is_stopped());
+
+    (request, selection, guard)
+}
+
+/// DYN-4143: a decode request produced after remote prefill must still reach the
+/// decode worker when the client has already disconnected, because only the
+/// worker can release the KV blocks the prefill worker staged for it.
+#[tokio::test]
+#[serial_test::serial]
+async fn stopped_decode_request_is_still_delivered_to_the_worker() {
+    let (router, dispatch, worker_id, runtime) =
+        router_with_recorded_dispatch("kv-decode-dispatch-after-stop").await;
+    let (request, selection, guard) = admitted_request_stopped_before_dispatch(
+        &router,
+        "post-prefill-decode-cleanup",
+        RequestPhase::Decode,
+    )
+    .await;
+
+    let mut stream = router
+        .dispatch_selection(request, selection, guard, false)
+        .await
+        .expect("decode dispatch must survive an already-stopped context");
+    while stream.next().await.is_some() {}
+
+    assert_eq!(
+        dispatch.worker_ids.lock().unwrap().as_slice(),
+        &[worker_id],
+        "the decode worker must receive the request so it can run its KV-transfer cleanup"
+    );
+
+    drop(router);
+    runtime.shutdown();
+}
+
+/// The other half of DYN-4143: every phase except decode keeps cancelling before
+/// dispatch, so a disconnected aggregated client never reaches a worker at all.
+#[tokio::test]
+#[serial_test::serial]
+async fn stopped_aggregated_request_is_cancelled_before_dispatch() {
+    let (router, dispatch, _worker_id, runtime) =
+        router_with_recorded_dispatch("kv-aggregated-dispatch-after-stop").await;
+    let (request, selection, guard) = admitted_request_stopped_before_dispatch(
+        &router,
+        "aggregated-pre-dispatch-cancellation",
+        RequestPhase::Aggregated,
+    )
+    .await;
+
+    let error = router
+        .dispatch_selection(request, selection, guard, false)
+        .await
+        .expect_err("aggregated dispatch must still be cancelled before it is issued");
+    assert!(match_error_chain(
+        error.as_ref(),
+        &[ErrorType::Cancelled],
+        &[]
+    ));
+    assert!(
+        dispatch.worker_ids.lock().unwrap().is_empty(),
+        "no worker should have been asked to serve a cancelled aggregated request"
+    );
+
+    drop(router);
+    runtime.shutdown();
 }
 
 async fn track_request(
