@@ -348,6 +348,10 @@ mod tests {
 
     #[test]
     fn peer_replication_config() {
+        type ExtraEnv = &'static [(&'static str, &'static str)];
+        type Expected = Result<(u16, usize), &'static str>;
+        type Case = (&'static str, ExtraEnv, Expected);
+
         let required = [
             ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
             ("POD_NAMESPACE", "inference"),
@@ -356,7 +360,7 @@ mod tests {
             ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
             ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
         ];
-        let cases: [(&str, &[(&str, &str)], Result<(u16, usize), &str>); 6] = [
+        let cases: [Case; 6] = [
             (
                 "default port",
                 &[
