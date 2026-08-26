@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class DynamoFrontendProcess(BaseDynamoFrontendProcess):
     """Fault-tolerance frontend wrapper (keeps env settings from the historical helper)."""
 
-    def __init__(self, request):
+    def __init__(self, request, timeout_s: int = 300):
         extra_env = {
             "DYN_REQUEST_PLANE": request.getfixturevalue("request_plane"),
             "DYN_LOG": "debug",
@@ -38,6 +38,7 @@ class DynamoFrontendProcess(BaseDynamoFrontendProcess):
             extra_env=extra_env,
             terminate_all_matching_process_names=False,
         )
+        self.timeout = timeout_s
 
 
 class CancellableRequest:
@@ -189,18 +190,12 @@ class CancellableRequest:
 
 
 def send_completion_request(
-    prompt: str, max_tokens: int, frontend_port: int
+    prompt: str,
+    max_tokens: int,
+    frontend_port: int,
+    timeout_s: float | None = None,
 ) -> CancellableRequest:
-    """Send a completion request to the frontend
-
-    Args:
-        prompt: The prompt for completion
-        max_tokens: Maximum tokens to generate
-        frontend_port: Port where the frontend is running
-
-    Returns:
-        A CancellableRequest object that can be explicitly cancelled
-    """
+    """Send a cancellable completion request to the frontend."""
     payload = {
         "model": FAULT_TOLERANCE_MODEL_NAME,
         "prompt": prompt,
@@ -219,24 +214,19 @@ def send_completion_request(
         f"http://localhost:{frontend_port}/v1/completions",
         headers=headers,
         json=payload,
+        timeout=timeout_s,
     )
     return cancellable_req
 
 
 def send_chat_completion_request(
-    prompt: str, max_tokens: int, frontend_port: int, stream: bool = False
+    prompt: str,
+    max_tokens: int,
+    frontend_port: int,
+    stream: bool = False,
+    timeout_s: float | None = None,
 ) -> CancellableRequest:
-    """Send a chat completion request to the frontend
-
-    Args:
-        prompt: The prompt for chat completion
-        max_tokens: Maximum tokens to generate
-        frontend_port: Port where the frontend is running
-        stream: Whether to stream the response
-
-    Returns:
-        A CancellableRequest object that can be explicitly cancelled
-    """
+    """Send a cancellable chat request to the frontend."""
     payload = {
         "model": FAULT_TOLERANCE_MODEL_NAME,
         "messages": [{"role": "user", "content": prompt}],
@@ -257,6 +247,7 @@ def send_chat_completion_request(
         headers=headers,
         json=payload,
         stream=stream,
+        timeout=timeout_s,
     )
     return cancellable_req
 
@@ -266,31 +257,22 @@ def send_cancellable_request(
     request_type: str = "completion",
     use_long_prompt: bool = False,
     max_tokens: int = 16384,
+    timeout_s: float | None = None,
 ) -> CancellableRequest:
-    """Send a request that can be manually cancelled.
-
-    Args:
-        frontend_port: Port where the frontend is running
-        request_type: Type of request - "completion", "chat_completion", or "chat_completion_stream"
-        use_long_prompt: Whether to use an extremely long prompt
-        max_tokens: Maximum tokens to generate for the cancellable request
-
-    Returns:
-        A CancellableRequest object that can be explicitly cancelled
-    """
+    """Send a request that can be manually cancelled."""
     prompt = "Tell me a very long and detailed story about the history of artificial intelligence, including all major milestones, researchers, and breakthroughs?"
     if use_long_prompt:
         prompt += " Make sure it is" + " long" * 16000 + "!"
 
     if request_type == "completion":
-        return send_completion_request(prompt, max_tokens, frontend_port)
+        return send_completion_request(prompt, max_tokens, frontend_port, timeout_s)
     elif request_type == "chat_completion":
         return send_chat_completion_request(
-            prompt, max_tokens, frontend_port, stream=False
+            prompt, max_tokens, frontend_port, stream=False, timeout_s=timeout_s
         )
     elif request_type == "chat_completion_stream":
         return send_chat_completion_request(
-            prompt, max_tokens, frontend_port, stream=True
+            prompt, max_tokens, frontend_port, stream=True, timeout_s=timeout_s
         )
     else:
         raise ValueError(f"Unknown request type: {request_type}")
