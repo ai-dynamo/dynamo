@@ -1183,49 +1183,37 @@ impl KvRouterConfig {
         })
     }
 
-    /// Return worker roles with an explicit non-default policy selection.
-    ///
-    /// Global worker-selection policy overrides apply to every role and are not returned.
+    /// Return worker roles with a non-default policy selected after applying standard precedence.
     pub fn explicit_worker_selection_policy_types(
         &self,
     ) -> Result<Vec<WorkerType>, WorkerSelectionPolicyConfigError> {
-        fn is_custom(value: Option<&str>) -> bool {
-            value.is_some_and(|name| {
-                let name = name.trim();
-                !name.is_empty() && name != "default"
-            })
-        }
-
-        let policy_config = self
-            .worker_selection_config()
-            .map_err(|source| WorkerSelectionPolicyConfigError::Config { source })?;
-        let mut worker_types = Vec::new();
-        let mut push_if_custom = |worker_type, value| {
-            if is_custom(value) && !worker_types.contains(&worker_type) {
-                worker_types.push(worker_type);
-            }
+        let selected = match env::var(DYN_ROUTER_WORKER_SELECTION_POLICY) {
+            Ok(name) => Ok(Some(name)),
+            Err(VarError::NotPresent) => Ok(None),
+            Err(source) => Err(source),
         };
-        push_if_custom(
-            WorkerType::Aggregated,
-            policy_config.and_then(|config| config.aggregated_instance()),
-        );
-        push_if_custom(
-            WorkerType::Prefill,
-            self.router_prefill_policy
-                .as_deref()
-                .or_else(|| policy_config.and_then(|config| config.prefill_instance())),
-        );
-        push_if_custom(
-            WorkerType::Decode,
-            self.router_decode_policy
-                .as_deref()
-                .or_else(|| policy_config.and_then(|config| config.decode_instance())),
-        );
-        push_if_custom(
-            WorkerType::Encode,
-            policy_config.and_then(|config| config.encode_instance()),
-        );
-        Ok(worker_types)
+        self.explicit_worker_selection_policy_types_from(selected)
+    }
+
+    fn explicit_worker_selection_policy_types_from(
+        &self,
+        selected: Result<Option<String>, VarError>,
+    ) -> Result<Vec<WorkerType>, WorkerSelectionPolicyConfigError> {
+        let WorkerSelectionPolicySelections {
+            aggregated,
+            prefill,
+            decode,
+            encode,
+        } = self.selected_worker_selection_policy_instances_from(selected)?;
+        Ok([
+            (WorkerType::Aggregated, aggregated),
+            (WorkerType::Prefill, prefill),
+            (WorkerType::Decode, decode),
+            (WorkerType::Encode, encode),
+        ]
+        .into_iter()
+        .filter_map(|(worker_type, selection)| selection.map(|_| worker_type))
+        .collect())
     }
 
     #[cfg(test)]
@@ -2010,25 +1998,67 @@ worker_selection:
             router_prefill_policy: Some("custom".to_string()),
             ..Default::default()
         };
-        for (name, config, expected) in [
+        let blank_prefill_override_config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            router_prefill_policy: Some(" ".to_string()),
+            ..Default::default()
+        };
+        let global_only_config = KvRouterConfig::default();
+        for (name, config, global, expected) in [
             (
                 "stage default disables YAML policy",
                 &config,
+                None,
                 vec![
                     WorkerType::Aggregated,
                     WorkerType::Prefill,
                     WorkerType::Encode,
                 ],
             ),
-            ("defaults only", &default_config, Vec::new()),
+            ("defaults only", &default_config, None, Vec::new()),
             (
                 "prefill override only",
                 &prefill_only_config,
+                None,
                 vec![WorkerType::Prefill],
+            ),
+            (
+                "global custom policy applies to every role",
+                &global_only_config,
+                Some("global"),
+                vec![
+                    WorkerType::Aggregated,
+                    WorkerType::Prefill,
+                    WorkerType::Decode,
+                    WorkerType::Encode,
+                ],
+            ),
+            (
+                "stage overrides take precedence over global policy",
+                &config,
+                Some("global"),
+                vec![
+                    WorkerType::Aggregated,
+                    WorkerType::Prefill,
+                    WorkerType::Encode,
+                ],
+            ),
+            (
+                "blank stage override falls through to YAML",
+                &blank_prefill_override_config,
+                None,
+                vec![
+                    WorkerType::Aggregated,
+                    WorkerType::Prefill,
+                    WorkerType::Decode,
+                    WorkerType::Encode,
+                ],
             ),
         ] {
             assert_eq!(
-                config.explicit_worker_selection_policy_types().unwrap(),
+                config
+                    .explicit_worker_selection_policy_types_from(Ok(global.map(str::to_owned)))
+                    .unwrap(),
                 expected,
                 "{name}"
             );
