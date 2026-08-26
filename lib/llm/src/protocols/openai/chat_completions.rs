@@ -591,7 +591,6 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
 impl ValidateRequest for NvCreateChatCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
-        validate::validate_guided_decoding(self)?;
         validate::validate_chat_template_args(self.chat_template_args.as_ref())?;
         validate::validate_messages(&self.inner.messages)?;
         validate::validate_model(&self.inner.model)?;
@@ -655,13 +654,8 @@ mod tests {
     use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolType, FunctionObject};
     use serde_json::json;
 
-    /// Two guided-decoding constraints in one request is a malformed
-    /// request, and it has to be rejected at the request-validation boundary so the
-    /// HTTP layer answers 400 with the conflict named. Before this ran here, the
-    /// conflict was only caught later inside `extract_sampling_options`, where the
-    /// error reached the HTTP layer untyped and became a 500.
     #[test]
-    fn test_conflicting_guided_decoding_options_fail_request_validation() {
+    fn test_conflicting_guided_decoding_options_return_invalid_argument() {
         // Each pair is two constraints set at once; every one of them must be rejected.
         let conflicts = [
             json!({"guided_json": {"type": "object"}, "guided_regex": "a+"}),
@@ -682,13 +676,14 @@ mod tests {
             let request: NvCreateChatCompletionRequest =
                 serde_json::from_value(body.clone()).expect("Failed to deserialize request");
 
-            let error = ValidateRequest::validate(&request)
-                .expect_err(&format!("expected {body} to fail validation"));
-            // The caller has to be told which rule it broke, not just that something
-            // was wrong -- that reason text is what the HTTP 400 body carries.
-            assert!(
-                error.to_string().contains("Only one of"),
-                "validation error should name the conflict, got: {error}"
+            let error = request.extract_sampling_options().unwrap_err();
+            let dynamo_error = error
+                .downcast_ref::<dynamo_runtime::error::DynamoError>()
+                .expect("sampling extraction must preserve the HTTP error type");
+            assert_eq!(
+                dynamo_error.error_type(),
+                dynamo_runtime::error::ErrorType::InvalidArgument,
+                "guided-decoding conflicts must map to HTTP 400",
             );
         }
     }
@@ -703,7 +698,7 @@ mod tests {
     /// text never named `whitespace_pattern` and the Python frontend
     /// (`components/src/dynamo/frontend/prepost.py`) builds that exact pair.
     #[test]
-    fn test_single_guided_decoding_option_passes_request_validation() {
+    fn test_single_guided_decoding_option_passes_sampling_extraction() {
         for extra in [
             json!({"guided_json": {"type": "object"}}),
             json!({"guided_regex": "a+"}),
@@ -725,7 +720,8 @@ mod tests {
 
             let request: NvCreateChatCompletionRequest =
                 serde_json::from_value(body.clone()).expect("Failed to deserialize request");
-            ValidateRequest::validate(&request)
+            request
+                .extract_sampling_options()
                 .unwrap_or_else(|e| panic!("{body} must stay valid, got: {e}"));
         }
     }

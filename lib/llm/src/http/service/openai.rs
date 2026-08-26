@@ -5090,8 +5090,8 @@ mod tests {
 
     use super::*;
     use crate::discovery::ModelManagerError;
-    use crate::protocols::common::StopConditionsProvider;
     use crate::protocols::common::extensions::{AgentCompaction, NvExt};
+    use crate::protocols::common::{SamplingOptionsProvider, StopConditionsProvider};
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
@@ -5635,6 +5635,29 @@ mod tests {
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1.message, "custom error message");
+    }
+
+    #[test]
+    fn guided_decoding_conflict_maps_to_bounded_bad_request() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "guided_json": {
+                "type": "object",
+                "description": "x".repeat(1_200_000),
+            },
+            "guided_regex": "a+",
+        }))
+        .expect("request should deserialize");
+
+        let error = request.extract_sampling_options().unwrap_err();
+        let response = ErrorMessage::from_anyhow(error, BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.1.message,
+            "Only one guided-decoding constraint can be set; received: json, regex"
+        );
     }
 
     #[test]

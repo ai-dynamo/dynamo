@@ -7,9 +7,7 @@ use dynamo_runtime::config::{
     env_is_truthy, environment_names::llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
 };
 
-use super::common_ext::CommonExtProvider;
 use super::tools::{ToolChoiceError, validate_openai_tool_choice};
-use crate::protocols::common::GuidedDecodingOptions;
 
 //
 // Hyperparameter Contraints

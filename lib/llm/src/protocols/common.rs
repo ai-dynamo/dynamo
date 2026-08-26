@@ -15,6 +15,7 @@
 
 use anyhow::Result;
 use derive_builder::Builder;
+use dynamo_runtime::error::{DynamoError, ErrorType};
 use serde::{Deserialize, Serialize};
 
 use super::TokenIdType;
@@ -22,6 +23,14 @@ use dynamo_protocols::types::StopReason;
 
 /// Maximum nesting depth allowed in guided_grammar EBNF strings.
 const MAX_GRAMMAR_NESTING_DEPTH: usize = 500;
+
+pub(crate) fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
+    DynamoError::builder()
+        .error_type(ErrorType::InvalidArgument)
+        .message(message.into())
+        .build()
+        .into()
+}
 
 pub mod extensions;
 pub mod input_trigger;
@@ -551,22 +560,26 @@ impl GuidedDecodingOptions {
     /// the error text below never named it, and while the Python frontend
     /// (`components/src/dynamo/frontend/prepost.py`) builds exactly that pair on purpose.
     pub fn validate(&self) -> Result<()> {
-        let count = [
-            self.json.is_some(),
-            self.regex.is_some(),
-            self.choice.as_ref().is_some_and(|v| !v.is_empty()),
-            self.grammar.is_some(),
-            self.structural_tag.is_some(),
-        ]
-        .iter()
-        .filter(|&&v| v)
-        .count();
+        let constraints = [
+            ("json", self.json.is_some()),
+            ("regex", self.regex.is_some()),
+            (
+                "choice",
+                self.choice.as_ref().is_some_and(|value| !value.is_empty()),
+            ),
+            ("grammar", self.grammar.is_some()),
+            ("structural_tag", self.structural_tag.is_some()),
+        ];
 
-        if count > 1 {
-            return Err(anyhow::anyhow!(
-                "Only one of json, regex, choice, grammar, or structural_tag can be set, but multiple are specified: {:?}",
-                self
-            ));
+        if constraints.iter().filter(|(_, is_set)| *is_set).count() > 1 {
+            let active_constraints = constraints
+                .into_iter()
+                .filter_map(|(name, is_set)| is_set.then_some(name))
+                .collect::<Vec<_>>();
+            return Err(invalid_argument_error(format!(
+                "Only one guided-decoding constraint can be set; received: {}",
+                active_constraints.join(", ")
+            )));
         }
 
         if let Some(ref grammar) = self.grammar {
@@ -592,11 +605,10 @@ impl GuidedDecodingOptions {
                 }
             }
             if max > MAX_GRAMMAR_NESTING_DEPTH {
-                return Err(anyhow::anyhow!(
+                return Err(invalid_argument_error(format!(
                     "guided_grammar exceeds maximum nesting depth of {} (got {})",
-                    MAX_GRAMMAR_NESTING_DEPTH,
-                    max
-                ));
+                    MAX_GRAMMAR_NESTING_DEPTH, max
+                )));
             }
         }
 
@@ -1164,12 +1176,49 @@ mod tests {
     }
 
     #[test]
+    fn test_guided_decoding_conflict_is_typed_and_bounded() {
+        let large_schema = serde_json::json!({
+            "type": "object",
+            "description": "x".repeat(1_200_000),
+        });
+        let error = GuidedDecodingOptions::validated(
+            Some(large_schema),
+            Some("a+".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        let dynamo_error = error
+            .downcast_ref::<dynamo_runtime::error::DynamoError>()
+            .expect("guided-decoding conflicts must remain typed for HTTP 400 mapping");
+        assert_eq!(
+            dynamo_error.error_type(),
+            dynamo_runtime::error::ErrorType::InvalidArgument
+        );
+        assert_eq!(
+            dynamo_error.message(),
+            "Only one guided-decoding constraint can be set; received: json, regex"
+        );
+    }
+
+    #[test]
     fn test_guided_grammar_deep_nesting_rejected() {
         let grammar = "(".repeat(501) + "a" + &")".repeat(501);
         let result =
             GuidedDecodingOptions::validated(None, None, None, Some(grammar), None, None, None);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("nesting depth"));
+        let error = result.unwrap_err();
+        let dynamo_error = error
+            .downcast_ref::<dynamo_runtime::error::DynamoError>()
+            .expect("guided grammar depth must remain typed for HTTP 400 mapping");
+        assert_eq!(
+            dynamo_error.error_type(),
+            dynamo_runtime::error::ErrorType::InvalidArgument
+        );
+        assert!(dynamo_error.message().contains("nesting depth"));
     }
 
     #[test]

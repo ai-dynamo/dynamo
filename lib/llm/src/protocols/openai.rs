@@ -10,7 +10,6 @@ use super::{
     ContentProvider,
     common::{self, OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider},
 };
-use crate::preprocessor::invalid_argument_error;
 use crate::protocols::common::extensions::NvExt;
 use crate::protocols::openai::common_ext::CommonExtProvider;
 use crate::types::TokenIdType;
@@ -162,7 +161,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
         let guided_grammar = self.get_guided_grammar();
         let guided_choice = self.get_guided_choice();
         let guided_whitespace_pattern = self.get_guided_whitespace_pattern();
-        let guided_decoding = match common::GuidedDecodingOptions::from_optional(
+        let guided_decoding = common::GuidedDecodingOptions::from_optional(
             guided_json,
             guided_regex,
             guided_choice,
@@ -170,23 +169,7 @@ impl<T: OpenAISamplingOptionsProvider + CommonExtProvider> SamplingOptionsProvid
             guided_decoding_backend,
             guided_whitespace_pattern,
             None,
-        ) {
-            Ok(options) => options,
-            Err(e) => {
-                // A caller sending two constraints is an expected outcome with a known
-                // reason, not an internal fault, so it leaves here typed. Without the
-                // `InvalidArgument` marker the HTTP layer has nothing to branch on and
-                // falls through to its internal-error path, which is how this surfaced
-                // as `500 Internal Server Error`.
-                //
-                // `ValidateRequest::validate` now runs the same check at the request
-                // boundary, so an HTTP request is rejected before reaching here. This
-                // arm still matters for entry points that build sampling options
-                // without that boundary, and as the invariant guard for this function.
-                tracing::error!("Invalid guided decoding options: {:?}", e);
-                return Err(invalid_argument_error(e.to_string()));
-            }
-        };
+        )?;
         Ok(common::SamplingOptions {
             n,
             best_of,
