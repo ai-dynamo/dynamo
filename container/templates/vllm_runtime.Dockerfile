@@ -194,6 +194,15 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
         "nixl-cu12==${NIXL_VERSION}"
 {% endif %}
 
+{% if device == "cuda" %}
+# Apply Dynamo-maintained vLLM patches (DSpark rejection-sampler NaN/OOB fix).
+RUN --mount=type=bind,source=./container/deps/vllm/patches,target=/tmp/vllm_patches,readonly \
+    SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
+    for p in $(ls /tmp/vllm_patches/*.patch 2>/dev/null | sort); do \
+        patch --fuzz=5 -p1 -d "${SITE_PACKAGES}" < "$p"; \
+    done
+{% endif %}
+
 # Install device-specific NIXL wheels for non-CUDA devices.
 # These are custom-built in wheel_builder and required for dev builds to link against NIXL libraries.
 {% if device != "cuda" %}
