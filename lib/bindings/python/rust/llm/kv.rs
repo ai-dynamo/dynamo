@@ -45,11 +45,11 @@ use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
 
-use llm_rs::kv_router::KvPushRouter;
+use llm_rs::kv_router::RoutingHost;
 #[cfg(not(feature = "custom-policy"))]
-type RsKvPushRouter = KvPushRouter;
+type RsRoutingHost = RoutingHost;
 #[cfg(feature = "custom-policy")]
-type RsKvPushRouter = KvPushRouter<WorkerSelectionPolicy>;
+type RsRoutingHost = RoutingHost<WorkerSelectionPolicy>;
 #[cfg(not(feature = "custom-policy"))]
 type RsKvRouter = llm_rs::kv_router::KvRouter;
 #[cfg(feature = "custom-policy")]
@@ -1845,7 +1845,7 @@ async fn create_kv_router_from_endpoint(
 
 #[pyclass]
 pub(crate) struct KvRouter {
-    inner: Arc<RsKvPushRouter>,
+    inner: Arc<RsRoutingHost>,
 }
 
 /// Attach worker_id info from the tracker to `routing_data` so it survives the
@@ -1879,7 +1879,7 @@ impl KvRouter {
     /// Helper method to process a request and create a Python async generator
     fn process_request_to_stream<'p>(
         py: Python<'p>,
-        inner: Arc<RsKvPushRouter>,
+        inner: Arc<RsRoutingHost>,
         request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
         tracker: Option<Arc<RequestTracker>>,
         response_buffer_size: usize,
@@ -1953,7 +1953,7 @@ impl KvRouter {
 
     fn dispatch_request_to_stream<'p>(
         py: Python<'p>,
-        inner: Arc<RsKvPushRouter>,
+        inner: Arc<RsRoutingHost>,
         request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
         tracker: Option<Arc<RequestTracker>>,
         response_buffer_mode: ResponseBufferMode,
@@ -2053,7 +2053,7 @@ impl KvRouter {
                 )
                 .await?;
 
-                let kv_push_router = RsKvPushRouter::new(
+                let routing_host = RsRoutingHost::new(
                     push_router,
                     kv_router,
                     session_affinity_ttl_secs.map(Duration::from_secs),
@@ -2061,7 +2061,7 @@ impl KvRouter {
                 .map_err(to_pyerr)?;
 
                 Ok(Self {
-                    inner: Arc::new(kv_push_router),
+                    inner: Arc::new(routing_host),
                 })
             })
         })
@@ -2245,7 +2245,7 @@ impl KvRouter {
             .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
             .transpose()?;
 
-        let chooser = self.inner.chooser.clone();
+        let chooser = Arc::clone(self.inner.kv_router());
         let update_states = request_id.is_some();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -2314,7 +2314,7 @@ impl KvRouter {
         py: Python<'p>,
         request_id: String,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let chooser = self.inner.chooser.clone();
+        let chooser = Arc::clone(self.inner.kv_router());
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             chooser
@@ -2327,7 +2327,7 @@ impl KvRouter {
 
     /// Free a request by its ID, signaling the router to release resources
     fn free<'p>(&self, py: Python<'p>, request_id: String) -> PyResult<Bound<'p, PyAny>> {
-        let chooser = self.inner.chooser.clone();
+        let chooser = Arc::clone(self.inner.kv_router());
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             chooser.free(&request_id).await.map_err(to_pyerr)?;
@@ -2347,7 +2347,7 @@ impl KvRouter {
         let block_mm_infos = block_mm_infos
             .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
             .transpose()?;
-        let chooser = self.inner.chooser.clone();
+        let chooser = Arc::clone(self.inner.kv_router());
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let loads = chooser
@@ -2393,7 +2393,7 @@ impl KvRouter {
         let block_mm_infos = block_mm_infos
             .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
             .transpose()?;
-        let chooser = self.inner.chooser.clone();
+        let chooser = Arc::clone(self.inner.kv_router());
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let scores = chooser
@@ -2418,7 +2418,7 @@ impl KvRouter {
 
     /// Dump all events from the KV router's indexer as a JSON string
     fn dump_events<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let chooser = self.inner.chooser.clone();
+        let chooser = Arc::clone(self.inner.kv_router());
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let events = chooser.dump_events().await.map_err(to_pyerr)?;
