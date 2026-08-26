@@ -19,7 +19,7 @@ use minijinja::value::Value;
 
 use dynamo_renderer::{
     ChatTemplate, ChatTemplateValue, ContextMixins, OAIChatLikeRequest, PromptFormatter,
-    PromptInput, RenderedPrompt, TextInput, TokenInput, deepseek_formatter_for,
+    PromptInput, RenderedPrompt, RenderedSegment, TextInput, TokenInput, deepseek_formatter_for,
     kimi_k3_formatter_for, may_be_fix_tool_schema,
 };
 
@@ -488,6 +488,9 @@ pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptForm
 
 /// HuggingFace `apply_chat_template(continue_final_message=True)`: after render,
 /// drop closing tokens so the prompt ends at the last assistant text.
+///
+/// When the renderer returned segment boundaries (Kimi K3 XTML), keep them so
+/// tokenization still uses `encode_segments` instead of flattening to plain text.
 pub(crate) fn apply_continue_final_message(
     prompt: RenderedPrompt,
     messages: Option<&[ChatCompletionRequestMessage]>,
@@ -515,9 +518,48 @@ pub(crate) fn apply_continue_final_message(
             return prompt;
         }
     };
-    RenderedPrompt::text(rendered[..idx + len].to_string())
+    truncate_rendered_prompt(prompt, idx + len)
 }
 
+/// Truncate `prompt` to the first `end` bytes of `as_str()`, preserving
+/// `RenderedSegment` trust boundaries when they are present.
+fn truncate_rendered_prompt(prompt: RenderedPrompt, end: usize) -> RenderedPrompt {
+    let Some(segments) = prompt.segments() else {
+        return RenderedPrompt::text(prompt.as_str()[..end].to_string());
+    };
+    let mut out = Vec::new();
+    let mut offset = 0usize;
+    for seg in segments {
+        let next = offset + seg.text.len();
+        if next <= end {
+            if !seg.text.is_empty() {
+                out.push(seg.clone());
+            }
+            offset = next;
+            if offset == end {
+                break;
+            }
+            continue;
+        }
+        if offset < end {
+            let keep = end - offset;
+            if keep > 0 && keep <= seg.text.len() && seg.text.is_char_boundary(keep) {
+                out.push(RenderedSegment {
+                    text: seg.text[..keep].to_string(),
+                    allow_special: seg.allow_special,
+                });
+            }
+        }
+        break;
+    }
+    if out.is_empty() {
+        RenderedPrompt::text(String::new())
+    } else {
+        RenderedPrompt::segmented(out)
+    }
+}
+
+/// Last assistant message text used as the HuggingFace truncation needle.
 fn last_assistant_text(messages: &[ChatCompletionRequestMessage]) -> Option<String> {
     let ChatCompletionRequestMessage::Assistant(message) = messages.last()? else {
         return None;
@@ -746,5 +788,81 @@ mod tests {
 
         let rendered = super::apply_continue_final_message(prompt, Some(&messages));
         assert_eq!(rendered.as_str(), "unchanged");
+    }
+
+    #[test]
+    fn continue_final_message_preserves_segment_boundaries() {
+        use dynamo_protocols::types::ChatCompletionRequestMessage;
+        use dynamo_renderer::{RenderedPrompt, RenderedSegment};
+
+        let prompt = RenderedPrompt::segmented(vec![
+            RenderedSegment {
+                text: "<|im_start|>assistant\n".to_string(),
+                allow_special: true,
+            },
+            RenderedSegment {
+                text: "LLM-Native Interaction".to_string(),
+                allow_special: false,
+            },
+            RenderedSegment {
+                text: "<|im_end|>".to_string(),
+                allow_special: true,
+            },
+            RenderedSegment {
+                text: "<|im_start|>assistant\n".to_string(),
+                allow_special: true,
+            },
+        ]);
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([
+                {"role": "assistant", "content": "LLM-Native Interaction"}
+            ]))
+            .unwrap();
+
+        let rendered = super::apply_continue_final_message(prompt, Some(&messages));
+        assert_eq!(
+            rendered.as_str(),
+            "<|im_start|>assistant\nLLM-Native Interaction"
+        );
+        let segments = rendered
+            .segments()
+            .expect("Kimi-style prompts must keep segment boundaries");
+        assert_eq!(segments.len(), 2);
+        assert!(segments[0].allow_special);
+        assert_eq!(segments[0].text, "<|im_start|>assistant\n");
+        assert!(!segments[1].allow_special);
+        assert_eq!(segments[1].text, "LLM-Native Interaction");
+    }
+
+    #[test]
+    fn continue_final_message_truncates_inside_an_ordinary_segment() {
+        use dynamo_protocols::types::ChatCompletionRequestMessage;
+        use dynamo_renderer::{RenderedPrompt, RenderedSegment};
+
+        let prompt = RenderedPrompt::segmented(vec![
+            RenderedSegment {
+                text: "<ctrl>".to_string(),
+                allow_special: true,
+            },
+            RenderedSegment {
+                text: "hello world extra".to_string(),
+                allow_special: false,
+            },
+        ]);
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([
+                {"role": "assistant", "content": "hello world"}
+            ]))
+            .unwrap();
+
+        let rendered = super::apply_continue_final_message(prompt, Some(&messages));
+        assert_eq!(rendered.as_str(), "<ctrl>hello world");
+        let segments = rendered
+            .segments()
+            .expect("truncated prompt stays segmented");
+        assert_eq!(segments.len(), 2);
+        assert!(segments[0].allow_special);
+        assert_eq!(segments[1].text, "hello world");
+        assert!(!segments[1].allow_special);
     }
 }

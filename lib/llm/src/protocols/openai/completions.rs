@@ -491,6 +491,10 @@ impl ValidateRequest for NvCreateCompletionRequest {
             get_prompt_batch_size(&self.inner.prompt),
             self.inner.n.unwrap_or(1),
         )?;
+        validate::validate_chat_only_generation_flags(
+            self.common.add_generation_prompt,
+            self.common.continue_final_message,
+        )?;
         Ok(())
     }
 }
@@ -539,6 +543,30 @@ mod tests {
                 .expect("Failed to extract output options");
 
             assert_eq!(output_options.skip_special_tokens, Some(skip_value));
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_chat_only_generation_flags() {
+        for extra in [
+            json!({"add_generation_prompt": false}),
+            json!({"continue_final_message": true}),
+        ] {
+            let mut body = json!({
+                "model": "test-model",
+                "prompt": "Hello, world!"
+            });
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let request: NvCreateCompletionRequest =
+                serde_json::from_value(body).expect("Failed to deserialize request");
+            let err = ValidateRequest::validate(&request)
+                .expect_err("chat-only generation flags must be rejected on completions");
+            assert!(
+                err.to_string().contains("/v1/chat/completions"),
+                "unexpected error: {err}"
+            );
         }
     }
 

@@ -894,6 +894,20 @@ pub fn validate_continue_final_message(
     }
 }
 
+/// Chat-template generation controls are meaningless on `/v1/completions`.
+/// Reject them so they are not silently ignored after landing on `CommonExt`.
+pub fn validate_chat_only_generation_flags(
+    add_generation_prompt: Option<bool>,
+    continue_final_message: Option<bool>,
+) -> Result<(), anyhow::Error> {
+    if add_generation_prompt.is_some() || continue_final_message.is_some() {
+        anyhow::bail!(
+            "`add_generation_prompt` and `continue_final_message` are only supported on /v1/chat/completions"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
