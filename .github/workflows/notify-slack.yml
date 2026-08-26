@@ -1,6 +1,6 @@
 # Reusable Slack failure notifier shared by the Post-merge and Nightly CI pipelines.
 # Collects the calling run's failed jobs and, if any are reportable, posts an alert
-# to Slack. Called via `uses: ./.github/workflows/notify-slack.yml`.
+# to Slack. Called via `uses: $/.github/workflows/notify-slack.yml`.
 name: Notify Slack
 
 on:
