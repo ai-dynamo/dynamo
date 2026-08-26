@@ -5,12 +5,18 @@
 
 import asyncio
 
-from dynamo.experimental.workflow import WorkflowEndpointHandler, WorkflowOrchestrator
+from dynamo.experimental.workflow import (
+    GenerateEndpointBinding,
+    InlineBinding,
+    WorkflowEndpointHandler,
+    WorkflowOrchestrator,
+)
 from dynamo.experimental.workflow.vllm import ExternalEncoderRequestStage
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from examples.experimental.workflow.user_ensemble.common.config import (
     CHAT_TEMPLATE,
+    GENERATOR_ENDPOINT,
     MODEL,
     ORCHESTRATOR_ENDPOINT,
     PUBLIC_MODEL_NAME,
@@ -21,7 +27,7 @@ from examples.experimental.workflow.user_ensemble.common.stages import (
     EnsembleResponseStage,
 )
 from examples.experimental.workflow.user_ensemble.workflow.workflow import (
-    compile_user_ensemble,
+    define_workflow,
 )
 
 
@@ -30,14 +36,15 @@ async def worker(runtime: DistributedRuntime) -> None:
     encoder = build_encoder_stage()
     try:
         orchestrator = await WorkflowOrchestrator.bind(
-            compile_user_ensemble(),
-            runtime=runtime,
-            inline_runners={
-                "encoder": encoder,
-                "classifier": DummyClassifier(),
-                "request_adapter": ExternalEncoderRequestStage(),
-                "response": EnsembleResponseStage(),
+            define_workflow(),
+            bindings={
+                "encoder": InlineBinding(encoder),
+                "classifier": InlineBinding(DummyClassifier()),
+                "request_adapter": InlineBinding(ExternalEncoderRequestStage()),
+                "generator": GenerateEndpointBinding(GENERATOR_ENDPOINT),
+                "response": InlineBinding(EnsembleResponseStage()),
             },
+            runtime=runtime,
         )
         endpoint = runtime.endpoint(ORCHESTRATOR_ENDPOINT)
         await register_model(

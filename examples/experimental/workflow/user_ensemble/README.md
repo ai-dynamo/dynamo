@@ -13,7 +13,7 @@ request ──> inline encoder ────────> │ GenerateRequest   �
                          └──────────────────────────────────> merge ──> chunk
 ```
 
-The declarative version uses `Workflow`, `compile_workflow`, and `WorkflowOrchestrator` to own graph scheduling, endpoint discovery, Generate-stream folding, validation, cancellation, and result propagation. The bespoke version contains the equivalent endpoint client, fan-out, stream collection, sibling cancellation, and merge control flow explicitly. This is a runnable code comparison, not a performance claim.
+The declarative version uses `Workflow` and `WorkflowOrchestrator.bind(...)` to own graph scheduling, endpoint discovery, Generate-stream folding, validation, cancellation, and result propagation. Inline runners and the remote Generate endpoint are bound together in the orchestrator worker. The bespoke version contains the equivalent endpoint client, fan-out, stream collection, sibling cancellation, and merge control flow explicitly. This is a runnable code comparison, not a performance claim.
 
 ## Run
 

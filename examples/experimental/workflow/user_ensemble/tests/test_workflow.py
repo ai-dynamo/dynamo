@@ -5,34 +5,29 @@ from types import SimpleNamespace
 
 import pytest
 
-from dynamo.experimental.workflow import GenerateEndpointBinding, InlineBinding
 from examples.experimental.workflow.user_ensemble.common.stages import (
     EnsembleResponseStage,
 )
 from examples.experimental.workflow.user_ensemble.workflow.workflow import (
-    compile_user_ensemble,
+    define_workflow,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
 
-def test_user_ensemble_compiles_mixed_placement() -> None:
-    plan = compile_user_ensemble()
+def test_user_ensemble_authors_request_only_generator() -> None:
+    workflow_ir = define_workflow().build()
+    stages = {stage.id: stage for stage in workflow_ir.stages}
 
-    assert set(plan.bindings) == {
+    assert set(stages) == {
         "encoder",
         "classifier",
         "request_adapter",
         "generator",
         "response",
     }
-    assert isinstance(plan.bindings["generator"], GenerateEndpointBinding)
-    assert all(
-        isinstance(plan.bindings[stage_id], InlineBinding)
-        for stage_id in ("encoder", "classifier", "request_adapter", "response")
-    )
-    assert plan.stage_contracts["generator"].inputs == {"request"}
-    assert plan.stage_contracts["generator"].outputs == {"completion"}
+    assert stages["generator"].contract.inputs == {"request"}
+    assert stages["generator"].contract.outputs == {"completion"}
 
 
 async def test_response_stage_preserves_completion_and_adds_scores() -> None:
