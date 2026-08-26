@@ -1188,25 +1188,35 @@ impl DistributedRuntime {
         let event_transport_kind =
             resolve_event_transport_kind(&discovery_backend_config, event_plane.as_deref())?;
 
-        // Try to get existing runtime first, create new Worker only if needed
-        // This allows multiple DistributedRuntime instances to share the same tokio runtime
-        let runtime = rs::Worker::runtime_from_existing()
-            .or_else(|_| -> anyhow::Result<rs::Runtime> {
-                // No existing Worker, create new one
-                let worker = rs::Worker::from_settings()?;
+        // Build (or adopt) the process-wide runtime and hand it to the pyo3
+        // bridge BEFORE anything else can touch it.
+        //
+        // This used to live inside an `.or_else` on `runtime_from_existing()`,
+        // which meant `init_with_runtime` was never called: that function does
+        // not return `Err` — its final branch builds a runtime and returns `Ok`
+        // — so the error path was unreachable. With the bridge uninitialised,
+        // `pyo3_async_runtimes::tokio::get_runtime()` lazily built its OWN
+        // runtime from `Builder::new_multi_thread()` defaults, sized from
+        // `available_parallelism()` and ignoring DYN_RUNTIME_* entirely.
+        //
+        // That mattered because the frontend's whole lifetime runs on the pyo3
+        // runtime: `run_input` wraps everything in `future_into_py`, which
+        // spawns via `get_runtime()`. So the configured runtime was built
+        // correctly and then sat mostly idle while the workload ran on an
+        // unconfigured one.
+        let primary = rs::Worker::ensure_process_runtime().map_err(to_pyerr)?;
+        INIT.get_or_try_init(|| -> anyhow::Result<()> {
+            pyo3_async_runtimes::tokio::init_with_runtime(primary).map_err(|e| {
+                anyhow::anyhow!("failed to initialize pyo3 static runtime: {:?}", e)
+            })?;
+            Ok(())
+        })
+        .map_err(to_pyerr)?;
 
-                // Initialize pyo3 bridge (only happens once per process)
-                INIT.get_or_try_init(|| -> anyhow::Result<()> {
-                    let primary = worker.tokio_runtime()?;
-                    pyo3_async_runtimes::tokio::init_with_runtime(primary).map_err(|e| {
-                        anyhow::anyhow!("failed to initialize pyo3 static runtime: {:?}", e)
-                    })?;
-                    Ok(())
-                })?;
-
-                Ok(worker.runtime().clone())
-            })
-            .map_err(to_pyerr)?;
+        // Now safe: `ensure_process_runtime` populated `RT`, so this takes the
+        // first branch and shares the runtime the bridge was given. Multiple
+        // DistributedRuntime instances continue to share one tokio runtime.
+        let runtime = rs::Worker::runtime_from_existing().map_err(to_pyerr)?;
 
         let nats_enabled = request_plane.is_nats()
             || matches!(

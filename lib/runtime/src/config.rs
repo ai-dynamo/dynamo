@@ -83,8 +83,19 @@ pub struct RuntimeConfig {
 
     /// Maximum number of blocking threads
     /// Blocking threads are used for blocking operations, this value must be greater than 0.
-    /// Set this at runtime with environment variable DYN_RUNTIME_MAX_BLOCKING_THREADS. Defaults to
-    /// 512.
+    /// Set this at runtime with environment variable DYN_RUNTIME_MAX_BLOCKING_THREADS.
+    ///
+    /// Defaults to the machine's core count -- see `impl Default for RuntimeConfig`, which sets
+    /// `max_blocking_threads: num_cores`. The `#[builder(default = "512")]` below applies only when
+    /// constructing through `RuntimeConfigBuilder` without setting this field; it is NOT the
+    /// default a normally-configured process sees.
+    ///
+    /// This comment previously read "Defaults to 512", which is a good way to build an incorrect
+    /// model of how many threads a process will start.
+    ///
+    /// Note this is a ceiling, not a preallocation: Tokio spawns blocking threads on demand and
+    /// reaps them after an idle timeout, so an observed thread count is timing-sensitive and should
+    /// be taken at steady state under load.
     #[validate(range(min = 1))]
     #[builder(default = "512")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
@@ -528,6 +539,66 @@ mod tests {
         assert_eq!(config.system_host, "127.0.0.1");
         assert_eq!(config.system_port, 9090);
         Ok(())
+    }
+
+    /// Both thread-pool variables must survive `from_settings()`.
+    ///
+    /// Regression guard. It has previously been unclear whether
+    /// `DYN_RUNTIME_MAX_BLOCKING_THREADS` was read at all, because setting it had
+    /// no observable effect on a frontend's thread count. The parsing was in fact
+    /// correct -- the runtime it configured was not the one serving traffic -- but
+    /// nothing pinned down the parsing side, so the question stayed open longer
+    /// than it needed to.
+    ///
+    /// `#[serial]` is not available here, so this test sets and restores the
+    /// variables itself and must not be run concurrently with another test that
+    /// touches the same ones. It is currently the only test that does.
+    #[test]
+    fn test_from_settings_reads_both_thread_env_vars() -> Result<()> {
+        const WORKERS: &str = "DYN_RUNTIME_NUM_WORKER_THREADS";
+        const BLOCKING: &str = "DYN_RUNTIME_MAX_BLOCKING_THREADS";
+
+        let prev_workers = std::env::var(WORKERS).ok();
+        let prev_blocking = std::env::var(BLOCKING).ok();
+
+        // SAFETY: single-threaded within this test; see the note above about
+        // concurrent tests touching these variables.
+        unsafe {
+            std::env::set_var(WORKERS, "7");
+            std::env::set_var(BLOCKING, "11");
+        }
+
+        let config = RuntimeConfig::from_settings();
+
+        unsafe {
+            match prev_workers {
+                Some(v) => std::env::set_var(WORKERS, v),
+                None => std::env::remove_var(WORKERS),
+            }
+            match prev_blocking {
+                Some(v) => std::env::set_var(BLOCKING, v),
+                None => std::env::remove_var(BLOCKING),
+            }
+        }
+
+        let config = config?;
+        assert_eq!(config.num_worker_threads, Some(7), "{WORKERS} was not read");
+        assert_eq!(config.max_blocking_threads, 11, "{BLOCKING} was not read");
+        Ok(())
+    }
+
+    /// `Default` sets `max_blocking_threads` to the core count, NOT 512.
+    ///
+    /// The doc comment on the field used to say 512 -- that is the
+    /// `#[builder(default)]`, which applies only when building through
+    /// `RuntimeConfigBuilder`. Reading the comment instead of the impl is an easy way to
+    /// mispredict how many threads a process will start.
+    #[test]
+    fn test_default_max_blocking_threads_is_core_count() {
+        let cores = std::thread::available_parallelism().unwrap().get();
+        let config = RuntimeConfig::default();
+        assert_eq!(config.max_blocking_threads, cores);
+        assert_eq!(config.num_worker_threads, Some(cores));
     }
 
     #[test]

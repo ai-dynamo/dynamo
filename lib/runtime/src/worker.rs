@@ -95,6 +95,38 @@ impl Worker {
         }
     }
 
+    /// Ensure a process-wide Tokio runtime exists, built from
+    /// [`RuntimeConfig::from_settings`], and return a `'static` reference to it.
+    ///
+    /// Idempotent — repeated calls return the same runtime.
+    ///
+    /// This exists so callers that need to hand the runtime to a foreign
+    /// executor bridge (notably `pyo3_async_runtimes::tokio::init_with_runtime`,
+    /// which requires `&'static tokio::runtime::Runtime`) can obtain one without
+    /// going through [`Worker::from_config`], which errors if a runtime already
+    /// exists.
+    ///
+    /// Prefer this over [`Worker::runtime_from_existing`] when the runtime will
+    /// be handed to such a bridge: `runtime_from_existing` may return a runtime
+    /// backed only by `RTHANDLE`, from which no `'static` reference can be
+    /// recovered.
+    pub fn ensure_process_runtime() -> anyhow::Result<&'static tokio::runtime::Runtime> {
+        // Fast path: already built by this function or by `Worker::from_config`.
+        if let Some(rt) = RT.get() {
+            return Ok(rt);
+        }
+
+        // `get_or_try_init` resolves the race: if two threads arrive together,
+        // one builds and both observe the same runtime.
+        RT.get_or_try_init(|| {
+            let config = RuntimeConfig::from_settings()?;
+            // Log the settings that were actually resolved. Without this there is
+            // no way to tell from a deployment whether DYN_RUNTIME_* was honoured.
+            tracing::info!("dynamo runtime configuration: {config}");
+            config.create_runtime().map_err(anyhow::Error::from)
+        })
+    }
+
     /// Whether a process-wide runtime has already been initialized
     /// (`RT` populated by `Worker::from_*`, or `RTHANDLE` populated by
     /// `runtime_from_existing`'s fallback / external callers).
