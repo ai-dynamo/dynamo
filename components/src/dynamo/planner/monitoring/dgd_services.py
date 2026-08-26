@@ -185,6 +185,8 @@ class Service(BaseModel):
         # Prefer limits, fall back to requests. For GPUs, Kubernetes device plugins
         # typically treat requests and limits as equivalent since GPUs are
         # non-compressible and allocated exclusively (no fractional sharing).
+        # TODO: Prefer current-generation gpuCountPerPod once all supported Operator
+        # versions publish it; scalar-first preserves bootstrap and rolling upgrades.
         if GPU_RESOURCE_KEY in limits:
             gpu_str = limits[GPU_RESOURCE_KEY]
         else:
