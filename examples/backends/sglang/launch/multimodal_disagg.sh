@@ -137,26 +137,6 @@ print_launch_banner --multimodal "Launching Disaggregated Multimodal E/P/D" "$MO
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python3 -m dynamo.frontend &
 
-# run SGLang multimodal encode worker (frontend-facing: encodes images, routes to worker)
-echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (GPU mem: $DYN_ENCODE_GPU_MEM)..."
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-env ${_ENCODE_CUDA_PIN:+"$_ENCODE_CUDA_PIN"} python3 -m dynamo.sglang \
-  --enable-multimodal \
-  --disaggregation-mode encode \
-  --model-path "$MODEL_NAME" \
-  $SERVED_MODEL_ARG \
-  --chat-template "$CHAT_TEMPLATE" \
-  --skip-tokenizer-init \
-  $ENCODE_EXTRA_ARGS &
-
-if [[ "$SINGLE_GPU" == "true" ]]; then
-    # The encode worker cannot become healthy until backend.generate exists,
-    # which is provided by the decode worker started below. Keep a short delay
-    # here to reduce overlap without creating a circular readiness dependency.
-    echo "Waiting before starting prefill worker..."
-    sleep 5
-fi
-
 # run SGLang multimodal prefill worker
 # NOTE: Each worker picks a random NCCL port (get_free_port) for torch.distributed.
 # This has a TOCTOU race — the port can be grabbed before init_process_group binds it,
@@ -164,7 +144,7 @@ fi
 # TODO: Remove disable-radix-cache once the issue is fixed.
 # See https://github.com/sgl-project/sglang/pull/11203.
 echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (GPU mem: $DYN_PREFILL_GPU_MEM)..."
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 env ${_PREFILL_CUDA_PIN:+"$_PREFILL_CUDA_PIN"} python3 -m dynamo.sglang \
   --enable-multimodal \
   --dedicated-mm-encoder \
@@ -184,11 +164,12 @@ env ${_PREFILL_CUDA_PIN:+"$_PREFILL_CUDA_PIN"} python3 -m dynamo.sglang \
 if [[ "$SINGLE_GPU" == "true" ]]; then
     # Prefill can become healthy independently, so use it to prevent the two
     # full-model workers from loading concurrently on the shared GPU.
-    wait_for_ready "http://localhost:${DYN_SYSTEM_PORT2:-8082}/health" 120
+    wait_for_ready "http://localhost:${DYN_SYSTEM_PORT1:-8081}/health" 120
 fi
 
 # run SGLang multimodal decode worker
 echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (GPU mem: $DYN_DECODE_GPU_MEM)..."
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 env ${_DECODE_CUDA_PIN:+"$_DECODE_CUDA_PIN"} python3 -m dynamo.sglang \
   --enable-multimodal \
   --dedicated-mm-encoder \
@@ -203,6 +184,23 @@ env ${_DECODE_CUDA_PIN:+"$_DECODE_CUDA_PIN"} python3 -m dynamo.sglang \
   --host 0.0.0.0 \
   --disaggregation-transfer-backend nixl \
   $DECODE_EXTRA_ARGS &
+
+if [[ "$SINGLE_GPU" == "true" ]]; then
+    wait_for_ready "http://localhost:${DYN_SYSTEM_PORT2:-8082}/health" 120
+fi
+
+# Start the frontend-facing encode worker last. It waits for backend.generate,
+# which is provided by the now-healthy decode worker.
+echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (GPU mem: $DYN_ENCODE_GPU_MEM)..."
+DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT3:-8083} \
+env ${_ENCODE_CUDA_PIN:+"$_ENCODE_CUDA_PIN"} python3 -m dynamo.sglang \
+  --enable-multimodal \
+  --disaggregation-mode encode \
+  --model-path "$MODEL_NAME" \
+  $SERVED_MODEL_ARG \
+  --chat-template "$CHAT_TEMPLATE" \
+  --skip-tokenizer-init \
+  $ENCODE_EXTRA_ARGS &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit
