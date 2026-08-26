@@ -16,7 +16,6 @@ use validator::ValidationError;
 use crate::vllm_render_client::parse_tokenizer_service_base_url;
 
 const DEFAULT_KV_EVENT_PORT: u16 = 5557;
-/// ZMQ replica-sync port shared by every EPP selected by a peer Service.
 const DEFAULT_REPLICA_SYNC_PORT: u16 = 9092;
 const DEFAULT_SELECTOR_THREADS: usize = 4;
 const DEFAULT_TOKENIZATION_TIMEOUT_MS: u64 = 5_000;
