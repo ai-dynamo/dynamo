@@ -37,6 +37,10 @@ not preserve all parser-related request semantics.
 
 ## Run
 
+### Runtime compatibility
+
+The Python `vllm` package and `vllm-rs` must expose compatible EngineCore and gRPC contracts. Prefer artifacts built from the same vLLM source revision; do not combine a Python wheel from one nightly with a `vllm-rs` binary from another. The sidecar's vendored gRPC source revisions are recorded in [`proto/README.md`](proto/README.md).
+
 Start vLLM with its gRPC listener:
 
 ```bash
