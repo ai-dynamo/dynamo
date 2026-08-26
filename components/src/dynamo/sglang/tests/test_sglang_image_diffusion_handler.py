@@ -58,6 +58,8 @@ def mock_context():
     context.trace_id = "test-trace-id"
     context.span_id = "test-span-id"
     context.is_cancelled = MagicMock(return_value=False)
+    context.is_stopped = MagicMock(return_value=False)
+    context.is_killed = MagicMock(return_value=False)
     return context
 
 
@@ -270,11 +272,14 @@ class TestImageDiffusionWorkerHandler:
         user_id = "user123"
         request_id = "req456"
 
-        url = await handler._upload_to_fs(image_bytes, user_id, request_id)
+        url, storage_path = await handler._upload_to_fs(
+            image_bytes, user_id, request_id
+        )
 
         # Verify storage path format
         assert f"users/{user_id}/generations/{request_id}/" in url
         assert url.endswith(".png")
+        assert storage_path.startswith(f"users/{user_id}/generations/{request_id}/")
 
     @pytest.mark.asyncio
     async def test_generate_images_with_numpy_array(self, handler):
@@ -527,3 +532,47 @@ class TestNParameter:
         assert results[0]["data"] == []
         assert "n must be in [1, 10]" in results[0]["error"]
         assert handler.generator.generate.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_cancelled_request_stops_between_generations(
+        self, handler, mock_context
+    ):
+        """A context stopped after the first generation must not start more."""
+        self._mock_one_image(handler)
+        # False for the first iteration check, True afterwards
+        mock_context.is_stopped = MagicMock(side_effect=[False, True, True])
+
+        results = []
+        async for result in handler.generate(self._request(n=3), mock_context):
+            results.append(result)
+
+        assert results == []
+        assert handler.generator.generate.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_partial_upload_failure_cleans_up(self, handler, mock_context):
+        """If a later upload fails, earlier uploaded files are removed."""
+        self._mock_one_image(handler)
+
+        uploads = []
+
+        async def fake_upload(img, user_id, request_id):
+            if len(uploads) == 1:
+                raise RuntimeError("upload failed")
+            uploads.append(
+                f"users/{user_id}/generations/{request_id}/img{len(uploads)}.png"
+            )
+            return "http://x/img.png", uploads[-1]
+
+        handler._upload_to_fs = fake_upload
+        handler._cleanup_uploads = AsyncMock()
+
+        req = self._request(n=2)
+        req["response_format"] = "url"
+        results = []
+        async for result in handler.generate(req, mock_context):
+            results.append(result)
+
+        assert results[0]["data"] == []
+        assert "upload failed" in results[0]["error"]
+        handler._cleanup_uploads.assert_awaited_once_with(uploads)

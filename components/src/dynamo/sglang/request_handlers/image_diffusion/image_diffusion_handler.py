@@ -133,6 +133,13 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             # Without a seed, each generation draws its own random seed.
             images: list[bytes] = []
             for i in range(num_images):
+                # Stop between generations if the request has gone away: a
+                # cancelled n=10 request must not keep occupying the GPU.
+                if context.is_stopped() or context.is_killed():
+                    logger.info(
+                        "Request cancelled after %d of %d generations", i, num_images
+                    )
+                    return
                 images.extend(
                     await self._generate_images(
                         prompt=req.prompt,
@@ -150,14 +157,24 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             assert context_id is not None
             user_id = req.user or context_id
             image_data = []
-            for img in images:
-                # uploading or encoding the image
-                if req.response_format == "url":
-                    url = await self._upload_to_fs(img, user_id, context_id)
-                    image_data.append(ImageData(url=url))
-                else:
-                    b64 = self._encode_base64(img)
-                    image_data.append(ImageData(b64_json=b64))
+            uploaded_paths: list[str] = []
+            try:
+                for img in images:
+                    # uploading or encoding the image
+                    if req.response_format == "url":
+                        url, storage_path = await self._upload_to_fs(
+                            img, user_id, context_id
+                        )
+                        uploaded_paths.append(storage_path)
+                        image_data.append(ImageData(url=url))
+                    else:
+                        b64 = self._encode_base64(img)
+                        image_data.append(ImageData(b64_json=b64))
+            except Exception:
+                # The whole batch fails: remove files already uploaded so a
+                # failed request leaves no orphaned media behind.
+                await self._cleanup_uploads(uploaded_paths)
+                raise
 
             response = ImagesResponse(created=int(time.time()), data=image_data)
 
@@ -265,7 +282,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             request_id: Request context ID.
 
         Returns:
-            Public URL for the uploaded image.
+            (public URL, storage path) for the uploaded image.
         """
         image_uuid = str(uuid.uuid4())
         image_filename = f"{image_uuid}.png"
@@ -273,7 +290,16 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         # Per-user storage path
         storage_path = f"users/{user_id}/generations/{request_id}/{image_filename}"
 
-        return await upload_to_fs(self.fs, storage_path, image_bytes, self.base_url)
+        url = await upload_to_fs(self.fs, storage_path, image_bytes, self.base_url)
+        return url, storage_path
+
+    async def _cleanup_uploads(self, storage_paths: list[str]) -> None:
+        """Best-effort removal of uploaded files after a failed batch."""
+        for path in storage_paths:
+            try:
+                await asyncio.to_thread(self.fs.rm, path)
+            except Exception:
+                logger.warning("Failed to clean up uploaded file %s", path)
 
     def _encode_base64(self, image_bytes: bytes) -> str:
         """Encode image as base64 string"""
