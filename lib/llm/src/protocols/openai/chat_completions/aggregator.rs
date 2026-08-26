@@ -23,8 +23,114 @@ fn is_harmony_parser(parser: &str) -> bool {
     parser == "harmony"
 }
 
+fn is_kimi_k3_parser(parser: &str) -> bool {
+    matches!(parser, "kimi_k3" | "kimi-k3")
+}
+
 fn contains_harmony_protocol(text: &str) -> bool {
     text.contains("<|channel|>")
+}
+
+/// Quote/escape-aware replacement for `dynamo_parsers::tool_calling::detect_tool_call_start`,
+/// which does a naive substring search and false-positives on a marker token that only
+/// appears as a quoted JSON string value (e.g. a tool argument literally containing the
+/// text `<tool_call>`). Looks up the real per-family marker tokens for `parser` from
+/// `dynamo_parsers`' own parser map (falling back to its "default" key exactly as
+/// `detect_tool_call_start` does for `None`/empty), then checks each with
+/// `unified_parser::contains_unquoted_marker` so a marker embedded inside a quoted string
+/// is not misread as native tool-call markup.
+fn contains_native_tool_call_marker(content: &str, parser: &str) -> bool {
+    let parser_key = if parser.is_empty() { "default" } else { parser };
+    let Some(config) = dynamo_parsers::tool_calling::parsers::get_tool_parser_map().get(parser_key)
+    else {
+        return false;
+    };
+    config
+        .parser_config
+        .tool_call_start_tokens()
+        .iter()
+        .any(|marker| {
+            !marker.is_empty() && super::unified_parser::contains_unquoted_marker(content, marker)
+        })
+}
+
+/// Drops any recovered native-fallback calls that don't match the forced
+/// `tool_name` from a `GuidedJsonNamed` constraint. Guided-JSON failure only
+/// tells us the *shape* was wrong; it says nothing about which tool the
+/// native markup named, so a malformed guided output that happens to embed
+/// native markup for a different tool must never be handed back to a client
+/// that pinned `tool_choice` to one specific function.
+fn filter_calls_to_forced_tool_name(
+    calls: Vec<dynamo_parsers::tool_calling::ToolCallResponse>,
+    constraint: &crate::protocols::openai::GuidedToolConstraint,
+) -> Vec<dynamo_parsers::tool_calling::ToolCallResponse> {
+    let crate::protocols::openai::GuidedToolConstraint::GuidedJsonNamed { tool_name } = constraint
+    else {
+        return calls;
+    };
+    let (matched, dropped): (Vec<_>, Vec<_>) = calls
+        .into_iter()
+        .partition(|call| &call.function.name == tool_name);
+    if !dropped.is_empty() {
+        tracing::warn!(
+            tool_name,
+            dropped = dropped.len(),
+            "dropped native-fallback tool call(s) whose name did not match the tool_choice-forced tool_name"
+        );
+    }
+    matched
+}
+
+async fn parse_complete_tool_output(
+    content: &str,
+    parser: &str,
+    constraint: &crate::protocols::openai::GuidedToolConstraint,
+) -> anyhow::Result<(
+    Vec<dynamo_parsers::tool_calling::ToolCallResponse>,
+    Option<String>,
+)> {
+    if constraint.installs_guided_json() {
+        match super::tool_parser_v2::parse_complete_guided_json(content, constraint) {
+            Ok(calls) => return Ok((calls, Some(String::new()))),
+            Err(guided_error) => {
+                if !contains_native_tool_call_marker(content, parser) {
+                    return Err(guided_error);
+                }
+                tracing::warn!(
+                    parser,
+                    why = "guided_json_reconstructed_but_native_markup_observed",
+                    recovered_bytes = content.len(),
+                    "falling back to the configured native tool parser"
+                );
+            }
+        }
+    }
+
+    let result =
+        if super::tool_parser_v2::enabled() && super::tool_parser_v2::supports_family(parser) {
+            super::tool_parser_v2::parse_complete(content, None, parser)
+                .map(|(calls, normal)| (calls, Some(normal)))
+        } else {
+            try_tool_call_parse_aggregate_finalize(content, Some(parser), None).await
+        };
+
+    result.and_then(|(calls, normal)| {
+        let filtered = filter_calls_to_forced_tool_name(calls, constraint);
+        if filtered.is_empty()
+            && matches!(
+                constraint,
+                crate::protocols::openai::GuidedToolConstraint::GuidedJsonNamed { .. }
+            )
+        {
+            // Mirror the "no native markup found" behavior above: a fallback
+            // that recovered nothing usable for the forced tool is treated
+            // the same as a fallback that found nothing at all.
+            return Err(anyhow::anyhow!(
+                "native tool-call fallback recovered no call matching the tool_choice-forced tool name"
+            ));
+        }
+        Ok((filtered, normal))
+    })
 }
 
 /// Aggregates a stream of [`NvCreateChatCompletionStreamResponse`]s into a single
@@ -81,6 +187,16 @@ struct DeltaChoice {
 
     /// Accumulated content parts for multimodal responses
     content_parts: Vec<dynamo_protocols::types::ChatCompletionResponseContentPart>,
+}
+
+fn suppress_tool_call_output(choice: &mut DeltaChoice) {
+    // Fail closed when the decoded turn contains only an unauthorized tool call.
+    // We cannot safely reconstruct parser-specific wire markup as assistant text;
+    // in that case content remains empty and the terminal reason becomes `stop`.
+    choice.tool_calls = None;
+    if choice.finish_reason == Some(dynamo_protocols::types::FinishReason::ToolCalls) {
+        choice.finish_reason = Some(dynamo_protocols::types::FinishReason::Stop);
+    }
 }
 
 impl Default for DeltaAggregator {
@@ -353,7 +469,93 @@ impl DeltaAggregator {
             }
         }
 
-        if let Some(parser) = parsing_options.tool_call_parser.as_deref() {
+        // This is both a defense-in-depth check for structured deltas and a
+        // prerequisite for whole-response decoders such as Harmony: clear any
+        // already-structured calls before parsing so the decoder can still
+        // inspect ordinary text below.
+        if parsing_options.suppress_tool_calls {
+            for choice in aggregator.choices.values_mut() {
+                suppress_tool_call_output(choice);
+            }
+        }
+
+        // Two independent families each own ONE unified parser (topology B: raw
+        // model text reaches the frontend un-split) that replaces the split
+        // reasoning/tool-call finalize below outright: Qwen3 (`unified_parser`,
+        // gated on DYN_ENABLE_EXPERIMENTAL_PARSERS_V2) and muse (`tool_parser_v2`,
+        // default-on). This is the safety net for output that reached the
+        // aggregator unparsed; a request the worker already streamed through the
+        // matching `apply_stream`/`apply_unified_stream` arrives with `tool_calls`
+        // populated and is skipped by each guard below.
+        let qwen3_unified_family = super::unified_parser::selected_batch_family(
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+        );
+        if let Some(family) = qwen3_unified_family {
+            for choice in aggregator.choices.values_mut() {
+                if choice.text.is_empty()
+                    || choice
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|calls| !calls.is_empty())
+                {
+                    continue;
+                }
+                match super::unified_parser::parse_complete(
+                    family,
+                    &choice.text,
+                    &parsing_options.guided_tool_constraint,
+                    &parsing_options.tools,
+                ) {
+                    Ok(parsed) => {
+                        choice.text = parsed.text;
+                        if !parsed.reasoning.is_empty() {
+                            choice
+                                .reasoning_content
+                                .get_or_insert_with(String::new)
+                                .push_str(&parsed.reasoning);
+                        }
+                        if !parsed.tool_calls.is_empty() && !parsing_options.suppress_tool_calls {
+                            choice.tool_calls = Some(parsed.tool_calls);
+                            // OpenAI contract: a message carrying tool calls finishes
+                            // with `ToolCalls`, not `Stop`.
+                            if choice.finish_reason
+                                == Some(dynamo_protocols::types::FinishReason::Stop)
+                            {
+                                choice.finish_reason =
+                                    Some(dynamo_protocols::types::FinishReason::ToolCalls);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        // Best-effort: the aggregated text is served as-is rather than
+                        // failing a request the model already answered.
+                        tracing::warn!(
+                            error = %error,
+                            family,
+                            "failed to parse aggregated unified output; serving it unparsed"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Muse finalizes through the UNIFIED parser (topology B: raw model text
+        // reaches the frontend un-split). Keyed on EITHER parser name to match the
+        // streaming guard, so a reasoning-only card (`--dyn-reasoning-parser
+        // muse_glimmer`, no tool-call parser) splits its markup here too. Default-on,
+        // so muse never falls into the v1 aggregate-finalize below. The gate is wider
+        // than main's `tool_call_parser.is_some()` for that reason; `parser` is bound
+        // inside the loop, after the muse branch has taken its `continue`. Excluded
+        // when Qwen3 already claimed the request above, since Qwen3 also configures a
+        // `tool_call_parser` and would otherwise fall through into this block too.
+        let unified_family = super::tool_parser_v2::unified_family(
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+        );
+        if qwen3_unified_family.is_none()
+            && (unified_family.is_some() || parsing_options.tool_call_parser.is_some())
+        {
             for choice in aggregator.choices.values_mut() {
                 if choice
                     .tool_calls
@@ -364,13 +566,117 @@ impl DeltaAggregator {
                     continue;
                 }
 
+                if let Some(family) = unified_family.as_deref() {
+                    // Only the guided-JSON success arm below returns a synthetic
+                    // empty `content` placeholder (there is no separate message
+                    // text distinct from the tool-call JSON itself). Every other
+                    // arm — the native-fallback-after-guided-error reconstruction,
+                    // and the plain non-guided `else` branch — returns REAL
+                    // stripped content from `parse_complete_unified` that must
+                    // always replace `choice.text`, matching the sibling Qwen3
+                    // block's unconditional assignment, regardless of whether any
+                    // tool calls were found.
+                    let mut content_is_guided_placeholder = false;
+                    let parse_result = if parsing_options
+                        .guided_tool_constraint
+                        .installs_guided_json()
+                    {
+                        match super::tool_parser_v2::parse_complete_guided_json(
+                            &choice.text,
+                            &parsing_options.guided_tool_constraint,
+                        ) {
+                            Ok(calls) => {
+                                content_is_guided_placeholder = true;
+                                Ok((calls, String::new(), String::new()))
+                            }
+                            Err(guided_error) => {
+                                match super::tool_parser_v2::parse_complete_unified(
+                                    &choice.text,
+                                    None,
+                                    family,
+                                ) {
+                                    Ok((calls, reasoning, content)) => {
+                                        // A GuidedJsonNamed constraint pins one tool
+                                        // name; the native fallback must never hand
+                                        // back a call for a different tool just
+                                        // because it happened to find markup naming
+                                        // one in the malformed guided output.
+                                        let calls = filter_calls_to_forced_tool_name(
+                                            calls,
+                                            &parsing_options.guided_tool_constraint,
+                                        );
+                                        if !calls.is_empty()
+                                            || !reasoning.is_empty()
+                                            || content != choice.text
+                                        {
+                                            tracing::warn!(
+                                                family,
+                                                why = "guided_json_reconstructed_but_native_markup_observed",
+                                                recovered_bytes = choice.text.len(),
+                                                "falling back to the configured unified parser"
+                                            );
+                                            Ok((calls, reasoning, content))
+                                        } else {
+                                            Err(guided_error)
+                                        }
+                                    }
+                                    Err(native_error) => Err(native_error.context(format!(
+                                        "guided JSON parse also failed: {guided_error:#}"
+                                    ))),
+                                }
+                            }
+                        }
+                    } else {
+                        super::tool_parser_v2::parse_complete_unified(&choice.text, None, family)
+                    };
+                    match parse_result {
+                        Ok((calls, reasoning, content)) => {
+                            let calls_is_empty = calls.is_empty();
+                            // Same rule the streaming path applies: `none` still gets the
+                            // reasoning/content split and the marker stripping, but a
+                            // caller that disabled tools must not receive `tool_calls`.
+                            if !calls_is_empty && !parsing_options.suppress_tool_calls {
+                                choice.tool_calls = Some(
+                                    calls
+                                        .into_iter()
+                                        .map(super::tool_call_response_to_protocol)
+                                        .collect(),
+                                );
+                            }
+                            if !reasoning.is_empty() {
+                                choice
+                                    .reasoning_content
+                                    .get_or_insert_with(String::new)
+                                    .push_str(&reasoning);
+                            }
+                            if !calls_is_empty || !content_is_guided_placeholder {
+                                choice.text = content;
+                            } else {
+                                tracing::warn!(
+                                    family,
+                                    why = "guided_json_produced_zero_calls_under_tool_choice_required",
+                                    original_bytes = choice.text.len(),
+                                    "guided-JSON parse returned zero tool calls; preserving original text"
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            tracing::debug!(error = %error, family, "muse unified batch parse failed");
+                        }
+                    }
+                    continue;
+                }
+
+                // Not muse: the loop gate guarantees a tool-call parser is set here.
+                let Some(parser) = parsing_options.tool_call_parser.as_deref() else {
+                    continue;
+                };
+
                 // With DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, supported families use the
                 // v2 parser for batch too (no jail / no aggregate-finalize):
                 // parse_complete drops a value truncated at EOF instead of guessing it.
-                // Other families, the flag off, and guided-decoded requests
-                // (tool_choice=required/named or structural-tag, gated by
-                // experimental_v2_batch_eligible — see tool_parser_v2::batch_tool_choice_eligible)
-                // keep the v1 finalize path.
+                // Other families and the flag-off path keep the v1 finalize path.
+                // Guided JSON is handled above from the exact carried constraint.
                 // Extract the truncated tail BEFORE parsing so a second <tool_call>
                 // truncated after a complete first one is not silently dropped.
                 // Token strings come from the parser config so this stays in sync
@@ -396,15 +702,12 @@ impl DeltaAggregator {
                     None
                 };
 
-                let parse_result = if super::tool_parser_v2::enabled()
-                    && super::tool_parser_v2::supports_family(parser)
-                    && parsing_options.experimental_v2_batch_eligible
-                {
-                    super::tool_parser_v2::parse_complete(&choice.text, None, parser)
-                        .map(|(calls, normal)| (calls, Some(normal)))
-                } else {
-                    try_tool_call_parse_aggregate_finalize(&choice.text, Some(parser), None).await
-                };
+                let parse_result = parse_complete_tool_output(
+                    &choice.text,
+                    parser,
+                    &parsing_options.guided_tool_constraint,
+                )
+                .await;
                 let (tool_calls, content) = match parse_result {
                     Ok(result) => result,
                     Err(error) => {
@@ -425,7 +728,9 @@ impl DeltaAggregator {
                             .collect(),
                     );
                     choice.text = content.unwrap_or_default();
-                } else if is_harmony_parser(parser) && contains_harmony_protocol(&choice.text) {
+                } else if (is_harmony_parser(parser) && contains_harmony_protocol(&choice.text))
+                    || is_kimi_k3_parser(parser)
+                {
                     choice.text = content.unwrap_or_default();
                 } else if parser == "glm47"
                     && matches!(
@@ -456,6 +761,16 @@ impl DeltaAggregator {
                         choice.text.push_str(&tail);
                     }
                 }
+            }
+        }
+
+        // A retained whole-response parser may discover a syntactically valid
+        // call while removing model-internal channel markup. Parser activation
+        // is not permission to expose that call; enforce the request policy
+        // again after aggregate parsing.
+        if parsing_options.suppress_tool_calls {
+            for choice in aggregator.choices.values_mut() {
+                suppress_tool_call_output(choice);
             }
         }
 
@@ -1945,6 +2260,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_disabled_tool_parsing_preserves_structured_content_with_name() {
+        let json = r#"{"name":"Science Fair","date":"Friday","participants":["Alice","Bob"]}"#;
+        let annotated_delta = create_test_delta(
+            0,
+            json,
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+            None,
+        );
+
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+        let response = DeltaAggregator::apply(
+            stream,
+            ParsingOptions::new(Some("hermes".to_string()), None)
+                .with_tool_call_parsing_enabled(false),
+        )
+        .await
+        .expect("aggregation should preserve assistant content");
+        let choice = &response.inner.choices[0];
+
+        assert_eq!(
+            choice.message.content,
+            Some(ChatCompletionMessageContent::Text(json.to_string()))
+        );
+        assert!(choice.message.tool_calls.is_none());
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Stop)
+        );
+    }
+
+    #[tokio::test]
     async fn test_preserves_non_tool_content_when_parsing_aggregated_tool_calls() {
         let annotated_delta = create_test_delta(
             0,
@@ -1980,7 +2328,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_harmony_aggregate_zero_call_drops_internal_analysis() {
+    async fn test_disabled_harmony_aggregate_drops_internal_analysis() {
         let annotated_delta = create_test_delta(
             0,
             r#"<|channel|>analysis<|message|>Need current weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"Hidden City"}"#,
@@ -1993,7 +2341,8 @@ mod tests {
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
         let result = DeltaAggregator::apply(
             stream,
-            ParsingOptions::new(Some("harmony".to_string()), None),
+            ParsingOptions::new(Some("harmony".to_string()), None)
+                .with_tool_call_parsing_enabled(false),
         )
         .await;
 
@@ -2001,6 +2350,33 @@ mod tests {
         let response = result.unwrap();
         let choice = &response.inner.choices[0];
         assert_eq!(choice.message.content, None);
+        assert!(choice.message.tool_calls.is_none());
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Stop)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_disabled_harmony_aggregate_suppresses_parsed_tool_call() {
+        let annotated_delta = create_test_delta(
+            0,
+            r#"<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"Paris"}<|call|>"#,
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::ToolCalls),
+            None,
+            None,
+        );
+
+        let response = DeltaAggregator::apply(
+            Box::pin(stream::iter(vec![annotated_delta])),
+            ParsingOptions::new(Some("harmony".to_string()), None)
+                .with_tool_call_parsing_enabled(false),
+        )
+        .await
+        .expect("Harmony decoding should succeed");
+        let choice = &response.inner.choices[0];
+
         assert!(choice.message.tool_calls.is_none());
         assert_eq!(
             choice.finish_reason,
@@ -2036,6 +2412,47 @@ mod tests {
             ))
         );
         assert!(choice.message.tool_calls.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_disabled_kimi_k3_aggregate_decodes_tool_free_response() {
+        let raw = concat!(
+            "<|open|>response<|sep|>",
+            "323",
+            "<|close|>response<|sep|>",
+            "<|close|>message<|sep|>",
+            "<|end_of_msg|>"
+        );
+
+        for parser in ["kimi_k3", "kimi-k3"] {
+            let annotated_delta = create_test_delta(
+                0,
+                raw,
+                Some(dynamo_protocols::types::Role::Assistant),
+                Some(dynamo_protocols::types::FinishReason::Stop),
+                None,
+                None,
+            );
+            let response = DeltaAggregator::apply(
+                Box::pin(stream::iter(vec![annotated_delta])),
+                ParsingOptions::new(Some(parser.to_string()), Some("kimi_k3".to_string()))
+                    .with_tool_call_parsing_enabled(false),
+            )
+            .await
+            .expect("Kimi K3 response decoding should succeed");
+            let choice = &response.inner.choices[0];
+
+            assert_eq!(
+                choice.message.content,
+                Some(ChatCompletionMessageContent::Text("323".to_string())),
+                "parser alias {parser} must strip K3 XTML wrappers"
+            );
+            assert!(choice.message.tool_calls.is_none());
+            assert_eq!(
+                choice.finish_reason,
+                Some(dynamo_protocols::types::FinishReason::Stop)
+            );
+        }
     }
 
     #[test]

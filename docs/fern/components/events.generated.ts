@@ -22,9 +22,11 @@ export interface DynamoEvent {
 }
 
 /** Generation date in Pacific, YYYY-MM-DD. The calendar grid treats this as "today". */
-export const GENERATED_ON = "2026-08-20";
+export const GENERATED_ON = "2026-08-26";
 
-export const UPCOMING_EVENTS: DynamoEvent[] = [
+export const UPCOMING_EVENTS: DynamoEvent[] = [];
+
+export const PAST_EVENTS: DynamoEvent[] = [
   {
     "title": "vLLM x Dynamo meetup",
     "start": "2026-08-25T01:00:00.000Z",
@@ -33,14 +35,11 @@ export const UPCOMING_EVENTS: DynamoEvent[] = [
     "year": "2026",
     "dateLabel": "Mon, Aug 24, 2026",
     "timeLabel": "6:00 PM",
-    "isPast": false,
+    "isPast": true,
     "location": "Luma",
     "locationUrl": "https://luma.com/r8o604o0",
     "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=vLLM+x+Dynamo+meetup&dates=20260825T010000Z%2F20260825T040000Z&location=https%3A%2F%2Fluma.com%2Fr8o604o0"
-  }
-];
-
-export const PAST_EVENTS: DynamoEvent[] = [
+  },
   {
     "title": "Dynamo Afterhours",
     "start": "2026-07-31T01:00:00.000Z",

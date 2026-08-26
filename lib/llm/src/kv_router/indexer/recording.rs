@@ -4,7 +4,8 @@
 use dynamo_kv_router::{
     ConcurrentRadixTreeCompressed,
     indexer::{
-        KvIndexer, KvIndexerInterface, KvRouterError, RoutingDecisionHashes, ThreadPoolIndexer,
+        ApproximateLruIncarnation, ApproximateLruLease, ApproximateLruRequestId, KvIndexer,
+        KvIndexerInterface, KvRouterError, RoutingDecisionHashes, ThreadPoolIndexer,
     },
     protocols::{LocalBlockHash, TokensWithHashes, WorkerWithDpRank},
 };
@@ -22,6 +23,23 @@ pub(super) enum RouteRecordingTarget<'a> {
 }
 
 impl Indexer {
+    pub(crate) fn begin_approximate_lru_request(
+        &self,
+        worker: WorkerWithDpRank,
+        incarnation: ApproximateLruIncarnation,
+        request_id: ApproximateLruRequestId,
+    ) -> Option<ApproximateLruLease> {
+        match self {
+            Self::KvIndexer { primary, .. } => {
+                primary.begin_approximate_lru_request(worker, incarnation, request_id)
+            }
+            Self::Concurrent { primary, .. } => {
+                primary.begin_approximate_lru_request(worker, incarnation, request_id)
+            }
+            Self::Remote { .. } | Self::None => None,
+        }
+    }
+
     pub(crate) fn records_routing_decisions(&self) -> bool {
         !matches!(self.recording_target(), RouteRecordingTarget::Disabled)
     }
