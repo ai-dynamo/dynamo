@@ -81,7 +81,7 @@ runs:
 
     - name: Re-initialize builder (if unhealthy)
       if: steps.check-health.outcome == 'failure'
-      uses: ./.github/actions/init-dynamo-builder
+      uses: $/.github/actions/init-dynamo-builder
       with:
         builder_name: ${{ inputs.builder_name }}
         flavor: ${{ inputs.flavor }}
