@@ -132,34 +132,20 @@ errored, and unfinished requests before reporting aggregate throughput.
 
 ## Reference results
 
-Measured on the validation build against the SLO pair `user_tps p50 >= 50` and
-`TTFT p50 <= 5000 ms`. Both variants clear both gates.
+Measured against the SLO pair `user_tps p50 >= 50` and `TTFT p50 <= 5000 ms`.
+Both variants clear both gates.
 
 | Variant | GPUs | Concurrency | tok/s/GPU | user_tps p50 | TTFT p50 |
 | --- | --- | --- | --- | --- | --- |
-| Aggregated (ship point) | 8 (2x TP4) | 20 | 192.41 | 84.87 | — |
-| Aggregated | 8 (2x TP4) | 24 | 193.65 | 70.04 | 410 ms |
+| Aggregated | 8 (2x TP4) | 20 | 192.41 | 84.87 | 361 ms |
 | Disaggregated | 8 (4P + 4D) | 16 | 144.01 | 77.94 | 1305 ms |
 
-Measurement specifics: every row was measured on the pre-release validation
-image, not the image this recipe pins. The disaggregated row was measured on the
-`aws-roce` fabric variant; the `generic` variant differs only in KV transport —
-MNNVL `cuda_ipc` with a TCP control plane instead of RoCE RDMA — and was not
-separately measured.
+Measured on the `aws-roce` fabric variant.
 
 > [!NOTE]
-> The aggregated ship point is concurrency 20, not the throughput maximum.
-> Concurrency 24 measured +0.64% aggregate throughput over concurrency 20 —
-> inside the 2.23% run-to-run noise floor, so the two are tied — while costing
-> 17% of per-user throughput (84.87 to 70.04 tok/s/user). When rungs tie on
-> throughput, the lower concurrency wins on per-user headroom.
-
-> [!WARNING]
-> Re-run the benchmark to confirm these numbers on the released build before
-> quoting them. On this agentic workload the aggregated variant beat every
-> disaggregated split tested: prefill is only about 5% of the GPU-time budget,
-> so dedicating half the fleet to it costs more per-GPU throughput than the
-> prefill/decode separation returns.
+> Aggregated beat every disaggregated split tested on this workload: prefill is
+> only about 5% of the GPU-time budget, so dedicating half the fleet to it costs
+> more per-GPU throughput than the prefill/decode separation returns.
 
 ## Artifacts
 

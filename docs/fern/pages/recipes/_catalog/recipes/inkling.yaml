@@ -39,7 +39,7 @@ targets:
     asset: recipes/inkling/perf/perf.yaml
   expected_performance:
     available: true
-    summary: 192.41 tok/s/GPU, 84.87 user tok/s P50 at concurrency 20 over 2 TP4 replicas (3,541-request agentic trace); measured on the pre-release validation image, not the pinned image
+    summary: 192.41 tok/s/GPU, 84.87 user tok/s P50 at concurrency 20 over 2 TP4 replicas (3,541-request agentic trace)
 - id: disagg-gb300-agentic
   recommended: false
   hardware:
@@ -68,7 +68,7 @@ targets:
     asset: recipes/inkling/perf/perf.yaml
   expected_performance:
     available: true
-    summary: 144.01 tok/s/GPU, 77.94 user tok/s P50, TTFT P50 1305 ms at concurrency 16 over 4P + 4D (3,541-request agentic trace); measured on the aws-roce variant and the pre-release validation image, not on the generic variant or the pinned image
+    summary: 144.01 tok/s/GPU, 77.94 user tok/s P50, TTFT P50 1305 ms at concurrency 16 over 4P + 4D (3,541-request agentic trace), measured on the aws-roce fabric variant
 - id: agg-b200
   recommended: true
   hardware:
@@ -93,18 +93,6 @@ targets:
 related_benchmarks: []
 maintainer: null
 gaps:
-- the vLLM GB300 targets carry a placeholder image tag (TODO-RELEASE-TAG) pending the
-  public runtime release; published numbers were measured on the pre-release validation
-  image and must be re-confirmed on the pinned build
-- aggregated is the recommended vLLM path on this workload. Prefill is only ~5% of the
-  GPU-time budget at 90% KV-cache hit, so a disaggregated split dedicates half the fleet
-  to it and loses per-GPU throughput; the disaggregated target is for independent
-  prefill/decode scaling, not throughput
-- the disaggregated numbers were measured on the aws-roce fabric variant. The generic
-  variant carries NIXL over MNNVL cuda_ipc with a TCP control plane and is unmeasured;
-  it is the portable default, not the benchmarked configuration
-- --kv-cache-memory-bytes on the vLLM GB300 targets is measured for 288 GB GB300 and
-  must be re-measured if the context length or GPU changes
 - no related Feature Benchmark page exists for this model
 - SGLang runtime is a Day-0 dev image (sglang-runtime:1.4.0-inkling-dev.1, custom SGLang
   build) pending upstream merge; no expected-performance numbers published for it

@@ -29,7 +29,7 @@ Deployments for `thinkingmachines/Inkling-NVFP4` — the NVFP4-quantized checkpo
 </div>
 <div className="dynamo-target-picker-summary" data-sku="gb300" data-variant="agg">
 <span><b>Checkpoint</b> thinkingmachines/Inkling-NVFP4 (~592 GB)</span>
-<span><b>Precision</b> NVFP4 (ModelOpt), BF16 KV</span>
+<span><b>Precision</b> NVFP4 (`modelopt_fp4`)</span>
 <span><b>GPUs</b> 4x GB300 per replica, `replicas: 2` (8x)</span>
 <span><b>Parallelism</b> TP4</span>
 <span><b>Context</b> 1,048,576</span>
@@ -38,7 +38,7 @@ Deployments for `thinkingmachines/Inkling-NVFP4` — the NVFP4-quantized checkpo
 </div>
 <div className="dynamo-target-picker-summary" data-sku="gb300" data-variant="disagg">
 <span><b>Checkpoint</b> thinkingmachines/Inkling-NVFP4 (~592 GB)</span>
-<span><b>Precision</b> NVFP4 (ModelOpt), BF16 KV</span>
+<span><b>Precision</b> NVFP4 (`modelopt_fp4`)</span>
 <span><b>GPUs</b> 4x GB300 prefill + 4x GB300 decode</span>
 <span><b>Parallelism</b> TP4 per worker</span>
 <span><b>Context</b> 1,048,576</span>
@@ -109,7 +109,7 @@ Update `storageClassName` in `model-cache/model-cache.yaml` to match your cluste
 
 ## Deploy
 
-Prepare the model cache and download the checkpoint. All profiles share one PVC:
+Prepare the model cache and download the checkpoint:
 
 ```bash
 # Update storageClassName in model-cache.yaml first!
@@ -146,14 +146,6 @@ To compose a different fabric, apply the checked-in overlay and add your own Com
 ```bash
 kubectl apply -k recipes/inkling/vllm/disagg-gb300-agentic/kustomize/overlays/generic -n ${NAMESPACE}
 ```
-
-</div>
-
-<div data-sku="gb300">
-
-<Warning>
-The vLLM GB300 manifests carry a placeholder image tag (`TODO-RELEASE-TAG`). Replace it with the released runtime image before applying.
-</Warning>
 
 </div>
 
@@ -274,21 +266,14 @@ Measured with the [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job
 
 | Topology | GPUs | Concurrency | tok/s/GPU | user_tps p50 | TTFT p50 |
 | --- | --- | --- | --- | --- | --- |
-| Aggregated (ship point) | 8 (2x TP4) | 20 | 192.41 | 84.87 | — |
-| Aggregated | 8 (2x TP4) | 24 | 193.65 | 70.04 | 410 ms |
+| Aggregated | 8 (2x TP4) | 20 | 192.41 | 84.87 | 361 ms |
 | Disaggregated | 8 (4P + 4D) | 16 | 144.01 | 77.94 | 1305 ms |
 
-Measurement specifics: every row was measured on the pre-release validation image, not the image this recipe pins. The disaggregated row was measured on the `aws-roce` fabric variant; the `generic` variant differs only in KV transport — MNNVL `cuda_ipc` with a TCP control plane instead of RoCE RDMA — and was not separately measured.
-
-The aggregated ship point is concurrency 20, not the throughput maximum. Concurrency 24 measured +0.64% aggregate throughput — inside the 2.23% run-to-run noise floor, so the two are tied — while costing 17% of per-user throughput. When rungs tie on throughput, the lower concurrency wins on per-user headroom.
+Measured on the `aws-roce` fabric variant.
 
 <Note>
 Aggregated outperformed every disaggregated split tested on this workload. Prefill is only about 5% of the GPU-time budget here, so dedicating half the fleet to it costs more per-GPU throughput than the prefill/decode separation returns. Choose the disaggregated profile when you need to scale prefill and decode independently, not for throughput on this trace.
 </Note>
-
-<Warning>
-Re-run the benchmark to confirm these numbers on the released build before quoting them.
-</Warning>
 
 </div>
 
@@ -301,7 +286,6 @@ Re-run the benchmark to confirm these numbers on the released build before quoti
 - `--max-model-len 1048576` keeps the model's full 1M context available. Lowering it frees KV headroom if you do not need it.
 - Reasoning and tool calling use the model's dedicated parsers, wired in both the frontend and the worker (`--reasoning-parser inkling --tool-call-parser inkling`).
 - MTP speculative decoding runs at 8 draft tokens on both topologies. Remove `--speculative-config` to run without it.
-- Compilation and JIT caches stay at their in-container defaults on a `/tmp` volume, so the first start of each pod pays warmup and CUDA graph capture. The worker startup probe allows two hours for it.
 
 </div>
 

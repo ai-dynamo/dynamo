@@ -41,11 +41,7 @@ spec:
         spec:
           containers:
             - name: main
-              # TODO(image): pending the public vLLM runtime release carrying the
-              # MTP-8-capable vLLM build and the Dynamo frontend reasoning-parser
-              # fixes. Before merge, replace with `<tag>@sha256:<digest>`; if the
-              # final tag is not a Dynamo semantic version, admission also needs
-              # `runtimeVersionOverride` on each component.
+              # TODO: pin the released image (tag + digest) before merging.
               image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:TODO-RELEASE-TAG
               imagePullPolicy: Always
               command: [python3, -m, dynamo.frontend]
@@ -173,12 +169,7 @@ spec:
                 - {name: UCX_TLS, value: "cuda_copy,cuda_ipc,tcp"}
                 - {name: VLLM_ALLREDUCE_USE_FLASHINFER, value: "1"}
                 - {name: VLLM_FLASHINFER_ALLREDUCE_BACKEND, value: mnnvl}
-                # TODO(image): drop once the release image ships a FlashInfer
-                # build that matches the vLLM pin.
-                - {name: FLASHINFER_DISABLE_VERSION_CHECK, value: "1"}
               ports: [{name: system, containerPort: 9090, protocol: TCP}]
-              # 2h budget: weight load, FlashInfer warmup, and CUDA graph capture
-              # at 1M context on a cold JIT cache.
               startupProbe: &workerStartupProbe
                 httpGet: {path: /live, port: system}
                 periodSeconds: 10
@@ -194,12 +185,8 @@ spec:
                 claims: [{name: compute-domain-channel}]
               volumeMounts: &workerVolumeMounts
                 - {name: model-cache, mountPath: /model-cache}
-                # Scratch for JIT/CUDA-graph caches, which stay at their default
-                # in-container locations. Keeps them off the container layer.
-                - {name: tmp, mountPath: /tmp}
           volumes: &workerVolumes
             - {name: model-cache, persistentVolumeClaim: {claimName: model-cache}}
-            - {name: tmp, emptyDir: {sizeLimit: 200Gi}}
 
     - name: VllmDecodeWorker
       replicas: 1

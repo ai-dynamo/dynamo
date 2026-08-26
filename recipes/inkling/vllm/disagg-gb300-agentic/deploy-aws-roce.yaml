@@ -135,8 +135,6 @@ spec:
             value: "1"
           - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
             value: mnnvl
-          - name: FLASHINFER_DISABLE_VERSION_CHECK
-            value: "1"
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:TODO-RELEASE-TAG
           imagePullPolicy: Always
           name: main
@@ -169,8 +167,6 @@ spec:
           volumeMounts:
           - mountPath: /model-cache
             name: model-cache
-          - mountPath: /tmp
-            name: tmp
         hostIPC: true
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-GB300
@@ -183,9 +179,6 @@ spec:
         - name: model-cache
           persistentVolumeClaim:
             claimName: model-cache
-        - emptyDir:
-            sizeLimit: 200Gi
-          name: tmp
     replicas: 1
     sharedMemorySize: 64Gi
     type: prefill
@@ -277,8 +270,6 @@ spec:
             value: "1"
           - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
             value: mnnvl
-          - name: FLASHINFER_DISABLE_VERSION_CHECK
-            value: "1"
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:TODO-RELEASE-TAG
           imagePullPolicy: Always
           name: main
@@ -311,8 +302,6 @@ spec:
           volumeMounts:
           - mountPath: /model-cache
             name: model-cache
-          - mountPath: /tmp
-            name: tmp
         hostIPC: true
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-GB300
@@ -325,9 +314,6 @@ spec:
         - name: model-cache
           persistentVolumeClaim:
             claimName: model-cache
-        - emptyDir:
-            sizeLimit: 200Gi
-          name: tmp
     replicas: 1
     # tmpfs at /dev/shm for the vLLM multiprocess executor's TP4 IPC buffers.
     # The operator default (8Gi) is too small for this context length.

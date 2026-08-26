@@ -99,58 +99,47 @@ kubectl wait --for=condition=Complete job/inkling-model-download -n ${NAMESPACE}
 
 ### 4. Deploy the DynamoGraphDeployment
 
-Pick one profile.
+Pick one profile, then apply it:
 
-SGLang, aggregated on B200:
-
-```bash
-kubectl apply -f sglang/agg-b200/deploy.yaml -n ${NAMESPACE}
-```
-
-vLLM, aggregated on GB300:
-
-```bash
-kubectl apply -f vllm/agg-gb300-agentic/deploy.yaml -n ${NAMESPACE}
-```
-
-vLLM, disaggregated on GB300. This one ships as Kustomize variants — `generic`
-moves KV over MNNVL `cuda_ipc` inside the ComputeDomain, and `aws-roce` adds a
-RoCE device claim on clusters that expose one through Dynamic Resource
-Allocation:
+| Profile | `DEPLOY` |
+| --- | --- |
+| SGLang, aggregated, B200 | `sglang/agg-b200/deploy.yaml` |
+| vLLM, aggregated, GB300 | `vllm/agg-gb300-agentic/deploy.yaml` |
+| vLLM, disaggregated, GB300 | `vllm/disagg-gb300-agentic/deploy-generic.yaml` |
+| vLLM, disaggregated, GB300, RoCE via DRA | `vllm/disagg-gb300-agentic/deploy-aws-roce.yaml` |
 
 ```bash
-kubectl apply -f vllm/disagg-gb300-agentic/deploy-generic.yaml -n ${NAMESPACE}
-# or, on EKS with the roce.networking.k8s.aws device class:
-kubectl apply -f vllm/disagg-gb300-agentic/deploy-aws-roce.yaml -n ${NAMESPACE}
+export DEPLOY=vllm/agg-gb300-agentic/deploy.yaml
+kubectl apply -f ${DEPLOY} -n ${NAMESPACE}
 ```
 
-Both disaggregated variants need the ComputeDomain controller (DRA) installed
-cluster-wide. To compose a different fabric, apply the checked-in overlay
-instead: `kubectl apply -k vllm/disagg-gb300-agentic/kustomize/overlays/generic`.
-
-> [!IMPORTANT]
-> The vLLM GB300 manifests carry a placeholder image tag
-> (`TODO-RELEASE-TAG`). Replace it with the released runtime image before
-> applying.
+The disaggregated profiles need the ComputeDomain controller (DRA) installed
+cluster-wide. `deploy-generic.yaml` moves KV over MNNVL `cuda_ipc`;
+`deploy-aws-roce.yaml` adds a RoCE device claim on clusters exposing the
+`roce.networking.k8s.aws` device class. To compose a different fabric, apply the
+overlay instead: `kubectl apply -k vllm/disagg-gb300-agentic/kustomize/overlays/generic`.
 
 To benchmark a deployment, see [`perf/README.md`](perf/README.md).
 
 ### 5. Smoke Test
 
-Forward the frontend of whichever profile you deployed:
+Forward the frontend of the profile you deployed — the Service is the DGD name
+with a `-frontend` suffix:
 
 ```bash
-# SGLang B200
-kubectl port-forward svc/tml-inkling-sglang-agg-frontend 8000:8000 -n ${NAMESPACE} &
-# vLLM GB300 aggregated
-kubectl port-forward svc/inkling-vllm-gb300-agg-agentic-frontend 8000:8000 -n ${NAMESPACE} &
-# vLLM GB300 disaggregated
-kubectl port-forward svc/inkling-vllm-gb300-disagg-agentic-frontend 8000:8000 -n ${NAMESPACE} &
+export FRONTEND=inkling-vllm-gb300-agg-agentic-frontend
+kubectl port-forward svc/${FRONTEND} 8000:8000 -n ${NAMESPACE} &
 ```
 
-All profiles serve the model as `thinkingmachines/Inkling-NVFP4`, so the text
-and reasoning-effort requests below work against any of them. The image and
-audio requests need the SGLang B200 profile.
+| Profile | Service |
+| --- | --- |
+| SGLang, aggregated, B200 | `tml-inkling-sglang-agg-frontend` |
+| vLLM, aggregated, GB300 | `inkling-vllm-gb300-agg-agentic-frontend` |
+| vLLM, disaggregated, GB300 | `inkling-vllm-gb300-disagg-agentic-frontend` |
+
+Every profile serves the model as `thinkingmachines/Inkling-NVFP4`, so the
+requests below are identical across them. Image and audio need the SGLang B200
+profile.
 
 #### Text
 

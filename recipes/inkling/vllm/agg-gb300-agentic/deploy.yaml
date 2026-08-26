@@ -27,11 +27,7 @@ spec:
         spec:
           containers:
             - name: main
-              # TODO(image): pending the public vLLM runtime release carrying the
-              # MTP-8-capable vLLM build and the Dynamo frontend reasoning-parser
-              # fixes. Before merge, replace with `<tag>@sha256:<digest>`; if the
-              # final tag is not a Dynamo semantic version, admission also needs
-              # `runtimeVersionOverride` on each component.
+              # TODO: pin the released image (tag + digest) before merging.
               image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:TODO-RELEASE-TAG
               imagePullPolicy: Always
               command: [python3, -m, dynamo.frontend]
@@ -130,8 +126,6 @@ spec:
                 # A 1M-token forward pass can exceed the default worker timeout.
                 - {name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS, value: "1800"}
               ports: [{name: system, containerPort: 9090, protocol: TCP}]
-              # 2h budget: weight load, FlashInfer warmup, and CUDA graph capture
-              # at 1M context on a cold JIT cache.
               startupProbe:
                 httpGet: {path: /live, port: system}
                 periodSeconds: 10
@@ -146,9 +140,5 @@ spec:
                 limits: {nvidia.com/gpu: "4"}
               volumeMounts:
                 - {name: model-cache, mountPath: /model-cache}
-                # Scratch for JIT/CUDA-graph caches, which stay at their default
-                # in-container locations. Keeps them off the container layer.
-                - {name: tmp, mountPath: /tmp}
           volumes:
             - {name: model-cache, persistentVolumeClaim: {claimName: model-cache}}
-            - {name: tmp, emptyDir: {sizeLimit: 200Gi}}
