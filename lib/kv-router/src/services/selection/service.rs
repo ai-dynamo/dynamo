@@ -6,10 +6,8 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::KvRouterConfig;
-use crate::identity::RoutingPartitionRef;
 use crate::protocols::WorkerId;
 use crate::scheduling::PotentialLoad;
-use crate::scheduling::selector::WorkerSelectionPolicy;
 use crate::services::common::replica_sync::{
     PeerManager, ReplicaPeerError, ReplicaSyncRuntime, setup_replica_sync,
 };
@@ -24,7 +22,7 @@ use super::types::{
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
     SelectResponse, WorkerCatalogRecord, WorkerPatchRequest, WorkerRequest,
 };
-use crate::{WorkerSelectionPolicyFactory, WorkerType};
+use crate::WorkerType;
 
 pub struct SelectionServiceBuilder {
     kv_router_config: KvRouterConfig,
@@ -35,7 +33,6 @@ pub struct SelectionServiceBuilder {
     selection_cache: SelectionCacheConfig,
     worker_type: WorkerType,
     worker_selection_policy_registry: Option<WorkerSelectionPolicyRegistry>,
-    worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
 }
 
 /// Warn when a host does not construct workers for explicitly configured policy roles.
@@ -69,7 +66,6 @@ impl SelectionServiceBuilder {
             selection_cache: SelectionCacheConfig::default(),
             worker_type: WorkerType::Aggregated,
             worker_selection_policy_registry: None,
-            worker_selection_policy_factory: None,
         }
     }
 
@@ -112,37 +108,15 @@ impl SelectionServiceBuilder {
         self
     }
 
-    pub fn worker_selection_policy_factory<F>(mut self, factory: F) -> Self
-    where
-        F: for<'a> Fn(
-                &KvRouterConfig,
-                WorkerType,
-                RoutingPartitionRef<'a>,
-            ) -> WorkerSelectionPolicy
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.worker_selection_policy_factory = Some(Arc::new(factory));
-        self
-    }
-
     pub async fn build(self) -> anyhow::Result<SelectionService> {
         self.kv_router_config
             .validate_config()
             .map_err(anyhow::Error::msg)?;
-        let worker_selection_policy_factory = match (
-            self.worker_selection_policy_factory,
-            self.worker_selection_policy_registry.as_ref(),
-        ) {
-            (Some(_), Some(_)) => anyhow::bail!(
-                "worker-selection policy factory and policy registry cannot both be configured"
-            ),
-            (Some(factory), None) => Some(factory),
-            (None, Some(registry)) => registry
+        let worker_selection_policy_factory = match self.worker_selection_policy_registry.as_ref() {
+            Some(registry) => registry
                 .resolve_for_worker_type(&self.kv_router_config, self.worker_type)
                 .map_err(anyhow::Error::from)?,
-            (None, None) => {
+            None => {
                 if let Some(instance) = self
                     .kv_router_config
                     .selected_worker_selection_policy_instance_for(self.worker_type)?
