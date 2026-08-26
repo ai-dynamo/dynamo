@@ -1,0 +1,330 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z-dynamo
+  namespace: warnold-dynamo
+  labels:
+    integration-run: prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z
+    integration-role: m5-dynamo
+spec:
+  selector:
+    integration-run: prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z
+    integration-role: m5-dynamo
+  ports:
+    - name: openai
+      port: 8000
+      targetPort: 8000
+    - name: engine-control
+      port: 9090
+      targetPort: 9090
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z-dynamo
+  namespace: warnold-dynamo
+  labels:
+    integration-run: prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z
+    integration-role: m5-dynamo
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 90
+  nodeSelector:
+    kubernetes.io/arch: amd64
+    nvidia.com/gpu.product: NVIDIA-B200
+  initContainers:
+    - name: install-integration
+      image: docker.io/radixark/miles@sha256:39b5227d8b8cc9997d0777d72b555ea1f1f0dc4c1027649f8c44c6ce88f51859
+      imagePullPolicy: IfNotPresent
+      command: ["bash", "-lc"]
+      args:
+        - |
+          set -euxo pipefail
+          WHEEL_DIR=/shared/test-artifacts/prorl-miles-nvfp4-f7de8eb-20260825t073154z/build/wheels
+          ARCHIVE_DIR=/shared/test-artifacts/prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z/build/archives
+          echo "1d90d516d27b2ede701e892a28a37e7cfb492cee9a18039e1220cb1b71fefcd5  $ARCHIVE_DIR/miles-bc1341fd5.tar.gz" | sha256sum -c -
+          echo "9b4cd02b40aa1f7fc61ba8065a29fa79eb32a16ad3ef4a6b6695e1f75b0d73dc  $ARCHIVE_DIR/prorl-0ee1d48f65.tar.gz" | sha256sum -c -
+          echo "eb7458e6c533684e19505ea3478aefb322c35a261d5b7fef8acb39f6f2c05f0f  $ARCHIVE_DIR/decode_handler-578fbde869.py" | sha256sum -c -
+          python3 -m pip install --no-deps --target /opt/runtime \
+            /shared/test-artifacts/prorl-miles-nvfp4-f7de8eb-20260825t073154z/build/dynamo-d899be0fa1/ai_dynamo_runtime-1.5.0-cp310-abi3-manylinux_2_39_x86_64.whl \
+            "$WHEEL_DIR"/ai_dynamo-1.5.0-py3-none-any.whl \
+            "$WHEEL_DIR"/aisimulate-0.1.0.dev1-cp310-abi3-manylinux_2_28_x86_64.whl \
+            "$WHEEL_DIR"/kubernetes-32.0.1-py2.py3-none-any.whl
+          mkdir -p /opt/integration-src/miles /opt/integration-src/prorl
+          tar -xzf "$ARCHIVE_DIR"/miles-bc1341fd5.tar.gz -C /opt/integration-src/miles
+          tar -xzf "$ARCHIVE_DIR"/prorl-0ee1d48f65.tar.gz -C /opt/integration-src/prorl
+          install -m 0644 "$ARCHIVE_DIR"/decode_handler-578fbde869.py \
+            /opt/runtime/dynamo/sglang/request_handlers/llm/decode_handler.py
+          python3 -m py_compile /opt/runtime/dynamo/sglang/request_handlers/llm/decode_handler.py
+          mkdir -p /shared/test-artifacts/prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z/dynamo/request-trace
+          PYTHONPATH=/opt/runtime:/opt/integration-src/miles:/opt/integration-src/prorl/src:/root/Megatron-LM \
+            python3 -c "import dynamo, miles, polar; print(dynamo.__file__); print(miles.__file__); print(polar.__file__)"
+      resources:
+        requests:
+          cpu: "2"
+          memory: 8Gi
+        limits:
+          cpu: "4"
+          memory: 16Gi
+      volumeMounts:
+        - name: shared
+          mountPath: /shared
+        - name: runtime
+          mountPath: /opt/runtime
+        - name: integration-src
+          mountPath: /opt/integration-src
+  containers:
+    - name: worker
+      image: docker.io/radixark/miles@sha256:39b5227d8b8cc9997d0777d72b555ea1f1f0dc4c1027649f8c44c6ce88f51859
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        runAsUser: 0
+        capabilities:
+          add: ["IPC_LOCK"]
+      command: ["python3", "-m", "dynamo.sglang"]
+      args:
+        - --model-path
+        - /shared/test-artifacts/prorl-miles-nvfp4-f7de8eb-20260825t073154z/models/Qwen3-30B-A3B-NVFP4-baseline
+        - --served-model-name
+        - Qwen/Qwen3-30B-A3B
+        - --tp-size
+        - "2"
+        - --ep-size
+        - "2"
+        - --quantization
+        - modelopt_fp4
+        - --fp4-gemm-backend
+        - flashinfer_trtllm
+        - --moe-runner-backend
+        - flashinfer_trtllm_routed
+        - --kv-cache-dtype
+        - bf16
+        - --mem-fraction-static
+        - "0.80"
+        - --context-length
+        - "32768"
+        - --dyn-tool-call-parser
+        - hermes
+        - --dyn-reasoning-parser
+        - qwen3
+        - --trust-remote-code
+        - --endpoint-types
+        - none
+        - --enable-return-routed-experts
+        - --engine-route
+        - server_info=get_server_info
+        - --engine-route
+        - health_generate=get_server_info
+        - --engine-route
+        - flush_cache:tm
+        - --engine-route
+        - pause_generation:tm
+        - --engine-route
+        - continue_generation:tm
+        - --engine-route
+        - init_weights_update_group:tm
+        - --engine-route
+        - destroy_weights_update_group:tm
+        - --engine-route
+        - begin_weight_update:tm
+        - --engine-route
+        - end_weight_update:tm
+      env:
+        - name: PYTHONPATH
+          value: /opt/runtime:/opt/integration-src/miles:/opt/integration-src/prorl/src:/root/Megatron-LM
+        - name: HF_HOME
+          value: /shared
+        - name: HF_HUB_CACHE
+          value: /shared/hub
+        - name: DYN_DISCOVERY_BACKEND
+          value: file
+        - name: DYN_FILE_KV
+          value: /discovery
+        - name: DYN_REQUEST_PLANE
+          value: tcp
+        - name: DYN_EVENT_PLANE
+          value: zmq
+        - name: DYN_SYSTEM_PORT
+          value: "9090"
+        - name: DYN_SGL_ALLOW_TOP_LOGPROBS
+          value: "1"
+        - name: SGLANG_FLASHINFER_NVFP4_PER_TOKEN_ACTIVATION
+          value: "1"
+        - name: NVTE_USE_FAST_MATH
+          value: "0"
+        - name: TRTLLM_DISABLE_FP4_QUANT_FAST_MATH
+          value: "1"
+        - name: FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH
+          value: "1"
+      ports:
+        - name: worker-system
+          containerPort: 9090
+      startupProbe:
+        httpGet:
+          path: /live
+          port: 9090
+        periodSeconds: 10
+        failureThreshold: 120
+      resources:
+        requests:
+          cpu: "16"
+          memory: 128Gi
+          nvidia.com/gpu: "2"
+        limits:
+          cpu: "32"
+          memory: 256Gi
+          nvidia.com/gpu: "2"
+      volumeMounts:
+        - name: shared
+          mountPath: /shared
+        - name: runtime
+          mountPath: /opt/runtime
+        - name: integration-src
+          mountPath: /opt/integration-src
+        - name: discovery
+          mountPath: /discovery
+        - name: dshm
+          mountPath: /dev/shm
+    - name: thunderagent
+      image: docker.io/radixark/miles@sha256:39b5227d8b8cc9997d0777d72b555ea1f1f0dc4c1027649f8c44c6ce88f51859
+      imagePullPolicy: IfNotPresent
+      command: ["python3", "-m", "dynamo.thunderagent_router"]
+      args:
+        - --endpoint
+        - dynamo.backend.generate
+        - --model-name
+        - Qwen/Qwen3-30B-A3B
+        - --model-path
+        - /shared/test-artifacts/prorl-miles-nvfp4-f7de8eb-20260825t073154z/models/Qwen3-30B-A3B-NVFP4-baseline
+        - --router-block-size
+        - "16"
+        - --shared-cache-type
+        - none
+        - --dyn-tool-call-parser
+        - hermes
+        - --dyn-reasoning-parser
+        - qwen3
+        - --publish-sglang-generate
+      env:
+        - name: PYTHONPATH
+          value: /opt/runtime:/opt/integration-src/miles:/opt/integration-src/prorl/src:/root/Megatron-LM
+        - name: HF_HOME
+          value: /shared
+        - name: HF_HUB_CACHE
+          value: /shared/hub
+        - name: DYN_DISCOVERY_BACKEND
+          value: file
+        - name: DYN_FILE_KV
+          value: /discovery
+        - name: DYN_REQUEST_PLANE
+          value: tcp
+        - name: DYN_EVENT_PLANE
+          value: zmq
+        - name: DYN_SYSTEM_PORT
+          value: "9091"
+      ports:
+        - name: thunder-system
+          containerPort: 9091
+      resources:
+        requests:
+          cpu: "2"
+          memory: 8Gi
+        limits:
+          cpu: "4"
+          memory: 16Gi
+      volumeMounts:
+        - name: shared
+          mountPath: /shared
+        - name: runtime
+          mountPath: /opt/runtime
+        - name: integration-src
+          mountPath: /opt/integration-src
+        - name: discovery
+          mountPath: /discovery
+    - name: frontend
+      image: docker.io/radixark/miles@sha256:39b5227d8b8cc9997d0777d72b555ea1f1f0dc4c1027649f8c44c6ce88f51859
+      imagePullPolicy: IfNotPresent
+      command: ["python3", "-m", "dynamo.frontend"]
+      args:
+        - --http-host
+        - 0.0.0.0
+        - --http-port
+        - "8000"
+        - --router-mode
+        - round-robin
+        - --shared-cache-type
+        - none
+      env:
+        - name: PYTHONPATH
+          value: /opt/runtime:/opt/integration-src/miles:/opt/integration-src/prorl/src:/root/Megatron-LM
+        - name: HF_HOME
+          value: /shared
+        - name: HF_HUB_CACHE
+          value: /shared/hub
+        - name: DYN_DISCOVERY_BACKEND
+          value: file
+        - name: DYN_FILE_KV
+          value: /discovery
+        - name: DYN_REQUEST_PLANE
+          value: tcp
+        - name: DYN_EVENT_PLANE
+          value: zmq
+        - name: DYN_SYSTEM_PORT
+          value: "9092"
+        - name: DYN_REQUEST_TRACE
+          value: "1"
+        - name: DYN_REQUEST_TRACE_SINKS
+          value: file
+        - name: DYN_REQUEST_TRACE_FILE_FORMAT
+          value: jsonl
+        - name: DYN_REQUEST_TRACE_FILE_PATH
+          value: /shared/test-artifacts/prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z/dynamo/request-trace/requests.jsonl
+      ports:
+        - name: openai
+          containerPort: 8000
+        - name: frontend-system
+          containerPort: 9092
+      startupProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        periodSeconds: 5
+        failureThreshold: 60
+      resources:
+        requests:
+          cpu: "2"
+          memory: 8Gi
+        limits:
+          cpu: "4"
+          memory: 16Gi
+      volumeMounts:
+        - name: shared
+          mountPath: /shared
+        - name: runtime
+          mountPath: /opt/runtime
+        - name: integration-src
+          mountPath: /opt/integration-src
+        - name: discovery
+          mountPath: /discovery
+  volumes:
+    - name: shared
+      persistentVolumeClaim:
+        claimName: shared-model-cache
+    - name: runtime
+      emptyDir: {}
+    - name: integration-src
+      emptyDir: {}
+    - name: discovery
+      emptyDir: {}
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 64Gi
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Equal
+      value: "true"
+      effect: NoSchedule

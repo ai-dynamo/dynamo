@@ -1,0 +1,121 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z-trainer
+  namespace: warnold-dynamo
+  labels:
+    integration-run: prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z
+    integration-role: m5-trainer
+spec:
+  restartPolicy: Never
+  activeDeadlineSeconds: 14400
+  terminationGracePeriodSeconds: 120
+  nodeSelector:
+    kubernetes.io/arch: amd64
+    nvidia.com/gpu.product: NVIDIA-B200
+  initContainers:
+    - name: install-integration
+      image: &image docker.io/radixark/miles@sha256:39b5227d8b8cc9997d0777d72b555ea1f1f0dc4c1027649f8c44c6ce88f51859
+      imagePullPolicy: IfNotPresent
+      command: ["bash", "-lc"]
+      args:
+        - |
+          set -euxo pipefail
+          root=/shared/test-artifacts/prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z
+          old_root=/shared/test-artifacts/prorl-miles-nvfp4-f7de8eb-20260825t073154z
+          echo "1d90d516d27b2ede701e892a28a37e7cfb492cee9a18039e1220cb1b71fefcd5  $root/build/archives/miles-bc1341fd5.tar.gz" | sha256sum -c -
+          echo "9b4cd02b40aa1f7fc61ba8065a29fa79eb32a16ad3ef4a6b6695e1f75b0d73dc  $root/build/archives/prorl-0ee1d48f65.tar.gz" | sha256sum -c -
+          mkdir -p /opt/integration-src/miles /opt/integration-src/prorl /opt/models "$root/train"
+          tar -xzf "$root/build/archives/miles-bc1341fd5.tar.gz" -C /opt/integration-src/miles
+          tar -xzf "$root/build/archives/prorl-0ee1d48f65.tar.gz" -C /opt/integration-src/prorl
+          ln -s /shared/hub/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39 /opt/models/Qwen3-30B-A3B
+          ln -s "$old_root/models/Qwen3-30B-A3B-NVFP4-baseline" /opt/models/Qwen3-30B-A3B-NVFP4
+          python3 -c 'import pathlib,sys; src=pathlib.Path(sys.argv[1]).read_text(); pathlib.Path(sys.argv[2]).write_text(src.replace("__POD_IP__",sys.argv[3]))'             "$root/integration/polar-miles-m5.yaml.in" /opt/config/polar-miles.yaml "$POD_IP"
+          PYTHONPATH=/opt/integration-src/miles:/opt/integration-src/prorl/src:/root/Megatron-LM             python3 -c "from miles.utils.types import Sample; from slime_bridge.rollout import generate_rollout_polar_async; from scripts.run_qwen3_30b_a3b import ScriptArgs; print(Sample, generate_rollout_polar_async, ScriptArgs)"
+          test -f "$root/integration/run_miles_prorl_one_step.py"
+          test -f "$root/integration/validate_m5_train.py"
+          test -f "$root/integration/agent-subagent-one-step.jsonl"
+      env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef: {fieldPath: status.podIP}
+      resources:
+        requests: {cpu: "2", memory: 8Gi}
+        limits: {cpu: "4", memory: 16Gi}
+      volumeMounts:
+        - {name: shared, mountPath: /shared}
+        - {name: integration-src, mountPath: /opt/integration-src}
+        - {name: models, mountPath: /opt/models}
+        - {name: config, mountPath: /opt/config}
+  containers:
+    - name: trainer
+      image: *image
+      imagePullPolicy: IfNotPresent
+      workingDir: /opt/integration-src/miles
+      securityContext:
+        runAsUser: 0
+        capabilities:
+          add: ["IPC_LOCK"]
+      command: ["bash", "-lc"]
+      args:
+        - |
+          set -euxo pipefail
+          root=/shared/test-artifacts/prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z
+          run_id=m5-qwen3-nvfp4-agent
+          until curl -fsS http://prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z-prorl:8080/health; do sleep 3; done
+          until curl -fsS http://prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z-prorl:8100/health; do sleep 3; done
+          until curl -fsS http://prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z-dynamo:8000/health; do sleep 5; done
+          timeout --signal=TERM --kill-after=120s 10800s             python3 "$root/integration/run_miles_prorl_one_step.py"               --run-id "$run_id"               --model-dir /opt/models               --prompt-data "$root/integration/agent-subagent-one-step.jsonl"               --polar-config /opt/config/polar-miles.yaml               --output-dir "$root/train"               --router-host prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z-dynamo               --router-port 8000               --control-url http://prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z-dynamo:9090/engine             2>&1 | tee "$root/train/driver.log"
+          python3 "$root/integration/validate_m5_train.py"             --run-dir "$root/train/$run_id"             --driver-log "$root/train/driver.log"             --evidence-dir "$root/evidence/train"             2>&1 | tee "$root/evidence/train-validator.log"
+      env:
+        - name: PYTHONPATH
+          value: /opt/integration-src/miles:/opt/integration-src/prorl/src:/root/Megatron-LM
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: HF_HOME
+          value: /shared
+        - name: HF_HUB_CACHE
+          value: /shared/hub
+        - name: HF_HUB_OFFLINE
+          value: "1"
+        - name: TRANSFORMERS_OFFLINE
+          value: "1"
+        - name: RAY_DEDUP_LOGS
+          value: "0"
+        - name: NCCL_SOCKET_IFNAME
+          value: eth0
+        - name: GLOO_SOCKET_IFNAME
+          value: eth0
+      resources:
+        requests:
+          cpu: "32"
+          memory: 768Gi
+          nvidia.com/gpu: "4"
+        limits:
+          cpu: "64"
+          memory: 1Ti
+          nvidia.com/gpu: "4"
+      volumeMounts:
+        - {name: shared, mountPath: /shared}
+        - {name: integration-src, mountPath: /opt/integration-src}
+        - {name: models, mountPath: /opt/models}
+        - {name: config, mountPath: /opt/config}
+        - {name: dshm, mountPath: /dev/shm}
+  volumes:
+    - name: shared
+      persistentVolumeClaim: {claimName: shared-model-cache}
+    - {name: integration-src, emptyDir: {}}
+    - {name: models, emptyDir: {}}
+    - {name: config, emptyDir: {}}
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 256Gi
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
