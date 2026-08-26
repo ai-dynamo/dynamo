@@ -60,15 +60,11 @@ pub enum SessionPrefixIndexError {
 
     /// A block was attached beneath a conflicting parent.
     #[error("block {block:?} is already parented elsewhere")]
-    ConflictingParent {
-        block: ExternalSequenceBlockHash,
-    },
+    ConflictingParent { block: ExternalSequenceBlockHash },
 
     /// A graft would create a parent cycle.
     #[error("block {block:?} would become its own ancestor")]
-    CyclicParent {
-        block: ExternalSequenceBlockHash,
-    },
+    CyclicParent { block: ExternalSequenceBlockHash },
 }
 
 /// Thread-safe session-aware logical prefix index.
@@ -200,7 +196,6 @@ impl SessionPrefixIndexer {
     }
 
     /// Records a stored block chain and reports whether the frontier advanced.
-    /// KV events do not yet supply the session identity required by this API.
     pub fn update_session_from_stored_blocks(
         &self,
         session_id: &str,
