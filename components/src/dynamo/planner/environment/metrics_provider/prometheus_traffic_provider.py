@@ -40,6 +40,9 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
             ssl_verify=config.metric_pulling_prometheus_ssl_verify,
             extra_query_params=config.metric_pulling_prometheus_extra_query_params,
             ca_bundle=config.metric_pulling_prometheus_ca_bundle,
+            request_timeout_seconds=(
+                config.metric_pulling_prometheus_request_timeout_seconds
+            ),
         )
         if config.throughput_metrics_source == "router":
             self.prometheus_traffic_client.warn_if_router_not_scraped()

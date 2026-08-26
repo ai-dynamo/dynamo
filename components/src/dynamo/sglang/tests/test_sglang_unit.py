@@ -22,11 +22,12 @@ from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.sglang._compat import (
     ensure_sglang_tensor_image_size,
-    ensure_sglang_top_level_exports,
     filter_supported_async_generate_kwargs,
+    override_server_args,
     require_reasoning_kwargs,
 )
 from dynamo.sglang.args import (
+    _diffusion_generator_kwargs,
     _forward_pass_metrics_source,
     _normalize_multimodal_disaggregation_args,
     parse_args,
@@ -66,6 +67,50 @@ pytestmark = [
 # Create SGLang-specific CLI args fixture
 # This will use monkeypatch to write to argv
 mock_sglang_cli = make_cli_args_fixture("dynamo.sglang")
+
+
+def test_diffusion_generator_kwargs_maps_nccl_port_to_master_port():
+    kwargs = _diffusion_generator_kwargs(
+        SimpleNamespace(
+            model_path="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+            tp_size=2,
+            dp_size=1,
+            dist_timeout=120,
+            nccl_port=23456,
+        )
+    )
+
+    assert kwargs == {
+        "model_path": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+        "num_gpus": 2,
+        "tp_size": 2,
+        "dp_size": 1,
+        "dist_timeout": 120,
+        "master_port": 23456,
+    }
+
+
+def test_diffusion_generator_kwargs_omits_unset_master_port():
+    kwargs = _diffusion_generator_kwargs(
+        SimpleNamespace(model_path="Tongyi-MAI/Z-Image-Turbo")
+    )
+
+    assert kwargs["num_gpus"] == 1
+    assert "master_port" not in kwargs
+
+
+def test_override_server_args_supports_legacy_xpu_pin():
+    server_args = SimpleNamespace(enable_memory_saver=False)
+
+    override_server_args(
+        server_args,
+        "dynamo.test",
+        enable_memory_saver=True,
+        load_format="legacy-loader",
+    )
+
+    assert server_args.enable_memory_saver is True
+    assert server_args.load_format == "legacy-loader"
 
 
 @pytest.fixture(autouse=True)
@@ -206,40 +251,6 @@ def _make_sglang_config(**overrides):
     return config
 
 
-def test_compat_restores_sglang_top_level_exports():
-    """Dynamo supports SGLang builds that omit top-level Engine/ServerArgs."""
-    import sglang as sgl
-    from sglang.srt.entrypoints.engine import Engine
-    from sglang.srt.server_args import ServerArgs
-
-    missing = object()
-    original_engine = getattr(sgl, "Engine", missing)
-    original_server_args = getattr(sgl, "ServerArgs", missing)
-
-    try:
-        if hasattr(sgl, "Engine"):
-            delattr(sgl, "Engine")
-        if hasattr(sgl, "ServerArgs"):
-            delattr(sgl, "ServerArgs")
-
-        ensure_sglang_top_level_exports()
-
-        assert sgl.Engine is Engine
-        assert sgl.ServerArgs is ServerArgs
-    finally:
-        if original_engine is missing:
-            if hasattr(sgl, "Engine"):
-                delattr(sgl, "Engine")
-        else:
-            sgl.Engine = original_engine
-
-        if original_server_args is missing:
-            if hasattr(sgl, "ServerArgs"):
-                delattr(sgl, "ServerArgs")
-        else:
-            sgl.ServerArgs = original_server_args
-
-
 def test_compat_supports_tensor_image_sizes_and_is_idempotent(caplog, monkeypatch):
     from sglang.srt.multimodal.processors.base_processor import (
         BaseMultimodalProcessor,
@@ -266,6 +277,10 @@ def test_compat_supports_tensor_image_sizes_and_is_idempotent(caplog, monkeypatc
 
         processor = object.__new__(ConcreteMultimodalProcessor)
         processor._processor = Processor()
+        # SGLang 0.5.17 resolves the processor and tokenizer together before
+        # handling raw multimodal items. This test stubs the processing path,
+        # so a tokenizer is not exercised, but the attribute must exist.
+        processor._tokenizer = None
         processor.use_cuda_ipc = False
         image_token_id = 99
         processor._process_and_collect_mm_items = lambda **kwargs: (
@@ -579,6 +594,32 @@ async def test_start_profile_forwards_profile_request():
     assert tokenizer_manager.request.start_step == body["start_step"]
     assert tokenizer_manager.request.num_steps == body["num_steps"]
     assert response == {"status": "ok", "message": "Profiling started"}
+
+
+@pytest.mark.asyncio
+async def test_update_weight_version_uses_tokenizer_manager_control_api():
+    class TokenizerManager:
+        updated_version = None
+
+        def _update_weight_version_if_provided(self, version):
+            self.updated_version = version
+
+    tokenizer_manager = TokenizerManager()
+    handler = SimpleNamespace(
+        engine=SimpleNamespace(tokenizer_manager=tokenizer_manager)
+    )
+
+    response = await BaseWorkerHandler.update_weight_version(
+        handler,
+        {"new_version": "step-42", "abort_all_requests": False},
+    )
+
+    assert tokenizer_manager.updated_version == "step-42"
+    assert response == {
+        "success": True,
+        "message": "Weight version updated to step-42",
+        "new_version": "step-42",
+    }
 
 
 @pytest.mark.asyncio

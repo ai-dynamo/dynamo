@@ -40,6 +40,10 @@ tabs:
   recipes:
     display-name: Recipes
     icon: file-code
+  agent-skills:
+    display-name: Agent Skills
+    icon: robot
+    slug: agent-skills
   developer-guide:
     display-name: Developer Guide
     icon: code
@@ -465,7 +469,7 @@ navigation:
           - page: Kimi-K2.6
             path: pages/recipes/model-recipes/kimi-k2-6.mdx
             slug: kimi-k2-6
-          - page: Nemotron-3.5-Lightning
+          - page: Nemotron 3.5 Lightning
             path: pages/recipes/model-recipes/nemotron-3-5-lightning.mdx
             slug: nemotron-3-5-lightning
           - page: Nemotron 3 Ultra
@@ -483,9 +487,6 @@ navigation:
           - page: DeepSeek-V4-Flash
             path: pages/recipes/model-recipes/deepseek-v4-flash.mdx
             slug: deepseek-v4-flash
-          - page: DeepSeek V3.2 NVFP4
-            path: pages/recipes/model-recipes/deepseek-v3-2-nvfp4.mdx
-            slug: deepseek-v3-2-nvfp4
           - page: GPT-OSS-120B
             path: pages/recipes/model-recipes/gpt-oss-120b.mdx
             slug: gpt-oss-120b
@@ -501,9 +502,6 @@ navigation:
           - page: Qwen3-32B FP8
             path: pages/recipes/model-recipes/qwen3-32b-fp8.mdx
             slug: qwen3-32b-fp8
-          - page: Llama-3.3-70B FP8
-            path: pages/recipes/model-recipes/llama-3-3-70b-fp8.mdx
-            slug: llama-3-3-70b
 
       # ==================== Kubernetes Templates ====================
       - section: Kubernetes Templates
@@ -577,19 +575,17 @@ navigation:
             path: pages/recipes/feature-benchmarks/qwen3-vl-embedding-cache.mdx
             slug: qwen3-vl-embedding-cache
             hidden: true
-          - page: DeepSeek V3.2 WideEP Routing
-            path: pages/recipes/feature-benchmarks/deepseek-v3-2-wideep-routing.mdx
-            slug: deepseek-v3-2-wideep-routing
-            hidden: true
-          - page: Llama-3.3-70B Topology
-            path: pages/recipes/feature-benchmarks/llama-3-3-70b-topology.mdx
-            slug: llama-3-70b-topology
-            hidden: true
           - page: KV Router A/B Testing
             path: pages/recipes/feature-benchmarks/kv-router-a-b-testing.md
             slug: kv-router-ab-testing
             hidden: true
 
+  - tab: agent-skills
+    layout:
+      - page: Overview
+        path: pages/agent-skills/overview.mdx
+
+  # ==================== Developer Guide ====================
   - tab: developer-guide
     layout:
       # ==================== Knowledge Base ====================
@@ -1210,6 +1206,9 @@ navigation:
         contents:
           # Keep this archive in reverse chronological order. Publication dates are
           # rendered in each article header and on the custom landing page.
+          - page: "Dynamo Agent Optimization Skills"
+            path: pages/blog/2026/agent-optimization-skills.mdx
+            slug: agent-optimization-skills
           - page: "DynoSim Pareto Frontier"
             path: pages/blog/2026/dynosim-pareto-frontier.mdx
             slug: dynosim-pareto-frontier

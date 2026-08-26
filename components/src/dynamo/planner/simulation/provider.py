@@ -11,9 +11,6 @@ from copy import deepcopy
 from enum import Enum
 from typing import Any, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from tqdm import tqdm  # type: ignore[import-untyped]
-
 from aisimulate.sweeper.provider import (
     AdapterReplaySpec,
     AdapterSearchPlan,
@@ -23,6 +20,8 @@ from aisimulate.sweeper.provider import (
     SearchSpaceFragment,
     SweepContext,
 )
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from tqdm import tqdm  # type: ignore[import-untyped]
 
 from .load_predictor import (
     LOAD_PREDICTOR_PRESETS,

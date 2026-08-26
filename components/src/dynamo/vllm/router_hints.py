@@ -6,6 +6,7 @@ from __future__ import annotations
 import ipaddress
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -17,6 +18,12 @@ from dynamo.common.constants import (
     ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY,
 )
 from dynamo.llm import ModelRuntimeConfig, WorkerType
+
+
+@dataclass(frozen=True)
+class RouterHintSource:
+    source_control_endpoint: str
+    worker_type: str
 
 
 def _secondary_tiers(engine_args: AsyncEngineArgs) -> list[Mapping[str, Any]]:
@@ -88,7 +95,7 @@ def _router_hint_source_control_endpoints(
     """Build source-control endpoints keyed by global DP rank.
 
     ``control_ports`` is local to this worker: entry 0 belongs to dp_start,
-    entry 1 belongs to dp_start + 1, and so on. vLLM/KVCC selects from the
+    entry 1 belongs to dp_start + 1, and so on. vLLM/KVCR selects from the
     same list with data_parallel_rank_local.
     """
     dp_start, dp_size = dp_range
@@ -130,20 +137,19 @@ def _router_hint_worker_type(worker_type: WorkerType) -> str | None:
     return role
 
 
-def enable_router_hint_support(
-    runtime_config: ModelRuntimeConfig,
+def resolve_router_hint_sources(
     engine_args: AsyncEngineArgs,
     worker_type: WorkerType,
     dp_range: tuple[int, int] = (0, 1),
-) -> None:
-    """Publish router-hint runtime metadata when vLLM config supports it."""
+) -> dict[int, RouterHintSource] | None:
+    """Resolve per-rank source metadata once for legacy or state-agent publication."""
     router_hint_worker_type = _router_hint_worker_type(worker_type)
     if router_hint_worker_type is None:
-        return
+        return None
 
     router_hint_tiers = _router_hint_tiers(engine_args)
     if not router_hint_tiers:
-        return
+        return None
     if len(router_hint_tiers) > 1:
         raise ValueError(
             "router_hint support requires exactly one router-hint-capable "
@@ -157,13 +163,38 @@ def enable_router_hint_support(
             "for all managed DP ranks"
         )
 
+    return {
+        int(rank): RouterHintSource(endpoint, router_hint_worker_type)
+        for rank, endpoint in endpoints.items()
+    }
+
+
+def enable_router_hint_support(
+    runtime_config: ModelRuntimeConfig,
+    engine_args: AsyncEngineArgs,
+    worker_type: WorkerType,
+    dp_range: tuple[int, int] = (0, 1),
+    *,
+    publish_source_endpoints: bool = True,
+) -> None:
+    """Publish router-hint runtime metadata when vLLM config supports it."""
+    sources = resolve_router_hint_sources(engine_args, worker_type, dp_range)
+    if sources is None:
+        return
+    router_hint_worker_type = next(iter(sources.values())).worker_type
+
     # set_engine_specific expects JSON text; the PyO3 binding parses each value
     # with serde_json::from_str, so Python strings must be json.dumps'ed first.
     # Publish capability last so partial metadata is not capability-only if this
     # setup is ever observed before model registration completes.
-    runtime_config.set_engine_specific(
-        ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY, json.dumps(endpoints)
-    )
+    if publish_source_endpoints:
+        endpoints = {
+            str(rank): source.source_control_endpoint
+            for rank, source in sources.items()
+        }
+        runtime_config.set_engine_specific(
+            ROUTER_HINT_SOURCE_CONTROL_ENDPOINTS_RUNTIME_KEY, json.dumps(endpoints)
+        )
     runtime_config.set_engine_specific(
         ROUTER_HINT_WORKER_TYPE_RUNTIME_KEY, json.dumps(router_hint_worker_type)
     )
