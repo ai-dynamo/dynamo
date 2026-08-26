@@ -150,9 +150,10 @@ env ${_ENCODE_CUDA_PIN:+"$_ENCODE_CUDA_PIN"} python3 -m dynamo.sglang \
   $ENCODE_EXTRA_ARGS &
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
-    # Wait for encode worker to initialize before starting prefill worker.
-    # This prevents workers from competing for GPU memory simultaneously, which can cause OOM.
-    echo "Waiting for encode worker to initialize..."
+    # The encode worker cannot become healthy until backend.generate exists,
+    # which is provided by the decode worker started below. Keep a short delay
+    # here to reduce overlap without creating a circular readiness dependency.
+    echo "Waiting before starting prefill worker..."
     sleep 5
 fi
 
@@ -181,9 +182,9 @@ env ${_PREFILL_CUDA_PIN:+"$_PREFILL_CUDA_PIN"} python3 -m dynamo.sglang \
   $PREFILL_EXTRA_ARGS &
 
 if [[ "$SINGLE_GPU" == "true" ]]; then
-    # Wait for prefill worker to initialize before starting decode worker.
-    echo "Waiting for prefill worker to initialize..."
-    sleep 5
+    # Prefill can become healthy independently, so use it to prevent the two
+    # full-model workers from loading concurrently on the shared GPU.
+    wait_for_ready "http://localhost:${DYN_SYSTEM_PORT2:-8082}/health" 120
 fi
 
 # run SGLang multimodal decode worker
