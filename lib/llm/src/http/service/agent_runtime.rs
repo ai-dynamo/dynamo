@@ -30,8 +30,8 @@ use dynamo_agent_tools::{
     BraveWebSearchError, BraveWebSearchExecutor, BraveWebSearchFailurePolicy, BraveWebSearchProfile,
 };
 use dynamo_protocols::types::responses::{
-    ResponseCompletedEvent, ResponseCreatedEvent, ResponseInProgressEvent,
-    ResponseOutputItemDoneEvent, ResponseStreamEvent, Status,
+    CreateResponse, ResponseCompletedEvent, ResponseCreatedEvent, ResponseInProgressEvent,
+    ResponseOutputItemDoneEvent, ResponseStreamEvent, Status, Tool,
 };
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use futures::{Stream, StreamExt, stream};
@@ -367,8 +367,23 @@ impl ToolFailurePolicy<ResponsesToolExecutorError> for ResponsesToolFailurePolic
 
 pub(super) struct ResponsesAgentRuntime {
     runtime: Arc<ResponsesAgentRuntimeCore>,
+    router: ResponsesRouter,
     tool_adapter: Arc<ResponsesToolAdapter>,
     tool_runner: Arc<ResponsesToolRunner>,
+}
+
+impl ResponsesAgentRuntime {
+    fn request_uses_runtime_tools(&self, request: &CreateResponse) -> bool {
+        request_uses_runtime_tools(request, &self.router)
+    }
+}
+
+fn request_uses_runtime_tools(request: &CreateResponse, router: &impl ToolRouter) -> bool {
+    request.tools.as_ref().is_some_and(|tools| {
+        tools.iter().any(|tool| {
+            matches!(tool, Tool::Function(function) if router.route(&function.name).is_some())
+        })
+    })
 }
 
 type ResponsesRuntimeError = AgentRuntimeError<
@@ -433,6 +448,7 @@ pub(super) fn new_responses_runtime() -> Arc<ResponsesAgentRuntime> {
     ));
     Arc::new(ResponsesAgentRuntime {
         runtime,
+        router: router.clone(),
         tool_adapter: Arc::new(ResponsesToolLoopAdapter::new(router)),
         tool_runner: Arc::new(ToolRunner::new(
             store,
@@ -652,6 +668,9 @@ pub(super) async fn handle_responses(
         .or_else(|| header_value(&headers, "x-idempotency-key"))
         .unwrap_or_else(|| request_id.clone());
     let authorization = ingress_authorization(&headers)?;
+    let agent_runtime = state.responses_agent_runtime();
+    let stage_runtime_tool_rounds =
+        streaming && agent_runtime.request_uses_runtime_tools(&request.inner);
     let invocation_context =
         DynamoResponsesContext::new(state.clone(), template, request_id, carrier, request.nvext);
     let step_kind = if parent_response_id.is_some() {
@@ -670,13 +689,17 @@ pub(super) async fn handle_responses(
     };
 
     if streaming {
-        let agent_runtime = state.responses_agent_runtime();
+        let stream_interpreter = if stage_runtime_tool_rounds {
+            ResponsesStreamEventInterpreter::stage_runtime_tool_rounds()
+        } else {
+            ResponsesStreamEventInterpreter::default()
+        };
         let result = agent_runtime
             .runtime
             .clone()
             .run_stream_with_tools(
                 command,
-                ResponsesStreamEventInterpreter::default(),
+                stream_interpreter,
                 agent_runtime.tool_adapter.clone(),
                 agent_runtime.tool_runner.clone(),
             )
@@ -704,7 +727,6 @@ pub(super) async fn handle_responses(
         ));
     }
 
-    let agent_runtime = state.responses_agent_runtime();
     let result = agent_runtime
         .runtime
         .run_unary_with_tools(
@@ -922,6 +944,22 @@ fn stream_runtime_error_response(error: ResponsesStreamRuntimeError) -> openai::
             )
         }
         AgentStreamRuntimeError::Interpreter { error, .. } => match error {},
+        AgentStreamRuntimeError::StagedEventEncoding {
+            error,
+            checkpoint_error,
+        } => agent_runtime_public_error(
+            checkpoint_failure_status(&checkpoint_error, StatusCode::BAD_GATEWAY),
+            "Inference backend returned an invalid stream event",
+            error,
+        ),
+        AgentStreamRuntimeError::StagedEventLimit {
+            limit_bytes,
+            checkpoint_error,
+        } => agent_runtime_public_error(
+            checkpoint_failure_status(&checkpoint_error, StatusCode::BAD_GATEWAY),
+            "Inference stream exceeded the runtime staging limit",
+            format_args!("staged stream exceeded {limit_bytes} bytes"),
+        ),
         AgentStreamRuntimeError::MissingTerminal { checkpoint_error } => {
             let status = if checkpoint_error.is_some() {
                 StatusCode::SERVICE_UNAVAILABLE
@@ -1183,9 +1221,11 @@ mod tests {
     use axum::http::{HeaderMap, StatusCode};
 
     use dynamo_agent_rt::{
-        AgentRuntimeError, MaterializationError, ResponseId, ToolRouter, TurnState,
+        AgentRuntimeError, ConfiguredToolRouter, MaterializationError, ResponseId, ToolRoute,
+        ToolRouter, TurnState,
     };
     use dynamo_agent_rt_store::{DuckDbStoreError, StoreInvariantError};
+    use dynamo_protocols::types::responses::CreateResponse;
     use futures::stream;
 
     use crate::protocols::common::extensions::{
@@ -1199,9 +1239,38 @@ mod tests {
         AUTH_HEADER, AUTH_MODE_ENV, AgentRuntimeAuthConfig, DynamoInvocationCarrier,
         DynamoResponsesInvocationError, IngressAuthorizationError, LOCAL_PRINCIPAL_ENV,
         LOCAL_TENANT_ENV, PERMITTED_CONNECTORS_ENV, PRINCIPAL_HEADER, ResponsesRuntimeError,
-        TENANT_HEADER, TRUSTED_PROXY_TOKEN_ENV, committed_response_events, runtime_error_response,
-        sandbox_components_from_config, sse_response, web_search_components_from_config,
+        TENANT_HEADER, TRUSTED_PROXY_TOKEN_ENV, committed_response_events,
+        request_uses_runtime_tools, runtime_error_response, sandbox_components_from_config,
+        sse_response, web_search_components_from_config,
     };
+
+    #[test]
+    fn stream_staging_is_selected_only_for_declared_runtime_tools() {
+        let router =
+            ConfiguredToolRouter::new([("python".to_owned(), ToolRoute::new("sandbox", "python"))]);
+        let request = |tool_name: &str| -> CreateResponse {
+            serde_json::from_value(serde_json::json!({
+                "model": "model",
+                "input": "hello",
+                "tools": [{
+                    "type": "function",
+                    "name": tool_name,
+                    "parameters": {"type": "object"}
+                }]
+            }))
+            .unwrap()
+        };
+
+        assert!(request_uses_runtime_tools(&request("python"), &router));
+        assert!(!request_uses_runtime_tools(
+            &request("client_shell"),
+            &router
+        ));
+        assert!(!request_uses_runtime_tools(
+            &CreateResponse::default(),
+            &router
+        ));
+    }
 
     #[test]
     fn web_search_route_exists_only_with_deployment_credentials() {

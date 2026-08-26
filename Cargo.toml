@@ -66,13 +66,13 @@ dynamo-truthy = { path = "lib/truthy", version = "1.5.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.5.0" }
 dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.5.0" }
 dynamo-memory = { path = "lib/memory", version = "1.5.0" }
-dynamo-agent-rt = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "c2084c157f8b5198b0d72adc6995e760860cf607" }
-dynamo-agent-rt-store = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "c2084c157f8b5198b0d72adc6995e760860cf607" }
-dynamo-agent-tools = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "c2084c157f8b5198b0d72adc6995e760860cf607" }
-agent-rt-sandbox = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "c2084c157f8b5198b0d72adc6995e760860cf607" }
+dynamo-agent-rt = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "ee84386962e269d4e819e02190ae4659e65b2b32" }
+dynamo-agent-rt-store = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "ee84386962e269d4e819e02190ae4659e65b2b32" }
+dynamo-agent-tools = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "ee84386962e269d4e819e02190ae4659e65b2b32" }
+agent-rt-sandbox = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "ee84386962e269d4e819e02190ae4659e65b2b32" }
 dynamo-mocker = { path = "lib/mocker", version = "1.5.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.5.0" }
-dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "c2084c157f8b5198b0d72adc6995e760860cf607" }
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "ee84386962e269d4e819e02190ae4659e65b2b32" }
 dynamo-parsers = { version = "8.0.0" }
 
 # Published on crates.io. To see all available versions:
@@ -200,7 +200,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-pemfile = { version = "2" }
 
 [patch.crates-io]
-dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "c2084c157f8b5198b0d72adc6995e760860cf607" }
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "ee84386962e269d4e819e02190ae4659e65b2b32" }
 
 [profile.dev.package]
 insta.opt-level = 3

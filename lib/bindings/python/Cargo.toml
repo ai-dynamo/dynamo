@@ -131,7 +131,7 @@ opentelemetry_sdk = { version = "0.31.0", features = ["trace"] }
 tracing-subscriber = { version = "0.3", features = ["registry"] }
 
 [patch.crates-io]
-dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "c2084c157f8b5198b0d72adc6995e760860cf607" }
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "ee84386962e269d4e819e02190ae4659e65b2b32" }
 
 [profile.profiling]
 inherits = "release"

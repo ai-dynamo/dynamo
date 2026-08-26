@@ -11,7 +11,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 [[package]]
 name = "agent-rt-sandbox"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=c2084c157f8b5198b0d72adc6995e760860cf607#c2084c157f8b5198b0d72adc6995e760860cf607"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=ee84386962e269d4e819e02190ae4659e65b2b32#ee84386962e269d4e819e02190ae4659e65b2b32"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -2687,7 +2687,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 [[package]]
 name = "dynamo-agent-rt"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=c2084c157f8b5198b0d72adc6995e760860cf607#c2084c157f8b5198b0d72adc6995e760860cf607"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=ee84386962e269d4e819e02190ae4659e65b2b32#ee84386962e269d4e819e02190ae4659e65b2b32"
 dependencies = [
  "async-stream",
  "blake3",
@@ -2702,7 +2702,7 @@ dependencies = [
 [[package]]
 name = "dynamo-agent-rt-store"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=c2084c157f8b5198b0d72adc6995e760860cf607#c2084c157f8b5198b0d72adc6995e760860cf607"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=ee84386962e269d4e819e02190ae4659e65b2b32#ee84386962e269d4e819e02190ae4659e65b2b32"
 dependencies = [
  "duckdb",
  "dynamo-agent-rt",
@@ -2715,7 +2715,7 @@ dependencies = [
 [[package]]
 name = "dynamo-agent-tools"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=c2084c157f8b5198b0d72adc6995e760860cf607#c2084c157f8b5198b0d72adc6995e760860cf607"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=ee84386962e269d4e819e02190ae4659e65b2b32#ee84386962e269d4e819e02190ae4659e65b2b32"
 dependencies = [
  "dynamo-agent-rt",
  "reqwest 0.13.4",
@@ -3182,7 +3182,7 @@ dependencies = [
 [[package]]
 name = "dynamo-protocols"
 version = "5.4.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=c2084c157f8b5198b0d72adc6995e760860cf607#c2084c157f8b5198b0d72adc6995e760860cf607"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=ee84386962e269d4e819e02190ae4659e65b2b32#ee84386962e269d4e819e02190ae4659e65b2b32"
 dependencies = [
  "async-openai",
  "derive_builder",
