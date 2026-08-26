@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::convert::Infallible;
 use std::sync::{Arc, LazyLock};
 
 use axum::body::to_bytes;
@@ -9,11 +10,12 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use dynamo_agent_rt::{
-    AgentRuntime, AuthorizationScope, CanonicalJsonFingerprinter, IdempotencyKey,
-    InMemoryCheckpointStore, InferenceFuture, InferenceIntent, InferenceInvoker, InferenceOutput,
-    InferenceRequest, ModelStepKind, OpenAiResponses, ResponseId, ResponsesOutputInterpreter,
-    ResponsesRequestMaterializer, ResponsesStreamEventInterpreter, RunStreamResult, RunTurn,
-    RuntimeAuthorization, RuntimeLimits, SystemClock, UuidGenerator,
+    AgentRuntime, AgentRuntimeError, AgentStreamRuntimeError, AuthorizationScope,
+    CanonicalJsonFingerprinter, IdempotencyKey, InMemoryCheckpointStore, InMemoryStoreError,
+    InferenceFuture, InferenceIntent, InferenceInvoker, InferenceOutput, InferenceRequest,
+    MaterializationError, ModelStepKind, OpenAiResponses, ResponseId, ResponsesOutputError,
+    ResponsesOutputInterpreter, ResponsesRequestMaterializer, ResponsesStreamEventInterpreter,
+    RunStreamResult, RunTurn, RuntimeAuthorization, RuntimeLimits, SystemClock, UuidGenerator,
 };
 use dynamo_protocols::types::responses::{
     ResponseCompletedEvent, ResponseCreatedEvent, ResponseInProgressEvent,
@@ -223,6 +225,17 @@ pub(super) type ResponsesAgentRuntime = AgentRuntime<
     SystemClock,
 >;
 
+type ResponsesRuntimeError = AgentRuntimeError<
+    InMemoryStoreError,
+    MaterializationError<Infallible>,
+    serde_json::Error,
+    DynamoResponsesInvocationError,
+    ResponsesOutputError,
+>;
+
+type ResponsesStreamRuntimeError =
+    AgentStreamRuntimeError<ResponsesRuntimeError, Infallible, InMemoryStoreError>;
+
 pub(super) fn new_responses_runtime() -> Arc<ResponsesAgentRuntime> {
     Arc::new(AgentRuntime::new(
         InMemoryCheckpointStore::default(),
@@ -363,11 +376,7 @@ pub(super) async fn handle_responses(
             .clone()
             .run_stream(command, ResponsesStreamEventInterpreter::default())
             .await
-            .map_err(|error| {
-                openai::ErrorMessage::internal_server_error(&format!(
-                    "Agent runtime failed: {error}"
-                ))
-            })?;
+            .map_err(stream_runtime_error_response)?;
         let stream: AgentResponsesStream = match result {
             RunStreamResult::Live(stream) => {
                 Box::pin(stream.map(|event| event.map_err(axum::Error::new)))
@@ -394,9 +403,7 @@ pub(super) async fn handle_responses(
         .responses_agent_runtime()
         .run_unary(command)
         .await
-        .map_err(|error| {
-            openai::ErrorMessage::internal_server_error(&format!("Agent runtime failed: {error}"))
-        })?;
+        .map_err(runtime_error_response)?;
     let response = result.record().response.clone().ok_or_else(|| {
         openai::ErrorMessage::internal_server_error(
             "Agent runtime turn exists but has no replayable response",
@@ -418,6 +425,202 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .get(name)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
+}
+
+fn stream_runtime_error_response(error: ResponsesStreamRuntimeError) -> openai::ErrorResponse {
+    match error {
+        AgentStreamRuntimeError::Runtime(error) => runtime_error_response(error),
+        AgentStreamRuntimeError::ExpectedStreaming { checkpoint_error } => {
+            if checkpoint_error.is_some() {
+                return agent_runtime_public_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Agent runtime could not durably record the failed turn",
+                    format_args!(
+                        "streaming response type mismatch; failed-state commit: {checkpoint_error:?}"
+                    ),
+                );
+            }
+            agent_runtime_public_error(
+                StatusCode::BAD_GATEWAY,
+                "Inference backend did not return a response stream",
+                "inference backend returned unary output for a streaming request",
+            )
+        }
+        AgentStreamRuntimeError::Interpreter { error, .. } => match error {},
+        AgentStreamRuntimeError::MissingTerminal { checkpoint_error } => {
+            let status = if checkpoint_error.is_some() {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            agent_runtime_public_error(
+                status,
+                "Inference stream ended without a terminal response",
+                format_args!("missing terminal event; failed-state commit: {checkpoint_error:?}"),
+            )
+        }
+    }
+}
+
+fn runtime_error_response(error: ResponsesRuntimeError) -> openai::ErrorResponse {
+    match error {
+        AgentRuntimeError::Store(error) => store_error_response(error),
+        AgentRuntimeError::Materialize(error) => materialization_error_response(error),
+        AgentRuntimeError::Fingerprint(error) => agent_runtime_public_error(
+            StatusCode::BAD_REQUEST,
+            "Request could not be fingerprinted",
+            error,
+        ),
+        AgentRuntimeError::LeaseDeadlineOverflow => agent_runtime_public_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Agent runtime could not create the turn",
+            "lease deadline overflow",
+        ),
+        AgentRuntimeError::Inference {
+            error,
+            checkpoint_error,
+        } => {
+            if checkpoint_error.is_some() {
+                return agent_runtime_public_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Agent runtime could not durably record the failed turn",
+                    format_args!(
+                        "inference failed: {error}; failed-state commit: {checkpoint_error:?}"
+                    ),
+                );
+            }
+            invocation_error_response(error)
+        }
+        AgentRuntimeError::StreamingUnsupported { checkpoint_error } => {
+            let status = if checkpoint_error.is_some() {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            agent_runtime_public_error(
+                status,
+                "Inference backend returned an incompatible response",
+                format_args!(
+                    "unary runtime received streaming output; failed-state commit: {checkpoint_error:?}"
+                ),
+            )
+        }
+        AgentRuntimeError::Output {
+            error,
+            checkpoint_error,
+        } => {
+            let status = if checkpoint_error.is_some() {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            agent_runtime_public_error(
+                status,
+                "Inference backend returned an invalid response",
+                format_args!(
+                    "output interpretation failed: {error}; failed-state commit: {checkpoint_error:?}"
+                ),
+            )
+        }
+        AgentRuntimeError::InvalidOutputState {
+            state,
+            checkpoint_error,
+        } => agent_runtime_public_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Agent runtime produced an invalid turn transition",
+            format_args!(
+                "invalid output state {state:?}; failed-state commit: {checkpoint_error:?}"
+            ),
+        ),
+    }
+}
+
+fn store_error_response(error: InMemoryStoreError) -> openai::ErrorResponse {
+    let (status, message) = match error {
+        InMemoryStoreError::NotFound => (
+            StatusCode::NOT_FOUND,
+            "Previous response was not found or is not accessible",
+        ),
+        InMemoryStoreError::IdempotencyConflict => (
+            StatusCode::CONFLICT,
+            "Idempotency key was already used for a different request",
+        ),
+        InMemoryStoreError::ResponseAlreadyExists(_)
+        | InMemoryStoreError::ParentNotReplayable(_)
+        | InMemoryStoreError::LeaseNotFound
+        | InMemoryStoreError::LeaseMismatch
+        | InMemoryStoreError::LeaseExpired
+        | InMemoryStoreError::VersionConflict => (
+            StatusCode::CONFLICT,
+            "Agent turn changed concurrently; retry with the same idempotency key",
+        ),
+        InMemoryStoreError::Poisoned
+        | InMemoryStoreError::InvalidLeaseDeadline
+        | InMemoryStoreError::LeaseDeadlineNotExtended
+        | InMemoryStoreError::InvalidTransition { .. }
+        | InMemoryStoreError::VersionOverflow
+        | InMemoryStoreError::CorruptChain => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Agent checkpoint store failed",
+        ),
+    };
+    agent_runtime_public_error(status, message, error)
+}
+
+fn materialization_error_response(
+    error: MaterializationError<Infallible>,
+) -> openai::ErrorResponse {
+    let (status, message) = match &error {
+        MaterializationError::MissingChain | MaterializationError::ScopeMismatch(_) => (
+            StatusCode::NOT_FOUND,
+            "Previous response was not found or is not accessible",
+        ),
+        MaterializationError::NonReplayable { .. } => (
+            StatusCode::CONFLICT,
+            "Previous response is not ready for continuation",
+        ),
+        MaterializationError::ParentMismatch { .. } => (
+            StatusCode::BAD_REQUEST,
+            "Continuation does not match the requested previous response",
+        ),
+        MaterializationError::UnexpectedChain | MaterializationError::BrokenChain(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Agent checkpoint chain is invalid",
+        ),
+        MaterializationError::Policy(error) => match *error {},
+    };
+    agent_runtime_public_error(status, message, error)
+}
+
+fn invocation_error_response(error: DynamoResponsesInvocationError) -> openai::ErrorResponse {
+    match error {
+        DynamoResponsesInvocationError::Dynamo { status, message } => {
+            agent_runtime_public_error(status, &message, "Dynamo Responses invocation failed")
+        }
+        DynamoResponsesInvocationError::Body(error) => agent_runtime_public_error(
+            StatusCode::BAD_GATEWAY,
+            "Failed to read the inference backend response",
+            error,
+        ),
+        DynamoResponsesInvocationError::Decode(error) => agent_runtime_public_error(
+            StatusCode::BAD_GATEWAY,
+            "Inference backend returned an invalid response",
+            error,
+        ),
+    }
+}
+
+fn agent_runtime_public_error(
+    status: StatusCode,
+    public_message: &str,
+    details: impl std::fmt::Display,
+) -> openai::ErrorResponse {
+    if status.is_server_error() {
+        tracing::error!(%status, %details, "agent runtime request failed");
+    } else {
+        tracing::debug!(%status, %details, "agent runtime request rejected");
+    }
+    openai::ErrorMessage::agent_runtime_error(status, public_message)
 }
 
 fn committed_response_events(
@@ -493,8 +696,11 @@ mod tests {
     use std::collections::HashMap;
 
     use axum::body::to_bytes;
-    use axum::http::HeaderMap;
+    use axum::http::{HeaderMap, StatusCode};
 
+    use dynamo_agent_rt::{
+        AgentRuntimeError, InMemoryStoreError, MaterializationError, ResponseId, TurnState,
+    };
     use futures::stream;
 
     use crate::protocols::common::extensions::{
@@ -506,10 +712,65 @@ mod tests {
 
     use super::{
         AUTH_HEADER, AUTH_MODE_ENV, AgentRuntimeAuthConfig, DynamoInvocationCarrier,
-        IngressAuthorizationError, LOCAL_PRINCIPAL_ENV, LOCAL_TENANT_ENV, PERMITTED_CONNECTORS_ENV,
-        PRINCIPAL_HEADER, TENANT_HEADER, TRUSTED_PROXY_TOKEN_ENV, committed_response_events,
+        DynamoResponsesInvocationError, IngressAuthorizationError, LOCAL_PRINCIPAL_ENV,
+        LOCAL_TENANT_ENV, PERMITTED_CONNECTORS_ENV, PRINCIPAL_HEADER, ResponsesRuntimeError,
+        TENANT_HEADER, TRUSTED_PROXY_TOKEN_ENV, committed_response_events, runtime_error_response,
         sse_response,
     };
+
+    #[test]
+    fn runtime_errors_have_stable_non_leaking_http_statuses() {
+        let missing: ResponsesRuntimeError = AgentRuntimeError::Store(InMemoryStoreError::NotFound);
+        let response = runtime_error_response(missing);
+        assert_eq!(response.0, StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.1.message(),
+            "Previous response was not found or is not accessible"
+        );
+
+        let conflict: ResponsesRuntimeError =
+            AgentRuntimeError::Store(InMemoryStoreError::IdempotencyConflict);
+        assert_eq!(runtime_error_response(conflict).0, StatusCode::CONFLICT);
+
+        let cross_scope: ResponsesRuntimeError = AgentRuntimeError::Materialize(
+            MaterializationError::ScopeMismatch(ResponseId::from("resp-private")),
+        );
+        assert_eq!(runtime_error_response(cross_scope).0, StatusCode::NOT_FOUND);
+
+        let not_replayable: ResponsesRuntimeError =
+            AgentRuntimeError::Materialize(MaterializationError::NonReplayable {
+                response_id: ResponseId::from("resp-running"),
+                state: TurnState::InFlight,
+            });
+        assert_eq!(
+            runtime_error_response(not_replayable).0,
+            StatusCode::CONFLICT
+        );
+
+        let downstream_overload: ResponsesRuntimeError = AgentRuntimeError::Inference {
+            error: DynamoResponsesInvocationError::Dynamo {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                message: "backend overloaded".to_owned(),
+            },
+            checkpoint_error: None,
+        };
+        assert_eq!(
+            runtime_error_response(downstream_overload).0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+
+        let durability_unknown: ResponsesRuntimeError = AgentRuntimeError::Inference {
+            error: DynamoResponsesInvocationError::Dynamo {
+                status: StatusCode::BAD_REQUEST,
+                message: "bad request".to_owned(),
+            },
+            checkpoint_error: Some(InMemoryStoreError::Poisoned),
+        };
+        assert_eq!(
+            runtime_error_response(durability_unknown).0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
 
     fn auth_config(entries: &[(&str, &str)]) -> Result<AgentRuntimeAuthConfig, String> {
         let environment: HashMap<&str, &str> = entries.iter().copied().collect();
@@ -709,8 +970,8 @@ pub(super) struct DynamoResponsesInvoker;
 
 #[derive(Debug, Error)]
 pub(super) enum DynamoResponsesInvocationError {
-    #[error("{0}")]
-    Dynamo(String),
+    #[error("Dynamo Responses invocation failed ({status}): {message}")]
+    Dynamo { status: StatusCode, message: String },
     #[error("failed to read Dynamo Responses body: {0}")]
     Body(#[from] axum::Error),
     #[error("failed to decode Dynamo Responses body: {0}")]
@@ -772,10 +1033,10 @@ impl InferenceInvoker<OpenAiResponses> for DynamoResponsesInvoker {
                 )
                 .await
                 .map_err(|(status, message)| {
-                    DynamoResponsesInvocationError::Dynamo(format!(
-                        "Dynamo Responses invocation failed ({status}): {}",
-                        message.message()
-                    ))
+                    DynamoResponsesInvocationError::Dynamo {
+                        status,
+                        message: message.message().to_owned(),
+                    }
                 })?;
                 connection_handle.disarm();
                 return Ok(InferenceOutput::Streaming(Box::pin(stream.map(Ok))));
@@ -788,19 +1049,17 @@ impl InferenceInvoker<OpenAiResponses> for DynamoResponsesInvoker {
                 stream_handle,
             )
             .await
-            .map_err(|(status, message)| {
-                DynamoResponsesInvocationError::Dynamo(format!(
-                    "Dynamo Responses invocation failed ({status}): {}",
-                    message.message()
-                ))
+            .map_err(|(status, message)| DynamoResponsesInvocationError::Dynamo {
+                status,
+                message: message.message().to_owned(),
             })?;
             connection_handle.disarm();
 
             if !response.status().is_success() {
-                return Err(DynamoResponsesInvocationError::Dynamo(format!(
-                    "Dynamo Responses invocation returned {}",
-                    response.status()
-                )));
+                return Err(DynamoResponsesInvocationError::Dynamo {
+                    status: response.status(),
+                    message: "Dynamo Responses invocation failed".to_owned(),
+                });
             }
             let body = to_bytes(response.into_body(), openai::get_body_limit()).await?;
             let response: NvResponse = serde_json::from_slice(&body)?;
