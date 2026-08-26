@@ -18,18 +18,16 @@
 package controller_common
 
 import (
+	"errors"
+
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-// IgnoreIntermediateError returns err for a real (terminal) Kubernetes API error that will not
-// resolve on retry — Invalid, BadRequest, or Forbidden — and nil for an intermediate
-// (transient, retryable) error. It mirrors client.IgnoreNotFound, so callers can write:
-//
-//	if controller_common.IgnoreIntermediateError(err) != nil { /* terminal: handle */ }
-//
-// to act only on terminal failures while letting transient ones requeue.
+// IgnoreIntermediateError returns terminal reconciliation errors and ignores transient failures.
 func IgnoreIntermediateError(err error) error {
-	if apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) || apierrors.IsForbidden(err) {
+	var alreadyOwned *controllerutil.AlreadyOwnedError
+	if errors.As(err, &alreadyOwned) || apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) || apierrors.IsForbidden(err) {
 		return err
 	}
 	return nil

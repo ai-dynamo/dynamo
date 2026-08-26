@@ -22,17 +22,21 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 func TestIgnoreIntermediateError(t *testing.T) {
 	gr := schema.GroupResource{Group: "nvidia.com", Resource: "podsnapshots"}
 
 	terminal := map[string]error{
-		"invalid":    apierrors.NewInvalid(schema.GroupKind{Group: "nvidia.com", Kind: "PodSnapshot"}, "x", nil),
-		"badRequest": apierrors.NewBadRequest("bad"),
-		"forbidden":  apierrors.NewForbidden(gr, "x", errors.New("not owned")),
+		"invalid":      apierrors.NewInvalid(schema.GroupKind{Group: "nvidia.com", Kind: "PodSnapshot"}, "x", nil),
+		"badRequest":   apierrors.NewBadRequest("bad"),
+		"forbidden":    apierrors.NewForbidden(gr, "x", errors.New("not owned")),
+		"alreadyOwned": &controllerutil.AlreadyOwnedError{Object: &corev1.ConfigMap{}, Owner: metav1.OwnerReference{Name: "other-controller"}},
 	}
 	for name, err := range terminal {
 		t.Run("terminal/"+name, func(t *testing.T) {
