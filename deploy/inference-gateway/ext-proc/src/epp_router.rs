@@ -70,7 +70,7 @@ impl EppRouter {
     /// Assemble the standalone runtime from the validated selector config.
     pub async fn from_selector(
         cfg: EppStandaloneConfig,
-        policy_registry: Option<WorkerSelectionPolicyRegistry>,
+        policy_registry: WorkerSelectionPolicyRegistry,
     ) -> Result<Self> {
         let selector = Arc::new(Selector::new(&cfg, policy_registry).await?);
         let renderer = VllmRenderClient::new(

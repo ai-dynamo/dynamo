@@ -32,7 +32,7 @@ pub struct SelectionServiceBuilder {
     replica_sync_peers: Vec<String>,
     selection_cache: SelectionCacheConfig,
     worker_type: WorkerType,
-    worker_selection_policy_registry: Option<WorkerSelectionPolicyRegistry>,
+    worker_selection_policy_registry: WorkerSelectionPolicyRegistry,
 }
 
 /// Warn when a host does not construct workers for explicitly configured policy roles.
@@ -56,7 +56,11 @@ pub fn warn_for_unserved_worker_selection_policies(
 }
 
 impl SelectionServiceBuilder {
-    pub fn new(kv_router_config: KvRouterConfig) -> Self {
+    pub fn new(
+        kv_router_config: KvRouterConfig,
+        worker_type: WorkerType,
+        worker_selection_policy_registry: WorkerSelectionPolicyRegistry,
+    ) -> Self {
         Self {
             kv_router_config,
             indexer_threads: 4,
@@ -64,8 +68,8 @@ impl SelectionServiceBuilder {
             replica_sync_port: None,
             replica_sync_peers: Vec::new(),
             selection_cache: SelectionCacheConfig::default(),
-            worker_type: WorkerType::Aggregated,
-            worker_selection_policy_registry: None,
+            worker_type,
+            worker_selection_policy_registry,
         }
     }
 
@@ -90,45 +94,13 @@ impl SelectionServiceBuilder {
         self
     }
 
-    /// Set the role of the worker pool this service owns.
-    ///
-    /// The role is passed to a custom worker-selection policy factory when a
-    /// routing partition is first created. It defaults to aggregated workers.
-    pub fn worker_type(mut self, worker_type: WorkerType) -> Self {
-        self.worker_type = worker_type;
-        self
-    }
-
-    /// Resolve the configured custom policy for this service's worker role.
-    pub fn worker_selection_policy_registry(
-        mut self,
-        registry: Option<WorkerSelectionPolicyRegistry>,
-    ) -> Self {
-        self.worker_selection_policy_registry = registry;
-        self
-    }
-
     pub async fn build(self) -> anyhow::Result<SelectionService> {
         self.kv_router_config
             .validate_config()
             .map_err(anyhow::Error::msg)?;
-        let worker_selection_policy_factory = match self.worker_selection_policy_registry.as_ref() {
-            Some(registry) => registry
-                .resolve_for_worker_type(&self.kv_router_config, self.worker_type)
-                .map_err(anyhow::Error::from)?,
-            None => {
-                if let Some(instance) = self
-                    .kv_router_config
-                    .selected_worker_selection_policy_instance_for(self.worker_type)?
-                {
-                    anyhow::bail!(
-                        "worker-selection instance {instance:?} is configured for {}, but no linked worker-selection policy registry was supplied",
-                        self.worker_type
-                    );
-                }
-                None
-            }
-        };
+        let worker_selection_policy_factory = self
+            .worker_selection_policy_registry
+            .resolve_for_worker_type(&self.kv_router_config, self.worker_type)?;
         let tracking_hash = Arc::new(TrackingHashContext::from_config(&self.kv_router_config)?);
         let cancel_token = CancellationToken::new();
         let mut startup_guard = StartupGuard::new(cancel_token.clone());
@@ -198,11 +170,19 @@ impl SelectionServiceBuilder {
 }
 
 impl SelectionServiceConfig {
-    pub fn service_builder(&self) -> SelectionServiceBuilder {
-        let mut builder = SelectionServiceBuilder::new(self.kv_router_config.clone())
-            .indexer_threads(self.threads)
-            .indexer_peers(self.indexer_peers.clone())
-            .selection_cache(self.selection_cache.clone());
+    pub fn service_builder(
+        &self,
+        worker_type: WorkerType,
+        worker_selection_policy_registry: WorkerSelectionPolicyRegistry,
+    ) -> SelectionServiceBuilder {
+        let mut builder = SelectionServiceBuilder::new(
+            self.kv_router_config.clone(),
+            worker_type,
+            worker_selection_policy_registry,
+        )
+        .indexer_threads(self.threads)
+        .indexer_peers(self.indexer_peers.clone())
+        .selection_cache(self.selection_cache.clone());
         if let Some(port) = self.replica_sync_port {
             builder = builder.replica_sync(port, self.replica_sync_peers.clone());
         }
@@ -476,7 +456,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configured_custom_policy_requires_registry_at_construction() {
+    async fn configured_custom_policy_requires_linked_policy_type_at_construction() {
         let policy_file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
             policy_file.path(),
@@ -495,18 +475,21 @@ worker_selection:
             ..test_config()
         };
 
-        let error = match SelectionServiceBuilder::new(config)
-            .worker_type(WorkerType::Prefill)
-            .build()
-            .await
+        let error = match SelectionServiceBuilder::new(
+            config,
+            WorkerType::Prefill,
+            WorkerSelectionPolicyRegistry::default(),
+        )
+        .build()
+        .await
         {
-            Ok(_) => panic!("a configured custom policy needs a linked registry"),
+            Ok(_) => panic!("a configured custom policy needs a linked policy type"),
             Err(error) => error,
         };
         assert!(
             error
                 .to_string()
-                .contains("no linked worker-selection policy registry"),
+                .contains("unknown worker-selection policy type \"acme\""),
             "{error}"
         );
     }
@@ -514,11 +497,15 @@ worker_selection:
     async fn build_on_port(port: u16) -> SelectionService {
         tokio::time::timeout(Duration::from_secs(5), async move {
             loop {
-                match SelectionServiceBuilder::new(test_config())
-                    .indexer_threads(1)
-                    .replica_sync(port, Vec::new())
-                    .build()
-                    .await
+                match SelectionServiceBuilder::new(
+                    test_config(),
+                    WorkerType::Aggregated,
+                    WorkerSelectionPolicyRegistry::default(),
+                )
+                .indexer_threads(1)
+                .replica_sync(port, Vec::new())
+                .build()
+                .await
                 {
                     Ok(service) => return service,
                     Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
@@ -532,11 +519,15 @@ worker_selection:
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn startup_and_shutdown_release_replica_resources() {
         let port = reserve_tcp_port();
-        let failed = SelectionServiceBuilder::new(test_config())
-            .indexer_threads(1)
-            .replica_sync(port, vec!["invalid".to_string()])
-            .build()
-            .await;
+        let failed = SelectionServiceBuilder::new(
+            test_config(),
+            WorkerType::Aggregated,
+            WorkerSelectionPolicyRegistry::default(),
+        )
+        .indexer_threads(1)
+        .replica_sync(port, vec!["invalid".to_string()])
+        .build()
+        .await;
         assert!(failed.is_err());
 
         let service = build_on_port(port).await;
@@ -583,10 +574,14 @@ worker_selection:
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
 
         let build = tokio::spawn(
-            SelectionServiceBuilder::new(test_config())
-                .indexer_threads(1)
-                .indexer_peers(vec![peer_url])
-                .build(),
+            SelectionServiceBuilder::new(
+                test_config(),
+                WorkerType::Aggregated,
+                WorkerSelectionPolicyRegistry::default(),
+            )
+            .indexer_threads(1)
+            .indexer_peers(vec![peer_url])
+            .build(),
         );
         tokio::time::timeout(Duration::from_secs(3), gate.requested.notified())
             .await

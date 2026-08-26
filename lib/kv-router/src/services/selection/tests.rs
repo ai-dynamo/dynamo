@@ -276,9 +276,8 @@ worker_selection:
         )
         .expect("register test worker-selection policy");
 
-    let service = SelectionServiceBuilder::new(config)
+    let service = SelectionServiceBuilder::new(config, crate::WorkerType::Aggregated, registry)
         .indexer_threads(1)
-        .worker_selection_policy_registry(Some(registry))
         .build()
         .await
         .expect("build selection service");
@@ -1795,14 +1794,27 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         kv_router_config: test_config(),
         selection_cache: SelectionCacheConfig::default(),
     };
-    let service_a = Arc::new(config_a.service_builder().build().await.unwrap());
-    let service_b = Arc::new(
-        SelectionServiceBuilder::new(test_config())
-            .indexer_threads(1)
-            .replica_sync(port_b, Vec::new())
+    let service_a = Arc::new(
+        config_a
+            .service_builder(
+                crate::WorkerType::Aggregated,
+                WorkerSelectionPolicyRegistry::default(),
+            )
             .build()
             .await
             .unwrap(),
+    );
+    let service_b = Arc::new(
+        SelectionServiceBuilder::new(
+            test_config(),
+            crate::WorkerType::Aggregated,
+            WorkerSelectionPolicyRegistry::default(),
+        )
+        .indexer_threads(1)
+        .replica_sync(port_b, Vec::new())
+        .build()
+        .await
+        .unwrap(),
     );
     service_b
         .register_replica_peer(format!("tcp://127.0.0.1:{port_a}"))

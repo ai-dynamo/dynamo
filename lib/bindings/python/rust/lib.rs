@@ -293,15 +293,18 @@ pub(crate) fn worker_selection_policy_factory(
 }
 
 #[cfg(feature = "select-service")]
-pub(crate) fn linked_worker_selection_policy_registry() -> Option<WorkerSelectionPolicyRegistry> {
+pub(crate) fn linked_worker_selection_policy_registry() -> WorkerSelectionPolicyRegistry {
     #[cfg(feature = "custom-policy")]
     {
-        WORKER_SELECTION_POLICY_REGISTRY.get().cloned()
+        WORKER_SELECTION_POLICY_REGISTRY
+            .get()
+            .cloned()
+            .unwrap_or_default()
     }
 
     #[cfg(not(feature = "custom-policy"))]
     {
-        None
+        WorkerSelectionPolicyRegistry::default()
     }
 }
 

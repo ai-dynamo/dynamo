@@ -134,7 +134,7 @@ pub async fn run(policy_registry: Option<WorkerSelectionPolicyRegistry>) -> Resu
     {
         anyhow::bail!("linked worker-selection policies require DYN_EPP_MODE=standalone")
     }
-    run_inner(mode, policy_registry).await
+    run_inner(mode, policy_registry.unwrap_or_default()).await
 }
 
 fn init_tracing() {
@@ -163,10 +163,7 @@ async fn wait_for_shutdown_signal() {
     }
 }
 
-async fn run_inner(
-    mode: EppMode,
-    policy_registry: Option<WorkerSelectionPolicyRegistry>,
-) -> Result<()> {
+async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry) -> Result<()> {
     let standalone = matches!(mode, EppMode::Standalone);
 
     let config = Config::from_env();

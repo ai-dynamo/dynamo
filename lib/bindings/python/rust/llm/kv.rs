@@ -457,7 +457,7 @@ where
 #[cfg(feature = "select-service")]
 pub(crate) fn run_select_service_cli<I, T>(
     args: I,
-    policy_registry: Option<WorkerSelectionPolicyRegistry>,
+    policy_registry: WorkerSelectionPolicyRegistry,
 ) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = T>,
@@ -498,10 +498,7 @@ where
             cli.selection_cache_max_bytes,
         ),
     };
-    let builder = config
-        .service_builder()
-        .worker_type(WorkerType::Aggregated)
-        .worker_selection_policy_registry(policy_registry);
+    let builder = config.service_builder(WorkerType::Aggregated, policy_registry);
     let rt = tokio::runtime::Runtime::new()?;
     let service = rt.block_on(builder.build())?;
     rt.block_on(selection::run_server(config.port, service))
@@ -604,10 +601,12 @@ impl SelectionService {
             &[WorkerType::Aggregated],
         )
         .map_err(to_pyerr)?;
-        let mut builder = SelectionServiceBuilder::new(kv_router_config)
-            .worker_type(WorkerType::Aggregated)
-            .worker_selection_policy_registry(crate::linked_worker_selection_policy_registry())
-            .indexer_threads(indexer_threads)
+        let mut builder = SelectionServiceBuilder::new(
+            kv_router_config,
+            WorkerType::Aggregated,
+            crate::linked_worker_selection_policy_registry(),
+        )
+        .indexer_threads(indexer_threads)
             .indexer_peers(indexer_peers.unwrap_or_default())
             .selection_cache(selection_cache.unwrap_or_default().inner);
         if let Some(port) = replica_sync_port {

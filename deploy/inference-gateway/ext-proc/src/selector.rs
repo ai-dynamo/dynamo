@@ -118,7 +118,7 @@ impl Selector {
 
     pub async fn new(
         cfg: &EppStandaloneConfig,
-        policy_registry: Option<WorkerSelectionPolicyRegistry>,
+        policy_registry: WorkerSelectionPolicyRegistry,
     ) -> Result<Self> {
         let kv_router_config =
             try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
@@ -128,14 +128,13 @@ impl Selector {
     async fn new_with_kv_router_config(
         cfg: &EppStandaloneConfig,
         kv_router_config: KvRouterConfig,
-        policy_registry: Option<WorkerSelectionPolicyRegistry>,
+        policy_registry: WorkerSelectionPolicyRegistry,
     ) -> Result<Self> {
         warn_for_unserved_worker_selection_policies(&kv_router_config, &[WorkerType::Aggregated])?;
         let replication = Self::replication(cfg).await?;
-        let mut builder = SelectionServiceBuilder::new(kv_router_config)
-            .worker_type(WorkerType::Aggregated)
-            .worker_selection_policy_registry(policy_registry)
-            .indexer_threads(cfg.selector_threads);
+        let mut builder =
+            SelectionServiceBuilder::new(kv_router_config, WorkerType::Aggregated, policy_registry)
+                .indexer_threads(cfg.selector_threads);
         if let Some((_, peer_sync_port)) = &replication {
             builder = builder.replica_sync(*peer_sync_port, Vec::new());
         }
@@ -535,7 +534,7 @@ models:
     /// Reconcile a single schedulable worker into a fresh selector, asserting the
     /// core admitted it (so the reserve paths below actually book).
     async fn selector_with_schedulable_worker() -> Selector {
-        let selector = Selector::new(&test_config(), None)
+        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
             .await
             .expect("selector should build");
         selector
@@ -571,7 +570,7 @@ worker_selection:
         let selector = Selector::new_with_kv_router_config(
             &test_config(),
             router_config_with_policy(&policy_file),
-            Some(registry),
+            registry,
         )
         .await
         .expect("custom selection service should build");
@@ -712,7 +711,7 @@ worker_selection:
     /// so a worker exists in the catalog but is never schedulable.
     #[tokio::test]
     async fn select_and_reserve_errors_without_a_schedulable_worker() {
-        let selector = Selector::new(&test_config(), None)
+        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
             .await
             .expect("selector should build");
         selector
@@ -738,7 +737,7 @@ worker_selection:
     /// `prefill_complete` treat an unknown id as success (NotFound → Ok).
     #[tokio::test]
     async fn free_and_prefill_of_unknown_reservation_are_noops() {
-        let selector = Selector::new(&test_config(), None)
+        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
             .await
             .expect("selector should build");
         selector
@@ -753,7 +752,7 @@ worker_selection:
 
     #[tokio::test]
     async fn incomplete_worker_is_not_cached_as_reconciled() {
-        let selector = Selector::new(&test_config(), None)
+        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
             .await
             .expect("selector should build");
 
@@ -789,7 +788,7 @@ worker_selection:
 
     #[tokio::test]
     async fn stale_incomplete_worker_is_deleted() {
-        let selector = Selector::new(&test_config(), None)
+        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
             .await
             .expect("selector should build");
 
@@ -824,7 +823,7 @@ worker_selection:
         let error = Selector::new_with_kv_router_config(
             &cfg,
             router_config_with_policy(&policy_file),
-            None,
+            WorkerSelectionPolicyRegistry::default(),
         )
         .await
         .err()
@@ -844,14 +843,18 @@ worker_selection:
         cfg.model_name = "threshold-free-model".to_string();
         cfg.max_num_batched_tokens = None;
 
-        Selector::new_with_kv_router_config(&cfg, router_config_with_policy(&policy_file), None)
-            .await
-            .expect("threshold-free model should allow missing capacity");
+        Selector::new_with_kv_router_config(
+            &cfg,
+            router_config_with_policy(&policy_file),
+            WorkerSelectionPolicyRegistry::default(),
+        )
+        .await
+        .expect("threshold-free model should allow missing capacity");
     }
 
     #[tokio::test]
     async fn duplicate_worker_ids_are_rejected_before_reconciliation() {
-        let selector = Selector::new(&test_config(), None)
+        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
             .await
             .expect("selector should build");
         let duplicate = incomplete_registration(1);
