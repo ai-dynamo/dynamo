@@ -59,6 +59,10 @@ tabs:
     display-name: Community
     icon: users
     skip-slug: true
+  enterprise:
+    display-name: Enterprise
+    icon: badge-check
+    slug: enterprise
 
 navigation:
   - tab: home
@@ -1269,3 +1273,36 @@ navigation:
               - page: Building and Publishing
                 path: pages/community/contributing/documentation/building-and-publishing.md
                 slug: building-and-publishing
+
+  # ==================== Enterprise ====================
+  # The Dynamo release artifacts that are eligible for NVIDIA Enterprise
+  # Support. These carry the -enterprise suffix and have no functional or
+  # binary differences from their open-source counterparts. Commercial
+  # support requires an NVIDIA AI Enterprise subscription; the artifacts
+  # themselves are free to download and run.
+  - tab: enterprise
+    layout:
+      - page: Overview
+        icon: circle-info
+        path: pages/enterprise/overview.mdx
+        slug: overview
+
+      - page: Supported Artifacts
+        icon: cubes
+        path: pages/enterprise/supported-artifacts.mdx
+        slug: supported-artifacts
+
+      - page: Install
+        icon: download
+        path: pages/enterprise/install.mdx
+        slug: install
+
+      - page: Support Coverage
+        icon: life-ring
+        path: pages/enterprise/support-coverage.mdx
+        slug: support-coverage
+
+      - page: Scope Boundaries
+        icon: list-check
+        path: pages/enterprise/scope-boundaries.mdx
+        slug: scope-boundaries

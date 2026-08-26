@@ -1,0 +1,47 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Overview
+subtitle: Commercial support for a curated set of NVIDIA Dynamo release artifacts.
+---
+
+Dynamo Enterprise identifies a curated set of NVIDIA Dynamo release artifacts that are eligible for NVIDIA Enterprise Support. It is a publishing and support designation, not a separate Dynamo fork, feature tier, or runtime implementation.
+
+<Info>
+Only the exact artifacts and versions listed in [Supported Artifacts](supported-artifacts.mdx) are included in the Dynamo Enterprise support scope. Every other Dynamo artifact, including the additional tags published in the corresponding open-source repositories, is out of scope for commercial support.
+</Info>
+
+## Scope
+
+Dynamo Enterprise covers a defined set of container images and the platform Helm chart that installs the Dynamo Operator for a Kubernetes deployment. It does not add features and it does not replace the open-source Dynamo distribution.
+
+| In scope | Out of scope |
+| --- | --- |
+| The six enterprise artifacts listed under [Supported Artifacts](supported-artifacts.mdx) | Every other Dynamo container, wheel, chart, or crate |
+| Commercial support for those artifacts under an active NVAIE subscription | Model deployment recipes (see [Recipes and Validated Configurations](scope-boundaries.mdx#recipes-and-validated-configurations)) |
+| Fix-forward defect resolution on the supported release line | Backports to earlier releases and on-demand off-cycle releases |
+| Blackwell and GB200 systems | Every other GPU generation and platform |
+
+## Access and Support
+
+Dynamo Enterprise artifacts are published on NVIDIA NGC as public images. Downloading and running them does not require an [NVIDIA AI Enterprise](https://docs.nvidia.com/ai-enterprise/) subscription. An active NVIDIA AI Enterprise subscription is required to open commercial support cases against those artifacts.
+
+| Activity | Requirement |
+| --- | --- |
+| Access and download Dynamo Enterprise artifacts | No NVIDIA AI Enterprise subscription required |
+| Use the artifacts in development or production | Available at no charge; applicable license terms apply |
+| Open a commercial support case | Active NVIDIA AI Enterprise subscription required |
+
+## Relationship to Open-Source Artifacts
+
+For the same release version, a Dynamo Enterprise artifact contains the same release binaries as its corresponding open-source artifact. The `-enterprise` suffix identifies the curated publication channel and the commercial support boundary; it does not identify a separately compiled or forked build.
+
+The open-source repositories can carry additional container tags for special-purpose builds, such as dated snapshots and nightly builds. Only the tags designated for commercial support are in the enterprise support scope.
+
+Binary equivalence does not extend commercial support to an unlisted artifact, tag, component, or configuration. When commercial support is required, pull the exact `-enterprise` artifact and version listed for the applicable release.
+
+## Get Help
+
+- **Commercial support cases.** Open cases through [NVIDIA Enterprise Experience (NVEX)](https://enterprise.nvidia.com/) with an active NVAIE subscription. Route Dynamo Enterprise cases against the Dynamo product designation so they reach the Dynamo support pool.
+- **Subscription and account questions.** For NVIDIA AI Enterprise subscription management, portal access, and account-level questions, see the [NVIDIA AI Enterprise documentation](https://docs.nvidia.com/ai-enterprise/).
+- **Community and open-source discussion.** For questions and discussion that fall outside the commercial support scope, use the [ai-dynamo GitHub repository](https://github.com/ai-dynamo/dynamo) and the channels on the [Community](../community/community.mdx) page.

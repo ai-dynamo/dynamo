@@ -1,0 +1,29 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Supported Artifacts
+subtitle: The exact container images and Helm chart eligible for NVIDIA Enterprise Support.
+---
+
+The Dynamo 1.4 release line is the current supported release. The following artifacts are published for it. Commercial support is limited to this exact set.
+
+| Component | Artifact |
+| --- | --- |
+| SGLang runtime | `nvcr.io/nvidia/dynamo-enterprise/sglang-runtime-enterprise:1.4.1` |
+| TensorRT-LLM runtime | `nvcr.io/nvidia/dynamo-enterprise/tensorrtllm-runtime-enterprise:1.4.1` |
+| vLLM runtime | `nvcr.io/nvidia/dynamo-enterprise/vllm-runtime-enterprise:1.4.1` |
+| Dynamo Frontend | `nvcr.io/nvidia/dynamo-enterprise/dynamo-frontend-enterprise:1.4.1` |
+| Dynamo Kubernetes Operator | `nvcr.io/nvidia/dynamo-enterprise/kubernetes-operator-enterprise:1.4.1` |
+| Dynamo Platform Helm chart | `dynamo-platform-enterprise`, version `1.4.1` |
+
+Both parts of the path carry `enterprise`: the team segment is `dynamo-enterprise` and the repository name ends in `-enterprise`. They change together; changing only one resolves to a different image or fails.
+
+EFA-optimized tags are not in the NVIDIA Enterprise Support scope for this release.
+
+The [Dynamo Enterprise collection on NVIDIA NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/dynamo-enterprise/collections/dynamo-enterprise) lists these artifacts in one place. The Dynamo Enterprise support designation is a label on each artifact repository. The collection page aggregates the labels from its underlying repositories; it does not carry a support label of its own.
+
+<Note>
+The exact list of patch versions within a supported release line that are in scope for NVIDIA Enterprise Support is being finalized. The `1.4.1` artifacts published here are the current launch artifacts for the Dynamo 1.4 release line. When in doubt for a specific subscription and workload, confirm the covered artifact list through NVIDIA Enterprise Support (see [Get Help](overview.mdx#get-help)).
+</Note>
+
+See [Release Artifacts](../reference/general/release-artifacts.mdx) for the full stable-release artifact inventory across the open-source distribution, and [Compatibility](../reference/general/compatibility.mdx) for hardware, platform, and backend feature support.

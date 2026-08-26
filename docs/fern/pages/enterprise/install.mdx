@@ -1,0 +1,95 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Install
+subtitle: Pull the enterprise images and Helm chart, and reference them from your deployments.
+---
+
+The Dynamo Enterprise install path parallels the open-source install path. It uses the same Kubernetes shape, the same values, and the same operational surface. The substantive differences are the container image references and the Helm chart name.
+
+For the full walkthrough of cluster prerequisites, accelerator support, optional multinode orchestration, RDMA, Prometheus, and shared model storage, follow the [Kubernetes Installation Guide](../kubernetes/installation/install-dynamo.md). The steps below cover only what changes for the enterprise images and chart.
+
+## Container Images
+
+The enterprise images are public. Anonymous `docker pull` works from any host with network access to `nvcr.io`. Environments that require authenticated pulls (a bastion registry, an air-gapped mirror, or a policy that blocks anonymous access to `nvcr.io`) can configure an NGC API key on the pulling host; see the [NGC User Guide](https://docs.nvidia.com/ngc/ngc-catalog-user-guide/index.html) for the API-key workflow.
+
+```bash
+docker pull nvcr.io/nvidia/dynamo-enterprise/sglang-runtime-enterprise:1.4.1
+docker pull nvcr.io/nvidia/dynamo-enterprise/tensorrtllm-runtime-enterprise:1.4.1
+docker pull nvcr.io/nvidia/dynamo-enterprise/vllm-runtime-enterprise:1.4.1
+docker pull nvcr.io/nvidia/dynamo-enterprise/dynamo-frontend-enterprise:1.4.1
+docker pull nvcr.io/nvidia/dynamo-enterprise/kubernetes-operator-enterprise:1.4.1
+```
+
+Kubernetes clusters that already pull from `nvcr.io` need no additional pull secret for the enterprise images. Air-gapped and internal-mirror installs should retag these into the internal registry using the same repository names and versions to keep the manifests portable.
+
+## Platform Helm Chart
+
+The enterprise Helm chart installs the Dynamo Operator, using the enterprise Operator image. etcd, NATS, KAI Scheduler, Grove, and Snapshot ship as bundled subcharts that are all disabled by default; enable the ones a deployment needs, or point the operator at instances you already run. The chart shape, its values, and its Kubernetes surface match the open-source `dynamo-platform` chart. The differences are the chart name and the default image references the chart resolves to.
+
+```bash
+export NAMESPACE=dynamo-system
+export RELEASE_VERSION=1.4.1
+
+helm fetch https://helm.ngc.nvidia.com/nvidia/dynamo-enterprise/charts/dynamo-platform-enterprise-$RELEASE_VERSION.tgz
+helm install dynamo-platform dynamo-platform-enterprise-$RELEASE_VERSION.tgz \
+  --namespace $NAMESPACE \
+  --create-namespace
+```
+
+Verify the operator:
+
+```bash
+kubectl get crd | grep dynamo
+kubectl get pods -n $NAMESPACE
+```
+
+The expected CRDs and pods are the same as in the open-source install; see the [Kubernetes Installation Guide](../kubernetes/installation/install-dynamo.md) for the full verification and troubleshooting steps, and for the values that enable the optional subcharts.
+
+## Runtime Images in Deployments
+
+The Dynamo Operator watches `DynamoGraphDeployment` (DGD) resources. Deployments that must run on the enterprise runtime images reference them by their full `dynamo-enterprise` path in the DGD spec. A minimal example:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: my-agg-deployment
+  namespace: dynamo-system
+spec:
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/dynamo-enterprise/dynamo-frontend-enterprise:1.4.1
+    - name: VllmWorker
+      type: worker
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/dynamo-enterprise/vllm-runtime-enterprise:1.4.1
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              command:
+                - python3
+                - -m
+                - dynamo.vllm
+              args:
+                - --model
+                - your-org/your-model
+```
+
+For the full DGD walkthrough (choosing a model, sizing parallelism, applying and testing the deployment), see [Deploy with DGD](../kubernetes/model-deployment/deploy-with-dgd.md).
+
+## Differences from the Open-Source Install
+
+- **Image references.** Enterprise images resolve under `nvcr.io/nvidia/dynamo-enterprise/`; open-source images resolve under `nvcr.io/nvidia/ai-dynamo/`. The enterprise repository names also carry an `-enterprise` suffix.
+- **Helm chart.** Enterprise chart: `dynamo-platform-enterprise`. Open-source chart: `dynamo-platform`. The values schema is the same.
+- **Support scope.** Only the images and chart listed above are eligible for commercial support. The Python wheels, Rust crates, and non-listed component containers in the same release remain community-supported.
