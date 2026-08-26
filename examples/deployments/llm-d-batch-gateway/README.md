@@ -9,7 +9,8 @@ Use this example to deploy llm-d Batch Gateway in front of a dedicated NVIDIA Dy
 worker pool. The steps submit an OpenAI Batch job, run its inference requests on
 Dynamo, and retrieve the results through the Batch API.
 
-This is an experimental validation example, not a supported production recipe.
+> [!WARNING]
+> This is an experimental validation example, not a supported production recipe.
 
 ## Before You Start
 

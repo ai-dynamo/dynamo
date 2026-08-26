@@ -66,12 +66,12 @@ spec:
     spec:
       securityContext:
         fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: valkey
           image: valkey/valkey:8.0.10-alpine
           imagePullPolicy: IfNotPresent
-          command:
-            - valkey-server
           args:
             - --appendonly
             - "yes"
@@ -106,6 +106,9 @@ spec:
             capabilities:
               drop:
                 - ALL
+            runAsGroup: 1000
+            runAsNonRoot: true
+            runAsUser: 999
           volumeMounts:
             - name: data
               mountPath: /data
