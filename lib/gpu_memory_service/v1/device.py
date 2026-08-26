@@ -6,11 +6,11 @@
 from __future__ import annotations
 
 import os
-import sys
 import tempfile
 from functools import cache
 from uuid import UUID
 
+from gpu_memory_service.common.utils import ensure_af_unix_path_fits
 from gpu_memory_service.common.vmm.cuda_utils import cuda_ensure_initialized
 
 try:
@@ -18,7 +18,6 @@ try:
 except ImportError:
     cuda = None
 
-_AF_UNIX_PATH_LIMIT = 104 if sys.platform == "darwin" else 108
 
 
 def _check_cuda(result, operation: str) -> None:
@@ -69,10 +68,5 @@ def get_socket_path(device: int, tag: str = "weights") -> str:
         socket_dir,
         f"gms_{device}_{tag}.sock",
     )
-    path_bytes = len(os.fsencode(path))
-    if path_bytes >= _AF_UNIX_PATH_LIMIT:
-        raise ValueError(
-            "GMS socket path is too long for AF_UNIX "
-            f"({path_bytes} bytes, limit {_AF_UNIX_PATH_LIMIT - 1}): {path}"
-        )
+    ensure_af_unix_path_fits(path)
     return path

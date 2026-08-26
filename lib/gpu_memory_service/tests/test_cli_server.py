@@ -17,6 +17,7 @@ if not HAS_GMS:
     )
 
 from gpu_memory_service.cli import runner, server
+from gpu_memory_service.common import utils as common_utils
 from gpu_memory_service.v1 import device as v1_device
 
 pytestmark = [
@@ -33,6 +34,17 @@ def test_v1_socket_path_rejects_af_unix_overflow(monkeypatch):
 
     with pytest.raises(ValueError, match="too long for AF_UNIX"):
         v1_device.get_socket_path(0, "weights")
+
+
+def test_v0_socket_path_rejects_af_unix_overflow(monkeypatch):
+    # server.py picks between this builder and the V1 one on args.use_v1, and
+    # this is the branch that names the socket after the full GPU UUID, so it
+    # produces the longer of the two paths for the same GMS_SOCKET_DIR.
+    monkeypatch.setenv("GMS_SOCKET_DIR", "/" + "s" * 200)
+    monkeypatch.setitem(common_utils._uuid_cache, 0, "GPU-0")
+
+    with pytest.raises(ValueError, match="too long for AF_UNIX"):
+        common_utils.get_socket_path(0, "weights")
 
 
 class _Process:

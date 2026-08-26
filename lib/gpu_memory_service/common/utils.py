@@ -5,6 +5,7 @@
 
 import logging
 import os
+import sys
 import tempfile
 from typing import NoReturn
 
@@ -23,6 +24,27 @@ ENV_VMM_GRANULARITY = "DYN_GMS_VMM_GRANULARITY"
 GMS_TAGS = ("weights", "kv_cache")
 
 _TRUTHY = ("true", "1", "yes")
+
+# sun_path is 104 bytes on Darwin and 108 on Linux, including the terminator.
+# Shared by both socket-path builders so the two cannot disagree about it.
+AF_UNIX_PATH_LIMIT = 104 if sys.platform == "darwin" else 108
+
+
+def ensure_af_unix_path_fits(path: str) -> str:
+    """Return path, or raise ValueError if it cannot be bound as an AF_UNIX socket.
+
+    bind() reports an over-long path as a bare ``OSError: AF_UNIX path too long``
+    from wherever the socket is created, which does not say which path or what
+    the limit was. Callers build these from ``GMS_SOCKET_DIR``, so the value is
+    operator-supplied and worth naming.
+    """
+    path_bytes = len(os.fsencode(path))
+    if path_bytes >= AF_UNIX_PATH_LIMIT:
+        raise ValueError(
+            "GMS socket path is too long for AF_UNIX "
+            f"({path_bytes} bytes, limit {AF_UNIX_PATH_LIMIT - 1}): {path}"
+        )
+    return path
 
 
 def is_truthy_env(name: str) -> bool:
@@ -74,7 +96,9 @@ def get_socket_path(device: int, tag: str = "weights") -> str:
             pynvml.nvmlShutdown()
         _uuid_cache[device] = uuid
     socket_dir = os.environ.get("GMS_SOCKET_DIR") or tempfile.gettempdir()
-    return os.path.join(socket_dir, f"gms_{uuid}_{tag}.sock")
+    return ensure_af_unix_path_fits(
+        os.path.join(socket_dir, f"gms_{uuid}_{tag}.sock")
+    )
 
 
 def align_to_granularity(size: int, granularity: int) -> int:
