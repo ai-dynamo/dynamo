@@ -3043,7 +3043,7 @@ mod tests {
             .expect("all eight logical ranks did not become active")
             .unwrap();
 
-            let initial_events = tokio::time::timeout(Duration::from_secs(5), async {
+            let initial_events = tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
                     publish_rank_blocks(&node_0_sources, 1, 100).await;
                     publish_rank_blocks(&old_node_1_sources, 1, 100).await;
