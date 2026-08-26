@@ -3,18 +3,8 @@
 
 use super::*;
 
-/// Whether a request may still be handed to its selected worker after the client
-/// has disconnected.
-///
-/// Post-prefill decode is the one phase that must be dispatched regardless. By the
-/// time the decode leg runs, the prefill worker has already staged KV blocks for
-/// one specific decode worker, and only that worker's own KV-transfer-complete
-/// path releases them. Dropping the dispatch leaves the transfer without a
-/// receiver and leaks those blocks for the lifetime of the worker, so the request
-/// is carried through purely to let that cleanup run — the response stream is
-/// still torn down immediately for the stopped client. Every other phase has no
-/// such staged remote state, so a disconnected client should stop the request
-/// before it ever reaches a worker.
+/// Whether a disconnected client's request still reaches its worker. Decode must
+/// dispatch: only that worker frees the KV blocks remote prefill staged for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DispatchCancellation {
     /// Skip the dispatch when the context is already stopped.

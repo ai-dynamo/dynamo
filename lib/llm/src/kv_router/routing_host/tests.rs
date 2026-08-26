@@ -674,15 +674,8 @@ async fn router_with_worker_configs(
     (router, runtime)
 }
 
-/// A dispatch plane that is not ready on its first poll.
-///
-/// [`CompletedBuiltinDispatch`] resolves without ever yielding, which no real
-/// dispatch does — a request to a worker is always pending at least once while
-/// the transport makes progress. That distinction is the whole subject of these
-/// tests: `cancel_on_stop` polls the operation first, so a dispatch that happens
-/// to be immediately ready survives an already-stopped context while a realistic
-/// one is dropped. Recording after the yield makes a recorded worker id mean the
-/// dispatch was actually carried through rather than merely started.
+/// A dispatch plane that yields before completing, unlike [`CompletedBuiltinDispatch`].
+/// A recorded worker id therefore means the dispatch survived, not merely started.
 #[derive(Default)]
 struct PendingThenCompletedDispatch {
     worker_ids: Mutex<Vec<u64>>,
@@ -810,9 +803,8 @@ async fn admitted_request_stopped_before_dispatch(
     (request, selection, guard)
 }
 
-/// DYN-4143: a decode request produced after remote prefill must still reach the
-/// decode worker when the client has already disconnected, because only the
-/// worker can release the KV blocks the prefill worker staged for it.
+/// DYN-4143: a disconnected decode client must still reach its worker, because
+/// only that worker releases the KV blocks remote prefill staged for it.
 #[tokio::test]
 #[serial_test::serial]
 async fn stopped_decode_request_is_still_delivered_to_the_worker() {
