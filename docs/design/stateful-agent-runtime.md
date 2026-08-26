@@ -336,7 +336,7 @@ An opaque `ForwardedCarrierSnapshot` may be stored only when server-tool-loop re
 Runtime-owned tools remain external to Dynamo:
 
 - The first connector is read-only web search with deployment-owned credentials, an allowlisted provider endpoint, timeout/concurrency limits, bounded normalized results, and citation metadata.
-- Broad MCP support is deferred. Future MCP connectors are deployment/tenant configured; clients cannot submit arbitrary server URLs or credential headers.
+- Narrow outbound MCP execution is implemented for one deployment-configured Streamable HTTP endpoint and a fixed read-only tool allowlist. Broader MCP catalogs remain deferred; clients cannot submit arbitrary server URLs or credential headers.
 - Sandboxes use a provider-neutral external execution contract with filesystem, network, identity, resource, artifact, and retention policy. Kubernetes Agent Sandbox is the first reference provider, not a runtime requirement.
 - Workers receive a scoped tool-execution request, not raw Dynamo headers or backend credentials.
 
@@ -357,11 +357,43 @@ Dynamo protocol frontend policy
 
 `frontend-crates/agent-rt/mcp` is a separate crate implementing the existing `ToolExecutor`; it does not add a new public registry, catalog, or MCP-specific runtime trait. `agent-rt/core` remains SDK- and transport-independent. The crate's public API uses only agent-rt and plain serde types; `mcp/src/client.rs` is the private adapter that knows `rmcp`. Dynamo owns concrete deployment assembly and enables the route only when its trusted configuration is valid.
 
-The first configuration is immutable for the process lifetime and contains one operator-selected server URL, one deployment-owned authorization profile, and a small allowlist of public tool name, remote tool name, description, closed input schema, timeout, and output limit. The configured descriptor is the source of truth. Until trusted frontend tool injection is added, the request must declare an allowed public tool with the same name and schema before Dynamo selects the runtime; a name-only match is forbidden. Clients cannot set the server URL, transport, headers, credentials, remote method, or replacement schema. Schema checks use JSON structural equality rather than serialized byte equality. The endpoint is parsed during startup, redirects are disabled, HTTPS is required outside an explicit loopback development mode, and no client headers are copied.
+The first configuration is immutable for the process lifetime and contains one operator-selected server URL, one deployment-owned authorization profile, and a small allowlist of public tool name, remote tool name, description, closed input schema, timeout, and output limit. The configured descriptor is the source of truth. Until trusted frontend tool injection is added, the request must declare an allowed public tool with the same name, description, and schema before Dynamo selects the runtime; a name-only match is forbidden. Clients cannot set the server URL, transport, headers, credentials, remote method, or replacement schema. Schema checks use JSON structural equality rather than serialized byte equality. The endpoint is parsed during startup, redirects are disabled, HTTPS is required outside an explicit loopback development mode, and no client headers are copied.
 
-MCP v0 is a single deployment trust domain: authorization for the `mcp` connector grants the configured allowlist as a unit. Per-tenant or per-tool grants require a later authorization dimension and are not approximated by remote MCP annotations. Profiles are immutable and versioned across rollouts so a durable `Started` record cannot recover against a different server hidden behind a reused profile name.
+The current Dynamo POC host contract is:
 
-The executor pins the official Rust MCP SDK and uses `ClientLifecycleMode::Auto`: modern servers use stateless discovery/request metadata, while older supported servers fall back to initialization and SDK-managed sessions. It owns one long-lived Streamable HTTP client per executor, paginated `tools/list`, and `tools/call`. Local configuration errors fail startup, but remote discovery and availability affect only route readiness; an unavailable MCP server does not prevent Dynamo's non-MCP inference frontend from starting. The executor verifies the configured allowlist against `tools/list`, fails the affected route closed on name/schema incompatibility, bounds the returned content before unbounded allocation, and normalizes structured or textual content into `ToolExecutionResult { output, is_error }`. MCP `isError` is a completed, journaled, model-visible result; timeout, network failure, malformed protocol, lifecycle rejection, and unsupported multi-round behavior are executor failures. Modern protocol state and legacy session IDs are transport internals and never checkpoint data; after process loss a read-only operation may establish a fresh session and recover through the journal contract.
+| Environment variable | Meaning |
+| --- | --- |
+| `DYN_ENABLE_AGENT_RT_POC=true` | Enables the stateful runtime path. |
+| `DYN_AGENT_RT_PERMITTED_CONNECTORS=mcp` | Authorizes the authenticated ingress scope to use the configured MCP connector. |
+| `DYN_AGENT_RT_MCP_ENDPOINT` | Required operator-owned Streamable HTTP URL. HTTPS is required except for explicit loopback development. |
+| `DYN_AGENT_RT_MCP_BEARER_TOKEN` | Optional deployment bearer credential; it never enters a request, checkpoint, journal, or debug representation. |
+| `DYN_AGENT_RT_MCP_ALLOW_HTTP_LOOPBACK=true` | Allows plaintext HTTP only for a syntactic loopback host such as `127.0.0.1`, `::1`, or `localhost`. |
+| `DYN_AGENT_RT_MCP_PROFILE` | Optional immutable deployment profile name; defaults to `mcp_default`. Operators should use a versioned name when changing endpoint semantics. |
+| `DYN_AGENT_RT_MCP_TOOLS_JSON` | Required JSON array of fixed descriptors. Each item contains `name`, `remote_name`, `description`, a closed object `input_schema`, and optional `timeout_millis` and `max_output_bytes`. |
+
+For example:
+
+```json
+[
+  {
+    "name": "company_search",
+    "remote_name": "search",
+    "description": "Search company knowledge",
+    "input_schema": {
+      "type": "object",
+      "properties": { "query": { "type": "string" } },
+      "required": ["query"],
+      "additionalProperties": false
+    },
+    "timeout_millis": 5000,
+    "max_output_bytes": 4096
+  }
+]
+```
+
+MCP v0 is a single deployment trust domain: authorization for the `mcp` connector grants the configured allowlist as a unit. Per-tenant or per-tool grants require a later authorization dimension and are not approximated by remote MCP annotations. Configuration is immutable within one process. Operators should use versioned profile names across semantic rollouts so a durable `Started` record does not recover against a different server hidden behind a reused name; automatic descriptor fingerprint enforcement remains future hardening before admitting side-effecting tools.
+
+The executor pins the official Rust MCP SDK and uses `ClientLifecycleMode::Auto`: modern servers use stateless discovery/request metadata, while older supported servers fall back to initialization and SDK-managed sessions. It owns one long-lived Streamable HTTP client per executor, paginated `tools/list`, and `tools/call`. Local configuration errors fail startup, but remote discovery and availability affect only the MCP route; an unavailable MCP server does not prevent Dynamo's non-MCP inference frontend from starting. The executor verifies the configured allowlist against `tools/list`, fails the affected route closed on name/schema incompatibility, enforces the SDK's raw SSE event bound, applies a normalized-output byte limit, and normalizes structured or textual content into `ToolExecutionResult { output, is_error }`. The SDK's built-in JSON response path currently parses a successful JSON body before the normalized-output limit runs; a strict raw JSON body cap remains a production-hardening item. MCP `isError` is a completed, journaled, model-visible result; timeout, network failure, malformed protocol, lifecycle rejection, and unsupported multi-round behavior are executor failures. Modern protocol state and legacy session IDs are transport internals and never checkpoint data; after process loss a read-only operation may establish a fresh session and recover through the journal contract.
 
 Every first-slice tool is operator-classified as read-only. A completed `ToolJournal` entry is replayed without another remote call, and a process loss that leaves `Started` may recover through `lookup`, which can safely re-execute the configured read-only operation. The current `ToolRunner` marks an in-process timeout as terminal `OutcomeUnknown` and does not retry it; MCP v0 makes no broader timeout-retry claim unless core gains an explicit side-effect-free timeout disposition. Side-effecting tools, transmitted idempotency keys, remote outcome lookup, and general `OutcomeUnknown` resolution are later extensions and require an explicit executor contract.
 
@@ -369,16 +401,20 @@ V1 excludes client-supplied servers or headers, multiple servers, `stdio`, tool 
 
 This is an outbound MCP client connector. It does not mount a public `/mcp` server, emit synthetic calls for the client to execute, or use MCP as a control plane. Tool durability remains entirely in `ToolRunner` and `ToolJournal`; the MCP executor performs one authorized remote call and returns one normalized result.
 
-Implementation order:
+Implementation status:
 
-1. Add `frontend-crates/agent-rt/mcp`, pin `rmcp = "=3.1.4"` with `default-features = false` and only `client`, `transport-streamable-http-client-reqwest`, and `reqwest`, and define the one-server configuration with secret-safe debug/serialization behavior.
-2. Add `ToolExecutionResult.is_error` with `#[serde(default)]`, journal either value as `Completed`, map it directly to Anthropic `tool_result.is_error`, and define a stable model-visible Responses error envelope while keeping `function_call_output.status = completed`.
-3. Implement discovery/initialize, list/schema verification, `call_tool_once`, cancellation, and result normalization behind `mcp/src/client.rs` with strict time, concurrency, pagination, response-size, and redirect bounds. Accept only `Complete`; reject `InputRequired` and task-shaped responses.
-4. Test the adapter against deterministic Streamable HTTP fixtures for modern stateless discovery and legacy initialize/session fallback. Cover pagination, tool errors, protocol errors, timeout, cancellation, malformed and oversized results, schema drift, and credential non-persistence without using the SDK in the fixture.
-5. Add the fixed `mcp` route to Dynamo's existing executor mux; require exact trusted request declarations and connector authorization.
-6. Prove deterministic two-step unary and streaming Responses plus Anthropic HTTP flows: the first inference step emits the configured call, the mock MCP server counts exactly one outbound call, the second inference step receives the exact native result/error, and completed replay makes no new MCP or inference call. Force a post-header MCP failure and assert Dynamo emits the protocol-native terminal error rather than truncating SSE.
-7. Keep a real Codex-to-Dynamo-to-MCP run opt-in as the final compatibility test rather than the primary semantic suite; instrument the outbound MCP call so this cannot accidentally prove Codex's client-owned MCP loop instead.
-8. Reassess multi-server catalogs, tool injection, side effects, and an external bridge only from demonstrated deployment requirements.
+| Slice | Status |
+| --- | --- |
+| `agent-rt/mcp`, exact `rmcp = "=3.1.4"`, one-server configuration, secret-safe bearer credential | Complete |
+| Generic completed `ToolExecutionResult.is_error` semantics for Responses and Anthropic | Complete |
+| Lazy Auto lifecycle, paginated descriptor verification, `call_tool_once`, no redirects, concurrency/time/output bounds, complete-only normalization | Complete, except for the strict raw JSON response-body cap noted above |
+| SDK-free modern Streamable HTTP fixture covering pagination, auth, completed tool errors, schema drift, timeout, long-lived client reuse, and read-only lookup | Complete |
+| Legacy initialize/session fixture, reconnect, malformed raw body, explicit cancellation, and raw JSON oversize tests | Pending hardening |
+| Dynamo executor mux, connector authorization, configuration collision checks, and exact Responses/Anthropic name-description-schema validation | Complete |
+| Deterministic full-HTTP unary Responses and Anthropic model → MCP → model flow with exact outbound-call and second-step-result assertions | Complete |
+| Streaming success/error, completed replay, and post-header protocol-native terminal error flows | Pending; coupled to the broader streaming terminal-error refactor |
+| Opt-in real Codex-to-Dynamo-to-MCP compatibility run | Pending |
+| Multiple servers, trusted tool injection, side effects, external bridge, and tenant catalogs | Deferred until demonstrated deployment need |
 
 ### Sandbox Plane and Kubernetes Reference Provider
 
