@@ -183,7 +183,6 @@ opentelemetry-proto = { version = "0.31.0", default-features = false, features =
     "gen-tonic",
     "metrics",
 ] }
-prometheus-parse = { version = "0.2.5" }
 validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
 url = { version = "2.5", features = ["serde"] }

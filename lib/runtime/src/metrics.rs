@@ -2026,6 +2026,17 @@ vllm_num_requests_running{model="llama"} 4
         let text = registry.prometheus_expfmt_combined().expect("text");
         let families = registry.metric_families_combined().expect("combined");
 
+        // Exact output: the merge refactor must not change a byte of /metrics.
+        assert_eq!(
+            text,
+            "# HELP dynamo_native_total Native counter\n\
+             # TYPE dynamo_native_total counter\n\
+             dynamo_native_total 7\n\
+             # HELP vllm_num_requests_running Running requests\n\
+             # TYPE vllm_num_requests_running gauge\n\
+             vllm_num_requests_running{model=\"llama\"} 4\n"
+        );
+
         for name in names(&families) {
             assert!(text.contains(name), "{name} missing from /metrics");
         }

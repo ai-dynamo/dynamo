@@ -4,19 +4,15 @@
 //! Parse Prometheus text exposition into `prometheus::proto::MetricFamily`.
 //!
 //! Engine metrics (vLLM / SGLang / TensorRT-LLM) never enter the Rust
-//! `prometheus::Registry`. They arrive as an exposition *string* produced by a
-//! Python callback (see `MetricsRegistry::add_expfmt_callback`) which
-//! `prometheus_expfmt_combined` appends verbatim to `/metrics`.
+//! `prometheus::Registry`. They arrive as an exposition string from a Python
+//! callback (see `MetricsRegistry::add_expfmt_callback`) which
+//! `prometheus_expfmt_combined` appends verbatim to `/metrics`, so `gather()`
+//! cannot see them. Parsing that text back into families lets one code path
+//! export both sources.
 //!
-//! `gather()` therefore cannot see them, and any OTLP bridge built on `gather()`
-//! alone would silently omit every engine metric. This module parses that text
-//! back into the same typed representation `gather()` returns, so both sources
-//! can be merged and exported through one path.
-//!
-//! `prometheus-parse` is an implementation detail deliberately hidden behind
-//! [`parse_exposition`]: the exposition format is frozen, our parse surface is
-//! narrow, and the upstream crate is dormant, so swapping in an in-tree parser
-//! must stay a single-file change.
+//! Hand-rolled rather than using `prometheus-parse`: that crate silently drops
+//! every sample whose name contains a colon, and vLLM names all of its metrics
+//! `vllm:*`. The exposition grammar is frozen and the subset we need is small.
 
 use prometheus::proto::{
     Bucket, Counter, Gauge, Histogram, LabelPair, Metric, MetricFamily, MetricType, Quantile,
@@ -24,229 +20,386 @@ use prometheus::proto::{
 };
 use std::collections::HashMap;
 
-/// Parse Prometheus text exposition into metric families.
-///
-/// Families are returned sorted by name so callers see a deterministic order.
-/// Malformed input is reported as an error rather than silently dropped: a
-/// broken engine callback should be visible, not quietly halve the metric set.
-pub fn parse_exposition(text: &str) -> anyhow::Result<Vec<MetricFamily>> {
-    if text.trim().is_empty() {
-        return Ok(Vec::new());
+/// One parsed sample line.
+struct Sample {
+    name: String,
+    labels: Vec<(String, String)>,
+    value: f64,
+}
+
+impl Sample {
+    /// Labels excluding `key`, which carries bucket/quantile position rather
+    /// than series identity.
+    fn labels_without(&self, key: &str) -> Vec<(String, String)> {
+        self.labels
+            .iter()
+            .filter(|(k, _)| k != key)
+            .cloned()
+            .collect()
     }
 
-    let lines = text.lines().map(|line| Ok(line.to_owned()));
-    let scrape = prometheus_parse::Scrape::parse(lines)
-        .map_err(|e| anyhow::anyhow!("parsing prometheus exposition text: {e}"))?;
+    fn label(&self, key: &str) -> Option<&str> {
+        self.labels
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+}
 
-    // The text format emits a histogram's or summary's sum and count as
-    // separate sample lines, which `prometheus-parse` surfaces as standalone
-    // untyped samples. Index them up front so they can be folded into their
-    // parent, and so they are not also emitted as bogus gauge families.
-    let siblings = Siblings::index(&scrape);
+/// Parse Prometheus text exposition into metric families, sorted by name.
+pub fn parse_exposition(text: &str) -> anyhow::Result<Vec<MetricFamily>> {
+    let mut docs: HashMap<&str, &str> = HashMap::new();
+    let mut types: HashMap<&str, MetricType> = HashMap::new();
+    let mut samples: Vec<Sample> = Vec::new();
 
-    let mut families: HashMap<String, MetricFamily> = HashMap::new();
-
-    for sample in &scrape.samples {
-        if siblings.is_absorbed(&sample.metric) {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
             continue;
         }
+        if let Some(rest) = line.strip_prefix('#') {
+            parse_comment(rest.trim(), &mut docs, &mut types);
+        } else if let Some(sample) = parse_sample(line) {
+            samples.push(sample);
+        }
+    }
 
-        let name = sample.metric.clone();
-        let metric_type = sample_metric_type(&sample.value);
+    // A declared TYPE owns its suffixed samples, so route each sample to the
+    // family that claims it before building anything.
+    let mut families: Vec<MetricFamily> = Vec::new();
+    let mut claimed: Vec<bool> = vec![false; samples.len()];
 
-        let family = families.entry(name.clone()).or_insert_with(|| {
+    for (name, metric_type) in &types {
+        let family = match metric_type {
+            MetricType::HISTOGRAM => build_histogram(name, &samples, &mut claimed),
+            MetricType::SUMMARY => build_summary(name, &samples, &mut claimed),
+            other => build_simple(name, *other, &samples, &mut claimed),
+        };
+        if let Some(mut family) = family {
+            family.set_help(docs.get(name).copied().unwrap_or_default().to_string());
+            families.push(family);
+        }
+    }
+
+    // Samples with no TYPE line are untyped; a gauge is the conservative
+    // reading since untyped carries no aggregation semantics.
+    let mut untyped: HashMap<&str, MetricFamily> = HashMap::new();
+    for (idx, sample) in samples.iter().enumerate() {
+        if claimed[idx] {
+            continue;
+        }
+        let family = untyped.entry(&sample.name).or_insert_with(|| {
             let mut f = MetricFamily::new();
-            f.set_name(name.clone());
-            // `docs` is keyed by family name; absent HELP yields an empty
-            // string, matching what the Prometheus encoder emits.
-            f.set_help(scrape.docs.get(&name).cloned().unwrap_or_default());
-            f.set_field_type(metric_type);
+            f.set_name(sample.name.clone());
+            f.set_help(
+                docs.get(sample.name.as_str())
+                    .copied()
+                    .unwrap_or_default()
+                    .to_string(),
+            );
+            f.set_field_type(MetricType::GAUGE);
             f
         });
-
-        if family.get_field_type() != metric_type {
-            anyhow::bail!(
-                "metric family '{}' has inconsistent types within one exposition payload",
-                name
-            );
-        }
-
-        family.mut_metric().push(build_metric(sample, &siblings));
+        let mut metric = Metric::new();
+        metric.set_label(label_pairs(&sample.labels));
+        let mut gauge = Gauge::new();
+        gauge.set_value(sample.value);
+        metric.set_gauge(gauge);
+        family.mut_metric().push(metric);
     }
+    families.extend(untyped.into_values());
 
-    let mut out: Vec<MetricFamily> = families.into_values().collect();
-    out.sort_by(|a, b| a.name().cmp(b.name()));
-    Ok(out)
+    families.sort_by(|a, b| a.name().cmp(b.name()));
+    Ok(families)
 }
 
-/// `_sum` / `_count` sample values belonging to a histogram or summary parent,
-/// keyed by `(parent name, label key)`.
-struct Siblings {
-    sums: HashMap<(String, String), f64>,
-    counts: HashMap<(String, String), f64>,
-    /// Sample names that were folded into a parent and must not become families.
-    absorbed: std::collections::HashSet<String>,
+fn parse_comment<'a>(
+    rest: &'a str,
+    docs: &mut HashMap<&'a str, &'a str>,
+    types: &mut HashMap<&'a str, MetricType>,
+) {
+    if let Some(body) = rest.strip_prefix("HELP ") {
+        let (name, help) = body.split_once(char::is_whitespace).unwrap_or((body, ""));
+        docs.insert(name, help.trim());
+    } else if let Some(body) = rest.strip_prefix("TYPE ") {
+        let Some((name, kind)) = body.split_once(char::is_whitespace) else {
+            return;
+        };
+        let metric_type = match kind.trim() {
+            "counter" => MetricType::COUNTER,
+            "gauge" => MetricType::GAUGE,
+            "histogram" => MetricType::HISTOGRAM,
+            "summary" => MetricType::SUMMARY,
+            _ => MetricType::GAUGE,
+        };
+        types.insert(name, metric_type);
+    }
 }
 
-impl Siblings {
-    fn index(scrape: &prometheus_parse::Scrape) -> Self {
-        // Only fold when a parent of the right type actually exists, so a
-        // legitimate standalone gauge ending in `_sum` is left intact.
-        let parents: std::collections::HashSet<&str> = scrape
-            .samples
-            .iter()
-            .filter(|s| {
-                matches!(
-                    s.value,
-                    prometheus_parse::Value::Histogram(_) | prometheus_parse::Value::Summary(_)
-                )
-            })
-            .map(|s| s.metric.as_str())
+/// `name{labels} value [timestamp]`. Returns `None` for unparseable lines
+/// rather than failing the whole payload: one malformed engine line should not
+/// cost us every other metric.
+fn parse_sample(line: &str) -> Option<Sample> {
+    let (name, remainder) = match line.find('{') {
+        Some(open) => {
+            let close = line.rfind('}')?;
+            let labels = &line[open + 1..close];
+            (
+                line[..open].trim().to_string(),
+                (parse_labels(labels), line[close + 1..].trim()),
+            )
+        }
+        None => {
+            let (name, rest) = line.split_once(char::is_whitespace)?;
+            (name.trim().to_string(), (Vec::new(), rest.trim()))
+        }
+    };
+    let (labels, rest) = remainder;
+
+    // A trailing timestamp is permitted and ignored; we stamp at export.
+    let value = rest.split_whitespace().next()?;
+    Some(Sample {
+        name,
+        labels,
+        value: parse_value(value)?,
+    })
+}
+
+fn parse_value(text: &str) -> Option<f64> {
+    match text {
+        "+Inf" => Some(f64::INFINITY),
+        "-Inf" => Some(f64::NEG_INFINITY),
+        "NaN" => Some(f64::NAN),
+        other => other.parse().ok(),
+    }
+}
+
+fn parse_labels(text: &str) -> Vec<(String, String)> {
+    let mut labels = Vec::new();
+    let mut chars = text.chars().peekable();
+
+    while chars.peek().is_some() {
+        let key: String = chars
+            .by_ref()
+            .take_while(|c| *c != '=')
+            .filter(|c| !c.is_whitespace() && *c != ',')
             .collect();
-
-        let mut sums = HashMap::new();
-        let mut counts = HashMap::new();
-        let mut absorbed = std::collections::HashSet::new();
-
-        for sample in &scrape.samples {
-            let value = match sample.value {
-                prometheus_parse::Value::Untyped(v)
-                | prometheus_parse::Value::Gauge(v)
-                | prometheus_parse::Value::Counter(v) => v,
-                _ => continue,
-            };
-
-            for (suffix, target) in [("_sum", &mut sums), ("_count", &mut counts)] {
-                let Some(parent) = sample.metric.strip_suffix(suffix) else {
-                    continue;
-                };
-                if !parents.contains(parent) {
-                    continue;
-                }
-                target.insert((parent.to_string(), label_key_from(&sample.labels)), value);
-                absorbed.insert(sample.metric.clone());
+        if key.is_empty() {
+            break;
+        }
+        // Skip to the opening quote of the value.
+        if chars.next_if_eq(&'"').is_none() {
+            break;
+        }
+        let mut value = String::new();
+        let mut escaped = false;
+        for c in chars.by_ref() {
+            if escaped {
+                value.push(match c {
+                    'n' => '\n',
+                    other => other,
+                });
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                break;
+            } else {
+                value.push(c);
             }
         }
-
-        Self {
-            sums,
-            counts,
-            absorbed,
-        }
+        labels.push((key, value));
+        chars.next_if_eq(&',');
     }
-
-    fn is_absorbed(&self, name: &str) -> bool {
-        self.absorbed.contains(name)
-    }
-
-    fn sum(&self, name: &str, labels: &str) -> Option<f64> {
-        self.sums
-            .get(&(name.to_string(), labels.to_string()))
-            .copied()
-    }
-
-    fn count(&self, name: &str, labels: &str) -> Option<u64> {
-        self.counts
-            .get(&(name.to_string(), labels.to_string()))
-            .map(|v| *v as u64)
-    }
+    labels
 }
 
-fn sample_metric_type(value: &prometheus_parse::Value) -> MetricType {
-    match value {
-        prometheus_parse::Value::Counter(_) => MetricType::COUNTER,
-        prometheus_parse::Value::Gauge(_) => MetricType::GAUGE,
-        prometheus_parse::Value::Histogram(_) => MetricType::HISTOGRAM,
-        prometheus_parse::Value::Summary(_) => MetricType::SUMMARY,
-        // Untyped has no OTLP-meaningful aggregation; a gauge is the
-        // conservative reading (point-in-time, non-monotonic).
-        prometheus_parse::Value::Untyped(_) => MetricType::GAUGE,
-    }
-}
-
-fn build_metric(sample: &prometheus_parse::Sample, siblings: &Siblings) -> Metric {
-    let mut metric = Metric::new();
-    metric.set_label(build_labels(&sample.labels));
-    let key = label_key_from(&sample.labels);
-
-    match &sample.value {
-        prometheus_parse::Value::Counter(v) => {
-            let mut counter = Counter::new();
-            counter.set_value(*v);
-            metric.set_counter(counter);
-        }
-        prometheus_parse::Value::Gauge(v) | prometheus_parse::Value::Untyped(v) => {
-            let mut gauge = Gauge::new();
-            gauge.set_value(*v);
-            metric.set_gauge(gauge);
-        }
-        prometheus_parse::Value::Histogram(counts) => {
-            let mut histogram = Histogram::new();
-            // Exposition buckets are already cumulative and `prometheus-parse`
-            // preserves that, so counts carry through unchanged.
-            let buckets = counts
-                .iter()
-                .map(|hc| {
-                    let mut bucket = Bucket::new();
-                    bucket.set_upper_bound(hc.less_than);
-                    bucket.set_cumulative_count(hc.count as u64);
-                    bucket
-                })
-                .collect::<Vec<_>>();
-            histogram.set_bucket(buckets);
-            histogram.set_sample_sum(siblings.sum(&sample.metric, &key).unwrap_or_default());
-            histogram.set_sample_count(siblings.count(&sample.metric, &key).unwrap_or_default());
-            metric.set_histogram(histogram);
-        }
-        prometheus_parse::Value::Summary(counts) => {
-            let mut summary = Summary::new();
-            let quantiles = counts
-                .iter()
-                .map(|sc| {
-                    let mut q = Quantile::new();
-                    q.set_quantile(sc.quantile);
-                    q.set_value(sc.count);
-                    q
-                })
-                .collect::<Vec<_>>();
-            summary.set_quantile(quantiles);
-            summary.set_sample_sum(siblings.sum(&sample.metric, &key).unwrap_or_default());
-            summary.set_sample_count(siblings.count(&sample.metric, &key).unwrap_or_default());
-            metric.set_summary(summary);
-        }
-    }
-
-    metric
-}
-
-fn build_labels(labels: &prometheus_parse::Labels) -> Vec<LabelPair> {
+fn label_pairs(labels: &[(String, String)]) -> Vec<LabelPair> {
     let mut pairs: Vec<LabelPair> = labels
         .iter()
         .map(|(k, v)| {
             let mut pair = LabelPair::new();
-            pair.set_name(k.to_string());
-            pair.set_value(v.to_string());
+            pair.set_name(k.clone());
+            pair.set_value(v.clone());
             pair
         })
         .collect();
-    // Sorted for stable series identity when merging and de-duplicating.
+    // Sorted so series identity is stable when merging.
     pairs.sort_by(|a, b| a.name().cmp(b.name()));
     pairs
 }
 
-/// Canonical identity for a label set, used to pair a histogram with its
-/// `_sum` / `_count` siblings.
-fn label_key_from(labels: &prometheus_parse::Labels) -> String {
-    let mut pairs: Vec<(String, String)> = labels
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-    pairs.sort();
-    pairs
-        .into_iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect::<Vec<_>>()
-        .join(",")
+/// Claim every sample named `name`, one metric each.
+fn build_simple(
+    name: &str,
+    metric_type: MetricType,
+    samples: &[Sample],
+    claimed: &mut [bool],
+) -> Option<MetricFamily> {
+    let mut family = new_family(name, metric_type);
+    for (idx, sample) in samples.iter().enumerate() {
+        if claimed[idx] || sample.name != name {
+            continue;
+        }
+        claimed[idx] = true;
+        let mut metric = Metric::new();
+        metric.set_label(label_pairs(&sample.labels));
+        if metric_type == MetricType::COUNTER {
+            let mut counter = Counter::new();
+            counter.set_value(sample.value);
+            metric.set_counter(counter);
+        } else {
+            let mut gauge = Gauge::new();
+            gauge.set_value(sample.value);
+            metric.set_gauge(gauge);
+        }
+        family.mut_metric().push(metric);
+    }
+    (!family.get_metric().is_empty()).then_some(family)
+}
+
+/// A histogram is spread across `<name>_bucket` (with `le`), `<name>_sum` and
+/// `<name>_count`, grouped by the remaining labels.
+fn build_histogram(name: &str, samples: &[Sample], claimed: &mut [bool]) -> Option<MetricFamily> {
+    #[derive(Default)]
+    struct Series {
+        buckets: Vec<Bucket>,
+        sum: f64,
+        count: u64,
+    }
+
+    let mut family = new_family(name, MetricType::HISTOGRAM);
+    let mut series: Vec<(Vec<(String, String)>, Series)> = Vec::new();
+
+    for (idx, sample) in samples.iter().enumerate() {
+        if claimed[idx] {
+            continue;
+        }
+        let (key, part) = if sample.name == format!("{name}_bucket") {
+            (sample.labels_without("le"), Part::Bucket)
+        } else if sample.name == format!("{name}_sum") {
+            (sample.labels.clone(), Part::Sum)
+        } else if sample.name == format!("{name}_count") {
+            (sample.labels.clone(), Part::Count)
+        } else {
+            continue;
+        };
+        claimed[idx] = true;
+
+        let entry = match series.iter_mut().find(|(k, _)| *k == key) {
+            Some(entry) => &mut entry.1,
+            None => {
+                series.push((key, Series::default()));
+                &mut series.last_mut()?.1
+            }
+        };
+
+        match part {
+            Part::Bucket => {
+                let Some(bound) = sample.label("le").and_then(parse_value) else {
+                    continue;
+                };
+                let mut bucket = Bucket::new();
+                bucket.set_upper_bound(bound);
+                bucket.set_cumulative_count(sample.value as u64);
+                entry.buckets.push(bucket);
+            }
+            Part::Sum => entry.sum = sample.value,
+            Part::Count => entry.count = sample.value as u64,
+        }
+    }
+
+    for (labels, mut parts) in series {
+        parts
+            .buckets
+            .sort_by(|a, b| a.upper_bound().total_cmp(&b.upper_bound()));
+        let mut histogram = Histogram::new();
+        histogram.set_bucket(parts.buckets);
+        histogram.set_sample_sum(parts.sum);
+        histogram.set_sample_count(parts.count);
+        let mut metric = Metric::new();
+        metric.set_label(label_pairs(&labels));
+        metric.set_histogram(histogram);
+        family.mut_metric().push(metric);
+    }
+    (!family.get_metric().is_empty()).then_some(family)
+}
+
+/// A summary is `<name>` with a `quantile` label plus `<name>_sum` and
+/// `<name>_count`.
+fn build_summary(name: &str, samples: &[Sample], claimed: &mut [bool]) -> Option<MetricFamily> {
+    #[derive(Default)]
+    struct Series {
+        quantiles: Vec<Quantile>,
+        sum: f64,
+        count: u64,
+    }
+
+    let mut family = new_family(name, MetricType::SUMMARY);
+    let mut series: Vec<(Vec<(String, String)>, Series)> = Vec::new();
+
+    for (idx, sample) in samples.iter().enumerate() {
+        if claimed[idx] {
+            continue;
+        }
+        let (key, part) = if sample.name == name && sample.label("quantile").is_some() {
+            (sample.labels_without("quantile"), Part::Bucket)
+        } else if sample.name == format!("{name}_sum") {
+            (sample.labels.clone(), Part::Sum)
+        } else if sample.name == format!("{name}_count") {
+            (sample.labels.clone(), Part::Count)
+        } else {
+            continue;
+        };
+        claimed[idx] = true;
+
+        let entry = match series.iter_mut().find(|(k, _)| *k == key) {
+            Some(entry) => &mut entry.1,
+            None => {
+                series.push((key, Series::default()));
+                &mut series.last_mut()?.1
+            }
+        };
+
+        match part {
+            Part::Bucket => {
+                let Some(q) = sample.label("quantile").and_then(parse_value) else {
+                    continue;
+                };
+                let mut quantile = Quantile::new();
+                quantile.set_quantile(q);
+                quantile.set_value(sample.value);
+                entry.quantiles.push(quantile);
+            }
+            Part::Sum => entry.sum = sample.value,
+            Part::Count => entry.count = sample.value as u64,
+        }
+    }
+
+    for (labels, parts) in series {
+        let mut summary = Summary::new();
+        summary.set_quantile(parts.quantiles);
+        summary.set_sample_sum(parts.sum);
+        summary.set_sample_count(parts.count);
+        let mut metric = Metric::new();
+        metric.set_label(label_pairs(&labels));
+        metric.set_summary(summary);
+        family.mut_metric().push(metric);
+    }
+    (!family.get_metric().is_empty()).then_some(family)
+}
+
+enum Part {
+    Bucket,
+    Sum,
+    Count,
+}
+
+fn new_family(name: &str, metric_type: MetricType) -> MetricFamily {
+    let mut family = MetricFamily::new();
+    family.set_name(name.to_string());
+    family.set_field_type(metric_type);
+    family
 }
 
 #[cfg(test)]
@@ -257,36 +410,56 @@ mod tests {
         fs.iter().map(|f| f.name()).collect()
     }
 
-    /// `_sum` and `_count` arrive as separate samples. Unfolded, the parent's
-    /// sum stays 0 and OTLP gains two gauge series `/metrics` never shows.
+    /// Real vLLM exposition: every name carries a colon, and the histogram is
+    /// spread across `_bucket` / `_sum` / `_count`.
     #[test]
-    fn histogram_folds_sum_and_count_into_parent() {
+    fn parses_vllm_shaped_exposition() {
         let fs = parse_exposition(
-            r#"# HELP d_seconds Request duration
-# TYPE d_seconds histogram
-d_seconds_bucket{model="a",le="0.1"} 1
-d_seconds_bucket{model="a",le="+Inf"} 5
-d_seconds_sum{model="a"} 2.75
-d_seconds_count{model="a"} 5
+            r#"# HELP vllm:num_requests_running Number of requests currently running on GPU.
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running{engine="0",model_name="llama"} 3
+# HELP vllm:time_to_first_token_seconds Histogram of time to first token in seconds.
+# TYPE vllm:time_to_first_token_seconds histogram
+vllm:time_to_first_token_seconds_bucket{engine="0",model_name="llama",le="0.1"} 1
+vllm:time_to_first_token_seconds_bucket{engine="0",model_name="llama",le="+Inf"} 5
+vllm:time_to_first_token_seconds_sum{engine="0",model_name="llama"} 2.75
+vllm:time_to_first_token_seconds_count{engine="0",model_name="llama"} 5
 "#,
         )
         .expect("parse");
 
-        assert_eq!(names(&fs), vec!["d_seconds"]);
-        assert_eq!(fs[0].get_field_type(), MetricType::HISTOGRAM);
-        assert_eq!(fs[0].help(), "Request duration");
+        assert_eq!(
+            names(&fs),
+            vec![
+                "vllm:num_requests_running",
+                "vllm:time_to_first_token_seconds"
+            ]
+        );
 
-        let h = fs[0].get_metric()[0].get_histogram();
+        let gauge = &fs[0];
+        assert_eq!(gauge.get_field_type(), MetricType::GAUGE);
+        assert_eq!(gauge.help(), "Number of requests currently running on GPU.");
+        assert_eq!(gauge.get_metric()[0].get_gauge().value(), 3.0);
+        assert_eq!(gauge.get_metric()[0].get_label()[0].name(), "engine");
+
+        let hist = &fs[1];
+        assert_eq!(hist.get_field_type(), MetricType::HISTOGRAM);
+        let h = hist.get_metric()[0].get_histogram();
         assert_eq!(h.get_bucket().len(), 2);
+        assert_eq!(h.get_bucket()[0].upper_bound(), 0.1);
+        assert!(h.get_bucket()[1].upper_bound().is_infinite());
         assert_eq!(h.sample_sum(), 2.75);
         assert_eq!(h.sample_count(), 5);
+        // `le` identifies the bucket, not the series.
+        assert_eq!(hist.get_metric()[0].get_label().len(), 2);
     }
 
     #[test]
-    fn summary_preserves_quantiles_and_folds_siblings() {
+    fn summary_quantiles_and_siblings_group_into_one_family() {
         let fs = parse_exposition(
             r#"# TYPE d_pause_seconds summary
 d_pause_seconds{quantile="0.5"} 0.01
+d_pause_seconds{quantile="0.99"} 0.2
 d_pause_seconds_sum 12.5
 d_pause_seconds_count 300
 "#,
@@ -295,17 +468,24 @@ d_pause_seconds_count 300
 
         assert_eq!(names(&fs), vec!["d_pause_seconds"]);
         let sm = fs[0].get_metric()[0].get_summary();
+        assert_eq!(sm.get_quantile().len(), 2);
         assert_eq!(sm.get_quantile()[0].quantile(), 0.5);
         assert_eq!(sm.sample_sum(), 12.5);
         assert_eq!(sm.sample_count(), 300);
     }
 
-    /// Folding keys off a real parent, so a plain gauge ending in `_sum`
-    /// must survive.
+    /// Suffixes are only claimed by a declared parent, so a plain gauge named
+    /// `*_sum` survives. Untyped samples fall back to gauge.
     #[test]
-    fn standalone_sum_suffixed_gauge_is_not_absorbed() {
-        let fs = parse_exposition("# TYPE d_batch_sum gauge\nd_batch_sum 42\n").expect("parse");
-        assert_eq!(names(&fs), vec!["d_batch_sum"]);
+    fn unclaimed_suffixes_and_untyped_samples_survive() {
+        let fs = parse_exposition(
+            "# TYPE d_batch_sum gauge\nd_batch_sum 42\nd_stray_metric{a=\"b\"} 7\n",
+        )
+        .expect("parse");
+
+        assert_eq!(names(&fs), vec!["d_batch_sum", "d_stray_metric"]);
         assert_eq!(fs[0].get_metric()[0].get_gauge().value(), 42.0);
+        assert_eq!(fs[1].get_field_type(), MetricType::GAUGE);
+        assert_eq!(fs[1].get_metric()[0].get_gauge().value(), 7.0);
     }
 }
