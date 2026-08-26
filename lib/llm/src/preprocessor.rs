@@ -2467,13 +2467,15 @@ impl OpenAIPreprocessor {
         } else {
             self.apply_template_inner(request)?
         };
-        Ok(formatted_prompt.map(|prompt| {
-            if request.get_continue_final_message() == Some(true) {
-                apply_continue_final_message(prompt, request.typed_messages())
-            } else {
-                prompt
-            }
-        }))
+        let Some(prompt) = formatted_prompt else {
+            return Ok(None);
+        };
+        if request.get_continue_final_message() != Some(true) {
+            return Ok(Some(prompt));
+        }
+        apply_continue_final_message(prompt, request.typed_messages())
+            .map_err(|error| invalid_argument_error(format!("{error:#}")))
+            .map(Some)
     }
 
     fn apply_template_inner<
@@ -8591,9 +8593,7 @@ mod tests {
     }
 
     #[test]
-    fn continue_final_message_without_explicit_add_generation_prompt_still_continues() {
-        use dynamo_renderer::OAIChatLikeRequest;
-
+    fn continue_final_message_without_explicit_add_generation_prompt_is_rejected() {
         let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
             "model": "test-model",
             "messages": [
@@ -8604,26 +8604,13 @@ mod tests {
         }))
         .unwrap();
 
-        assert!(
-            !request.should_add_generation_prompt(),
-            "continue_final_message must suppress the generation prompt when add_generation_prompt is omitted"
+        let err = crate::engines::ValidateRequest::validate(&request).expect_err(
+            "omitted add_generation_prompt must conflict with continue_final_message",
         );
-
-        let mut mdc = ModelDeploymentCard::load_from_disk(
-            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
-            None,
-        )
-        .unwrap();
-        mdc.set_name("test-model");
-        let prompt = OpenAIPreprocessor::new(mdc)
-            .unwrap()
-            .apply_template(&request)
-            .unwrap()
-            .unwrap();
         assert!(
-            prompt.as_str().ends_with("LLM-Native Interaction"),
-            "omitting add_generation_prompt must still leave the last assistant open, got {:?}",
-            prompt.as_str()
+            err.to_string()
+                .contains("Cannot set both `continue_final_message` and `add_generation_prompt`"),
+            "unexpected error: {err}"
         );
     }
 
@@ -8647,17 +8634,18 @@ mod tests {
             .unwrap();
         assert!(!explicit_false.should_add_generation_prompt());
 
-        let continue_only: NvCreateChatCompletionRequest =
+        let continue_with_false: NvCreateChatCompletionRequest =
             serde_json::from_value(serde_json::json!({
                 "model": "test-model",
                 "messages": [
                     {"role": "user", "content": "hi"},
                     {"role": "assistant", "content": "partial"}
                 ],
+                "add_generation_prompt": false,
                 "continue_final_message": true
             }))
             .unwrap();
-        assert!(!continue_only.should_add_generation_prompt());
+        assert!(!continue_with_false.should_add_generation_prompt());
     }
 
     /// Qwen-style templates close every turn, including the last assistant. Truncate
@@ -8693,7 +8681,7 @@ mod tests {
 
         let rendered = formatter.render_prompt(request).unwrap();
         if request.get_continue_final_message() == Some(true) {
-            apply_continue_final_message(rendered, request.typed_messages())
+            apply_continue_final_message(rendered, request.typed_messages()).unwrap()
         } else {
             rendered
         }

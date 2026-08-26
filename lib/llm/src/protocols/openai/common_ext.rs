@@ -95,9 +95,9 @@ pub struct CommonExt {
     #[builder(default, setter(strip_option))]
     pub add_generation_prompt: Option<bool>,
 
-    /// If true, leave the last assistant message open so the model continues it
-    /// instead of starting a new turn. Requires the last message to be assistant.
-    /// Incompatible with `add_generation_prompt: true`.
+    /// If true, leave the last message open so the model continues it instead of
+    /// starting a new turn. Incompatible with omitted or `true`
+    /// `add_generation_prompt` (vLLM 0.27.1 finalizes the omitted field to true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub continue_final_message: Option<bool>,

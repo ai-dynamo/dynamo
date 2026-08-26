@@ -623,7 +623,6 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_continue_final_message(
             self.common.add_generation_prompt,
             self.common.continue_final_message,
-            &self.inner.messages,
         )?;
 
         Ok(())
@@ -1177,24 +1176,21 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_continue_final_message_requires_last_assistant() {
+    fn test_validate_continue_final_message_accepts_last_user() {
         let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
             "model": "test-model",
             "messages": [{"role": "user", "content": "Hello"}],
+            "add_generation_prompt": false,
             "continue_final_message": true
         }))
         .expect("Failed to deserialize request");
 
-        let err = ValidateRequest::validate(&request)
-            .expect_err("continue_final_message requires last assistant");
-        assert!(
-            err.to_string().contains("last message to be an assistant"),
-            "unexpected error: {err}"
-        );
+        ValidateRequest::validate(&request)
+            .expect("continue_final_message must accept a final user message");
     }
 
     #[test]
-    fn test_validate_continue_final_message_omitted_add_generation_prompt_ok() {
+    fn test_validate_continue_final_message_omitted_add_generation_prompt_rejected() {
         let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
             "model": "test-model",
             "messages": [
@@ -1205,8 +1201,14 @@ mod tests {
         }))
         .expect("Failed to deserialize request");
 
-        ValidateRequest::validate(&request)
-            .expect("omitting add_generation_prompt with continue_final_message must be accepted");
+        let err = ValidateRequest::validate(&request).expect_err(
+            "omitted add_generation_prompt defaults to true and conflicts with continue_final_message",
+        );
+        assert!(
+            err.to_string()
+                .contains("Cannot set both `continue_final_message` and `add_generation_prompt`"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

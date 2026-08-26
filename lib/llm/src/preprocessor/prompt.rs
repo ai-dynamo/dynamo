@@ -30,7 +30,11 @@ use crate::protocols::openai::{
 };
 use dynamo_protocols::types::{
     ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestAssistantMessageContentPart,
-    ChatCompletionRequestMessage,
+    ChatCompletionRequestDeveloperMessageContent, ChatCompletionRequestDeveloperMessageContentPart,
+    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageContent,
+    ChatCompletionRequestSystemMessageContentPart, ChatCompletionRequestToolMessageContent,
+    ChatCompletionRequestToolMessageContentPart, ChatCompletionRequestUserMessageContent,
+    ChatCompletionRequestUserMessageContentPart,
 };
 
 /// lib/llm-local extension carrying multimodal media-IO config. Kept off
@@ -276,8 +280,10 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     }
 
     fn should_add_generation_prompt(&self) -> bool {
-        // vLLM / HF: continue_final_message leaves the last assistant turn open,
-        // which is incompatible with appending a new generation prompt.
+        // vLLM / HF: continue_final_message leaves the last turn open, which is
+        // incompatible with appending a new generation prompt. Validation already
+        // rejects the omitted/true add_generation_prompt combination; keep this
+        // guard so internal callers that skip ValidateRequest still match HF.
         if self.common.continue_final_message == Some(true) {
             return false;
         }
@@ -486,39 +492,65 @@ pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptForm
     }
 }
 
+const CONTINUE_FINAL_MESSAGE_NOT_FOUND: &str =
+    "Unable to continue the final message because it was not found in the rendered chat template.";
+
 /// HuggingFace `apply_chat_template(continue_final_message=True)`: after render,
-/// drop closing tokens so the prompt ends at the last assistant text.
+/// drop closing tokens so the prompt ends at the last message text.
 ///
 /// When the renderer returned segment boundaries (Kimi K3 XTML), keep them so
 /// tokenization still uses `encode_segments` instead of flattening to plain text.
+/// Missing, empty, or template-transformed content is an invalid request rather
+/// than silently returning the closed prompt.
 pub(crate) fn apply_continue_final_message(
     prompt: RenderedPrompt,
     messages: Option<&[ChatCompletionRequestMessage]>,
-) -> RenderedPrompt {
-    let Some(final_text) = last_assistant_text(messages.unwrap_or(&[])) else {
-        return prompt;
+) -> Result<RenderedPrompt> {
+    let messages = messages.unwrap_or(&[]);
+    let Some(final_text) = last_message_text(messages) else {
+        anyhow::bail!(CONTINUE_FINAL_MESSAGE_NOT_FOUND);
     };
-    let rendered = prompt.as_str();
-    let trimmed = final_text.trim();
-    let (idx, len) = match rendered.rfind(&final_text) {
-        Some(idx) => (idx, final_text.len()),
-        None if !trimmed.is_empty() && trimmed != final_text => match rendered.rfind(trimmed) {
-            Some(idx) => (idx, trimmed.len()),
-            None => {
-                tracing::warn!(
-                    "continue_final_message: last assistant text not found in rendered prompt"
-                );
-                return prompt;
+    let end = {
+        let rendered = prompt.as_str();
+        let search_from = continuation_search_start(rendered, messages, final_text);
+        let haystack = &rendered[search_from..];
+        let trimmed = final_text.trim();
+        let (rel, len) = match haystack.rfind(final_text) {
+            Some(idx) => (idx, final_text.len()),
+            None if !trimmed.is_empty() && trimmed != final_text => {
+                match haystack.rfind(trimmed) {
+                    Some(idx) => (idx, trimmed.len()),
+                    None => anyhow::bail!(CONTINUE_FINAL_MESSAGE_NOT_FOUND),
+                }
             }
-        },
-        None => {
-            tracing::warn!(
-                "continue_final_message: last assistant text not found in rendered prompt"
-            );
-            return prompt;
-        }
+            None => anyhow::bail!(CONTINUE_FINAL_MESSAGE_NOT_FOUND),
+        };
+        search_from + rel + len
     };
-    truncate_rendered_prompt(prompt, idx + len)
+    Ok(truncate_rendered_prompt(prompt, end))
+}
+
+/// Prefer matching the last message after the previous turn so a template that
+/// rewrote the final content cannot `rfind` an earlier copy of the original text.
+fn continuation_search_start(
+    rendered: &str,
+    messages: &[ChatCompletionRequestMessage],
+    final_text: &str,
+) -> usize {
+    let Some(previous) = messages
+        .len()
+        .checked_sub(2)
+        .and_then(|idx| message_text(&messages[idx]))
+    else {
+        return 0;
+    };
+    if final_text.contains(previous) {
+        return 0;
+    }
+    rendered
+        .rfind(previous)
+        .map(|idx| idx + previous.len())
+        .unwrap_or(0)
 }
 
 /// Truncate `prompt` to the first `end` bytes of `as_str()`, preserving
@@ -559,26 +591,78 @@ fn truncate_rendered_prompt(prompt: RenderedPrompt, end: usize) -> RenderedPromp
     }
 }
 
-/// Last assistant message text used as the HuggingFace truncation needle.
-fn last_assistant_text(messages: &[ChatCompletionRequestMessage]) -> Option<String> {
-    let ChatCompletionRequestMessage::Assistant(message) = messages.last()? else {
-        return None;
-    };
-    match message.content.as_ref()? {
-        ChatCompletionRequestAssistantMessageContent::Text(text) if !text.is_empty() => {
-            Some(text.clone())
+/// Last message text used as the HuggingFace truncation needle. Any final role
+/// can be continued; generic HF `apply_chat_template` is not assistant-only.
+fn last_message_text(messages: &[ChatCompletionRequestMessage]) -> Option<&str> {
+    message_text(messages.last()?)
+}
+
+fn message_text(message: &ChatCompletionRequestMessage) -> Option<&str> {
+    match message {
+        ChatCompletionRequestMessage::Assistant(message) => match message.content.as_ref()? {
+            ChatCompletionRequestAssistantMessageContent::Text(text) => non_empty_str(text),
+            ChatCompletionRequestAssistantMessageContent::Array(parts) => {
+                parts.iter().rev().find_map(|part| match part {
+                    ChatCompletionRequestAssistantMessageContentPart::Text(part) => {
+                        non_empty_str(&part.text)
+                    }
+                    _ => None,
+                })
+            }
+        },
+        ChatCompletionRequestMessage::User(message) => match &message.content {
+            ChatCompletionRequestUserMessageContent::Text(text) => non_empty_str(text),
+            ChatCompletionRequestUserMessageContent::Array(parts) => {
+                parts.iter().rev().find_map(|part| match part {
+                    ChatCompletionRequestUserMessageContentPart::Text(part) => {
+                        non_empty_str(&part.text)
+                    }
+                    _ => None,
+                })
+            }
+        },
+        ChatCompletionRequestMessage::System(message) => match &message.content {
+            ChatCompletionRequestSystemMessageContent::Text(text) => non_empty_str(text),
+            ChatCompletionRequestSystemMessageContent::Array(parts) => {
+                parts.iter().rev().find_map(|part| match part {
+                    ChatCompletionRequestSystemMessageContentPart::Text(part) => {
+                        non_empty_str(&part.text)
+                    }
+                })
+            }
+        },
+        ChatCompletionRequestMessage::Developer(message) => match &message.content {
+            ChatCompletionRequestDeveloperMessageContent::Text(text) => non_empty_str(text),
+            ChatCompletionRequestDeveloperMessageContent::Array(parts) => {
+                parts.iter().rev().find_map(|part| match part {
+                    ChatCompletionRequestDeveloperMessageContentPart::Text(part) => {
+                        non_empty_str(&part.text)
+                    }
+                })
+            }
+        },
+        ChatCompletionRequestMessage::Tool(message) => match &message.content {
+            ChatCompletionRequestToolMessageContent::Text(text) => non_empty_str(text),
+            ChatCompletionRequestToolMessageContent::Array(parts) => {
+                parts.iter().rev().find_map(|part| match part {
+                    ChatCompletionRequestToolMessageContentPart::Text(part) => {
+                        non_empty_str(&part.text)
+                    }
+                    _ => None,
+                })
+            }
+        },
+        ChatCompletionRequestMessage::Function(message) => {
+            non_empty_str(message.content.as_deref()?)
         }
-        ChatCompletionRequestAssistantMessageContent::Array(parts) => {
-            parts.iter().rev().find_map(|part| match part {
-                ChatCompletionRequestAssistantMessageContentPart::Text(part)
-                    if !part.text.is_empty() =>
-                {
-                    Some(part.text.clone())
-                }
-                _ => None,
-            })
-        }
-        _ => None,
+    }
+}
+
+fn non_empty_str(text: &str) -> Option<&str> {
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
     }
 }
 
@@ -695,22 +779,31 @@ mod tests {
         );
     }
 
+    fn continue_rendered(
+        prompt: dynamo_renderer::RenderedPrompt,
+        messages: serde_json::Value,
+    ) -> dynamo_renderer::RenderedPrompt {
+        use dynamo_protocols::types::ChatCompletionRequestMessage;
+
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(messages).unwrap();
+        super::apply_continue_final_message(prompt, Some(&messages)).unwrap()
+    }
+
     #[test]
     fn continue_final_message_truncates_after_last_assistant_text() {
-        use dynamo_protocols::types::ChatCompletionRequestMessage;
         use dynamo_renderer::RenderedPrompt;
 
-        let prompt = RenderedPrompt::text(
-            "user text<|im_end|>LLM-Native Interaction<|im_end|><|im_start|>assistant".to_string(),
-        );
-        let messages: Vec<ChatCompletionRequestMessage> =
-            serde_json::from_value(serde_json::json!([
+        let rendered = continue_rendered(
+            RenderedPrompt::text(
+                "user text<|im_end|>LLM-Native Interaction<|im_end|><|im_start|>assistant"
+                    .to_string(),
+            ),
+            serde_json::json!([
                 {"role": "user", "content": "user text"},
                 {"role": "assistant", "content": "LLM-Native Interaction"}
-            ]))
-            .unwrap();
-
-        let rendered = super::apply_continue_final_message(prompt, Some(&messages));
+            ]),
+        );
         assert_eq!(
             rendered.as_str(),
             "user text<|im_end|>LLM-Native Interaction"
@@ -719,36 +812,29 @@ mod tests {
 
     #[test]
     fn continue_final_message_uses_trimmed_content_when_template_trims() {
-        use dynamo_protocols::types::ChatCompletionRequestMessage;
         use dynamo_renderer::RenderedPrompt;
 
-        let prompt = RenderedPrompt::text("hello world extra".to_string());
-        let messages: Vec<ChatCompletionRequestMessage> =
-            serde_json::from_value(serde_json::json!([
-                {"role": "assistant", "content": "  world  "}
-            ]))
-            .unwrap();
-
-        let rendered = super::apply_continue_final_message(prompt, Some(&messages));
+        let rendered = continue_rendered(
+            RenderedPrompt::text("hello world extra".to_string()),
+            serde_json::json!([{"role": "assistant", "content": "  world  "}]),
+        );
         assert_eq!(rendered.as_str(), "hello world");
     }
 
     #[test]
     fn continue_final_message_uses_last_occurrence_when_text_repeats() {
-        use dynamo_protocols::types::ChatCompletionRequestMessage;
         use dynamo_renderer::RenderedPrompt;
 
-        let prompt = RenderedPrompt::text(
-            "LLM-Native Interaction in the user turn. LLM-Native Interaction<|im_end|>".to_string(),
-        );
-        let messages: Vec<ChatCompletionRequestMessage> =
-            serde_json::from_value(serde_json::json!([
+        let rendered = continue_rendered(
+            RenderedPrompt::text(
+                "LLM-Native Interaction in the user turn. LLM-Native Interaction<|im_end|>"
+                    .to_string(),
+            ),
+            serde_json::json!([
                 {"role": "user", "content": "LLM-Native Interaction in the user turn."},
                 {"role": "assistant", "content": "LLM-Native Interaction"}
-            ]))
-            .unwrap();
-
-        let rendered = super::apply_continue_final_message(prompt, Some(&messages));
+            ]),
+        );
         assert_eq!(
             rendered.as_str(),
             "LLM-Native Interaction in the user turn. LLM-Native Interaction"
@@ -757,25 +843,34 @@ mod tests {
 
     #[test]
     fn continue_final_message_reads_last_text_part_from_array_content() {
-        use dynamo_protocols::types::ChatCompletionRequestMessage;
         use dynamo_renderer::RenderedPrompt;
 
-        let prompt = RenderedPrompt::text("prefix Design extra".to_string());
-        let messages: Vec<ChatCompletionRequestMessage> =
-            serde_json::from_value(serde_json::json!([
-                {"role": "assistant", "content": [
+        let rendered = continue_rendered(
+            RenderedPrompt::text("prefix Design extra".to_string()),
+            serde_json::json!([{
+                "role": "assistant",
+                "content": [
                     {"type": "text", "text": "ignored"},
                     {"type": "text", "text": "Design"}
-                ]}
-            ]))
-            .unwrap();
-
-        let rendered = super::apply_continue_final_message(prompt, Some(&messages));
+                ]
+            }]),
+        );
         assert_eq!(rendered.as_str(), "prefix Design");
     }
 
     #[test]
-    fn continue_final_message_keeps_prompt_when_assistant_text_is_missing() {
+    fn continue_final_message_continues_final_user_message() {
+        use dynamo_renderer::RenderedPrompt;
+
+        let rendered = continue_rendered(
+            RenderedPrompt::text("hello world extra".to_string()),
+            serde_json::json!([{"role": "user", "content": "hello world"}]),
+        );
+        assert_eq!(rendered.as_str(), "hello world");
+    }
+
+    #[test]
+    fn continue_final_message_errors_when_final_text_is_missing() {
         use dynamo_protocols::types::ChatCompletionRequestMessage;
         use dynamo_renderer::RenderedPrompt;
 
@@ -786,40 +881,80 @@ mod tests {
             ]))
             .unwrap();
 
-        let rendered = super::apply_continue_final_message(prompt, Some(&messages));
-        assert_eq!(rendered.as_str(), "unchanged");
+        let err = super::apply_continue_final_message(prompt, Some(&messages)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("not found in the rendered chat template"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn continue_final_message_errors_when_final_content_is_empty() {
+        use dynamo_protocols::types::ChatCompletionRequestMessage;
+        use dynamo_renderer::RenderedPrompt;
+
+        let prompt = RenderedPrompt::text("closed<|im_end|>".to_string());
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([
+                {"role": "assistant", "content": ""}
+            ]))
+            .unwrap();
+
+        let err = super::apply_continue_final_message(prompt, Some(&messages)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("not found in the rendered chat template"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn continue_final_message_errors_when_only_an_earlier_message_matches() {
+        use dynamo_protocols::types::ChatCompletionRequestMessage;
+        use dynamo_renderer::RenderedPrompt;
+
+        let prompt = RenderedPrompt::text("hello extra HELLO<|im_end|>".to_string());
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([
+                {"role": "user", "content": "hello extra"},
+                {"role": "assistant", "content": "hello"}
+            ]))
+            .unwrap();
+
+        let err = super::apply_continue_final_message(prompt, Some(&messages)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("not found in the rendered chat template"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
     fn continue_final_message_preserves_segment_boundaries() {
-        use dynamo_protocols::types::ChatCompletionRequestMessage;
         use dynamo_renderer::{RenderedPrompt, RenderedSegment};
 
-        let prompt = RenderedPrompt::segmented(vec![
-            RenderedSegment {
-                text: "<|im_start|>assistant\n".to_string(),
-                allow_special: true,
-            },
-            RenderedSegment {
-                text: "LLM-Native Interaction".to_string(),
-                allow_special: false,
-            },
-            RenderedSegment {
-                text: "<|im_end|>".to_string(),
-                allow_special: true,
-            },
-            RenderedSegment {
-                text: "<|im_start|>assistant\n".to_string(),
-                allow_special: true,
-            },
-        ]);
-        let messages: Vec<ChatCompletionRequestMessage> =
-            serde_json::from_value(serde_json::json!([
-                {"role": "assistant", "content": "LLM-Native Interaction"}
-            ]))
-            .unwrap();
-
-        let rendered = super::apply_continue_final_message(prompt, Some(&messages));
+        let rendered = continue_rendered(
+            RenderedPrompt::segmented(vec![
+                RenderedSegment {
+                    text: "<|im_start|>assistant\n".to_string(),
+                    allow_special: true,
+                },
+                RenderedSegment {
+                    text: "LLM-Native Interaction".to_string(),
+                    allow_special: false,
+                },
+                RenderedSegment {
+                    text: "<|im_end|>".to_string(),
+                    allow_special: true,
+                },
+                RenderedSegment {
+                    text: "<|im_start|>assistant\n".to_string(),
+                    allow_special: true,
+                },
+            ]),
+            serde_json::json!([{"role": "assistant", "content": "LLM-Native Interaction"}]),
+        );
         assert_eq!(
             rendered.as_str(),
             "<|im_start|>assistant\nLLM-Native Interaction"
@@ -836,26 +971,21 @@ mod tests {
 
     #[test]
     fn continue_final_message_truncates_inside_an_ordinary_segment() {
-        use dynamo_protocols::types::ChatCompletionRequestMessage;
         use dynamo_renderer::{RenderedPrompt, RenderedSegment};
 
-        let prompt = RenderedPrompt::segmented(vec![
-            RenderedSegment {
-                text: "<ctrl>".to_string(),
-                allow_special: true,
-            },
-            RenderedSegment {
-                text: "hello world extra".to_string(),
-                allow_special: false,
-            },
-        ]);
-        let messages: Vec<ChatCompletionRequestMessage> =
-            serde_json::from_value(serde_json::json!([
-                {"role": "assistant", "content": "hello world"}
-            ]))
-            .unwrap();
-
-        let rendered = super::apply_continue_final_message(prompt, Some(&messages));
+        let rendered = continue_rendered(
+            RenderedPrompt::segmented(vec![
+                RenderedSegment {
+                    text: "<ctrl>".to_string(),
+                    allow_special: true,
+                },
+                RenderedSegment {
+                    text: "hello world extra".to_string(),
+                    allow_special: false,
+                },
+            ]),
+            serde_json::json!([{"role": "assistant", "content": "hello world"}]),
+        );
         assert_eq!(rendered.as_str(), "<ctrl>hello world");
         let segments = rendered
             .segments()

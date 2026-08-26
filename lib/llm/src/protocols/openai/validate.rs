@@ -870,28 +870,23 @@ pub fn validate_chat_template_args(
 }
 
 /// vLLM `ChatCompletionRequest` (`mode="before"`): both flags true on the raw
-/// payload is an error. Omitting `add_generation_prompt` while setting
-/// `continue_final_message` is allowed; the preprocessor then treats generation
-/// prompt as false. The last message must be assistant.
+/// payload is an error. Omitted `add_generation_prompt` finalizes to true (vLLM
+/// 0.27.1 and the Python frontend), so `continue_final_message=true` requires
+/// an explicit `add_generation_prompt=false`. Generic HuggingFace continuation
+/// is not assistant-only; last-message role is checked at truncation time.
 pub fn validate_continue_final_message(
     add_generation_prompt: Option<bool>,
     continue_final_message: Option<bool>,
-    messages: &[dynamo_protocols::types::ChatCompletionRequestMessage],
 ) -> Result<(), anyhow::Error> {
     if continue_final_message != Some(true) {
         return Ok(());
     }
-    if add_generation_prompt == Some(true) {
+    if add_generation_prompt.unwrap_or(true) {
         anyhow::bail!(
             "Cannot set both `continue_final_message` and `add_generation_prompt` to True."
         );
     }
-    match messages.last() {
-        Some(dynamo_protocols::types::ChatCompletionRequestMessage::Assistant(_)) => Ok(()),
-        _ => anyhow::bail!(
-            "`continue_final_message` requires the last message to be an assistant message"
-        ),
-    }
+    Ok(())
 }
 
 /// Chat-template generation controls are meaningless on `/v1/completions`.
