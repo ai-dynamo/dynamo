@@ -24,13 +24,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
+	"sort"
 	"strings"
 	"text/template"
 	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -60,7 +61,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/defaulting"
 )
 
 const (
@@ -855,7 +855,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingPhase(ctx contex
 			return ctrl.Result{}, err
 		}
 
-		if matches, mismatchReason := resolveGeneratedDGDIdentity(dgdr, dgd, generatedDGD); !matches {
+		matches, mismatchReason, err := resolveGeneratedDGDIdentity(dgdr, dgd, generatedDGD)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		if !matches {
 			return r.failDeploymentNameCollision(ctx, dgdr, dgd, mismatchReason)
 		}
 	}
@@ -1054,7 +1058,11 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 				return ctrl.Result{}, getErr
 			}
 
-			if matches, mismatchReason := resolveGeneratedDGDIdentity(dgdr, existingDGD, generatedDGD); !matches {
+			matches, mismatchReason, identityErr := resolveGeneratedDGDIdentity(dgdr, existingDGD, generatedDGD)
+			if identityErr != nil {
+				return ctrl.Result{}, identityErr
+			}
+			if !matches {
 				return r.failDeploymentNameCollision(ctx, dgdr, existingDGD, mismatchReason)
 			}
 
@@ -1136,47 +1144,136 @@ func resolveGeneratedDGDIdentity(
 	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
 	liveDGD *nvidiacomv1beta1.DynamoGraphDeployment,
 	generatedDGD *nvidiacomv1beta1.DynamoGraphDeployment,
-) (matches bool, mismatchReason string) {
+) (matches bool, mismatchReason string, err error) {
 	// Require the tracking labels this controller writes on every DGD it creates.
 	if liveDGD.Labels[nvidiacomv1beta1.LabelDGDRName] != dgdr.Name ||
 		liveDGD.Labels[nvidiacomv1beta1.LabelDGDRNamespace] != dgdr.Namespace ||
 		liveDGD.Labels[nvidiacomv1beta1.LabelManagedBy] != nvidiacomv1beta1.LabelValueDynamoOperator {
-		return false, "it does not carry this request's tracking labels"
+		return false, "it does not carry this request's tracking labels", nil
 	}
 
-	// Require the live spec to be the one this request generated.
-	if !generatedSpecMatches(liveDGD, generatedDGD) {
-		return false, "its spec differs from the spec this request generated"
+	// Require the live spec to carry everything this request asked for.
+	divergence, err := generatedSpecDivergence(liveDGD, generatedDGD)
+	if err != nil {
+		return false, "", err
+	}
+	if divergence != "" {
+		return false, fmt.Sprintf("its %s differs from the spec this request generated", divergence), nil
 	}
 
-	return true, ""
+	return true, "", nil
 }
 
-// generatedSpecMatches reports whether liveDGD's spec is the spec generatedDGD
-// describes, tolerating the defaults admission adds on the way in. Both arguments
-// must be non-nil and neither is modified.
+// generatedSpecDivergence returns the first field path at which liveDGD fails to
+// carry what generatedDGD asks for, or the empty string when the live spec
+// satisfies the generated one. Both arguments must be non-nil and neither is
+// modified. An error means the comparison could not be made at all and the caller
+// must retry rather than conclude anything about identity.
 //
-// A strict comparison against the raw generated spec is wrong here. liveDGD has
-// passed through the DGD mutating webhook and so carries defaulted replicas,
-// Grove minimum-available replicas, and provider-override targets that the generated
-// spec never had; comparing the two directly reports a mismatch on every legitimate
-// recovery. Normalizing both sides through the webhook's own defaulting keeps the
-// comparison honest as those defaults grow, and cannot mask a real divergence,
-// because defaulting only fills fields that are unset.
+// This is deliberately a subset test and not an equality test. Equality is wrong
+// here because the two sides have been through different numbers of defaulting
+// layers, and there is no way to run the missing ones in process:
 //
-// The provider comes from the live object's controller-owned annotation rather than
-// from a guess: when it is absent, the provider-conditional defaults are suppressed
-// on both sides instead of being invented for one of them.
-func generatedSpecMatches(liveDGD, generatedDGD *nvidiacomv1beta1.DynamoGraphDeployment) bool {
-	provider, providerSelected := liveDGD.Annotations[consts.KubeAnnotationWorkloadProvider]
+//   - liveDGD was persisted through the API server, so it carries the DGD CRD's
+//     structural defaults — a container port's protocol, multinode.nodeCount,
+//     restart.strategy.type, and every non-zero default under experimental.
+//   - liveDGD also passed the DGD mutating webhook, so it carries defaulted
+//     replicas, Grove minimum-available replicas, and provider-override targets.
+//   - generatedDGD was decoded from an annotation this controller wrote from
+//     profiler output. It has been through neither layer.
+//
+// An earlier revision normalized both sides through the mutating webhook's own
+// defaulting. That closed the webhook gap and left the structural one wide open:
+// any request whose generated spec touched a defaulted subtree — reachable today
+// through spec.overrides.dgd — was failed terminally for colliding with the
+// deployment it had just created itself.
+//
+// Subset comparison closes both gaps at once and stays closed as either layer
+// grows, because defaulting only ever fills a field that was left unset. A live
+// value that contradicts a generated one, or a generated field the live object
+// does not have at all, is still a divergence and still rejected. What it
+// deliberately does not detect is a live object that is a strict superset of the
+// generated spec; the tracking-label half of the contract is what establishes
+// ownership, and this half only has to confirm the deployment we asked for.
+func generatedSpecDivergence(liveDGD, generatedDGD *nvidiacomv1beta1.DynamoGraphDeployment) (string, error) {
+	liveSpec, err := specAsJSONValue(liveDGD)
+	if err != nil {
+		return "", fmt.Errorf("failed to encode the live deployment spec for comparison: %w", err)
+	}
+	generatedSpec, err := specAsJSONValue(generatedDGD)
+	if err != nil {
+		return "", fmt.Errorf("failed to encode the generated deployment spec for comparison: %w", err)
+	}
 
-	// Normalize copies of both sides through the same defaults before comparing.
-	normalizedLive := liveDGD.DeepCopy()
-	normalizedGenerated := generatedDGD.DeepCopy()
-	defaulting.ApplySpecDefaults(normalizedLive, provider, providerSelected)
-	defaulting.ApplySpecDefaults(normalizedGenerated, provider, providerSelected)
+	return jsonSubsetDivergence(generatedSpec, liveSpec, "spec"), nil
+}
 
-	return apiequality.Semantic.DeepEqual(normalizedLive.Spec, normalizedGenerated.Spec)
+// specAsJSONValue renders dgd's spec as the generic JSON value the API server
+// would have seen, so that a field the Go type serializes with omitempty is
+// absent here exactly when it was absent on the wire. That correspondence is what
+// makes the subset test line up with structural defaulting, which fills a field
+// only when the submitted document omits it. dgd must not be nil and is not
+// modified.
+func specAsJSONValue(dgd *nvidiacomv1beta1.DynamoGraphDeployment) (any, error) {
+	encoded, err := json.Marshal(dgd.Spec)
+	if err != nil {
+		return nil, err
+	}
+	var decoded any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		return nil, err
+	}
+	return decoded, nil
+}
+
+// jsonSubsetDivergence returns the path of the first place where have does not
+// carry what want specifies, or the empty string when it does. Both arguments are
+// generic JSON values as produced by specAsJSONValue. path names the position
+// being compared and appears in the operator-facing collision message, so keys are
+// walked in sorted order to keep the reported path stable across runs.
+//
+// Lists compare element-wise and require equal length. Structural defaulting can
+// fill fields inside an existing element but cannot add or drop elements, so a
+// length difference is a real divergence rather than a defaulting artifact.
+func jsonSubsetDivergence(want, have any, path string) string {
+	switch wantValue := want.(type) {
+	case map[string]any:
+		haveObject, isObject := have.(map[string]any)
+		if !isObject {
+			return path
+		}
+		keys := make([]string, 0, len(wantValue))
+		for key := range wantValue {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			haveChild, present := haveObject[key]
+			if !present {
+				return path + "." + key
+			}
+			if divergence := jsonSubsetDivergence(wantValue[key], haveChild, path+"."+key); divergence != "" {
+				return divergence
+			}
+		}
+		return ""
+	case []any:
+		haveList, isList := have.([]any)
+		if !isList || len(haveList) != len(wantValue) {
+			return path
+		}
+		for index := range wantValue {
+			if divergence := jsonSubsetDivergence(wantValue[index], haveList[index], fmt.Sprintf("%s[%d]", path, index)); divergence != "" {
+				return divergence
+			}
+		}
+		return ""
+	default:
+		if !reflect.DeepEqual(want, have) {
+			return path
+		}
+		return ""
+	}
 }
 
 // failDeploymentNameCollision drives the request terminal because the DGD name it
