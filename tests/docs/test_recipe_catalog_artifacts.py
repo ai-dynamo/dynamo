@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import importlib.util
 import json
 import re
 import subprocess
@@ -11,24 +10,15 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.docs.recipe_catalog_test_utils import (
+    CATALOG,
+    VALIDATOR_PATH,
+    load_catalog_validator,
+)
+
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-CATALOG = REPO_ROOT / "docs/fern/pages/recipes/_catalog"
-VALIDATOR_PATH = CATALOG / "validate.py"
-
-if not VALIDATOR_PATH.is_file():
-    pytest.skip(
-        "recipe catalog sources are not present in this runtime image",
-        allow_module_level=True,
-    )
-
-_SPEC = importlib.util.spec_from_file_location(
-    "recipe_catalog_validate", VALIDATOR_PATH
-)
-assert _SPEC is not None and _SPEC.loader is not None
-catalog_validate = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(catalog_validate)
+catalog_validate = load_catalog_validator("recipe_catalog_validate")
 
 
 @pytest.mark.parametrize(
@@ -309,32 +299,32 @@ def test_recipe_image_validation_rejects_duplicate_ownership() -> None:
     )
 
 
+def _period_artifacts(
+    image: str,
+    revision: str,
+    start: str = "",
+    end: str = "",
+    current: bool = False,
+) -> dict[str, object]:
+    period: dict[str, str] = {"image": image, "source_revision": revision}
+    if start:
+        period["effective_from"] = start
+    if end:
+        period["effective_to"] = end
+    artifacts: dict[str, object] = {"recipe_specific_image_periods": [period]}
+    if current:
+        artifacts["recipe_specific_images"] = [image]
+    return artifacts
+
+
 def test_recipe_image_validation_allows_effective_dated_ownership_handoff() -> None:
     image = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-handoff-dev.1"
     entries = {
         "recipe-a": {
-            "artifacts": {
-                "recipe_specific_image_periods": [
-                    {
-                        "image": image,
-                        "effective_from": "2026-01-01",
-                        "effective_to": "2026-01-31",
-                        "source_revision": "a" * 40,
-                    }
-                ],
-            }
+            "artifacts": _period_artifacts(image, "a" * 40, "2026-01-01", "2026-01-31")
         },
         "recipe-b": {
-            "artifacts": {
-                "recipe_specific_images": [image],
-                "recipe_specific_image_periods": [
-                    {
-                        "image": image,
-                        "effective_from": "2026-02-01",
-                        "source_revision": "b" * 40,
-                    }
-                ],
-            }
+            "artifacts": _period_artifacts(image, "b" * 40, "2026-02-01", current=True)
         },
     }
     catalog_validate.ERRORS.clear()
@@ -348,28 +338,10 @@ def test_recipe_image_validation_rejects_overlapping_effective_periods() -> None
     image = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-overlap-dev.1"
     entries = {
         "recipe-a": {
-            "artifacts": {
-                "recipe_specific_image_periods": [
-                    {
-                        "image": image,
-                        "effective_from": "2026-01-01",
-                        "effective_to": "2026-02-01",
-                        "source_revision": "a" * 40,
-                    }
-                ],
-            }
+            "artifacts": _period_artifacts(image, "a" * 40, "2026-01-01", "2026-02-01")
         },
         "recipe-b": {
-            "artifacts": {
-                "recipe_specific_images": [image],
-                "recipe_specific_image_periods": [
-                    {
-                        "image": image,
-                        "effective_from": "2026-02-01",
-                        "source_revision": "b" * 40,
-                    }
-                ],
-            }
+            "artifacts": _period_artifacts(image, "b" * 40, "2026-02-01", current=True)
         },
     }
     catalog_validate.ERRORS.clear()
@@ -384,28 +356,9 @@ def test_recipe_image_validation_rejects_overlapping_effective_periods() -> None
 def test_recipe_image_validation_rejects_same_start_overlapping_periods() -> None:
     image = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-overlap-dev.1"
     entries = {
-        "recipe-a": {
-            "artifacts": {
-                "recipe_specific_image_periods": [
-                    {
-                        "image": image,
-                        "effective_from": "2026-01-01",
-                        "source_revision": "a" * 40,
-                    }
-                ],
-            }
-        },
+        "recipe-a": {"artifacts": _period_artifacts(image, "a" * 40, "2026-01-01")},
         "recipe-b": {
-            "artifacts": {
-                "recipe_specific_image_periods": [
-                    {
-                        "image": image,
-                        "effective_from": "2026-01-01",
-                        "effective_to": "2026-02-01",
-                        "source_revision": "b" * 40,
-                    }
-                ],
-            }
+            "artifacts": _period_artifacts(image, "b" * 40, "2026-01-01", "2026-02-01")
         },
     }
     catalog_validate.ERRORS.clear()
@@ -475,17 +428,7 @@ def test_recipe_image_validation_rejects_closed_period_for_deployed_image(
     image = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-still-deployed-dev.1"
     deploy = tmp_path / "deploy.yaml"
     deploy.write_text(f"image: {image}\n")
-    artifacts = {
-        "recipe_specific_images": [],
-        "recipe_specific_image_periods": [
-            {
-                "image": image,
-                "effective_from": "2026-01-01",
-                "effective_to": "2026-02-01",
-                "source_revision": "a" * 40,
-            }
-        ],
-    }
+    artifacts = _period_artifacts(image, "a" * 40, "2026-01-01", "2026-02-01")
 
     errors = catalog_validate._image_attribution.recipe_image_errors(
         artifacts, [deploy], "still-deployed"

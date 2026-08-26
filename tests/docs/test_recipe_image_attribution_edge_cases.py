@@ -1,29 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import importlib.util
 from datetime import date
-from pathlib import Path
 
 import pytest
 
+from tests.docs.recipe_catalog_test_utils import load_catalog_validator
+
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-VALIDATOR_PATH = REPO_ROOT / "docs/fern/pages/recipes/_catalog/validate.py"
-
-if not VALIDATOR_PATH.is_file():
-    pytest.skip(
-        "recipe catalog sources are not present in this runtime image",
-        allow_module_level=True,
-    )
-
-_SPEC = importlib.util.spec_from_file_location(
-    "recipe_catalog_validate_edge_cases", VALIDATOR_PATH
-)
-assert _SPEC is not None and _SPEC.loader is not None
-catalog_validate = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(catalog_validate)
+catalog_validate = load_catalog_validator("recipe_catalog_validate_edge_cases")
 
 
 def test_recipe_image_validation_rejects_unquoted_end_date_without_crashing() -> None:
