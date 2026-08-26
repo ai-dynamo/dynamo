@@ -25,7 +25,6 @@ from dynamo.vllm.kv_connector_protocols import (
     KvConnectorProtocol,
     MooncakeConnectorProtocol,
     NixlConnectorProtocol,
-    NixlPushConnectorProtocol,
     make_kv_connector_protocol,
 )
 
@@ -487,42 +486,13 @@ def test_registry_keys_match_vllm_connector_names():
 
 
 # ---------------------------------------------------------------------------
-# NixlPushConnectorProtocol
+# NixlPushConnector (shares NixlConnectorProtocol)
 # ---------------------------------------------------------------------------
 
 
 def test_make_kv_connector_protocol_dispatches_nixl_push():
     proto = make_kv_connector_protocol(_config("NixlPushConnector"))
-    assert isinstance(proto, NixlPushConnectorProtocol)
-
-
-def test_nixl_push_prefill_request_matches_pull_mode():
-    """Push reverses who moves the blocks, not what the producer leg declares.
-
-    ``do_remote_decode`` is what marks this engine as the producer in both
-    modes; a divergence here would silently stop the prefill worker from
-    staging its finished blocks for the push.
-    """
-    push = NixlPushConnectorProtocol(_config("NixlPushConnector"))
-    pull = NixlConnectorProtocol(_config("NixlConnector"))
-    assert (
-        push.prefill_request_kv_transfer_params()
-        == pull.prefill_request_kv_transfer_params()
-    )
-
-
-def test_nixl_push_decode_passes_through_engine_response():
-    """The sequential fallback: when the frontend did not pre-dispatch decode,
-    the prefill worker's own response carries the push coordinates."""
-    proto = NixlPushConnectorProtocol(_config("NixlPushConnector"))
-    engine_payload = {
-        "do_remote_prefill": True,
-        "remote_engine_id": "eng-1",
-        "remote_host": "10.0.0.1",
-        "remote_port": 5600,
-    }
-    response = SimpleNamespace(kv_transfer_params=engine_payload)
-    assert proto.decode_request_kv_transfer_params(response) is engine_payload
+    assert isinstance(proto, NixlConnectorProtocol)
 
 
 def test_nixl_push_resolves_inside_pd_connector():
@@ -539,7 +509,7 @@ def test_nixl_push_resolves_inside_pd_connector():
             engine_id="wrapper-engine",
         )
     )
-    assert isinstance(proto, NixlPushConnectorProtocol)
+    assert isinstance(proto, NixlConnectorProtocol)
 
 
 def test_nixl_connector_names_cover_every_registered_nixl_protocol():

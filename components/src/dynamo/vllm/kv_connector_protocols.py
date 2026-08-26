@@ -58,28 +58,6 @@ class NixlConnectorProtocol(KvConnectorProtocol):
         return prefill_response.kv_transfer_params
 
 
-class NixlPushConnectorProtocol(NixlConnectorProtocol):
-    """Push-based, but with the same ``kv_transfer_params`` shape as pull.
-
-    ``NixlPushConnector`` reverses who moves the KV blocks -- prefill WRITEs
-    into decode's pre-allocated memory instead of decode READing prefill's --
-    but that reversal is negotiated worker-to-worker over NIXL notifications,
-    not through the params the handler sets. So the prefill leg is byte-identical
-    to pull mode (``do_remote_decode`` is what marks this engine as the producer),
-    and the decode leg is still whatever the prefill response reports.
-
-    Inheriting rather than aliasing keeps the registry honest about which
-    connector is configured, and gives the divergence somewhere to land if
-    upstream ever splits the two shapes.
-
-    Note this is the *sequential* handoff, used when the frontend did not
-    pre-dispatch decode. It works -- the prefill worker holds its finished
-    blocks until decode's late registration arrives -- but it forfeits the
-    overlap push mode exists to buy. The overlapped path builds decode's params
-    in the router from discovery, and never consults this class.
-    """
-
-
 class MooncakeConnectorProtocol(KvConnectorProtocol):
     """Push-based: ``transfer_id`` is allocated up front and threaded
     through both sides; bootstrap address is published to the decode
@@ -129,19 +107,21 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
 
 
 # Keyed by ``KVTransferConfig.kv_connector``. One entry per connector.
+# ``KVTransferConfig.kv_connector`` value that selects push mode.
+PUSH_CONNECTOR_NAME: str = "NixlPushConnector"
+
+# Keyed by ``KVTransferConfig.kv_connector``. One entry per connector.
+# Push reverses who moves the blocks, but that is negotiated worker-to-worker
+# over NIXL; the params either leg declares are identical to pull mode.
 KV_CONNECTOR_PROTOCOLS: Dict[str, Type[KvConnectorProtocol]] = {
     "NixlConnector": NixlConnectorProtocol,
-    "NixlPushConnector": NixlPushConnectorProtocol,
+    PUSH_CONNECTOR_NAME: NixlConnectorProtocol,
     "MooncakeConnector": MooncakeConnectorProtocol,
 }
 
 # Connectors that transfer over NIXL and therefore need the side-channel host
-# resolved before the engine starts. Both directions of the transfer use the
-# same side channel, so push belongs here for the same reason pull does.
-NIXL_CONNECTOR_NAMES: Tuple[str, ...] = ("NixlConnector", "NixlPushConnector")
-
-# ``KVTransferConfig.kv_connector`` value that selects push mode.
-PUSH_CONNECTOR_NAME: str = "NixlPushConnector"
+# resolved before the engine starts. Both directions use the same side channel.
+NIXL_CONNECTOR_NAMES: Tuple[str, ...] = ("NixlConnector", PUSH_CONNECTOR_NAME)
 
 # Wrapper connectors that compose sub-connectors under
 # ``kv_connector_extra_config["connectors"]``. ``PdConnector``
