@@ -16,11 +16,11 @@
 //!
 //! Selected per handler by signature — [`handler_supports_push`] picks this
 //! path for a handler declaring a `response_sender` parameter, which in
-//! practice means the TRT-LLM `@push_egress_capable` decorator
-//! (`components/src/dynamo/trtllm/request_handlers/push_egress.py`). There is
-//! no environment variable: that decorator is the switch, so the two halves
-//! cannot disagree about which path an endpoint is on. Every other Python
-//! handler keeps the pull path verbatim.
+//! practice means a TRT-LLM `@push_egress_capable` or SGLang
+//! `@response_handler_capable` decorator. There is no environment variable:
+//! the decorator is the switch, so the two halves cannot disagree about which
+//! path an endpoint is on. Every other Python handler keeps the pull path
+//! verbatim.
 //!
 //! The sender reaches the handler as the `response_sender` keyword argument,
 //! and only that way — the same parameter the signature check keys on.
@@ -31,7 +31,7 @@ use anyhow::Error;
 use bytes::Bytes;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyModule;
+use pyo3::types::{PyModule, PyTuple};
 use tokio_stream::{Stream, StreamExt};
 
 use tokio::sync::mpsc;
@@ -249,7 +249,14 @@ impl ResponseSink {
         // enqueue. Unlike the pull path neither step acquires the GIL — the
         // Python handler already holds it.
         let frame = PushFrame::encode(py, obj)?;
+        self.send_frame(py, frame)
+    }
 
+    /// Enqueue one response that has already been encoded.
+    ///
+    /// Splitting this from [`ResponseSink::send`] lets the batch API validate
+    /// all `(sender, response)` pairs before it changes any request stream.
+    fn send_frame(&self, py: Python<'_>, frame: PushFrame) -> PyResult<()> {
         let Some(tx) = self.sender() else {
             return Err(PyRuntimeError::new_err(
                 "response stream is closed; send() after close()",
@@ -376,6 +383,45 @@ impl ResponseSender {
     /// if the object cannot be encoded.
     fn send(&self, py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<()> {
         self.sink.send(py, obj)
+    }
+
+    /// Encode and fan out one scheduler batch through independent sinks.
+    ///
+    /// `items` contains `(ResponseSender, response)` pairs. The outer Python
+    /// callback crosses into Rust once, but every response is still encoded
+    /// and enqueued as its own ordered wire frame. A failed item does not stop
+    /// the other request streams; its index is returned so the response
+    /// handler can stop tracking that request.
+    #[staticmethod]
+    fn send_batch(py: Python<'_>, items: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
+        // Validate and own every pair before sending the first frame. This
+        // makes malformed input fail without partly changing request streams.
+        let mut prepared = Vec::new();
+        for item in items.try_iter()? {
+            let item = item?;
+            let pair = item.downcast::<PyTuple>().map_err(|_| {
+                PyValueError::new_err("batch fanout items must be (ResponseSender, response) pairs")
+            })?;
+            if pair.len() != 2 {
+                return Err(PyValueError::new_err(
+                    "batch fanout items must be (ResponseSender, response) pairs",
+                ));
+            }
+            let sender = pair.get_item(0)?.extract::<PyRef<'_, ResponseSender>>()?;
+            let sink = sender.sink();
+            let response = pair.get_item(1)?.unbind();
+            prepared.push((sink, response));
+        }
+
+        let mut failed = Vec::new();
+        for (index, (sink, response)) in prepared.into_iter().enumerate() {
+            let result = PushFrame::encode(py, response.bind(py))
+                .and_then(|frame| sink.send_frame(py, frame));
+            if result.is_err() {
+                failed.push(index);
+            }
+        }
+        Ok(failed)
     }
 
     /// Normal end of stream. Idempotent.

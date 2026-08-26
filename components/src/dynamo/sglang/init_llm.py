@@ -27,6 +27,10 @@ from dynamo.sglang.publisher import (
 )
 from dynamo.sglang.register import register_model_with_readiness_gate
 from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHandler
+from dynamo.sglang.request_handlers.llm.response_handler import (
+    DynamoResponseHandler,
+    create_response_handler,
+)
 
 
 async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
@@ -48,6 +52,7 @@ async def init_decode(
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
     snapshot_engine: Optional[sgl.Engine] = None,
+    response_handler: DynamoResponseHandler | None = None,
 ) -> None:
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -74,8 +79,18 @@ async def init_decode(
             server_args.enable_forward_pass_metrics = False
     else:
         set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
+        if response_handler is None:
+            response_handler = create_response_handler()
         start_time = time.time()
-        engine = sgl.Engine(server_args=server_args)
+        engine_kwargs = (
+            {"response_handler": response_handler}
+            if response_handler is not None
+            else {}
+        )
+        engine = sgl.Engine(
+            server_args=server_args,
+            **engine_kwargs,
+        )
         load_time = time.time() - start_time
 
     if server_args.enable_trace:

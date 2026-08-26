@@ -36,6 +36,10 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     extract_media_urls,
     raise_if_unextracted_multimodal,
 )
+from dynamo.sglang.request_handlers.llm.response_handler import (
+    get_response_entry,
+    response_handler_capable,
+)
 
 _SAMPLING_OPTION_FIELDS = (
     "presence_penalty",
@@ -383,6 +387,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
         return native_generate_stream(self.engine, native_request)
 
+    @response_handler_capable
     async def generate(
         self, request: Dict[str, Any], context: Context
     ) -> AsyncGenerator[Dict[str, Any], None]:
@@ -572,6 +577,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Forward opaque SGLang chunks while retaining engine cancellation."""
         request_id_future: asyncio.Future[str] = asyncio.Future()
+        response_entry = get_response_entry(self.engine, context)
+        if response_entry is not None:
+            request_id_future.set_result(response_entry.rid)
         async with self._cancellation_monitor(request_id_future, context):
             async for chunk in stream_source:
                 native_response = chunk["engine_data"]["sglang_response"]
@@ -605,6 +613,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         """
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
+        response_entry = get_response_entry(self.engine, context)
+        if response_entry is not None:
+            request_id_future.set_result(response_entry.rid)
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 meta_info = res.get("meta_info", {})
@@ -723,10 +734,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # SGLang text chunks are cumulative per choice. Keep independent text
         # offsets so interleaved n>1 choices do not compute deltas from each
         # other's previous text.
-        text_counts_per_choice: dict[int, int] = {}
+        response_entry = get_response_entry(self.engine, context)
+        text_counts_per_choice = (
+            response_entry.text_counts_per_choice if response_entry is not None else {}
+        )
 
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
+        if response_entry is not None:
+            request_id_future.set_result(response_entry.rid)
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 meta_info = res.get("meta_info", {})
@@ -753,9 +769,19 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     if finish_reason
                     else None
                 )
-                next_count = len(text)
                 count = text_counts_per_choice.get(index, 0)
-                delta = text[count:]
+                if response_entry is not None and bool(
+                    getattr(
+                        self.config.server_args,
+                        "incremental_streaming_output",
+                        False,
+                    )
+                ):
+                    delta = text
+                    next_count = count
+                else:
+                    delta = text[count:]
+                    next_count = len(text)
 
                 choice_data = {
                     "index": index,

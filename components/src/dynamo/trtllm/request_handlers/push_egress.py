@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Inverted (push-based) Python -> Rust response egress for the TRT-LLM workers.
+"""Inverted (push-based) Python -> Rust response egress for Python workers.
 
 On the pull path Rust drives the handler's async generator, taking the GIL on
 tokio threads once per response. Here the handler -- already on the event loop

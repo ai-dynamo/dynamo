@@ -771,8 +771,8 @@ class TestDecoratorAppliedToRealHandlers:
 # ===========================================================================
 
 
-class TestNoBleedIntoOtherEngines:
-    """Only TRT-LLM handlers may be push-capable.
+class TestNoBleedIntoOtherHandlers:
+    """Only the explicit backend adapters may be push-capable.
 
     `Endpoint.serve_endpoint` is shared by every Python worker -- vLLM, SGLang,
     frontend, planner, router, mocker, and more -- and the ONLY thing keeping
@@ -802,37 +802,45 @@ class TestNoBleedIntoOtherEngines:
                 hits.append(node.name)
         return hits
 
-    def test_only_trtllm_handlers_declare_response_sender(self):
+    ALLOWED_MODULES: ClassVar[set[str]] = {
+        "dynamo/trtllm/request_handlers/push_egress.py",
+        "dynamo/sglang/request_handlers/llm/response_handler.py",
+    }
+
+    def test_only_push_adapters_declare_response_sender(self):
         offenders = {}
         for path in (_COMPONENTS_SRC / "dynamo").rglob("*.py"):
-            if "/trtllm/" in path.as_posix():
-                continue  # the one engine that is supposed to have it
+            relative = path.relative_to(_COMPONENTS_SRC).as_posix()
+            if "/tests/" in f"/{relative}":
+                continue
+            if relative in self.ALLOWED_MODULES:
+                continue
             hits = self._declares_response_sender(path)
             if hits:
-                offenders[path.relative_to(_COMPONENTS_SRC).as_posix()] = hits
+                offenders[relative] = hits
 
         assert not offenders, (
-            "non-TRT-LLM code declares a `response_sender` parameter: "
+            "code outside the push adapters declares a `response_sender` parameter: "
             f"{offenders}. Endpoint.serve_endpoint selects the push egress "
             "engine purely on that parameter name, so these handlers would be "
             "driven in push mode without ever pushing -- silently degrading "
             "to the forward-yield path. Rename the parameter."
         )
 
-    def test_trtllm_side_is_where_it_lives(self):
-        """Sanity check on the scan: it must actually find the trtllm ones.
+    def test_push_adapters_are_where_response_sender_lives(self):
+        """Sanity check on the scan: it must find both push adapters.
 
         Guards against the walk silently matching nothing (wrong root, changed
         layout), which would make the test above vacuously green forever.
         """
         found = {}
-        for path in (_COMPONENTS_SRC / "dynamo" / "trtllm").rglob("*.py"):
+        for relative in self.ALLOWED_MODULES:
+            path = _COMPONENTS_SRC / relative
             hits = self._declares_response_sender(path)
             if hits:
-                found[path.name] = hits
+                found[relative] = hits
 
-        assert "push_egress.py" in found, (
-            f"scan found no response_sender parameter in trtllm/push_egress.py "
-            f"(found: {found}); the AST walk is probably broken, which would "
-            "make the no-bleed assertion vacuous"
+        assert found.keys() == self.ALLOWED_MODULES, (
+            "scan did not find response_sender in every push adapter "
+            f"(found: {found}); the AST walk may be broken"
         )
