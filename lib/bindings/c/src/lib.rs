@@ -360,20 +360,33 @@ pub unsafe extern "C" fn dynamo_llm_init(
 pub extern "C" fn dynamo_llm_shutdown() -> DynamoLlmResult {
     let mut state = lifecycle();
 
+    apply_shutdown(&mut state, || {
+        let wk = match WK.get() {
+            Some(wk) => wk,
+            None => {
+                tracing::error!("Runtime not initialized");
+                return false;
+            }
+        };
+
+        wk.runtime().shutdown();
+        true
+    })
+}
+
+fn apply_shutdown(
+    state: &mut LifecycleState,
+    shutdown_runtime: impl FnOnce() -> bool,
+) -> DynamoLlmResult {
     if matches!(&*state, LifecycleState::ShutDown) {
         tracing::debug!("dynamo_llm_shutdown called again; runtime is already shut down");
         return DynamoLlmResult::OK;
     }
 
-    let wk = match WK.get() {
-        Some(wk) => wk,
-        None => {
-            tracing::error!("Runtime not initialized");
-            return DynamoLlmResult::ERR;
-        }
-    };
+    if !shutdown_runtime() {
+        return DynamoLlmResult::ERR;
+    }
 
-    wk.runtime().shutdown();
     *state = LifecycleState::ShutDown;
 
     DynamoLlmResult::OK
@@ -1959,6 +1972,14 @@ mod tests {
     use std::ffi::CString;
     use std::time::Instant;
 
+    static LIFECYCLE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lifecycle_test_guard() -> MutexGuard<'static, ()> {
+        LIFECYCLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn c_string(value: &str) -> CString {
         CString::new(value).expect("test string must not contain an interior NUL")
     }
@@ -1974,6 +1995,7 @@ mod tests {
 
     #[test]
     fn init_is_process_once_and_rejects_incompatible_reinitialization() {
+        let _guard = lifecycle_test_guard();
         let namespace = c_string("ns_a");
         let component = c_string("comp_a");
         let endpoint_a = c_string("ep_a");
@@ -2062,16 +2084,27 @@ mod tests {
             "a refused re-init must return before any runtime work"
         );
 
-        WK.get_or_try_init(Worker::from_settings)
-            .expect("Worker::from_settings must succeed once per process");
-
-        assert_eq!(dynamo_llm_shutdown(), DynamoLlmResult::OK);
+        let mut shutdown_count = 0;
+        assert_eq!(
+            apply_shutdown(&mut lifecycle(), || {
+                shutdown_count += 1;
+                true
+            }),
+            DynamoLlmResult::OK
+        );
         assert!(
             matches!(&*lifecycle(), LifecycleState::ShutDown),
             "shutdown must record that the runtime is retired"
         );
 
-        assert_eq!(dynamo_llm_shutdown(), DynamoLlmResult::OK);
+        assert_eq!(
+            apply_shutdown(&mut lifecycle(), || {
+                shutdown_count += 1;
+                true
+            }),
+            DynamoLlmResult::OK
+        );
+        assert_eq!(shutdown_count, 1, "repeated shutdown must be a no-op");
 
         let started = Instant::now();
         let init_after_shutdown = unsafe {
@@ -2107,10 +2140,15 @@ mod tests {
             matches!(&*lifecycle(), LifecycleState::ShutDown),
             "the shut-down state is terminal"
         );
+
+        *lifecycle() = LifecycleState::Uninitialized;
     }
 
     #[test]
     fn publishing_without_an_initialized_publisher_returns_err() {
+        let _guard = lifecycle_test_guard();
+        *lifecycle() = LifecycleState::Uninitialized;
+
         let block_ids: [u64; 0] = [];
         let token_ids: [u32; 0] = [];
         let block_token_counts: [usize; 0] = [];
@@ -2132,6 +2170,8 @@ mod tests {
             )
         };
         assert_eq!(stored, DynamoLlmResult::ERR);
+
+        *lifecycle() = LifecycleState::Uninitialized;
     }
 
     #[test]
