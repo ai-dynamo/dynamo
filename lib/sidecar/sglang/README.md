@@ -22,8 +22,9 @@ cargo build --release -p dynamo-sglang-sidecar
 ```
 
 There is no published image yet; see
-[Build the image](../README.md#build-the-image) containing all sidecar executables.
-Official packaging is deferred to a follow-up.
+[Build the image](../README.md#build-the-image), which produces one image
+containing all three sidecar executables. Official packaging is deferred to a
+follow-up.
 
 Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is provided through the environment.
 
@@ -60,7 +61,8 @@ disaggregated prefill/decode with NIXL KV transfer.
 
 There is no published sidecar image yet, so build and push the image from
 `lib/sidecar/Dockerfile`. It contains all three engine-specific sidecar
-executables; this deployment passes `sglang` to the image entrypoint.
+executables; these manifests run `dynamo-sglang-sidecar` as the container
+command.
 
 > [!NOTE]
 > The engine image must be a stock SGLang **v0.5.16+** build: the native gRPC
@@ -80,8 +82,8 @@ executables; this deployment passes `sglang` to the image entrypoint.
 ### 1. Build and push the sidecar image
 
 Follow [Build the image](../README.md#build-the-image) and push the result to
-a registry your cluster can pull from. This deployment passes `sglang` as the
-first container argument.
+a registry your cluster can pull from. These manifests set the container
+`command` to `dynamo-sglang-sidecar`.
 
 ### 2. Point the manifest at your image
 

@@ -50,18 +50,21 @@ event integration with Dynamo's discovery and event planes.
 ## Container Packaging
 
 The sidecar Dockerfile builds all three engine-specific sidecar executables into
-one CPU-only image. The image provides one `dynamo-sidecar` entrypoint:
+one CPU-only image. Deployments select an engine by setting the container
+`command`:
 
-| Engine | First container argument |
+| Engine | Container command |
 |---|---|
-| vLLM | `vllm` |
-| SGLang | `sglang` |
-| TensorRT-LLM | `trtllm` |
+| vLLM | `dynamo-vllm-sidecar` |
+| SGLang | `dynamo-sglang-sidecar` |
+| TensorRT-LLM | `dynamo-trtllm-sidecar` |
 
-The entrypoint runs the matching engine-specific executable and forwards the
-remaining arguments. The inference engine remains in a separate GPU container,
-so the sidecar image does not include vLLM, SGLang, TensorRT-LLM, CUDA, or
-engine-specific Python dependencies.
+The image's default entrypoint, `dynamo-sidecar`, maps the short names `vllm`,
+`sglang`, and `trtllm` onto those executables. It is a convenience for ad-hoc
+`docker run`; the deployment manifests override it with `command`. The inference
+engine remains in a separate GPU container, so the sidecar image does not
+include vLLM, SGLang, TensorRT-LLM, CUDA, or engine-specific Python
+dependencies.
 
 No published sidecar image is available yet. Build `dynamo-sidecar` from the
 [sidecar Dockerfile](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/Dockerfile).
