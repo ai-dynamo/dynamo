@@ -19,7 +19,6 @@ except ImportError:
     cuda = None
 
 
-
 def _check_cuda(result, operation: str) -> None:
     if cuda is None:
         raise RuntimeError(

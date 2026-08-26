@@ -96,9 +96,7 @@ def get_socket_path(device: int, tag: str = "weights") -> str:
             pynvml.nvmlShutdown()
         _uuid_cache[device] = uuid
     socket_dir = os.environ.get("GMS_SOCKET_DIR") or tempfile.gettempdir()
-    return ensure_af_unix_path_fits(
-        os.path.join(socket_dir, f"gms_{uuid}_{tag}.sock")
-    )
+    return ensure_af_unix_path_fits(os.path.join(socket_dir, f"gms_{uuid}_{tag}.sock"))
 
 
 def align_to_granularity(size: int, granularity: int) -> int:
