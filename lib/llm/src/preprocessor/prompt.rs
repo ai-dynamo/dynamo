@@ -29,8 +29,8 @@ use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
 };
 use dynamo_protocols::types::{
-    ChatCompletionRequestAssistantMessageContent,
-    ChatCompletionRequestAssistantMessageContentPart, ChatCompletionRequestMessage,
+    ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestAssistantMessageContentPart,
+    ChatCompletionRequestMessage,
 };
 
 /// lib/llm-local extension carrying multimodal media-IO config. Kept off
@@ -661,14 +661,18 @@ mod tests {
         let prompt = RenderedPrompt::text(
             "user text<|im_end|>LLM-Native Interaction<|im_end|><|im_start|>assistant".to_string(),
         );
-        let messages: Vec<ChatCompletionRequestMessage> = serde_json::from_value(serde_json::json!([
-            {"role": "user", "content": "user text"},
-            {"role": "assistant", "content": "LLM-Native Interaction"}
-        ]))
-        .unwrap();
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([
+                {"role": "user", "content": "user text"},
+                {"role": "assistant", "content": "LLM-Native Interaction"}
+            ]))
+            .unwrap();
 
         let rendered = super::apply_continue_final_message(prompt, Some(&messages));
-        assert_eq!(rendered.as_str(), "user text<|im_end|>LLM-Native Interaction");
+        assert_eq!(
+            rendered.as_str(),
+            "user text<|im_end|>LLM-Native Interaction"
+        );
     }
 
     #[test]
@@ -677,10 +681,11 @@ mod tests {
         use dynamo_renderer::RenderedPrompt;
 
         let prompt = RenderedPrompt::text("hello world extra".to_string());
-        let messages: Vec<ChatCompletionRequestMessage> = serde_json::from_value(serde_json::json!([
-            {"role": "assistant", "content": "  world  "}
-        ]))
-        .unwrap();
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([
+                {"role": "assistant", "content": "  world  "}
+            ]))
+            .unwrap();
 
         let rendered = super::apply_continue_final_message(prompt, Some(&messages));
         assert_eq!(rendered.as_str(), "hello world");
@@ -694,11 +699,12 @@ mod tests {
         let prompt = RenderedPrompt::text(
             "LLM-Native Interaction in the user turn. LLM-Native Interaction<|im_end|>".to_string(),
         );
-        let messages: Vec<ChatCompletionRequestMessage> = serde_json::from_value(serde_json::json!([
-            {"role": "user", "content": "LLM-Native Interaction in the user turn."},
-            {"role": "assistant", "content": "LLM-Native Interaction"}
-        ]))
-        .unwrap();
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([
+                {"role": "user", "content": "LLM-Native Interaction in the user turn."},
+                {"role": "assistant", "content": "LLM-Native Interaction"}
+            ]))
+            .unwrap();
 
         let rendered = super::apply_continue_final_message(prompt, Some(&messages));
         assert_eq!(
@@ -713,13 +719,14 @@ mod tests {
         use dynamo_renderer::RenderedPrompt;
 
         let prompt = RenderedPrompt::text("prefix Design extra".to_string());
-        let messages: Vec<ChatCompletionRequestMessage> = serde_json::from_value(serde_json::json!([
-            {"role": "assistant", "content": [
-                {"type": "text", "text": "ignored"},
-                {"type": "text", "text": "Design"}
-            ]}
-        ]))
-        .unwrap();
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "ignored"},
+                    {"type": "text", "text": "Design"}
+                ]}
+            ]))
+            .unwrap();
 
         let rendered = super::apply_continue_final_message(prompt, Some(&messages));
         assert_eq!(rendered.as_str(), "prefix Design");
@@ -731,10 +738,11 @@ mod tests {
         use dynamo_renderer::RenderedPrompt;
 
         let prompt = RenderedPrompt::text("unchanged".to_string());
-        let messages: Vec<ChatCompletionRequestMessage> = serde_json::from_value(serde_json::json!([
-            {"role": "assistant", "content": "not-in-the-prompt"}
-        ]))
-        .unwrap();
+        let messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(serde_json::json!([
+                {"role": "assistant", "content": "not-in-the-prompt"}
+            ]))
+            .unwrap();
 
         let rendered = super::apply_continue_final_message(prompt, Some(&messages));
         assert_eq!(rendered.as_str(), "unchanged");
