@@ -23,6 +23,7 @@ rules:
   - agent-docs/rules/benchmarking/proxy-workload-selection.md
   - agent-docs/rules/benchmarking/result-storage.md
   - agent-docs/rules/benchmarking/series-boundaries.md
+  - agent-docs/rules/benchmarking/tool-version.md
   - agent-docs/rules/optimization/evidence-before-spend.md
   - agent-docs/rules/optimization/one-variable.md
   - agent-docs/rules/verification/config-engagement.md
