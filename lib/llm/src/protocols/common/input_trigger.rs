@@ -56,15 +56,7 @@ pub fn classify_response_request(request: &NvCreateResponse) -> InputTrigger {
                 return InputTrigger::Other;
             };
             match last {
-                InputItem::Item(
-                    Item::FunctionCallOutput(_)
-                    | Item::ToolSearchOutput(_)
-                    | Item::ComputerCallOutput(_)
-                    | Item::LocalShellCallOutput(_)
-                    | Item::ShellCallOutput(_)
-                    | Item::ApplyPatchCallOutput(_)
-                    | Item::CustomToolCallOutput(_),
-                ) => InputTrigger::ToolResult,
+                InputItem::Item(item) if is_response_tool_output(item) => InputTrigger::ToolResult,
                 InputItem::Item(Item::Message(MessageItem::Input(msg))) => {
                     if msg.role == InputRole::User {
                         InputTrigger::UserMessage
@@ -84,6 +76,23 @@ pub fn classify_response_request(request: &NvCreateResponse) -> InputTrigger {
             }
         }
     }
+}
+
+/// Return whether an item is tool output supplied back to the model.
+///
+/// Tool calls, hosted-tool lifecycle items, and approval workflow items (including
+/// `McpApprovalResponse`) are not execution results and remain classified as `Other`.
+fn is_response_tool_output(item: &Item) -> bool {
+    matches!(
+        item,
+        Item::FunctionCallOutput(_)
+            | Item::ToolSearchOutput(_)
+            | Item::ComputerCallOutput(_)
+            | Item::LocalShellCallOutput(_)
+            | Item::ShellCallOutput(_)
+            | Item::ApplyPatchCallOutput(_)
+            | Item::CustomToolCallOutput(_)
+    )
 }
 
 /// Classify an Anthropic Messages request by its last causal message.
@@ -266,6 +275,28 @@ mod tests {
             assert_eq!(
                 classify_response_request(&response_request_with_item(item)),
                 InputTrigger::ToolResult
+            );
+        }
+    }
+
+    #[test]
+    fn responses_tool_calls_and_approval_responses_are_not_tool_outputs() {
+        for item in [
+            serde_json::json!({
+                "type": "function_call",
+                "arguments": "{}",
+                "call_id": "function-1",
+                "name": "get_weather",
+            }),
+            serde_json::json!({
+                "type": "mcp_approval_response",
+                "approval_request_id": "approval-1",
+                "approve": true,
+            }),
+        ] {
+            assert_eq!(
+                classify_response_request(&response_request_with_item(item)),
+                InputTrigger::Other
             );
         }
     }
