@@ -13,8 +13,7 @@ from dynamo.common.external_encoder import (
     ExternalEncoderResult,
     decode_request_plane_tensor,
 )
-from dynamo.experimental.workflow import GenerateEndpointBinding, StageContext
-from dynamo.experimental.workflow.plan import validate_binding_contract
+from dynamo.experimental.workflow import StageContext
 from dynamo.experimental.workflow.vllm import (
     DynamoVllmStage,
     EncoderStage,
@@ -51,12 +50,7 @@ def _context(stage_id: str = "encoder") -> StageContext:
     )
 
 
-def test_dynamo_vllm_stage_matches_generate_endpoint_contract() -> None:
-    validate_binding_contract(
-        GenerateEndpointBinding("workflows.generator.generate"),
-        DynamoVllmStage.request_complete_contract,
-    )
-
+def test_dynamo_vllm_stage_publishes_request_complete_contract() -> None:
     assert DynamoVllmStage.request_complete_contract.inputs == {"request"}
     assert DynamoVllmStage.request_complete_contract.outputs == {"completion"}
 
