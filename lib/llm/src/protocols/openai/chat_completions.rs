@@ -9,7 +9,6 @@ use utoipa::ToSchema;
 use validator::Validate;
 
 use crate::engines::ValidateRequest;
-use crate::preprocessor::media::MediaDecoder;
 
 use super::{
     OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
@@ -111,11 +110,12 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<serde_json::Value>,
 
-    /// Runtime media decoding parameters.
-    /// When provided, these override the MDC defaults
+    /// Runtime media decoding parameters, forwarded verbatim to the worker when the
+    /// worker owns decoding. When the frontend decodes, these override the MDC defaults.
+    /// Kept opaque so options the frontend does not own pass through untouched.
     /// Example: `{"video": {"num_frames": 16}}`
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub media_io_kwargs: Option<MediaDecoder>,
+    pub media_io_kwargs: Option<serde_json::Value>,
 
     /// When true, logprob token fields are returned as "token_id:`<id>`" instead
     /// of decoded text.

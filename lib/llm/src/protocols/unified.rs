@@ -37,7 +37,6 @@ use dynamo_protocols::types::anthropic::CacheControl;
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
 
-use crate::preprocessor::media::MediaDecoder;
 use dynamo_renderer::{OAIChatLikeRequest, TextInput};
 
 use crate::protocols::common::extensions::{NvExt, NvExtProvider};
@@ -501,7 +500,7 @@ impl OAIChatLikeRequest for UnifiedRequest {
 }
 
 impl crate::preprocessor::prompt::MediaRequestExt for UnifiedRequest {
-    fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
+    fn media_io_kwargs(&self) -> Option<&serde_json::Value> {
         self.inner.media_io_kwargs.as_ref()
     }
 }

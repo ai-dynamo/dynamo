@@ -24,7 +24,6 @@ use dynamo_renderer::{
 };
 
 use crate::model_card::{ModelDeploymentCard, PromptFormatterArtifact};
-use crate::preprocessor::media::MediaDecoder;
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
 };
@@ -32,8 +31,11 @@ use crate::protocols::openai::{
 /// lib/llm-local extension carrying multimodal media-IO config. Kept off
 /// [`OAIChatLikeRequest`] so `dynamo_renderer` stays free of the media module;
 /// the multimodal preprocessing path bounds on `OAIChatLikeRequest + MediaRequestExt`.
+///
+/// Opaque JSON: the frontend only interprets it when it owns decoding, so options
+/// belonging to the worker pass through untouched.
 pub trait MediaRequestExt {
-    fn media_io_kwargs(&self) -> Option<&MediaDecoder>;
+    fn media_io_kwargs(&self) -> Option<&serde_json::Value>;
 }
 
 /// Parse a JSON object string into a serde_json Map, preserving the exact
@@ -290,7 +292,7 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
 }
 
 impl MediaRequestExt for NvCreateChatCompletionRequest {
-    fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
+    fn media_io_kwargs(&self) -> Option<&serde_json::Value> {
         self.media_io_kwargs.as_ref()
     }
 }
@@ -359,7 +361,7 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
 }
 
 impl MediaRequestExt for NvCreateCompletionRequest {
-    fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
+    fn media_io_kwargs(&self) -> Option<&serde_json::Value> {
         None
     }
 }
