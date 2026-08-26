@@ -1,0 +1,238 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: prorl-miles-nvfp4-m6-f049b16-20260826t052909z-prorl
+  namespace: warnold-dynamo
+  labels: &labels
+    integration-run: prorl-miles-nvfp4-m6-f049b16-20260826t052909z
+    integration-role: m6-prorl
+spec:
+  selector: *labels
+  ports:
+    - {name: rollout, port: 8080, targetPort: 8080}
+    - {name: gateway, port: 8100, targetPort: 8100}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prorl-miles-nvfp4-m6-f049b16-20260826t052909z-prorl
+  namespace: warnold-dynamo
+  labels:
+    integration-run: prorl-miles-nvfp4-m6-f049b16-20260826t052909z
+    integration-role: m6-prorl
+data:
+  topology.yaml: |
+    rollout:
+      host: 0.0.0.0
+      port: 8080
+      public_url: http://127.0.0.1:8080
+      save_dir: /shared/test-artifacts/prorl-miles-nvfp4-m6-f049b16-20260826t052909z/prorl/results
+      callback_grace_seconds: 30.0
+    gateway:
+      heartbeat_interval_seconds: 5
+      rollout_server_url: http://127.0.0.1:8080
+      completion_persistence:
+        enabled: true
+        max_field_bytes: 67108864
+        queue_size: 128
+      nodes:
+        - id: m6-prorl-gateway
+          host: 0.0.0.0
+          port: 8100
+          public_url: http://127.0.0.1:8100
+          model_served: Qwen/Qwen3-30B-A3B
+          inference:
+            engine: dynamo
+            base_url: http://prorl-miles-nvfp4-m6-f049b16-20260826t052909z-dynamo:8000
+          max_init_workers: 1
+          max_run_workers: 1
+          max_postrun_workers: 1
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: prorl-miles-nvfp4-m6-f049b16-20260826t052909z-prorl
+  namespace: warnold-dynamo
+  labels:
+    integration-run: prorl-miles-nvfp4-m6-f049b16-20260826t052909z
+    integration-role: m6-prorl
+spec:
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 60
+  nodeSelector:
+    kubernetes.io/arch: amd64
+  initContainers:
+    - name: copy-docker-cli
+      image: docker.io/library/docker@sha256:f649ef046008ca7f926a2571c32b0ac22e5c59eb61b959617f9acc2a4c638cf5
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-c"]
+      args: ["cp /usr/local/bin/docker /opt/docker-cli/docker && chmod 0755 /opt/docker-cli/docker"]
+      resources:
+        requests: {cpu: "100m", memory: 128Mi}
+        limits: {cpu: "500m", memory: 512Mi}
+      volumeMounts:
+        - {name: docker-cli, mountPath: /opt/docker-cli}
+    - name: install-integration
+      image: &miles-image docker.io/radixark/miles@sha256:39b5227d8b8cc9997d0777d72b555ea1f1f0dc4c1027649f8c44c6ce88f51859
+      imagePullPolicy: IfNotPresent
+      command: ["bash", "-lc"]
+      args:
+        - |
+          set -euxo pipefail
+          archive_dir=/shared/test-artifacts/prorl-miles-nvfp4-m6-f049b16-20260826t052909z/build/archives
+          echo "1d90d516d27b2ede701e892a28a37e7cfb492cee9a18039e1220cb1b71fefcd5  $archive_dir/miles-bc1341fd5.tar.gz" | sha256sum -c -
+          echo "9b4cd02b40aa1f7fc61ba8065a29fa79eb32a16ad3ef4a6b6695e1f75b0d73dc  $archive_dir/prorl-0ee1d48f65.tar.gz" | sha256sum -c -
+          echo "33746476525e9ca3cac4fc028f92f758410e14c2b8300e34565485dacc662dd7  $archive_dir/swegym-16dd480c.tar.gz" | sha256sum -c -
+          overlay_dir=/shared/test-artifacts/prorl-miles-nvfp4-m6-f049b16-20260826t052909z/build/overlays/prorl
+          echo "29e861642a10e9022b486f139d63e4f92d7d91082a46d9db18bcd130a2471dc9  $overlay_dir/record_utils.py" | sha256sum -c -
+          echo "55bf41e585f85ce8c4c16244b51efa755d969876908a012f15776773453066f6  $overlay_dir/test_per_request_builder.py" | sha256sum -c -
+          echo "08b92e37b93c029a4e4efae7fcdf2ef49003b6d525524cc3cf8b987e07cd7fe4  $overlay_dir/patch_utils.py" | sha256sum -c -
+          echo "1d802e7effbe968cf4622cc00218751042a743e309b9bdafd506af633c5a8506  $overlay_dir/engine.py" | sha256sum -c -
+          echo "132143a323892defd710ead64a0d9bc8c08be6dcac847ed40499191346492b55  $overlay_dir/proxy.py" | sha256sum -c -
+          echo "6592978313af676f727fd51794a9363ac25258aad7fa9911318a122b75a3081b  $overlay_dir/test_engine.py" | sha256sum -c -
+          echo "b080b3a8e8aa855c89af52c34673fdb91cad4d8902f32010f118f1e679f8f70b  $overlay_dir/test_proxy.py" | sha256sum -c -
+          mkdir -p /opt/integration-src/miles /opt/integration-src/prorl /opt/integration-src/swegym
+          tar -xzf "$archive_dir"/miles-bc1341fd5.tar.gz -C /opt/integration-src/miles
+          tar -xzf "$archive_dir"/prorl-0ee1d48f65.tar.gz -C /opt/integration-src/prorl
+          tar -xzf "$archive_dir"/swegym-16dd480c.tar.gz -C /opt/integration-src/swegym
+          install -m 0644 "$overlay_dir/record_utils.py" /opt/integration-src/prorl/src/polar/trajectory/builder/record_utils.py
+          install -m 0644 "$overlay_dir/test_per_request_builder.py" /opt/integration-src/prorl/tests/trajectory/test_per_request_builder.py
+          install -m 0644 "$overlay_dir/patch_utils.py" /opt/integration-src/prorl/src/polar/trajectory/evaluator/_patch_utils.py
+          install -m 0644 "$overlay_dir/engine.py" /opt/integration-src/prorl/src/polar/gateway/engine.py
+          install -m 0644 "$overlay_dir/proxy.py" /opt/integration-src/prorl/src/polar/gateway/proxy.py
+          install -m 0644 "$overlay_dir/test_engine.py" /opt/integration-src/prorl/tests/gateway/test_engine.py
+          install -m 0644 "$overlay_dir/test_proxy.py" /opt/integration-src/prorl/tests/gateway/test_proxy.py
+          wheel_dir=/shared/test-artifacts/prorl-miles-nvfp4-m6-f049b16-20260826t052909z/build/swegym-wheels
+          cd "$wheel_dir"
+          sha256sum -c SHA256SUMS
+          python3 -m pip install --no-deps --target /opt/integration-src/swegym-deps \
+            "$wheel_dir"/beautifulsoup4-4.15.0-py3-none-any.whl \
+            "$wheel_dir"/chardet-7.6.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl \
+            "$wheel_dir"/docker-7.2.0-py3-none-any.whl \
+            "$wheel_dir"/fastcore-2.2.15-py3-none-any.whl \
+            "$wheel_dir"/fastspec-0.2.3-py3-none-any.whl \
+            "$wheel_dir"/fasttransport-0.0.1-py3-none-any.whl \
+            "$wheel_dir"/ghapi-2.1.2-py3-none-any.whl \
+            "$wheel_dir"/gitdb-4.0.12-py3-none-any.whl \
+            "$wheel_dir"/gitpython-3.1.60-py3-none-any.whl \
+            "$wheel_dir"/smmap-5.0.3-py3-none-any.whl \
+            "$wheel_dir"/soupsieve-2.9.2-py3-none-any.whl \
+            "$wheel_dir"/unidiff-1.0.0-py3-none-any.whl
+          PYTHONPATH=/opt/integration-src/swegym-deps:/opt/integration-src/swegym/swegym-16dd480c:/opt/integration-src/miles:/opt/integration-src/prorl/src:/root/Megatron-LM             python3 -c "import miles, polar, slime_bridge, swegym; from swegym.harness.test_spec import make_test_spec; print(miles.__file__); print(polar.__file__); print(slime_bridge.__file__); print(swegym.__file__)"
+          cd /opt/integration-src/prorl
+          PYTHONPATH=src pytest -q tests/gateway/test_engine.py tests/gateway/test_proxy.py tests/trajectory/test_per_request_builder.py
+          mkdir -p /shared/test-artifacts/prorl-miles-nvfp4-m6-f049b16-20260826t052909z/prorl/results /shared/test-artifacts/prorl-miles-nvfp4-m6-f049b16-20260826t052909z/prorl/agent-cli
+      resources:
+        requests: {cpu: "1", memory: 2Gi}
+        limits: {cpu: "2", memory: 4Gi}
+      volumeMounts:
+        - {name: shared, mountPath: /shared}
+        - {name: integration-src, mountPath: /opt/integration-src}
+  containers:
+    - name: rollout
+      image: *miles-image
+      imagePullPolicy: IfNotPresent
+      command: ["python3", "-m", "polar.cli"]
+      args: ["serve_rollout", "-c", "/etc/polar/topology.yaml"]
+      env: &python-env
+        - name: PYTHONPATH
+          value: /opt/integration-src/swegym-deps:/opt/integration-src/swegym/swegym-16dd480c:/opt/integration-src/miles:/opt/integration-src/prorl/src:/root/Megatron-LM
+        - name: PYTHONUNBUFFERED
+          value: "1"
+      ports:
+        - {name: rollout, containerPort: 8080}
+      startupProbe:
+        httpGet: {path: /health, port: 8080}
+        periodSeconds: 3
+        failureThreshold: 60
+      resources:
+        requests: {cpu: "500m", memory: 8Gi}
+        limits: {cpu: "2", memory: 64Gi}
+      volumeMounts:
+        - {name: shared, mountPath: /shared}
+        - {name: integration-src, mountPath: /opt/integration-src}
+        - {name: topology, mountPath: /etc/polar}
+    - name: gateway
+      image: *miles-image
+      imagePullPolicy: IfNotPresent
+      command: ["bash", "-lc"]
+      args:
+        - |
+          set -euxo pipefail
+          export PATH=/opt/docker-cli:$PATH
+          until docker info >/dev/null 2>&1; do sleep 2; done
+          task_image=xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7365@sha256:94e35e659e612830e1c6a0ed23bc1aae150eb3b8e8ffcb0ffde0f69eb68f82dc
+          node_image=docker.io/library/node@sha256:4d676821dff059fd00d277ee4261ef34ea712317fed0737c03941481b5760c96
+          cli_dir=/shared/test-artifacts/prorl-miles-nvfp4-m6-f049b16-20260826t052909z/prorl/agent-cli
+          docker pull "$task_image"
+          docker pull "$node_image"
+          if [ ! -x "$cli_dir/bin/claude" ]; then
+            docker run --rm -v "$cli_dir:/opt/node" "$node_image" bash -lc 'cp -a /usr/local/. /opt/node/ && npm install -g --prefix /opt/node --no-audit --no-fund @anthropic-ai/claude-code@2.1.139'
+          fi
+          docker run --rm -v "$cli_dir:/opt/node:ro" "$task_image" bash -lc 'PATH=/opt/node/bin:$PATH claude --version | grep -F 2.1.139 && test -d /testbed/.git && test -x /opt/miniconda3/envs/testbed/bin/python'
+          exec python3 -m polar.cli serve_gateway             -c /etc/polar/topology.yaml --node-id m6-prorl-gateway
+      env:
+        - name: PYTHONPATH
+          value: /opt/integration-src/swegym-deps:/opt/integration-src/swegym/swegym-16dd480c:/opt/integration-src/miles:/opt/integration-src/prorl/src:/root/Megatron-LM
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: DOCKER_HOST
+          value: tcp://127.0.0.1:2375
+      ports:
+        - {name: gateway, containerPort: 8100}
+      startupProbe:
+        httpGet: {path: /health, port: 8100}
+        periodSeconds: 3
+        failureThreshold: 240
+      resources:
+        requests: {cpu: "1", memory: 2Gi}
+        limits: {cpu: "8", memory: 64Gi}
+      volumeMounts:
+        - {name: shared, mountPath: /shared}
+        - {name: integration-src, mountPath: /opt/integration-src}
+        - {name: topology, mountPath: /etc/polar}
+        - {name: docker-cli, mountPath: /opt/docker-cli}
+        - {name: session-tmp, mountPath: /tmp}
+    - name: dind
+      image: docker.io/library/docker@sha256:f649ef046008ca7f926a2571c32b0ac22e5c59eb61b959617f9acc2a4c638cf5
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        privileged: true
+        runAsUser: 0
+      command: ["dockerd"]
+      args:
+        - --host=tcp://0.0.0.0:2375
+        - --host=unix:///var/run/docker.sock
+        - --storage-driver=overlay2
+      env:
+        - name: DOCKER_TLS_CERTDIR
+          value: ""
+      startupProbe:
+        exec:
+          command: ["docker", "--host=tcp://127.0.0.1:2375", "info"]
+        periodSeconds: 3
+        failureThreshold: 120
+      resources:
+        requests:
+          cpu: "1"
+          memory: 4Gi
+          ephemeral-storage: 16Gi
+        limits:
+          cpu: "12"
+          memory: 24Gi
+          ephemeral-storage: 128Gi
+      volumeMounts:
+        - {name: docker-data, mountPath: /var/lib/docker}
+        - {name: session-tmp, mountPath: /tmp}
+        - {name: shared, mountPath: /shared}
+  volumes:
+    - name: shared
+      persistentVolumeClaim: {claimName: shared-model-cache}
+    - {name: integration-src, emptyDir: {}}
+    - {name: topology, configMap: {name: prorl-miles-nvfp4-m6-f049b16-20260826t052909z-prorl}}
+    - {name: docker-cli, emptyDir: {}}
+    - {name: docker-data, emptyDir: {}}
+    - {name: session-tmp, emptyDir: {}}

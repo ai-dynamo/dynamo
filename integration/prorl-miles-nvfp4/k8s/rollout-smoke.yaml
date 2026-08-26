@@ -1,0 +1,108 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: prorl-miles-nvfp4-m6-f049b16-20260826t052909z-rollout-smoke
+  namespace: warnold-dynamo
+  labels:
+    integration-run: prorl-miles-nvfp4-m6-f049b16-20260826t052909z
+    integration-role: m6-rollout-smoke
+spec:
+  restartPolicy: Never
+  activeDeadlineSeconds: 14400
+  terminationGracePeriodSeconds: 30
+  nodeSelector:
+    kubernetes.io/arch: amd64
+  initContainers:
+    - name: install-integration
+      image: &image docker.io/radixark/miles@sha256:39b5227d8b8cc9997d0777d72b555ea1f1f0dc4c1027649f8c44c6ce88f51859
+      imagePullPolicy: IfNotPresent
+      command: ["bash", "-lc"]
+      args:
+        - |
+          set -euxo pipefail
+          root=/shared/test-artifacts/prorl-miles-nvfp4-m6-f049b16-20260826t052909z
+          echo "1d90d516d27b2ede701e892a28a37e7cfb492cee9a18039e1220cb1b71fefcd5  $root/build/archives/miles-bc1341fd5.tar.gz" | sha256sum -c -
+          echo "9b4cd02b40aa1f7fc61ba8065a29fa79eb32a16ad3ef4a6b6695e1f75b0d73dc  $root/build/archives/prorl-0ee1d48f65.tar.gz" | sha256sum -c -
+          echo "33746476525e9ca3cac4fc028f92f758410e14c2b8300e34565485dacc662dd7  $root/build/archives/swegym-16dd480c.tar.gz" | sha256sum -c -
+          echo "29e861642a10e9022b486f139d63e4f92d7d91082a46d9db18bcd130a2471dc9  $root/build/overlays/prorl/record_utils.py" | sha256sum -c -
+          echo "cad35f124865731094f4286f90b8c42486e572064a1e9802cb685f1e2bd94f7b  $root/integration/apply_moto_fix.sh" | sha256sum -c -
+          echo "37b00e70b44647da7a41c389690d9ea44521584d23ee861a55053869b7c024e6  $root/integration/m6-general-purpose-agent.md" | sha256sum -c -
+          echo "79885181c9ca5c2b6d32001244a8be853fb11441ebdb0a292967163ba02f7094  $root/integration/guard_root_bash.py" | sha256sum -c -
+          echo "93afa17b6c64834a7eb2ca41f9b8088eaed9dedcb238ec820581680f308de1bf  $root/integration/enforce_root_final.py" | sha256sum -c -
+          echo "d99a0da67a7c7e321e522e240d900d5e683816e082ad52a148042ef61996ba70  $root/integration/m6-claude-settings.json" | sha256sum -c -
+          echo "5b226838aee0ff7da65c57b12e5ee44ab35896f356d5ce5280c488f05a414e13  $root/integration/prepare_swegym_task.py" | sha256sum -c -
+          echo "291d108f36cab7f91cf384229d07d9f9ad3f9a22e5da5901abdf95a20234ec84  $root/integration/polar-miles-swegym.yaml.in" | sha256sum -c -
+          echo "ab3b292648ae5132dce35ebf6a4c536366c93ae509770739b17f7991776949a6  $root/integration/swegym_fidelity.py" | sha256sum -c -
+          echo "458637be8e570cb45ae4354a3b688949c03859ed331a04390fe2d1d17888112a  $root/integration/validate_long_context.py" | sha256sum -c -
+          echo "ad5d73fbffeccdf503f3159352c820485c1627fa8a10c87b99134aaed824191f  $root/integration/validate_swegym_rollout.py" | sha256sum -c -
+          mkdir -p /opt/integration-src/miles /opt/integration-src/prorl /opt/integration-src/swegym "$root/evidence/rollout"
+          tar -xzf "$root/build/archives/miles-bc1341fd5.tar.gz" -C /opt/integration-src/miles
+          tar -xzf "$root/build/archives/prorl-0ee1d48f65.tar.gz" -C /opt/integration-src/prorl
+          tar -xzf "$root/build/archives/swegym-16dd480c.tar.gz" -C /opt/integration-src/swegym
+          install -m 0644 "$root/build/overlays/prorl/record_utils.py" /opt/integration-src/prorl/src/polar/trajectory/builder/record_utils.py
+          python3 "$root/integration/prepare_swegym_task.py" --source /opt/integration-src/prorl/examples/swegym_slime_grpo/swegym_train_293.jsonl --output /opt/config/getmoto-moto-7365.jsonl
+          PYTHONPATH=/opt/integration-src/miles:/opt/integration-src/prorl/src:/root/Megatron-LM python3 -c "from miles.utils.types import Sample; from slime_bridge.rollout import generate_rollout_polar_async; print(Sample, generate_rollout_polar_async)"
+          test -f "$root/integration/polar-miles-swegym.yaml.in"
+          test -f "$root/integration/apply_moto_fix.sh"
+          test -x "$root/integration/apply_moto_fix.sh"
+          test -f "$root/integration/m6-general-purpose-agent.md"
+          test -f "$root/integration/guard_root_bash.py"
+          test -f "$root/integration/enforce_root_final.py"
+          test -f "$root/integration/m6-claude-settings.json"
+          test -f "$root/integration/swegym_fidelity.py"
+          test -f "$root/integration/validate_long_context.py"
+          test -f "$root/integration/validate_swegym_rollout.py"
+      resources:
+        requests: {cpu: "1", memory: 2Gi}
+        limits: {cpu: "2", memory: 4Gi}
+      volumeMounts:
+        - {name: shared, mountPath: /shared}
+        - {name: integration-src, mountPath: /opt/integration-src}
+        - {name: config, mountPath: /opt/config}
+  containers:
+    - name: rollout
+      image: *image
+      imagePullPolicy: IfNotPresent
+      command: ["bash", "-lc"]
+      args:
+        - |
+          set -euxo pipefail
+          root=/shared/test-artifacts/prorl-miles-nvfp4-m6-f049b16-20260826t052909z
+          python3 -c 'import pathlib,sys; src=pathlib.Path(sys.argv[1]).read_text(); pathlib.Path(sys.argv[2]).write_text(src.replace("__POD_IP__",sys.argv[3]))' "$root/integration/polar-miles-swegym.yaml.in" /opt/config/polar-miles.yaml "$POD_IP"
+          until curl -fsS http://prorl-miles-nvfp4-m6-f049b16-20260826t052909z-prorl:8080/health; do sleep 3; done
+          until curl -fsS http://prorl-miles-nvfp4-m6-f049b16-20260826t052909z-prorl:8100/health; do sleep 3; done
+          until curl -fsS http://prorl-miles-nvfp4-m6-f049b16-20260826t052909z-dynamo:8000/health; do sleep 5; done
+          python3 "$root/integration/validate_long_context.py" --url http://prorl-miles-nvfp4-m6-f049b16-20260826t052909z-dynamo:8000/v1/chat/completions --server-info-url http://prorl-miles-nvfp4-m6-f049b16-20260826t052909z-dynamo:9090/engine/server_info --tokenizer /shared/test-artifacts/prorl-miles-nvfp4-f7de8eb-20260825t073154z/models/Qwen3-30B-A3B-NVFP4-baseline --output "$root/evidence/rollout/long-context-summary.json"
+          curl -fsS -X POST http://prorl-miles-nvfp4-m6-f049b16-20260826t052909z-dynamo:9090/engine/control/update_weight_version -H 'content-type: application/json' -d '{"new_version":"0"}'
+          timeout --signal=TERM --kill-after=60s 12000s python3 "$root/integration/validate_swegym_rollout.py" --polar-config /opt/config/polar-miles.yaml --prompt-data /opt/config/getmoto-moto-7365.jsonl --evidence-dir "$root/evidence/rollout" --trace-dir "$root/dynamo/request-trace" --rollout-id 9000 --expected-weight-version 0 2>&1 | tee "$root/evidence/rollout/rollout.log"
+          if grep -E 'Dropping trace .*total_len=.*max_tokens=|no usable trace' "$root/evidence/rollout/rollout.log"; then
+            echo 'ProRL dropped at least one trace at the 131072-token boundary' >&2
+            exit 1
+          fi
+      env:
+        - name: PYTHONPATH
+          value: /opt/integration-src/miles:/opt/integration-src/prorl/src:/root/Megatron-LM
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: HF_HOME
+          value: /shared
+        - name: HF_HUB_CACHE
+          value: /shared/hub
+        - name: POD_IP
+          valueFrom:
+            fieldRef: {fieldPath: status.podIP}
+      resources:
+        requests: {cpu: "2", memory: 8Gi}
+        limits: {cpu: "4", memory: 64Gi}
+      volumeMounts:
+        - {name: shared, mountPath: /shared}
+        - {name: integration-src, mountPath: /opt/integration-src}
+        - {name: config, mountPath: /opt/config}
+  volumes:
+    - name: shared
+      persistentVolumeClaim: {claimName: shared-model-cache}
+    - {name: integration-src, emptyDir: {}}
+    - {name: config, emptyDir: {}}

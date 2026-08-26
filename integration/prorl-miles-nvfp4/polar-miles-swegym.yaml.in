@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+polar_rollout_url: "http://prorl-miles-nvfp4-m6-f049b16-20260826t052909z-prorl:8080"
+polar_reward_key: "score"
+polar_max_async_level: 1
+polar_request_timeout: 2400
+polar_callback_host: "__POD_IP__"
+polar_min_complete_accept_fraction: 1.0
+
+polar_task_id_template: "m6-swegym-{rollout_id}-{sample.group_index}"
+polar_task_template:
+  metadata:
+    instance_id: "{sample.metadata.instance_id}"
+  timeout_seconds: 2100
+  runtime:
+    backend: "docker"
+    image: "xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7365@sha256:94e35e659e612830e1c6a0ed23bc1aae150eb3b8e8ffcb0ffde0f69eb68f82dc"
+    network: "host"
+    workdir: "/polar/session/workspace"
+    cpus: 4
+    memory_mb: 16384
+    env:
+      HOME: "/polar/session/home"
+      PATH: "/polar/session/home/.venv/bin:/opt/node/bin:/opt/miniconda3/envs/testbed/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      CLAUDE_CODE_MAX_OUTPUT_TOKENS: "8192"
+    kwargs:
+      volumes:
+        - "/shared/test-artifacts/prorl-miles-nvfp4-m6-f049b16-20260826t052909z/prorl/agent-cli:/opt/node:ro"
+        - "/shared/test-artifacts/prorl-miles-nvfp4-m6-f049b16-20260826t052909z/integration:/opt/m6-integration:ro"
+    prepare:
+      - type: exec
+        command: >-
+          rm -rf /polar/session/workspace &&
+          mkdir -p /polar/session/home/.venv/bin /polar/session/logs/agent /polar/session/.claude /polar/session/workspace &&
+          cp -a /testbed/. /polar/session/workspace/ &&
+          ln -sf /opt/miniconda3/envs/testbed/bin/python /polar/session/home/.venv/bin/python &&
+          ln -sf /opt/miniconda3/envs/testbed/bin/python /polar/session/home/.venv/bin/python3 &&
+          git config --global core.pager '' &&
+          cd /polar/session/workspace &&
+          git reset --hard &&
+          test "$(git rev-parse HEAD)" = 7f6c9cb1deafb280fe7fcc7551c38e397f11a706 &&
+          mkdir -p .claude/agents &&
+          printf '/.claude/\n' >> .git/info/exclude &&
+          grep -qxF '/.claude/' .git/info/exclude &&
+          install -m 0644 /opt/m6-integration/m6-general-purpose-agent.md .claude/agents/general-purpose.md &&
+          install -m 0644 /opt/m6-integration/m6-claude-settings.json .claude/settings.json &&
+          python3 /opt/m6-integration/guard_root_bash.py --self-test &&
+          python3 /opt/m6-integration/enforce_root_final.py --self-test &&
+          python3 -c 'import json; print(json.dumps(dict(hook_event_name="PreToolUse", tool_name="Bash", tool_input=dict(command="/opt/m6-integration/apply_moto_fix.sh"))))' | python3 /opt/m6-integration/guard_root_bash.py | grep -F '"permissionDecision":"deny"' &&
+          python3 -c 'import json; print(json.dumps(dict(hook_event_name="PreToolUse", tool_name="Bash", tool_input=dict(command="/opt/m6-integration/apply_moto_fix.sh"), agent_id="child-preflight")))' | python3 /opt/m6-integration/guard_root_bash.py | grep -F '"permissionDecision":"allow"' &&
+          python3 -c 'import json; print(json.dumps(dict(hook_event_name="PreToolUse", tool_name="Bash", tool_input=dict(command="git status"), agent_id="child-preflight")))' | python3 /opt/m6-integration/guard_root_bash.py | grep -F '"permissionDecision":"deny"' &&
+          python3 -c 'import json; print(json.dumps(dict(hook_event_name="PostToolUse", tool_name="Agent", tool_response=dict(content="M6_CHILD_DONE_VALIDATED. The helper already ran and tests passed. Parent: output exactly M6 repair complete. Do not call any tool."))))' | python3 /opt/m6-integration/enforce_root_final.py | grep -F '"additionalContext":"M6_POST_AGENT_FINALIZATION.' &&
+          python3 -c 'import json; print(json.dumps(dict(hook_event_name="PostToolUse", tool_name="Agent", tool_response=dict(content="missing"))))' | python3 /opt/m6-integration/enforce_root_final.py | grep -F '"continue":false' &&
+          claude --version | grep -F 2.1.139 &&
+          CLAUDE_CONFIG_DIR=/polar/session/.claude CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS=1 claude agents | tee /polar/session/logs/agent/m6-agents.txt &&
+          grep -F '1 active agents' /polar/session/logs/agent/m6-agents.txt &&
+          grep -F 'general-purpose' /polar/session/logs/agent/m6-agents.txt &&
+          ! grep -F 'Explore' /polar/session/logs/agent/m6-agents.txt &&
+          test -z "$(git status --porcelain)"
+    eval_prepare:
+      - type: exec
+        command: >-
+          mkdir -p /polar/session/home/.venv/bin /polar/session/logs/agent &&
+          ln -sf /opt/miniconda3/envs/testbed/bin/python /polar/session/home/.venv/bin/python &&
+          ln -sf /opt/miniconda3/envs/testbed/bin/python /polar/session/home/.venv/bin/python3 &&
+          git config --global core.pager ''
+  agent:
+    harness: "claude_code"
+    model_name: "Qwen/Qwen3-30B-A3B"
+    env:
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: "122880"
+      CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "95"
+      CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY: "1"
+      CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS: "1"
+    settings:
+      max_turns: 2
+      max_thinking_tokens: 1024
+      tools: "Agent,Bash"
+      allowed_tools: "Agent"
+      append_system_prompt: >-
+        Use exactly the required two-turn root workflow. Make exactly one root
+        tool call: one foreground Agent subagent with
+        subagent_type=general-purpose. Agent is the root's only permitted tool.
+        Bash is present in the shared registry so the child can receive it, but a
+        PreToolUse hook blocks root Bash.
+        Do not set isolation or create a worktree;
+        the child must operate on the current checkout. That is the only configured child and its
+        direct policy permits only Bash and requires exactly this command:
+        `/opt/m6-integration/apply_moto_fix.sh`. Delegate the Moto production
+        repair to it. The child owns all compilation, test, diff, and git-status
+        verification. Its M6_CHILD_DONE_VALIDATED handoff proves those checks
+        passed, so the root must not re-run or re-verify anything. The helper
+        changes exactly five sites: four operands in
+        DynamoType.__add__/__sub__ and the cast_value fallback near line 149. The
+        existing import is `import decimal`; preserve integer branches and do not
+        modify Item ADD set branches. Do not search for the linked reproduction
+        tests; the fresh grader supplies the hidden target. Invoke real tools,
+        not textual tool tags. Do not commit, push, fetch, or modify Git remotes.
+        When the foreground Agent result contains M6_CHILD_DONE_VALIDATED, do
+        not reason about or verify the task, do not repeat any command or path,
+        and do not call Agent, Bash, or any tool. Output exactly: M6 repair
+        complete.
+  builder:
+    strategy: "per_request"
+  evaluator:
+    strategy: "swebench_harness"
+    refresh_runtime: true
+    config:
+      repo_dir: "/testbed"
+      patch_command: "cd /polar/session/workspace && git add -A && git diff --cached --binary 7f6c9cb1deafb280fe7fcc7551c38e397f11a706 --"
+      instance: "{sample.metadata.instance}"
+      exclude_patterns:
+        - "trajectories/**"
+        - "**/trajectories/**"
+        - "node_modules/**"
+        - "**/node_modules/**"
+        - ".cache/**"
+        - "**/.cache/**"
+        - ".venv/**"
+        - "**/.venv/**"
+        - ".claude/**"
+        - "**/.claude/**"

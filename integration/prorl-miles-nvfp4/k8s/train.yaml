@@ -1,0 +1,182 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: prorl-miles-nvfp4-m6-f049b16-20260826t052909z-trainer
+  namespace: warnold-dynamo
+  labels:
+    integration-run: prorl-miles-nvfp4-m6-f049b16-20260826t052909z
+    integration-role: m6-trainer
+spec:
+  restartPolicy: Never
+  activeDeadlineSeconds: 21600
+  terminationGracePeriodSeconds: 120
+  nodeSelector:
+    kubernetes.io/arch: amd64
+    nvidia.com/gpu.product: NVIDIA-B200
+  initContainers:
+    - name: install-integration
+      image: &image docker.io/radixark/miles@sha256:39b5227d8b8cc9997d0777d72b555ea1f1f0dc4c1027649f8c44c6ce88f51859
+      imagePullPolicy: IfNotPresent
+      command: ["bash", "-lc"]
+      args:
+        - |
+          set -euxo pipefail
+          root=/shared/test-artifacts/prorl-miles-nvfp4-m6-f049b16-20260826t052909z
+          old_root=/shared/test-artifacts/prorl-miles-nvfp4-f7de8eb-20260825t073154z
+          echo "1d90d516d27b2ede701e892a28a37e7cfb492cee9a18039e1220cb1b71fefcd5  $root/build/archives/miles-bc1341fd5.tar.gz" | sha256sum -c -
+          echo "9b4cd02b40aa1f7fc61ba8065a29fa79eb32a16ad3ef4a6b6695e1f75b0d73dc  $root/build/archives/prorl-0ee1d48f65.tar.gz" | sha256sum -c -
+          echo "29e861642a10e9022b486f139d63e4f92d7d91082a46d9db18bcd130a2471dc9  $root/build/overlays/prorl/record_utils.py" | sha256sum -c -
+          echo "08b92e37b93c029a4e4efae7fcdf2ef49003b6d525524cc3cf8b987e07cd7fe4  $root/build/overlays/prorl/patch_utils.py" | sha256sum -c -
+          echo "1d802e7effbe968cf4622cc00218751042a743e309b9bdafd506af633c5a8506  $root/build/overlays/prorl/engine.py" | sha256sum -c -
+          echo "132143a323892defd710ead64a0d9bc8c08be6dcac847ed40499191346492b55  $root/build/overlays/prorl/proxy.py" | sha256sum -c -
+          echo "6592978313af676f727fd51794a9363ac25258aad7fa9911318a122b75a3081b  $root/build/overlays/prorl/test_engine.py" | sha256sum -c -
+          echo "b080b3a8e8aa855c89af52c34673fdb91cad4d8902f32010f118f1e679f8f70b  $root/build/overlays/prorl/test_proxy.py" | sha256sum -c -
+          echo "1ffdb2427fb9cd61291c33ba68715bd65cfe80e06525a71389c6219aa00f763a  $root/build/overlays/miles/model_provider.py" | sha256sum -c -
+          echo "9255d7bb65b9a7a8864b0d95ef24f722fe34f77ec80eff9d01c0f4b9b1c8a57d  $root/build/overlays/miles/test_bridge_yarn_config.py" | sha256sum -c -
+          echo "beb17a2699f6ed11a1a1c052976cb9c9a890be15727461cf689a4eb385b16d1e  $root/build/overlays/miles/broadcast.py" | sha256sum -c -
+          echo "d717b6996cb98bf61b9838ed83b76434ab4ca3a80c6def338619a8ef57515674  $root/build/overlays/miles/update_weight_common.py" | sha256sum -c -
+          echo "a727495bcd3f39b666d8572636bcad1f15978274a0da7bca19f73d53f2b6af14  $root/build/overlays/miles/replay_data.py" | sha256sum -c -
+          echo "6a2158c8fa8e794a86d20d1ba5d4b2e38a17ce5b7c2655300b0331e1ec6e10df  $root/build/overlays/miles/actor.py" | sha256sum -c -
+          echo "a1b65ea8a7b4950ea77bfa524677cf390663c04a9f5a248c94c7308ceb6d7d56  $root/build/overlays/miles/test_update_weight_from_distributed_lock.py" | sha256sum -c -
+          echo "7c81d89353f828f76d9aee1aedad28b081aee376c6d1955836ea4eee05fcb986  $root/integration/run_miles_prorl_swegym_step.py" | sha256sum -c -
+          echo "f99ac27e53eda4ac853443a230c384a042b9ca16996547aade05d9a68bb2bb95  $root/integration/validate_swegym_train.py" | sha256sum -c -
+          echo "cad35f124865731094f4286f90b8c42486e572064a1e9802cb685f1e2bd94f7b  $root/integration/apply_moto_fix.sh" | sha256sum -c -
+          echo "37b00e70b44647da7a41c389690d9ea44521584d23ee861a55053869b7c024e6  $root/integration/m6-general-purpose-agent.md" | sha256sum -c -
+          echo "79885181c9ca5c2b6d32001244a8be853fb11441ebdb0a292967163ba02f7094  $root/integration/guard_root_bash.py" | sha256sum -c -
+          echo "93afa17b6c64834a7eb2ca41f9b8088eaed9dedcb238ec820581680f308de1bf  $root/integration/enforce_root_final.py" | sha256sum -c -
+          echo "d99a0da67a7c7e321e522e240d900d5e683816e082ad52a148042ef61996ba70  $root/integration/m6-claude-settings.json" | sha256sum -c -
+          echo "5b226838aee0ff7da65c57b12e5ee44ab35896f356d5ce5280c488f05a414e13  $root/integration/prepare_swegym_task.py" | sha256sum -c -
+          echo "291d108f36cab7f91cf384229d07d9f9ad3f9a22e5da5901abdf95a20234ec84  $root/integration/polar-miles-swegym.yaml.in" | sha256sum -c -
+          echo "ab3b292648ae5132dce35ebf6a4c536366c93ae509770739b17f7991776949a6  $root/integration/swegym_fidelity.py" | sha256sum -c -
+          test ! -e "$root/train"
+          test ! -e "$root/evidence/train"
+          test ! -e "$root/evidence/train-validator.log"
+          mkdir -p /opt/integration-src/miles /opt/integration-src/prorl /opt/models "$root/train"
+          python3 "$root/integration/swegym_fidelity.py" snapshot \
+            --trace-dir "$root/dynamo/request-trace" \
+            --output "$root/train/request-trace-start.json"
+          date +%s%N > "$root/train/attempt-start-ns.txt"
+          tar -xzf "$root/build/archives/miles-bc1341fd5.tar.gz" -C /opt/integration-src/miles
+          tar -xzf "$root/build/archives/prorl-0ee1d48f65.tar.gz" -C /opt/integration-src/prorl
+          install -m 0644 "$root/build/overlays/prorl/record_utils.py" /opt/integration-src/prorl/src/polar/trajectory/builder/record_utils.py
+          install -m 0644 "$root/build/overlays/prorl/patch_utils.py" /opt/integration-src/prorl/src/polar/trajectory/evaluator/_patch_utils.py
+          install -m 0644 "$root/build/overlays/prorl/engine.py" /opt/integration-src/prorl/src/polar/gateway/engine.py
+          install -m 0644 "$root/build/overlays/prorl/proxy.py" /opt/integration-src/prorl/src/polar/gateway/proxy.py
+          install -m 0644 "$root/build/overlays/prorl/test_engine.py" /opt/integration-src/prorl/tests/gateway/test_engine.py
+          install -m 0644 "$root/build/overlays/prorl/test_proxy.py" /opt/integration-src/prorl/tests/gateway/test_proxy.py
+          install -m 0644 "$root/build/overlays/miles/model_provider.py" /opt/integration-src/miles/miles/backends/megatron_utils/model_provider.py
+          install -m 0644 "$root/build/overlays/miles/test_bridge_yarn_config.py" /opt/integration-src/miles/tests/fast/backends/megatron_utils/test_bridge_yarn_config.py
+          install -m 0644 "$root/build/overlays/miles/broadcast.py" /opt/integration-src/miles/miles/backends/megatron_utils/update_weight/update_weight_from_distributed/broadcast.py
+          install -m 0644 "$root/build/overlays/miles/update_weight_common.py" /opt/integration-src/miles/miles/backends/megatron_utils/update_weight/common.py
+          install -m 0644 "$root/build/overlays/miles/replay_data.py" /opt/integration-src/miles/miles/backends/training_utils/replay_data.py
+          install -m 0644 "$root/build/overlays/miles/actor.py" /opt/integration-src/miles/miles/backends/megatron_utils/actor.py
+          install -m 0644 "$root/build/overlays/miles/test_update_weight_from_distributed_lock.py" /opt/integration-src/miles/tests/fast/backends/megatron_utils/test_update_weight_from_distributed_lock.py
+          ln -s /shared/hub/models--Qwen--Qwen3-30B-A3B/snapshots/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39 /opt/models/Qwen3-30B-A3B
+          ln -s "$old_root/models/Qwen3-30B-A3B-NVFP4-baseline" /opt/models/Qwen3-30B-A3B-NVFP4
+          python3 -c 'import pathlib,sys; src=pathlib.Path(sys.argv[1]).read_text(); pathlib.Path(sys.argv[2]).write_text(src.replace("__POD_IP__",sys.argv[3]))'             "$root/integration/polar-miles-swegym.yaml.in" /opt/config/polar-miles.yaml "$POD_IP"
+          PYTHONPATH=/opt/integration-src/miles:/opt/integration-src/prorl/src:/root/Megatron-LM             python3 -c "from miles.utils.types import Sample; from slime_bridge.rollout import generate_rollout_polar_async; from scripts.run_qwen3_30b_a3b import ScriptArgs; print(Sample, generate_rollout_polar_async, ScriptArgs)"
+          cd /opt/integration-src/prorl
+          PYTHONPATH=src pytest -q tests/gateway/test_engine.py tests/gateway/test_proxy.py
+          cd /opt/integration-src/miles
+          PYTHONPATH=/opt/integration-src/miles:/opt/integration-src/prorl/src:/root/Megatron-LM pytest -q tests/fast/backends/megatron_utils/test_bridge_yarn_config.py tests/fast/backends/megatron_utils/test_update_weight_from_distributed_lock.py
+          test -f "$root/integration/run_miles_prorl_swegym_step.py"
+          test -f "$root/integration/apply_moto_fix.sh"
+          test -x "$root/integration/apply_moto_fix.sh"
+          test -f "$root/integration/m6-general-purpose-agent.md"
+          test -f "$root/integration/guard_root_bash.py"
+          test -f "$root/integration/enforce_root_final.py"
+          test -f "$root/integration/m6-claude-settings.json"
+          test -f "$root/integration/swegym_fidelity.py"
+          test -f "$root/integration/validate_swegym_train.py"
+          test -f /opt/integration-src/prorl/examples/swegym_slime_grpo/swegym_train_293.jsonl
+          python3 "$root/integration/prepare_swegym_task.py" --source /opt/integration-src/prorl/examples/swegym_slime_grpo/swegym_train_293.jsonl --output /opt/config/getmoto-moto-7365.jsonl
+      env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef: {fieldPath: status.podIP}
+      resources:
+        requests: {cpu: "2", memory: 8Gi, nvidia.com/gpu: "1"}
+        limits: {cpu: "4", memory: 16Gi, nvidia.com/gpu: "1"}
+      volumeMounts:
+        - {name: shared, mountPath: /shared}
+        - {name: integration-src, mountPath: /opt/integration-src}
+        - {name: models, mountPath: /opt/models}
+        - {name: config, mountPath: /opt/config}
+  containers:
+    - name: trainer
+      image: *image
+      imagePullPolicy: IfNotPresent
+      workingDir: /opt/integration-src/miles
+      securityContext:
+        runAsUser: 0
+        capabilities:
+          add: ["IPC_LOCK"]
+      command: ["bash", "-lc"]
+      args:
+        - |
+          set -euxo pipefail
+          root=/shared/test-artifacts/prorl-miles-nvfp4-m6-f049b16-20260826t052909z
+          run_id=m6-qwen3-nvfp4-swegym
+          until curl -fsS http://prorl-miles-nvfp4-m6-f049b16-20260826t052909z-prorl:8080/health; do sleep 3; done
+          until curl -fsS http://prorl-miles-nvfp4-m6-f049b16-20260826t052909z-prorl:8100/health; do sleep 3; done
+          until curl -fsS http://prorl-miles-nvfp4-m6-f049b16-20260826t052909z-dynamo:8000/health; do sleep 5; done
+          curl -fsS http://prorl-miles-nvfp4-m6-f049b16-20260826t052909z-dynamo:9090/engine/server_info > "$root/train/pre-server-info.json"
+          python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); assert str(data.get("weight_version")) == "0", data' "$root/train/pre-server-info.json"
+          timeout --signal=TERM --kill-after=120s 19800s             python3 "$root/integration/run_miles_prorl_swegym_step.py"               --run-id "$run_id"               --model-dir /opt/models               --prompt-data /opt/config/getmoto-moto-7365.jsonl               --polar-config /opt/config/polar-miles.yaml               --output-dir "$root/train"               --router-host prorl-miles-nvfp4-m6-f049b16-20260826t052909z-dynamo               --router-port 8000               --control-url http://prorl-miles-nvfp4-m6-f049b16-20260826t052909z-dynamo:9090/engine             2>&1 | tee "$root/train/driver.log"
+          if grep -E 'Dropping trace .*total_len=.*max_tokens=|no usable trace' "$root/train/driver.log"; then
+            echo 'ProRL dropped at least one training trace at the 131072-token boundary' >&2
+            exit 1
+          fi
+          python3 "$root/integration/validate_swegym_train.py"             --run-dir "$root/train/$run_id"             --driver-log "$root/train/driver.log"             --evidence-dir "$root/evidence/train"             --attempt-start-file "$root/train/attempt-start-ns.txt"             --pre-server-info "$root/train/pre-server-info.json"             --server-info-url http://prorl-miles-nvfp4-m6-f049b16-20260826t052909z-dynamo:9090/engine/server_info             --trace-dir "$root/dynamo/request-trace"             --trace-start-file "$root/train/request-trace-start.json"             2>&1 | tee "$root/evidence/train-validator.log"
+      env:
+        - name: PYTHONPATH
+          value: /opt/integration-src/miles:/opt/integration-src/prorl/src:/root/Megatron-LM
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: HF_HOME
+          value: /shared
+        - name: HF_HUB_CACHE
+          value: /shared/hub
+        - name: HF_HUB_OFFLINE
+          value: "1"
+        - name: TRANSFORMERS_OFFLINE
+          value: "1"
+        - name: RAY_DEDUP_LOGS
+          value: "0"
+        - name: NCCL_SOCKET_IFNAME
+          value: eth0
+        - name: GLOO_SOCKET_IFNAME
+          value: eth0
+      resources:
+        requests:
+          cpu: "32"
+          memory: 768Gi
+          nvidia.com/gpu: "4"
+        limits:
+          cpu: "64"
+          memory: 1Ti
+          nvidia.com/gpu: "4"
+      volumeMounts:
+        - {name: shared, mountPath: /shared}
+        - {name: integration-src, mountPath: /opt/integration-src}
+        - {name: models, mountPath: /opt/models}
+        - {name: config, mountPath: /opt/config}
+        - {name: dshm, mountPath: /dev/shm}
+  volumes:
+    - name: shared
+      persistentVolumeClaim: {claimName: shared-model-cache}
+    - {name: integration-src, emptyDir: {}}
+    - {name: models, emptyDir: {}}
+    - {name: config, emptyDir: {}}
+    - name: dshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 256Gi
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Equal
+      value: "true"
+      effect: NoSchedule

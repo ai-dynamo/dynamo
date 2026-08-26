@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Launch one maintained Qwen3 NVFP4 Miles step using ProRL rollouts."""
+"""Train one Qwen3 NVFP4 step from four real ProRL SWE-Gym sessions."""
 
 from __future__ import annotations
 
@@ -39,9 +39,27 @@ def main() -> None:
             "--metadata-key metadata",
             "--num-rollout 1",
             "--rollout-batch-size 1",
-            "--n-samples-per-prompt 1",
-            "--global-batch-size 1",
+            "--n-samples-per-prompt 4",
+            "--global-batch-size 4",
             "--rollout-max-response-len 4096",
+            "--rollout-max-context-len 131072",
+            "--rollout-temperature 0.7",
+            "--rollout-top-p 0.95",
+            "--seq-length 131072",
+            "--tensor-model-parallel-size 1",
+            "--context-parallel-size 4",
+            "--pipeline-model-parallel-size 1",
+            "--expert-model-parallel-size 4",
+            "--expert-tensor-parallel-size 1",
+            "--recompute-granularity full",
+            "--recompute-method uniform",
+            "--recompute-num-layers 1",
+            "--optimizer-cpu-offload",
+            "--overlap-cpu-optimizer-d2h-h2d",
+            "--use-precision-aware-optimizer",
+            "--position-embedding-type yarn",
+            "--rotary-scaling-factor 4.0",
+            "--yarn-original-max-position-embeddings 32768",
             "--max-tokens-per-gpu 32768",
             "--rollout-function-path slime_bridge.rollout.generate_rollout_polar_async",
             "--custom-rm-path slime_bridge.reward.reward_func",

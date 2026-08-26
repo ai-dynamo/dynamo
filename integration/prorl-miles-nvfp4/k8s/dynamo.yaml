@@ -4,15 +4,15 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z-dynamo
+  name: prorl-miles-nvfp4-m6-f049b16-20260826t052909z-dynamo
   namespace: warnold-dynamo
   labels:
-    integration-run: prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z
-    integration-role: m5-dynamo
+    integration-run: prorl-miles-nvfp4-m6-f049b16-20260826t052909z
+    integration-role: m6-dynamo
 spec:
   selector:
-    integration-run: prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z
-    integration-role: m5-dynamo
+    integration-run: prorl-miles-nvfp4-m6-f049b16-20260826t052909z
+    integration-role: m6-dynamo
   ports:
     - name: openai
       port: 8000
@@ -24,11 +24,11 @@ spec:
 apiVersion: v1
 kind: Pod
 metadata:
-  name: prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z-dynamo
+  name: prorl-miles-nvfp4-m6-f049b16-20260826t052909z-dynamo
   namespace: warnold-dynamo
   labels:
-    integration-run: prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z
-    integration-role: m5-dynamo
+    integration-run: prorl-miles-nvfp4-m6-f049b16-20260826t052909z
+    integration-role: m6-dynamo
 spec:
   restartPolicy: Never
   terminationGracePeriodSeconds: 90
@@ -44,7 +44,7 @@ spec:
         - |
           set -euxo pipefail
           WHEEL_DIR=/shared/test-artifacts/prorl-miles-nvfp4-f7de8eb-20260825t073154z/build/wheels
-          ARCHIVE_DIR=/shared/test-artifacts/prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z/build/archives
+          ARCHIVE_DIR=/shared/test-artifacts/prorl-miles-nvfp4-m6-f049b16-20260826t052909z/build/archives
           echo "1d90d516d27b2ede701e892a28a37e7cfb492cee9a18039e1220cb1b71fefcd5  $ARCHIVE_DIR/miles-bc1341fd5.tar.gz" | sha256sum -c -
           echo "9b4cd02b40aa1f7fc61ba8065a29fa79eb32a16ad3ef4a6b6695e1f75b0d73dc  $ARCHIVE_DIR/prorl-0ee1d48f65.tar.gz" | sha256sum -c -
           echo "eb7458e6c533684e19505ea3478aefb322c35a261d5b7fef8acb39f6f2c05f0f  $ARCHIVE_DIR/decode_handler-578fbde869.py" | sha256sum -c -
@@ -59,7 +59,7 @@ spec:
           install -m 0644 "$ARCHIVE_DIR"/decode_handler-578fbde869.py \
             /opt/runtime/dynamo/sglang/request_handlers/llm/decode_handler.py
           python3 -m py_compile /opt/runtime/dynamo/sglang/request_handlers/llm/decode_handler.py
-          mkdir -p /shared/test-artifacts/prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z/dynamo/request-trace
+          mkdir -p /shared/test-artifacts/prorl-miles-nvfp4-m6-f049b16-20260826t052909z/dynamo/request-trace
           PYTHONPATH=/opt/runtime:/opt/integration-src/miles:/opt/integration-src/prorl/src:/root/Megatron-LM \
             python3 -c "import dynamo, miles, polar; print(dynamo.__file__); print(miles.__file__); print(polar.__file__)"
       resources:
@@ -105,7 +105,9 @@ spec:
         - --mem-fraction-static
         - "0.80"
         - --context-length
-        - "32768"
+        - "131072"
+        - --json-model-override-args
+        - '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768,"rope_theta":1000000.0}}'
         - --dyn-tool-call-parser
         - hermes
         - --dyn-reasoning-parser
@@ -133,6 +135,8 @@ spec:
         - --engine-route
         - end_weight_update:tm
       env:
+        - name: SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN
+          value: "1"
         - name: PYTHONPATH
           value: /opt/runtime:/opt/integration-src/miles:/opt/integration-src/prorl/src:/root/Megatron-LM
         - name: HF_HOME
@@ -281,7 +285,7 @@ spec:
         - name: DYN_REQUEST_TRACE_FILE_FORMAT
           value: jsonl
         - name: DYN_REQUEST_TRACE_FILE_PATH
-          value: /shared/test-artifacts/prorl-miles-nvfp4-m5-0ee1d48-20260826t033310z/dynamo/request-trace/requests.jsonl
+          value: /shared/test-artifacts/prorl-miles-nvfp4-m6-f049b16-20260826t052909z/dynamo/request-trace/requests.jsonl
       ports:
         - name: openai
           containerPort: 8000

@@ -1,1 +1,0 @@
-{"prompt":"Use the Agent tool exactly once in the foreground with description `Calculate product`, prompt `Calculate 13 * 17 and return exactly CHILD_221.`, and subagent_type `general-purpose`. Wait for its result. Then reply exactly ROOT_OK CHILD_221. Do not call any other tool.","label":"","metadata":{"integration_case":"prorl-miles-dynamo-agent-subagent-nvfp4"}}
