@@ -7,10 +7,16 @@ use std::time::Duration;
 use clap::Args;
 use dynamo_backend_common::CommonArgs;
 
+use crate::GrpcEndpoint;
+
 const DEFAULT_GRPC_CONNECT_ATTEMPT_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_GRPC_CONNECTIONS: NonZeroUsize = NonZeroUsize::new(8).unwrap();
 const DEFAULT_GRPC_RETRY_INTERVAL_SECS: u64 = 1;
 const DEFAULT_GRPC_STARTUP_DEADLINE_SECS: u64 = 300;
+
+fn parse_grpc_endpoint(raw: &str) -> Result<GrpcEndpoint, String> {
+    GrpcEndpoint::parse(raw, "--grpc-endpoint").map_err(|error| error.to_string())
+}
 
 /// CLI flags shared by gRPC sidecars.
 #[derive(Args, Clone, Debug)]
@@ -70,6 +76,14 @@ pub struct SidecarArgs {
     #[command(flatten)]
     pub common: CommonArgs,
 
+    /// Engine gRPC endpoint as `host:port` or a plaintext gRPC/HTTP URL.
+    #[arg(
+        long,
+        env = "DYN_SIDECAR_GRPC_ENDPOINT",
+        value_parser = parse_grpc_endpoint
+    )]
+    pub grpc_endpoint: GrpcEndpoint,
+
     #[command(flatten)]
     pub grpc: GrpcTransportArgs,
 }
@@ -109,7 +123,8 @@ mod tests {
 
     #[test]
     fn parses_defaults_and_overrides() {
-        let defaults = TestArgs::try_parse_from(["test"]).expect("parse defaults");
+        let defaults = TestArgs::try_parse_from(["test", "--grpc-endpoint", "127.0.0.1:50051"])
+            .expect("parse defaults");
         let config = defaults.sidecar.grpc.config();
         assert_eq!(config.connections.get(), 8);
         assert_eq!(config.connect_attempt_timeout, Duration::from_secs(30));
@@ -118,6 +133,8 @@ mod tests {
 
         let overrides = TestArgs::try_parse_from([
             "test",
+            "--grpc-endpoint",
+            "127.0.0.1:50051",
             "--grpc-connections",
             "2",
             "--grpc-connect-attempt-timeout-secs",
@@ -143,7 +160,12 @@ mod tests {
             "--grpc-retry-interval-secs",
             "--grpc-startup-deadline-secs",
         ] {
-            assert!(TestArgs::try_parse_from(["test", flag, "0"]).is_err());
+            assert!(
+                TestArgs::try_parse_from(
+                    ["test", "--grpc-endpoint", "127.0.0.1:50051", flag, "0",]
+                )
+                .is_err()
+            );
         }
     }
 }

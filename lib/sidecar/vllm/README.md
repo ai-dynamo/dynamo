@@ -55,10 +55,10 @@ Start the Dynamo worker explicitly:
 
 ```bash
 dynamo-vllm-sidecar \
-  --vllm-endpoint 127.0.0.1:50051
+  --grpc-endpoint 127.0.0.1:50051
 ```
 
-Use `VLLM_GRPC_ENDPOINT` instead of `--vllm-endpoint` when the endpoint is
+Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is
 provided through the environment.
 
 ### RL workflows
@@ -73,7 +73,7 @@ vllm-rs serve Qwen/Qwen3-0.6B \
   --weight-transfer-config '{"backend":"nccl"}'
 
 DYN_SYSTEM_PORT=8081 dynamo-vllm-sidecar \
-  --vllm-endpoint 127.0.0.1:50051 \
+  --grpc-endpoint 127.0.0.1:50051 \
   --enable-rl
 ```
 
@@ -112,7 +112,7 @@ cargo run -p dynamo-vllm-mocker --bin dynamo-vllm-mocker-server -- \
   --extra-engine-args '{"speedup_ratio":1000}'
 
 cargo run -p dynamo-vllm-sidecar --bin dynamo-vllm-sidecar -- \
-  --vllm-endpoint 127.0.0.1:50051
+  --grpc-endpoint 127.0.0.1:50051
 ```
 
 The mocker does not advertise RL capabilities; use a compatible vLLM server for RL route testing.
