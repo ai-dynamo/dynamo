@@ -1,6 +1,6 @@
 # Stateful Agent Traffic Runtime
 
-**Status:** Direct-path Responses and Anthropic Messages vertical slices implemented; narrow MCP implementation, observability completion, and GAIE/EPP integration remain
+**Status:** Direct-path Responses, Anthropic Messages, and narrow outbound MCP vertical slices implemented; observability completion and GAIE/EPP integration remain
 **Scope:** A composition model for native OpenAI Responses and Anthropic Messages traffic, durable state, external tools, Kubernetes-native sandboxes, and Dynamo inference.
 **Decision horizon:** Productionize the direct Dynamo path first; preserve the same boundaries for Dynamo GAIE/EPP Kubernetes deployments.
 
@@ -148,10 +148,10 @@ The direct-path vertical slice is split by responsibility rather than by engine:
 | Runtime contracts and orchestration | `frontend-crates/agent-rt/core`: native Responses materialization, pull-based stream observation, public response identity, tool rounds, checkpoint gating, and the traits above. |
 | Durable response/tool state | `frontend-crates/agent-rt/store`: embedded SQLite and shared PostgreSQL implementations. |
 | Read-only server tools | `frontend-crates/agent-rt/tools`: bounded Brave web search behind `ToolExecutor`. |
-| Configured MCP connector (next) | `frontend-crates/agent-rt/mcp`: an `rmcp = "=3.1.4"`-backed `ToolExecutor` for trusted Streamable HTTP servers. The runtime core does not depend on the MCP SDK. |
+| Configured MCP connector | `frontend-crates/agent-rt/mcp`: an implemented `rmcp = "=3.1.4"`-backed `ToolExecutor` for trusted Streamable HTTP servers. The runtime core does not depend on the MCP SDK. |
 | Sandbox contract and adapters | `frontend-crates/agent-rt/sandbox`: `SandboxProvider`, HTTP provider client, Kubernetes Agent Sandbox control plane, sandboxd data plane, and the durable execution supervisor. |
 | Sandbox service | `frontend-crates/agent-rt/sandbox-service`: authenticated HTTP service, PostgreSQL execution fencing, operator catalog, container images, and Kubernetes manifests. It is deployed separately from Dynamo. |
-| Dynamo composition | `dynamo-llm`'s optional `agent-rt-poc` feature: trusted ingress scope, filtered Dynamo carrier, native typed Responses and Anthropic streaming with Dynamo-owned SSE, SQLite runtime construction, and deployment-selected web-search/sandbox routes. |
+| Dynamo composition | `dynamo-llm`'s optional `agent-rt-poc` feature: trusted ingress scope, filtered Dynamo carrier, native typed Responses and Anthropic streaming with Dynamo-owned SSE, SQLite runtime construction, and deployment-selected web-search, sandbox, and MCP routes. |
 
 Anthropic selection is trusted host policy. Ordinary Claude Code requests and client-owned tools stay on Dynamo's stateless Messages path. A request enters the durable runtime only when it declares a deployment-configured runtime tool or the operator sets `DYN_AGENT_RT_STATEFUL_ANTHROPIC=true`. Every model step then re-enters Dynamo's native Messages core; `agent-rt` does not perform Anthropic-to-chat conversion itself.
 
@@ -564,7 +564,7 @@ Remaining cross-provider acceptance work, in order:
 
 1. Implement and test the versioned SQLite migration/startup policy described above.
 2. Add host-integrated runtime/store/tool observations and the first dashboard/alerts without duplicating Dynamo inference metrics.
-3. Implement the narrow configured MCP slice above; broader catalogs, side effects, and MCP capability breadth remain deferred.
+3. Harden the narrow MCP slice with a strict raw JSON success-body bound, legacy/reconnect/malformed/cancellation fixtures, streaming terminal-error and replay acceptance, and an opt-in real Codex outbound-MCP run; broader catalogs, side effects, and MCP capability breadth remain deferred.
 4. Add a deployment-level checkpoint-store failure injector if live fault testing beyond the deterministic runtime contract test is required; `agent-rt` already proves that an injected terminal commit failure releases neither staged deltas nor `response.completed`.
 5. Exercise one live Brave request when deployment credentials are available.
 
