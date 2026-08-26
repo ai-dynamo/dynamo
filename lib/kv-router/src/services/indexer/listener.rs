@@ -153,6 +153,7 @@ struct ListenerLoop {
     /// source for its whole life, while replays only happen at startup and on gaps.
     replay_endpoint: Option<String>,
     watermark: Arc<AtomicU64>,
+    snapshot_bootstrap_first_batch: Arc<std::sync::atomic::AtomicBool>,
     normalizer: ZmqEventNormalizer,
     messages_processed: u64,
 }
@@ -169,6 +170,7 @@ impl ListenerLoop {
         live_socket: ZmqSocket,
         replay_endpoint: Option<String>,
         watermark: Arc<AtomicU64>,
+        snapshot_bootstrap_first_batch: Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         Self {
             worker_id,
@@ -178,6 +180,7 @@ impl ListenerLoop {
             live_socket,
             replay_endpoint,
             watermark,
+            snapshot_bootstrap_first_batch,
             normalizer: ZmqEventNormalizer::new(block_size)
                 .with_engine_owned_mm_identity(engine_owned_mm_identity),
             messages_processed: 0,
@@ -316,7 +319,22 @@ impl ListenerLoop {
     }
 
     async fn handle_gap(&mut self, seq: u64) -> Result<(), String> {
-        match self.cursor().observe(seq) {
+        let observation = self.cursor().observe(seq);
+        if matches!(observation, CursorObservation::Initial { .. })
+            && self
+                .snapshot_bootstrap_first_batch
+                .swap(false, Ordering::AcqRel)
+        {
+            tracing::debug!(
+                self.worker_id,
+                self.dp_rank,
+                seq,
+                "Establishing live cursor from first batch after peer snapshot"
+            );
+            return Ok(());
+        }
+
+        match observation {
             CursorObservation::Initial { got } if got > 0 => {
                 tracing::warn!(
                     self.worker_id,
@@ -501,6 +519,7 @@ async fn run_listener(
     let engine_owned_mm_identity = record.engine_owned_mm_identity();
     let indexer = record.indexer();
     let watermark = record.watermark();
+    let snapshot_bootstrap_first_batch = record.snapshot_bootstrap_first_batch();
 
     tracing::info!(worker_id, dp_rank, endpoint, "ZMQ listener starting");
 
@@ -545,6 +564,7 @@ async fn run_listener(
         socket,
         replay_endpoint,
         watermark,
+        snapshot_bootstrap_first_batch,
     );
     listener.drain_buffered().await?;
     if !record.try_mark_active(generation) {
