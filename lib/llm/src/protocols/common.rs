@@ -543,13 +543,19 @@ impl GuidedDecodingOptions {
 
     /// Validate that only one guided decoding option is set, and that
     /// grammar nesting depth is bounded.
+    ///
+    /// `whitespace_pattern` and `backend` are deliberately absent from the count. Both
+    /// modify how a constraint is applied rather than being a constraint themselves, so
+    /// pairing either with `json` is a normal request, not a conflict. Counting
+    /// `whitespace_pattern` made `guided_json` + `guided_whitespace_pattern` fail while
+    /// the error text below never named it, and while the Python frontend
+    /// (`components/src/dynamo/frontend/prepost.py`) builds exactly that pair on purpose.
     pub fn validate(&self) -> Result<()> {
         let count = [
             self.json.is_some(),
             self.regex.is_some(),
             self.choice.as_ref().is_some_and(|v| !v.is_empty()),
             self.grammar.is_some(),
-            self.whitespace_pattern.is_some(),
             self.structural_tag.is_some(),
         ]
         .iter()

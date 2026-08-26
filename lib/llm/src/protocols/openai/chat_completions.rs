@@ -664,7 +664,6 @@ mod tests {
     fn test_conflicting_guided_decoding_options_fail_request_validation() {
         // Each pair is two constraints set at once; every one of them must be rejected.
         let conflicts = [
-            json!({"guided_json": {"type": "object"}, "guided_whitespace_pattern": "[\n ]?"}),
             json!({"guided_json": {"type": "object"}, "guided_regex": "a+"}),
             json!({"guided_regex": "a+", "guided_choice": ["x", "y"]}),
             json!({"guided_grammar": "root ::= \"a\"", "guided_json": {"type": "object"}}),
@@ -697,6 +696,12 @@ mod tests {
     /// The guard for the above: a request with exactly ONE guided-decoding constraint
     /// is legal and must keep validating, so the new check cannot be satisfied by
     /// rejecting guided decoding outright.
+    ///
+    /// This also covers `guided_whitespace_pattern` paired with a constraint.
+    /// `GuidedDecodingOptions::validate` used to count it toward the exclusivity limit,
+    /// which rejected `guided_json` + `guided_whitespace_pattern` even though the error
+    /// text never named `whitespace_pattern` and the Python frontend
+    /// (`components/src/dynamo/frontend/prepost.py`) builds that exact pair.
     #[test]
     fn test_single_guided_decoding_option_passes_request_validation() {
         for extra in [
@@ -704,6 +709,10 @@ mod tests {
             json!({"guided_regex": "a+"}),
             json!({"guided_choice": ["x", "y"]}),
             json!({"guided_whitespace_pattern": "[\n ]?"}),
+            // The companion pair: whitespace_pattern modifies the JSON grammar rather
+            // than being a second grammar, so setting both is one constraint, not two.
+            json!({"guided_json": {"type": "object"}, "guided_whitespace_pattern": "[\n ]?"}),
+            json!({"guided_regex": "a+", "guided_whitespace_pattern": "[\n ]?"}),
         ] {
             let mut body = json!({
                 "model": "test-model",
