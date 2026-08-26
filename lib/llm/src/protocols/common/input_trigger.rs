@@ -56,7 +56,15 @@ pub fn classify_response_request(request: &NvCreateResponse) -> InputTrigger {
                 return InputTrigger::Other;
             };
             match last {
-                InputItem::Item(Item::FunctionCallOutput(_)) => InputTrigger::ToolResult,
+                InputItem::Item(
+                    Item::FunctionCallOutput(_)
+                    | Item::ToolSearchOutput(_)
+                    | Item::ComputerCallOutput(_)
+                    | Item::LocalShellCallOutput(_)
+                    | Item::ShellCallOutput(_)
+                    | Item::ApplyPatchCallOutput(_)
+                    | Item::CustomToolCallOutput(_),
+                ) => InputTrigger::ToolResult,
                 InputItem::Item(Item::Message(MessageItem::Input(msg))) => {
                     if msg.role == InputRole::User {
                         InputTrigger::UserMessage
@@ -72,7 +80,6 @@ pub fn classify_response_request(request: &NvCreateResponse) -> InputTrigger {
                     ResponseRole::User => InputTrigger::UserMessage,
                     _ => InputTrigger::Other,
                 },
-                // TODO: Classify non-function tool output variants as ToolResult.
                 _ => InputTrigger::Other,
             }
         }
@@ -189,6 +196,18 @@ mod tests {
         }
     }
 
+    fn response_request_with_item(item: serde_json::Value) -> NvCreateResponse {
+        NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![serde_json::from_value(item).unwrap()]),
+                model: Some("test".into()),
+                ..Default::default()
+            },
+            nvext: None,
+            chat_template_args: None,
+        }
+    }
+
     #[test]
     fn responses_easy_message_roles() {
         for (role, expected) in [
@@ -199,6 +218,54 @@ mod tests {
             assert_eq!(
                 classify_response_request(&response_request_with_easy_messages(role)),
                 expected
+            );
+        }
+    }
+
+    #[test]
+    fn responses_tool_outputs() {
+        for item in [
+            serde_json::json!({
+                "type": "function_call_output",
+                "call_id": "function-1",
+                "output": "ok",
+            }),
+            serde_json::json!({
+                "type": "tool_search_output",
+                "tools": [],
+            }),
+            serde_json::json!({
+                "type": "computer_call_output",
+                "call_id": "computer-1",
+                "output": {
+                    "type": "computer_screenshot",
+                    "image_url": "https://example.com/screenshot.png",
+                },
+            }),
+            serde_json::json!({
+                "type": "local_shell_call_output",
+                "id": "shell-1",
+                "output": "done",
+            }),
+            serde_json::json!({
+                "type": "shell_call_output",
+                "call_id": "shell-2",
+                "output": [],
+            }),
+            serde_json::json!({
+                "type": "apply_patch_call_output",
+                "call_id": "patch-1",
+                "status": "completed",
+            }),
+            serde_json::json!({
+                "type": "custom_tool_call_output",
+                "call_id": "custom-1",
+                "output": "done",
+            }),
+        ] {
+            assert_eq!(
+                classify_response_request(&response_request_with_item(item)),
+                InputTrigger::ToolResult
             );
         }
     }
