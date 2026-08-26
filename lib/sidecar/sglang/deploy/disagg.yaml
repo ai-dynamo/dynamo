@@ -22,7 +22,7 @@
 #   - RDMA/NIXL: engines need rdma/ib devices, IPC_LOCK, and shared memory; tune
 #     for your fabric (UCX_NET_DEVICES etc.). NIXL/UCX ship in sglang-runtime.
 #   - Model / served-model-name / TP must match between prefill and decode.
-#   - `main` runs the unified dynamo-sidecar image (no GPU); build from
+#   - `main` runs the dynamo-sidecar image (no GPU); build from
 #     lib/sidecar/Dockerfile (see README) and select the sglang entrypoint.
 
 apiVersion: nvidia.com/v1beta1

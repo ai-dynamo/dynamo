@@ -59,7 +59,7 @@ provided through the environment.
 sidecar next to a TensorRT-LLM engine and serves `Qwen/Qwen3-0.6B` on one GPU.
 
 There is no published sidecar image yet (see [Packaging](#packaging)), so build
-and push the unified image from `lib/sidecar/Dockerfile`. It contains all three
+and push the image from `lib/sidecar/Dockerfile`. It contains all three
 engine-specific sidecar executables; this deployment passes `trtllm` to the
 image entrypoint.
 
@@ -140,7 +140,7 @@ all the gain.
 
 ## Packaging
 
-There is no published unified sidecar image yet. The image contains the vLLM,
+There is no published sidecar image yet. The image contains the vLLM,
 SGLang, and TensorRT-LLM executables and uses a minimal CPU-only base. Until
 official packaging is available, build and push `dynamo-sidecar` as described in
 [Build the image](../README.md#build-the-image).

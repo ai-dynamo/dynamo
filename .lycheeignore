@@ -47,7 +47,7 @@
 # URL returns 404 until merge.
 ^https://github\.com/ai-dynamo/dynamo/tree/main/examples/power-aware-budget$
 
-# The unified sidecar Dockerfile is introduced by the same PR as its docs link,
+# The sidecar Dockerfile is introduced by the same PR as its docs link,
 # so the blob/main URL returns 404 until merge. Remove this entry after merge.
 ^https://github\.com/ai-dynamo/dynamo/blob/main/lib/sidecar/Dockerfile$
 

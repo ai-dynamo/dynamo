@@ -65,7 +65,7 @@ curl localhost:8000/v1/chat/completions \
 
 ## Deploy on Kubernetes
 
-No published unified sidecar image is available yet. Follow the
+No published sidecar image is available yet. Follow the
 [Kubernetes quick start](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/sglang/README.md#deploy-on-kubernetes-quick-start)
 to build `dynamo-sidecar`, which contains all three engine-specific sidecar
 executables. The SGLang manifests pass `sglang` to the image entrypoint and

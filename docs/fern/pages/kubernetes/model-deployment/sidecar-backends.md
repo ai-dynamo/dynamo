@@ -49,7 +49,8 @@ event integration with Dynamo's discovery and event planes.
 
 ## Container Packaging
 
-The unified CPU-only sidecar image provides one `dynamo-sidecar` entrypoint:
+The sidecar Dockerfile builds all three engine-specific sidecar executables into
+one CPU-only image. The image provides one `dynamo-sidecar` entrypoint:
 
 | Engine | First container argument |
 |---|---|
@@ -62,8 +63,7 @@ remaining arguments. The inference engine remains in a separate GPU container,
 so the sidecar image does not include vLLM, SGLang, TensorRT-LLM, CUDA, or
 engine-specific Python dependencies.
 
-No published unified sidecar image is available yet. Build `dynamo-sidecar`
-from the
+No published sidecar image is available yet. Build `dynamo-sidecar` from the
 [sidecar Dockerfile](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/Dockerfile).
 
 ## Target Responsibilities
@@ -87,5 +87,5 @@ This table describes validated launch topologies, not feature parity with the
 in-process backends.
 
 See the
-[sidecar source, unified Dockerfile, and engine-specific READMEs](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar)
+[sidecar Dockerfile, source, and engine-specific READMEs](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar)
 for implementation details.

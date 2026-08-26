@@ -9,7 +9,7 @@ common/     Shared gRPC arguments, transport, and errors
 sglang/     SGLang sidecar
 trtllm/     TensorRT-LLM sidecar
 vllm/       vLLM sidecar
-Dockerfile  Unified CPU-only image holding all three sidecar executables
+Dockerfile  Builds all three sidecar executables into a CPU-only image
 dynamo-sidecar  Image entrypoint that selects an engine-specific executable
 ```
 

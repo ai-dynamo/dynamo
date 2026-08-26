@@ -1,7 +1,7 @@
 # SGLang sidecar
 
 > [!WARNING]
-> **Experimental.** These deployment examples and the unified sidecar image
+> **Experimental.** These deployment examples and the sidecar image
 > are experimental and not yet packaged for distribution (the launcher module
 > ships inside `ai-dynamo-runtime`). The manifests, flags, and behavior may change
 > without notice.
@@ -22,7 +22,7 @@ cargo build --release -p dynamo-sglang-sidecar
 ```
 
 There is no published image yet; see
-[Build the image](../README.md#build-the-image) for the unified sidecar image.
+[Build the image](../README.md#build-the-image) containing all sidecar executables.
 Official packaging is deferred to a follow-up.
 
 Use `SGLANG_GRPC_ENDPOINT` instead of `--sglang-endpoint` when the endpoint is provided through the environment.
@@ -57,8 +57,8 @@ same unified worker lifecycle as the standalone executable.
 that colocates the sidecar with an SGLang engine). `deploy/disagg.yaml` runs
 disaggregated prefill/decode with NIXL KV transfer.
 
-There is no published sidecar image yet, so build and push the unified image
-from `lib/sidecar/Dockerfile`. It contains all three engine-specific sidecar
+There is no published sidecar image yet, so build and push the image from
+`lib/sidecar/Dockerfile`. It contains all three engine-specific sidecar
 executables; this deployment passes `sglang` to the image entrypoint.
 
 > [!NOTE]
