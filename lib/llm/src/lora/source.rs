@@ -451,6 +451,10 @@ mod tests {
     use super::*;
     use hf_hub::Cache;
     use mockito::Matcher;
+    use object_store::{
+        StaticCredentialProvider,
+        aws::{AmazonS3ConfigKey, AwsCredentialProvider},
+    };
     use std::fs;
     use tempfile::TempDir;
 
@@ -479,6 +483,35 @@ mod tests {
     fn test_parse_s3_uri_invalid() {
         let uri = "file:///path/to/lora";
         assert!(S3LoRASource::parse_s3_uri(uri).is_err());
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn s3_builder_prioritizes_service_endpoint_and_preserves_addressing_style() {
+        let credentials: AwsCredentialProvider =
+            Arc::new(StaticCredentialProvider::new(AwsCredential {
+                key_id: "test-access-key".to_string(),
+                secret_key: "test-secret-key".to_string(),
+                token: None,
+            }));
+        let builder = temp_env::with_vars(
+            [
+                ("AWS_ENDPOINT_URL_S3", Some("https://s3-specific.example")),
+                ("AWS_ENDPOINT_URL", Some("https://generic.example")),
+                ("AWS_ENDPOINT", Some("https://legacy.example")),
+                ("AWS_VIRTUAL_HOSTED_STYLE_REQUEST", Some("true")),
+            ],
+            || S3LoRASource::build_s3_builder("bucket", "us-east-1", credentials, 60),
+        );
+
+        assert_eq!(
+            builder.get_config_value(&AmazonS3ConfigKey::Endpoint),
+            Some("https://s3-specific.example".to_string())
+        );
+        assert_eq!(
+            builder.get_config_value(&AmazonS3ConfigKey::VirtualHostedStyleRequest),
+            Some("true".to_string())
+        );
     }
 
     #[serial_test::serial]
