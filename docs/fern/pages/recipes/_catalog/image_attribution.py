@@ -19,6 +19,10 @@ def _invalid_release_tag(value):
     return value is not None and (not isinstance(value, str) or not value.strip())
 
 
+def _valid_choice(value, choices):
+    return isinstance(value, str) and value in choices
+
+
 def _is_iso_date(value):
     if not isinstance(value, str) or not _ISO_DATE_RE.fullmatch(value):
         return False
@@ -48,6 +52,14 @@ def _configured_images(artifacts, label):
     if configured_images is not None and not isinstance(configured_images, list):
         errors.append("[%s] artifacts.recipe_specific_images must be an array" % label)
         configured_images = []
+    elif isinstance(configured_images, list):
+        if any(not isinstance(image, str) for image in configured_images):
+            errors.append(
+                "[%s] artifacts.recipe_specific_images entries must be strings" % label
+            )
+        configured_images = [
+            image for image in configured_images if isinstance(image, str)
+        ]
     return configured_images or [], errors
 
 
@@ -73,7 +85,7 @@ def _release_field_errors(period, label):
     release_tag = period.get("release_tag")
     release_state = period.get("release_state")
     errors = []
-    if source_kind is not None and source_kind not in _SOURCE_KINDS:
+    if source_kind is not None and not _valid_choice(source_kind, _SOURCE_KINDS):
         errors.append(
             "[%s] recipe-specific image period has invalid source_kind" % label
         )
@@ -81,7 +93,7 @@ def _release_field_errors(period, label):
         errors.append(
             "[%s] recipe-specific image period has invalid release_tag" % label
         )
-    if release_state is not None and release_state not in _RELEASE_STATES:
+    if release_state is not None and not _valid_choice(release_state, _RELEASE_STATES):
         errors.append(
             "[%s] recipe-specific image period has invalid release_state" % label
         )
@@ -98,9 +110,10 @@ def _github_release_errors(period, label):
     if period.get("source_kind") != "github-release":
         return []
     errors = []
+    release_state = period.get("release_state")
     if not period.get("release_tag"):
         errors.append("[%s] github-release image period is missing release_tag" % label)
-    if period.get("release_state") not in _RELEASE_STATES:
+    if not _valid_choice(release_state, _RELEASE_STATES):
         errors.append(
             "[%s] github-release image period has invalid release_state" % label
         )
@@ -109,11 +122,12 @@ def _github_release_errors(period, label):
 
 def _complete_release(period):
     tag = period.get("release_tag")
+    release_state = period.get("release_state")
     return (
         period.get("source_kind") == "github-release"
         and isinstance(tag, str)
         and bool(tag.strip())
-        and period.get("release_state") in _RELEASE_STATES
+        and _valid_choice(release_state, _RELEASE_STATES)
     )
 
 
@@ -176,27 +190,22 @@ def _deploy_evidence_errors(
     return errors
 
 
-def recipe_image_errors(artifacts, deploy_paths, label) -> list[str]:
-    if artifacts is None:
-        return []
-    if not isinstance(artifacts, dict):
-        return ["[%s] artifacts must be an object" % label]
-    current_images, errors = _configured_images(artifacts, label)
+def _configured_periods(artifacts, label):
     periods = artifacts.get("recipe_specific_image_periods")
     if not isinstance(periods, list):
-        errors.append(
+        return [], [
             "[%s] artifacts.recipe_specific_image_periods must be an array" % label
-        )
-        periods = []
-    elif not periods:
-        errors.append(
+        ]
+    if not periods:
+        return [], [
             "[%s] artifacts.recipe_specific_image_periods must contain at least one item"
             % label
-        )
-    period_errors, tracked_images, open_images, release_images = _period_sets(
-        periods, label
-    )
-    errors.extend(period_errors)
+        ]
+    return periods, []
+
+
+def _evidence_errors(current_images, periods, deploy_paths, label):
+    errors, tracked_images, open_images, release_images = _period_sets(periods, label)
     errors.extend(
         _deploy_evidence_errors(
             current_images,
@@ -207,12 +216,23 @@ def recipe_image_errors(artifacts, deploy_paths, label) -> list[str]:
             label,
         )
     )
-    current_set = {image for image in current_images if isinstance(image, str)}
-    if current_set != open_images:
+    if set(current_images) != open_images:
         errors.append(
             "[%s] current recipe-specific images must match open ownership periods"
             % label
         )
+    return errors
+
+
+def recipe_image_errors(artifacts, deploy_paths, label) -> list[str]:
+    if artifacts is None:
+        return []
+    if not isinstance(artifacts, dict):
+        return ["[%s] artifacts must be an object" % label]
+    current_images, errors = _configured_images(artifacts, label)
+    periods, period_errors = _configured_periods(artifacts, label)
+    errors.extend(period_errors)
+    errors.extend(_evidence_errors(current_images, periods, deploy_paths, label))
     return errors
 
 
@@ -243,7 +263,14 @@ def _entry_ownership(recipe_id, obj):
 
 def _overlap_errors(image, periods):
     errors = []
-    ordered = sorted(periods, key=lambda p: (p[0], p[1] or "9999-12-31", p[2]))
+    ordered = sorted(
+        periods,
+        key=lambda p: (
+            p[0],
+            p[1] if isinstance(p[1], str) else "9999-12-31",
+            p[2],
+        ),
+    )
     for index, (start, end, recipe_id) in enumerate(ordered):
         upper = end if isinstance(end, str) else "9999-12-31"
         for other_start, other_end, other_recipe_id in ordered[index + 1 :]:

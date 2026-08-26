@@ -89,10 +89,11 @@ source-revision-backed ownership periods. GitHub release periods record
 `release_tag` and `release_state`; append one period and image per re-release so
 each tag retains independent pull history. Omit
 `effective_from` when the exact tag belongs to the recipe for all retained
-telemetry; use explicit dates for ownership handoffs. `source_revision` is a
-recipe-owner provenance assertion. The offline validator checks its commit-SHA
-shape but does not prove that the commit exists or introduced the image. Verify
-new or changed revisions against repository history during review. The
+telemetry; use explicit dates for ownership handoffs. `source_revision` is the
+main-branch commit that introduced the recipe's image reference, not the image
+build revision. The offline validator checks its commit-SHA shape but does not
+prove that the commit exists or introduced the image. Verify new or changed
+revisions against repository history during review. The
 validator also checks cross-catalog referential integrity (recipe
 `related_benchmarks` ↔ benchmark
 ids; benchmark `related_recipes` and `promotion_candidate.deferred_recipe_id` ↔
