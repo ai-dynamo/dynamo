@@ -178,6 +178,28 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         rs::logging::init();
     }
 
+    // Bound the runtime the bridge builds for itself.
+    //
+    // `DistributedRuntime::new` hands the bridge a configured runtime, but only if it reaches
+    // `pyo3_async_runtimes::tokio` first. Roughly ninety `future_into_py` / `into_future` call
+    // sites across the bindings can get there earlier, and on an unset bridge `get_runtime()`
+    // builds from `Builder::new_multi_thread()` defaults: `available_parallelism()` workers and
+    // Tokio's 512-thread blocking ceiling, none of it derived from DYN_RUNTIME_*.
+    //
+    // Replacing the builder removes the ordering question instead of answering it — whoever
+    // builds the runtime, it is sized from the same config. Module init is the earliest point
+    // this can happen, since nothing in the extension is reachable until the import returns.
+    match rs::RuntimeConfig::from_settings() {
+        Ok(config) => pyo3_async_runtimes::tokio::init(config.tokio_builder()),
+        // Deliberately not fatal. `Worker::ensure_process_runtime` reads the same settings and
+        // raises this where the message has context; failing here would turn a malformed
+        // DYN_RUNTIME_* value into an ImportError that names neither the variable nor the cause.
+        Err(e) => tracing::warn!(
+            "could not resolve the runtime configuration at import ({e}); if the async bridge \
+             has to build its own runtime it will fall back to Tokio's unbounded defaults"
+        ),
+    }
+
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(lora_name_to_id, m)?)?;
     #[cfg(feature = "mm-routing")]
@@ -1195,22 +1217,23 @@ impl DistributedRuntime {
         // DYN_RUNTIME_*. Initialising it here is what keeps the workload on the runtime we
         // configured.
         let primary = rs::Worker::ensure_process_runtime().map_err(to_pyerr)?;
-        INIT.get_or_try_init(|| -> anyhow::Result<()> {
-            // An already-initialised bridge is legitimate: `backend::Worker` initialises it
-            // with this same `RT`. Accept that, but confirm the runtime really is ours —
-            // running on a foreign one is the failure this guards against.
-            if pyo3_async_runtimes::tokio::init_with_runtime(primary).is_err() {
-                // The failure proves the cell is set, so this can't hit the lazy-build path.
-                if !std::ptr::eq(pyo3_async_runtimes::tokio::get_runtime(), primary) {
-                    anyhow::bail!(
-                        "pyo3 async bridge already initialized with a different tokio runtime; \
-                         refusing to run on a runtime that ignores DYN_RUNTIME_*"
-                    );
-                }
+        INIT.get_or_init(|| {
+            // The bridge holds at most one runtime for the life of the process and will not
+            // hand it back, so an `Err` here is a state we have to accept, not a failure to
+            // report: `backend::Worker` may have initialised it with this same `RT`, and
+            // anything that reached `get_runtime()` first will have had one built lazily.
+            // Refusing to construct would break callers that work fine on that runtime.
+            if pyo3_async_runtimes::tokio::init_with_runtime(primary).is_err()
+                && !std::ptr::eq(pyo3_async_runtimes::tokio::get_runtime(), primary)
+            {
+                // Say it out loud, though — futures spawned through the bridge are the ones
+                // DYN_RUNTIME_* was meant to size, and here they will not be.
+                tracing::warn!(
+                    "pyo3 async bridge was already initialized with a different tokio runtime; \
+                     futures spawned through it will not use the DYN_RUNTIME_* configuration"
+                );
             }
-            Ok(())
-        })
-        .map_err(to_pyerr)?;
+        });
 
         // Wraps the same `RT` the bridge was just given, so multiple
         // DistributedRuntime instances continue to share one tokio runtime.
