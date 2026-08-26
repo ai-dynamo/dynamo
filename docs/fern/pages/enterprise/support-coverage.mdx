@@ -35,17 +35,11 @@ Dynamo Enterprise coverage is currently scoped to Blackwell and GB200 systems. O
 
 ## Lifecycle and End-of-Life
 
-Dynamo Enterprise follows the [NVIDIA AI Enterprise Lifecycle Policy](https://docs.nvidia.com/ai-enterprise/lifecycle/latest/index.html), under the terms for [Application Layer Software](https://docs.nvidia.com/ai-enterprise/lifecycle/latest/application-software.html), which covers AI frameworks and SDKs. That policy defines three branch types with different support windows:
+Dynamo Enterprise is an NVIDIA AI Enterprise Feature Branch and follows the [NVIDIA AI Enterprise Lifecycle Policy](https://docs.nvidia.com/ai-enterprise/lifecycle/latest/index.html) under the terms for [Application Layer Software](https://docs.nvidia.com/ai-enterprise/lifecycle/latest/application-software.html).
 
-| Branch Type | Support Window | Release Cadence |
-|---|---|---|
-| Feature Branch (FB) | One month per branch | New FB monthly |
-| Production Branch (PB) | Nine months, with monthly bug fixes and security updates for high and critical vulnerabilities | New PB every six months |
-| Long-Term Support Branch (LTSB) | Extended API stability for regulated or long-certification environments | See the policy |
+Each Feature Branch is supported for one month, and NVIDIA publishes a new Feature Branch monthly. Dynamo feature releases follow roughly the same monthly cadence, so each one supersedes the previous Feature Branch and carries support forward. Bug fixes and security updates ship in subsequent releases rather than as backports to an earlier one. Because Feature Branch releases are superseded monthly, the NGC catalog collection reflects the current Feature Branch release rather than an archive of prior ones.
 
-Dynamo Enterprise is currently designated a Feature Branch. Because Feature Branch releases are superseded monthly, the NGC catalog collection reflects the current Feature Branch release rather than an archive of prior ones.
-
-For end-of-life notices across NVIDIA AI Enterprise, see [End of Life Notices](https://docs.nvidia.com/ai-enterprise/lifecycle/latest/eol-notices.html). For guidance on which branch type fits a deployment, see [Choosing the Right Release Branch](https://docs.nvidia.com/ai-enterprise/lifecycle/latest/choosing-a-branch.html).
+For end-of-life notices across NVIDIA AI Enterprise, see [End of Life Notices](https://docs.nvidia.com/ai-enterprise/lifecycle/latest/eol-notices.html).
 
 ## Get Help
 
