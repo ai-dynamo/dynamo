@@ -28,12 +28,30 @@ time a no-op is exercised so the misconfiguration is discoverable.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any
 
 from dynamo._core import Context
 
 if TYPE_CHECKING:
     from dynamo._core import SpanProxy
+
+
+_LIFECYCLE_TRACE_ENABLED = "DYN_LIFECYCLE_TRACE_ENABLED"
+_LIFECYCLE_STAGES = frozenset({"engine.queue", "kv.transfer"})
+
+
+class _NoopSpan:
+    """Context-manager-shaped no-op for a disabled lifecycle stage."""
+
+    def close(self) -> None:
+        pass
+
+    def __enter__(self) -> "_NoopSpan":
+        return self
+
+    def __exit__(self, _exc_type, _exc_value, _traceback) -> bool:
+        return False
 
 
 def current_span(context: Context) -> "SpanProxy":
@@ -53,6 +71,25 @@ def start_span(context: Context, name: str, **attrs: Any) -> "SpanProxy":
             s.add_event("encoder_warmup_complete")
     """
     return context.start_span(name, dict(attrs) if attrs else None)
+
+
+def start_lifecycle_span(context: Context | None, name: str) -> "SpanProxy | _NoopSpan":
+    """Open one approved timing-only lifecycle child span.
+
+    Lifecycle tracing is opt-in. The restricted name set keeps backend calls
+    aligned with the Rust lifecycle registry and deliberately accepts no
+    attributes while the initial rollout records timing only.
+    """
+    if name not in _LIFECYCLE_STAGES:
+        raise ValueError(f"unknown lifecycle stage: {name!r}")
+    if context is None or os.environ.get(_LIFECYCLE_TRACE_ENABLED, "").lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return _NoopSpan()
+    return start_span(context, name)
 
 
 def trace_headers(context: Context) -> dict[str, str] | None:

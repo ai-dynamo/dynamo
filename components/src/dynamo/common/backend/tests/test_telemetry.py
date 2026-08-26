@@ -198,3 +198,22 @@ def test_engine_trace_kwargs_returns_empty_when_disabled_or_no_headers():
     )
     # No upstream traceparent → omit the kwarg entirely.
     assert telemetry.engine_trace_kwargs(_FakeContext()) == {}
+
+
+def test_start_lifecycle_span_is_gated_and_timing_only(monkeypatch):
+    ctx = _FakeContext()
+    with telemetry.start_lifecycle_span(ctx, "engine.queue"):
+        pass
+    assert ctx._child_spans == []
+
+    monkeypatch.setenv("DYN_LIFECYCLE_TRACE_ENABLED", "true")
+    with telemetry.start_lifecycle_span(ctx, "engine.queue"):
+        pass
+    assert [(name, attrs) for name, attrs, _ in ctx._child_spans] == [
+        ("engine.queue", None)
+    ]
+
+
+def test_start_lifecycle_span_rejects_unregistered_name():
+    with pytest.raises(ValueError, match="unknown lifecycle stage"):
+        telemetry.start_lifecycle_span(_FakeContext(), "unbounded.name")

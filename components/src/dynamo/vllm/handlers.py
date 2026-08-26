@@ -48,6 +48,7 @@ from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
+from dynamo.common.backend import telemetry
 from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
@@ -113,6 +114,17 @@ from .state_agent import state_agent_settings
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+
+async def _close_span_on_first_output(stream, span):
+    """End a timing span when the engine first produces a result."""
+    try:
+        async for value in stream:
+            span.close()
+            yield value
+    finally:
+        span.close()
+
 
 # Marker set by the Rust conditional-disagg bypass path. When present on a
 # DECODE-mode worker, the request runs as local prefill+decode instead of
@@ -3188,6 +3200,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         priority=0,
         reasoning_ended=None,
         reasoning_parser_kwargs=None,
+        context: Context | None = None,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -3221,7 +3234,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # carries None. Capture the first non-None payload and attach it to
             # the final chunk instead of reading res.prompt_logprobs there.
             prompt_logprobs_payload: Optional[list] = None
-            async for res in gen:
+            async for res in _close_span_on_first_output(
+                gen,
+                telemetry.start_lifecycle_span(context, "engine.queue"),
+            ):
                 # res is vllm's RequestOutput
                 if (
                     prompt_logprobs_payload is None
@@ -3674,7 +3690,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 accumulated_token_ids: dict[int, list[int]] = {}
                 accumulated_log_probs: dict[int, list[float]] = {}
                 try:
-                    async for tok in self.generate_tokens(
+                    generation = self.generate_tokens(
                         prompt,
                         sampling_params,
                         request_id,
@@ -3684,7 +3700,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         priority=priority,
                         reasoning_ended=reasoning_ended,
                         reasoning_parser_kwargs=reasoning_parser_kwargs,
-                    ):
+                        context=context,
+                    )
+                    # vLLM's first decode output is the safe point after its
+                    # remote KV handoff; keep this span confined to that wait.
+                    if is_decode_only and kv_params is not None:
+                        generation = _close_span_on_first_output(
+                            generation,
+                            telemetry.start_lifecycle_span(context, "kv.transfer"),
+                        )
+                    async for tok in generation:
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
                         if prefill_result is not None and "completion_usage" in tok:
@@ -3769,7 +3794,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     priority=priority,
                 )
 
-                async for res in gen:
+                async for res in _close_span_on_first_output(
+                    gen,
+                    telemetry.start_lifecycle_span(context, "engine.queue"),
+                ):
                     if not res.outputs:
                         yield {
                             "id": openai_request_id,
@@ -3977,7 +4005,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 self.runtime.shutdown()
                 os._exit(1)
 
-            async for res in gen:
+            async for res in _close_span_on_first_output(
+                gen,
+                telemetry.start_lifecycle_span(context, "engine.queue"),
+            ):
                 logger.debug(f"kv transfer params: {res.kv_transfer_params}")
 
                 token_ids = res.outputs[0].token_ids if res.outputs else []
