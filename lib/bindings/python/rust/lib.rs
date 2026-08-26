@@ -1206,15 +1206,31 @@ impl DistributedRuntime {
         // unconfigured one.
         let primary = rs::Worker::ensure_process_runtime().map_err(to_pyerr)?;
         INIT.get_or_try_init(|| -> anyhow::Result<()> {
-            pyo3_async_runtimes::tokio::init_with_runtime(primary).map_err(|e| {
-                anyhow::anyhow!("failed to initialize pyo3 static runtime: {:?}", e)
-            })?;
+            // `init_with_runtime` fails if the bridge already holds a runtime,
+            // which is a legitimate state rather than an error: `backend::Worker`
+            // initialises the bridge with this same `RT` and deliberately ignores
+            // the same error, so any process that builds a Worker before a
+            // DistributedRuntime arrives here with the bridge already set. Treat
+            // it as idempotent — but only after confirming the bridge really does
+            // hold our runtime, because silently running on a foreign one is the
+            // exact failure this whole change exists to prevent.
+            if pyo3_async_runtimes::tokio::init_with_runtime(primary).is_err() {
+                // Safe to call now: it only lazily builds a runtime when unset,
+                // and the failure above proves it is set.
+                let existing = pyo3_async_runtimes::tokio::get_runtime();
+                if !std::ptr::eq(existing, primary) {
+                    anyhow::bail!(
+                        "the pyo3 async bridge was already initialized with a different tokio \
+                         runtime than the dynamo process runtime; refusing to run on a runtime \
+                         that ignores DYN_RUNTIME_*"
+                    );
+                }
+            }
             Ok(())
         })
         .map_err(to_pyerr)?;
 
-        // Now safe: `ensure_process_runtime` populated `RT`, so this takes the
-        // first branch and shares the runtime the bridge was given. Multiple
+        // Wraps the same `RT` the bridge was just given, so multiple
         // DistributedRuntime instances continue to share one tokio runtime.
         let runtime = rs::Worker::runtime_from_existing().map_err(to_pyerr)?;
 

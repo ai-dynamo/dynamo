@@ -550,41 +550,21 @@ mod tests {
     /// nothing pinned down the parsing side, so the question stayed open longer
     /// than it needed to.
     ///
-    /// `#[serial]` is not available here, so this test sets and restores the
-    /// variables itself and must not be run concurrently with another test that
-    /// touches the same ones. It is currently the only test that does.
+    /// Environment mutation goes through `temp_env::with_vars`, which holds a
+    /// process-global lock for the duration of the closure and restores the
+    /// previous values on the way out (including on panic). Setting the
+    /// variables directly would race any other test reading the environment on
+    /// another harness thread.
     #[test]
-    fn test_from_settings_reads_both_thread_env_vars() -> Result<()> {
+    fn test_from_settings_reads_both_thread_env_vars() {
         const WORKERS: &str = "DYN_RUNTIME_NUM_WORKER_THREADS";
         const BLOCKING: &str = "DYN_RUNTIME_MAX_BLOCKING_THREADS";
 
-        let prev_workers = std::env::var(WORKERS).ok();
-        let prev_blocking = std::env::var(BLOCKING).ok();
-
-        // SAFETY: single-threaded within this test; see the note above about
-        // concurrent tests touching these variables.
-        unsafe {
-            std::env::set_var(WORKERS, "7");
-            std::env::set_var(BLOCKING, "11");
-        }
-
-        let config = RuntimeConfig::from_settings();
-
-        unsafe {
-            match prev_workers {
-                Some(v) => std::env::set_var(WORKERS, v),
-                None => std::env::remove_var(WORKERS),
-            }
-            match prev_blocking {
-                Some(v) => std::env::set_var(BLOCKING, v),
-                None => std::env::remove_var(BLOCKING),
-            }
-        }
-
-        let config = config?;
-        assert_eq!(config.num_worker_threads, Some(7), "{WORKERS} was not read");
-        assert_eq!(config.max_blocking_threads, 11, "{BLOCKING} was not read");
-        Ok(())
+        temp_env::with_vars([(WORKERS, Some("7")), (BLOCKING, Some("11"))], || {
+            let config = RuntimeConfig::from_settings().expect("from_settings failed");
+            assert_eq!(config.num_worker_threads, Some(7), "{WORKERS} was not read");
+            assert_eq!(config.max_blocking_threads, 11, "{BLOCKING} was not read");
+        });
     }
 
     /// `Default` sets `max_blocking_threads` to the core count, NOT 512.
