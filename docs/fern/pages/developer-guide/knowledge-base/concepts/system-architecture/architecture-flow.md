@@ -56,7 +56,7 @@ Coordination and messaging support:
 - Selects prefill workers using KV-aware routing (cache overlap scores + load) or simple load balancing
 - Injects transfer metadata into decode requests for KV cache coordination
 
-### NIXL (NVIDIA Interchange Library):
+### NIXL (NVIDIA Inference Xfer Library):
 - Enables high-speed GPU-to-GPU data transfers using NVLink, InfiniBand/UCX, or PCIe
 - Transfer metadata exchanged via `disaggregated_params` in prefill response
 - Backend-specific coordination: SGLang uses bootstrap connections, TRTLLM uses opaque state, vLLM uses block IDs
