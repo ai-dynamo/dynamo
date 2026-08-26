@@ -945,7 +945,7 @@ pub(super) async fn handle_responses(
         return Ok(sse_response(
             stream,
             ResponseEventSerializer::new(&response_params),
-            state.sse_keep_alive(),
+            state.sse_keep_alive_for_response(stage_runtime_tool_rounds),
         ));
     }
 
@@ -1046,7 +1046,10 @@ pub(super) async fn handle_anthropic(
                 ))
             }
         };
-        return Ok(anthropic_sse_response(stream, state.sse_keep_alive()));
+        return Ok(anthropic_sse_response(
+            stream,
+            state.sse_keep_alive_for_response(stage_runtime_tool_rounds),
+        ));
     }
 
     let result = agent_runtime
