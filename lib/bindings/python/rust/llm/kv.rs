@@ -20,8 +20,6 @@ use crate::Endpoint;
     feature = "select-service"
 ))]
 use clap::Parser;
-#[cfg(feature = "select-service")]
-use dynamo_kv_router::{TrackingHashAlgorithm, WorkerType};
 #[cfg(feature = "custom-policy")]
 use dynamo_kv_router::WorkerSelectionPolicy;
 use dynamo_kv_router::WorkerSelectionPolicyFactory;
@@ -42,6 +40,8 @@ use dynamo_kv_router::services::selection::{
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
+#[cfg(feature = "select-service")]
+use dynamo_kv_router::{TrackingHashAlgorithm, WorkerType};
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
@@ -596,19 +596,16 @@ impl SelectionService {
         }
         let kv_router_config =
             try_kv_router_config_from_dynamo_env().map_err(PyValueError::new_err)?;
-        warn_for_unserved_worker_selection_policies(
-            &kv_router_config,
-            &[WorkerType::Aggregated],
-        )
-        .map_err(to_pyerr)?;
+        warn_for_unserved_worker_selection_policies(&kv_router_config, &[WorkerType::Aggregated])
+            .map_err(to_pyerr)?;
         let mut builder = SelectionServiceBuilder::new(
             kv_router_config,
             WorkerType::Aggregated,
             crate::linked_worker_selection_policy_registry(),
         )
         .indexer_threads(indexer_threads)
-            .indexer_peers(indexer_peers.unwrap_or_default())
-            .selection_cache(selection_cache.unwrap_or_default().inner);
+        .indexer_peers(indexer_peers.unwrap_or_default())
+        .selection_cache(selection_cache.unwrap_or_default().inner);
         if let Some(port) = replica_sync_port {
             builder = builder.replica_sync(port, replica_sync_peers);
         }
