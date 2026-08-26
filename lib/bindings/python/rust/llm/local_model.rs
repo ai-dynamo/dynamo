@@ -343,6 +343,8 @@ impl ModelRuntimeConfig {
         bootstrap_host: Option<String>,
         bootstrap_port: Option<u16>,
     ) {
+        // Mutate in place: the bootstrap fields and `nixl_push` are set by
+        // different backends and must not clobber each other.
         let endpoint = self.inner.disaggregated_endpoint.get_or_insert_default();
         endpoint.bootstrap_host = bootstrap_host;
         endpoint.bootstrap_port = bootstrap_port;
@@ -383,25 +385,6 @@ impl ModelRuntimeConfig {
             .disaggregated_endpoint
             .as_ref()
             .and_then(|e| e.bootstrap_port)
-    }
-
-    /// `(engine_id, host, port, tensor_parallel_size, pipeline_parallel_size)`,
-    /// or `None` when this worker does not run the NIXL push connector.
-    #[getter]
-    fn nixl_push_endpoint(&self) -> Option<(String, String, u16, u32, u32)> {
-        self.inner
-            .disaggregated_endpoint
-            .as_ref()
-            .and_then(|e| e.nixl_push.as_ref())
-            .map(|push| {
-                (
-                    push.engine_id.clone(),
-                    push.host.clone(),
-                    push.port,
-                    push.tensor_parallel_size,
-                    push.pipeline_parallel_size,
-                )
-            })
     }
 
     #[getter]
