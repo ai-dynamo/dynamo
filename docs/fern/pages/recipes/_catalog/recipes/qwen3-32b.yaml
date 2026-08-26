@@ -40,5 +40,5 @@ maintainer: null
 gaps:
 - No expected performance numbers in source README (directional claims + video only); Expected Performance omitted
 - maintainer unknown
-- 'agg-kvbm single-GPU walkthrough removed from the recipe entirely (2026-06-12): the KVBM walkthrough is not receiving
-  new docs investment, so no docs re-add is planned. Source assets at recipes/qwen3-32b/vllm/agg-kvbm/ remain untouched.'
+- 'agg-kvbm single-GPU walkthrough removed from the recipe entirely (2026-06-12): this walkthrough is not receiving new
+  docs investment, so no docs re-add is planned. Source assets at recipes/qwen3-32b/vllm/agg-kvbm/ remain untouched.'
