@@ -15,6 +15,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
 use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 
@@ -152,11 +153,45 @@ mod tests {
 
     use dynamo_kv_router::WorkerSelectionPolicyFactory;
     use dynamo_kv_router::services::selection::WorkerSelectionPolicyProviderError;
+    use tokio::sync::mpsc;
 
     use super::*;
     use crate::epp_standalone_config::{DYN_EPP_MODE, DYNAMO_RUNTIME_MODE};
 
     static EPP_MODE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[tokio::test]
+    async fn background_tasks_shutdown_aborts_and_joins_every_task() {
+        let (sender, mut receiver) = mpsc::channel::<()>(1);
+        let health_task = tokio::spawn({
+            let sender = sender.clone();
+            async move {
+                let _sender = sender;
+                std::future::pending::<()>().await;
+            }
+        });
+        let metrics_task = tokio::spawn({
+            let sender = sender.clone();
+            async move {
+                let _sender = sender;
+                std::future::pending::<()>().await;
+            }
+        });
+        let shutdown_task = tokio::spawn(async move {
+            let _sender = sender;
+            std::future::pending::<()>().await;
+        });
+
+        BackgroundTasks {
+            health_task,
+            metrics_task: Some(metrics_task),
+            shutdown_task,
+        }
+        .shutdown()
+        .await;
+
+        assert!(receiver.recv().await.is_none());
+    }
 
     #[tokio::test]
     async fn linked_policy_registry_requires_standalone_mode() {
@@ -208,6 +243,35 @@ async fn wait_for_shutdown_signal() {
     }
 }
 
+/// Tasks started before router initialization that must not outlive a failed run.
+struct BackgroundTasks {
+    health_task: JoinHandle<()>,
+    metrics_task: Option<JoinHandle<()>>,
+    shutdown_task: JoinHandle<()>,
+}
+
+impl BackgroundTasks {
+    async fn shutdown(self) {
+        let Self {
+            health_task,
+            metrics_task,
+            shutdown_task,
+        } = self;
+
+        health_task.abort();
+        if let Some(task) = &metrics_task {
+            task.abort();
+        }
+        shutdown_task.abort();
+
+        let _ = health_task.await;
+        if let Some(task) = metrics_task {
+            let _ = task.await;
+        }
+        let _ = shutdown_task.await;
+    }
+}
+
 async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry) -> Result<()> {
     let standalone = matches!(mode, EppMode::Standalone);
 
@@ -230,24 +294,29 @@ async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry
 
     let health_addr = format!("0.0.0.0:{HEALTH_PORT}").parse()?;
     tracing::info!(%health_addr, "Starting gRPC health server (plaintext)");
-    tokio::spawn(
-        tonic::transport::Server::builder()
+    let health_task = tokio::spawn(async move {
+        if let Err(error) = tonic::transport::Server::builder()
             .add_service(health_service)
-            .serve(health_addr),
-    );
+            .serve(health_addr)
+            .await
+        {
+            tracing::error!(%error, "Health server exited");
+        }
+    });
 
     // Start before router init so scrapes during a slow discovery bootstrap
     // return an empty exposition rather than a connection refusal.
     let metrics_port = parse_env(metrics::METRICS_PORT_ENV, metrics::DEFAULT_METRICS_PORT);
-    if metrics_port == 0 {
+    let metrics_task = if metrics_port == 0 {
         tracing::info!("Metrics server disabled");
+        None
     } else {
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             if let Err(e) = metrics::serve(metrics_port).await {
                 tracing::error!(error = %e, port = metrics_port, "Metrics server exited");
             }
-        });
-    }
+        }))
+    };
 
     // Shutdown coordination: on SIGTERM/SIGINT, flip health to NOT_SERVING
     // (the gateway stops routing new requests to this EPP), allow the endpoint
@@ -256,7 +325,7 @@ async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry
     // connections are handled by the follow-up connection-lifecycle work.
     let draining = CancellationToken::new();
     let shutdown = CancellationToken::new();
-    {
+    let shutdown_task = {
         let draining = draining.clone();
         let shutdown = shutdown.clone();
         tokio::spawn(async move {
@@ -278,62 +347,72 @@ async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry
             tokio::time::sleep(std::time::Duration::from_secs(propagation_secs)).await;
             shutdown.cancel();
             tracing::info!("EPP endpoint propagation complete; stopping accepts");
-        });
-    }
+        })
+    };
+    let background_tasks = BackgroundTasks {
+        health_task,
+        metrics_task,
+        shutdown_task,
+    };
 
-    if standalone {
-        let selector_cfg = EppStandaloneConfig::from_env()?;
-        tracing::info!(
-            inference_pool_name = %selector_cfg.inference_pool_name,
-            model_name = %selector_cfg.model_name,
-            block_size = selector_cfg.block_size,
-            "Initializing standalone selector mode (no Dynamo runtime)..."
-        );
-        metrics::set_served_model(&selector_cfg.model_name);
-        let router = tokio::select! {
-            _ = draining.cancelled() => {
-                tracing::info!("Shutdown received during standalone EPP initialization");
+    let result = async {
+        if standalone {
+            let selector_cfg = EppStandaloneConfig::from_env()?;
+            tracing::info!(
+                inference_pool_name = %selector_cfg.inference_pool_name,
+                model_name = %selector_cfg.model_name,
+                block_size = selector_cfg.block_size,
+                "Initializing standalone selector mode (no Dynamo runtime)..."
+            );
+            metrics::set_served_model(&selector_cfg.model_name);
+            let router = tokio::select! {
+                _ = draining.cancelled() => {
+                    tracing::info!("Shutdown received during standalone EPP initialization");
+                    return Ok(());
+                }
+                router = crate::EppRouter::from_selector(selector_cfg, policy_registry) => Arc::new(router?),
+            };
+            if draining.is_cancelled() {
+                tracing::info!("Shutdown received before standalone EPP serving started");
                 return Ok(());
             }
-            router = crate::EppRouter::from_selector(selector_cfg, policy_registry) => Arc::new(router?),
-        };
-        if draining.is_cancelled() {
-            tracing::info!("Shutdown received before standalone EPP serving started");
-            return Ok(());
-        }
-        let ready_router = router.clone();
-        serve(
-            router,
-            move || ready_router.is_ready(),
-            health_reporter,
-            draining,
-            shutdown,
-        )
-        .await
-    } else {
-        tracing::info!("Initializing KV-aware router from discovery...");
-        let router = tokio::select! {
-            _ = draining.cancelled() => {
-                tracing::info!("Shutdown received during Dynamo discovery initialization");
+            let ready_router = router.clone();
+            serve(
+                router,
+                move || ready_router.is_ready(),
+                health_reporter,
+                draining,
+                shutdown,
+            )
+            .await
+        } else {
+            tracing::info!("Initializing KV-aware router from discovery...");
+            let router = tokio::select! {
+                _ = draining.cancelled() => {
+                    tracing::info!("Shutdown received during Dynamo discovery initialization");
+                    return Ok(());
+                }
+                router = Router::from_discovery(&config.namespace, &config.component) => router?,
+            };
+            if draining.is_cancelled() {
+                tracing::info!("Shutdown received before Dynamo discovery serving started");
                 return Ok(());
             }
-            router = Router::from_discovery(&config.namespace, &config.component) => router?,
-        };
-        if draining.is_cancelled() {
-            tracing::info!("Shutdown received before Dynamo discovery serving started");
-            return Ok(());
+            metrics::set_served_model(router.served_model());
+            let ready = router.pod_store_ready();
+            serve(
+                Arc::new(router),
+                move || ready.load(std::sync::atomic::Ordering::Acquire),
+                health_reporter,
+                draining,
+                shutdown,
+            )
+            .await
         }
-        metrics::set_served_model(router.served_model());
-        let ready = router.pod_store_ready();
-        serve(
-            Arc::new(router),
-            move || ready.load(std::sync::atomic::Ordering::Acquire),
-            health_reporter,
-            draining,
-            shutdown,
-        )
-        .await
     }
+    .await;
+    background_tasks.shutdown().await;
+    result
 }
 
 /// Mirror the picker's live readiness onto the gRPC health status, then serve
