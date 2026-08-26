@@ -2430,6 +2430,11 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		return nil, fmt.Errorf("failed to generate labels: %w", err)
 	}
 	clique.Labels = labels
+	// Stamp the same role contract used by LWS so autoscalers can select one
+	// metric-emitting leader Pod for each logical multi-node component replica.
+	if p.isMultinode {
+		clique.Labels[commonconsts.KubeLabelDynamoWorkloadRole] = string(p.r.Role)
+	}
 	if p.isInterPodFailover && p.r.Role != RoleGMS {
 		clique.Labels[commonconsts.KubeLabelDynamoFailoverEngineGroupMember] = commonconsts.KubeLabelValueTrue
 	}

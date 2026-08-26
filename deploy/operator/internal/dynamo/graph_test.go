@@ -2662,6 +2662,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 									commonconsts.KubeLabelDynamoComponent:           "worker",
 									commonconsts.KubeLabelDynamoNamespace:           "test-namespace-test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoWorkloadRole:        string(RoleLeader),
 									"nvidia.com/label1":                             "label1",
 									"nvidia.com/label2":                             "label2",
 								},
@@ -2875,6 +2876,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 									commonconsts.KubeLabelDynamoComponent:           "worker",
 									commonconsts.KubeLabelDynamoNamespace:           "test-namespace-test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoWorkloadRole:        string(RoleWorker),
 									"nvidia.com/label1":                             "label1",
 									"nvidia.com/label2":                             "label2",
 								},
@@ -3684,6 +3686,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeWorker,
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 									commonconsts.KubeLabelDynamoNamespace:           "test-namespace-test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoWorkloadRole:        string(RoleLeader),
 									"nvidia.com/label1":                             "label1",
 									"nvidia.com/label2":                             "label2",
 								},
@@ -3884,6 +3887,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									commonconsts.KubeLabelDynamoComponent:           "worker",
 									commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 									commonconsts.KubeLabelDynamoNamespace:           "test-namespace-test-dynamo-graph-deployment",
+									commonconsts.KubeLabelDynamoWorkloadRole:        string(RoleWorker),
 									"nvidia.com/label1":                             "label1",
 									"nvidia.com/label2":                             "label2",
 								},
@@ -9056,6 +9060,46 @@ func TestGenerateGrovePodCliqueSet_ComponentMinAvailable(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGenerateGrovePodCliqueSetMultinodeRoleLabels(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Render a Grove-backed multi-node component")
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "test-ns"},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(2)),
+					Multinode:     &v1alpha1.MultinodeSpec{NodeCount: 4},
+					Resources: &v1alpha1.Resources{
+						Limits: &v1alpha1.ResourceItem{GPU: "1"},
+					},
+				},
+			},
+		},
+	}
+	got, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		betaDGD(t, dgd),
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{},
+		nil, nil, nil, nil, nil,
+	)
+	require.NoError(t, err)
+
+	t.Log("Verify each PodClique carries the provider-independent workload role")
+	roles := make(map[string]string, len(got.Spec.Template.Cliques))
+	for _, clique := range got.Spec.Template.Cliques {
+		roles[clique.Name] = clique.Labels[commonconsts.KubeLabelDynamoWorkloadRole]
+	}
+	assert.Equal(t, map[string]string{
+		"worker-ldr": string(RoleLeader),
+		"worker-wkr": string(RoleWorker),
+	}, roles)
 }
 
 // TestGenerateGrovePodCliqueSet_SingleNodeForceScalingGroup pins the

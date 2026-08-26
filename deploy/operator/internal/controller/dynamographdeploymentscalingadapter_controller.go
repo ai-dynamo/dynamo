@@ -40,6 +40,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 )
 
@@ -138,7 +139,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 
 	// 5. Update adapter status
 	adapter.Status.Replicas = adapter.Spec.Replicas
-	adapter.Status.Selector = r.buildPodSelector(dgd.Name, componentName)
+	adapter.Status.Selector = r.buildPodSelector(dgd.Name, component)
 
 	if err := r.Status().Update(ctx, adapter); err != nil {
 		logger.Error(err, "Failed to update adapter status")
@@ -148,15 +149,26 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 	return ctrl.Result{}, nil
 }
 
-// buildPodSelector constructs a label selector for the pods managed by this component.
-func (r *DynamoGraphDeploymentScalingAdapterReconciler) buildPodSelector(dgdName, componentName string) string {
-	// Pods are labeled with:
-	// - nvidia.com/dynamo-graph-deployment-name = dgd.Name
-	// - nvidia.com/dynamo-component = componentName
-	return labels.SelectorFromSet(labels.Set{
+// buildPodSelector constructs a replica-aligned label selector for the Pods managed by this component.
+func (r *DynamoGraphDeploymentScalingAdapterReconciler) buildPodSelector(
+	dgdName string,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) string {
+	// Select the component's Pods on every workload provider.
+	podLabels := labels.Set{
 		consts.KubeLabelDynamoGraphDeploymentName: dgdName,
-		consts.KubeLabelDynamoComponent:           componentName,
-	}).String()
+		consts.KubeLabelDynamoComponent:           component.ComponentName,
+	}
+
+	// A multi-node replica expands into one leader and one or more worker Pods.
+	// HPA Pods metrics require one selected Pod per logical replica; otherwise
+	// worker Pods without engine metrics are treated as missing at the target
+	// value and block scale-down.
+	if component.IsMultinode() {
+		podLabels[consts.KubeLabelDynamoWorkloadRole] = string(dynamo.RoleLeader)
+	}
+
+	return labels.SelectorFromSet(podLabels).String()
 }
 
 // SetupWithManager sets up the controller with the Manager

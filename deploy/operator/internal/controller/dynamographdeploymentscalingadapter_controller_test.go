@@ -327,6 +327,46 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile(t *testing.T) {
 	}
 }
 
+func TestDynamoGraphDeploymentScalingAdapterReconcilerBuildPodSelector(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		multinode *v1beta1.MultinodeSpec
+		wantRole  string
+	}{
+		"single-node selects the component": {},
+		"multi-node selects one leader per logical replica": {
+			multinode: &v1beta1.MultinodeSpec{NodeCount: 4},
+			wantRole:  "leader",
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			t.Log("Build the scale selector for the component topology")
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker",
+				Multinode:     tt.multinode,
+			}
+			got := (&DynamoGraphDeploymentScalingAdapterReconciler{}).buildPodSelector("test-dgd", component)
+
+			t.Log("Verify the selector stays replica-aligned")
+			wantLabels := labels.Set{
+				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+				consts.KubeLabelDynamoComponent:           "worker",
+			}
+			if tt.wantRole != "" {
+				wantLabels[consts.KubeLabelDynamoWorkloadRole] = tt.wantRole
+			}
+			if want := labels.SelectorFromSet(wantLabels).String(); got != want {
+				t.Fatalf("buildPodSelector() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile_NotFound(t *testing.T) {
 	// Register custom types with the scheme
 	if err := v1beta1.AddToScheme(scheme.Scheme); err != nil {
