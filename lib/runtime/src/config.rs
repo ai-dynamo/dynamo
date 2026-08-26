@@ -369,13 +369,12 @@ impl RuntimeConfig {
         }
     }
 
-    /// The Tokio builder this configuration describes, not yet built.
+    /// The Tokio builder for this config, not yet built.
     ///
-    /// Separate from [`Self::create_runtime`] because some runtimes are not built by us.
-    /// `pyo3_async_runtimes::tokio::init` takes a builder and calls `build()` on it later,
-    /// at a point we do not control; handing it this builder is the only way to bound the
-    /// size of a runtime the bridge constructs on its own. Both paths must agree, so both
-    /// go through here.
+    /// Separate from [`Self::create_runtime`] because the pyo3 bridge builds its own runtime:
+    /// `pyo3_async_runtimes::tokio::init` takes a builder and calls `build()` later. Handing it
+    /// this builder is the only way to bound that runtime's size. Both paths go through here so
+    /// they cannot drift apart.
     pub fn tokio_builder(&self) -> tokio::runtime::Builder {
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         builder
@@ -548,12 +547,11 @@ mod tests {
 
     /// Both thread-pool variables must survive `from_settings()`.
     ///
-    /// Pins the parsing side on its own, so a frontend whose thread count ignores
-    /// `DYN_RUNTIME_MAX_BLOCKING_THREADS` can be diagnosed as a runtime-wiring problem rather
-    /// than a config one.
+    /// Covers parsing on its own, so if a frontend's thread count ignores
+    /// `DYN_RUNTIME_MAX_BLOCKING_THREADS` the cause is wiring rather than parsing.
     ///
-    /// `temp_env::with_vars` holds a process-global lock and restores prior values on the way
-    /// out, so this can't race other tests reading the environment.
+    /// `temp_env::with_vars` takes a process-global lock and restores the old values, so this
+    /// cannot race other tests that read the environment.
     #[test]
     fn test_from_settings_reads_both_thread_env_vars() {
         const WORKERS: &str = "DYN_RUNTIME_NUM_WORKER_THREADS";
@@ -566,12 +564,11 @@ mod tests {
         });
     }
 
-    /// The builder handed to the pyo3 bridge carries the configured worker count.
+    /// The builder given to the pyo3 bridge must carry the configured worker count.
     ///
-    /// The bridge stores a builder and calls `build()` on it itself, so nothing on our side
-    /// observes the result. If `tokio_builder` ever stopped applying the config, a runtime the
-    /// bridge built would silently fall back to `available_parallelism()` — the original
-    /// DYN-4127 symptom, reintroduced somewhere no test looks.
+    /// The bridge calls `build()` itself, so nothing on our side sees the resulting runtime. If
+    /// this stopped applying the config, a bridge-built runtime would quietly go back to one
+    /// worker per CPU — the original bug, in a place no other test looks.
     #[test]
     fn test_tokio_builder_applies_configured_worker_threads() -> Result<()> {
         let config = RuntimeConfig::builder()
@@ -581,6 +578,76 @@ mod tests {
 
         let runtime = config.tokio_builder().build()?;
         assert_eq!(runtime.metrics().num_workers(), 3);
+        Ok(())
+    }
+
+    /// With `num_worker_threads` unset, the builder falls back to the core count.
+    #[test]
+    fn test_tokio_builder_defaults_worker_threads_to_core_count() -> Result<()> {
+        let config = RuntimeConfig {
+            num_worker_threads: None,
+            ..RuntimeConfig::default()
+        };
+
+        let runtime = config.tokio_builder().build()?;
+        assert_eq!(
+            runtime.metrics().num_workers(),
+            std::thread::available_parallelism()?.get()
+        );
+        Ok(())
+    }
+
+    /// `max_blocking_threads` must actually cap concurrent blocking work.
+    ///
+    /// This is the setting DYN-4127 was reported against, and `num_workers()` cannot show it —
+    /// Tokio counts blocking threads separately and only exposes that count under
+    /// `tokio_unstable`. Measuring concurrency works on stable instead: blocking threads are
+    /// spawned on demand up to the cap, so queueing more tasks than the cap must serialize them.
+    ///
+    /// Only the upper bound is asserted. A missing cap shows up as a peak near the task count,
+    /// while asserting a lower bound would make the test depend on the scheduler overlapping
+    /// tasks, which a loaded CI machine need not do.
+    #[test]
+    fn test_tokio_builder_applies_max_blocking_threads() -> Result<()> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const CAP: usize = 2;
+
+        let config = RuntimeConfig::builder()
+            .num_worker_threads(Some(2))
+            .max_blocking_threads(CAP)
+            .build()?;
+        let runtime = config.tokio_builder().build()?;
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        runtime.block_on(async {
+            let tasks: Vec<_> = (0..CAP * 4)
+                .map(|_| {
+                    let in_flight = Arc::clone(&in_flight);
+                    let peak = Arc::clone(&peak);
+                    tokio::task::spawn_blocking(move || {
+                        let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        // Long enough that tasks overlap if the cap allows it.
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        in_flight.fetch_sub(1, Ordering::SeqCst);
+                    })
+                })
+                .collect();
+
+            for task in tasks {
+                task.await.expect("blocking task panicked");
+            }
+        });
+
+        let observed = peak.load(Ordering::SeqCst);
+        assert!(
+            observed <= CAP,
+            "{observed} blocking tasks ran at once, but the cap was {CAP}"
+        );
         Ok(())
     }
 

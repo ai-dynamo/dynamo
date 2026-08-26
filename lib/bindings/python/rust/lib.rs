@@ -178,22 +178,19 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         rs::logging::init();
     }
 
-    // Bound the runtime the bridge builds for itself.
+    // Size the runtime the bridge may build for itself.
     //
-    // `DistributedRuntime::new` hands the bridge a configured runtime, but only if it reaches
-    // `pyo3_async_runtimes::tokio` first. Roughly ninety `future_into_py` / `into_future` call
-    // sites across the bindings can get there earlier, and on an unset bridge `get_runtime()`
-    // builds from `Builder::new_multi_thread()` defaults: `available_parallelism()` workers and
-    // Tokio's 512-thread blocking ceiling, none of it derived from DYN_RUNTIME_*.
+    // `DistributedRuntime::new` gives the bridge a configured runtime, but only when it gets
+    // there first, and often it does not — `dynamo.sglang` reaches the bridge earlier. Then
+    // `get_runtime()` builds a runtime from Tokio's own defaults: one worker per CPU and a
+    // 512-thread blocking ceiling, with DYN_RUNTIME_* ignored entirely.
     //
-    // Replacing the builder removes the ordering question instead of answering it — whoever
-    // builds the runtime, it is sized from the same config. Module init is the earliest point
-    // this can happen, since nothing in the extension is reachable until the import returns.
+    // Setting the builder here means that runtime is sized correctly no matter who builds it.
+    // Module init is the earliest our code runs, so nothing can get in ahead of it.
     match rs::RuntimeConfig::from_settings() {
         Ok(config) => pyo3_async_runtimes::tokio::init(config.tokio_builder()),
-        // Deliberately not fatal. `Worker::ensure_process_runtime` reads the same settings and
-        // raises this where the message has context; failing here would turn a malformed
-        // DYN_RUNTIME_* value into an ImportError that names neither the variable nor the cause.
+        // Not fatal: `Worker::ensure_process_runtime` reads the same settings and reports the
+        // error where there is context for it. Failing here would give a bare ImportError.
         Err(e) => tracing::warn!(
             "could not resolve the runtime configuration at import ({e}); if the async bridge \
              has to build its own runtime it will fall back to Tokio's unbounded defaults"
@@ -1210,24 +1207,19 @@ impl DistributedRuntime {
         let event_transport_kind =
             resolve_event_transport_kind(&discovery_backend_config, event_plane.as_deref())?;
 
-        // The bridge must hold the configured runtime before any future is spawned on it.
-        // `run_input` wraps the frontend's whole lifetime in `future_into_py`, which spawns via
-        // `pyo3_async_runtimes::tokio::get_runtime()` — and if the bridge is unset, that call
-        // builds its own runtime from `Builder::new_multi_thread()` defaults, ignoring
-        // DYN_RUNTIME_*. Initialising it here is what keeps the workload on the runtime we
-        // configured.
+        // Give the bridge our runtime before anything spawns on it. `run_input` wraps the whole
+        // frontend in `future_into_py`, which spawns through `get_runtime()`, so this is the
+        // call that decides which runtime serves traffic.
         let primary = rs::Worker::ensure_process_runtime().map_err(to_pyerr)?;
         INIT.get_or_init(|| {
-            // The bridge holds at most one runtime for the life of the process and will not
-            // hand it back, so an `Err` here is a state we have to accept, not a failure to
-            // report: `backend::Worker` may have initialised it with this same `RT`, and
-            // anything that reached `get_runtime()` first will have had one built lazily.
-            // Refusing to construct would break callers that work fine on that runtime.
+            // An `Err` means the bridge already holds a runtime, and it never hands one back.
+            // That is a state to accept rather than a failure to report: `backend::Worker` may
+            // have registered this same `RT`, and `dynamo.sglang` reaches `get_runtime()`
+            // before we run. Refusing here broke every sglang test.
             if pyo3_async_runtimes::tokio::init_with_runtime(primary).is_err()
                 && !std::ptr::eq(pyo3_async_runtimes::tokio::get_runtime(), primary)
             {
-                // Say it out loud, though — futures spawned through the bridge are the ones
-                // DYN_RUNTIME_* was meant to size, and here they will not be.
+                // Still worth saying: these are the futures DYN_RUNTIME_* was meant to size.
                 tracing::warn!(
                     "pyo3 async bridge was already initialized with a different tokio runtime; \
                      futures spawned through it will not use the DYN_RUNTIME_* configuration"

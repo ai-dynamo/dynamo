@@ -1,22 +1,21 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Process-wide runtime wiring for [`Worker`].
+//! Process-wide runtime wiring for `Worker`.
 //!
-//! These live in their own integration-test binary because `Worker` keeps the runtime, its
-//! config, and the compute-pool claim in process-global `OnceCell`s that can only be
-//! initialized once. A single test per process is the only way to observe first-call
-//! behaviour, so this file deliberately holds one test.
+//! Its own test binary because `Worker` keeps the runtime, its config, and the compute-pool
+//! claim in process-global `OnceCell`s. First-call behaviour can only be observed once per
+//! process, so this file deliberately holds a single test.
 
 use dynamo_runtime::Worker;
 
-/// The first [`Runtime`] wrapper carries the compute pool; later ones share the tokio runtime
-/// without spawning a second Rayon pool.
+/// The first `Runtime` wrapper gets the compute pool; later ones share the Tokio runtime without
+/// spawning a second Rayon pool.
 ///
-/// Both halves matter, and call order must not decide either. `DistributedRuntime::new` calls
-/// `ensure_process_runtime` first to set up the pyo3 bridge, so any rule phrased as "did I just
-/// create the runtime?" drops the pool on the frontend's own path; a rule that attaches one
-/// unconditionally spawns a Rayon pool per `DistributedRuntime`.
+/// Call order must not decide either half. `DistributedRuntime::new` calls
+/// `ensure_process_runtime` first, so a rule like "did I just create the runtime?" would drop the
+/// pool on the frontend's own path, while attaching one every time would spawn a Rayon pool per
+/// `DistributedRuntime`.
 #[test]
 fn first_runtime_wrapper_owns_the_compute_pool() {
     // Mirror `DistributedRuntime::new`: ensure the process runtime up front, as the bridge

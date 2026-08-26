@@ -267,11 +267,11 @@ impl Runtime {
         Runtime::new(primary, Some(secondary))
     }
 
-    /// Like [`Runtime::from_handle`], but also attaches the `config`-derived compute pool and
-    /// `block_in_place` permits that [`Runtime::from_settings`] sets up.
+    /// Like [`Runtime::from_handle`], but also attaches the compute pool and `block_in_place`
+    /// permits that `config` implies, the way [`Runtime::from_settings`] does.
     ///
-    /// For the case where the Tokio runtime is owned elsewhere — a process-wide `OnceCell`, say
-    /// — so only a handle can be borrowed, but the [`RuntimeConfig`] it was built from is known.
+    /// For when the Tokio runtime is owned elsewhere — a process-wide `OnceCell`, say — so only a
+    /// handle can be borrowed, but the [`RuntimeConfig`] behind it is known.
     pub fn from_handle_with_config(
         handle: tokio::runtime::Handle,
         config: &RuntimeConfig,
