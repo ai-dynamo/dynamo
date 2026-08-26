@@ -60,7 +60,6 @@ class PytestSpec(TypedDict, total=False):
     """Pytest selection metadata attached to an ownership area."""
 
     markers: list[str]
-    mode: str
 
 
 class Area(TypedDict, total=False):
@@ -98,7 +97,6 @@ class ResolvedArea:
     github_team: str
     path_globs: list[str]
     pytest_markers: list[str] = field(default_factory=list)
-    pytest_mode: str = "fallback"
 
 
 @dataclass
@@ -409,14 +407,13 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
             raise SystemExit(
                 f"areas.yaml: area {area['label']!r} pytest must be a mapping"
             )
-        unknown_pytest_keys = set(pytest_spec) - {"markers", "mode"}
+        unknown_pytest_keys = set(pytest_spec) - {"markers"}
         if unknown_pytest_keys:
             raise SystemExit(
                 f"areas.yaml: area {area['label']!r} pytest has unsupported key "
                 f"{min(unknown_pytest_keys)!r}"
             )
         markers = pytest_spec.get("markers", [])
-        mode = pytest_spec.get("mode", "fallback")
         if not isinstance(markers, list) or not all(
             isinstance(marker, str) and marker_name.fullmatch(marker)
             for marker in markers
@@ -425,23 +422,12 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
                 f"areas.yaml: area {area['label']!r} pytest.markers must be a "
                 "list of pytest marker names"
             )
-        if mode not in {"fallback", "none"}:
-            raise SystemExit(
-                f"areas.yaml: area {area['label']!r} pytest.mode must be "
-                "'fallback' or 'none'"
-            )
-        if markers and "mode" in pytest_spec:
-            raise SystemExit(
-                f"areas.yaml: area {area['label']!r} pytest cannot declare "
-                "both markers and mode"
-            )
         areas.append(
             ResolvedArea(
                 label=area["label"],
                 github_team=area["github_team"],
                 path_globs=sorted(set(area.get("path_globs", []) or [])),
                 pytest_markers=sorted(set(markers)),
-                pytest_mode=mode,
             )
         )
 

@@ -182,9 +182,8 @@ def build_plan(model: ResolvedModel, paths: list[str]) -> SelectionPlan:
         if markers:
             clauses.add(MarkerClause.from_markers(markers))
             continue
-        if any(area.pytest_mode == "fallback" for area in areas):
-            labels = ", ".join(area.label for area in areas)
-            fallback_reasons.append(f"{path}: no marker mapping ({labels})")
+        labels = ", ".join(area.label for area in areas)
+        fallback_reasons.append(f"{path}: no marker mapping ({labels})")
 
     changed_tests = tuple(sorted(path for path in set(paths) if _is_test_file(path)))
     if fallback_reasons or not paths:

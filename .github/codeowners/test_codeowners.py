@@ -328,7 +328,6 @@ class TestComputeResolution:
         runtime = next(area for area in model.areas if area.label == "runtime")
         kvbm = next(area for area in model.areas if area.label == "kvbm")
 
-        assert runtime.pytest_mode == "fallback"
         assert runtime.pytest_markers == []
         assert kvbm.pytest_markers == ["kvbm"]
 
@@ -349,11 +348,10 @@ class TestComputeResolution:
             (False, "pytest must be a mapping"),
             ("", "pytest must be a mapping"),
             ([], "pytest must be a mapping"),
-            ({"mode": "invalid"}, "pytest.mode"),
+            ({"mode": "none"}, "unsupported key"),
             ({"markers": "router"}, "pytest.markers"),
             ({"markers": False}, "pytest.markers"),
             ({"markers": None}, "pytest.markers"),
-            ({"markers": ["router"], "mode": "none"}, "both markers and mode"),
             ({"unknown": True}, "unsupported key"),
         ],
     )

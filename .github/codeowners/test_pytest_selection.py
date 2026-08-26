@@ -61,13 +61,11 @@ def _model():
                     "label": "docs",
                     "github_team": "@docs",
                     "path_globs": ["docs/"],
-                    "pytest": {"mode": "none"},
                 },
                 {
                     "label": "agents",
                     "github_team": "@agents",
                     "path_globs": [],
-                    "pytest": {"mode": "none"},
                 },
             ],
             "shared": [{"glob": "lib/router/agents/", "owners": ["router", "agents"]}],
@@ -121,11 +119,11 @@ def test_unmapped_executable_area_falls_back_to_full() -> None:
     assert "no marker mapping" in plan.fallback_reasons[0]
 
 
-def test_explicit_no_pytest_area_selects_no_tests() -> None:
+def test_area_without_pytest_markers_falls_back_to_full() -> None:
     plan = build_plan(_model(), ["docs/overview.md"])
 
-    assert plan.mode == "none"
-    assert all(selection.mode == "none" for selection in plan.lanes.values())
+    assert plan.mode == "full"
+    assert all(selection.mode == "full" for selection in plan.lanes.values())
 
 
 def test_shared_ownership_contributes_marker_metadata() -> None:
@@ -148,15 +146,11 @@ def test_repository_area_fallback_is_implicit_and_markers_are_registered() -> No
     )
     omitted_labels = {area["label"] for area in spec["areas"] if "pytest" not in area}
     assert omitted_labels
-    assert all(
-        area.get("pytest", {}).get("mode") != "fallback" for area in spec["areas"]
-    )
+    assert all(set(area.get("pytest", {})) <= {"markers"} for area in spec["areas"])
 
     model = compute_resolution(spec)
     resolved_by_label = {area.label: area for area in model.areas}
-    assert all(
-        resolved_by_label[label].pytest_mode == "fallback" for label in omitted_labels
-    )
+    assert all(not resolved_by_label[label].pytest_markers for label in omitted_labels)
     configured = {marker for area in model.areas for marker in area.pytest_markers}
     pyproject = tomllib.loads(
         (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")

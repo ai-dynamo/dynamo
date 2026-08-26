@@ -68,7 +68,7 @@ The PR workflow evaluates every ownership area matching each changed path.
 Backend markers narrow a feature to that framework, while other markers select
 the affected feature tests. Different changed paths are unioned. Omit `pytest`
 for an area without a safe marker mapping; omission conservatively selects the
-full suite. Documentation-only areas can use `pytest: {mode: none}`.
+full suite when changed-files detection has already triggered a backend lane.
 
 The marker report collects effective pytest markers, including module, class,
 function, and parameter inheritance. Unit tests are the always-on smoke slice.

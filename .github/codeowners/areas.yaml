@@ -375,8 +375,6 @@ areas:
   - scripts/
 - label: docs
   github_team: '@ai-dynamo/dynamo-docs-codeowners'
-  pytest:
-    mode: none
   path_globs:
   - README.md
   - README.zh-CN.md
@@ -386,8 +384,6 @@ areas:
   - examples/__init__.py
 - label: process
   github_team: '@ai-dynamo/dynamo-process-codeowners'
-  pytest:
-    mode: none
   path_globs:
   - .agents/
   - .ai/
