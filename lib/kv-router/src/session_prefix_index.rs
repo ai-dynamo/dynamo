@@ -119,9 +119,14 @@ impl SessionPrefixIndexer {
 
     /// Creates an index and clamps a zero session cap to one.
     pub fn with_max_sessions(max_sessions: usize) -> Self {
+        Self::with_limits(max_sessions, DEFAULT_MAX_SESSION_DEPTH)
+    }
+
+    fn with_limits(max_sessions: usize, max_session_depth: usize) -> Self {
         Self {
             state: RwLock::new(IndexState {
                 max_sessions: max_sessions.max(1),
+                max_session_depth: max_session_depth.max(1),
                 ..IndexState::default()
             }),
         }
@@ -957,6 +962,25 @@ mod tests {
             !lineage_of(&indexer, "s1").is_empty(),
             "the sole tracked session must survive its own insertion"
         );
+    }
+
+    #[test]
+    fn lineage_depth_limit_reclaims_detached_ancestors() {
+        let chain = hashes(vec![1, 2, 3, 4, 5]);
+        let indexer = SessionPrefixIndexer::with_limits(DEFAULT_MAX_SESSIONS, 3);
+
+        for &block_hash in &chain {
+            indexer.update_session_from_match("s1", block_hash).unwrap();
+        }
+
+        assert_eq!(lineage_of(&indexer, "s1"), vec![chain[2..].to_vec()]);
+        assert_eq!(indexer.node_count(), 3);
+        for &block_hash in &chain[..2] {
+            assert_eq!(indexer.get_node_from_hash(block_hash), None);
+        }
+        for &block_hash in &chain[2..] {
+            assert!(indexer.get_node_from_hash(block_hash).is_some());
+        }
     }
 
     #[test]

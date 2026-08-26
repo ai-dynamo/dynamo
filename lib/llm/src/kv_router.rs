@@ -2238,6 +2238,24 @@ mod tests {
             Some(ExternalSequenceBlockHash(104)),
             "the session reached as far as the best-matching worker proves it did"
         );
+
+        let mut tied_scores = OverlapScores::new();
+        tied_scores.scores.insert(shallow, 2);
+        tied_scores.scores.insert(deep, 2);
+        let tied = MatchDetails {
+            overlap_scores: tied_scores,
+            last_matched_hashes: [
+                (shallow, ExternalSequenceBlockHash(101)),
+                (deep, ExternalSequenceBlockHash(104)),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        };
+        assert_eq!(
+            deepest_matched_hash(&tied),
+            Some(ExternalSequenceBlockHash(104))
+        );
     }
 
     #[test]
