@@ -614,6 +614,51 @@ async fn session_affinity_publishes_after_dispatch_and_lease_completion() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn session_affinity_worker_only_binding_allows_ranked_dispatch_without_narrowing() {
+    let coordinator = coordinator();
+    let worker_binding = target(7, None);
+
+    let initialization = coordinator.acquire(&session_id(), None).await.unwrap();
+    drop(
+        initialization
+            .into_stream(worker_binding, response_stream(1))
+            .unwrap(),
+    );
+
+    let continuation = coordinator.acquire(&session_id(), None).await.unwrap();
+    let stream = continuation
+        .into_stream(target(7, Some(3)), response_stream(1))
+        .expect("worker-only affinity must allow the scheduler to select a DP rank");
+
+    assert_eq!(
+        coordinator.query_target(&session_id(), None).unwrap(),
+        Some(worker_binding)
+    );
+    drop(stream);
+}
+
+#[tokio::test(start_paused = true)]
+async fn session_affinity_ranked_binding_rejects_mismatched_rank_dispatch() {
+    let coordinator = coordinator();
+    let binding = target(7, Some(2));
+
+    let initialization = coordinator.acquire(&session_id(), None).await.unwrap();
+    drop(
+        initialization
+            .into_stream(binding, response_stream(1))
+            .unwrap(),
+    );
+
+    let continuation = coordinator.acquire(&session_id(), None).await.unwrap();
+    assert!(
+        continuation
+            .into_stream(target(7, Some(3)), response_stream(1))
+            .is_err()
+    );
+    assert_eq!(coordinator.query_target(&session_id(), None).unwrap(), None);
+}
+
+#[tokio::test(start_paused = true)]
 async fn session_affinity_completion_restores_expired_remote_binding() {
     let origin = coordinator();
     let mut updates = origin.enable_test_replica(99, 4);

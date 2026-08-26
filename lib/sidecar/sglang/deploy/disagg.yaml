@@ -104,6 +104,7 @@ spec:
           - "30000"
           - --grpc-port
           - "30001"
+          - --incremental-streaming-output
           - --disaggregation-mode
           - prefill
           - --disaggregation-bootstrap-port
@@ -118,7 +119,7 @@ spec:
           - /usr/local/bin/dynamo-sidecar
           args:
           - sglang
-          - --sglang-endpoint
+          - --grpc-endpoint
           - 127.0.0.1:30001
           env:
           # Advertise this pod's IP as the bootstrap host decode workers dial.
@@ -194,6 +195,7 @@ spec:
           - "30000"
           - --grpc-port
           - "30001"
+          - --incremental-streaming-output
           - --disaggregation-mode
           - decode
           - --disaggregation-bootstrap-port
@@ -208,7 +210,7 @@ spec:
           - /usr/local/bin/dynamo-sidecar
           args:
           - sglang
-          - --sglang-endpoint
+          - --grpc-endpoint
           - 127.0.0.1:30001
           envFrom:
           - secretRef:

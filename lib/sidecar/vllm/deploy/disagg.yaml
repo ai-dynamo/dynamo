@@ -137,7 +137,7 @@ spec:
           - /usr/local/bin/dynamo-sidecar
           args:
           - vllm
-          - --vllm-endpoint
+          - --grpc-endpoint
           - 127.0.0.1:50051
           - --disaggregation-mode
           - prefill
@@ -230,7 +230,7 @@ spec:
           - /usr/local/bin/dynamo-sidecar
           args:
           - vllm
-          - --vllm-endpoint
+          - --grpc-endpoint
           - 127.0.0.1:50051
           - --disaggregation-mode
           - decode

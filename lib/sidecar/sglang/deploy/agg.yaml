@@ -85,6 +85,7 @@ spec:
           - "30000"
           - --grpc-port
           - "30001"
+          - --incremental-streaming-output
         containers:
         # Sidecar worker. No published image yet — build from
         # lib/sidecar/Dockerfile, set <your-registry> (see README), add
@@ -97,7 +98,7 @@ spec:
           - /usr/local/bin/dynamo-sidecar
           args:
           - sglang
-          - --sglang-endpoint
+          - --grpc-endpoint
           - 127.0.0.1:30001
           envFrom:
           - secretRef:
