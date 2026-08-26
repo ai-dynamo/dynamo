@@ -12,7 +12,12 @@ repository.workspace = true
 description = "Dynamo Runtime Library"
 
 [package.metadata.cargo-machete]
-ignored = ["mio"]
+# nvtx is depended on for the static C library its build script compiles with
+# `cc`, not for its Rust API: src/nvtx.rs declares the `ffi_*` symbols itself so
+# the signatures match nvtx-sys/export.c (the upstream `ffi_range_end` binding
+# does not) and so marker names cannot panic on an interior NUL. No Rust path
+# names the crate, which is exactly the case machete cannot see.
+ignored = ["mio", "nvtx"]
 
 [features]
 default = []
