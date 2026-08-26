@@ -1188,19 +1188,17 @@ impl DistributedRuntime {
         let event_transport_kind =
             resolve_event_transport_kind(&discovery_backend_config, event_plane.as_deref())?;
 
-        // Hand the configured runtime to the pyo3 bridge before anything can touch it.
-        //
-        // This used to sit in an `.or_else` on `runtime_from_existing()`, whose error path is
-        // unreachable — so `init_with_runtime` never ran. An uninitialised bridge makes
-        // `get_runtime()` lazily build its own runtime from `Builder::new_multi_thread()`
-        // defaults, ignoring DYN_RUNTIME_*. That runs the frontend's entire lifetime, since
-        // `run_input` wraps everything in `future_into_py`, so the configured runtime sat idle
-        // while the workload ran on an unconfigured one.
+        // The bridge must hold the configured runtime before any future is spawned on it.
+        // `run_input` wraps the frontend's whole lifetime in `future_into_py`, which spawns via
+        // `pyo3_async_runtimes::tokio::get_runtime()` — and if the bridge is unset, that call
+        // builds its own runtime from `Builder::new_multi_thread()` defaults, ignoring
+        // DYN_RUNTIME_*. Initialising it here is what keeps the workload on the runtime we
+        // configured.
         let primary = rs::Worker::ensure_process_runtime().map_err(to_pyerr)?;
         INIT.get_or_try_init(|| -> anyhow::Result<()> {
-            // An already-initialised bridge is legitimate, not an error: `backend::Worker`
-            // initialises it with this same `RT` and ignores the same error. Accept it, but
-            // check it really is our runtime — running on a foreign one is the bug above.
+            // An already-initialised bridge is legitimate: `backend::Worker` initialises it
+            // with this same `RT`. Accept that, but confirm the runtime really is ours —
+            // running on a foreign one is the failure this guards against.
             if pyo3_async_runtimes::tokio::init_with_runtime(primary).is_err() {
                 // The failure proves the cell is set, so this can't hit the lazy-build path.
                 if !std::ptr::eq(pyo3_async_runtimes::tokio::get_runtime(), primary) {

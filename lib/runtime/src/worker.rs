@@ -25,6 +25,7 @@ use super::{CancellationToken, Runtime, RuntimeConfig};
 use futures::Future;
 use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::{signal, task::JoinHandle};
 
@@ -40,10 +41,13 @@ use tokio::{signal, task::JoinHandle};
 static RT: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
 
 /// The config [`Worker::ensure_process_runtime`] built `RT` from, kept so
-/// [`Worker::runtime_from_existing`] can attach the matching compute pool without re-reading
-/// the environment. Left empty when [`Worker::from_config`] builds `RT`, since that path has
-/// never attached one.
+/// [`Worker::runtime_from_existing`] can attach the matching compute pool without re-reading the
+/// environment. Left empty by [`Worker::from_config`], which brings its own config and no pool.
 static RTCONFIG: OnceCell<RuntimeConfig> = OnceCell::new();
+
+/// Whether the compute pool has been handed to a [`Runtime`] yet. Claimed exactly once, so the
+/// pool stays a per-process resource however many wrappers are built.
+static COMPUTE_CLAIMED: AtomicBool = AtomicBool::new(false);
 
 static INIT: OnceCell<Mutex<Option<tokio::task::JoinHandle<anyhow::Result<()>>>>> = OnceCell::new();
 
@@ -94,22 +98,29 @@ impl Worker {
     /// Adopt the process-wide runtime, creating it on first use. The returned [`Runtime`] is
     /// just a wrapper around a handle to `RT`, so every caller shares one Tokio runtime.
     ///
-    /// This used to publish its fallback runtime as a bare `Handle` in a separate `RTHANDLE`
-    /// cell, leaving `RT` empty. A later [`Worker::ensure_process_runtime`] — reached by
-    /// constructing a `DistributedRuntime` after `DistributedRuntime.detached()`, say — could
-    /// not recover a `&'static` reference from that handle, so it built a *second* runtime:
-    /// traffic on one, the configured thread counts on the other.
+    /// Creating goes through [`Worker::ensure_process_runtime`] so the runtime lands in `RT`,
+    /// where a `&'static` reference can still be recovered for a foreign executor bridge.
+    /// Publishing only a handle would leave a bridge unable to adopt it, and a process running
+    /// on two runtimes: traffic on one, the configured thread counts on the other.
     pub fn runtime_from_existing() -> anyhow::Result<Runtime> {
-        // Only the caller that creates the process runtime gets the config-derived compute pool
-        // and `block_in_place` permits, matching what the old `Runtime::from_settings()`
-        // fallback did. Callers that adopt an existing runtime never had them, and attaching a
-        // pool per call would spawn a fresh set of Rayon threads for every `DistributedRuntime`.
-        let creating = RT.get().is_none();
         let rt = Self::ensure_process_runtime()?;
         let handle = rt.handle().clone();
 
+        // Exactly one wrapper gets the config-derived compute pool and `block_in_place`
+        // permits: they are per-process resources, and attaching them per call would spawn a
+        // Rayon pool for every `DistributedRuntime`.
+        //
+        // The claim is a swap rather than a "did I just create `RT`?" check because callers may
+        // call `ensure_process_runtime` first — `DistributedRuntime::new` does, to set up the
+        // pyo3 bridge — which would make that check always answer no. The swap is also what
+        // settles the race when two threads arrive together.
+        //
+        // `RTCONFIG` is empty when `Worker::from_config` built the runtime, which supplies its
+        // own config and no pool.
         match RTCONFIG.get() {
-            Some(config) if creating => Runtime::from_handle_with_config(handle, config),
+            Some(config) if !COMPUTE_CLAIMED.swap(true, Ordering::SeqCst) => {
+                Runtime::from_handle_with_config(handle, config)
+            }
             _ => Runtime::from_handle(handle),
         }
     }

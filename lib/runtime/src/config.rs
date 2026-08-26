@@ -537,9 +537,9 @@ mod tests {
 
     /// Both thread-pool variables must survive `from_settings()`.
     ///
-    /// Regression guard: setting `DYN_RUNTIME_MAX_BLOCKING_THREADS` had no effect on a
-    /// frontend's thread count, which looked like a parsing bug. Parsing was fine — the
-    /// runtime it configured was not the one serving traffic — but nothing pinned that down.
+    /// Pins the parsing side on its own, so a frontend whose thread count ignores
+    /// `DYN_RUNTIME_MAX_BLOCKING_THREADS` can be diagnosed as a runtime-wiring problem rather
+    /// than a config one.
     ///
     /// `temp_env::with_vars` holds a process-global lock and restores prior values on the way
     /// out, so this can't race other tests reading the environment.
