@@ -1635,11 +1635,7 @@ where
             }
 
             // Reclaim after recording the final match.
-            let session_over = session.session_final() == Some(true)
-                || session
-                    .kv_hints()
-                    .is_some_and(|hints| hints.evict_session());
-            if session_over {
+            if session.session_final() == Some(true) {
                 index.remove_session(session.session_id());
             }
         }
