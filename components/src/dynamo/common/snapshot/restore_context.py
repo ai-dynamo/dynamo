@@ -6,6 +6,7 @@
 import json
 import logging
 import os
+import uuid
 from inspect import isawaitable
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping, TypeVar
@@ -116,12 +117,51 @@ def parse_snapshot_restore_runtime_config(argv: list[str] | None) -> object:
 def apply_snapshot_restore_env() -> dict[str, str | None]:
     """Load restore-context JSON and apply its runtime env to ``os.environ``."""
 
-    # Load the restore-context JSON captured by the restore standby process. It
-    # contains the target container's actual restore-time env after Kubernetes
-    # resolved literals, Downward API values, ConfigMaps, and Secrets.
-    control_dir = os.environ.get(SNAPSHOT_CONTROL_DIR_ENV, SNAPSHOT_CONTROL_DIR)
-    context_path = Path(control_dir) / SNAPSHOT_RESTORE_CONTEXT_FILE
+    restore_context, context_path = _read_restore_context()
+    assert restore_context is not None
+    env_config = restore_context.get("env")
+    if not isinstance(env_config, dict):
+        raise RuntimeError("snapshot restore context requires an object env field")
+    return _apply_restore_env(env_config, source=str(context_path))
+
+
+def load_restore_incarnation_id(control_dir: str | None = None) -> str | None:
+    """Read the restore ``incarnation_id`` from the snapshot-control volume.
+
+    Workers must read the file. ``POD_IP`` is often unchanged after restore, so
+    P/D NIXL rebind is keyed by this id, not by address.
+    """
+
+    restore_context, _ = _read_restore_context(control_dir, missing_ok=True)
+    if restore_context is None:
+        return None
+    incarnation_id = restore_context.get("incarnation_id")
+    if not isinstance(incarnation_id, str) or not incarnation_id:
+        return None
+    return incarnation_id
+
+
+def should_rebind_pd(bound_incarnation_id: str | None) -> bool:
+    """True when a restore context exists and this process has not bound it yet."""
+
+    incarnation_id = load_restore_incarnation_id()
+    return incarnation_id is not None and incarnation_id != bound_incarnation_id
+
+
+def _restore_context_path(control_dir: str | None = None) -> Path:
+    root = control_dir or os.environ.get(SNAPSHOT_CONTROL_DIR_ENV, SNAPSHOT_CONTROL_DIR)
+    return Path(root) / SNAPSHOT_RESTORE_CONTEXT_FILE
+
+
+def _read_restore_context(
+    control_dir: str | None = None,
+    *,
+    missing_ok: bool = False,
+) -> tuple[dict[str, object] | None, Path]:
+    context_path = _restore_context_path(control_dir)
     if not context_path.is_file():
+        if missing_ok:
+            return None, context_path
         raise RuntimeError(f"snapshot restore context file not found: {context_path}")
 
     source = str(context_path)
@@ -134,10 +174,7 @@ def apply_snapshot_restore_env() -> dict[str, str | None]:
 
     if not isinstance(restore_context, dict):
         raise RuntimeError("snapshot restore context requires an object payload")
-    env_config = restore_context.get("env")
-    if not isinstance(env_config, dict):
-        raise RuntimeError("snapshot restore context requires an object env field")
-    return _apply_restore_env(env_config, source=source)
+    return restore_context, context_path
 
 
 def write_snapshot_restore_context(control_dir: str | None = None) -> None:
@@ -155,7 +192,10 @@ def write_snapshot_restore_context(control_dir: str | None = None) -> None:
 
     # Capture only the non-secret env names Dynamo needs after restore. Missing
     # values are written as null so stale snapshot-time env can be cleared.
+    # incarnation_id is generated here (not an env var) so same-IP / same-UID
+    # restores still get a new P/D NIXL identity.
     context = {
+        "incarnation_id": str(uuid.uuid4()),
         "env": {
             name: os.environ.get(name) if name in os.environ else None
             for name in sorted(_SUPPORTED_RESTORE_ENV_NAMES)
@@ -175,7 +215,11 @@ def write_snapshot_restore_context(control_dir: str | None = None) -> None:
         encoding="utf-8",
     )
     tmp_path.replace(context_file)
-    logger.info("Captured snapshot restore context at %s", context_file)
+    logger.info(
+        "Captured snapshot restore context at %s incarnation_id=%s",
+        context_file,
+        context["incarnation_id"],
+    )
 
 
 def _validate_kubernetes_restore_env_for_config(config: object) -> None:

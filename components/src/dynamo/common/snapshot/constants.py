@@ -12,7 +12,13 @@ KUBERNETES_REQUIRED_ENV_NAMES = {
     "POD_NAMESPACE",
     "POD_UID",
 }
-KUBERNETES_OPTIONAL_ENV_NAMES = {"DYN_NAMESPACE_WORKER_SUFFIX"}
+KUBERNETES_OPTIONAL_ENV_NAMES = {
+    "DYN_NAMESPACE_WORKER_SUFFIX",
+    # Advertised by the restore Pod. hostNetwork often keeps the same value
+    # across restart, so NIXL rebind is keyed by incarnation_id, not IP.
+    "POD_IP",
+    "VLLM_NIXL_SIDE_CHANNEL_HOST",
+}
 SNAPSHOT_CONTROL_DIR_ENV = "DYN_SNAPSHOT_CONTROL_DIR"
 SNAPSHOT_CONTROL_DIR = "/snapshot-control"
 SNAPSHOT_RESTORE_CONTEXT_FILE = "restore-context.json"

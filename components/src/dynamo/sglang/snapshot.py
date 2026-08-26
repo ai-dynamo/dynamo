@@ -72,9 +72,9 @@ async def warmup_engine(engine: sgl.Engine, server_args: Any) -> None:
         warmup_args["input_ids"] = np.load(
             server_args.debug_tensor_dump_input_file
         ).tolist()
-        warmup_args["sampling_params"][
-            "max_new_tokens"
-        ] = DUMMY_DEBUG_TENSOR_MAX_NEW_TOKENS
+        warmup_args["sampling_params"]["max_new_tokens"] = (
+            DUMMY_DEBUG_TENSOR_MAX_NEW_TOKENS
+        )
 
     is_disaggregated = server_args.disaggregation_mode != "null"
     if is_disaggregated:
@@ -135,6 +135,9 @@ async def prepare_snapshot_engine(
 
     configure_snapshot_capture_env()
     logger.info("Snapshot mode enabled (watcher-driven signals)")
+    from dynamo.sglang.snapshot_nixl import install_snapshot_nixl
+
+    install_snapshot_nixl()
 
     # Enable memory_saver so GPU memory can be released for CRIU.
     # When using GMS, weights use VA-stable unmap/remap (no CPU backup); GMS
