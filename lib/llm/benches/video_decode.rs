@@ -21,7 +21,7 @@ fn bench_video_decode(c: &mut Criterion) {
     let num_frames = DEFAULT_NUM_FRAMES;
     let decoder_config = video_decoder(num_frames);
     let decoder = decoder_config.video.as_ref().unwrap();
-    let mut group = c.benchmark_group("video_decode_h264_320x240_100_to_30");
+    let mut group = c.benchmark_group("video_decode_vp9_320x240_100_to_30");
     group.throughput(Throughput::Elements(num_frames));
 
     group.bench_function("ffmpeg_next", |b| {
