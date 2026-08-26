@@ -345,14 +345,20 @@ class TestComputeResolution:
     @pytest.mark.parametrize(
         ("pytest_spec", "message"),
         [
+            (None, "pytest must be a mapping"),
+            (False, "pytest must be a mapping"),
+            ("", "pytest must be a mapping"),
+            ([], "pytest must be a mapping"),
             ({"mode": "invalid"}, "pytest.mode"),
             ({"markers": "router"}, "pytest.markers"),
+            ({"markers": False}, "pytest.markers"),
+            ({"markers": None}, "pytest.markers"),
             ({"markers": ["router"], "mode": "none"}, "both markers and mode"),
             ({"unknown": True}, "unsupported key"),
         ],
     )
     def test_invalid_pytest_metadata_is_rejected(
-        self, pytest_spec: dict, message: str
+        self, pytest_spec: object, message: str
     ) -> None:
         spec = self._spec()
         spec["areas"][0]["pytest"] = pytest_spec

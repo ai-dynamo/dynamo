@@ -49,6 +49,9 @@ jobs:
             --override-ini="addopts=" \
             --override-ini="filterwarnings="
 
+      # Intentionally fail closed on collection errors. Selective CI consumes
+      # this inventory, so accepting a partial collection could silently omit
+      # tests from a marker-selected lane.
       - name: Validate effective pytest marker coverage
         run: python tests/report_pytest_markers.py
 

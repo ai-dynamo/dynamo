@@ -404,7 +404,7 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
     areas: list[ResolvedArea] = []
     marker_name = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
     for area in raw_areas:
-        pytest_spec = area.get("pytest", {}) or {}
+        pytest_spec = area["pytest"] if "pytest" in area else {}
         if not isinstance(pytest_spec, dict):
             raise SystemExit(
                 f"areas.yaml: area {area['label']!r} pytest must be a mapping"
@@ -415,7 +415,7 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
                 f"areas.yaml: area {area['label']!r} pytest has unsupported key "
                 f"{min(unknown_pytest_keys)!r}"
             )
-        markers = pytest_spec.get("markers", []) or []
+        markers = pytest_spec.get("markers", [])
         mode = pytest_spec.get("mode", "fallback")
         if not isinstance(markers, list) or not all(
             isinstance(marker, str) and marker_name.fullmatch(marker)

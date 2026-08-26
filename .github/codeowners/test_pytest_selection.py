@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import sys
-import tomllib
 from pathlib import Path
 
 import yaml
+
+try:
+    import tomllib  # Python >=3.11
+except ImportError:
+    import tomli as tomllib  # type: ignore
 
 sys.path.insert(0, str(Path(__file__).parent))
 
