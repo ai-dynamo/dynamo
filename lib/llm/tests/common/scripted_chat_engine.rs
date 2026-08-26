@@ -12,6 +12,7 @@ use dynamo_llm::protocols::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
 };
+use dynamo_runtime::error::DynamoError;
 use dynamo_runtime::pipeline::{
     AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn, async_trait,
 };
@@ -21,6 +22,11 @@ pub type Script = Vec<NvCreateChatCompletionStreamResponse>;
 
 enum QueuedScript {
     Immediate(Script),
+    #[allow(dead_code)]
+    BackendError {
+        chunks: Script,
+        error: DynamoError,
+    },
     Gated {
         chunks: Script,
         split_at: usize,
@@ -71,6 +77,17 @@ impl ScriptedChatEngine {
         )
     }
 
+    #[allow(dead_code)]
+    pub fn with_backend_error(chunks: Script, error: DynamoError) -> Self {
+        Self {
+            scripts: Mutex::new(VecDeque::from([QueuedScript::BackendError {
+                chunks,
+                error,
+            }])),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
     /// Remove and return all requests observed so far, in arrival order.
     pub async fn take_requests(&self) -> Vec<NvCreateChatCompletionRequest> {
         std::mem::take(&mut *self.requests.lock().await)
@@ -110,6 +127,18 @@ impl
                     for chunk in chunks {
                         yield Annotated::from_data(chunk);
                     }
+                }
+                QueuedScript::BackendError { chunks, error } => {
+                    for chunk in chunks {
+                        yield Annotated::from_data(chunk);
+                    }
+                    yield Annotated {
+                        data: None,
+                        id: None,
+                        event: Some("error".to_string()),
+                        comment: None,
+                        error: Some(error),
+                    };
                 }
                 QueuedScript::Gated {
                     chunks,

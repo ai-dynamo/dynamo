@@ -32,7 +32,7 @@ use super::openai::{
 };
 use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
-use crate::protocols::common::preprocessor::PreprocessedRequest;
+use crate::protocols::common::preprocessor::{MmRoutingInfo, PreprocessedRequest};
 use crate::protocols::common::{SamplingOptions, StopConditions};
 use crate::protocols::openai::generate::{
     GenerateRequest, GenerateResponse, GenerateResponseOptions, SamplingParams, StreamOptions,
@@ -205,6 +205,288 @@ impl<'a> VllmTitoEnvelope<'a> {
     }
 }
 
+type MmPlaceholderRange = (usize, usize, u64, Option<Vec<bool>>);
+
+#[derive(Debug)]
+struct GenerateMmRoutingProjection {
+    info: MmRoutingInfo,
+    /// Frontend-approved hashes in the marker form understood by the KV-event
+    /// decoder. The worker applies these only to the vLLM prompt it builds;
+    /// the caller's opaque `features` payload remains unchanged.
+    marked_image_hashes: Vec<String>,
+}
+
+struct GenerateRoutingMetadata {
+    kv_cache_block_size: u32,
+    tower_connector_lora_enabled: bool,
+    lora_name: Option<String>,
+}
+
+#[inline]
+fn intersecting_mm_ranges<'a>(
+    ranges: &'a [MmPlaceholderRange],
+    block_start: usize,
+    block_end: usize,
+    first_intersecting: &mut usize,
+) -> &'a [MmPlaceholderRange] {
+    while *first_intersecting < ranges.len() {
+        if ranges[*first_intersecting].1 > block_start {
+            break;
+        }
+        *first_intersecting += 1;
+    }
+
+    let start = *first_intersecting;
+    let mut end = start;
+    while end < ranges.len() {
+        if ranges[end].0 >= block_end {
+            break;
+        }
+        end += 1;
+    }
+
+    &ranges[start..end]
+}
+
+/// Build the routing-only token sequence used by vLLM KV events for multimodal
+/// prompts. The caller-provided `features` object remains opaque to execution;
+/// this projection reads only the hashes and placeholder ranges required to
+/// make request-side KV hashes match worker-side event hashes.
+fn generate_mm_routing_info(
+    request: &GenerateRequest,
+    kv_cache_block_size: u32,
+) -> Result<Option<GenerateMmRoutingProjection>, &'static str> {
+    let Some(features) = request.passthrough.get("features") else {
+        return Ok(None);
+    };
+    if features.is_null() {
+        return Ok(None);
+    }
+
+    let features = features
+        .as_object()
+        .ok_or("features must be a JSON object")?;
+    let Some(mm_hashes) = features.get("mm_hashes") else {
+        return Ok(None);
+    };
+    let mm_hashes = mm_hashes
+        .as_object()
+        .ok_or("features.mm_hashes must be a JSON object")?;
+    let mm_placeholders = features
+        .get("mm_placeholders")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("features.mm_placeholders must be a JSON object")?;
+
+    if mm_hashes
+        .keys()
+        .chain(mm_placeholders.keys())
+        .any(|modality| modality != "image")
+    {
+        return Err("exact /generate MM routing currently supports image placeholders only");
+    }
+    if kv_cache_block_size == 0 {
+        return Err("KV cache block size must be non-zero");
+    }
+
+    let (hashes, placeholders) = match (mm_hashes.get("image"), mm_placeholders.get("image")) {
+        (None, None) => return Ok(None),
+        (Some(hashes), Some(placeholders)) => (
+            hashes
+                .as_array()
+                .ok_or("features.mm_hashes.image must be an array")?,
+            placeholders
+                .as_array()
+                .ok_or("features.mm_placeholders.image must be an array")?,
+        ),
+        _ => return Err("image hashes and placeholders must both be present"),
+    };
+    if hashes.len() != placeholders.len() {
+        return Err("image hashes and placeholders must have equal lengths");
+    }
+
+    let mut ranges: Vec<MmPlaceholderRange> = Vec::with_capacity(hashes.len());
+    for (hash, placeholder) in hashes.iter().zip(placeholders) {
+        let hash = hash
+            .as_str()
+            .and_then(dynamo_kv_router::protocols::hash_mm_identifier)
+            .ok_or("multimodal hashes must be non-empty strings")?;
+        let placeholder = placeholder
+            .as_object()
+            .ok_or("multimodal placeholders must be JSON objects")?;
+        let offset = placeholder
+            .get("offset")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or("multimodal placeholder offsets must be non-negative integers")?;
+        let length = placeholder
+            .get("length")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or("multimodal placeholder lengths must be positive integers")?;
+        let end = offset
+            .checked_add(length)
+            .filter(|end| *end <= request.token_ids.len())
+            .ok_or("multimodal placeholder range exceeds token_ids")?;
+        let is_embed = match placeholder.get("is_embed") {
+            None | Some(serde_json::Value::Null) => {
+                // vLLM 0.24 render responses omit sparse masks. A uniform
+                // placeholder span is safely dense; a mixed span is ambiguous
+                // and must retain token-only routing rather than over-substitute.
+                if request.token_ids[offset..end]
+                    .windows(2)
+                    .any(|pair| pair[0] != pair[1])
+                {
+                    return Err("mixed multimodal placeholder spans require is_embed");
+                }
+                None
+            }
+            Some(value) => {
+                let mask = value
+                    .as_array()
+                    .ok_or("multimodal placeholder is_embed must be an array")?;
+                if mask.len() != length {
+                    return Err(
+                        "multimodal placeholder is_embed length must match placeholder length",
+                    );
+                }
+                let mut parsed = Vec::with_capacity(mask.len());
+                for entry in mask {
+                    parsed.push(
+                        entry
+                            .as_bool()
+                            .ok_or("multimodal placeholder is_embed entries must be booleans")?,
+                    );
+                }
+                Some(parsed)
+            }
+        };
+        ranges.push((offset, end, hash, is_embed));
+    }
+
+    if ranges.is_empty() {
+        return Ok(None);
+    }
+
+    if ranges.windows(2).any(|pair| pair[0].0 > pair[1].0) {
+        return Err("multimodal placeholders must be ordered by offset");
+    }
+    for pair in ranges.windows(2) {
+        let (_, previous_end, previous_hash, _) = &pair[0];
+        let (next_offset, _, next_hash, _) = &pair[1];
+        if previous_end > next_offset {
+            return Err("multimodal placeholder ranges must not overlap");
+        }
+        if previous_end == next_offset && previous_hash != next_hash {
+            return Err("adjacent multimodal placeholders must share an identifier");
+        }
+    }
+
+    // The worker discovers multimodal runs by scanning for its resolved image
+    // token. Infer that token from the declared embed positions and require the
+    // declarations to cover every occurrence. Otherwise an undeclared image
+    // token can shift the worker's run-to-object alignment away from the
+    // request-side projection.
+    let mut image_token_id = None;
+    let mut declared_image_tokens = 0;
+    for (offset, end, _, is_embed) in &ranges {
+        for position in *offset..*end {
+            let should_embed = is_embed
+                .as_ref()
+                .is_none_or(|mask| mask[position - *offset]);
+            if !should_embed {
+                continue;
+            }
+
+            let token_id = request.token_ids[position];
+            if image_token_id.is_some_and(|expected| expected != token_id) {
+                return Err("multimodal embed positions must share an image token");
+            }
+            image_token_id = Some(token_id);
+            declared_image_tokens += 1;
+        }
+    }
+    let image_token_id = image_token_id.ok_or("multimodal placeholders contain no embed tokens")?;
+    if request
+        .token_ids
+        .iter()
+        .filter(|token_id| **token_id == image_token_id)
+        .count()
+        != declared_image_tokens
+    {
+        return Err("image tokens must be covered by multimodal placeholder ranges");
+    }
+
+    // Apply the same per-block run-order normalization as vLLM KV events, then
+    // compare it with the renderer-declared positions. A sparse mask can split
+    // one object into multiple runs, so exact routing is enabled only when the
+    // shared worker normalization produces the same token projection.
+    let block_size = kv_cache_block_size as usize;
+    let mut first_intersecting = 0;
+    let mut worker_objects = Vec::new();
+    let mut routing_token_ids = Vec::with_capacity(request.token_ids.len());
+    for block_start in (0..request.token_ids.len()).step_by(block_size) {
+        let block_end = (block_start + block_size).min(request.token_ids.len());
+        let block_tokens = &request.token_ids[block_start..block_end];
+        let block_ranges =
+            intersecting_mm_ranges(&ranges, block_start, block_end, &mut first_intersecting);
+        if block_ranges.is_empty() {
+            routing_token_ids.extend_from_slice(block_tokens);
+            continue;
+        }
+
+        worker_objects.clear();
+        let mut expected_tokens = block_tokens.to_vec();
+        for (offset, end, hash, is_embed) in block_ranges {
+            let intersection_start = (*offset).max(block_start);
+            let intersection_end = (*end).min(block_end);
+            worker_objects.push(*hash);
+            for global_position in intersection_start..intersection_end {
+                let should_embed = is_embed
+                    .as_ref()
+                    .is_none_or(|mask| mask[global_position - *offset]);
+                if should_embed {
+                    expected_tokens[global_position - block_start] =
+                        dynamo_kv_router::protocols::pad_value_for_mm_hash(*hash);
+                }
+            }
+        }
+
+        let normalized_tokens = dynamo_kv_router::zmq_wire::normalize_mm_token_runs(
+            block_tokens,
+            image_token_id,
+            &worker_objects,
+        )
+        .map(|(tokens, _)| tokens)
+        .ok_or("multimodal block must contain a routing hash")?;
+        if normalized_tokens != expected_tokens {
+            return Err("sparse multimodal layout cannot be normalized exactly by worker events");
+        }
+        routing_token_ids.extend(normalized_tokens);
+    }
+
+    let padded_len = routing_token_ids
+        .len()
+        .div_ceil(block_size)
+        .checked_mul(block_size)
+        .ok_or("multimodal routing token length overflow")?;
+    routing_token_ids.resize(padded_len, 0);
+
+    Ok(Some(GenerateMmRoutingProjection {
+        info: MmRoutingInfo {
+            routing_token_ids,
+            // vLLM events are normalized to the same pad-value token scheme, so
+            // MM identity is already present in the alternate routing tokens.
+            block_mm_infos: Vec::new(),
+            expanded_prompt_len: request.token_ids.len(),
+        },
+        marked_image_hashes: ranges
+            .iter()
+            .map(|(_, _, hash, _)| dynamo_kv_router::zmq_wire::mark_mm_hash_for_extra_key(*hash))
+            .collect(),
+    }))
+}
+
 /// Project routing controls while retaining all engine-owned fields in
 /// `extra_args.vllm_tito`. The backend remains the authority for interpreting
 /// every vLLM-specific field.
@@ -213,13 +495,51 @@ fn preprocessed_from_generate(
     model: &str,
     data_parallel_rank: Option<u32>,
     request_id: &str,
+    routing_metadata: GenerateRoutingMetadata,
 ) -> anyhow::Result<PreprocessedRequest> {
+    let GenerateRoutingMetadata {
+        kv_cache_block_size,
+        tower_connector_lora_enabled,
+        lora_name,
+    } = routing_metadata;
     let sampling = &request.sampling_params;
     let max_tokens = sampling.max_tokens();
     let min_tokens = sampling.min_tokens();
     let ignore_eos = sampling.ignore_eos();
     let routing_priority = dynamo_routing_priority(request.priority);
+    // With vLLM's default `enable_tower_connector_lora=false`, MM identifiers
+    // are adapter-invariant and `lora_name` separately salts LM KV hashes. When
+    // tower/connector LoRA is enabled for an adapter request, fall back to
+    // token-only routing because vLLM scopes the MM identity by that adapter.
+    let mm_routing = if tower_connector_lora_enabled && lora_name.is_some() {
+        tracing::debug!(
+            target: "mm_routing",
+            "tower/connector LoRA is active; using token-only multimodal routing"
+        );
+        None
+    } else {
+        match generate_mm_routing_info(&request, kv_cache_block_size) {
+            Ok(info) => info,
+            Err(reason) => {
+                tracing::debug!(
+                    target: "mm_routing",
+                    reason,
+                    "invalid /generate multimodal routing metadata; using token-only routing"
+                );
+                None
+            }
+        }
+    };
     let vllm_tito = serde_json::to_value(VllmTitoEnvelope::new(&request, request_id))?;
+    let mut extra_args = serde_json::Map::new();
+    extra_args.insert("vllm_tito".to_string(), vllm_tito);
+    if let Some(projection) = &mm_routing {
+        extra_args.insert(
+            "dynamo_mm_routing_hashes".to_string(),
+            serde_json::to_value(&projection.marked_image_hashes)?,
+        );
+    }
+    let mm_routing_info = mm_routing.map(|projection| projection.info);
     let GenerateRequest {
         token_ids,
         cache_salt,
@@ -240,9 +560,11 @@ fn preprocessed_from_generate(
             ..Default::default()
         })
         .output_options(Default::default())
+        .mm_routing_info(mm_routing_info)
         .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
             dp_rank: data_parallel_rank,
             expected_output_tokens: max_tokens,
+            lora_name,
             cache_namespace: cache_salt,
             // `priority_jump` is a boost-only scheduler input. Preserve penalties
             // in signed `priority`, matching the standard preprocessor projection.
@@ -250,11 +572,9 @@ fn preprocessed_from_generate(
             priority: Some(routing_priority),
             ..Default::default()
         }))
-        .extra_args(Some(serde_json::json!({
-            // Do not copy token_ids into this envelope. The worker must rebuild
-            // that field from PreprocessedRequest.token_ids after routing.
-            "vllm_tito": vllm_tito,
-        })))
+        // Do not copy token_ids into this envelope. The worker must rebuild
+        // that field from PreprocessedRequest.token_ids after routing.
+        .extra_args(Some(serde_json::Value::Object(extra_args)))
         .build()
         .map_err(|error| anyhow::anyhow!("failed to build PreprocessedRequest: {error}"))
 }
@@ -313,11 +633,13 @@ async fn handler_generate(
         return response.into_response();
     }
 
-    let engine = match state
+    let selection = match state
         .manager()
-        .get_generate_engine_for_capability(&model, VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
-    {
-        Ok(engine) => engine,
+        .get_generate_engine_for_capability_with_routing(
+            &model,
+            VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        ) {
+        Ok(selection) => selection,
         Err(error) => {
             let (status, error_type) = match error {
                 crate::discovery::ModelManagerError::ModelUnavailable(_) => {
@@ -328,6 +650,12 @@ async fn handler_generate(
             return generate_error_response(status, error_type, error.to_string());
         }
     };
+    let routing_metadata = GenerateRoutingMetadata {
+        kv_cache_block_size: selection.kv_cache_block_size,
+        tower_connector_lora_enabled: selection.tower_connector_lora_enabled,
+        lora_name: selection.lora_name,
+    };
+    let engine = selection.engine;
 
     let request_context = resolve_generate_request_context(&headers, request.request_id.as_deref());
     let preprocessed = match preprocessed_from_generate(
@@ -335,6 +663,7 @@ async fn handler_generate(
         &model,
         request_context.data_parallel_rank,
         &request_context.request_id,
+        routing_metadata,
     ) {
         Ok(preprocessed) => preprocessed,
         Err(error) => {
@@ -525,6 +854,18 @@ mod tests {
     use tracing::{Subscriber, span};
     use tracing_subscriber::Layer;
     use tracing_subscriber::prelude::*;
+
+    fn routing_metadata(
+        kv_cache_block_size: u32,
+        tower_connector_lora_enabled: bool,
+        lora_name: Option<&str>,
+    ) -> GenerateRoutingMetadata {
+        GenerateRoutingMetadata {
+            kv_cache_block_size,
+            tower_connector_lora_enabled,
+            lora_name: lora_name.map(str::to_string),
+        }
+    }
 
     #[derive(Clone, Copy)]
     enum PendingPhase {
@@ -849,9 +1190,14 @@ mod tests {
         let request: GenerateRequest =
             serde_json::from_value(raw.clone()).expect("deserialize request");
 
-        let preprocessed =
-            preprocessed_from_generate(request, "test-model", None, "resolved-request")
-                .expect("build request");
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            routing_metadata(16, false, None),
+        )
+        .expect("build request");
         assert_eq!(preprocessed.stop_conditions.max_tokens, Some(8));
         assert_eq!(preprocessed.stop_conditions.min_tokens, None);
         assert_eq!(
@@ -902,6 +1248,369 @@ mod tests {
     }
 
     #[test]
+    fn multimodal_routing_matches_worker_events_and_preserves_execution_payload() {
+        let hash_a = "a".repeat(64);
+        let hash_b = "b".repeat(64);
+        let raw = serde_json::json!({
+            "token_ids": [10, 11, 12, 12, 12, 15, 16, 12, 12, 19],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": [hash_a, hash_b]},
+                "mm_placeholders": {"image": [
+                    {"offset": 2, "length": 3},
+                    {"offset": 7, "length": 2}
+                ]},
+                "kwargs_data": {"image": ["opaque-a", "opaque-b"]}
+            }
+        });
+        let request: GenerateRequest =
+            serde_json::from_value(raw.clone()).expect("deserialize request");
+
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            routing_metadata(4, false, None),
+        )
+        .expect("build request");
+
+        let pad_a = dynamo_kv_router::protocols::pad_value_for_mm_hash(0xaaaaaaaaaaaaaaaa);
+        let pad_b = dynamo_kv_router::protocols::pad_value_for_mm_hash(0xbbbbbbbbbbbbbbbb);
+        let mm = preprocessed
+            .mm_routing_info
+            .as_ref()
+            .expect("multimodal routing projection");
+        assert_eq!(
+            mm.routing_token_ids,
+            vec![10, 11, pad_a, pad_a, pad_a, 15, 16, pad_b, pad_b, 19, 0, 0]
+        );
+        assert!(mm.block_mm_infos.is_empty());
+        assert_eq!(mm.expanded_prompt_len, 10);
+
+        assert_eq!(
+            preprocessed.token_ids,
+            vec![10, 11, 12, 12, 12, 15, 16, 12, 12, 19]
+        );
+        let envelope = preprocessed
+            .extra_args
+            .as_ref()
+            .and_then(|extra| extra.get("vllm_tito"))
+            .expect("vllm_tito envelope");
+        assert_eq!(envelope["features"], raw["features"]);
+        assert_eq!(
+            preprocessed
+                .extra_args
+                .as_ref()
+                .and_then(|extra| extra.get("dynamo_mm_routing_hashes")),
+            Some(&serde_json::json!([
+                format!("{}{}", "a".repeat(16), "0".repeat(48)),
+                format!("{}{}", "b".repeat(16), "0".repeat(48))
+            ]))
+        );
+
+        // A frontend-approved, marker-form hash must produce the same KV hash
+        // on the request and event paths, including ordinary language-only LoRA.
+        let mm_identifier = "1234567890abcdef".repeat(4);
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [10, 99, 99, 20],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": [mm_identifier.clone()]},
+                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
+            }
+        }))
+        .expect("deserialize request");
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "adapter-a",
+            None,
+            "resolved-request",
+            routing_metadata(4, false, Some("adapter-a")),
+        )
+        .expect("build LoRA request");
+        let routing = preprocessed
+            .mm_routing_info
+            .as_ref()
+            .expect("language-only LoRA keeps exact MM routing");
+        assert_eq!(
+            preprocessed
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.lora_name.as_deref()),
+            Some("adapter-a")
+        );
+        let request_hashes = dynamo_kv_router::protocols::compute_block_hash_for_seq(
+            &routing.routing_token_ids,
+            4,
+            dynamo_kv_router::protocols::BlockHashOptions {
+                lora_name: Some("adapter-a"),
+                ..Default::default()
+            },
+        );
+        let marked_identifier = preprocessed
+            .extra_args
+            .as_ref()
+            .and_then(|extra| extra.get("dynamo_mm_routing_hashes"))
+            .and_then(serde_json::Value::as_array)
+            .and_then(|hashes| hashes.first())
+            .and_then(serde_json::Value::as_str)
+            .expect("frontend-approved marked MM hash")
+            .to_string();
+        let event_mm_info =
+            dynamo_kv_router::zmq_wire::extra_keys_to_block_mm_infos(Some(vec![Some(vec![
+                dynamo_kv_router::zmq_wire::ExtraKeyItem::HashWithUnsignedOffset((
+                    marked_identifier,
+                    1,
+                )),
+            ])]))
+            .expect("parse canonical offset-bearing MM extra key")
+            .into_iter()
+            .next()
+            .flatten()
+            .expect("block MM metadata");
+        let event_block = dynamo_kv_router::zmq_wire::create_stored_block_from_parts(
+            4,
+            7,
+            &[10, 99, 99, 20],
+            dynamo_kv_router::zmq_wire::StoredBlockOptions {
+                lora_name: Some("adapter-a"),
+                mm_extra_info: Some(event_mm_info),
+                image_token_id: Some(99),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(request_hashes[0], event_block.tokens_hash);
+    }
+
+    #[test]
+    fn sparse_and_ambiguous_multimodal_layouts_are_handled() {
+        let mm_identifier = "opaque-renderer-image-0";
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [10, 99, 42, 99, 20],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": [mm_identifier]},
+                "mm_placeholders": {"image": [{
+                    "offset": 1,
+                    "length": 3,
+                    "is_embed": [true, false, true]
+                }]}
+            }
+        }))
+        .expect("deserialize request");
+        let routing = generate_mm_routing_info(&request, 5)
+            .expect("valid sparse MM routing metadata")
+            .expect("MM routing projection");
+        let mm_hash = dynamo_kv_router::protocols::hash_mm_identifier(mm_identifier)
+            .expect("non-empty identifier");
+        let pad = dynamo_kv_router::protocols::pad_value_for_mm_hash(mm_hash);
+        assert_eq!(routing.info.routing_token_ids, vec![10, pad, 42, pad, 20]);
+
+        for (name, token_ids, features, expected_error) in [
+            (
+                "missing sparse mask",
+                serde_json::json!([10, 99, 42, 99, 20]),
+                serde_json::json!({
+                    "mm_hashes": {"image": ["image-0"]},
+                    "mm_placeholders": {"image": [{"offset": 1, "length": 3}]}
+                }),
+                "mixed multimodal placeholder spans require is_embed",
+            ),
+            (
+                "undeclared image token",
+                serde_json::json!([99, 10, 99, 99, 20]),
+                serde_json::json!({
+                    "mm_hashes": {"image": ["image-0"]},
+                    "mm_placeholders": {"image": [{"offset": 2, "length": 2}]}
+                }),
+                "image tokens must be covered by multimodal placeholder ranges",
+            ),
+            (
+                "ambiguous sparse object order",
+                serde_json::json!([10, 99, 42, 99, 20, 99, 30]),
+                serde_json::json!({
+                    "mm_hashes": {"image": ["image-a", "image-b"]},
+                    "mm_placeholders": {"image": [
+                        {"offset": 1, "length": 3, "is_embed": [true, false, true]},
+                        {"offset": 5, "length": 1}
+                    ]}
+                }),
+                "sparse multimodal layout cannot be normalized exactly by worker events",
+            ),
+        ] {
+            let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+                "token_ids": token_ids,
+                "sampling_params": {},
+                "features": features,
+            }))
+            .expect("deserialize request");
+
+            assert_eq!(
+                generate_mm_routing_info(&request, 7)
+                    .expect_err("ambiguous layout must disable exact routing"),
+                expected_error,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_or_unsupported_multimodal_metadata_falls_back_safely() {
+        for (name, token_ids, features) in [
+            (
+                "unrelated features",
+                serde_json::json!([1, 2, 3, 4]),
+                serde_json::json!({"future_feature": [1, 2, 3]}),
+            ),
+            (
+                "malformed hashes",
+                serde_json::json!([1, 2, 3, 4]),
+                serde_json::json!({"mm_hashes": ["not-an-object"]}),
+            ),
+            (
+                "empty identifier",
+                serde_json::json!([1, 2, 3, 4]),
+                serde_json::json!({
+                    "mm_hashes": {"image": [""]},
+                    "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+                    "kwargs_data": {"image": ["opaque"]}
+                }),
+            ),
+            (
+                "overlapping placeholders",
+                serde_json::json!([9, 9, 9, 4]),
+                serde_json::json!({
+                    "mm_hashes": {"image": ["a".repeat(64), "b".repeat(64)]},
+                    "mm_placeholders": {"image": [
+                        {"offset": 0, "length": 2},
+                        {"offset": 1, "length": 2}
+                    ]}
+                }),
+            ),
+            (
+                "unsupported modality",
+                serde_json::json!([1, 2, 3, 4]),
+                serde_json::json!({
+                    "mm_hashes": {"audio": ["audio-0"]},
+                    "mm_placeholders": {"audio": [{"offset": 1, "length": 2}]}
+                }),
+            ),
+            (
+                "unpaired image metadata",
+                serde_json::json!([1, 2, 3, 4]),
+                serde_json::json!({
+                    "mm_hashes": {"image": ["image-0"]},
+                    "mm_placeholders": {}
+                }),
+            ),
+            (
+                "unequal item counts",
+                serde_json::json!([1, 2, 3, 4]),
+                serde_json::json!({
+                    "mm_hashes": {"image": ["image-0", "image-1"]},
+                    "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
+                }),
+            ),
+            (
+                "out-of-order placeholders",
+                serde_json::json!([99, 99, 3, 99]),
+                serde_json::json!({
+                    "mm_hashes": {"image": ["late", "early"]},
+                    "mm_placeholders": {"image": [
+                        {"offset": 3, "length": 1},
+                        {"offset": 0, "length": 2}
+                    ]}
+                }),
+            ),
+        ] {
+            let raw = serde_json::json!({
+                "token_ids": token_ids,
+                "sampling_params": {},
+                "features": features,
+            });
+            let request: GenerateRequest =
+                serde_json::from_value(raw.clone()).expect("deserialize request");
+            let expected_token_ids = request.token_ids.clone();
+
+            let preprocessed = preprocessed_from_generate(
+                request,
+                "test-model",
+                None,
+                "resolved-request",
+                routing_metadata(4, false, None),
+            )
+            .expect("invalid routing metadata must not reject execution");
+
+            assert!(preprocessed.mm_routing_info.is_none(), "{name}");
+            assert_eq!(preprocessed.token_ids, expected_token_ids, "{name}");
+            let envelope = preprocessed
+                .extra_args
+                .as_ref()
+                .and_then(|extra| extra.get("vllm_tito"))
+                .expect("vllm_tito envelope");
+            assert_eq!(envelope["features"], raw["features"], "{name}");
+            assert!(
+                preprocessed
+                    .extra_args
+                    .as_ref()
+                    .and_then(|extra| extra.get("dynamo_mm_routing_hashes"))
+                    .is_none(),
+                "{name}"
+            );
+        }
+
+        let raw = serde_json::json!({
+            "token_ids": [10, 99, 99, 20],
+            "sampling_params": {},
+            "features": {
+                "mm_hashes": {"image": ["image-0"]},
+                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
+            }
+        });
+        let base_request: GenerateRequest =
+            serde_json::from_value(raw.clone()).expect("deserialize base request");
+        let base = preprocessed_from_generate(
+            base_request,
+            "test-model",
+            None,
+            "resolved-request",
+            routing_metadata(4, true, None),
+        )
+        .expect("build base request");
+        assert!(
+            base.mm_routing_info.is_some(),
+            "the worker setting alone does not activate adapter-scoped MM identity"
+        );
+
+        let adapter_request: GenerateRequest =
+            serde_json::from_value(raw.clone()).expect("deserialize adapter request");
+        let adapter = preprocessed_from_generate(
+            adapter_request,
+            "adapter-a",
+            None,
+            "resolved-request",
+            routing_metadata(4, true, Some("adapter-a")),
+        )
+        .expect("build adapter request");
+        assert!(adapter.mm_routing_info.is_none());
+        assert_eq!(
+            adapter
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.lora_name.as_deref()),
+            Some("adapter-a")
+        );
+        let envelope = adapter
+            .extra_args
+            .as_ref()
+            .and_then(|extra| extra.get("vllm_tito"))
+            .expect("vllm_tito envelope");
+        assert_eq!(envelope["features"], raw["features"]);
+    }
+
+    #[test]
     fn omitted_max_tokens_stays_omitted_in_control_shadow() {
         let request: GenerateRequest = serde_json::from_value(serde_json::json!({
             "token_ids": [1, 2],
@@ -910,9 +1619,14 @@ mod tests {
         }))
         .expect("deserialize request");
 
-        let preprocessed =
-            preprocessed_from_generate(request, "test-model", None, "resolved-request")
-                .expect("build request");
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            routing_metadata(16, false, None),
+        )
+        .expect("build request");
         assert_eq!(preprocessed.stop_conditions.max_tokens, None);
         assert_eq!(preprocessed.stop_conditions.min_tokens, None);
         assert_eq!(
@@ -933,9 +1647,14 @@ mod tests {
         }))
         .expect("deserialize request");
 
-        let preprocessed =
-            preprocessed_from_generate(request, "test-model", None, "resolved-request")
-                .expect("build request");
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            routing_metadata(16, false, None),
+        )
+        .expect("build request");
         assert_eq!(preprocessed.stop_conditions.min_tokens, Some(0));
     }
 
@@ -1140,9 +1859,14 @@ mod tests {
         }))
         .expect("deserialize request");
 
-        let preprocessed =
-            preprocessed_from_generate(request, "test-model", Some(3), "resolved-request")
-                .expect("build request");
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            Some(3),
+            "resolved-request",
+            routing_metadata(16, false, None),
+        )
+        .expect("build request");
         let routing = preprocessed.routing.as_ref().expect("routing hints");
 
         assert_eq!(routing.dp_rank, Some(3));

@@ -1213,7 +1213,16 @@ impl ModelDeploymentCard {
                     }
                 }
 
-                // TODO: Do we want any of user_data or runtime_config?
+                // Tower/connector LoRA changes vLLM's multimodal cache identity.
+                // Isolate such workers from the default/missing=false WorkerSet
+                // without changing checksums for existing deployments.
+                if self.runtime_config.runtime_flag_enabled(
+                    crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY,
+                ) {
+                    bytes_to_hash.extend_from_slice(b"\0vllm_enable_tower_connector_lora\0true");
+                }
+
+                // TODO: Do we want any other user_data or runtime_config?
 
                 blake3::hash(&bytes_to_hash).to_string()
             })
@@ -3143,6 +3152,26 @@ mod ownership_tests {
         enabled.runtime_config.kv_event_publishing_enabled = Some(true);
 
         assert_eq!(disabled.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
+    fn tower_connector_lora_runtime_flag_isolates_worker_sets() {
+        use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
+
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled.runtime_config.runtime_data.insert(
+            VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY.to_string(),
+            false.into(),
+        );
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled.runtime_config.runtime_data.insert(
+            VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY.to_string(),
+            true.into(),
+        );
+
+        assert_eq!(missing.mdcsum(), disabled.mdcsum());
+        assert_ne!(missing.mdcsum(), enabled.mdcsum());
     }
 }
 
