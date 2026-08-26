@@ -42,7 +42,7 @@ jobs:
       target_tag_plain: trtllm-runtime
       cuda_version: '["13.1"]'
       platform: '["amd64"]'
-      source_ref: 0d2a46844c7a2627467a8b9d394152218e49ea54
+      canary_image_ref: 0d2a46844c7a2627467a8b9d394152218e49ea54
       run_cpu_only_tests: true
       cpu_only_test_markers: 'pre_merge and trtllm and gpu_0'
       cpu_parallel_mode: auto

@@ -98,6 +98,11 @@ on:
         required: false
         type: string
         default: ''
+      canary_image_ref:
+        description: 'Canary-only image SHA override'
+        required: false
+        type: string
+        default: ''
       image_tag_suffix:
         description: 'Suffix appended to the SHA-keyed image tag (e.g. "-nightly"). Empty = no suffix.'
         required: false
@@ -151,7 +156,7 @@ jobs:
       DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
       DYNAMO_TEST_FRAMEWORK: ${{ inputs.test_suite_name }}
     container:
-      image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
+      image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.canary_image_ref != '' && inputs.canary_image_ref || (inputs.source_ref != '' && inputs.source_ref || github.sha) }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
