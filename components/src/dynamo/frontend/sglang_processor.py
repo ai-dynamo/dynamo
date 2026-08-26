@@ -857,11 +857,14 @@ class SglangProcessor:
                         top_logprobs is not None,
                     )
                     if pending_logprob_shape != chunk_logprob_shape:
-                        yield flush_pending(
+                        envelope = flush_pending(
                             finish_reason=None,
                             stop_reason=None,
                             engine_data=None,
                         )
+                        yield envelope
+                        if post.locally_finished:
+                            break
 
                 chunk_tokens = len(new_ids)
                 cumulative_output_tokens += chunk_tokens
@@ -893,8 +896,6 @@ class SglangProcessor:
                         stop_reason=stop_reason,
                         engine_data=engine_data,
                     )
-                    if post.locally_finished and context is not None:
-                        context.stop_generating()
                     yield envelope
                     if post.locally_finished:
                         break

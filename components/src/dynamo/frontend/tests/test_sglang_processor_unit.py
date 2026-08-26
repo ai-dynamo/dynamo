@@ -3299,18 +3299,25 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert chunks[0]["choices"][0]["delta"]["content"] == "A"
         assert chunks[0]["choices"][0]["finish_reason"] == "stop"
 
-    def test_processor_stops_generation_on_local_stop_string(self):
+    def test_processor_finishes_locally_without_stopping_parent_context(self):
+        routed_engine = FakeRoutedEngine(
+            items=[
+                {
+                    "token_ids": list(b"AEN"),
+                    "finish_reason": None,
+                    "log_probs": [-0.1, -0.2, -0.3],
+                },
+                {
+                    "token_ids": list(b"Dignored"),
+                    "finish_reason": None,
+                    "log_probs": [-0.4] * len(b"Dignored"),
+                },
+                {"token_ids": list(b"not-consumed"), "finish_reason": None},
+            ]
+        )
         processor = SglangProcessor(
             tokenizer=self.ByteTokenizer(),
-            routed_engine=FakeRoutedEngine(
-                items=[
-                    {
-                        "token_ids": list(b"AEN"),
-                        "finish_reason": None,
-                    },
-                    {"token_ids": list(b"Dignored"), "finish_reason": None},
-                ]
-            ),
+            routed_engine=routed_engine,
             tool_call_parser_name=None,
             reasoning_parser_name=None,
             eos_token_ids=None,
@@ -3352,15 +3359,90 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
 
         assert chunks[0]["choices"][0]["delta"]["content"] == "A"
         assert chunks[0]["choices"][0]["finish_reason"] is None
+        assert [
+            entry["token"]
+            for entry in chunks[0]["choices"][0]["logprobs"]["content"]
+        ] == ["A"]
         assert "usage" not in chunks[0]
         assert chunks[1]["choices"][0]["delta"] == {}
         assert chunks[1]["choices"][0]["finish_reason"] == "stop"
+        assert chunks[1]["choices"][0]["logprobs"] is None
         assert chunks[1]["usage"] == {
             "prompt_tokens": 2,
             "completion_tokens": 11,
             "total_tokens": 13,
         }
-        assert context.stopped
+        assert not context.stopped
+        assert routed_engine.yielded == 2
+        assert routed_engine.stream_released
+        assert len(chunks) == 2
+
+    def test_logprob_shape_flush_finishes_without_stopping_parent_context(self):
+        routed_engine = FakeRoutedEngine(
+            items=[
+                {"token_ids": list(b"A"), "finish_reason": None},
+                {"token_ids": list(b"END"), "finish_reason": None},
+                {
+                    "token_ids": list(b"x"),
+                    "finish_reason": None,
+                    "log_probs": [-0.1],
+                },
+                {"token_ids": list(b"not-consumed"), "finish_reason": None},
+            ]
+        )
+        processor = SglangProcessor(
+            tokenizer=self.ByteTokenizer(),
+            routed_engine=routed_engine,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            eos_token_ids=None,
+            stream_interval=20,
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=None,
+            reasoning_parser=None,
+            stop_strings={"END"},
+        )
+
+        class Context:
+            stopped = False
+
+            def stop_generating(self):
+                self.stopped = True
+
+        context = Context()
+
+        async def collect():
+            return [
+                item["data"]
+                async for item in processor._generate_and_stream(
+                    "req-stop",
+                    {
+                        "model": "test-model",
+                        "stream_options": {"include_usage": True},
+                    },
+                    {},
+                    [1, 2],
+                    post,
+                    context,
+                )
+                if "data" in item
+            ]
+
+        chunks = asyncio.run(collect())
+
+        assert chunks[0]["choices"][0]["delta"]["content"] == "A"
+        assert chunks[1]["choices"][0]["delta"] == {}
+        assert chunks[1]["choices"][0]["finish_reason"] == "stop"
+        assert chunks[1]["usage"] == {
+            "prompt_tokens": 2,
+            "completion_tokens": 4,
+            "total_tokens": 6,
+        }
+        assert not context.stopped
+        assert routed_engine.yielded == 3
+        assert routed_engine.stream_released
         assert len(chunks) == 2
 
     def test_split_stop_string_suffix_is_not_emitted(self, tokenizer):
