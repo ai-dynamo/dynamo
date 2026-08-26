@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use agent_rt_sandbox::{
     HttpSandboxProvider, HttpSandboxProviderConfig, HttpSandboxProviderError, SandboxFailurePolicy,
@@ -31,6 +32,10 @@ use dynamo_agent_rt::{
     ToolFailureDisposition, ToolFailurePolicy, ToolRoute, ToolRouter, ToolRunError, ToolRunner,
     TurnState, UuidGenerator,
 };
+use dynamo_agent_rt_mcp::{
+    McpBearerToken, McpClientConfig, McpToolDefinition, McpToolExecutor, McpToolExecutorError,
+    McpToolFailurePolicy,
+};
 use dynamo_agent_rt_store::{SqliteStore, SqliteStoreError, StoreInvariantError};
 use dynamo_agent_tools::{
     BraveWebSearchError, BraveWebSearchExecutor, BraveWebSearchFailurePolicy, BraveWebSearchProfile,
@@ -46,6 +51,7 @@ use dynamo_protocols::types::responses::{
 };
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use futures::{Stream, StreamExt, stream};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -92,6 +98,13 @@ const SANDBOX_TOKEN_ENV: &str = "DYN_AGENT_RT_SANDBOX_TOKEN";
 const SANDBOX_ALLOW_HTTP_ENV: &str = "DYN_AGENT_RT_SANDBOX_ALLOW_HTTP";
 const SANDBOX_TOOL_NAME_ENV: &str = "DYN_AGENT_RT_SANDBOX_TOOL_NAME";
 const SANDBOX_PROFILE_ENV: &str = "DYN_AGENT_RT_SANDBOX_PROFILE";
+const MCP_ENDPOINT_ENV: &str = "DYN_AGENT_RT_MCP_ENDPOINT";
+const MCP_BEARER_TOKEN_ENV: &str = "DYN_AGENT_RT_MCP_BEARER_TOKEN";
+const MCP_ALLOW_HTTP_LOOPBACK_ENV: &str = "DYN_AGENT_RT_MCP_ALLOW_HTTP_LOOPBACK";
+const MCP_PROFILE_ENV: &str = "DYN_AGENT_RT_MCP_PROFILE";
+const MCP_TOOLS_ENV: &str = "DYN_AGENT_RT_MCP_TOOLS_JSON";
+const MCP_DEFAULT_TIMEOUT_MILLIS: u64 = 30_000;
+const MCP_DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
 static AUTH_CONFIG: LazyLock<Result<AgentRuntimeAuthConfig, String>> =
     LazyLock::new(AgentRuntimeAuthConfig::from_environment);
@@ -258,6 +271,8 @@ type ResponsesStore = SqliteStore<OpenAiResponses>;
 struct RuntimeToolRouter {
     web_search: ConfiguredToolRouter,
     sandbox: ConfiguredToolRouter,
+    mcp: ConfiguredToolRouter,
+    mcp_definitions: BTreeMap<String, McpToolDefinition>,
 }
 
 impl ToolRouter for RuntimeToolRouter {
@@ -265,6 +280,7 @@ impl ToolRouter for RuntimeToolRouter {
         self.web_search
             .route(tool_name)
             .or_else(|| self.sandbox.route(tool_name))
+            .or_else(|| self.mcp.route(tool_name))
     }
 }
 
@@ -312,6 +328,7 @@ type AnthropicToolRunner = ToolRunner<
 struct RuntimeToolExecutor {
     web_search: BraveWebSearchExecutor,
     sandbox: Option<SandboxProviderExecutor<HttpSandboxProvider>>,
+    mcp: Option<McpToolExecutor>,
 }
 
 #[derive(Debug, Error)]
@@ -320,6 +337,8 @@ enum RuntimeToolExecutorError {
     WebSearch(#[source] BraveWebSearchError),
     #[error("sandbox execution failed: {0}")]
     Sandbox(#[source] SandboxToolError<HttpSandboxProviderError>),
+    #[error("MCP execution failed: {0}")]
+    Mcp(#[source] McpToolExecutorError),
     #[error("tool connector is not configured: {0}")]
     UnsupportedConnector(String),
 }
@@ -347,6 +366,15 @@ impl ToolExecutor for RuntimeToolExecutor {
                     .execute(request)
                     .await
                     .map_err(RuntimeToolExecutorError::Sandbox),
+                "mcp" => self
+                    .mcp
+                    .as_ref()
+                    .ok_or_else(|| {
+                        RuntimeToolExecutorError::UnsupportedConnector("mcp".to_owned())
+                    })?
+                    .execute(request)
+                    .await
+                    .map_err(RuntimeToolExecutorError::Mcp),
                 connector => Err(RuntimeToolExecutorError::UnsupportedConnector(
                     connector.to_owned(),
                 )),
@@ -374,6 +402,15 @@ impl ToolExecutor for RuntimeToolExecutor {
                     .lookup(request)
                     .await
                     .map_err(RuntimeToolExecutorError::Sandbox),
+                "mcp" => self
+                    .mcp
+                    .as_ref()
+                    .ok_or_else(|| {
+                        RuntimeToolExecutorError::UnsupportedConnector("mcp".to_owned())
+                    })?
+                    .lookup(request)
+                    .await
+                    .map_err(RuntimeToolExecutorError::Mcp),
                 connector => Err(RuntimeToolExecutorError::UnsupportedConnector(
                     connector.to_owned(),
                 )),
@@ -392,6 +429,7 @@ impl ToolFailurePolicy<RuntimeToolExecutorError> for RuntimeToolFailurePolicy {
                 BraveWebSearchFailurePolicy.classify(error)
             }
             RuntimeToolExecutorError::Sandbox(error) => SandboxFailurePolicy.classify(error),
+            RuntimeToolExecutorError::Mcp(error) => McpToolFailurePolicy.classify(error),
             RuntimeToolExecutorError::UnsupportedConnector(_) => {
                 ToolFailureDisposition::Failed(ToolExecutionFailure {
                     code: "unsupported_connector".to_owned(),
@@ -430,6 +468,13 @@ impl AnthropicAgentRuntime {
                 .any(|tool| self.router.route(&tool.name).is_some())
         })
     }
+
+    fn validate_mcp_tools(
+        &self,
+        request: &AnthropicCreateMessageRequest,
+    ) -> Result<(), McpDescriptorError> {
+        validate_anthropic_mcp_tools(request, &self.router.mcp_definitions)
+    }
 }
 
 fn anthropic_request_requires_runtime(
@@ -453,6 +498,68 @@ impl ResponsesAgentRuntime {
     fn request_uses_runtime_tools(&self, request: &CreateResponse) -> bool {
         request_uses_runtime_tools(request, &self.router)
     }
+
+    fn validate_mcp_tools(&self, request: &CreateResponse) -> Result<(), McpDescriptorError> {
+        validate_responses_mcp_tools(request, &self.router.mcp_definitions)
+    }
+}
+
+fn validate_anthropic_mcp_tools(
+    request: &AnthropicCreateMessageRequest,
+    definitions: &BTreeMap<String, McpToolDefinition>,
+) -> Result<(), McpDescriptorError> {
+    let mut seen = BTreeSet::new();
+    for tool in request.tools.iter().flatten() {
+        let Some(definition) = definitions.get(&tool.name) else {
+            continue;
+        };
+        if !seen.insert(tool.name.as_str()) {
+            return Err(McpDescriptorError::Duplicate(tool.name.clone()));
+        }
+        let is_custom = tool
+            .tool_type
+            .as_deref()
+            .is_none_or(|tool_type| tool_type == "custom");
+        if !is_custom
+            || tool.description.as_deref() != Some(definition.description())
+            || tool.input_schema.as_ref() != Some(definition.input_schema())
+        {
+            return Err(McpDescriptorError::Mismatch(tool.name.clone()));
+        }
+    }
+    Ok(())
+}
+
+fn validate_responses_mcp_tools(
+    request: &CreateResponse,
+    definitions: &BTreeMap<String, McpToolDefinition>,
+) -> Result<(), McpDescriptorError> {
+    let mut seen = BTreeSet::new();
+    for tool in request.tools.iter().flatten() {
+        let Tool::Function(function) = tool else {
+            continue;
+        };
+        let Some(definition) = definitions.get(&function.name) else {
+            continue;
+        };
+        if !seen.insert(function.name.as_str()) {
+            return Err(McpDescriptorError::Duplicate(function.name.clone()));
+        }
+        if function.description.as_deref() != Some(definition.description())
+            || function.parameters.as_ref() != Some(definition.input_schema())
+        {
+            return Err(McpDescriptorError::Mismatch(function.name.clone()));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+enum McpDescriptorError {
+    #[error("configured MCP tool {0:?} appears more than once")]
+    Duplicate(String),
+    #[error("configured MCP tool {0:?} does not match the deployment descriptor")]
+    Mismatch(String),
 }
 
 fn request_uses_runtime_tools(request: &CreateResponse, router: &impl ToolRouter) -> bool {
@@ -529,13 +636,17 @@ pub(super) fn new_responses_runtime() -> Result<Arc<ResponsesAgentRuntime>, Agen
     }?;
     let (web_search_router, web_search) = web_search_components()?;
     let (sandbox_router, sandbox) = sandbox_components()?;
+    let (mcp_router, mcp, mcp_definitions) = mcp_components(&web_search_router, &sandbox_router)?;
     let router = RuntimeToolRouter {
         web_search: web_search_router,
         sandbox: sandbox_router,
+        mcp: mcp_router,
+        mcp_definitions,
     };
     let executor = RuntimeToolExecutor {
         web_search,
         sandbox,
+        mcp,
     };
     let output_interpreter =
         PolicyResponsesOutputInterpreter::new(RoutedResponsesOutcomePolicy::new(router.clone()));
@@ -568,13 +679,17 @@ pub(super) fn new_anthropic_runtime() -> Result<Arc<AnthropicAgentRuntime>, Agen
     }?;
     let (web_search_router, web_search) = web_search_components()?;
     let (sandbox_router, sandbox) = sandbox_components()?;
+    let (mcp_router, mcp, mcp_definitions) = mcp_components(&web_search_router, &sandbox_router)?;
     let router = RuntimeToolRouter {
         web_search: web_search_router,
         sandbox: sandbox_router,
+        mcp: mcp_router,
+        mcp_definitions,
     };
     let executor = RuntimeToolExecutor {
         web_search,
         sandbox,
+        mcp,
     };
     let output_interpreter =
         PolicyAnthropicOutputInterpreter::new(RoutedAnthropicOutcomePolicy::new(router.clone()));
@@ -728,6 +843,148 @@ fn sandbox_components_from_config(
     let executor = SandboxProviderExecutor::new(provider, SandboxToolExecutorConfig::default())
         .map_err(|error| AgentRuntimeInitError::Configuration(error.to_string()))?;
     Ok((router, Some(executor)))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpEnvironmentTool {
+    name: String,
+    remote_name: String,
+    description: String,
+    input_schema: serde_json::Value,
+    #[serde(default = "default_mcp_timeout_millis")]
+    timeout_millis: u64,
+    #[serde(default = "default_mcp_max_output_bytes")]
+    max_output_bytes: usize,
+}
+
+const fn default_mcp_timeout_millis() -> u64 {
+    MCP_DEFAULT_TIMEOUT_MILLIS
+}
+
+const fn default_mcp_max_output_bytes() -> usize {
+    MCP_DEFAULT_MAX_OUTPUT_BYTES
+}
+
+type McpComponents = (
+    ConfiguredToolRouter,
+    Option<McpToolExecutor>,
+    BTreeMap<String, McpToolDefinition>,
+);
+
+fn mcp_components(
+    web_search_router: &ConfiguredToolRouter,
+    sandbox_router: &ConfiguredToolRouter,
+) -> Result<McpComponents, AgentRuntimeInitError> {
+    let endpoint = optional_environment(MCP_ENDPOINT_ENV)?;
+    let bearer_token = optional_environment(MCP_BEARER_TOKEN_ENV)?;
+    let allow_http_loopback = optional_environment(MCP_ALLOW_HTTP_LOOPBACK_ENV)?
+        .map(|value| {
+            value.parse::<bool>().map_err(|_| {
+                AgentRuntimeInitError::Configuration(format!(
+                    "{MCP_ALLOW_HTTP_LOOPBACK_ENV} must be true or false"
+                ))
+            })
+        })
+        .transpose()?
+        .unwrap_or(false);
+    let profile = optional_environment(MCP_PROFILE_ENV)?;
+    let tools = optional_environment(MCP_TOOLS_ENV)?;
+    mcp_components_from_config(
+        endpoint,
+        bearer_token,
+        allow_http_loopback,
+        profile,
+        tools,
+        web_search_router,
+        sandbox_router,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mcp_components_from_config(
+    endpoint: Option<String>,
+    bearer_token: Option<String>,
+    allow_http_loopback: bool,
+    profile: Option<String>,
+    tools: Option<String>,
+    web_search_router: &ConfiguredToolRouter,
+    sandbox_router: &ConfiguredToolRouter,
+) -> Result<McpComponents, AgentRuntimeInitError> {
+    let Some(endpoint) = endpoint else {
+        if bearer_token.is_some() || profile.is_some() || tools.is_some() || allow_http_loopback {
+            return Err(AgentRuntimeInitError::Configuration(format!(
+                "{MCP_ENDPOINT_ENV} is required when MCP configuration is present"
+            )));
+        }
+        return Ok((ConfiguredToolRouter::default(), None, BTreeMap::new()));
+    };
+    let tools = tools.ok_or_else(|| {
+        AgentRuntimeInitError::Configuration(format!(
+            "{MCP_TOOLS_ENV} is required when MCP execution is enabled"
+        ))
+    })?;
+    let raw_tools: Vec<McpEnvironmentTool> = serde_json::from_str(&tools).map_err(|error| {
+        AgentRuntimeInitError::Configuration(format!("invalid {MCP_TOOLS_ENV}: {error}"))
+    })?;
+    let definitions = raw_tools
+        .into_iter()
+        .map(|tool| {
+            McpToolDefinition::new(
+                tool.name,
+                tool.remote_name,
+                tool.description,
+                tool.input_schema,
+            )
+            .and_then(|definition| {
+                definition.with_limits(
+                    Duration::from_millis(tool.timeout_millis),
+                    tool.max_output_bytes,
+                )
+            })
+            .map_err(|error| AgentRuntimeInitError::Configuration(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for definition in &definitions {
+        if web_search_router.route(definition.public_name()).is_some()
+            || sandbox_router.route(definition.public_name()).is_some()
+        {
+            return Err(AgentRuntimeInitError::Configuration(format!(
+                "MCP tool {:?} conflicts with another configured runtime tool",
+                definition.public_name()
+            )));
+        }
+    }
+    let endpoint = url::Url::parse(&endpoint).map_err(|error| {
+        AgentRuntimeInitError::Configuration(format!("invalid {MCP_ENDPOINT_ENV}: {error}"))
+    })?;
+    let mut config = if allow_http_loopback {
+        McpClientConfig::new_for_loopback(endpoint, definitions.clone())
+    } else {
+        McpClientConfig::new(endpoint, definitions.clone())
+    }
+    .map_err(|error| AgentRuntimeInitError::Configuration(error.to_string()))?;
+    if let Some(bearer_token) = bearer_token {
+        config = config.with_bearer_token(
+            McpBearerToken::new(bearer_token)
+                .map_err(|error| AgentRuntimeInitError::Configuration(error.to_string()))?,
+        );
+    }
+    let profile = profile.unwrap_or_else(|| "mcp_default".to_owned());
+    let router = ConfiguredToolRouter::new(definitions.iter().map(|definition| {
+        (
+            definition.public_name().to_owned(),
+            ToolRoute::new("mcp", definition.remote_name()).with_profile(profile.clone()),
+        )
+    }));
+    let descriptor_map = definitions
+        .iter()
+        .cloned()
+        .map(|definition| (definition.public_name().to_owned(), definition))
+        .collect();
+    let executor = McpToolExecutor::new(profile, config)
+        .map_err(|error| AgentRuntimeInitError::Configuration(error.to_string()))?;
+    Ok((router, Some(executor), descriptor_map))
 }
 
 /// Dynamo-owned, explicitly filtered ingress data forwarded across model steps.
@@ -895,6 +1152,15 @@ pub(super) async fn handle_responses(
         .unwrap_or_else(|| request_id.clone());
     let authorization = ingress_authorization(&headers)?;
     let agent_runtime = state.responses_agent_runtime();
+    agent_runtime
+        .validate_mcp_tools(&request.inner)
+        .map_err(|error| {
+            agent_runtime_public_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Configured MCP tool does not match deployment policy",
+                error,
+            )
+        })?;
     let stage_runtime_tool_rounds =
         streaming && agent_runtime.request_uses_runtime_tools(&request.inner);
     let invocation_context =
@@ -997,6 +1263,16 @@ pub(super) async fn handle_anthropic(
         .unwrap_or_else(|| request_id.clone());
     let authorization = ingress_authorization(&headers).map_err(openai_error_to_anthropic)?;
     let agent_runtime = state.anthropic_agent_runtime();
+    agent_runtime
+        .validate_mcp_tools(&request)
+        .map_err(|error| {
+            tracing::debug!(%error, "Anthropic MCP tool descriptor rejected");
+            anthropic::anthropic_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_request_error",
+                "Configured MCP tool does not match deployment policy",
+            )
+        })?;
     let stage_runtime_tool_rounds = streaming && agent_runtime.request_uses_runtime_tools(&request);
     let invocation_context = DynamoAnthropicContext {
         state: state.clone(),
@@ -1618,6 +1894,7 @@ fn tool_executor_error_status(error: &RuntimeToolExecutorError) -> StatusCode {
     match error {
         RuntimeToolExecutorError::WebSearch(error) => web_search_error_status(error),
         RuntimeToolExecutorError::Sandbox(error) => sandbox_error_status(error),
+        RuntimeToolExecutorError::Mcp(error) => mcp_error_status(error),
         RuntimeToolExecutorError::UnsupportedConnector(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
@@ -1638,6 +1915,31 @@ fn web_search_error_status(error: &BraveWebSearchError) -> StatusCode {
         | BraveWebSearchError::ResponseTooLarge { .. }
         | BraveWebSearchError::Decode(_)
         | BraveWebSearchError::Normalize(_) => StatusCode::BAD_GATEWAY,
+    }
+}
+
+fn mcp_error_status(error: &McpToolExecutorError) -> StatusCode {
+    match error {
+        McpToolExecutorError::ExecutorClosed
+        | McpToolExecutorError::ConnectTimeout
+        | McpToolExecutorError::Connect(_)
+        | McpToolExecutorError::ListTools(_)
+        | McpToolExecutorError::Timeout
+        | McpToolExecutorError::Call(_) => StatusCode::SERVICE_UNAVAILABLE,
+        McpToolExecutorError::UnsupportedRoute { .. } | McpToolExecutorError::ToolNotAllowed(_) => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+        McpToolExecutorError::InvalidArguments
+        | McpToolExecutorError::TooManyAdvertisedTools { .. }
+        | McpToolExecutorError::TooManyListPages { .. }
+        | McpToolExecutorError::RepeatedListCursor
+        | McpToolExecutorError::DuplicateAdvertisedTool(_)
+        | McpToolExecutorError::MissingAdvertisedTool(_)
+        | McpToolExecutorError::SchemaMismatch(_)
+        | McpToolExecutorError::UnsupportedContinuation
+        | McpToolExecutorError::UnsupportedContent
+        | McpToolExecutorError::OutputTooLarge { .. }
+        | McpToolExecutorError::Normalize(_) => StatusCode::BAD_GATEWAY,
     }
 }
 
@@ -1991,8 +2293,9 @@ mod tests {
         LOCAL_PRINCIPAL_ENV, LOCAL_TENANT_ENV, PERMITTED_CONNECTORS_ENV, PRINCIPAL_HEADER,
         ResponsesRuntimeError, ResponsesStore, TENANT_HEADER, TRUSTED_PROXY_TOKEN_ENV,
         anthropic_request_requires_runtime, committed_anthropic_events, committed_response_events,
-        existing_response, filtered_routing_headers, request_uses_runtime_tools,
-        runtime_error_response, sandbox_components_from_config, sse_response,
+        existing_response, filtered_routing_headers, mcp_components_from_config,
+        request_uses_runtime_tools, runtime_error_response, sandbox_components_from_config,
+        sse_response, validate_anthropic_mcp_tools, validate_responses_mcp_tools,
         web_search_components_from_config,
     };
 
@@ -2189,6 +2492,128 @@ mod tests {
         assert_eq!(route.operation, "python");
         assert_eq!(route.profile, "python-deny-egress");
         assert!(executor.is_some());
+    }
+
+    fn mcp_tools_json() -> String {
+        serde_json::json!([{
+            "name": "company_search",
+            "remote_name": "search",
+            "description": "Search company knowledge",
+            "input_schema": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": false
+            },
+            "timeout_millis": 5000,
+            "max_output_bytes": 4096
+        }])
+        .to_string()
+    }
+
+    #[test]
+    fn mcp_route_is_deployment_owned_and_lazy() {
+        let web_search = ConfiguredToolRouter::default();
+        let sandbox = ConfiguredToolRouter::default();
+        let (router, executor, definitions) = mcp_components_from_config(
+            Some("http://127.0.0.1:8090/mcp".to_owned()),
+            Some("deployment-secret".to_owned()),
+            true,
+            Some("internal_search".to_owned()),
+            Some(mcp_tools_json()),
+            &web_search,
+            &sandbox,
+        )
+        .expect("explicit loopback MCP configuration is valid without connecting");
+
+        let route = router.route("company_search").expect("route configured");
+        assert_eq!(route.connector, "mcp");
+        assert_eq!(route.operation, "search");
+        assert_eq!(route.profile, "internal_search");
+        assert!(executor.is_some());
+        assert_eq!(
+            definitions["company_search"].description(),
+            "Search company knowledge"
+        );
+    }
+
+    #[test]
+    fn mcp_configuration_cannot_shadow_an_existing_runtime_tool() {
+        let web_search = ConfiguredToolRouter::new([(
+            "company_search".to_owned(),
+            ToolRoute::new("web_search", "search"),
+        )]);
+        let error = mcp_components_from_config(
+            Some("https://mcp.example.com/mcp".to_owned()),
+            None,
+            false,
+            None,
+            Some(mcp_tools_json()),
+            &web_search,
+            &ConfiguredToolRouter::default(),
+        )
+        .err()
+        .expect("tool-name collision must fail");
+        assert!(error.to_string().contains("conflicts"));
+    }
+
+    #[test]
+    fn mcp_descriptors_must_match_for_responses_and_anthropic() {
+        let (_, _, definitions) = mcp_components_from_config(
+            Some("https://mcp.example.com/mcp".to_owned()),
+            None,
+            false,
+            None,
+            Some(mcp_tools_json()),
+            &ConfiguredToolRouter::default(),
+            &ConfiguredToolRouter::default(),
+        )
+        .unwrap();
+        let responses: CreateResponse = serde_json::from_value(serde_json::json!({
+            "model": "model",
+            "input": "hello",
+            "tools": [{
+                "type": "function",
+                "name": "company_search",
+                "description": "Search company knowledge",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": false
+                },
+                "strict": true
+            }]
+        }))
+        .unwrap();
+        let anthropic: AnthropicCreateMessageRequest = serde_json::from_value(serde_json::json!({
+            "model": "model",
+            "max_tokens": 128,
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{
+                "name": "company_search",
+                "description": "Search company knowledge",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": false
+                }
+            }]
+        }))
+        .unwrap();
+
+        assert!(validate_responses_mcp_tools(&responses, &definitions).is_ok());
+        assert!(validate_anthropic_mcp_tools(&anthropic, &definitions).is_ok());
+
+        let mut mismatched = responses;
+        let dynamo_protocols::types::responses::Tool::Function(function) =
+            &mut mismatched.tools.as_mut().unwrap()[0]
+        else {
+            panic!("expected function tool")
+        };
+        function.description = Some("Caller-controlled description".to_owned());
+        assert!(validate_responses_mcp_tools(&mismatched, &definitions).is_err());
     }
 
     #[test]
