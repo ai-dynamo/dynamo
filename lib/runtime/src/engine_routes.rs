@@ -41,10 +41,13 @@ impl EngineRoutePolicy {
         let disable_all = std::env::var(env_engine_routes::DYN_DISABLE_ENGINE_ROUTES)
             .ok()
             .is_some_and(|v| is_truthy(&v));
+        // A *present* allow var — even empty/whitespace — is a deliberate opt-in to
+        // restrictive mode: an empty allowlist serves nothing (fail closed). Only a
+        // truly-unset var leaves the default `AllowAll`. An empty deny var is a no-op,
+        // so treat it as unset.
         let allow = std::env::var(env_engine_routes::DYN_ENGINE_ROUTES_ALLOW)
             .ok()
-            .map(|v| parse_route_set(&v))
-            .filter(|s| !s.is_empty());
+            .map(|v| parse_route_set(&v));
         let deny = std::env::var(env_engine_routes::DYN_ENGINE_ROUTES_DENY)
             .ok()
             .map(|v| parse_route_set(&v))
@@ -301,7 +304,8 @@ mod tests {
             },
         );
 
-        // Empty-set allow env -> treated as unset -> AllowAll (does not disable everything).
+        // Present-but-empty allow env -> Allowlist(empty) = serve nothing (fail closed).
+        // (Unset -> AllowAll is covered by the "nothing set" case above.)
         temp_env::with_vars(
             [
                 (DYN_DISABLE_ENGINE_ROUTES, None),
@@ -309,7 +313,10 @@ mod tests {
                 (DYN_ENGINE_ROUTES_DENY, None),
             ],
             || {
-                assert_eq!(EngineRoutePolicy::from_env(), EngineRoutePolicy::AllowAll);
+                assert_eq!(
+                    EngineRoutePolicy::from_env(),
+                    EngineRoutePolicy::Allowlist(set(&[]))
+                );
             },
         );
 

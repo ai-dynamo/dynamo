@@ -134,6 +134,8 @@ pub mod runtime {
 
         /// Comma-separated allowlist of `/engine/*` route names (full route string, e.g.
         /// `control/start_profile,update/model_taints`). Only listed routes are served.
+        /// Present-but-empty (`""`) is a deliberate opt-in that serves no routes (fail
+        /// closed); leave the variable unset for the default (all routes served).
         pub const DYN_ENGINE_ROUTES_ALLOW: &str = "DYN_ENGINE_ROUTES_ALLOW";
 
         /// Comma-separated denylist of `/engine/*` route names (full route string). Listed

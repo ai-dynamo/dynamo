@@ -588,9 +588,13 @@ async fn call_lora_endpoint(
 
     // 2. Unified-backend engine-update registry fallback. The unified Worker
     //    registers LoRA ops as engine updates under `update/<name>`, so map the
-    //    bare LoRA endpoint name onto that namespaced key.
+    //    bare LoRA endpoint name onto that namespaced key. Respect the engine-route
+    //    policy here too: if the operator disabled this route, the /v1/loras shim
+    //    must not become a backdoor to it.
     let update_key = format!("update/{endpoint_name}");
-    if let Some(callback) = drt.engine_routes().get(&update_key) {
+    if !drt.engine_routes().is_allowed(&update_key) {
+        tracing::debug!("LoRA route '{update_key}' disabled by engine-route policy");
+    } else if let Some(callback) = drt.engine_routes().get(&update_key) {
         tracing::debug!(
             "Found '{}' in engine routes registry, invoking update callback",
             update_key
@@ -1338,6 +1342,38 @@ mod integration_tests {
         .await;
     }
 
+    /// The `/v1/loras` shim must respect the engine-route policy: with the route
+    /// disabled, `call_lora_endpoint` must not reach the registered engine-update
+    /// callback and instead returns the "not available" error.
+    #[tokio::test]
+    async fn test_call_lora_endpoint_respects_engine_route_policy() {
+        use crate::config::environment_names::runtime::engine_routes as env_er;
+        temp_env::async_with_vars(
+            [
+                (env_system::DYN_SYSTEM_PORT, None),
+                (env_er::DYN_DISABLE_ENGINE_ROUTES, Some("1")),
+                (env_er::DYN_ENGINE_ROUTES_ALLOW, None::<&str>),
+                (env_er::DYN_ENGINE_ROUTES_DENY, None),
+            ],
+            async {
+                let drt = create_test_drt_async().await;
+
+                let callback: crate::engine_routes::EngineRouteCallback =
+                    Arc::new(|_body| Box::pin(async move { Ok(serde_json::json!({"ok": true})) }));
+                drt.engine_routes().register("update/load_lora", callback);
+
+                let err = call_lora_endpoint(&drt, "load_lora", serde_json::json!({}))
+                    .await
+                    .expect_err("policy-disabled route must not be reachable via /v1/loras");
+                assert!(
+                    err.to_string().contains("LoRA management not available"),
+                    "expected unavailable message, got: {err}"
+                );
+            },
+        )
+        .await;
+    }
+
     /// When neither the local registry nor `engine_routes()` holds the name,
     /// the caller gets an explicit "LoRA management not available" error
     /// rather than an opaque "endpoint not found".
@@ -1394,13 +1430,13 @@ mod integration_tests {
     /// the policy is enforced before the registry lookup.
     #[tokio::test]
     async fn test_engine_route_policy_disable_all_returns_403() {
+        use crate::config::environment_names::runtime::engine_routes as env_er;
         temp_env::async_with_vars(
             [
                 (env_system::DYN_SYSTEM_PORT, Some("0")),
-                (
-                    crate::config::environment_names::runtime::engine_routes::DYN_DISABLE_ENGINE_ROUTES,
-                    Some("1"),
-                ),
+                (env_er::DYN_DISABLE_ENGINE_ROUTES, Some("1")),
+                (env_er::DYN_ENGINE_ROUTES_ALLOW, None),
+                (env_er::DYN_ENGINE_ROUTES_DENY, None),
             ],
             async {
                 let drt = Arc::new(create_test_drt_async().await);
@@ -1441,13 +1477,16 @@ mod integration_tests {
     /// while an allowed-but-unregistered route still returns 404 (route does not exist).
     #[tokio::test]
     async fn test_engine_route_policy_allowlist_enforced_over_http() {
+        use crate::config::environment_names::runtime::engine_routes as env_er;
         temp_env::async_with_vars(
             [
                 (env_system::DYN_SYSTEM_PORT, Some("0")),
+                (env_er::DYN_DISABLE_ENGINE_ROUTES, None),
                 (
-                    crate::config::environment_names::runtime::engine_routes::DYN_ENGINE_ROUTES_ALLOW,
+                    env_er::DYN_ENGINE_ROUTES_ALLOW,
                     Some("control/start_profile,update/model_taints"),
                 ),
+                (env_er::DYN_ENGINE_ROUTES_DENY, None),
             ],
             async {
                 let drt = Arc::new(create_test_drt_async().await);
@@ -1456,8 +1495,7 @@ mod integration_tests {
                     Arc::new(|_body| Box::pin(async move { Ok(serde_json::json!({"ok": true})) }));
                 let deny_cb: crate::engine_routes::EngineRouteCallback =
                     Arc::new(|_body| Box::pin(async move { Ok(serde_json::json!({"ok": true})) }));
-                drt.engine_routes()
-                    .register("control/start_profile", ok_cb);
+                drt.engine_routes().register("control/start_profile", ok_cb);
                 drt.engine_routes()
                     .register("control/update_weights_from_disk", deny_cb);
 
