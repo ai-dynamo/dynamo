@@ -1756,6 +1756,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._weight_version = version
 
     async def get_weight_version(self, body: dict) -> dict:
+        """Report the worker's current declared weight-version state."""
         if body is None:
             body = {}
         elif not isinstance(body, dict):
@@ -1772,6 +1773,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         }
 
     async def set_weight_version(self, body: dict) -> dict:
+        """Validate and declare a weight version for subsequent requests."""
         if body is None:
             body = {}
         elif not isinstance(body, dict):
