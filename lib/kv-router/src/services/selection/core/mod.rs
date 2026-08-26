@@ -43,7 +43,7 @@ use super::pending::{PendingSelection, SelectionCache, SelectionCacheConfig};
 use super::types::{
     ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
-    SelectResponse, SelectionWorkerConfig, WORKER_TYPE, WorkerCatalogRecord, WorkerLifecycle,
+    SelectResponse, SelectionWorkerConfig, WorkerCatalogRecord, WorkerLifecycle,
     WorkerPatchRequest, WorkerRequest,
 };
 use crate::WorkerSelectionPolicyFactory;
@@ -454,13 +454,14 @@ impl SelectionCore {
                 let (workers_tx, workers_rx) = watch::channel(HashMap::new());
                 let scoped_replica_sync =
                     setup_scoped_replica_sync(self.replica_config.as_ref(), &key, block_size);
+                let worker_label = self.worker_type.default_selector_label();
                 let slots = Arc::new(ActiveSequencesMultiWorker::new_with_replica_worker_policy(
                     scoped_replica_sync.publisher,
                     block_size as usize,
                     HashMap::new(),
                     scoped_replica_sync.enabled,
                     scoped_replica_sync.process_id,
-                    WORKER_TYPE,
+                    worker_label,
                     ReplicaWorkerPolicy::RequireRegistered,
                 ));
                 let replica_tx = scoped_replica_sync.channel.map(|(replica_tx, subscriber)| {
@@ -480,7 +481,7 @@ impl SelectionCore {
                     block_size,
                 ));
                 let selector = self.worker_selection_policy_factory.as_ref().map_or_else(
-                    || WorkerSelectionPolicy::default(self.kv_router_config.clone(), WORKER_TYPE),
+                    || WorkerSelectionPolicy::default(self.kv_router_config.clone(), worker_label),
                     |factory| factory(&self.kv_router_config, self.worker_type, key.as_ref()),
                 );
                 let profile = self
@@ -501,7 +502,7 @@ impl SelectionCore {
                     self.kv_router_config.router_queue_recheck_interval(),
                     self.kv_router_config.router_track_prefill_tokens,
                     self.cancel_token.child_token(),
-                    WORKER_TYPE,
+                    worker_label,
                     true,
                 )?;
                 Ok(Arc::new(SelectionEntry {
@@ -1366,6 +1367,42 @@ mod tests {
         assert!(!core.cancel_token.is_cancelled());
         parent.cancel();
         assert!(core.cancel_token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn selection_setup_uses_default_label_for_worker_type() {
+        for (worker_type, expected_label) in [
+            (WorkerType::Prefill, "prefill"),
+            (WorkerType::Decode, "decode"),
+            (WorkerType::Encode, "decode"),
+        ] {
+            let config = test_config(false);
+            let tracking_hash = Arc::new(
+                TrackingHashContext::from_config(&config)
+                    .expect("valid tracking hash configuration"),
+            );
+            let core = SelectionCore::new_inner(
+                config,
+                1,
+                CancellationToken::new(),
+                None,
+                None,
+                worker_type,
+                true,
+                SelectionCacheConfig::default(),
+                tracking_hash,
+            );
+
+            core.upsert_worker(worker(1)).await.expect("worker upsert");
+            let entry = core
+                .entry(&RoutingPartitionId::new("model", "default"))
+                .expect("selection entry");
+            assert_eq!(
+                entry.scheduler.worker_type(),
+                expected_label,
+                "{worker_type}"
+            );
+        }
     }
 
     #[test]
