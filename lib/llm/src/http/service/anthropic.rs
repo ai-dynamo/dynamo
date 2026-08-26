@@ -245,6 +245,24 @@ fn validate_anthropic_tools(
     Ok(())
 }
 
+fn anthropic_ingress_error(
+    state: &service_v2::State,
+    metric_model: &str,
+    streaming: bool,
+    request_id: &str,
+    error_type: ErrorType,
+    response: Response,
+) -> Response {
+    let mut guard = state.metrics_clone().create_inflight_guard(
+        metric_model,
+        Endpoint::AnthropicMessages,
+        streaming,
+        request_id,
+    );
+    guard.mark_error(error_type);
+    response
+}
+
 /// Top-level HTTP handler for POST /v1/messages.
 async fn handler_anthropic_messages(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
@@ -259,38 +277,62 @@ async fn handler_anthropic_messages(
         .manager()
         .metric_model_for(&canonical_model)
         .to_string();
+    if let Err(error) = validate_anthropic_messages(&request.messages) {
+        return Err(anthropic_ingress_error(
+            &state,
+            &metric_model,
+            streaming,
+            &request_id,
+            error.metric_error_type(),
+            anthropic_error(
+                error.status(),
+                error.anthropic_error_type(),
+                error.message(),
+            ),
+        ));
+    }
+    if let Err(error) = validate_anthropic_tools(request.tools.as_deref()) {
+        return Err(anthropic_ingress_error(
+            &state,
+            &metric_model,
+            streaming,
+            &request_id,
+            error.metric_error_type(),
+            anthropic_error(
+                error.status(),
+                error.anthropic_error_type(),
+                error.message(),
+            ),
+        ));
+    }
+    if request.max_tokens == 0 {
+        return Err(anthropic_ingress_error(
+            &state,
+            &metric_model,
+            streaming,
+            &request_id,
+            ErrorType::Validation,
+            anthropic_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "max_tokens: must be greater than 0",
+            ),
+        ));
+    }
+    gate_anthropic_nvext(&mut request, state.nvext_enabled());
+
+    #[cfg(feature = "agent-rt-poc")]
+    if super::agent_runtime::enabled() && state.anthropic_agent_runtime().requires_runtime(&request)
+    {
+        return super::agent_runtime::handle_anthropic(state, template, headers, request).await;
+    }
+
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
         &metric_model,
         Endpoint::AnthropicMessages,
         streaming,
         &request_id,
     );
-
-    if let Err(error) = validate_anthropic_messages(&request.messages) {
-        inflight_guard.mark_error(error.metric_error_type());
-        return Err(anthropic_error(
-            error.status(),
-            error.anthropic_error_type(),
-            error.message(),
-        ));
-    }
-    if let Err(error) = validate_anthropic_tools(request.tools.as_deref()) {
-        inflight_guard.mark_error(error.metric_error_type());
-        return Err(anthropic_error(
-            error.status(),
-            error.anthropic_error_type(),
-            error.message(),
-        ));
-    }
-    if request.max_tokens == 0 {
-        inflight_guard.mark_error(ErrorType::Validation);
-        return Err(anthropic_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-            "max_tokens: must be greater than 0",
-        ));
-    }
-    gate_anthropic_nvext(&mut request, state.nvext_enabled());
 
     // Create request context
     let cancellation_labels = CancellationLabels {

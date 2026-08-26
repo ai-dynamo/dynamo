@@ -18,7 +18,9 @@ use axum::response::IntoResponse;
 use super::Metrics;
 use super::RouteDoc;
 #[cfg(feature = "agent-rt-poc")]
-use super::agent_runtime::{ResponsesAgentRuntime, new_responses_runtime};
+use super::agent_runtime::{
+    AnthropicAgentRuntime, ResponsesAgentRuntime, new_anthropic_runtime, new_responses_runtime,
+};
 use super::frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
 };
@@ -147,6 +149,8 @@ pub struct State {
     sse_keep_alive: Option<Duration>,
     #[cfg(feature = "agent-rt-poc")]
     responses_agent_runtime: Arc<ResponsesAgentRuntime>,
+    #[cfg(feature = "agent-rt-poc")]
+    anthropic_agent_runtime: Arc<AnthropicAgentRuntime>,
 }
 
 /// Typed config needed only to construct HTTP shared state.
@@ -493,6 +497,8 @@ impl State {
             sse_keep_alive: config.sse_keep_alive,
             #[cfg(feature = "agent-rt-poc")]
             responses_agent_runtime: new_responses_runtime()?,
+            #[cfg(feature = "agent-rt-poc")]
+            anthropic_agent_runtime: new_anthropic_runtime()?,
         })
     }
 
@@ -504,6 +510,11 @@ impl State {
     #[cfg(feature = "agent-rt-poc")]
     pub(super) fn responses_agent_runtime(&self) -> &Arc<ResponsesAgentRuntime> {
         &self.responses_agent_runtime
+    }
+
+    #[cfg(feature = "agent-rt-poc")]
+    pub(super) fn anthropic_agent_runtime(&self) -> &Arc<AnthropicAgentRuntime> {
+        &self.anthropic_agent_runtime
     }
 
     pub fn manager(&self) -> &ModelManager {

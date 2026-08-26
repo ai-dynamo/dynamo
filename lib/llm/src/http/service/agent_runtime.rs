@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
+use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 
 use agent_rt_sandbox::{
@@ -15,19 +16,29 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use dynamo_agent_rt::{
     AgentRuntime, AgentRuntimeError, AgentStreamRuntimeError, AgentToolRuntimeError,
-    AuthorizationScope, Blake3ToolIdempotencyKeys, BoxFuture, CanonicalJsonFingerprinter,
-    ConfiguredToolRouter, IdempotencyKey, InferenceFuture, InferenceIntent, InferenceInvoker,
-    InferenceOutput, InferenceRequest, MaterializationError, ModelStepKind, OpenAiResponses,
-    PolicyResponsesOutputInterpreter, ResponseId, ResponsesRequestMaterializer,
-    ResponsesStreamEventInterpreter, ResponsesToolAdapterError, ResponsesToolLoopAdapter,
+    AnthropicMaterializationError, AnthropicMessages, AnthropicRequestMaterializer,
+    AnthropicRequestSelector, AnthropicStreamEventError, AnthropicStreamEventInterpreter,
+    AnthropicToolLoopAdapter, AnthropicUuidGenerator, AuthorizationScope,
+    Blake3ToolIdempotencyKeys, BoxFuture, CanonicalJsonFingerprinter, ConfiguredToolRouter,
+    IdempotencyKey, InferenceFuture, InferenceIntent, InferenceInvoker, InferenceOutput,
+    InferenceRequest, MaterializationError, ModelStepKind, OpenAiResponses,
+    PolicyAnthropicOutputInterpreter, PolicyResponsesOutputInterpreter, ResponseId,
+    ResponsesRequestMaterializer, ResponsesStreamEventInterpreter, ResponsesToolAdapterError,
+    ResponsesToolLoopAdapter, RoutedAnthropicOutcomeError, RoutedAnthropicOutcomePolicy,
     RoutedResponsesOutcomeError, RoutedResponsesOutcomePolicy, RunStreamResult, RunTurn,
-    RunTurnResult, RuntimeAuthorization, RuntimeLimits, SystemClock, ToolExecutionFailure,
-    ToolExecutionRequest, ToolExecutionResult, ToolExecutor, ToolFailureDisposition,
-    ToolFailurePolicy, ToolRoute, ToolRouter, ToolRunError, ToolRunner, TurnState, UuidGenerator,
+    RunTurnResult, RuntimeAuthorization, RuntimeLimits, RuntimeSelectionContext, RuntimeSelector,
+    SystemClock, ToolExecutionFailure, ToolExecutionRequest, ToolExecutionResult, ToolExecutor,
+    ToolFailureDisposition, ToolFailurePolicy, ToolRoute, ToolRouter, ToolRunError, ToolRunner,
+    TurnState, UuidGenerator,
 };
 use dynamo_agent_rt_store::{DuckDbStore, DuckDbStoreError, StoreInvariantError};
 use dynamo_agent_tools::{
     BraveWebSearchError, BraveWebSearchExecutor, BraveWebSearchFailurePolicy, BraveWebSearchProfile,
+};
+use dynamo_protocols::types::anthropic::{
+    AnthropicCreateMessageRequest, AnthropicDelta, AnthropicErrorResponse,
+    AnthropicMessageDeltaBody, AnthropicMessageResponse, AnthropicResponseContentBlock,
+    AnthropicStreamEvent,
 };
 use dynamo_protocols::types::responses::{
     CreateResponse, ResponseCompletedEvent, ResponseCreatedEvent, ResponseInProgressEvent,
@@ -41,12 +52,18 @@ use thiserror::Error;
 
 use super::disconnect::create_connection_monitor;
 use super::metrics::{CancellationLabels, Endpoint};
-use super::{metadata, openai, service_v2};
+use super::{anthropic, metadata, openai, service_v2};
 use crate::protocols::agents::{agent_context_header_values, session_affinity_header_value};
 use crate::protocols::common::extensions::{
-    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, NvExt, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
+    AGENT_CONTEXT_CONTEXT_KEY, AgentContext, HEADER_DATA_PARALLEL_RANK_ALIAS, HEADER_DP_RANK,
+    HEADER_DP_RANK_ALIAS, HEADER_PREFILL_DP_RANK, HEADER_PREFILL_DP_RANK_ALIAS,
+    HEADER_PREFILL_INSTANCE_ID, HEADER_PREFILL_INSTANCE_ID_ALIAS, HEADER_REQUEST_PRIORITY,
+    HEADER_REQUEST_STRICT_PRIORITY, HEADER_TENANT_ID, HEADER_WORKER_INSTANCE_ID,
+    HEADER_WORKER_INSTANCE_ID_ALIAS, NvExt, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
 };
-use crate::protocols::common::input_trigger::classify_response_request;
+use crate::protocols::common::input_trigger::{
+    classify_anthropic_request, classify_response_request,
+};
 use crate::protocols::openai::responses::stream_converter::ResponseEventSerializer;
 use crate::protocols::openai::responses::{NvCreateResponse, NvResponse, ResponseParams};
 use crate::request_template::{RequestTemplate, resolve_request_model};
@@ -67,6 +84,7 @@ const AUTH_HEADER: &str = "x-dynamo-agent-rt-auth";
 const TENANT_HEADER: &str = "x-dynamo-tenant-id";
 const PRINCIPAL_HEADER: &str = "x-dynamo-principal-id";
 const DUCKDB_PATH_ENV: &str = "DYN_AGENT_RT_DUCKDB_PATH";
+const STATEFUL_ANTHROPIC_ENV: &str = "DYN_AGENT_RT_STATEFUL_ANTHROPIC";
 const WEB_SEARCH_API_KEY_ENV: &str = "BRAVE_SEARCH_API_KEY";
 const WEB_SEARCH_TOOL_NAME_ENV: &str = "DYN_AGENT_RT_WEB_SEARCH_TOOL_NAME";
 const SANDBOX_ENDPOINT_ENV: &str = "DYN_AGENT_RT_SANDBOX_ENDPOINT";
@@ -237,12 +255,12 @@ fn ingress_authorization(
 type ResponsesStore = DuckDbStore<OpenAiResponses>;
 
 #[derive(Clone, Default)]
-struct ResponsesRouter {
+struct RuntimeToolRouter {
     web_search: ConfiguredToolRouter,
     sandbox: ConfiguredToolRouter,
 }
 
-impl ToolRouter for ResponsesRouter {
+impl ToolRouter for RuntimeToolRouter {
     fn route(&self, tool_name: &str) -> Option<ToolRoute> {
         self.web_search
             .route(tool_name)
@@ -250,7 +268,7 @@ impl ToolRouter for ResponsesRouter {
     }
 }
 
-type ResponsesOutcomePolicy = RoutedResponsesOutcomePolicy<ResponsesRouter>;
+type ResponsesOutcomePolicy = RoutedResponsesOutcomePolicy<RuntimeToolRouter>;
 type ResponsesOutputInterpreter = PolicyResponsesOutputInterpreter<ResponsesOutcomePolicy>;
 type ResponsesAgentRuntimeCore = AgentRuntime<
     OpenAiResponses,
@@ -262,21 +280,42 @@ type ResponsesAgentRuntimeCore = AgentRuntime<
     UuidGenerator,
     SystemClock,
 >;
-type ResponsesToolAdapter = ResponsesToolLoopAdapter<ResponsesRouter>;
+type ResponsesToolAdapter = ResponsesToolLoopAdapter<RuntimeToolRouter>;
 type ResponsesToolRunner = ToolRunner<
     ResponsesStore,
-    ResponsesToolExecutor,
+    RuntimeToolExecutor,
     Blake3ToolIdempotencyKeys,
-    ResponsesToolFailurePolicy,
+    RuntimeToolFailurePolicy,
 >;
 
-struct ResponsesToolExecutor {
+type AnthropicStore = DuckDbStore<AnthropicMessages>;
+type AnthropicOutcomePolicy = RoutedAnthropicOutcomePolicy<RuntimeToolRouter>;
+type AnthropicOutputInterpreter = PolicyAnthropicOutputInterpreter<AnthropicOutcomePolicy>;
+type AnthropicAgentRuntimeCore = AgentRuntime<
+    AnthropicMessages,
+    AnthropicStore,
+    AnthropicRequestMaterializer,
+    CanonicalJsonFingerprinter,
+    DynamoAnthropicInvoker,
+    AnthropicOutputInterpreter,
+    AnthropicUuidGenerator,
+    SystemClock,
+>;
+type AnthropicToolAdapter = AnthropicToolLoopAdapter<RuntimeToolRouter>;
+type AnthropicToolRunner = ToolRunner<
+    AnthropicStore,
+    RuntimeToolExecutor,
+    Blake3ToolIdempotencyKeys,
+    RuntimeToolFailurePolicy,
+>;
+
+struct RuntimeToolExecutor {
     web_search: BraveWebSearchExecutor,
     sandbox: Option<SandboxProviderExecutor<HttpSandboxProvider>>,
 }
 
 #[derive(Debug, Error)]
-enum ResponsesToolExecutorError {
+enum RuntimeToolExecutorError {
     #[error("web search execution failed: {0}")]
     WebSearch(#[source] BraveWebSearchError),
     #[error("sandbox execution failed: {0}")]
@@ -285,8 +324,8 @@ enum ResponsesToolExecutorError {
     UnsupportedConnector(String),
 }
 
-impl ToolExecutor for ResponsesToolExecutor {
-    type Error = ResponsesToolExecutorError;
+impl ToolExecutor for RuntimeToolExecutor {
+    type Error = RuntimeToolExecutorError;
 
     fn execute(
         &self,
@@ -298,17 +337,17 @@ impl ToolExecutor for ResponsesToolExecutor {
                     .web_search
                     .execute(request)
                     .await
-                    .map_err(ResponsesToolExecutorError::WebSearch),
+                    .map_err(RuntimeToolExecutorError::WebSearch),
                 "sandbox" => self
                     .sandbox
                     .as_ref()
                     .ok_or_else(|| {
-                        ResponsesToolExecutorError::UnsupportedConnector("sandbox".to_owned())
+                        RuntimeToolExecutorError::UnsupportedConnector("sandbox".to_owned())
                     })?
                     .execute(request)
                     .await
-                    .map_err(ResponsesToolExecutorError::Sandbox),
-                connector => Err(ResponsesToolExecutorError::UnsupportedConnector(
+                    .map_err(RuntimeToolExecutorError::Sandbox),
+                connector => Err(RuntimeToolExecutorError::UnsupportedConnector(
                     connector.to_owned(),
                 )),
             }
@@ -325,17 +364,17 @@ impl ToolExecutor for ResponsesToolExecutor {
                     .web_search
                     .lookup(request)
                     .await
-                    .map_err(ResponsesToolExecutorError::WebSearch),
+                    .map_err(RuntimeToolExecutorError::WebSearch),
                 "sandbox" => self
                     .sandbox
                     .as_ref()
                     .ok_or_else(|| {
-                        ResponsesToolExecutorError::UnsupportedConnector("sandbox".to_owned())
+                        RuntimeToolExecutorError::UnsupportedConnector("sandbox".to_owned())
                     })?
                     .lookup(request)
                     .await
-                    .map_err(ResponsesToolExecutorError::Sandbox),
-                connector => Err(ResponsesToolExecutorError::UnsupportedConnector(
+                    .map_err(RuntimeToolExecutorError::Sandbox),
+                connector => Err(RuntimeToolExecutorError::UnsupportedConnector(
                     connector.to_owned(),
                 )),
             }
@@ -344,16 +383,16 @@ impl ToolExecutor for ResponsesToolExecutor {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct ResponsesToolFailurePolicy;
+struct RuntimeToolFailurePolicy;
 
-impl ToolFailurePolicy<ResponsesToolExecutorError> for ResponsesToolFailurePolicy {
-    fn classify(&self, error: &ResponsesToolExecutorError) -> ToolFailureDisposition {
+impl ToolFailurePolicy<RuntimeToolExecutorError> for RuntimeToolFailurePolicy {
+    fn classify(&self, error: &RuntimeToolExecutorError) -> ToolFailureDisposition {
         match error {
-            ResponsesToolExecutorError::WebSearch(error) => {
+            RuntimeToolExecutorError::WebSearch(error) => {
                 BraveWebSearchFailurePolicy.classify(error)
             }
-            ResponsesToolExecutorError::Sandbox(error) => SandboxFailurePolicy.classify(error),
-            ResponsesToolExecutorError::UnsupportedConnector(_) => {
+            RuntimeToolExecutorError::Sandbox(error) => SandboxFailurePolicy.classify(error),
+            RuntimeToolExecutorError::UnsupportedConnector(_) => {
                 ToolFailureDisposition::Failed(ToolExecutionFailure {
                     code: "unsupported_connector".to_owned(),
                     message: error.to_string(),
@@ -366,9 +405,48 @@ impl ToolFailurePolicy<ResponsesToolExecutorError> for ResponsesToolFailurePolic
 
 pub(super) struct ResponsesAgentRuntime {
     runtime: Arc<ResponsesAgentRuntimeCore>,
-    router: ResponsesRouter,
+    router: RuntimeToolRouter,
     tool_adapter: Arc<ResponsesToolAdapter>,
     tool_runner: Arc<ResponsesToolRunner>,
+}
+
+pub(super) struct AnthropicAgentRuntime {
+    runtime: Arc<AnthropicAgentRuntimeCore>,
+    router: RuntimeToolRouter,
+    tool_adapter: Arc<AnthropicToolAdapter>,
+    tool_runner: Arc<AnthropicToolRunner>,
+    requires_durable_state: bool,
+}
+
+impl AnthropicAgentRuntime {
+    pub(super) fn requires_runtime(&self, request: &AnthropicCreateMessageRequest) -> bool {
+        anthropic_request_requires_runtime(request, &self.router, self.requires_durable_state)
+    }
+
+    fn request_uses_runtime_tools(&self, request: &AnthropicCreateMessageRequest) -> bool {
+        request.tools.as_ref().is_some_and(|tools| {
+            tools
+                .iter()
+                .any(|tool| self.router.route(&tool.name).is_some())
+        })
+    }
+}
+
+fn anthropic_request_requires_runtime(
+    request: &AnthropicCreateMessageRequest,
+    router: &impl ToolRouter,
+    requires_durable_state: bool,
+) -> bool {
+    AnthropicRequestSelector.requires_runtime(
+        request,
+        RuntimeSelectionContext {
+            has_runtime_owned_tools: request
+                .tools
+                .as_ref()
+                .is_some_and(|tools| tools.iter().any(|tool| router.route(&tool.name).is_some())),
+            requires_durable_state,
+        },
+    )
 }
 
 impl ResponsesAgentRuntime {
@@ -396,30 +474,47 @@ type ResponsesRuntimeError = AgentRuntimeError<
 type ResponsesStreamRuntimeError =
     AgentStreamRuntimeError<ResponsesRuntimeError, Infallible, DuckDbStoreError>;
 
-type ResponsesToolRunError = ToolRunError<DuckDbStoreError, ResponsesToolExecutorError>;
+type RuntimeToolRunError = ToolRunError<DuckDbStoreError, RuntimeToolExecutorError>;
 type ResponsesToolRuntimeError = AgentToolRuntimeError<
     ResponsesRuntimeError,
     ResponsesToolAdapterError,
-    ResponsesToolRunError,
+    RuntimeToolRunError,
     DuckDbStoreError,
 >;
 type ResponsesToolStreamRuntimeError = AgentToolRuntimeError<
     ResponsesStreamRuntimeError,
     ResponsesToolAdapterError,
-    ResponsesToolRunError,
+    RuntimeToolRunError,
+    DuckDbStoreError,
+>;
+
+type AnthropicRuntimeError = AgentRuntimeError<
+    DuckDbStoreError,
+    AnthropicMaterializationError,
+    serde_json::Error,
+    DynamoAnthropicInvocationError,
+    RoutedAnthropicOutcomeError,
+>;
+type AnthropicStreamRuntimeError =
+    AgentStreamRuntimeError<AnthropicRuntimeError, AnthropicStreamEventError, DuckDbStoreError>;
+type AnthropicToolRuntimeError =
+    AgentToolRuntimeError<AnthropicRuntimeError, Infallible, RuntimeToolRunError, DuckDbStoreError>;
+type AnthropicToolStreamRuntimeError = AgentToolRuntimeError<
+    AnthropicStreamRuntimeError,
+    Infallible,
+    RuntimeToolRunError,
     DuckDbStoreError,
 >;
 
 #[derive(Debug, Error)]
-pub(super) enum ResponsesRuntimeInitError {
+pub(super) enum AgentRuntimeInitError {
     #[error("failed to initialize agent runtime DuckDB store: {0}")]
     Store(#[from] DuckDbStoreError),
     #[error("invalid agent runtime deployment configuration: {0}")]
     Configuration(String),
 }
 
-pub(super) fn new_responses_runtime()
--> Result<Arc<ResponsesAgentRuntime>, ResponsesRuntimeInitError> {
+pub(super) fn new_responses_runtime() -> Result<Arc<ResponsesAgentRuntime>, AgentRuntimeInitError> {
     let store = match std::env::var_os(DUCKDB_PATH_ENV) {
         Some(path) if !path.is_empty() => ResponsesStore::open(path),
         _ => {
@@ -434,11 +529,11 @@ pub(super) fn new_responses_runtime()
     }?;
     let (web_search_router, web_search) = web_search_components()?;
     let (sandbox_router, sandbox) = sandbox_components()?;
-    let router = ResponsesRouter {
+    let router = RuntimeToolRouter {
         web_search: web_search_router,
         sandbox: sandbox_router,
     };
-    let executor = ResponsesToolExecutor {
+    let executor = RuntimeToolExecutor {
         web_search,
         sandbox,
     };
@@ -461,23 +556,73 @@ pub(super) fn new_responses_runtime()
             store,
             executor,
             Blake3ToolIdempotencyKeys,
-            ResponsesToolFailurePolicy,
+            RuntimeToolFailurePolicy,
         )),
     }))
 }
 
-fn optional_environment(name: &'static str) -> Result<Option<String>, ResponsesRuntimeInitError> {
+pub(super) fn new_anthropic_runtime() -> Result<Arc<AnthropicAgentRuntime>, AgentRuntimeInitError> {
+    let store = match std::env::var_os(DUCKDB_PATH_ENV) {
+        Some(path) if !path.is_empty() => AnthropicStore::open(path),
+        _ => AnthropicStore::open_in_memory(),
+    }?;
+    let (web_search_router, web_search) = web_search_components()?;
+    let (sandbox_router, sandbox) = sandbox_components()?;
+    let router = RuntimeToolRouter {
+        web_search: web_search_router,
+        sandbox: sandbox_router,
+    };
+    let executor = RuntimeToolExecutor {
+        web_search,
+        sandbox,
+    };
+    let output_interpreter =
+        PolicyAnthropicOutputInterpreter::new(RoutedAnthropicOutcomePolicy::new(router.clone()));
+    let runtime = Arc::new(AgentRuntime::new(
+        store.clone(),
+        AnthropicRequestMaterializer,
+        CanonicalJsonFingerprinter,
+        DynamoAnthropicInvoker,
+        output_interpreter,
+        AnthropicUuidGenerator,
+        SystemClock,
+    ));
+    let requires_durable_state = optional_environment(STATEFUL_ANTHROPIC_ENV)?
+        .map(|value| {
+            value.parse::<bool>().map_err(|_| {
+                AgentRuntimeInitError::Configuration(format!(
+                    "{STATEFUL_ANTHROPIC_ENV} must be true or false"
+                ))
+            })
+        })
+        .transpose()?
+        .unwrap_or(false);
+    Ok(Arc::new(AnthropicAgentRuntime {
+        runtime,
+        router: router.clone(),
+        tool_adapter: Arc::new(AnthropicToolLoopAdapter::new(router)),
+        tool_runner: Arc::new(ToolRunner::new(
+            store,
+            executor,
+            Blake3ToolIdempotencyKeys,
+            RuntimeToolFailurePolicy,
+        )),
+        requires_durable_state,
+    }))
+}
+
+fn optional_environment(name: &'static str) -> Result<Option<String>, AgentRuntimeInitError> {
     match std::env::var(name) {
         Ok(value) => Ok(Some(value)),
         Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err(ResponsesRuntimeInitError::Configuration(
+        Err(std::env::VarError::NotUnicode(_)) => Err(AgentRuntimeInitError::Configuration(
             format!("{name} must contain UTF-8"),
         )),
     }
 }
 
 fn web_search_components()
--> Result<(ConfiguredToolRouter, BraveWebSearchExecutor), ResponsesRuntimeInitError> {
+-> Result<(ConfiguredToolRouter, BraveWebSearchExecutor), AgentRuntimeInitError> {
     let api_key = optional_environment(WEB_SEARCH_API_KEY_ENV)?;
     let tool_name = optional_environment(WEB_SEARCH_TOOL_NAME_ENV)?;
     web_search_components_from_config(api_key, tool_name)
@@ -486,23 +631,21 @@ fn web_search_components()
 fn web_search_components_from_config(
     api_key: Option<String>,
     tool_name: Option<String>,
-) -> Result<(ConfiguredToolRouter, BraveWebSearchExecutor), ResponsesRuntimeInitError> {
+) -> Result<(ConfiguredToolRouter, BraveWebSearchExecutor), AgentRuntimeInitError> {
     let Some(api_key) = api_key else {
         return Ok((
             ConfiguredToolRouter::default(),
             BraveWebSearchExecutor::new([])
-                .map_err(|error| ResponsesRuntimeInitError::Configuration(error.to_string()))?,
+                .map_err(|error| AgentRuntimeInitError::Configuration(error.to_string()))?,
         ));
     };
     let tool_name = tool_name.unwrap_or_else(|| "web_search".to_owned());
     validate_scope_component(&tool_name).map_err(|error| {
-        ResponsesRuntimeInitError::Configuration(format!(
-            "invalid {WEB_SEARCH_TOOL_NAME_ENV}: {error}"
-        ))
+        AgentRuntimeInitError::Configuration(format!("invalid {WEB_SEARCH_TOOL_NAME_ENV}: {error}"))
     })?;
     let profile_name = "brave_default".to_owned();
     let profile = BraveWebSearchProfile::new(api_key).map_err(|error| {
-        ResponsesRuntimeInitError::Configuration(format!(
+        AgentRuntimeInitError::Configuration(format!(
             "invalid web-search deployment configuration: {error}"
         ))
     })?;
@@ -511,7 +654,7 @@ fn web_search_components_from_config(
         ToolRoute::new("web_search", "search").with_profile(profile_name.clone()),
     )]);
     let executor = BraveWebSearchExecutor::new([(profile_name, profile)]).map_err(|error| {
-        ResponsesRuntimeInitError::Configuration(format!(
+        AgentRuntimeInitError::Configuration(format!(
             "failed to initialize web-search executor: {error}"
         ))
     })?;
@@ -523,14 +666,14 @@ fn sandbox_components() -> Result<
         ConfiguredToolRouter,
         Option<SandboxProviderExecutor<HttpSandboxProvider>>,
     ),
-    ResponsesRuntimeInitError,
+    AgentRuntimeInitError,
 > {
     let endpoint = optional_environment(SANDBOX_ENDPOINT_ENV)?;
     let token = optional_environment(SANDBOX_TOKEN_ENV)?;
     let allow_http = optional_environment(SANDBOX_ALLOW_HTTP_ENV)?
         .map(|value| {
             value.parse::<bool>().map_err(|_| {
-                ResponsesRuntimeInitError::Configuration(format!(
+                AgentRuntimeInitError::Configuration(format!(
                     "{SANDBOX_ALLOW_HTTP_ENV} must be true or false"
                 ))
             })
@@ -553,25 +696,23 @@ fn sandbox_components_from_config(
         ConfiguredToolRouter,
         Option<SandboxProviderExecutor<HttpSandboxProvider>>,
     ),
-    ResponsesRuntimeInitError,
+    AgentRuntimeInitError,
 > {
     let Some(endpoint) = endpoint else {
         return Ok((ConfiguredToolRouter::default(), None));
     };
     let token = token.ok_or_else(|| {
-        ResponsesRuntimeInitError::Configuration(format!(
+        AgentRuntimeInitError::Configuration(format!(
             "{SANDBOX_TOKEN_ENV} is required when sandbox execution is enabled"
         ))
     })?;
     let tool_name = tool_name.unwrap_or_else(|| "python".to_owned());
     let profile = profile.unwrap_or_else(|| "python-deny-egress".to_owned());
     validate_scope_component(&tool_name).map_err(|error| {
-        ResponsesRuntimeInitError::Configuration(format!(
-            "invalid {SANDBOX_TOOL_NAME_ENV}: {error}"
-        ))
+        AgentRuntimeInitError::Configuration(format!("invalid {SANDBOX_TOOL_NAME_ENV}: {error}"))
     })?;
     validate_scope_component(&profile).map_err(|error| {
-        ResponsesRuntimeInitError::Configuration(format!("invalid {SANDBOX_PROFILE_ENV}: {error}"))
+        AgentRuntimeInitError::Configuration(format!("invalid {SANDBOX_PROFILE_ENV}: {error}"))
     })?;
     let provider = HttpSandboxProvider::new(HttpSandboxProviderConfig {
         endpoint,
@@ -579,13 +720,13 @@ fn sandbox_components_from_config(
         allow_http,
         ..HttpSandboxProviderConfig::default()
     })
-    .map_err(|error| ResponsesRuntimeInitError::Configuration(error.to_string()))?;
+    .map_err(|error| AgentRuntimeInitError::Configuration(error.to_string()))?;
     let router = ConfiguredToolRouter::new([(
         tool_name,
         ToolRoute::new("sandbox", "python").with_profile(profile),
     )]);
     let executor = SandboxProviderExecutor::new(provider, SandboxToolExecutorConfig::default())
-        .map_err(|error| ResponsesRuntimeInitError::Configuration(error.to_string()))?;
+        .map_err(|error| AgentRuntimeInitError::Configuration(error.to_string()))?;
     Ok((router, Some(executor)))
 }
 
@@ -643,6 +784,30 @@ impl DynamoInvocationCarrier {
         }
         request
     }
+
+    fn anthropic_context(
+        &self,
+        request: AnthropicCreateMessageRequest,
+        request_id: String,
+    ) -> Context<AnthropicCreateMessageRequest> {
+        let input_trigger = classify_anthropic_request(&request);
+        let mut request = Context::with_id_and_metadata(request, request_id, self.metadata.clone());
+        if let Some(trace_request_id) = &self.trace_request_id {
+            request.insert(
+                crate::request_trace::X_REQUEST_ID_CONTEXT_KEY,
+                trace_request_id.clone(),
+            );
+        }
+        if let Some(values) = &self.agent_context {
+            let mut agent_context = AgentContext::from(values.clone());
+            agent_context.input_trigger = Some(input_trigger);
+            request.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context);
+        }
+        if let Some(session_affinity) = &self.session_affinity {
+            request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity.clone());
+        }
+        request
+    }
 }
 
 /// Ephemeral Dynamo ingress state forwarded across model steps.
@@ -653,6 +818,41 @@ pub(super) struct DynamoResponsesContext {
     request_id: String,
     carrier: DynamoInvocationCarrier,
     nvext: Option<NvExt>,
+}
+
+#[derive(Clone)]
+pub(super) struct DynamoAnthropicContext {
+    state: Arc<service_v2::State>,
+    template: Option<RequestTemplate>,
+    routing_headers: HeaderMap,
+    request_id: String,
+    carrier: DynamoInvocationCarrier,
+}
+
+fn filtered_routing_headers(headers: &HeaderMap) -> HeaderMap {
+    const ROUTING_HEADERS: [&str; 11] = [
+        HEADER_WORKER_INSTANCE_ID,
+        HEADER_WORKER_INSTANCE_ID_ALIAS,
+        HEADER_PREFILL_INSTANCE_ID,
+        HEADER_PREFILL_INSTANCE_ID_ALIAS,
+        HEADER_DP_RANK,
+        HEADER_DP_RANK_ALIAS,
+        HEADER_DATA_PARALLEL_RANK_ALIAS,
+        HEADER_PREFILL_DP_RANK,
+        HEADER_PREFILL_DP_RANK_ALIAS,
+        HEADER_REQUEST_PRIORITY,
+        HEADER_REQUEST_STRICT_PRIORITY,
+    ];
+    let mut filtered = HeaderMap::new();
+    for name in ROUTING_HEADERS {
+        if let Some(value) = headers.get(name) {
+            filtered.insert(name, value.clone());
+        }
+    }
+    if let Some(value) = headers.get(HEADER_TENANT_ID) {
+        filtered.insert(HEADER_TENANT_ID, value.clone());
+    }
+    filtered
 }
 
 impl DynamoResponsesContext {
@@ -777,6 +977,489 @@ pub(super) async fn handle_responses(
     Ok(axum::Json(response).into_response())
 }
 
+pub(super) async fn handle_anthropic(
+    state: Arc<service_v2::State>,
+    template: Option<RequestTemplate>,
+    headers: HeaderMap,
+    request: AnthropicCreateMessageRequest,
+) -> Result<Response, Response> {
+    let streaming = request.stream;
+    let request_id = openai::get_or_create_request_id(&headers);
+    let carrier = DynamoInvocationCarrier::from_headers(&headers).map_err(|error| {
+        anthropic::anthropic_error(
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            "invalid_request_error",
+            &error.to_string(),
+        )
+    })?;
+    let idempotency_key = header_value(&headers, "idempotency-key")
+        .or_else(|| header_value(&headers, "x-idempotency-key"))
+        .unwrap_or_else(|| request_id.clone());
+    let authorization = ingress_authorization(&headers).map_err(openai_error_to_anthropic)?;
+    let agent_runtime = state.anthropic_agent_runtime();
+    let stage_runtime_tool_rounds = streaming && agent_runtime.request_uses_runtime_tools(&request);
+    let invocation_context = DynamoAnthropicContext {
+        state: state.clone(),
+        template,
+        routing_headers: filtered_routing_headers(&headers),
+        request_id,
+        carrier,
+    };
+    let command = RunTurn {
+        request,
+        parent_response_id: None,
+        authorization,
+        idempotency_key: IdempotencyKey::from(idempotency_key),
+        invocation_context,
+        inference_intent: InferenceIntent {
+            step_kind: ModelStepKind::Initial,
+        },
+        lease_duration_millis: 120_000,
+    };
+
+    if streaming {
+        let stream_interpreter = if stage_runtime_tool_rounds {
+            AnthropicStreamEventInterpreter::stage_runtime_tool_rounds()
+        } else {
+            AnthropicStreamEventInterpreter::default()
+        };
+        let result = agent_runtime
+            .runtime
+            .clone()
+            .run_stream_with_tools(
+                command,
+                stream_interpreter,
+                agent_runtime.tool_adapter.clone(),
+                agent_runtime.tool_runner.clone(),
+            )
+            .await
+            .map_err(anthropic_tool_stream_error_response)?;
+        let stream: AgentAnthropicStream = match result {
+            RunStreamResult::Live(stream) => {
+                Box::pin(stream.map(|event| event.map_err(axum::Error::new)))
+            }
+            RunStreamResult::Existing(record) => {
+                let response =
+                    existing_anthropic_response(record).map_err(anthropic_replay_error_response)?;
+                Box::pin(stream::iter(
+                    committed_anthropic_events(response).into_iter().map(Ok),
+                ))
+            }
+        };
+        return Ok(anthropic_sse_response(stream, state.sse_keep_alive()));
+    }
+
+    let result = agent_runtime
+        .runtime
+        .run_unary_with_tools(
+            command,
+            agent_runtime.tool_adapter.as_ref(),
+            agent_runtime.tool_runner.as_ref(),
+        )
+        .await
+        .map_err(anthropic_tool_error_response)?;
+    let response = match result {
+        RunTurnResult::Committed { record, .. } => record.response.ok_or_else(|| {
+            anthropic_public_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Agent runtime committed a turn without a response",
+                "missing committed Anthropic response",
+            )
+        })?,
+        RunTurnResult::Existing(record) => {
+            existing_anthropic_response(record).map_err(anthropic_replay_error_response)?
+        }
+    };
+    Ok(axum::Json(response).into_response())
+}
+
+fn openai_error_to_anthropic(error: openai::ErrorResponse) -> Response {
+    anthropic::anthropic_error(error.0, "api_error", error.1.message())
+}
+
+fn existing_anthropic_response(
+    record: Box<dynamo_agent_rt::CheckpointRecord<AnthropicMessages>>,
+) -> Result<AnthropicMessageResponse, (StatusCode, &'static str, &'static str)> {
+    match record.state {
+        TurnState::Completed | TurnState::AwaitingClientToolOutput => record.response.ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Agent runtime replayable turn has no response",
+            "missing replayable Anthropic response",
+        )),
+        TurnState::InFlight | TurnState::ToolStarted => Err((
+            StatusCode::CONFLICT,
+            "Agent runtime turn is still in progress",
+            "active Anthropic turn replay",
+        )),
+        TurnState::OutcomeUnknown => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Agent runtime turn outcome is unknown",
+            "Anthropic turn outcome unknown",
+        )),
+        TurnState::Failed => Err((
+            StatusCode::CONFLICT,
+            "Agent runtime turn previously failed",
+            "failed Anthropic turn replay",
+        )),
+    }
+}
+
+fn anthropic_replay_error_response(
+    (status, message, details): (StatusCode, &'static str, &'static str),
+) -> Response {
+    anthropic_public_error(status, message, details)
+}
+
+type AgentAnthropicStream =
+    Pin<Box<dyn Stream<Item = Result<AnthropicStreamEvent, axum::Error>> + Send>>;
+
+fn anthropic_sse_response(
+    stream: AgentAnthropicStream,
+    keep_alive: Option<std::time::Duration>,
+) -> Response {
+    let stream = stream.map(|event| {
+        event.and_then(|event| {
+            crate::protocols::anthropic::stream_converter::make_sse_event(&event)
+                .map_err(axum::Error::new)
+        })
+    });
+    let mut response = Sse::new(stream);
+    if let Some(keep_alive) = keep_alive {
+        response = response.keep_alive(KeepAlive::default().interval(keep_alive));
+    }
+    response.into_response()
+}
+
+fn committed_anthropic_events(response: AnthropicMessageResponse) -> Vec<AnthropicStreamEvent> {
+    let mut initial = response.clone();
+    initial.content.clear();
+    initial.stop_reason = None;
+    initial.stop_sequence = None;
+    initial.usage.output_tokens = 0;
+    let mut events = Vec::with_capacity(response.content.len().saturating_mul(3) + 3);
+    events.push(AnthropicStreamEvent::MessageStart { message: initial });
+    for (index, block) in response.content.iter().enumerate() {
+        let index = index as u32;
+        match block {
+            AnthropicResponseContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
+                events.push(AnthropicStreamEvent::ContentBlockStart {
+                    index,
+                    content_block: AnthropicResponseContentBlock::Thinking {
+                        thinking: String::new(),
+                        signature: String::new(),
+                    },
+                });
+                if !thinking.is_empty() {
+                    events.push(AnthropicStreamEvent::ContentBlockDelta {
+                        index,
+                        delta: AnthropicDelta::ThinkingDelta {
+                            thinking: thinking.clone(),
+                        },
+                        usage: Some(response.usage.clone()),
+                    });
+                }
+                if !signature.is_empty() {
+                    events.push(AnthropicStreamEvent::ContentBlockDelta {
+                        index,
+                        delta: AnthropicDelta::SignatureDelta {
+                            signature: signature.clone(),
+                        },
+                        usage: Some(response.usage.clone()),
+                    });
+                }
+            }
+            AnthropicResponseContentBlock::Text { text, citations } => {
+                events.push(AnthropicStreamEvent::ContentBlockStart {
+                    index,
+                    content_block: AnthropicResponseContentBlock::Text {
+                        text: String::new(),
+                        citations: None,
+                    },
+                });
+                if !text.is_empty() {
+                    events.push(AnthropicStreamEvent::ContentBlockDelta {
+                        index,
+                        delta: AnthropicDelta::TextDelta { text: text.clone() },
+                        usage: Some(response.usage.clone()),
+                    });
+                }
+                for citation in citations.iter().flatten() {
+                    events.push(AnthropicStreamEvent::ContentBlockDelta {
+                        index,
+                        delta: AnthropicDelta::CitationsDelta {
+                            citation: citation.clone(),
+                        },
+                        usage: Some(response.usage.clone()),
+                    });
+                }
+            }
+            AnthropicResponseContentBlock::ToolUse { id, name, input } => {
+                events.push(AnthropicStreamEvent::ContentBlockStart {
+                    index,
+                    content_block: AnthropicResponseContentBlock::ToolUse {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: serde_json::json!({}),
+                    },
+                });
+                events.push(AnthropicStreamEvent::ContentBlockDelta {
+                    index,
+                    delta: AnthropicDelta::InputJsonDelta {
+                        partial_json: input.to_string(),
+                    },
+                    usage: Some(response.usage.clone()),
+                });
+            }
+            block => events.push(AnthropicStreamEvent::ContentBlockStart {
+                index,
+                content_block: block.clone(),
+            }),
+        }
+        events.push(AnthropicStreamEvent::ContentBlockStop { index });
+    }
+    events.push(AnthropicStreamEvent::MessageDelta {
+        delta: AnthropicMessageDeltaBody {
+            stop_reason: response.stop_reason.clone(),
+            stop_sequence: response.stop_sequence.clone(),
+        },
+        usage: response.usage,
+    });
+    events.push(AnthropicStreamEvent::MessageStop {});
+    events
+}
+
+fn anthropic_tool_stream_error_response(error: AnthropicToolStreamRuntimeError) -> Response {
+    match error {
+        AgentToolRuntimeError::Runtime(error) => anthropic_stream_runtime_error_response(error),
+        AgentToolRuntimeError::Adapter {
+            error,
+            checkpoint_error: _,
+        } => match error {},
+        AgentToolRuntimeError::ToolBatch {
+            errors,
+            checkpoint_error,
+            ..
+        } => anthropic_public_error(
+            checkpoint_failure_status(
+                &checkpoint_error,
+                errors
+                    .iter()
+                    .map(tool_run_error_status)
+                    .max_by_key(|status| status_severity(*status))
+                    .unwrap_or(StatusCode::BAD_GATEWAY),
+            ),
+            "Server-side tool execution failed",
+            "Anthropic server-side tool batch failed",
+        ),
+        AgentToolRuntimeError::MissingCalls { checkpoint_error } => anthropic_public_error(
+            checkpoint_failure_status(&checkpoint_error, StatusCode::INTERNAL_SERVER_ERROR),
+            "Agent runtime could not resolve the server-tool call",
+            "Anthropic runtime tool calls missing",
+        ),
+        AgentToolRuntimeError::ToolRoundLimit {
+            checkpoint_error, ..
+        }
+        | AgentToolRuntimeError::ParallelToolLimit {
+            checkpoint_error, ..
+        } => anthropic_public_error(
+            checkpoint_failure_status(&checkpoint_error, StatusCode::BAD_GATEWAY),
+            "Server-side tool execution exceeded deployment limits",
+            "Anthropic runtime tool limit exceeded",
+        ),
+        AgentToolRuntimeError::MissingLease | AgentToolRuntimeError::MissingResponse => {
+            anthropic_public_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Agent runtime lost server-tool turn state",
+                "Anthropic runtime tool state missing",
+            )
+        }
+    }
+}
+
+fn anthropic_tool_error_response(error: AnthropicToolRuntimeError) -> Response {
+    match error {
+        AgentToolRuntimeError::Runtime(error) => anthropic_runtime_error_response(error),
+        AgentToolRuntimeError::Adapter {
+            error,
+            checkpoint_error: _,
+        } => match error {},
+        AgentToolRuntimeError::ToolBatch {
+            errors,
+            checkpoint_error,
+            ..
+        } => anthropic_public_error(
+            checkpoint_failure_status(
+                &checkpoint_error,
+                errors
+                    .iter()
+                    .map(tool_run_error_status)
+                    .max_by_key(|status| status_severity(*status))
+                    .unwrap_or(StatusCode::BAD_GATEWAY),
+            ),
+            "Server-side tool execution failed",
+            "Anthropic server-side tool batch failed",
+        ),
+        AgentToolRuntimeError::MissingCalls { checkpoint_error } => anthropic_public_error(
+            checkpoint_failure_status(&checkpoint_error, StatusCode::INTERNAL_SERVER_ERROR),
+            "Agent runtime could not resolve the server-tool call",
+            "Anthropic runtime tool calls missing",
+        ),
+        AgentToolRuntimeError::ToolRoundLimit {
+            checkpoint_error, ..
+        }
+        | AgentToolRuntimeError::ParallelToolLimit {
+            checkpoint_error, ..
+        } => anthropic_public_error(
+            checkpoint_failure_status(&checkpoint_error, StatusCode::BAD_GATEWAY),
+            "Server-side tool execution exceeded deployment limits",
+            "Anthropic runtime tool limit exceeded",
+        ),
+        AgentToolRuntimeError::MissingLease | AgentToolRuntimeError::MissingResponse => {
+            anthropic_public_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Agent runtime lost server-tool turn state",
+                "Anthropic runtime tool state missing",
+            )
+        }
+    }
+}
+
+fn anthropic_stream_runtime_error_response(error: AnthropicStreamRuntimeError) -> Response {
+    match error {
+        AgentStreamRuntimeError::Runtime(error) => anthropic_runtime_error_response(error),
+        AgentStreamRuntimeError::ExpectedStreaming { checkpoint_error } => anthropic_public_error(
+            checkpoint_failure_status(&checkpoint_error, StatusCode::BAD_GATEWAY),
+            "Inference backend did not return a response stream",
+            "Anthropic inference returned unary output for a streaming request",
+        ),
+        AgentStreamRuntimeError::Interpreter {
+            error,
+            checkpoint_error,
+        } => anthropic_public_error(
+            checkpoint_failure_status(&checkpoint_error, StatusCode::BAD_GATEWAY),
+            "Inference backend returned an invalid Anthropic stream",
+            error,
+        ),
+        AgentStreamRuntimeError::StagedEventEncoding {
+            error,
+            checkpoint_error,
+        } => anthropic_public_error(
+            checkpoint_failure_status(&checkpoint_error, StatusCode::BAD_GATEWAY),
+            "Inference backend returned an invalid stream event",
+            error,
+        ),
+        AgentStreamRuntimeError::StagedEventLimit {
+            limit_bytes,
+            checkpoint_error,
+        } => anthropic_public_error(
+            checkpoint_failure_status(&checkpoint_error, StatusCode::BAD_GATEWAY),
+            "Inference stream exceeded the runtime staging limit",
+            format_args!("staged Anthropic stream exceeded {limit_bytes} bytes"),
+        ),
+        AgentStreamRuntimeError::MissingTerminal { checkpoint_error } => anthropic_public_error(
+            checkpoint_failure_status(&checkpoint_error, StatusCode::BAD_GATEWAY),
+            "Inference stream ended without a terminal response",
+            "Anthropic stream ended before message_stop",
+        ),
+    }
+}
+
+fn anthropic_runtime_error_response(error: AnthropicRuntimeError) -> Response {
+    match error {
+        AgentRuntimeError::Store(error) => {
+            let response = store_error_response(error);
+            openai_error_to_anthropic(response)
+        }
+        AgentRuntimeError::Materialize(error) => anthropic_public_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Agent runtime could not materialize the Anthropic turn",
+            error,
+        ),
+        AgentRuntimeError::Fingerprint(error) => anthropic_public_error(
+            StatusCode::BAD_REQUEST,
+            "Request could not be fingerprinted",
+            error,
+        ),
+        AgentRuntimeError::LeaseDeadlineOverflow => anthropic_public_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Agent runtime could not create the turn",
+            "lease deadline overflow",
+        ),
+        AgentRuntimeError::Inference {
+            error,
+            checkpoint_error,
+        } => {
+            if checkpoint_error.is_some() {
+                return anthropic_public_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Agent runtime could not durably record the failed turn",
+                    format_args!(
+                        "Anthropic inference failed: {error}; failed-state commit: {checkpoint_error:?}"
+                    ),
+                );
+            }
+            anthropic_invocation_error_response(error)
+        }
+        AgentRuntimeError::StreamingUnsupported { checkpoint_error } => anthropic_public_error(
+            checkpoint_failure_status(&checkpoint_error, StatusCode::BAD_GATEWAY),
+            "Inference backend returned an incompatible response",
+            "Anthropic unary runtime received streaming output",
+        ),
+        AgentRuntimeError::Output {
+            error,
+            checkpoint_error,
+        } => anthropic_public_error(
+            checkpoint_failure_status(&checkpoint_error, StatusCode::BAD_GATEWAY),
+            "Inference backend returned an invalid response",
+            error,
+        ),
+        AgentRuntimeError::InvalidOutputState {
+            state,
+            checkpoint_error,
+        } => anthropic_public_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Agent runtime produced an invalid turn transition",
+            format_args!(
+                "invalid Anthropic output state {state:?}; failed-state commit: {checkpoint_error:?}"
+            ),
+        ),
+    }
+}
+
+fn anthropic_invocation_error_response(error: DynamoAnthropicInvocationError) -> Response {
+    match error {
+        DynamoAnthropicInvocationError::Dynamo { status, message } => {
+            anthropic_public_error(status, &message, "Dynamo Anthropic invocation failed")
+        }
+        DynamoAnthropicInvocationError::Body(error) => anthropic_public_error(
+            StatusCode::BAD_GATEWAY,
+            "Failed to read the inference backend response",
+            error,
+        ),
+        DynamoAnthropicInvocationError::Decode(error) => anthropic_public_error(
+            StatusCode::BAD_GATEWAY,
+            "Inference backend returned an invalid response",
+            error,
+        ),
+    }
+}
+
+fn anthropic_public_error(
+    status: StatusCode,
+    public_message: &str,
+    details: impl std::fmt::Display,
+) -> Response {
+    if status.is_server_error() {
+        tracing::error!(%status, %details, "Anthropic agent runtime request failed");
+    } else {
+        tracing::debug!(%status, %details, "Anthropic agent runtime request rejected");
+    }
+    anthropic::anthropic_error(status, "api_error", public_message)
+}
+
 fn existing_response(
     record: Box<dynamo_agent_rt::CheckpointRecord<OpenAiResponses>>,
 ) -> Result<dynamo_protocols::types::responses::Response, openai::ErrorResponse> {
@@ -826,7 +1509,7 @@ fn tool_error_response<R>(
     error: AgentToolRuntimeError<
         R,
         ResponsesToolAdapterError,
-        ResponsesToolRunError,
+        RuntimeToolRunError,
         DuckDbStoreError,
     >,
     runtime_error: impl FnOnce(R) -> openai::ErrorResponse,
@@ -890,7 +1573,7 @@ fn checkpoint_failure_status(
     }
 }
 
-fn tool_run_error_status(error: &ResponsesToolRunError) -> StatusCode {
+fn tool_run_error_status(error: &RuntimeToolRunError) -> StatusCode {
     match error {
         ToolRunError::UnauthorizedConnector(_) => StatusCode::FORBIDDEN,
         ToolRunError::Journal(_)
@@ -928,11 +1611,11 @@ fn tool_run_error_status(error: &ResponsesToolRunError) -> StatusCode {
     }
 }
 
-fn tool_executor_error_status(error: &ResponsesToolExecutorError) -> StatusCode {
+fn tool_executor_error_status(error: &RuntimeToolExecutorError) -> StatusCode {
     match error {
-        ResponsesToolExecutorError::WebSearch(error) => web_search_error_status(error),
-        ResponsesToolExecutorError::Sandbox(error) => sandbox_error_status(error),
-        ResponsesToolExecutorError::UnsupportedConnector(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        RuntimeToolExecutorError::WebSearch(error) => web_search_error_status(error),
+        RuntimeToolExecutorError::Sandbox(error) => sandbox_error_status(error),
+        RuntimeToolExecutorError::UnsupportedConnector(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
@@ -1279,11 +1962,16 @@ mod tests {
     use axum::http::{HeaderMap, StatusCode};
 
     use dynamo_agent_rt::{
-        AgentRuntimeError, AuthorizationScope, CheckpointRecord, CheckpointVersion,
-        ConfiguredToolRouter, IdempotencyKey, MaterializationError, RequestFingerprint, ResponseId,
-        ToolRoute, ToolRouter, TurnState,
+        AgentRuntimeError, AnthropicStreamEventInterpreter, AuthorizationScope, CheckpointRecord,
+        CheckpointVersion, ConfiguredToolRouter, IdempotencyKey, MaterializationError,
+        ModelStepKind, OutputIdentity, RequestFingerprint, ResponseId, StreamEventAction,
+        StreamEventInterpreter, ToolRoute, ToolRouter, TurnState,
     };
     use dynamo_agent_rt_store::{DuckDbStoreError, StoreInvariantError};
+    use dynamo_protocols::types::anthropic::{
+        AnthropicCreateMessageRequest, AnthropicResponseContentBlock, AnthropicStopReason,
+        AnthropicStreamEvent, AnthropicUsage,
+    };
     use dynamo_protocols::types::responses::CreateResponse;
     use futures::stream;
 
@@ -1295,12 +1983,14 @@ mod tests {
     use crate::protocols::openai::responses::stream_converter::ResponseEventSerializer;
 
     use super::{
-        AUTH_HEADER, AUTH_MODE_ENV, AgentRuntimeAuthConfig, DynamoInvocationCarrier,
-        DynamoResponsesInvocationError, IngressAuthorizationError, LOCAL_PRINCIPAL_ENV,
-        LOCAL_TENANT_ENV, PERMITTED_CONNECTORS_ENV, PRINCIPAL_HEADER, ResponsesRuntimeError,
-        TENANT_HEADER, TRUSTED_PROXY_TOKEN_ENV, committed_response_events, existing_response,
-        request_uses_runtime_tools, runtime_error_response, sandbox_components_from_config,
-        sse_response, web_search_components_from_config,
+        AUTH_HEADER, AUTH_MODE_ENV, AgentRuntimeAuthConfig, AnthropicStore,
+        DynamoInvocationCarrier, DynamoResponsesInvocationError, IngressAuthorizationError,
+        LOCAL_PRINCIPAL_ENV, LOCAL_TENANT_ENV, PERMITTED_CONNECTORS_ENV, PRINCIPAL_HEADER,
+        ResponsesRuntimeError, ResponsesStore, TENANT_HEADER, TRUSTED_PROXY_TOKEN_ENV,
+        anthropic_request_requires_runtime, committed_anthropic_events, committed_response_events,
+        existing_response, filtered_routing_headers, request_uses_runtime_tools,
+        runtime_error_response, sandbox_components_from_config, sse_response,
+        web_search_components_from_config,
     };
 
     #[test]
@@ -1329,6 +2019,124 @@ mod tests {
             &CreateResponse::default(),
             &router
         ));
+    }
+
+    #[test]
+    fn anthropic_runtime_selection_preserves_client_tool_passthrough() {
+        let router =
+            ConfiguredToolRouter::new([("web".to_owned(), ToolRoute::new("web_search", "search"))]);
+        let request = |tool_name: &str| -> AnthropicCreateMessageRequest {
+            serde_json::from_value(serde_json::json!({
+                "model": "model",
+                "max_tokens": 128,
+                "messages": [{"role": "user", "content": "hello"}],
+                "tools": [{
+                    "name": tool_name,
+                    "description": "test",
+                    "input_schema": {"type": "object"}
+                }]
+            }))
+            .unwrap()
+        };
+
+        assert!(!anthropic_request_requires_runtime(
+            &request("client_shell"),
+            &router,
+            false
+        ));
+        assert!(anthropic_request_requires_runtime(
+            &request("web"),
+            &router,
+            false
+        ));
+        assert!(anthropic_request_requires_runtime(
+            &request("client_shell"),
+            &router,
+            true
+        ));
+    }
+
+    #[test]
+    fn anthropic_replay_stream_reconstructs_the_committed_response() {
+        let response = dynamo_protocols::types::anthropic::AnthropicMessageResponse {
+            id: "msg_public".to_owned(),
+            object_type: "message".to_owned(),
+            role: "assistant".to_owned(),
+            content: vec![
+                AnthropicResponseContentBlock::Text {
+                    text: "hello".to_owned(),
+                    citations: None,
+                },
+                AnthropicResponseContentBlock::ToolUse {
+                    id: "tool_1".to_owned(),
+                    name: "client_shell".to_owned(),
+                    input: serde_json::json!({"command": "pwd"}),
+                },
+            ],
+            model: "model".to_owned(),
+            stop_reason: Some(AnthropicStopReason::ToolUse),
+            stop_sequence: None,
+            usage: AnthropicUsage {
+                input_tokens: 5,
+                output_tokens: 3,
+                ..Default::default()
+            },
+        };
+        let events = committed_anthropic_events(response.clone());
+        assert!(
+            matches!(events.first(), Some(AnthropicStreamEvent::MessageStart { message }) if message.id == "msg_public")
+        );
+        assert!(matches!(
+            events.last(),
+            Some(AnthropicStreamEvent::MessageStop {})
+        ));
+
+        let identity = OutputIdentity {
+            response_id: ResponseId::from("msg_public"),
+            parent_response_id: None,
+        };
+        let mut interpreter = AnthropicStreamEventInterpreter::default();
+        interpreter.begin_step(ModelStepKind::Initial);
+        let mut reconstructed = None;
+        for event in events {
+            if let StreamEventAction::Terminal { response, .. } =
+                interpreter.observe(event, &identity).unwrap()
+            {
+                reconstructed = Some(response);
+            }
+        }
+        let reconstructed = reconstructed.expect("message_stop reconstructs the response");
+        assert_eq!(
+            serde_json::to_value(reconstructed).unwrap(),
+            serde_json::to_value(response).unwrap()
+        );
+    }
+
+    #[test]
+    fn anthropic_internal_steps_receive_only_routing_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer secret".parse().unwrap());
+        headers.insert("x-dynamo-agent-rt-auth", "runtime-secret".parse().unwrap());
+        headers.insert("x-dynamo-tenant-id", "tenant-auth".parse().unwrap());
+        headers.insert("x-tenant-id", "tenant-cache-salt".parse().unwrap());
+        headers.insert("x-dynamo-request-priority", "7".parse().unwrap());
+
+        let filtered = filtered_routing_headers(&headers);
+        assert_eq!(filtered["x-tenant-id"], "tenant-cache-salt");
+        assert_eq!(filtered["x-dynamo-request-priority"], "7");
+        assert!(!filtered.contains_key("authorization"));
+        assert!(!filtered.contains_key("x-dynamo-agent-rt-auth"));
+        assert!(!filtered.contains_key("x-dynamo-tenant-id"));
+    }
+
+    #[test]
+    fn duckdb_file_can_host_responses_and_anthropic_protocols() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("agent-runtime.duckdb");
+        let responses = ResponsesStore::open(&path).expect("open Responses store");
+        let anthropic = AnthropicStore::open(&path).expect("open Anthropic store");
+        drop(anthropic);
+        drop(responses);
     }
 
     #[test]
@@ -1752,6 +2560,123 @@ impl InferenceInvoker<OpenAiResponses> for DynamoResponsesInvoker {
             let body = to_bytes(response.into_body(), openai::get_body_limit()).await?;
             let response: NvResponse = serde_json::from_slice(&body)?;
             Ok(InferenceOutput::Unary(Box::new(response.inner)))
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct DynamoAnthropicInvoker;
+
+#[derive(Debug, Error)]
+pub(super) enum DynamoAnthropicInvocationError {
+    #[error("Dynamo Anthropic invocation failed ({status}): {message}")]
+    Dynamo { status: StatusCode, message: String },
+    #[error("failed to read Dynamo Anthropic body: {0}")]
+    Body(#[from] axum::Error),
+    #[error("failed to decode Dynamo Anthropic body: {0}")]
+    Decode(#[from] serde_json::Error),
+}
+
+async fn anthropic_invocation_error(response: Response) -> DynamoAnthropicInvocationError {
+    let status = response.status();
+    let message = match to_bytes(response.into_body(), openai::get_body_limit()).await {
+        Ok(body) => serde_json::from_slice::<AnthropicErrorResponse>(&body)
+            .map(|error| error.error.message)
+            .unwrap_or_else(|_| "Dynamo Anthropic invocation failed".to_owned()),
+        Err(error) => {
+            tracing::error!(%status, error = %error, "failed to read Dynamo Anthropic error body");
+            "Dynamo Anthropic invocation failed".to_owned()
+        }
+    };
+    DynamoAnthropicInvocationError::Dynamo { status, message }
+}
+
+impl InferenceInvoker<AnthropicMessages> for DynamoAnthropicInvoker {
+    type Context = DynamoAnthropicContext;
+    type Error = DynamoAnthropicInvocationError;
+
+    fn invoke<'a>(
+        &'a self,
+        request: &'a InferenceRequest<AnthropicMessages, Self::Context>,
+    ) -> InferenceFuture<'a, AnthropicMessages, Self::Error> {
+        Box::pin(async move {
+            let inner = request.request.clone();
+            let streaming = inner.stream;
+            let model =
+                resolve_request_model(&inner.model, request.context.template.as_ref()).to_owned();
+            let pipeline_request = request
+                .context
+                .carrier
+                .anthropic_context(inner, request.context.request_id.clone());
+            let engine_context = pipeline_request.context();
+            let metric_model = request
+                .context
+                .state
+                .manager()
+                .metric_model_for(&model)
+                .to_owned();
+            let inflight_guard = request.context.state.metrics_clone().create_inflight_guard(
+                &metric_model,
+                Endpoint::AnthropicMessages,
+                streaming,
+                &request.context.request_id,
+            );
+            let labels = CancellationLabels {
+                model: metric_model,
+                endpoint: Endpoint::AnthropicMessages.to_string(),
+                request_type: if streaming {
+                    "agent_runtime_stream"
+                } else {
+                    "agent_runtime_unary"
+                }
+                .to_owned(),
+            };
+            let (mut connection_handle, stream_handle) = create_connection_monitor(
+                engine_context,
+                Some(request.context.state.metrics_clone()),
+                labels,
+            )
+            .await;
+
+            if streaming {
+                let stream = match anthropic::anthropic_messages_native_stream(
+                    request.context.state.clone(),
+                    request.context.template.clone(),
+                    pipeline_request,
+                    request.context.routing_headers.clone(),
+                    stream_handle,
+                    inflight_guard,
+                )
+                .await
+                {
+                    Ok(stream) => stream,
+                    Err(response) => return Err(anthropic_invocation_error(response).await),
+                };
+                connection_handle.disarm();
+                return Ok(InferenceOutput::Streaming(Box::pin(stream.map(Ok))));
+            }
+
+            let response = match anthropic::anthropic_messages(
+                request.context.state.clone(),
+                request.context.template.clone(),
+                pipeline_request,
+                request.context.routing_headers.clone(),
+                stream_handle,
+                inflight_guard,
+            )
+            .await
+            {
+                Ok(response) => response,
+                Err(response) => return Err(anthropic_invocation_error(response).await),
+            };
+            connection_handle.disarm();
+
+            if !response.status().is_success() {
+                return Err(anthropic_invocation_error(response).await);
+            }
+            let body = to_bytes(response.into_body(), openai::get_body_limit()).await?;
+            let response: AnthropicMessageResponse = serde_json::from_slice(&body)?;
+            Ok(InferenceOutput::Unary(Box::new(response)))
         })
     }
 }
