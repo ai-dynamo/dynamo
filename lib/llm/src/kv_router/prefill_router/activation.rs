@@ -25,7 +25,7 @@ use super::{PrefillBinding, PrefillBuildContext, PrefillLifecycleState, PrefillR
 use crate::{
     discovery::{LoadThresholdHandle, ModelManager},
     kv_router::{
-        KvRouter, RouterLoadSource, RoutingHost, TypedRoutingGraph, WorkerSelectorFactory,
+        KvRouter, RouterLoadSource, RoutingHost, RoutingLoadContext, WorkerSelectorFactory,
     },
     local_model::runtime_config::ModelRuntimeConfig,
     model_card::ModelDeploymentCard,
@@ -315,7 +315,7 @@ where
         let prefill_session_affinity_ttl = advertisement
             .session_affinity_ttl
             .unwrap_or(context.session_affinity_ttl);
-        let graph = TypedRoutingGraph::start(
+        let load_context = RoutingLoadContext::start(
             client.clone(),
             RouterLoadSource::Prefill,
             context.load_thresholds.clone(),
@@ -373,8 +373,8 @@ where
                     WORKER_TYPE_PREFILL,
                     Some(context.model_name.clone()),
                     advertisement.is_eagle,
-                    graph.scheduler_load_sender(),
-                    graph.cancellation_token(),
+                    load_context.scheduler_load_sender(),
+                    load_context.cancellation_token(),
                 )
                 .await?;
 
@@ -389,10 +389,10 @@ where
             )
             .await?;
 
-            Arc::new(RoutingHost::new_with_coordinator(
+            Arc::new(RoutingHost::new_with_load_context_and_coordinator(
                 push_router,
                 kv_chooser,
-                graph.clone(),
+                load_context.clone(),
                 affinity,
             ))
         } else {
@@ -411,7 +411,7 @@ where
 
             Arc::new(RoutingHost::<Sel>::new_builtin_with_coordinator(
                 push_router,
-                graph.clone(),
+                load_context.clone(),
                 affinity,
             )?)
         };

@@ -45,6 +45,7 @@ use dynamo_runtime::{
     },
     protocols::EndpointId,
     protocols::annotated::Annotated,
+    traits::DistributedRuntimeProvider,
 };
 use futures::stream;
 use tracing::Instrument;
@@ -61,8 +62,8 @@ pub mod metrics;
 pub mod prefill_router;
 pub mod publisher;
 mod route_lookup;
-pub(crate) mod routing_graph;
 mod routing_host;
+pub(crate) mod routing_load;
 pub mod scheduler;
 pub mod sequence;
 pub mod shared_cache;
@@ -73,8 +74,10 @@ pub use dynamo_kv_router::scheduling::{
 pub use encoder_router::EncoderRouter;
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
-pub use routing_graph::{KvRoutingGraph, RouterLoadSource, SchedulerLoadSender, TypedRoutingGraph};
 pub use routing_host::{KvPushRouter, RoutingHost};
+pub use routing_load::{
+    ManagedKvRouter, RouterLoadSource, RoutingLoadContext, SchedulerLoadSender,
+};
 
 use crate::{
     discovery::{KvSourceMembershipWatch, RuntimeConfigWatch},
@@ -582,8 +585,6 @@ where
         is_eagle: bool,
         shared_cache: Option<Box<dyn SharedKvCache>>,
         lora_filter: Option<Arc<crate::lora::LoraFilter>>,
-        scheduler_load: SchedulerLoadSender,
-        cancellation_token: CancellationToken,
     ) -> Result<Self> {
         Self::new_with_worker_role(
             endpoint,
@@ -600,14 +601,54 @@ where
             is_eagle,
             shared_cache,
             lora_filter,
-            scheduler_load,
-            cancellation_token,
         )
         .await
     }
 
     #[allow(clippy::too_many_arguments)]
     pub async fn new_with_worker_role(
+        endpoint: Endpoint,
+        client: Client,
+        workers_with_configs: RuntimeConfigWatch,
+        kv_source_membership: Option<KvSourceMembershipWatch>,
+        block_size: u32,
+        selector: Sel,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_role: Option<WorkerType>,
+        metric_worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+        shared_cache: Option<Box<dyn SharedKvCache>>,
+        lora_filter: Option<Arc<crate::lora::LoraFilter>>,
+    ) -> Result<Self> {
+        let source = RouterLoadSource::from_worker_role_or_metric(worker_role, metric_worker_type);
+        let parent_token = endpoint.component().drt().child_token();
+        let scheduler_load = SchedulerLoadSender::disabled(source, parent_token.child_token());
+
+        Self::new_with_worker_role_and_scheduler_load(
+            endpoint,
+            client,
+            workers_with_configs,
+            kv_source_membership,
+            block_size,
+            selector,
+            kv_router_config,
+            prefill_load_estimator,
+            worker_role,
+            metric_worker_type,
+            model_name,
+            is_eagle,
+            shared_cache,
+            lora_filter,
+            scheduler_load,
+            parent_token,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn new_with_worker_role_and_scheduler_load(
         endpoint: Endpoint,
         client: Client,
         workers_with_configs: RuntimeConfigWatch,
@@ -648,7 +689,7 @@ where
                     | KvEventSourceRequirement::Unknown
             );
         let component = endpoint.component();
-        // All chooser tasks are children of the typed routing graph owner.
+        // All chooser tasks are children of the routing load context owner.
         let cancellation_token = parent_token.child_token();
         let cancellation_guard = cancellation_token.clone().drop_guard();
         let min_initial_workers = min_initial_workers_from_env()?;
@@ -2062,10 +2103,6 @@ mod tests {
     use crate::kv_router::scheduler::KvSchedulerError;
     use crate::local_model::runtime_config::ModelRuntimeConfig;
 
-    fn scheduler_load_sender() -> SchedulerLoadSender {
-        routing_graph::scheduler_load_channel(RouterLoadSource::Decode, CancellationToken::new()).0
-    }
-
     #[test]
     fn all_filtered_workers_map_to_unavailable() {
         let error = map_scheduler_error(KvSchedulerError::AllEligibleWorkersFiltered);
@@ -2389,8 +2426,6 @@ mod tests {
             false,
             None,
             None,
-            scheduler_load_sender(),
-            CancellationToken::new(),
         )
         .await
     }
@@ -2443,8 +2478,6 @@ mod tests {
                 should_error: false,
             })),
             None,
-            scheduler_load_sender(),
-            CancellationToken::new(),
         )
         .await
         .unwrap();
@@ -2499,8 +2532,6 @@ mod tests {
             false,
             shared_cache,
             None,
-            scheduler_load_sender(),
-            CancellationToken::new(),
         )
         .await
         .unwrap()

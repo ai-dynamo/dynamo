@@ -45,15 +45,16 @@ use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
 
+use llm_rs::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use llm_rs::kv_router::RoutingHost;
 #[cfg(not(feature = "custom-policy"))]
 type RsRoutingHost = RoutingHost;
 #[cfg(feature = "custom-policy")]
 type RsRoutingHost = RoutingHost<WorkerSelectionPolicy>;
 #[cfg(not(feature = "custom-policy"))]
-type RsKvRoutingGraph = llm_rs::kv_router::KvRoutingGraph;
+type RsManagedKvRouter = llm_rs::kv_router::ManagedKvRouter;
 #[cfg(feature = "custom-policy")]
-type RsKvRoutingGraph = llm_rs::kv_router::KvRoutingGraph<WorkerSelectionPolicy>;
+type RsManagedKvRouter = llm_rs::kv_router::ManagedKvRouter<WorkerSelectionPolicy>;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
@@ -64,6 +65,48 @@ use super::entrypoint::AicPerfConfig;
 mod demand_driven;
 
 const MAX_RESPONSE_BUFFER_SIZE: usize = tokio::sync::Semaphore::MAX_PERMITS;
+
+#[pyclass(frozen)]
+#[derive(Clone, Debug)]
+pub(crate) struct LoadThresholdConfig {
+    #[pyo3(get)]
+    active_decode_blocks_threshold: Option<f64>,
+    #[pyo3(get)]
+    active_prefill_tokens_threshold: Option<u64>,
+    #[pyo3(get)]
+    active_prefill_tokens_threshold_frac: Option<f64>,
+}
+
+#[pymethods]
+impl LoadThresholdConfig {
+    #[new]
+    #[pyo3(signature = (*, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None))]
+    fn new(
+        active_decode_blocks_threshold: Option<f64>,
+        active_prefill_tokens_threshold: Option<u64>,
+        active_prefill_tokens_threshold_frac: Option<f64>,
+    ) -> PyResult<Self> {
+        let config = Self {
+            active_decode_blocks_threshold,
+            active_prefill_tokens_threshold,
+            active_prefill_tokens_threshold_frac,
+        };
+        config.as_rust().validate().map_err(|error| {
+            PyValueError::new_err(format!("invalid load threshold config: {error}"))
+        })?;
+        Ok(config)
+    }
+}
+
+impl LoadThresholdConfig {
+    fn as_rust(&self) -> RsLoadThresholdConfig {
+        RsLoadThresholdConfig {
+            active_decode_blocks_threshold: self.active_decode_blocks_threshold,
+            active_prefill_tokens_threshold: self.active_prefill_tokens_threshold,
+            active_prefill_tokens_threshold_frac: self.active_prefill_tokens_threshold_frac,
+        }
+    }
+}
 
 #[cfg(any(feature = "slot-tracker", feature = "select-service"))]
 fn parse_nonzero_port(value: &str) -> Result<u16, String> {
@@ -1653,6 +1696,52 @@ fn advertised_and_policy_worker_roles(
 mod metric_worker_type_tests {
     use super::*;
 
+    async fn standalone_encode_router(
+        namespace: &str,
+        load_threshold_config: RsLoadThresholdConfig,
+    ) -> (RsManagedKvRouter, rs::Runtime) {
+        let runtime = rs::Runtime::from_current().unwrap();
+        let distributed = rs::DistributedRuntime::new(
+            runtime.clone(),
+            rs::distributed::DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let inner = distributed
+            .namespace(namespace.to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        inner.register_endpoint_instance().await.unwrap();
+        let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only("encode-model");
+        card.worker_type = Some(llm_rs::worker_type::WorkerType::Encode);
+        card.model_input = llm_rs::model_type::ModelInput::Tokens;
+        card.model_type = llm_rs::model_type::ModelType::Chat;
+        llm_rs::local_model::register_model_card(&inner, &card)
+            .await
+            .unwrap();
+        let client = inner.client().await.unwrap();
+        let config = KvRouterConfig {
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            ..Default::default()
+        };
+
+        let router = create_kv_router_from_endpoint(
+            &inner,
+            client,
+            16,
+            Some(config),
+            load_threshold_config,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        (router, runtime)
+    }
+
     #[test]
     fn preserves_prefill_fallback_before_discovery() {
         assert_eq!(
@@ -1683,46 +1772,71 @@ mod metric_worker_type_tests {
     }
 
     #[tokio::test]
-    async fn standalone_encode_kv_router_retains_graph_with_load_monitoring_disabled() {
-        let runtime = rs::Runtime::from_current().unwrap();
-        let distributed = rs::DistributedRuntime::new(
-            runtime.clone(),
-            rs::distributed::DistributedConfig::process_local(),
-        )
-        .await
-        .unwrap();
-        let inner = distributed
-            .namespace("python-standalone-encode".to_string())
-            .unwrap()
-            .component("workers".to_string())
-            .unwrap()
-            .endpoint("generate".to_string());
-        inner.register_endpoint_instance().await.unwrap();
-        let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only("encode-model");
-        card.worker_type = Some(llm_rs::worker_type::WorkerType::Encode);
-        card.model_input = llm_rs::model_type::ModelInput::Tokens;
-        card.model_type = llm_rs::model_type::ModelType::Chat;
-        llm_rs::local_model::register_model_card(&inner, &card)
-            .await
-            .unwrap();
-        let client = inner.client().await.unwrap();
-        let config = KvRouterConfig {
-            skip_initial_worker_wait: true,
-            use_kv_events: false,
-            ..Default::default()
-        };
-
-        let graph = create_kv_router_from_endpoint(&inner, client, 16, Some(config), None, None)
-            .await
-            .unwrap();
+    async fn standalone_encode_kv_router_retains_context_with_load_monitoring_disabled() {
+        let (router, runtime) =
+            standalone_encode_router("python-standalone-encode-default-load", Default::default())
+                .await;
 
         assert_eq!(
-            graph.owner().source(),
+            router.load_context().source(),
             llm_rs::kv_router::RouterLoadSource::Encode
         );
-        assert!(graph.owner().monitor().is_none());
-        assert!(!graph.owner().scheduler_load_sender().is_enabled());
+        assert!(router.load_context().monitor().is_none());
+        assert!(!router.load_context().scheduler_load_sender().is_enabled());
+        assert_eq!(
+            router.load_context().load_thresholds().get(),
+            RsLoadThresholdConfig::default()
+        );
         runtime.shutdown();
+    }
+
+    #[tokio::test]
+    async fn standalone_kv_router_threads_configured_load_thresholds() {
+        let thresholds = RsLoadThresholdConfig {
+            active_decode_blocks_threshold: Some(0.8),
+            active_prefill_tokens_threshold: Some(1024),
+            active_prefill_tokens_threshold_frac: Some(0.5),
+        };
+        let (router, runtime) = standalone_encode_router(
+            "python-standalone-encode-configured-load",
+            thresholds.clone(),
+        )
+        .await;
+
+        assert_eq!(router.load_context().load_thresholds().get(), thresholds);
+        runtime.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod load_threshold_config_tests {
+    use super::*;
+
+    #[test]
+    fn default_config_disables_overload_thresholds() {
+        let config = LoadThresholdConfig::new(None, None, None).unwrap();
+        assert!(!config.as_rust().is_configured());
+    }
+
+    #[test]
+    fn valid_config_preserves_all_thresholds() {
+        let config = LoadThresholdConfig::new(Some(0.75), Some(512), Some(0.5)).unwrap();
+        assert_eq!(
+            config.as_rust(),
+            RsLoadThresholdConfig {
+                active_decode_blocks_threshold: Some(0.75),
+                active_prefill_tokens_threshold: Some(512),
+                active_prefill_tokens_threshold_frac: Some(0.5),
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_config_returns_value_error() {
+        let error = LoadThresholdConfig::new(Some(1.1), None, None).unwrap_err();
+        assert!(error.to_string().contains(
+            "invalid load threshold config: active_decode_blocks_threshold must be between 0.0 and 1.0"
+        ));
     }
 }
 
@@ -1733,9 +1847,10 @@ async fn create_kv_router_from_endpoint(
     client: rs::component::Client,
     block_size: usize,
     kv_router_config: Option<KvRouterConfig>,
+    load_threshold_config: RsLoadThresholdConfig,
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
     worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
-) -> anyhow::Result<RsKvRoutingGraph> {
+) -> anyhow::Result<RsManagedKvRouter> {
     // Create ModelManager and use it to create KvRouter (ensures registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
     let endpoint_id = endpoint.id();
@@ -1847,10 +1962,10 @@ async fn create_kv_router_from_endpoint(
     #[cfg(not(feature = "custom-policy"))]
     let _ = (policy_model_name, policy_worker_role);
 
-    let graph = llm_rs::kv_router::TypedRoutingGraph::start(
+    let load_context = llm_rs::kv_router::RoutingLoadContext::start(
         client.clone(),
         load_source,
-        llm_rs::discovery::LoadThresholdHandle::new(Default::default()),
+        llm_rs::discovery::LoadThresholdHandle::new(load_threshold_config),
         &endpoint.component().drt().child_token(),
         None,
     )
@@ -1871,8 +1986,8 @@ async fn create_kv_router_from_endpoint(
             metric_worker_type,
             model_name,
             enable_eagle,
-            graph.scheduler_load_sender(),
-            graph.cancellation_token(),
+            load_context.scheduler_load_sender(),
+            load_context.cancellation_token(),
         )
         .await?;
 
@@ -1906,13 +2021,16 @@ async fn create_kv_router_from_endpoint(
                 metric_worker_type,
                 model_name,
                 enable_eagle,
-                graph.scheduler_load_sender(),
-                graph.cancellation_token(),
+                load_context.scheduler_load_sender(),
+                load_context.cancellation_token(),
             )
             .await?
     };
 
-    Ok(llm_rs::kv_router::KvRoutingGraph::new(graph, kv_router))
+    Ok(llm_rs::kv_router::ManagedKvRouter::new(
+        load_context,
+        kv_router,
+    ))
 }
 
 #[pyclass]
@@ -2052,7 +2170,7 @@ impl KvRouter {
     ///
     /// Worker role and Prometheus metric labels come from the endpoint's model card.
     #[new]
-    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None))]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None, *, load_threshold_config=None))]
     fn new(
         py: Python<'_>,
         endpoint: &Endpoint,
@@ -2060,6 +2178,7 @@ impl KvRouter {
         kv_router_config: &super::entrypoint::KvRouterConfig,
         aic_perf_config: Option<&AicPerfConfig>,
         session_affinity_ttl_secs: Option<u64>,
+        load_threshold_config: Option<&LoadThresholdConfig>,
     ) -> PyResult<Self> {
         if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
             return Err(PyValueError::new_err(
@@ -2067,6 +2186,9 @@ impl KvRouter {
             ));
         }
         let kv_router_config = kv_router_config.inner();
+        let load_threshold_config = load_threshold_config
+            .map(LoadThresholdConfig::as_rust)
+            .unwrap_or_default();
         let worker_selection_policy_factory =
             crate::worker_selection_policy_factory(&kv_router_config).map_err(to_pyerr)?;
         let prefill_load_estimator = aic_perf_config
@@ -2103,11 +2225,12 @@ impl KvRouter {
                 let client = endpoint.inner.client().await.map_err(to_pyerr)?;
 
                 // Create KvRouter using helper function (ensures etcd registration)
-                let kv_graph = create_kv_router_from_endpoint(
+                let managed_router = create_kv_router_from_endpoint(
                     &endpoint.inner,
                     client,
                     block_size,
                     Some(kv_router_config),
+                    load_threshold_config,
                     prefill_load_estimator,
                     worker_selection_policy_factory,
                 )
@@ -2120,16 +2243,16 @@ impl KvRouter {
                         llm_rs::protocols::common::llm_backend::LLMEngineOutput,
                     >,
                 >::from_client(
-                    kv_graph.owner().client().clone(),
+                    managed_router.load_context().client().clone(),
                     rs::pipeline::network::egress::push_router::RouterMode::KV,
                 )
                 .await
                 .map_err(to_pyerr)?;
 
-                let routing_host = RsRoutingHost::new(
+                let routing_host = RsRoutingHost::new_with_load_context(
                     push_router,
-                    kv_graph.router().clone(),
-                    kv_graph.owner().clone(),
+                    managed_router.router().clone(),
+                    managed_router.load_context().clone(),
                     session_affinity_ttl_secs.map(Duration::from_secs),
                 )
                 .map_err(to_pyerr)?;

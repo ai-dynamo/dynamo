@@ -528,7 +528,7 @@ mod tests {
     use tokio::time::Instant;
 
     fn scheduler_load_sender() -> SchedulerLoadSender {
-        super::super::routing_graph::scheduler_load_channel(
+        super::super::routing_load::scheduler_load_channel(
             super::super::RouterLoadSource::Decode,
             CancellationToken::new(),
         )

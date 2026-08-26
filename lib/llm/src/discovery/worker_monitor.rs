@@ -17,7 +17,7 @@ use crate::http::service::metrics::{
     WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE,
 };
 use crate::kv_router::metrics::WORKER_LOAD_METRICS;
-use crate::kv_router::routing_graph::SchedulerLoadReceiver;
+use crate::kv_router::routing_load::SchedulerLoadReceiver;
 use crate::kv_router::{KV_METRICS_SUBJECT, RouterLoadSource};
 use dynamo_runtime::component::Client;
 use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
@@ -142,7 +142,7 @@ impl LoadThresholdConfig {
     }
 }
 
-/// Shared threshold configuration for independently owned typed routing graphs.
+/// Shared threshold configuration for independently owned routing load contexts.
 #[derive(Clone)]
 pub struct LoadThresholdHandle(Arc<std::sync::RwLock<LoadThresholdConfig>>);
 

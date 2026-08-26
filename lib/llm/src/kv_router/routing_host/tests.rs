@@ -32,7 +32,7 @@ use tokio::sync::watch;
 use super::*;
 use crate::{
     http::service::metrics::Metrics,
-    kv_router::TypedRoutingGraph,
+    kv_router::RoutingLoadContext,
     local_model::runtime_config::ModelRuntimeConfig,
     lora::{LoraReplicaConfig, LoraRoutingTable, LoraStateTracker},
     migration::Migration,
@@ -50,8 +50,8 @@ fn request() -> PreprocessedRequest {
         .unwrap()
 }
 
-async fn test_graph(client: &Client) -> Arc<TypedRoutingGraph> {
-    TypedRoutingGraph::start(
+async fn test_load_context(client: &Client) -> Arc<RoutingLoadContext> {
+    RoutingLoadContext::start(
         client.clone(),
         crate::kv_router::RouterLoadSource::Aggregated,
         crate::discovery::LoadThresholdHandle::new(Default::default()),
@@ -109,11 +109,12 @@ async fn builtin_host_constructs_only_declared_capabilities() {
         .unwrap()
         .endpoint("generate".to_string());
     let client = endpoint.client().await.unwrap();
-    let graph = test_graph(&client).await;
+    let load_context = test_load_context(&client).await;
     let inner = PushRouter::from_client(client.clone(), RouterMode::RoundRobin)
         .await
         .unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, graph.clone()).unwrap();
+    let host =
+        RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context.clone()).unwrap();
 
     assert_eq!(host.required_worker_inputs(), WorkerInputs::NONE);
     assert!(host.hosted_occupancy.is_none());
@@ -125,7 +126,7 @@ async fn builtin_host_constructs_only_declared_capabilities() {
     let inner = PushRouter::from_client(client, RouterMode::PowerOfTwoChoices)
         .await
         .unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, graph).unwrap();
+    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context).unwrap();
     let RoutingPolicy::Builtin(selector) = &host.policy else {
         unreachable!()
     };
@@ -168,13 +169,13 @@ async fn builtin_occupancy_selection_uses_all_selectable_workers() {
         .unwrap()
         .endpoint("generate".to_string());
     let client = endpoint.client().await.unwrap();
-    let graph = test_graph(&client).await;
+    let load_context = test_load_context(&client).await;
     let inner = PushRouter::from_client(client.clone(), RouterMode::LeastLoaded)
         .await
         .unwrap();
     client.override_discovered_instances(vec![1, 2]);
     client.override_instance_avail(vec![1, 2]);
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, graph).unwrap();
+    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context).unwrap();
     let RoutingPolicy::Builtin(selector) = &host.policy else {
         unreachable!()
     };
@@ -210,13 +211,16 @@ async fn builtin_direct_without_worker_is_invalid_argument() {
         .unwrap()
         .endpoint("generate".to_string());
     let client = endpoint.client().await.unwrap();
-    let graph = test_graph(&client).await;
+    let load_context = test_load_context(&client).await;
     let inner = PushRouter::from_client(client, RouterMode::Direct)
         .await
         .unwrap();
-    let host =
-        RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(inner, graph, None)
-            .unwrap();
+    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
+        inner,
+        load_context,
+        None,
+    )
+    .unwrap();
 
     let error = host.generate(Context::new(request())).await.unwrap_err();
     assert!(match_error_chain(
@@ -282,7 +286,7 @@ async fn builtin_direct_dispatch_ignores_local_inhibition() {
         .unwrap()
         .endpoint("generate".to_string());
     let client = endpoint.client().await.unwrap();
-    let graph = test_graph(&client).await;
+    let load_context = test_load_context(&client).await;
     endpoint.register_endpoint_instance().await.unwrap();
     let worker_id = client.wait_for_instances().await.unwrap()[0].id();
     let dispatch = Arc::new(CompletedBuiltinDispatch::default());
@@ -293,9 +297,12 @@ async fn builtin_direct_dispatch_ignores_local_inhibition() {
     )
     .await
     .unwrap();
-    let host =
-        RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(inner, graph, None)
-            .unwrap();
+    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
+        inner,
+        load_context,
+        None,
+    )
+    .unwrap();
 
     client.report_instance_down(worker_id);
     assert!(client.instance_ids().contains(&worker_id));
@@ -325,7 +332,7 @@ async fn builtin_lora_keeps_separate_selection_and_cleanup() {
         .unwrap()
         .endpoint("generate".to_string());
     let client = endpoint.client().await.unwrap();
-    let graph = test_graph(&client).await;
+    let load_context = test_load_context(&client).await;
     endpoint.register_endpoint_instance().await.unwrap();
     let worker_id = client.wait_for_instances().await.unwrap()[0].id();
     let stale_worker = worker_id.wrapping_add(1);
@@ -353,7 +360,7 @@ async fn builtin_lora_keeps_separate_selection_and_cleanup() {
     let estimator = Arc::new(LoadEstimator::new());
     let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_capabilities(
         inner,
-        graph,
+        load_context,
         None,
         Some((filter, Arc::clone(&estimator))),
     )
@@ -416,7 +423,7 @@ async fn builtin_affinity_uses_common_host_for_every_policy() {
     {
         let endpoint = component.endpoint(format!("mode-{index}"));
         let client = endpoint.client().await.unwrap();
-        let graph = test_graph(&client).await;
+        let load_context = test_load_context(&client).await;
         endpoint.register_endpoint_instance().await.unwrap();
         let worker_id = client.wait_for_instances().await.unwrap()[0].id();
         let dispatch = Arc::new(CompletedBuiltinDispatch::default());
@@ -430,7 +437,7 @@ async fn builtin_affinity_uses_common_host_for_every_policy() {
         let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
         let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
             inner,
-            graph,
+            load_context,
             Some(affinity.clone()),
         )
         .unwrap();
@@ -476,7 +483,7 @@ async fn builtin_direct_fallback_stays_disabled_for_affinity() {
         .unwrap()
         .endpoint("generate".to_string());
     let client = endpoint.client().await.unwrap();
-    let graph = test_graph(&client).await;
+    let load_context = test_load_context(&client).await;
     endpoint.register_endpoint_instance().await.unwrap();
     let real_worker = client.wait_for_instances().await.unwrap()[0].id();
     let stale_worker = real_worker.wrapping_add(1);
@@ -492,7 +499,7 @@ async fn builtin_direct_fallback_stays_disabled_for_affinity() {
     let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
     let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
         inner,
-        graph,
+        load_context,
         Some(affinity.clone()),
     )
     .unwrap();
@@ -660,7 +667,6 @@ async fn router_with_worker_configs(
         .unwrap();
     let endpoint = component.endpoint("generate");
     let client = endpoint.client().await.unwrap();
-    let graph = test_graph(&client).await;
     let worker_ids = workers.keys().copied().collect::<Vec<_>>();
     let (_tx, workers) = watch::channel(workers);
     let config = KvRouterConfig {
@@ -683,15 +689,13 @@ async fn router_with_worker_configs(
         false,
         None,
         None,
-        graph.scheduler_load_sender(),
-        graph.cancellation_token(),
     )
     .await
     .unwrap();
     let inner = PushRouter::from_client(client, RouterMode::KV)
         .await
         .unwrap();
-    let router = RoutingHost::new(inner, Arc::new(chooser), graph, session_affinity_ttl).unwrap();
+    let router = RoutingHost::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
     router
         .inner
         .client
@@ -1295,7 +1299,7 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
 
     let endpoint = endpoint_for(&router_drt);
     let client = endpoint.client().await.unwrap();
-    let graph = test_graph(&client).await;
+    let load_context = test_load_context(&client).await;
     let instances = tokio::time::timeout(Duration::from_secs(5), async {
         let mut source = client.instance_source.as_ref().clone();
         loop {
@@ -1326,7 +1330,7 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
         router_track_active_blocks: false,
         ..Default::default()
     };
-    let chooser = KvRouter::new(
+    let chooser = KvRouter::new_with_worker_role_and_scheduler_load(
         endpoint,
         client.clone(),
         workers,
@@ -1335,13 +1339,14 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
         DefaultWorkerSelector::new(Some(config.clone()), "decode"),
         Some(config),
         None,
+        None,
         "decode",
         None,
         false,
         None,
         None,
-        graph.scheduler_load_sender(),
-        graph.cancellation_token(),
+        load_context.scheduler_load_sender(),
+        load_context.cancellation_token(),
     )
     .await
     .unwrap();
@@ -1351,7 +1356,10 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
             .await
             .unwrap();
     let chooser = Arc::new(chooser);
-    let kv_router = Arc::new(RoutingHost::new(push_router, chooser.clone(), graph, None).unwrap());
+    let kv_router = Arc::new(
+        RoutingHost::new_with_load_context(push_router, chooser.clone(), load_context, None)
+            .unwrap(),
+    );
     let next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> = kv_router;
     let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));
 

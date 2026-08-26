@@ -32,7 +32,7 @@ use crate::{
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::{
-        EncoderRouter, PrefillRouter, RouterLoadSource, TypedRoutingGraph, WorkerSelectorFactory,
+        EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext, WorkerSelectorFactory,
     },
     local_model::runtime_config::{
         ModelRuntimeConfig, TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
@@ -569,13 +569,13 @@ where
 
             let load_thresholds =
                 LoadThresholdHandle::new(router_config.load_threshold_config.clone());
-            let routing_graph = if needs_preprocessed_routing {
+            let load_context = if needs_preprocessed_routing {
                 let source = RouterLoadSource::from_worker_type(effective_worker_type(
                     card.worker_type,
                     card.model_type,
                 ));
                 Some(
-                    TypedRoutingGraph::start(
+                    RoutingLoadContext::start(
                         client.clone(),
                         source,
                         load_thresholds.clone(),
@@ -601,9 +601,9 @@ where
                     let mut chooser = self
                         .manager
                         .kv_chooser_for_with_selector_and_client(
-                            routing_graph
+                            load_context
                                 .as_ref()
-                                .expect("routing graph must exist")
+                                .expect("routing load context must exist")
                                 .client()
                                 .clone(),
                             card.kv_cache_block_size,
@@ -614,13 +614,13 @@ where
                             WORKER_TYPE_DECODE, // This is the decode router
                             Some(card.display_name.clone()),
                             card.runtime_config.enable_eagle,
-                            routing_graph
+                            load_context
                                 .as_ref()
-                                .expect("routing graph must exist")
+                                .expect("routing load context must exist")
                                 .scheduler_load_sender(),
-                            routing_graph
+                            load_context
                                 .as_ref()
-                                .expect("routing graph must exist")
+                                .expect("routing load context must exist")
                                 .cancellation_token(),
                         )
                         .await?;
@@ -687,7 +687,9 @@ where
                         &client,
                         self.manager.clone(),
                         router_config.router_mode,
-                        routing_graph.clone().expect("routing graph must exist"),
+                        load_context
+                            .clone()
+                            .expect("routing load context must exist"),
                         kv_chooser.clone(),
                         prefill_chooser.clone(),
                         encoder_chooser.clone(),
@@ -826,7 +828,7 @@ where
             // would silently omit engines for mixed-capability cards.
             let load_thresholds =
                 LoadThresholdHandle::new(router_config.load_threshold_config.clone());
-            let routing_graph = TypedRoutingGraph::start(
+            let load_context = RoutingLoadContext::start(
                 client,
                 RouterLoadSource::from_worker_type(effective_worker_type(
                     card.worker_type,
@@ -837,7 +839,7 @@ where
                 Some(allocator_trim.clone()),
             )
             .await?;
-            let client = routing_graph.client().clone();
+            let client = load_context.client().clone();
 
             if card.model_type.supports_embedding() {
                 let push_router = PushRouter::<
@@ -948,7 +950,7 @@ where
             }
 
             worker_set.load_thresholds = Some(load_thresholds);
-            worker_set.set_routing_graph(routing_graph);
+            worker_set.set_load_context(load_context);
         } else if card.model_input == ModelInput::Tokens && card.model_type.supports_embedding() {
             // Case 4: Tokens + Embeddings
             // Create preprocessing pipeline similar to Backend
@@ -1501,12 +1503,12 @@ mod tests {
             .await
             .unwrap();
         let worker_set = prepared.worker_set.as_ref().unwrap();
-        let graph = worker_set
-            .routing_graph()
-            .expect("Text routing must retain its typed graph");
-        assert_eq!(graph.source(), RouterLoadSource::Aggregated);
-        assert!(graph.monitor().is_some());
-        assert_eq!(graph.client().endpoint.id(), desired.endpoint_id);
+        let load_context = worker_set
+            .load_context()
+            .expect("text routing must retain its routing load context");
+        assert_eq!(load_context.source(), RouterLoadSource::Aggregated);
+        assert!(load_context.monitor().is_some());
+        assert_eq!(load_context.client().endpoint.id(), desired.endpoint_id);
         watcher
             .commit_group(&spec, prepared, &[desired], &[])
             .unwrap();
@@ -1525,7 +1527,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn surface_encode_worker_builds_kv_routing_graph_without_load_monitoring() {
+    async fn surface_encode_worker_builds_kv_load_context_without_load_monitoring() {
         use dynamo_runtime::{Runtime, distributed::DistributedConfig};
 
         let runtime = Runtime::from_current().unwrap();

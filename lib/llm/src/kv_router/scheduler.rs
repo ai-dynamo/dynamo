@@ -541,7 +541,7 @@ mod tests {
             None,
             Some("test-model"),
             "decode",
-            super::super::routing_graph::scheduler_load_channel(
+            super::super::routing_load::scheduler_load_channel(
                 super::super::RouterLoadSource::Decode,
                 cancellation_token.child_token(),
             )

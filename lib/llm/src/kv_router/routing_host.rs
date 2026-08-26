@@ -195,7 +195,7 @@ where
     affinity: Option<AffinityCoordinator>,
     hosted_occupancy: Option<HostedOccupancy>,
     lora: Option<LoraRouting>,
-    _graph: Arc<crate::kv_router::TypedRoutingGraph>,
+    _load_context: Option<Arc<crate::kv_router::RoutingLoadContext>>,
 }
 
 /// Compatibility name for the KV-only host used by existing callers.
@@ -211,22 +211,59 @@ where
     pub fn new(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         kv_router: Arc<KvRouter<Sel>>,
-        graph: Arc<crate::kv_router::TypedRoutingGraph>,
         session_affinity_ttl: Option<Duration>,
     ) -> Result<Self, Error> {
         let affinity = session_affinity_ttl
             .map(AffinityCoordinator::new)
             .transpose()?;
 
-        Ok(Self::new_with_coordinator(
-            inner, kv_router, graph, affinity,
+        Ok(Self::new_with_coordinator(inner, kv_router, affinity))
+    }
+
+    pub fn new_with_load_context(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        kv_router: Arc<KvRouter<Sel>>,
+        load_context: Arc<crate::kv_router::RoutingLoadContext>,
+        session_affinity_ttl: Option<Duration>,
+    ) -> Result<Self, Error> {
+        let affinity = session_affinity_ttl
+            .map(AffinityCoordinator::new)
+            .transpose()?;
+
+        Ok(Self::new_with_load_context_and_coordinator(
+            inner,
+            kv_router,
+            load_context,
+            affinity,
         ))
     }
 
     pub(crate) fn new_with_coordinator(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         kv_router: Arc<KvRouter<Sel>>,
-        graph: Arc<crate::kv_router::TypedRoutingGraph>,
+        affinity: Option<AffinityCoordinator>,
+    ) -> Self {
+        Self::new_with_optional_load_context_and_coordinator(inner, kv_router, None, affinity)
+    }
+
+    pub(crate) fn new_with_load_context_and_coordinator(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        kv_router: Arc<KvRouter<Sel>>,
+        load_context: Arc<crate::kv_router::RoutingLoadContext>,
+        affinity: Option<AffinityCoordinator>,
+    ) -> Self {
+        Self::new_with_optional_load_context_and_coordinator(
+            inner,
+            kv_router,
+            Some(load_context),
+            affinity,
+        )
+    }
+
+    fn new_with_optional_load_context_and_coordinator(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        kv_router: Arc<KvRouter<Sel>>,
+        load_context: Option<Arc<crate::kv_router::RoutingLoadContext>>,
         affinity: Option<AffinityCoordinator>,
     ) -> Self {
         // Eagerly register router request metrics (as zeros) so they are
@@ -242,29 +279,29 @@ where
             affinity,
             hosted_occupancy: None,
             lora: None,
-            _graph: graph,
+            _load_context: load_context,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn new_builtin(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        graph: Arc<crate::kv_router::TypedRoutingGraph>,
+        load_context: Arc<crate::kv_router::RoutingLoadContext>,
     ) -> Result<Self, Error> {
-        Self::new_builtin_with_capabilities(inner, graph, None, None)
+        Self::new_builtin_with_capabilities(inner, load_context, None, None)
     }
 
     pub(crate) fn new_builtin_with_coordinator(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        graph: Arc<crate::kv_router::TypedRoutingGraph>,
+        load_context: Arc<crate::kv_router::RoutingLoadContext>,
         affinity: Option<AffinityCoordinator>,
     ) -> Result<Self, Error> {
-        Self::new_builtin_with_capabilities(inner, graph, affinity, None)
+        Self::new_builtin_with_capabilities(inner, load_context, affinity, None)
     }
 
     pub(crate) fn new_builtin_with_capabilities(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        graph: Arc<crate::kv_router::TypedRoutingGraph>,
+        load_context: Arc<crate::kv_router::RoutingLoadContext>,
         affinity: Option<AffinityCoordinator>,
         lora: Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>,
     ) -> Result<Self, Error> {
@@ -321,7 +358,7 @@ where
                     load_estimator,
                     selector,
                 }),
-            _graph: graph,
+            _load_context: Some(load_context),
         })
     }
 

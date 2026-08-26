@@ -20,7 +20,7 @@ use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 use crate::worker_type::WorkerType;
 
-/// Endpoint role whose scheduler and remote metrics feed one routing graph.
+/// Endpoint role whose scheduler and remote metrics feed one load context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouterLoadSource {
     Decode,
@@ -45,6 +45,19 @@ impl RouterLoadSource {
             WorkerType::Prefill => Self::Prefill,
             WorkerType::Encode => Self::Encode,
         }
+    }
+
+    pub(crate) fn from_worker_role_or_metric(
+        worker_role: Option<WorkerType>,
+        metric_worker_type: &'static str,
+    ) -> Self {
+        worker_role.map(Self::from_worker_type).unwrap_or_else(|| {
+            if metric_worker_type == WORKER_TYPE_PREFILL {
+                Self::Prefill
+            } else {
+                Self::Aggregated
+            }
+        })
     }
 
     const fn monitors_sequence_load(self) -> bool {
@@ -106,7 +119,7 @@ impl SchedulerLoadShared {
         if count.is_power_of_two() {
             tracing::error!(
                 closed_publications = count,
-                "scheduler-load channel closed before graph cancellation"
+                "scheduler-load channel closed before load-context cancellation"
             );
         }
     }
@@ -125,7 +138,7 @@ impl SchedulerLoadShared {
     }
 }
 
-/// Nonblocking scheduler-load publication handle owned by one typed routing graph.
+/// Nonblocking scheduler-load publication handle owned by one routing load context.
 #[derive(Clone)]
 pub struct SchedulerLoadSender {
     tx: Option<mpsc::Sender<SchedulerLoadCommand>>,
@@ -135,6 +148,18 @@ pub struct SchedulerLoadSender {
 }
 
 impl SchedulerLoadSender {
+    pub(crate) fn disabled(
+        source: RouterLoadSource,
+        cancellation_token: CancellationToken,
+    ) -> Self {
+        Self {
+            tx: None,
+            shared: Arc::new(SchedulerLoadShared::new()),
+            source,
+            cancellation_token,
+        }
+    }
+
     pub(crate) const fn metric_label(&self) -> &'static str {
         self.source.metric_label()
     }
@@ -225,18 +250,6 @@ fn scheduler_load_channel_with_capacity(
     )
 }
 
-fn disabled_scheduler_load_sender(
-    source: RouterLoadSource,
-    cancellation_token: CancellationToken,
-) -> SchedulerLoadSender {
-    SchedulerLoadSender {
-        tx: None,
-        shared: Arc::new(SchedulerLoadShared::new()),
-        source,
-        cancellation_token,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,14 +291,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn encode_graph_retains_client_with_sequence_load_monitoring_disabled() {
+    async fn encode_context_retains_client_with_sequence_load_monitoring_disabled() {
         let runtime = Runtime::from_current().unwrap();
         let distributed =
             DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
                 .await
                 .unwrap();
         let endpoint = distributed
-            .namespace("encode-routing-graph".to_string())
+            .namespace("encode-routing-load".to_string())
             .unwrap()
             .component("workers".to_string())
             .unwrap()
@@ -293,7 +306,7 @@ mod tests {
         let client = endpoint.client().await.unwrap();
         let parent_token = distributed.child_token();
 
-        let graph = TypedRoutingGraph::start(
+        let load_context = RoutingLoadContext::start(
             client.clone(),
             RouterLoadSource::Encode,
             LoadThresholdHandle::new(Default::default()),
@@ -303,25 +316,27 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(graph.source(), RouterLoadSource::Encode);
-        assert_eq!(graph.client().endpoint.id(), client.endpoint.id());
-        assert!(graph.monitor().is_none());
-        assert!(!graph.scheduler_load_sender().is_enabled());
-        graph.scheduler_load_sender().publish(snapshot(1, 100));
+        assert_eq!(load_context.source(), RouterLoadSource::Encode);
+        assert_eq!(load_context.client().endpoint.id(), client.endpoint.id());
+        assert!(load_context.monitor().is_none());
+        assert!(!load_context.scheduler_load_sender().is_enabled());
+        load_context
+            .scheduler_load_sender()
+            .publish(snapshot(1, 100));
         assert_eq!(client.overloaded_instance_ids(), None);
 
-        drop(graph);
+        drop(load_context);
         assert!(!parent_token.is_cancelled());
         runtime.shutdown();
     }
 }
 
-/// Owns the load lifecycle for one typed endpoint routing graph.
+/// Owns the load lifecycle for one typed routing endpoint.
 ///
-/// Every selection and dispatch plane in the graph receives a clone of this
-/// graph's single endpoint [`Client`]. Decode, aggregated, and prefill graphs
+/// Every selection and dispatch plane receives a clone of this context's
+/// single endpoint [`Client`]. Decode, aggregated, and prefill contexts
 /// are intentionally independent.
-pub struct TypedRoutingGraph {
+pub struct RoutingLoadContext {
     client: Client,
     source: RouterLoadSource,
     scheduler_load: SchedulerLoadSender,
@@ -331,7 +346,7 @@ pub struct TypedRoutingGraph {
     _task_guard: Option<EngineContextGuard>,
 }
 
-impl TypedRoutingGraph {
+impl RoutingLoadContext {
     pub async fn start(
         client: Client,
         source: RouterLoadSource,
@@ -355,7 +370,7 @@ impl TypedRoutingGraph {
             (scheduler_load, Some(monitor))
         } else {
             (
-                disabled_scheduler_load_sender(source, cancellation_token.child_token()),
+                SchedulerLoadSender::disabled(source, cancellation_token.child_token()),
                 None,
             )
         };
@@ -396,23 +411,23 @@ impl TypedRoutingGraph {
     }
 }
 
-impl Drop for TypedRoutingGraph {
+impl Drop for RoutingLoadContext {
     fn drop(&mut self) {
         self.cancellation_token.cancel();
     }
 }
 
-/// Standalone KV selection surface plus the typed graph that owns its load tasks.
+/// Standalone KV selection surface plus the context that owns its load tasks.
 #[derive(Clone)]
-pub struct KvRoutingGraph<Sel = dynamo_kv_router::selector::DefaultWorkerSelector>
+pub struct ManagedKvRouter<Sel = dynamo_kv_router::selector::DefaultWorkerSelector>
 where
     Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
 {
-    owner: Arc<TypedRoutingGraph>,
+    load_context: Arc<RoutingLoadContext>,
     router: Arc<KvRouter<Sel>>,
 }
 
-impl<Sel> std::ops::Deref for KvRoutingGraph<Sel>
+impl<Sel> std::ops::Deref for ManagedKvRouter<Sel>
 where
     Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
 {
@@ -423,16 +438,19 @@ where
     }
 }
 
-impl<Sel> KvRoutingGraph<Sel>
+impl<Sel> ManagedKvRouter<Sel>
 where
     Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
 {
-    pub fn new(owner: Arc<TypedRoutingGraph>, router: Arc<KvRouter<Sel>>) -> Self {
-        Self { owner, router }
+    pub fn new(load_context: Arc<RoutingLoadContext>, router: Arc<KvRouter<Sel>>) -> Self {
+        Self {
+            load_context,
+            router,
+        }
     }
 
-    pub fn owner(&self) -> &Arc<TypedRoutingGraph> {
-        &self.owner
+    pub fn load_context(&self) -> &Arc<RoutingLoadContext> {
+        &self.load_context
     }
 
     pub fn router(&self) -> &Arc<KvRouter<Sel>> {
