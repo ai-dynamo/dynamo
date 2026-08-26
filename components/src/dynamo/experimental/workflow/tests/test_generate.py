@@ -181,6 +181,32 @@ async def test_generate_invoker_forwards_multimodal_request_unchanged() -> None:
     assert transport.request == request
 
 
+async def test_generate_invoker_forwards_encoder_result_unchanged() -> None:
+    transport = _Client([{"token_ids": [42], "index": 0, "finish_reason": "stop"}])
+    request = {
+        "token_ids": [1, 2],
+        "sampling_options": {"n": 1},
+        "output_options": {},
+        "encoder_result": {
+            "features": {
+                "transport": "request_plane_msgpack",
+                "data": b"packed-features",
+            }
+        },
+    }
+
+    result = await GenerateEndpointInvoker(transport).run(
+        "generator",
+        GENERATOR,
+        {"request": request},
+        _context(),
+    )
+
+    assert result["completion"]["token_ids"] == [42]
+    assert transport.request == request
+    assert transport.request is not request
+
+
 async def test_generate_invoker_accepts_null_n_as_the_frontend_default() -> None:
     transport = _Client([{"token_ids": [42], "index": 0, "finish_reason": "stop"}])
 

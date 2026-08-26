@@ -3,6 +3,10 @@
 
 """Experimental vLLM integrations for Dynamo workflows."""
 
-from dynamo.experimental.workflow.vllm.stages import DynamoVllmStage
+from dynamo.experimental.workflow.vllm.stages import (
+    DynamoVllmStage,
+    EncoderStage,
+    ExternalEncoderRequestStage,
+)
 
-__all__ = ["DynamoVllmStage"]
+__all__ = ["DynamoVllmStage", "EncoderStage", "ExternalEncoderRequestStage"]

@@ -4,7 +4,6 @@
 import asyncio
 import base64
 import functools
-import importlib
 import inspect
 import logging
 import math
@@ -97,9 +96,10 @@ from .lora_state import LoRAState
 from .multimodal_utils.custom_encoder import (
     AsyncVisionEncoder,
     CustomEncoderAdapter,
-    VisionEncoderBackend,
     create_custom_encoder_adapter,
+    resolve_vision_encoder_backend_class,
 )
+from .multimodal_utils.external_encoder import ExternalEncoderPromptLoader
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 from .multimodal_utils.request_processor import (
     IMAGE_URL_KEY,
@@ -1237,16 +1237,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         custom_encoder_class = config.custom_encoder_class
         if not custom_encoder_class:
             return
-        module_path, _, class_name = custom_encoder_class.rpartition(".")
-        backend_cls = getattr(importlib.import_module(module_path), class_name)
-        if not (
-            isinstance(backend_cls, type)
-            and issubclass(backend_cls, VisionEncoderBackend)
-        ):
-            raise TypeError(
-                f"--custom-encoder-class {custom_encoder_class!r} must resolve to a "
-                f"VisionEncoderBackend subclass, got {backend_cls!r}."
-            )
+        backend_cls = resolve_vision_encoder_backend_class(custom_encoder_class)
         # The author writes the VisionEncoderBackend; Dynamo wraps it in the
         # AsyncVisionEncoder glue, which owns the preprocess pool and
         # ThreadedMicroBatcher actor thread. load() runs backend.build() there
@@ -3152,6 +3143,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             enable_frontend_decoding=enable_frontend_decoding,
             encode_worker_client=encode_worker_client,
         )
+        self._external_encoder_prompt_loader: Optional[
+            ExternalEncoderPromptLoader
+        ] = None
 
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation
@@ -3162,6 +3156,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         with time_and_log_code_section(
             f"[DECODE] request: {request_id} generate"
         ) as decode_timer:
+            if self.use_vllm_tokenizer and request.get("encoder_result") is not None:
+                yield {
+                    "finish_reason": (
+                        "error: external encoder results require token-in/token-out "
+                        "mode"
+                    ),
+                    "index": 0,
+                    "token_ids": [],
+                }
+                return
             if self.use_vllm_tokenizer:
                 # Text-in-text-out mode: use InputParamManager and OpenAI-compatible format
                 generator = self._generate_text_mode(request, context, request_id)
@@ -3276,6 +3280,54 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
         return prepared
 
+    async def _assemble_external_encoder_prompt(
+        self,
+        request: Dict[str, Any],
+        request_id: str,
+    ) -> EmbedsPrompt:
+        """Decode an external encoder result and prepare the vLLM prompt."""
+
+        conflicts = [
+            key
+            for key in (
+                "multi_modal_data",
+                "multi_modal_uuids",
+                "prompt_embeds",
+            )
+            if request.get(key) is not None
+        ]
+        extra_args = request.get("extra_args")
+        if isinstance(extra_args, Mapping):
+            conflicts.extend(
+                f"extra_args.{key}"
+                for key in ("mm_kwargs_shm", "mm_kwargs_nixl")
+                if extra_args.get(key) is not None
+            )
+
+        if conflicts:
+            raise InvalidArgument(
+                "encoder_result is authoritative and cannot be combined with "
+                f"raw multimodal or prompt embedding fields: {sorted(conflicts)}"
+            )
+        encoder_result = request.get("encoder_result")
+        if not isinstance(encoder_result, Mapping):
+            raise InvalidArgument("encoder_result must be an object")
+        token_ids = request.get("token_ids")
+        if not isinstance(token_ids, list):
+            raise InvalidArgument("external encoder results require token_ids")
+        if self._external_encoder_prompt_loader is None:
+            self._external_encoder_prompt_loader = ExternalEncoderPromptLoader(
+                self.model_config,
+                self.config.engine_args,
+            )
+        prompt = await self._external_encoder_prompt_loader.load(
+            encoder_result,
+            token_ids,
+        )
+
+        logger.debug("Request %s: prepared external encoder prompt", request_id)
+        return prompt
+
     async def _generate_token_mode(self, request, context, request_id):
         """Generate tokens using internal protocol format (token-in-token-out)."""
         # Firstly extract disaggregated params from prefill result if available
@@ -3291,6 +3343,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             kv_params = None
 
         mode = cast(DisaggregationMode, self.config.disaggregation_mode)
+        has_external_encoder_result = request.get("encoder_result") is not None
+        if has_external_encoder_result and mode != DisaggregationMode.AGGREGATED:
+            yield {
+                "finish_reason": (
+                    "error: external encoder results currently require an "
+                    "aggregated vLLM worker"
+                ),
+                "index": 0,
+                "token_ids": [],
+            }
+            return
         is_decode_only = mode == DisaggregationMode.DECODE
         if is_decode_only and BYPASS_REMOTE_PREFILL_ANNOTATION in (
             request.get("annotations") or []
@@ -3302,9 +3365,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             is_decode_only = False
             mode = DisaggregationMode.AGGREGATED
         has_mm_data = request.get("multi_modal_data") is not None
-        custom_prompt: EmbedsPrompt | TokensPrompt | None = None
+        assembled_prompt: EmbedsPrompt | TokensPrompt | None = None
 
-        if (
+        if has_external_encoder_result:
+            assembled_prompt = await self._assemble_external_encoder_prompt(
+                request, request_id
+            )
+            multi_modal_data = None
+            mm_processor_kwargs = None
+            pre_rendered = None
+        elif (
             mode == DisaggregationMode.AGGREGATED
             and self._custom_encoder is not None
             and has_mm_data
@@ -3315,7 +3385,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # Failures propagate as exceptions; the bindings map the type to a
             # typed backend error, so an input fault answers 400 with its
             # message and an engine fault stays a retryable 5xx.
-            custom_prompt = await self._assemble_custom_encoder_prompt(
+            assembled_prompt = await self._assemble_custom_encoder_prompt(
                 request,
                 request_id,
             )
@@ -3350,8 +3420,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # branches without spelling out the full union.
         prompt: Any
         with _nvtx.annotate("mm_backend:build_prompt", color="yellow"):
-            if custom_prompt is not None:
-                prompt = custom_prompt
+            if assembled_prompt is not None:
+                prompt = assembled_prompt
             elif pre_rendered is not None:
                 # pre_rendered is a MultiModalInput dict with "type": "multimodal".
                 # The engine's InputProcessor.process_inputs() will see the "type"

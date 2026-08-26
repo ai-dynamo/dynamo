@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The author-written contract for a pluggable in-process vision encoder.
+"""The author-written contract for a pluggable vision encoder.
 
 ``VisionEncoderBackend`` is the **single surface an encoder author implements**.
 It is a pure policy + compute backend: no threads, no futures, no event loop.
@@ -10,10 +10,10 @@ coalescing, engine adaptation, and the lifecycle — via ``ThreadedMicroBatcher`
 (the generic cross-request batcher) and ``AsyncVisionEncoder`` (the async
 request-API glue). This module defines only the contract those drivers call.
 
-The encoder runs in the **same process** as the aggregated vLLM worker (no
-separate encode worker, no NIXL transfer): it turns image inputs into ordered,
-producer-defined artifacts. The resolved downstream decoder selects an adapter
-that validates those artifacts and constructs the final engine prompt.
+The driver may run beside an aggregated vLLM worker or in an inline workflow
+stage. It turns image inputs into ordered, producer-defined artifacts. An
+in-process decoder adapter or ``EncoderStage`` validates those artifacts for its
+downstream consumer.
 
 Division of labour (author vs. Dynamo):
 
@@ -121,7 +121,7 @@ class Preprocessed(Generic[ItemT]):
 
 
 class VisionEncoderBackend(ABC, Generic[RawT, ItemT, ArtifactT]):
-    """Author-written, in-process vision encoder contract.
+    """Author-written vision encoder contract.
 
     A pure policy + compute backend — no threads, no futures. Dynamo drives it
     on a dedicated actor thread (``ThreadedMicroBatcher``) and exposes the async
