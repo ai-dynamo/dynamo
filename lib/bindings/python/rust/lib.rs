@@ -1219,10 +1219,13 @@ impl DistributedRuntime {
             if pyo3_async_runtimes::tokio::init_with_runtime(primary).is_err()
                 && !std::ptr::eq(pyo3_async_runtimes::tokio::get_runtime(), primary)
             {
-                // Still worth saying: these are the futures DYN_RUNTIME_* was meant to size.
+                // Both runtimes are sized from DYN_RUNTIME_*, since module init handed the
+                // bridge the same builder. The cost is that there are two of them, so the
+                // process carries twice the threads that configuration describes.
                 tracing::warn!(
-                    "pyo3 async bridge was already initialized with a different tokio runtime; \
-                     futures spawned through it will not use the DYN_RUNTIME_* configuration"
+                    "the pyo3 async bridge built its own tokio runtime before this \
+                     DistributedRuntime was created, so the process now has two; both are sized \
+                     from DYN_RUNTIME_*, so the thread counts it describes are doubled"
                 );
             }
         });

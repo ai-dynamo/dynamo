@@ -550,8 +550,7 @@ mod tests {
     /// Covers parsing on its own, so if a frontend's thread count ignores
     /// `DYN_RUNTIME_MAX_BLOCKING_THREADS` the cause is wiring rather than parsing.
     ///
-    /// `temp_env::with_vars` takes a process-global lock and restores the old values, so this
-    /// cannot race other tests that read the environment.
+    /// `temp_env::with_vars` restores the old values on the way out, including on panic.
     #[test]
     fn test_from_settings_reads_both_thread_env_vars() {
         const WORKERS: &str = "DYN_RUNTIME_NUM_WORKER_THREADS";
@@ -599,10 +598,11 @@ mod tests {
 
     /// `max_blocking_threads` must actually cap concurrent blocking work.
     ///
-    /// This is the setting DYN-4127 was reported against, and `num_workers()` cannot show it —
-    /// Tokio counts blocking threads separately and only exposes that count under
-    /// `tokio_unstable`. Measuring concurrency works on stable instead: blocking threads are
-    /// spawned on demand up to the cap, so queueing more tasks than the cap must serialize them.
+    /// This is the setting whose effect on a frontend's thread count could not be observed, and
+    /// `num_workers()` cannot show it — Tokio counts blocking threads separately and only
+    /// exposes that count under `tokio_unstable`. Measuring concurrency works on stable instead:
+    /// blocking threads are spawned on demand up to the cap, so queueing more tasks than the cap
+    /// must serialize them.
     ///
     /// Only the upper bound is asserted. A missing cap shows up as a peak near the task count,
     /// while asserting a lower bound would make the test depend on the scheduler overlapping
