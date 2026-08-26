@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, LazyLock};
 
 use axum::body::to_bytes;
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use dynamo_agent_rt::{
@@ -21,6 +21,8 @@ use dynamo_protocols::types::responses::{
 };
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use futures::{Stream, StreamExt, stream};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 
 use super::disconnect::create_connection_monitor;
@@ -42,8 +44,172 @@ static ENABLED: LazyLock<bool> = LazyLock::new(|| {
         .unwrap_or(false)
 });
 
+const AUTH_MODE_ENV: &str = "DYN_AGENT_RT_AUTH_MODE";
+const LOCAL_TENANT_ENV: &str = "DYN_AGENT_RT_LOCAL_TENANT_ID";
+const LOCAL_PRINCIPAL_ENV: &str = "DYN_AGENT_RT_LOCAL_PRINCIPAL_ID";
+const TRUSTED_PROXY_TOKEN_ENV: &str = "DYN_AGENT_RT_TRUSTED_PROXY_TOKEN";
+const PERMITTED_CONNECTORS_ENV: &str = "DYN_AGENT_RT_PERMITTED_CONNECTORS";
+const AUTH_HEADER: &str = "x-dynamo-agent-rt-auth";
+const TENANT_HEADER: &str = "x-dynamo-tenant-id";
+const PRINCIPAL_HEADER: &str = "x-dynamo-principal-id";
+
+static AUTH_CONFIG: LazyLock<Result<AgentRuntimeAuthConfig, String>> =
+    LazyLock::new(AgentRuntimeAuthConfig::from_environment);
+
 pub(super) fn enabled() -> bool {
     *ENABLED
+}
+
+struct AgentRuntimeAuthConfig {
+    mode: AgentRuntimeAuthMode,
+    permitted_connectors: BTreeSet<String>,
+}
+
+enum AgentRuntimeAuthMode {
+    Local(AuthorizationScope),
+    TrustedProxy { token_sha256: [u8; 32] },
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+enum IngressAuthorizationError {
+    #[error("trusted proxy authentication failed")]
+    Unauthorized,
+    #[error("trusted proxy identity is missing or invalid")]
+    InvalidIdentity,
+}
+
+impl AgentRuntimeAuthConfig {
+    fn from_environment() -> Result<Self, String> {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Result<Self, String> {
+        let mode = match lookup(AUTH_MODE_ENV).as_deref() {
+            Some("local") => {
+                let tenant_id = lookup(LOCAL_TENANT_ENV).unwrap_or_else(|| "local".to_owned());
+                let principal_id =
+                    lookup(LOCAL_PRINCIPAL_ENV).unwrap_or_else(|| "local".to_owned());
+                validate_scope_component(&tenant_id)
+                    .map_err(|error| format!("invalid {LOCAL_TENANT_ENV}: {error}"))?;
+                validate_scope_component(&principal_id)
+                    .map_err(|error| format!("invalid {LOCAL_PRINCIPAL_ENV}: {error}"))?;
+                AgentRuntimeAuthMode::Local(AuthorizationScope {
+                    tenant_id,
+                    principal_id,
+                })
+            }
+            Some("trusted_proxy") => {
+                let token = lookup(TRUSTED_PROXY_TOKEN_ENV).ok_or_else(|| {
+                    format!("{TRUSTED_PROXY_TOKEN_ENV} is required in trusted_proxy mode")
+                })?;
+                if !(32..=1024).contains(&token.len()) {
+                    return Err(format!(
+                        "{TRUSTED_PROXY_TOKEN_ENV} must contain 32 to 1024 bytes"
+                    ));
+                }
+                AgentRuntimeAuthMode::TrustedProxy {
+                    token_sha256: Sha256::digest(token.as_bytes()).into(),
+                }
+            }
+            Some(mode) => {
+                return Err(format!(
+                    "unsupported {AUTH_MODE_ENV} value {mode:?}; expected local or trusted_proxy"
+                ));
+            }
+            None => return Err(format!("{AUTH_MODE_ENV} must be set")),
+        };
+        let permitted_connectors = lookup(PERMITTED_CONNECTORS_ENV)
+            .map(|value| parse_connector_allowlist(&value))
+            .transpose()?
+            .unwrap_or_default();
+        Ok(Self {
+            mode,
+            permitted_connectors,
+        })
+    }
+
+    fn authorize(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<RuntimeAuthorization, IngressAuthorizationError> {
+        let scope = match &self.mode {
+            AgentRuntimeAuthMode::Local(scope) => scope.clone(),
+            AgentRuntimeAuthMode::TrustedProxy { token_sha256 } => {
+                let provided_token = header_value(headers, AUTH_HEADER)
+                    .ok_or(IngressAuthorizationError::Unauthorized)?;
+                let provided_sha256: [u8; 32] = Sha256::digest(provided_token.as_bytes()).into();
+                if !bool::from(token_sha256.ct_eq(&provided_sha256)) {
+                    return Err(IngressAuthorizationError::Unauthorized);
+                }
+                let tenant_id = header_value(headers, TENANT_HEADER)
+                    .filter(|value| validate_scope_component(value).is_ok())
+                    .ok_or(IngressAuthorizationError::InvalidIdentity)?;
+                let principal_id = header_value(headers, PRINCIPAL_HEADER)
+                    .filter(|value| validate_scope_component(value).is_ok())
+                    .ok_or(IngressAuthorizationError::InvalidIdentity)?;
+                AuthorizationScope {
+                    tenant_id,
+                    principal_id,
+                }
+            }
+        };
+        Ok(RuntimeAuthorization {
+            scope,
+            permitted_connectors: self.permitted_connectors.clone(),
+            limits: RuntimeLimits::default(),
+        })
+    }
+}
+
+fn validate_scope_component(value: &str) -> Result<(), &'static str> {
+    if !(1..=128).contains(&value.len()) {
+        return Err("must contain 1 to 128 bytes");
+    }
+    if !value.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':' | b'/' | b'@')
+    }) {
+        return Err("contains unsupported characters");
+    }
+    Ok(())
+}
+
+fn parse_connector_allowlist(value: &str) -> Result<BTreeSet<String>, String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|connector| !connector.is_empty())
+        .map(|connector| {
+            validate_scope_component(connector)
+                .map_err(|error| format!("invalid connector {connector:?}: {error}"))?;
+            Ok(connector.to_owned())
+        })
+        .collect()
+}
+
+fn ingress_authorization(
+    headers: &HeaderMap,
+) -> Result<RuntimeAuthorization, openai::ErrorResponse> {
+    let config = AUTH_CONFIG.as_ref().map_err(|error| {
+        tracing::error!(%error, "agent runtime ingress authorization configuration is invalid");
+        openai::ErrorMessage::service_unavailable_with_body(
+            "Agent runtime ingress is not configured".to_owned(),
+        )
+    })?;
+    config.authorize(headers).map_err(|error| {
+        tracing::warn!(%error, "agent runtime ingress authorization rejected request");
+        match error {
+            IngressAuthorizationError::Unauthorized => openai::ErrorMessage::agent_runtime_error(
+                StatusCode::UNAUTHORIZED,
+                "Agent runtime authentication failed",
+            ),
+            IngressAuthorizationError::InvalidIdentity => {
+                openai::ErrorMessage::agent_runtime_error(
+                    StatusCode::BAD_REQUEST,
+                    "Trusted proxy identity is missing or invalid",
+                )
+            }
+        }
+    })
 }
 
 pub(super) type ResponsesAgentRuntime = AgentRuntime<
@@ -173,16 +339,7 @@ pub(super) async fn handle_responses(
     let idempotency_key = header_value(&headers, "idempotency-key")
         .or_else(|| header_value(&headers, "x-idempotency-key"))
         .unwrap_or_else(|| request_id.clone());
-    let authorization = RuntimeAuthorization {
-        scope: AuthorizationScope {
-            tenant_id: header_value(&headers, "x-dynamo-tenant-id")
-                .unwrap_or_else(|| "local".to_owned()),
-            principal_id: header_value(&headers, "x-dynamo-principal-id")
-                .unwrap_or_else(|| "local".to_owned()),
-        },
-        permitted_connectors: BTreeSet::new(),
-        limits: RuntimeLimits::default(),
-    };
+    let authorization = ingress_authorization(&headers)?;
     let invocation_context =
         DynamoResponsesContext::new(state.clone(), template, request_id, carrier, request.nvext);
     let step_kind = if parent_response_id.is_some() {
@@ -333,6 +490,8 @@ fn sse_response(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use axum::body::to_bytes;
     use axum::http::HeaderMap;
 
@@ -345,7 +504,92 @@ mod tests {
     use crate::protocols::openai::responses::ResponseParams;
     use crate::protocols::openai::responses::stream_converter::ResponseEventSerializer;
 
-    use super::{DynamoInvocationCarrier, committed_response_events, sse_response};
+    use super::{
+        AUTH_HEADER, AUTH_MODE_ENV, AgentRuntimeAuthConfig, DynamoInvocationCarrier,
+        IngressAuthorizationError, LOCAL_PRINCIPAL_ENV, LOCAL_TENANT_ENV, PERMITTED_CONNECTORS_ENV,
+        PRINCIPAL_HEADER, TENANT_HEADER, TRUSTED_PROXY_TOKEN_ENV, committed_response_events,
+        sse_response,
+    };
+
+    fn auth_config(entries: &[(&str, &str)]) -> Result<AgentRuntimeAuthConfig, String> {
+        let environment: HashMap<&str, &str> = entries.iter().copied().collect();
+        AgentRuntimeAuthConfig::from_lookup(|name| environment.get(name).map(ToString::to_string))
+    }
+
+    #[test]
+    fn local_authorization_ignores_caller_identity() {
+        let config = auth_config(&[
+            (AUTH_MODE_ENV, "local"),
+            (LOCAL_TENANT_ENV, "configured-tenant"),
+            (LOCAL_PRINCIPAL_ENV, "configured-principal"),
+            (PERMITTED_CONNECTORS_ENV, "web_search,sandbox"),
+        ])
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(TENANT_HEADER, "spoofed-tenant".parse().unwrap());
+        headers.insert(PRINCIPAL_HEADER, "spoofed-principal".parse().unwrap());
+
+        let authorization = config.authorize(&headers).unwrap();
+
+        assert_eq!(authorization.scope.tenant_id, "configured-tenant");
+        assert_eq!(authorization.scope.principal_id, "configured-principal");
+        assert_eq!(
+            authorization.permitted_connectors,
+            ["sandbox".to_owned(), "web_search".to_owned()].into()
+        );
+    }
+
+    #[test]
+    fn trusted_proxy_requires_secret_before_accepting_identity() {
+        let token = "a-trusted-proxy-secret-with-32-bytes-minimum";
+        let config = auth_config(&[
+            (AUTH_MODE_ENV, "trusted_proxy"),
+            (TRUSTED_PROXY_TOKEN_ENV, token),
+        ])
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(TENANT_HEADER, "tenant-a".parse().unwrap());
+        headers.insert(PRINCIPAL_HEADER, "principal-a".parse().unwrap());
+
+        assert_eq!(
+            config.authorize(&headers).unwrap_err(),
+            IngressAuthorizationError::Unauthorized
+        );
+        headers.insert(AUTH_HEADER, "wrong-secret".parse().unwrap());
+        assert_eq!(
+            config.authorize(&headers).unwrap_err(),
+            IngressAuthorizationError::Unauthorized
+        );
+        headers.insert(AUTH_HEADER, token.parse().unwrap());
+        let authorization = config.authorize(&headers).unwrap();
+        assert_eq!(authorization.scope.tenant_id, "tenant-a");
+        assert_eq!(authorization.scope.principal_id, "principal-a");
+    }
+
+    #[test]
+    fn authorization_configuration_is_fail_closed() {
+        assert!(
+            auth_config(&[])
+                .err()
+                .expect("missing mode rejected")
+                .contains(AUTH_MODE_ENV)
+        );
+        assert!(
+            auth_config(&[(AUTH_MODE_ENV, "trusted_proxy")])
+                .err()
+                .expect("missing token rejected")
+                .contains(TRUSTED_PROXY_TOKEN_ENV)
+        );
+        assert!(
+            auth_config(&[
+                (AUTH_MODE_ENV, "trusted_proxy"),
+                (TRUSTED_PROXY_TOKEN_ENV, "too-short")
+            ])
+            .err()
+            .expect("short token rejected")
+            .contains("32 to 1024")
+        );
+    }
 
     #[test]
     fn invocation_carrier_forwards_only_typed_ingress_data() {

@@ -146,6 +146,19 @@ impl ErrorMessage {
     pub(crate) fn message(&self) -> &str {
         &self.message
     }
+
+    pub(super) fn agent_runtime_error(code: StatusCode, message: &str) -> ErrorResponse {
+        (
+            code,
+            Json(ErrorMessage {
+                message: message.to_string(),
+                error_type: map_error_code_to_error_type(code),
+                code: code.as_u16(),
+                details: None,
+                metric_error_type: None,
+            }),
+        )
+    }
 }
 
 fn map_error_code_to_error_type(code: StatusCode) -> String {

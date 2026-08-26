@@ -37,7 +37,7 @@ mm-routing = ["dep:llm-multimodal", "dep:llm-tokenizer"]
 request-trace-bench = []
 # S3 destination for the request-trace sink, reusing the existing object_store client.
 request-trace-s3 = []
-agent-rt-poc = ["dep:dynamo-agent-rt"]
+agent-rt-poc = ["dep:dynamo-agent-rt", "dep:subtle"]
 
 [[bench]]
 name = "tokenizer_simple"
@@ -104,6 +104,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
 strum = { workspace = true }
+subtle = { version = "2.6", optional = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tmq = { workspace = true }
