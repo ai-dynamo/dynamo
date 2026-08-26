@@ -2710,6 +2710,26 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
+			// Reachable without broadening the seeder bypass: the seed creates a
+			// provider-bearing object, then the bypassed seeder UPDATE removes it,
+			// which the mutating webhook does not undo on UPDATE. That leaves the
+			// stored no-provider state a legacy object reaches the update path in.
+			name:               "terminating rejects an unsupported workload provider",
+			terminating:        true,
+			seedWithoutWebhook: true,
+			username:           admissionOperatorPrincipal,
+			oldBeforeUpdate:    betaTerminatingDGDForAdmission(nil),
+			oldDeployment: betaTerminatingDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				delete(dgd.Annotations, consts.KubeAnnotationWorkloadProvider)
+			}),
+			deployment: betaTerminatingDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations[consts.KubeAnnotationWorkloadProvider] = "bogus"
+			}),
+			wantWebhookErrs: []string{
+				`metadata.annotations[nvidia.com/workload-provider]: Unsupported value: "bogus": supported values: "component", "grove"`,
+			},
+		},
+		{
 			name:               "terminating accepts a finalizer-only update",
 			terminating:        true,
 			seedWithoutWebhook: true,
