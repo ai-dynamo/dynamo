@@ -1760,11 +1760,11 @@ class TestReasoningParserGuidanceForwarding:
         )
 
     async def _preprocess(self, tokenizer, *, request=None, **kwargs):
+        kwargs.setdefault("tool_parser_class", None)
         return await prepost_module.preprocess_chat_request(
             request if request is not None else self._request(),
             tokenizer=tokenizer,
             renderer=self._renderer(),
-            tool_parser_class=None,
             **kwargs,
         )
 
@@ -1811,6 +1811,43 @@ class TestReasoningParserGuidanceForwarding:
 
         assert result.guided_decoding == {"json": {"type": "object"}}
         assert result.request_for_sampling.skip_special_tokens is not False
+
+    @pytest.mark.asyncio
+    async def test_rewrite_is_forwarded_with_a_tool_parser_also_active(self, tokenizer):
+        """Attribution is measured, so a tool parser being present is irrelevant.
+
+        Both parsers run against the same request inside _prepare_request. The
+        snapshot taken between them shows the tool parser left the guidance alone
+        and the reasoning parser rewrote it, so the rewrite is attributable and
+        wins -- exactly as it does with no tool parser at all.
+        """
+        result = await self._preprocess(
+            tokenizer,
+            request=self._request(tools=TOOL_REQUEST["tools"], tool_choice="auto"),
+            tool_parser_class=_FakePassthroughToolParser,
+            reasoning_parser_class=_FakeStructuralTagReasoningParser,
+        )
+
+        assert result.guided_decoding == {"structural_tag": '{"format": "reasoning"}'}
+
+    @pytest.mark.asyncio
+    async def test_tool_parser_rewrite_still_loses_to_the_caller(self, tokenizer):
+        """The other half: tool-path precedence is deliberately unchanged.
+
+        Same measurement, opposite attribution -- the tool parser moved the
+        guidance and the reasoning parser did not -- so the caller's explicit
+        constraint still wins, as pinned by
+        test_assistant_guidance_takes_precedence_over_auto_tool_guidance and the
+        response-format-precedence row of TOOL_GUIDANCE_PARITY_CASES.
+        """
+        result = await self._preprocess(
+            tokenizer,
+            request=self._request(tools=TOOL_REQUEST["tools"], tool_choice="auto"),
+            tool_parser_class=_FakeAdjustRequestGrammarToolParser,
+            reasoning_parser_class=_FakePassthroughReasoningParser,
+        )
+
+        assert result.guided_decoding == {"json": {"type": "object"}}
 
 
 class TestToolCallGuidedDecoding:

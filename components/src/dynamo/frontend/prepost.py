@@ -447,6 +447,7 @@ def _prepare_request(
     default_chat_template_kwargs: dict[str, Any] | None = None,
     default_thinking_mode: str | None = None,
     validated_request: ChatCompletionRequest | None = None,
+    guidance_snapshots: dict[str, Any] | None = None,
 ) -> tuple[ChatCompletionRequest, ToolParser | None, dict[str, Any], Any, ChatParams]:
     """Validate request and build arguments for template rendering.
 
@@ -479,6 +480,22 @@ def _prepare_request(
         if request_for_sampling.tool_choice != "none":
             tool_parser = tool_parser_class(tokenizer, request_for_sampling.tools)
             request_for_sampling = tool_parser.adjust_request(request_for_sampling)
+
+    # Both parsers rewrite the same request in place, tool first and reasoning
+    # below, so a single before/after diff cannot say which one moved the
+    # guidance. Reading it here splits that into two attributable diffs and is the
+    # only reason the caller can apply one precedence rule to a reasoning rewrite
+    # and a different one to a tool rewrite. Optional and write-only, so the
+    # existing call sites are unaffected.
+    if guidance_snapshots is not None:
+        guidance_snapshots["after_tool_parser"] = deepcopy(
+            # Same accessor as adjusted_structured_guidance below, deliberately:
+            # this value is only ever compared against that one, and
+            # extract_structured_outputs() is a different view.
+            _guided_decoding_from_structured_outputs(
+                request_for_sampling.structured_outputs
+            )
+        )
 
     # Strip tools from the template when tool_choice=none so the model doesn't
     # see them and generate raw XML tool calls in its response.
@@ -599,6 +616,7 @@ async def preprocess_chat_request(
     # structured_outputs itself. Reading it afterwards would treat a
     # parser-generated constraint as one the caller sent and reject the request.
     has_explicit_output_constraint = _has_explicit_output_constraint(validated_request)
+    guidance_snapshots: dict[str, Any] = {}
     (
         request_for_sampling,
         tool_parser,
@@ -615,6 +633,7 @@ async def preprocess_chat_request(
         default_chat_template_kwargs=default_chat_template_kwargs,
         default_thinking_mode=default_thinking_mode,
         validated_request=validated_request,
+        guidance_snapshots=guidance_snapshots,
     )
 
     adjusted_structured_guidance = _guided_decoding_from_structured_outputs(
@@ -660,26 +679,37 @@ async def preprocess_chat_request(
             "tool_choice forces a tool call and cannot be combined with an "
             "explicit guided_* or structured_outputs constraint."
         )
-    # A rewrite that only the reasoning parser can have made. With no tool parser
-    # there is no other adjust_request in this request, so the change is
-    # attributable, and tool_guided_decoding cannot carry it out either:
-    # build_tool_call_guided_decoding returns early when the request has no tools.
-    # Without this the request ends up holding the parser's structural tag while
-    # the engine is handed the pre-adjustment copy captured before
-    # _prepare_request ran.
+    # Which parser moved the guidance, measured rather than inferred. Both run
+    # inside _prepare_request against the same request -- tool first, reasoning
+    # second -- so the snapshot taken between them turns one ambiguous diff into
+    # two attributable ones:
     #
-    # Scoped to that case on purpose. When a tool parser is also active the change
-    # is not attributable to either parser, and parser-vs-assistant precedence is
-    # already settled there -- the caller's explicit constraint wins, pinned by
-    # test_assistant_guidance_takes_precedence_over_auto_tool_guidance and the
-    # response-format-precedence row of TOOL_GUIDANCE_PARITY_CASES. Revisiting that
-    # policy is a separate change.
-    reasoning_only_guided_decoding = (
-        parser_guided_decoding if tool_parser is None else None
+    #     client -> after_tool_parser   changed by the tool parser
+    #     after_tool_parser -> final    changed by the reasoning parser
+    #
+    # This matters because the two rewrites carry different precedence. A tool
+    # parser's rewrite loses to the caller's explicit constraint -- deliberate,
+    # pinned by test_assistant_guidance_takes_precedence_over_auto_tool_guidance
+    # and the response-format-precedence row of TOOL_GUIDANCE_PARITY_CASES. A
+    # reasoning parser's rewrite has to win, or the request carries the parser's
+    # structural tag while the engine is handed the pre-adjustment copy, which is
+    # the bug this change exists to fix.
+    #
+    # When both rewrote it there is nothing to arbitrate: the reasoning parser ran
+    # last, on the already-tool-adjusted request, so the final value IS the
+    # composition. Forwarding it is just forwarding what the request holds.
+    # Absent only when no tool parser ran, in which case nothing has touched the
+    # request yet and the caller's own constraint is the correct baseline.
+    guidance_after_tool_parser = guidance_snapshots.get(
+        "after_tool_parser", client_structured_guidance
+    )
+    reasoning_rewrote_guidance = (
+        _reasoning_parser_enabled(reasoning_parser_class, chat_template_kwargs)
+        and adjusted_structured_guidance != guidance_after_tool_parser
     )
     guided_decoding: dict[str, Any] | None
-    if reasoning_only_guided_decoding is not None and not is_forced_tool_choice:
-        guided_decoding = reasoning_only_guided_decoding
+    if reasoning_rewrote_guidance and not is_forced_tool_choice:
+        guided_decoding = adjusted_structured_guidance
     elif assistant_guided_decoding is not None and not is_forced_tool_choice:
         guided_decoding = assistant_guided_decoding
     else:
