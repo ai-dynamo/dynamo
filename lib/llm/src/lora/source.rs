@@ -10,16 +10,19 @@ use futures::StreamExt;
 use hf_hub::Cache;
 use object_store::{
     CredentialProvider, Error as ObjectStoreError, ObjectStore,
-    aws::{AmazonS3Builder, AwsCredential},
+    aws::{AmazonS3Builder, AwsCredential, AwsCredentialProvider},
     client::ClientConfigKey,
     path::Path as ObjectPath,
 };
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
-use tokio::io::AsyncWriteExt;
+use tokio::{
+    io::AsyncWriteExt,
+    sync::{Mutex, OnceCell},
+};
 use url::Url;
 
 /// Minimal trait for LoRA sources
@@ -162,9 +165,41 @@ impl LoRASource for LocalLoRASource {
 ///
 /// This includes environment variables, shared AWS config and credentials files,
 /// web identity tokens, container credentials, and EC2 instance metadata.
+const CREDENTIAL_REFRESH_BUFFER: Duration = Duration::from_secs(60);
+
+/// A cached object-store credential and the expiration of its AWS source credential.
+#[derive(Debug)]
+struct CachedAwsCredential {
+    credential: Arc<AwsCredential>,
+    expires_at: Option<SystemTime>,
+}
+
+impl CachedAwsCredential {
+    /// Returns whether the credential is safe to use without refreshing it.
+    fn is_current(&self) -> bool {
+        self.expires_at.is_none_or(|expires_at| {
+            SystemTime::now()
+                .checked_add(CREDENTIAL_REFRESH_BUFFER)
+                .is_some_and(|refresh_at| refresh_at < expires_at)
+        })
+    }
+}
+
+/// Adapts AWS SDK credentials for the object-store S3 client with expiry-aware caching.
 #[derive(Debug)]
 struct AwsSdkCredentialProvider {
     credentials: SharedCredentialsProvider,
+    cached_credentials: Mutex<Option<CachedAwsCredential>>,
+}
+
+impl AwsSdkCredentialProvider {
+    /// Creates an object-store credential provider backed by an AWS SDK provider chain.
+    fn new(credentials: SharedCredentialsProvider) -> Self {
+        Self {
+            credentials,
+            cached_credentials: Mutex::new(None),
+        }
+    }
 }
 
 #[async_trait]
@@ -172,6 +207,14 @@ impl CredentialProvider for AwsSdkCredentialProvider {
     type Credential = AwsCredential;
 
     async fn get_credential(&self) -> object_store::Result<Arc<Self::Credential>> {
+        let mut cached_credentials = self.cached_credentials.lock().await;
+        if let Some(cached) = cached_credentials
+            .as_ref()
+            .filter(|cached| cached.is_current())
+        {
+            return Ok(Arc::clone(&cached.credential));
+        }
+
         let credentials = self
             .credentials
             .provide_credentials()
@@ -181,16 +224,31 @@ impl CredentialProvider for AwsSdkCredentialProvider {
                 source: Box::new(source),
             })?;
 
-        Ok(Arc::new(AwsCredential {
+        let credential = Arc::new(AwsCredential {
             key_id: credentials.access_key_id().to_string(),
             secret_key: credentials.secret_access_key().to_string(),
             token: credentials.session_token().map(ToString::to_string),
-        }))
+        });
+        *cached_credentials = Some(CachedAwsCredential {
+            credential: Arc::clone(&credential),
+            expires_at: credentials.expiry(),
+        });
+
+        Ok(credential)
     }
 }
 
+/// AWS S3 settings shared by all requests for a LoRA source.
+#[derive(Debug)]
+struct AwsS3Configuration {
+    credentials: AwsCredentialProvider,
+    region: String,
+}
+
 /// S3-based LoRA source using object_store with the AWS SDK credential provider chain.
-pub struct S3LoRASource;
+pub struct S3LoRASource {
+    configuration: OnceCell<AwsS3Configuration>,
+}
 
 impl S3LoRASource {
     /// Creates an S3 source using standard AWS configuration at request time.
@@ -198,11 +256,66 @@ impl S3LoRASource {
     /// Credentials can come from environment variables, shared AWS configuration,
     /// workload identity, container credentials, or instance metadata.
     pub fn from_env() -> Result<Self> {
-        Ok(Self)
+        Ok(Self {
+            configuration: OnceCell::new(),
+        })
     }
 }
 
 impl S3LoRASource {
+    /// Returns the explicitly configured S3 endpoint with AWS service-specific precedence.
+    fn endpoint_from_env() -> Option<String> {
+        ["AWS_ENDPOINT_URL_S3", "AWS_ENDPOINT_URL", "AWS_ENDPOINT"]
+            .into_iter()
+            .find_map(|name| std::env::var(name).ok())
+    }
+
+    /// Builds an S3 object-store client builder from the resolved AWS configuration.
+    fn build_s3_builder(
+        bucket: &str,
+        region: &str,
+        credentials: AwsCredentialProvider,
+        timeout_secs: u64,
+    ) -> AmazonS3Builder {
+        let mut builder = AmazonS3Builder::from_env()
+            .with_region(region)
+            .with_bucket_name(bucket)
+            .with_config(
+                object_store::aws::AmazonS3ConfigKey::Client(ClientConfigKey::Timeout),
+                format!("{timeout_secs}s"),
+            )
+            .with_credentials(credentials);
+
+        if let Some(endpoint) = Self::endpoint_from_env() {
+            builder = builder.with_endpoint(endpoint);
+        }
+
+        builder
+    }
+
+    /// Loads the AWS SDK configuration once for this LoRA source.
+    async fn aws_s3_configuration(&self) -> Result<&AwsS3Configuration> {
+        self.configuration
+            .get_or_try_init(|| async {
+                let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                    .load()
+                    .await;
+                let credentials = aws_config
+                    .credentials_provider()
+                    .ok_or_else(|| anyhow::anyhow!("AWS credential provider is not configured"))?;
+                let region = aws_config
+                    .region()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "us-east-1".to_string());
+
+                Ok(AwsS3Configuration {
+                    credentials: Arc::new(AwsSdkCredentialProvider::new(credentials)),
+                    region,
+                })
+            })
+            .await
+    }
+
     const MAX_RETRIES: u32 = 3;
     const INITIAL_BACKOFF_MS: u64 = 1000;
     const MAX_BACKOFF_MS: u64 = 30000;
@@ -272,37 +385,20 @@ impl S3LoRASource {
 }
 
 impl S3LoRASource {
+    /// Builds an S3 object store configured for the requested bucket.
     async fn build_store(&self, bucket: &str) -> Result<Arc<dyn ObjectStore>> {
         let timeout_secs: u64 = std::env::var("LORA_DOWNLOAD_TIMEOUT_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(3600);
-
-        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .load()
-            .await;
-        let credentials = aws_config
-            .credentials_provider()
-            .ok_or_else(|| anyhow::anyhow!("AWS credential provider is not configured"))?;
-        let region = aws_config
-            .region()
-            .map(|region| region.as_ref())
-            .unwrap_or("us-east-1");
-
-        let mut builder = AmazonS3Builder::from_env()
-            .with_region(region)
-            .with_bucket_name(bucket)
-            .with_config(
-                object_store::aws::AmazonS3ConfigKey::Client(ClientConfigKey::Timeout),
-                format!("{timeout_secs}s"),
-            )
-            .with_credentials(Arc::new(AwsSdkCredentialProvider { credentials }));
-
-        if std::env::var("AWS_ENDPOINT").is_ok() || std::env::var("AWS_ENDPOINT_URL").is_ok() {
-            builder = builder.with_virtual_hosted_style_request(false);
-        }
-
-        let store = builder.build()?;
+        let configuration = self.aws_s3_configuration().await?;
+        let store = Self::build_s3_builder(
+            bucket,
+            &configuration.region,
+            Arc::clone(&configuration.credentials),
+            timeout_secs,
+        )
+        .build()?;
         Ok(Arc::new(store))
     }
 
@@ -449,14 +545,37 @@ impl LoRASource for S3LoRASource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aws_credential_types::{
+        Credentials,
+        provider::{ProvideCredentials, SharedCredentialsProvider, future},
+    };
     use hf_hub::Cache;
     use mockito::Matcher;
     use object_store::{
         StaticCredentialProvider,
         aws::{AmazonS3ConfigKey, AwsCredentialProvider},
     };
-    use std::fs;
+    use std::{
+        fs,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
     use tempfile::TempDir;
+
+    #[derive(Debug)]
+    struct CountingCredentialProvider {
+        credentials: Credentials,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ProvideCredentials for CountingCredentialProvider {
+        fn provide_credentials<'a>(&'a self) -> future::ProvideCredentials<'a>
+        where
+            Self: 'a,
+        {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            future::ProvideCredentials::ready(Ok(self.credentials.clone()))
+        }
+    }
 
     #[test]
     fn test_parse_file_uri() {
@@ -514,6 +633,52 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn s3_credential_provider_caches_valid_credentials() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = AwsSdkCredentialProvider::new(SharedCredentialsProvider::new(
+            CountingCredentialProvider {
+                credentials: Credentials::new(
+                    "test-access-key",
+                    "test-secret-key",
+                    None,
+                    None,
+                    "test",
+                ),
+                calls: Arc::clone(&calls),
+            },
+        ));
+
+        let first = provider.get_credential().await.unwrap();
+        let second = provider.get_credential().await.unwrap();
+
+        assert_eq!(first.key_id, "test-access-key");
+        assert_eq!(second.key_id, "test-access-key");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn s3_credential_provider_refreshes_expiring_credentials() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = AwsSdkCredentialProvider::new(SharedCredentialsProvider::new(
+            CountingCredentialProvider {
+                credentials: Credentials::new(
+                    "test-access-key",
+                    "test-secret-key",
+                    None,
+                    Some(SystemTime::now() + Duration::from_secs(30)),
+                    "test",
+                ),
+                calls: Arc::clone(&calls),
+            },
+        ));
+
+        provider.get_credential().await.unwrap();
+        provider.get_credential().await.unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
     #[serial_test::serial]
     #[tokio::test]
     async fn s3_source_uses_shared_credentials_and_endpoint_url() {
@@ -551,11 +716,13 @@ mod tests {
                 ("AWS_REGION", None),
                 ("AWS_DEFAULT_REGION", None),
                 ("AWS_ENDPOINT", None),
+                ("AWS_ENDPOINT_URL_S3", None),
                 ("AWS_SHARED_CREDENTIALS_FILE", credentials_path.to_str()),
                 ("AWS_CONFIG_FILE", config_path.to_str()),
                 ("AWS_PROFILE", Some("profile")),
                 ("AWS_ENDPOINT_URL", Some(server.url().as_str())),
                 ("AWS_ALLOW_HTTP", Some("true")),
+                ("AWS_VIRTUAL_HOSTED_STYLE_REQUEST", None),
                 ("AWS_EC2_METADATA_DISABLED", Some("true")),
             ],
             async {
