@@ -1775,10 +1775,7 @@ class TestControlMarkerStrip:
         """The gate: models that never had markers stripped are unaffected."""
         post = self._post(tokenizer)
         assert post.tool_parser is None and post.reasoning_parser is None
-        assert (
-            post._strip_control_markers("<|end_message|>408")
-            == "<|end_message|>408"
-        )
+        assert post._strip_control_markers("<|end_message|>408") == "<|end_message|>408"
 
     def test_a_parsers_own_markers_survive(self, tokenizer):
         """A tool marker of this shape belongs to the parser's wire format.
@@ -1823,9 +1820,7 @@ class TestControlMarkerStrip:
         )
         assert "content" not in choice["delta"]
 
-    def test_compose_delta_message_strips_content_and_keeps_reasoning(
-        self, tokenizer
-    ):
+    def test_compose_delta_message_strips_content_and_keeps_reasoning(self, tokenizer):
         """`reasoning` is deliberately left alone -- it is already clean, and
         rewriting it would risk mangling text the model quoted."""
         post = self._active(tokenizer)
