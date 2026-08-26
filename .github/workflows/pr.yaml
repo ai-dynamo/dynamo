@@ -46,16 +46,9 @@ jobs:
       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
       run_deploy_tests: ${{ steps.deploy-test-configuration.outputs.enabled }}
       run_multigpu_tests: ${{ steps.multigpu-test-configuration.outputs.enabled }}
-      pytest_selection_mode: ${{ steps.pytest-selection.outputs.mode }}
-      pytest_selection_areas: ${{ steps.pytest-selection.outputs.areas }}
-      pytest_vllm_mode: ${{ steps.pytest-selection.outputs.vllm_mode }}
-      pytest_vllm_expression: ${{ steps.pytest-selection.outputs.vllm_expression }}
-      pytest_sglang_mode: ${{ steps.pytest-selection.outputs.sglang_mode }}
-      pytest_sglang_expression: ${{ steps.pytest-selection.outputs.sglang_expression }}
-      pytest_trtllm_mode: ${{ steps.pytest-selection.outputs.trtllm_mode }}
-      pytest_trtllm_expression: ${{ steps.pytest-selection.outputs.trtllm_expression }}
-      pytest_generic_mode: ${{ steps.pytest-selection.outputs.generic_mode }}
-      pytest_generic_expression: ${{ steps.pytest-selection.outputs.generic_expression }}
+      pytest_vllm_features: ${{ steps.pytest-selection.outputs.vllm_features }}
+      pytest_sglang_features: ${{ steps.pytest-selection.outputs.sglang_features }}
+      pytest_trtllm_features: ${{ steps.pytest-selection.outputs.trtllm_features }}
     steps:
       - name: Validate deploy test configuration
         id: deploy-test-configuration
@@ -145,6 +138,7 @@ jobs:
         env:
           CHANGED_FILES: ${{ steps.changes.outputs.all_modified_files }}
           MARKER_REPORT_STATUS: ${{ steps.pytest-marker-inventory.outcome }}
+          PYTEST_SELECTION_MODE: ${{ vars.PYTEST_SELECTION_MODE }}
         run: |
           MARKER_REPORT_ARGS=()
           if [[ -f "$RUNNER_TEMP/pytest-marker-report.json" ]]; then
@@ -153,12 +147,17 @@ jobs:
               --marker-report-status "$MARKER_REPORT_STATUS"
             )
           fi
+          SELECTION_ARGS=()
+          if [[ "$PYTEST_SELECTION_MODE" == "selective" ]]; then
+            SELECTION_ARGS+=(--apply-selection)
+          fi
           python .github/codeowners/select_pytest.py \
             --areas .github/codeowners/areas.yaml \
             --paths-from-env CHANGED_FILES \
             --github-output "$GITHUB_OUTPUT" \
             --summary "$GITHUB_STEP_SUMMARY" \
             --selection-json "$RUNNER_TEMP/pytest-shadow-selection.json" \
+            "${SELECTION_ARGS[@]}" \
             "${MARKER_REPORT_ARGS[@]}"
       - name: Upload exact shadow test selection
         if: vars.PYTEST_SELECTION_MODE != 'selective'
@@ -811,9 +810,7 @@ jobs:
       (needs.changed-files.outputs.core == 'true' ||
        needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true' ||
-       needs.changed-files.outputs.sample == 'true') &&
-      (vars.PYTEST_SELECTION_MODE != 'selective' ||
-       needs.changed-files.outputs.pytest_vllm_mode != 'none')
+       needs.changed-files.outputs.sample == 'true')
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
@@ -823,8 +820,8 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      cpu_only_test_markers: ${{ vars.PYTEST_SELECTION_MODE == 'selective' && needs.changed-files.outputs.pytest_vllm_mode == 'markers' && format('pre_merge and vllm and gpu_0 and (unit or ({0}))', needs.changed-files.outputs.pytest_vllm_expression) || 'pre_merge and vllm and gpu_0' }}
-      gpu_test_markers: ${{ vars.PYTEST_SELECTION_MODE == 'selective' && needs.changed-files.outputs.pytest_vllm_mode == 'markers' && format('pre_merge and vllm and gpu_1 and (unit or ({0}))', needs.changed-files.outputs.pytest_vllm_expression) || 'pre_merge and vllm and gpu_1' }}
+      cpu_only_test_markers: ${{ needs.changed-files.outputs.pytest_vllm_features != '' && format('pre_merge and vllm and gpu_0 and (unit or ({0}))', needs.changed-files.outputs.pytest_vllm_features) || 'pre_merge and vllm and gpu_0' }}
+      gpu_test_markers: ${{ needs.changed-files.outputs.pytest_vllm_features != '' && format('pre_merge and vllm and gpu_1 and (unit or ({0}))', needs.changed-files.outputs.pytest_vllm_features) || 'pre_merge and vllm and gpu_1' }}
       gpu_test_timeout_minutes: 45
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
       # 24 GiB admits all currently profiled vLLM tests (max is ~20.4 GiB) on a 48 GiB GPU.
@@ -839,9 +836,7 @@ jobs:
       needs.changed-files.outputs.run_multigpu_tests == 'true' &&
       (needs.changed-files.outputs.core == 'true' ||
        needs.changed-files.outputs.vllm == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
-      (vars.PYTEST_SELECTION_MODE != 'selective' ||
-       needs.changed-files.outputs.pytest_vllm_mode != 'none')
+       needs.changed-files.outputs.deploy == 'true')
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
@@ -851,7 +846,7 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: ${{ vars.PYTEST_SELECTION_MODE == 'selective' && needs.changed-files.outputs.pytest_vllm_mode == 'markers' && format('pre_merge and vllm and gpu_2 and (unit or ({0}))', needs.changed-files.outputs.pytest_vllm_expression) || 'pre_merge and vllm and gpu_2' }}
+      gpu_test_markers: ${{ needs.changed-files.outputs.pytest_vllm_features != '' && format('pre_merge and vllm and gpu_2 and (unit or ({0}))', needs.changed-files.outputs.pytest_vllm_features) || 'pre_merge and vllm and gpu_2' }}
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -862,9 +857,7 @@ jobs:
       needs.changed-files.outputs.run_multigpu_tests == 'true' &&
       (needs.changed-files.outputs.core == 'true' ||
        needs.changed-files.outputs.vllm == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
-      (vars.PYTEST_SELECTION_MODE != 'selective' ||
-       needs.changed-files.outputs.pytest_vllm_mode != 'none')
+       needs.changed-files.outputs.deploy == 'true')
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
@@ -875,7 +868,7 @@ jobs:
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
       # Exercise the only vLLM gpu_4 topology before merge.
-      gpu_test_markers: ${{ vars.PYTEST_SELECTION_MODE == 'selective' && needs.changed-files.outputs.pytest_vllm_mode == 'markers' && format('(pre_merge or post_merge) and vllm and gpu_4 and (unit or ({0}))', needs.changed-files.outputs.pytest_vllm_expression) || '(pre_merge or post_merge) and vllm and gpu_4' }}
+      gpu_test_markers: ${{ needs.changed-files.outputs.pytest_vllm_features != '' && format('(pre_merge or post_merge) and vllm and gpu_4 and (unit or ({0}))', needs.changed-files.outputs.pytest_vllm_features) || '(pre_merge or post_merge) and vllm and gpu_4' }}
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -885,9 +878,7 @@ jobs:
     if: |
       (needs.changed-files.outputs.core == 'true' ||
        needs.changed-files.outputs.sglang == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
-      (vars.PYTEST_SELECTION_MODE != 'selective' ||
-       needs.changed-files.outputs.pytest_sglang_mode != 'none')
+       needs.changed-files.outputs.deploy == 'true')
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
@@ -897,8 +888,8 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      cpu_only_test_markers: ${{ vars.PYTEST_SELECTION_MODE == 'selective' && needs.changed-files.outputs.pytest_sglang_mode == 'markers' && format('pre_merge and sglang and gpu_0 and (unit or ({0}))', needs.changed-files.outputs.pytest_sglang_expression) || 'pre_merge and sglang and gpu_0' }}
-      gpu_test_markers: ${{ vars.PYTEST_SELECTION_MODE == 'selective' && needs.changed-files.outputs.pytest_sglang_mode == 'markers' && format('pre_merge and sglang and gpu_1 and (unit or ({0}))', needs.changed-files.outputs.pytest_sglang_expression) || 'pre_merge and sglang and gpu_1' }}
+      cpu_only_test_markers: ${{ needs.changed-files.outputs.pytest_sglang_features != '' && format('pre_merge and sglang and gpu_0 and (unit or ({0}))', needs.changed-files.outputs.pytest_sglang_features) || 'pre_merge and sglang and gpu_0' }}
+      gpu_test_markers: ${{ needs.changed-files.outputs.pytest_sglang_features != '' && format('pre_merge and sglang and gpu_1 and (unit or ({0}))', needs.changed-files.outputs.pytest_sglang_features) || 'pre_merge and sglang and gpu_1' }}
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
@@ -913,9 +904,7 @@ jobs:
       needs.changed-files.outputs.run_multigpu_tests == 'true' &&
       (needs.changed-files.outputs.core == 'true' ||
        needs.changed-files.outputs.sglang == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
-      (vars.PYTEST_SELECTION_MODE != 'selective' ||
-       needs.changed-files.outputs.pytest_sglang_mode != 'none')
+       needs.changed-files.outputs.deploy == 'true')
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
@@ -925,7 +914,7 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: ${{ vars.PYTEST_SELECTION_MODE == 'selective' && needs.changed-files.outputs.pytest_sglang_mode == 'markers' && format('pre_merge and sglang and gpu_2 and (unit or ({0}))', needs.changed-files.outputs.pytest_sglang_expression) || 'pre_merge and sglang and gpu_2' }}
+      gpu_test_markers: ${{ needs.changed-files.outputs.pytest_sglang_features != '' && format('pre_merge and sglang and gpu_2 and (unit or ({0}))', needs.changed-files.outputs.pytest_sglang_features) || 'pre_merge and sglang and gpu_2' }}
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -935,9 +924,7 @@ jobs:
     if: |
       (needs.changed-files.outputs.core == 'true' ||
        needs.changed-files.outputs.trtllm == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
-      (vars.PYTEST_SELECTION_MODE != 'selective' ||
-       needs.changed-files.outputs.pytest_trtllm_mode != 'none')
+       needs.changed-files.outputs.deploy == 'true')
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: trtllm
@@ -947,8 +934,8 @@ jobs:
       cuda_version: '["13.1"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      cpu_only_test_markers: ${{ vars.PYTEST_SELECTION_MODE == 'selective' && needs.changed-files.outputs.pytest_trtllm_mode == 'markers' && format('pre_merge and trtllm and gpu_0 and (unit or ({0}))', needs.changed-files.outputs.pytest_trtllm_expression) || 'pre_merge and trtllm and gpu_0' }}
-      gpu_test_markers: ${{ vars.PYTEST_SELECTION_MODE == 'selective' && needs.changed-files.outputs.pytest_trtllm_mode == 'markers' && format('pre_merge and trtllm and gpu_1 and (unit or ({0}))', needs.changed-files.outputs.pytest_trtllm_expression) || 'pre_merge and trtllm and gpu_1' }}
+      cpu_only_test_markers: ${{ needs.changed-files.outputs.pytest_trtllm_features != '' && format('pre_merge and trtllm and gpu_0 and (unit or ({0}))', needs.changed-files.outputs.pytest_trtllm_features) || 'pre_merge and trtllm and gpu_0' }}
+      gpu_test_markers: ${{ needs.changed-files.outputs.pytest_trtllm_features != '' && format('pre_merge and trtllm and gpu_1 and (unit or ({0}))', needs.changed-files.outputs.pytest_trtllm_features) || 'pre_merge and trtllm and gpu_1' }}
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled TRT-LLM pool
       # while yielding one auto slot today. Larger runners will get more slots from the same markers.
@@ -963,9 +950,7 @@ jobs:
       needs.changed-files.outputs.run_multigpu_tests == 'true' &&
       (needs.changed-files.outputs.core == 'true' ||
        needs.changed-files.outputs.trtllm == 'true' ||
-       needs.changed-files.outputs.deploy == 'true') &&
-      (vars.PYTEST_SELECTION_MODE != 'selective' ||
-       needs.changed-files.outputs.pytest_trtllm_mode != 'none')
+       needs.changed-files.outputs.deploy == 'true')
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: trtllm
@@ -975,7 +960,7 @@ jobs:
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: ${{ vars.PYTEST_SELECTION_MODE == 'selective' && needs.changed-files.outputs.pytest_trtllm_mode == 'markers' && format('pre_merge and trtllm and gpu_2 and (unit or ({0}))', needs.changed-files.outputs.pytest_trtllm_expression) || 'pre_merge and trtllm and gpu_2' }}
+      gpu_test_markers: ${{ needs.changed-files.outputs.pytest_trtllm_features != '' && format('pre_merge and trtllm and gpu_2 and (unit or ({0}))', needs.changed-files.outputs.pytest_trtllm_features) || 'pre_merge and trtllm and gpu_2' }}
       gpu_test_timeout_minutes: 60
     secrets: inherit
 

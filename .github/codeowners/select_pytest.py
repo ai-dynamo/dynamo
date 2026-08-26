@@ -210,17 +210,19 @@ def build_plan(model: ResolvedModel, paths: list[str]) -> SelectionPlan:
     )
 
 
-def _write_github_output(path: Path, plan: SelectionPlan) -> None:
+def _write_github_output(
+    path: Path, plan: SelectionPlan, *, apply_selection: bool
+) -> None:
+    """Export only backend feature expressions consumed by the PR workflow."""
     with path.open("a", encoding="utf-8") as output:
-        output.write(f"mode={plan.mode}\n")
-        output.write(f"areas={','.join(plan.areas)}\n")
-        output.write(
-            "changed_test_files="
-            f"{json.dumps(plan.changed_test_files, separators=(',', ':'))}\n"
-        )
-        for lane, selection in plan.lanes.items():
-            output.write(f"{lane}_mode={selection.mode}\n")
-            output.write(f"{lane}_expression={selection.expression}\n")
+        for lane in sorted(BACKEND_MARKERS):
+            selection = plan.lanes[lane]
+            features = (
+                selection.expression
+                if apply_selection and selection.mode == "markers"
+                else ""
+            )
+            output.write(f"{lane}_features={features}\n")
 
 
 def _write_summary(
@@ -285,6 +287,11 @@ def _parse_args() -> argparse.Namespace:
         help="Read a shell-style changed-files list from this environment variable",
     )
     parser.add_argument("--github-output", type=Path)
+    parser.add_argument(
+        "--apply-selection",
+        action="store_true",
+        help="Export selected feature expressions; otherwise export empty shadow outputs",
+    )
     parser.add_argument("--summary", type=Path)
     parser.add_argument("--marker-report", type=Path)
     parser.add_argument("--marker-report-status", default="")
@@ -309,7 +316,9 @@ def main() -> int:
         selected_tests = selected_tests_by_lane(plan, records)
         pr_tests = selected_pr_tests(plan, records)
     if args.github_output:
-        _write_github_output(args.github_output, plan)
+        _write_github_output(
+            args.github_output, plan, apply_selection=args.apply_selection
+        )
     if args.summary:
         _write_summary(
             args.summary,

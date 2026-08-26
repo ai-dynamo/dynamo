@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from codeowners_match import compute_resolution  # noqa: E402
 from select_pytest import (  # noqa: E402
+    _write_github_output,
     build_plan,
     selected_pr_tests,
     selected_tests_by_lane,
@@ -180,16 +181,71 @@ def test_repository_router_path_selects_router_marker() -> None:
     assert all(selection.expression == "router" for selection in plan.lanes.values())
 
 
-def test_repository_selective_backend_jobs_keep_unit_smoke_tests() -> None:
+def test_repository_mixed_feature_serve_test_keeps_full_lanes() -> None:
+    spec = yaml.safe_load(
+        (REPO_ROOT / ".github/codeowners/areas.yaml").read_text(encoding="utf-8")
+    )
+    plan = build_plan(compute_resolution(spec), ["tests/serve/test_vllm.py"])
+
+    assert plan.areas == ("runtime",)
+    assert plan.mode == "full"
+    assert all(selection.mode == "full" for selection in plan.lanes.values())
+
+
+def test_github_outputs_only_applied_backend_features(tmp_path: Path) -> None:
+    plan = build_plan(_model(), ["lib/router/scheduler.rs"])
+    output = tmp_path / "github-output"
+
+    _write_github_output(output, plan, apply_selection=True)
+
+    assert output.read_text(encoding="utf-8").splitlines() == [
+        "sglang_features=router",
+        "trtllm_features=router",
+        "vllm_features=router",
+    ]
+
+
+def test_github_outputs_empty_features_for_shadow_and_full_fallback(
+    tmp_path: Path,
+) -> None:
+    shadow_output = tmp_path / "shadow-output"
+    _write_github_output(
+        shadow_output,
+        build_plan(_model(), ["lib/router/scheduler.rs"]),
+        apply_selection=False,
+    )
+    fallback_output = tmp_path / "fallback-output"
+    _write_github_output(
+        fallback_output,
+        build_plan(_model(), ["lib/runtime.py"]),
+        apply_selection=True,
+    )
+
+    expected = ["sglang_features=", "trtllm_features=", "vllm_features="]
+    assert shadow_output.read_text(encoding="utf-8").splitlines() == expected
+    assert fallback_output.read_text(encoding="utf-8").splitlines() == expected
+
+
+def test_repository_selective_backend_jobs_keep_default_marker_dimensions() -> None:
     workflow = (REPO_ROOT / ".github/workflows/pr.yaml").read_text(encoding="utf-8")
     selective_marker_inputs = [
         line.strip()
         for line in workflow.splitlines()
-        if "test_markers:" in line and "PYTEST_SELECTION_MODE == 'selective'" in line
+        if "test_markers:" in line and "_features" in line
     ]
 
     assert len(selective_marker_inputs) == 10
     assert all("and (unit or ({0}))" in line for line in selective_marker_inputs)
+    assert all("gpu_" in line for line in selective_marker_inputs)
+    assert all(
+        "pre_merge" in line or "post_merge" in line for line in selective_marker_inputs
+    )
+    assert "pytest_selection_mode" not in workflow
+    assert "pytest_selection_areas" not in workflow
+    assert "pytest_generic_" not in workflow
+    assert "pytest_vllm_mode" not in workflow
+    assert "pytest_sglang_mode" not in workflow
+    assert "pytest_trtllm_mode" not in workflow
 
 
 def test_unit_framework_test_does_not_require_selective_feature_marker() -> None:

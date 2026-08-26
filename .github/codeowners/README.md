@@ -78,6 +78,15 @@ must also carry at least one selective feature marker such as `core`, `router`,
 features may carry more than one. In selective mode, triggered backend lanes run
 their `unit` tests in addition to the selected feature expression.
 
+The selector exports one feature expression per backend. Lifecycle, framework,
+and GPU-count markers remain in `.github/workflows/pr.yaml`; the selector does
+not generate or replace them. An empty feature expression preserves that job's
+existing full-suite marker expression, so an unmapped or inapplicable selection
+fails safely by running the lane already triggered by changed-files detection.
+For example, `tests/router/**` is explicitly mapped to the `router` area and
+feature. The mixed-feature files under `tests/serve/**` remain in the broader
+`runtime` area, so changes to those files conservatively keep the full lanes.
+
 The default rollout mode reports the marker expressions and exact selected
 pytest node IDs without reducing coverage. The complete selection is uploaded
 as the `pytest-shadow-selection-<run id>` JSON artifact; the job summary shows
