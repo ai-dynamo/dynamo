@@ -234,6 +234,7 @@ areas:
   - examples/backends/tritonserver/
   - examples/common/
   - examples/custom_backend/
+  - examples/experimental/
   - lib/backend-common/
   - lib/backend-common/examples/
   - lib/sidecar/README.md
