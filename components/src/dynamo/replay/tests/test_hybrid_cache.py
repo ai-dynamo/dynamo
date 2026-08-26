@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import pytest
+
 from dynamo.replay.hybrid_cache import (
     HybridCacheConfig,
     HybridCacheRequest,
