@@ -118,12 +118,16 @@ impl Selector {
         Self::validate_queueing_worker_capacity(cfg, &kv_router_config)?;
 
         warn_for_unserved_worker_selection_policies(&kv_router_config, &[WorkerType::Aggregated])?;
-        let replication = Self::replication(cfg).await?;
+        let peer_service = cfg.peer_service.as_deref();
+        if let Some(peer_service) = peer_service {
+            crate::peer_discovery::ensure_peer_service_exists(&cfg.namespace, peer_service).await?;
+        }
+
         let mut builder =
             SelectionServiceBuilder::new(kv_router_config, WorkerType::Aggregated, policy_registry)
                 .indexer_threads(cfg.selector_threads);
-        if let Some((_, peer_sync_port)) = &replication {
-            builder = builder.replica_sync(*peer_sync_port, Vec::new());
+        if peer_service.is_some() {
+            builder = builder.replica_sync(cfg.replica_sync_port, Vec::new());
         }
         let service = Arc::new(
             builder
@@ -131,56 +135,18 @@ impl Selector {
                 .await
                 .map_err(|e| anyhow!("building embedded selection service: {e}"))?,
         );
-        Self::from_service_with_replication(cfg, service, replication).await
-    }
 
-    fn validate_queueing_worker_capacity(
-        cfg: &EppStandaloneConfig,
-        kv_router_config: &KvRouterConfig,
-    ) -> Result<()> {
-        let queueing_enabled = kv_router_config
-            .queueing_enabled(Some(&cfg.model_name))
-            .map_err(|e| anyhow!("resolving router policy for model {}: {e}", cfg.model_name))?;
-        if queueing_enabled && cfg.max_num_batched_tokens.unwrap_or(0) == 0 {
-            anyhow::bail!(
-                "DYN_EPP_MAX_NUM_BATCHED_TOKENS is required (and must be > 0) because the router \
-                 scheduling policy enables queueing for model {}; set it to the engine's \
-                 --max-num-batched-tokens",
-                cfg.model_name
-            );
-        }
-        Ok(())
-    }
-
-    async fn replication(cfg: &EppStandaloneConfig) -> Result<Option<(String, u16)>> {
-        match &cfg.peer_service {
-            Some(name) => {
-                crate::peer_discovery::ensure_peer_service_exists(&cfg.namespace, name).await?;
-                Ok(Some((name.clone(), cfg.replica_sync_port)))
-            }
-            None => Ok(None),
-        }
-    }
-
-    async fn from_service_with_replication(
-        cfg: &EppStandaloneConfig,
-        service: Arc<SelectionService>,
-        replication: Option<(String, u16)>,
-    ) -> Result<Self> {
         let cancel = CancellationToken::new();
-
-        let peer_ready = if let Some((service_name, peer_sync_port)) = replication {
-            let self_ip = cfg
-                .pod_ip
-                .clone()
-                .expect("validated peer discovery config must include POD_IP");
+        let peer_ready = if let Some(peer_service) = peer_service {
             Some(
                 crate::peer_discovery::spawn(
                     service.clone(),
                     &cfg.namespace,
-                    &service_name,
-                    peer_sync_port,
-                    self_ip,
+                    peer_service,
+                    cfg.replica_sync_port,
+                    cfg.pod_ip
+                        .clone()
+                        .expect("validated peer discovery config must include POD_IP"),
                     cancel.clone(),
                 )
                 .await?,
@@ -200,6 +166,24 @@ impl Selector {
             reconcile_state: Mutex::new(ReconcileState::default()),
             peer_ready,
         })
+    }
+
+    fn validate_queueing_worker_capacity(
+        cfg: &EppStandaloneConfig,
+        kv_router_config: &KvRouterConfig,
+    ) -> Result<()> {
+        let queueing_enabled = kv_router_config
+            .queueing_enabled(Some(&cfg.model_name))
+            .map_err(|e| anyhow!("resolving router policy for model {}: {e}", cfg.model_name))?;
+        if queueing_enabled && cfg.max_num_batched_tokens.unwrap_or(0) == 0 {
+            anyhow::bail!(
+                "DYN_EPP_MAX_NUM_BATCHED_TOKENS is required (and must be > 0) because the router \
+                 scheduling policy enables queueing for model {}; set it to the engine's \
+                 --max-num-batched-tokens",
+                cfg.model_name
+            );
+        }
+        Ok(())
     }
 
     pub fn peer_ready(&self) -> Option<Arc<AtomicBool>> {
