@@ -8,12 +8,10 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
-use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::services::selection::SelectionService;
@@ -44,8 +42,6 @@ pub(crate) async fn ensure_peer_service_exists(namespace: &str, service_name: &s
 
 /// Starts peer discovery for the EPP's own Kubernetes Service, keeping
 /// replica-sync peers registered on `service` and excluding `self_ip`.
-///
-/// Returns a readiness flag that becomes `true` after the initial reconciliation.
 pub async fn spawn(
     service: Arc<SelectionService>,
     namespace: &str,
@@ -53,7 +49,7 @@ pub async fn spawn(
     sync_port: u16,
     self_ip: String,
     cancel: CancellationToken,
-) -> Result<Arc<AtomicBool>> {
+) -> Result<()> {
     use futures::StreamExt;
     use kube::{Api, Client, runtime::WatchStreamExt, runtime::reflector, runtime::watcher};
 
@@ -67,7 +63,6 @@ pub async fn spawn(
     let writer = reflector::store::Writer::default();
     let store = writer.as_reader();
     let reflect = reflector::reflector(writer, watcher(slices, cfg_watch).default_backoff());
-    let (changes_tx, changes_rx) = watch::channel(0u64);
 
     tracing::info!(
         %namespace,
@@ -77,24 +72,21 @@ pub async fn spawn(
         "Starting EPP peer EndpointSlice watch (embedded replication)"
     );
 
-    // EndpointSlice reflector stream -> bump the change generation. The watcher
-    // retries transient errors internally; the stream ends only on writer drop.
-    let cancel_watch = cancel.clone();
+    // Reconcile only when the reflector's Store holds a coherent snapshot:
+    // InitDone completes a LIST/relist, while Apply/Delete update a live Store.
+    // The watcher retries transient errors internally; its stream ends only when
+    // its writer drops.
     tokio::spawn(async move {
         tokio::pin!(reflect);
-        let mut generation = 0u64;
+        let mut known = BTreeSet::new();
         loop {
             tokio::select! {
-                _ = cancel_watch.cancelled() => return,
+                _ = cancel.cancelled() => return,
                 item = reflect.next() => match item {
-                    // Skip the per-object relist events (Init/InitApply) and errors:
-                    // the store is consistent at InitDone, and Apply/Delete are
-                    // single-object deltas. Reconcile reads the store, so bumping on
-                    // partial relist state only triggers redundant reconciles.
+                    // Store state during a relist is incomplete until InitDone.
                     Some(Ok(watcher::Event::Init | watcher::Event::InitApply(_))) => {}
                     Some(Ok(_)) => {
-                        generation = generation.wrapping_add(1);
-                        let _ = changes_tx.send(generation);
+                        reconcile_once(&service, &store, sync_port, &self_ip, &mut known).await;
                     }
                     Some(Err(e)) => {
                         tracing::warn!(error = %e, "EPP peer EndpointSlice watch error");
@@ -108,67 +100,7 @@ pub async fn spawn(
         }
     });
 
-    let peer_ready = Arc::new(AtomicBool::new(false));
-
-    tokio::spawn(reconcile_loop(
-        service,
-        store,
-        sync_port,
-        self_ip,
-        changes_rx,
-        cancel,
-        peer_ready.clone(),
-    ));
-    Ok(peer_ready)
-}
-
-/// React to EndpointSlice changes: diff the live sibling set against the peers
-/// currently registered and apply the delta. Exits when `cancel` fires or the
-/// change channel closes.
-async fn reconcile_loop(
-    service: Arc<SelectionService>,
-    store: Store,
-    sync_port: u16,
-    self_ip: String,
-    mut changes_rx: watch::Receiver<u64>,
-    cancel: CancellationToken,
-    peer_ready: Arc<AtomicBool>,
-) {
-    // Block on the first authoritative LIST before the initial reconcile so we
-    // never latch readiness on an empty snapshot. The reflector retries watch
-    // errors with backoff, so this resolves once the LIST lands; a writer drop
-    // (watch task gone) means we can't sync, so bail without latching.
-    tokio::select! {
-        _ = cancel.cancelled() => return,
-        result = store.wait_until_ready() => {
-            if result.is_err() {
-                tracing::warn!(
-                    "EPP peer EndpointSlice writer dropped before initial LIST; \
-                     peer discovery never became ready"
-                );
-                return;
-            }
-        }
-    }
-
-    let mut known: BTreeSet<String> = BTreeSet::new();
-    reconcile_once(&service, &store, sync_port, &self_ip, &mut known).await;
-    // Set readiness to true after the initial reconciliation.
-    // Subsequent transient watch failures keep the last-known peers and must not clear it.
-    peer_ready.store(true, Ordering::Release);
-    tracing::info!("EPP peer discovery initial sync complete");
-
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => break,
-            changed = changes_rx.changed() => {
-                if changed.is_err() {
-                    break;
-                }
-            }
-        }
-        reconcile_once(&service, &store, sync_port, &self_ip, &mut known).await;
-    }
+    Ok(())
 }
 
 async fn reconcile_once(

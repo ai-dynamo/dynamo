@@ -9,7 +9,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use anyhow::{Result, anyhow};
 
@@ -82,10 +81,6 @@ pub struct Selector {
     /// `Drop` tears down its core + replica-sync tasks.
     cancel: CancellationToken,
     reconcile_state: Mutex<ReconcileState>,
-    /// Peer-discovery readiness in replicated mode: `None` when replication is
-    /// disabled (single replica, always ready), or `Some(flag)` that latches
-    /// `true` once the initial peer-set sync completes. ANDed into EPP health.
-    peer_ready: Option<Arc<AtomicBool>>,
 }
 
 /// Local bookkeeping for desired-state reconciliation.
@@ -137,26 +132,21 @@ impl Selector {
         );
 
         let cancel = CancellationToken::new();
-        let peer_ready = if let Some(peer_service) = peer_service {
-            Some(
-                crate::peer_discovery::spawn(
-                    service.clone(),
-                    &cfg.namespace,
-                    peer_service,
-                    cfg.replica_sync_port,
-                    cfg.pod_ip
-                        .clone()
-                        .expect("validated peer discovery config must include POD_IP"),
-                    cancel.clone(),
-                )
-                .await?,
+        if let Some(peer_service) = peer_service {
+            crate::peer_discovery::spawn(
+                service.clone(),
+                &cfg.namespace,
+                peer_service,
+                cfg.replica_sync_port,
+                cfg.pod_ip
+                    .clone()
+                    .expect("validated peer discovery config must include POD_IP"),
+                cancel.clone(),
             )
-        } else {
-            None
-        };
-
+            .await?;
+        }
         tracing::info!(
-            replicated = peer_ready.is_some(),
+            replicated = peer_service.is_some(),
             "Initialized in-process selection service"
         );
 
@@ -164,7 +154,6 @@ impl Selector {
             service,
             cancel,
             reconcile_state: Mutex::new(ReconcileState::default()),
-            peer_ready,
         })
     }
 
@@ -184,10 +173,6 @@ impl Selector {
             );
         }
         Ok(())
-    }
-
-    pub fn peer_ready(&self) -> Option<Arc<AtomicBool>> {
-        self.peer_ready.clone()
     }
 
     fn worker_request(reg: &WorkerRegistration) -> CoreWorkerRequest {
