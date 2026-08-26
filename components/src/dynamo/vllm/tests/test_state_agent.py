@@ -168,15 +168,26 @@ async def test_attachment_owner_preserves_global_rank_and_resolved_endpoint(
 
     monkeypatch.setattr(state_agent, "KvStateAttachmentOwner", FakeOwner)
     endpoint = SimpleNamespace(connection_id=lambda: 17)
+    config = _config(
+        {
+            "7": _owner("d"),
+            "4": _owner("a"),
+            "6": _owner("c"),
+            "5": _owner("b"),
+        }
+    )
+    config.disaggregation_mode = state_agent.DisaggregationMode.PREFILL
+    config.engine_args.kv_transfer_config.kv_connector_extra_config[
+        "secondary_tiers"
+    ] = [
+        {
+            "router_capabilities": ["router_hint"],
+            "control_advertise_host": "cache-owner.example",
+            "control_ports": ["23284", "23285", "23286", "23287"],
+        }
+    ]
     owner = await state_agent.start_attachment_owner(
-        _config(
-            {
-                "7": _owner("d"),
-                "4": _owner("a"),
-                "6": _owner("c"),
-                "5": _owner("b"),
-            }
-        ),
+        config,
         endpoint,
         _vllm_config(4, 4),
         image_token_id=99,
@@ -190,6 +201,24 @@ async def test_attachment_owner_preserves_global_rank_and_resolved_endpoint(
         "tcp://worker-a.example:5562",
         "tcp://worker-a.example:5563",
         "tcp://worker-a.example:5564",
+    ]
+    assert [item["router_hint_source"] for item in captured["descriptors"]] == [
+        {
+            "source_control_endpoint": "tcp://cache-owner.example:23284",
+            "worker_type": "prefill",
+        },
+        {
+            "source_control_endpoint": "tcp://cache-owner.example:23285",
+            "worker_type": "prefill",
+        },
+        {
+            "source_control_endpoint": "tcp://cache-owner.example:23286",
+            "worker_type": "prefill",
+        },
+        {
+            "source_control_endpoint": "tcp://cache-owner.example:23287",
+            "worker_type": "prefill",
+        },
     ]
     assert captured["started"] is True
 
