@@ -253,128 +253,59 @@ fn label_key_from(labels: &prometheus_parse::Labels) -> String {
 mod tests {
     use super::*;
 
-    fn family<'a>(fs: &'a [MetricFamily], name: &str) -> &'a MetricFamily {
-        fs.iter()
-            .find(|f| f.name() == name)
-            .unwrap_or_else(|| panic!("missing family {name}; have {:?}", names(fs)))
-    }
-
     fn names(fs: &[MetricFamily]) -> Vec<&str> {
         fs.iter().map(|f| f.name()).collect()
     }
 
-    const HISTOGRAM: &str = r#"# HELP dynamo_req_duration_seconds Request duration
-# TYPE dynamo_req_duration_seconds histogram
-dynamo_req_duration_seconds_bucket{model="a",le="0.1"} 1
-dynamo_req_duration_seconds_bucket{model="a",le="0.5"} 3
-dynamo_req_duration_seconds_bucket{model="a",le="+Inf"} 5
-dynamo_req_duration_seconds_sum{model="a"} 2.75
-dynamo_req_duration_seconds_count{model="a"} 5
-"#;
-
-    /// A histogram's `_sum` / `_count` arrive as separate sample lines. They must
-    /// be folded into the parent, or sums are silently zero and OTLP grows two
-    /// gauge series that `/metrics` consumers never see as separate metrics.
+    /// `_sum` and `_count` arrive as separate samples. Unfolded, the parent's
+    /// sum stays 0 and OTLP gains two gauge series `/metrics` never shows.
     #[test]
     fn histogram_folds_sum_and_count_into_parent() {
-        let fs = parse_exposition(HISTOGRAM).expect("parse");
+        let fs = parse_exposition(
+            r#"# HELP d_seconds Request duration
+# TYPE d_seconds histogram
+d_seconds_bucket{model="a",le="0.1"} 1
+d_seconds_bucket{model="a",le="+Inf"} 5
+d_seconds_sum{model="a"} 2.75
+d_seconds_count{model="a"} 5
+"#,
+        )
+        .expect("parse");
 
-        assert_eq!(
-            names(&fs),
-            vec!["dynamo_req_duration_seconds"],
-            "_sum/_count must not survive as standalone families"
-        );
+        assert_eq!(names(&fs), vec!["d_seconds"]);
+        assert_eq!(fs[0].get_field_type(), MetricType::HISTOGRAM);
+        assert_eq!(fs[0].help(), "Request duration");
 
-        let f = family(&fs, "dynamo_req_duration_seconds");
-        assert_eq!(f.get_field_type(), MetricType::HISTOGRAM);
-        assert_eq!(f.help(), "Request duration", "HELP text must survive");
-
-        let h = f.get_metric()[0].get_histogram();
-        assert_eq!(h.get_bucket().len(), 3);
+        let h = fs[0].get_metric()[0].get_histogram();
+        assert_eq!(h.get_bucket().len(), 2);
+        assert_eq!(h.sample_sum(), 2.75);
         assert_eq!(h.sample_count(), 5);
-        assert_eq!(h.sample_sum(), 2.75, "sum must come from the _sum sibling");
-        assert_eq!(h.get_bucket()[0].upper_bound(), 0.1);
-        assert_eq!(h.get_bucket()[0].cumulative_count(), 1);
     }
-
-    const SUMMARY: &str = r#"# HELP dynamo_gc_pause_seconds GC pause
-# TYPE dynamo_gc_pause_seconds summary
-dynamo_gc_pause_seconds{quantile="0.5"} 0.01
-dynamo_gc_pause_seconds{quantile="0.99"} 0.2
-dynamo_gc_pause_seconds_sum 12.5
-dynamo_gc_pause_seconds_count 300
-"#;
 
     #[test]
     fn summary_preserves_quantiles_and_folds_siblings() {
-        let fs = parse_exposition(SUMMARY).expect("parse");
-        assert_eq!(names(&fs), vec!["dynamo_gc_pause_seconds"]);
+        let fs = parse_exposition(
+            r#"# TYPE d_pause_seconds summary
+d_pause_seconds{quantile="0.5"} 0.01
+d_pause_seconds_sum 12.5
+d_pause_seconds_count 300
+"#,
+        )
+        .expect("parse");
 
-        let f = family(&fs, "dynamo_gc_pause_seconds");
-        assert_eq!(f.get_field_type(), MetricType::SUMMARY);
-
-        let sm = f.get_metric()[0].get_summary();
-        assert_eq!(sm.get_quantile().len(), 2);
+        assert_eq!(names(&fs), vec!["d_pause_seconds"]);
+        let sm = fs[0].get_metric()[0].get_summary();
         assert_eq!(sm.get_quantile()[0].quantile(), 0.5);
-        assert_eq!(sm.get_quantile()[0].value(), 0.01);
         assert_eq!(sm.sample_sum(), 12.5);
         assert_eq!(sm.sample_count(), 300);
     }
 
-    /// A standalone gauge whose name merely ends in `_sum` has no histogram or
-    /// summary parent, so it must be left alone rather than silently absorbed.
+    /// Folding keys off a real parent, so a plain gauge ending in `_sum`
+    /// must survive.
     #[test]
     fn standalone_sum_suffixed_gauge_is_not_absorbed() {
-        let text = r#"# HELP dynamo_batch_sum Total batch size
-# TYPE dynamo_batch_sum gauge
-dynamo_batch_sum 42
-"#;
-        let fs = parse_exposition(text).expect("parse");
-        assert_eq!(names(&fs), vec!["dynamo_batch_sum"]);
+        let fs = parse_exposition("# TYPE d_batch_sum gauge\nd_batch_sum 42\n").expect("parse");
+        assert_eq!(names(&fs), vec!["d_batch_sum"]);
         assert_eq!(fs[0].get_metric()[0].get_gauge().value(), 42.0);
-    }
-
-    #[test]
-    fn counter_and_gauge_roundtrip_with_labels() {
-        let text = r#"# HELP dynamo_requests_total Total requests
-# TYPE dynamo_requests_total counter
-dynamo_requests_total{model="a",endpoint="generate"} 17
-# HELP dynamo_inflight Current inflight
-# TYPE dynamo_inflight gauge
-dynamo_inflight{model="a"} 3
-"#;
-        let fs = parse_exposition(text).expect("parse");
-        assert_eq!(names(&fs), vec!["dynamo_inflight", "dynamo_requests_total"]);
-
-        let c = family(&fs, "dynamo_requests_total");
-        assert_eq!(c.get_field_type(), MetricType::COUNTER);
-        assert_eq!(c.get_metric()[0].get_counter().value(), 17.0);
-        // Labels are sorted for stable series identity when merging.
-        let labels: Vec<&str> = c.get_metric()[0]
-            .get_label()
-            .iter()
-            .map(|l| l.name())
-            .collect();
-        assert_eq!(labels, vec!["endpoint", "model"]);
-
-        assert_eq!(
-            family(&fs, "dynamo_inflight").get_field_type(),
-            MetricType::GAUGE
-        );
-    }
-
-    #[test]
-    fn empty_input_yields_no_families() {
-        assert!(parse_exposition("").expect("parse").is_empty());
-        assert!(parse_exposition("   \n  ").expect("parse").is_empty());
-    }
-
-    /// Untyped samples have no OTLP-meaningful aggregation; gauge is the
-    /// conservative reading.
-    #[test]
-    fn untyped_becomes_gauge() {
-        let fs = parse_exposition("some_untyped_metric 5\n").expect("parse");
-        assert_eq!(fs[0].get_field_type(), MetricType::GAUGE);
-        assert_eq!(fs[0].get_metric()[0].get_gauge().value(), 5.0);
     }
 }

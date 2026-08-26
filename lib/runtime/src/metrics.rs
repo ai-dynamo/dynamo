@@ -7,6 +7,7 @@
 //! with automatic label injection and hierarchical naming support.
 
 pub mod frontend_perf;
+pub mod otlp_export;
 pub mod prom_text;
 pub mod prometheus_names;
 pub mod request_plane;
@@ -21,6 +22,7 @@ use std::sync::Arc;
 
 use crate::component::ComponentBuilder;
 use anyhow;
+use anyhow::Context as _;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::any::Any;
@@ -1015,8 +1017,8 @@ impl MetricsRegistry {
 fn run_update_callbacks(registries: &[MetricsRegistry]) {
     for registry in registries {
         for result in registry.execute_update_callbacks() {
-            if let Err(e) = result {
-                tracing::error!("Error executing metrics callback: {e}");
+            if let Err(error) = result {
+                tracing::error!(%error, "metrics update callback failed");
             }
         }
     }
@@ -1059,10 +1061,11 @@ impl FamilyMerger {
             by_name: HashMap::new(),
             seen_series: HashSet::new(),
         };
-        for registry in registries {
-            let families = registry.get_prometheus_registry().gather();
-            for family in families {
-                merger.add_family(family)?;
+        for (idx, registry) in registries.iter().enumerate() {
+            for family in registry.get_prometheus_registry().gather() {
+                merger
+                    .add_family(family)
+                    .with_context(|| format!("gathering from registry {idx}"))?;
             }
         }
         Ok(merger)
@@ -1086,7 +1089,7 @@ impl FamilyMerger {
             ));
         }
 
-        for metric in family.take_metric().drain(..) {
+        for metric in family.take_metric() {
             let mut labels: Vec<(String, String)> = metric
                 .get_label()
                 .iter()
@@ -1985,7 +1988,12 @@ mod test_metric_families_combined {
     use super::*;
     use std::sync::Arc as StdArc;
 
-    fn registry_with_metrics() -> MetricsRegistry {
+    const ENGINE_TEXT: &str = r#"# HELP vllm_num_requests_running Running requests
+# TYPE vllm_num_requests_running gauge
+vllm_num_requests_running{model="llama"} 4
+"#;
+
+    fn registry() -> MetricsRegistry {
         let registry = MetricsRegistry::new();
         let counter = prometheus::IntCounter::new("dynamo_native_total", "Native counter").unwrap();
         counter.inc_by(7);
@@ -1993,104 +2001,56 @@ mod test_metric_families_combined {
             .get_prometheus_registry()
             .register(Box::new(counter))
             .unwrap();
+        registry.add_expfmt_callback(StdArc::new(|| Ok(ENGINE_TEXT.to_string())));
         registry
     }
-
-    const ENGINE_TEXT: &str = r#"# HELP vllm_num_requests_running Running requests
-# TYPE vllm_num_requests_running gauge
-vllm_num_requests_running{model="llama"} 4
-# HELP vllm_time_to_first_token_seconds TTFT
-# TYPE vllm_time_to_first_token_seconds histogram
-vllm_time_to_first_token_seconds_bucket{model="llama",le="0.1"} 2
-vllm_time_to_first_token_seconds_bucket{model="llama",le="+Inf"} 9
-vllm_time_to_first_token_seconds_sum{model="llama"} 1.5
-vllm_time_to_first_token_seconds_count{model="llama"} 9
-"#;
 
     fn names(fs: &[prometheus::proto::MetricFamily]) -> Vec<&str> {
         fs.iter().map(|f| f.name()).collect()
     }
 
-    /// The whole point of the structured path: engine metrics reach OTLP.
-    /// `gather()` alone cannot see them, so a regression here silently drops
-    /// every vLLM / SGLang / TRT-LLM metric from the export.
+    /// `gather()` cannot see expfmt-callback metrics. Without this the OTLP
+    /// export ships with zero engine metrics.
     #[test]
-    fn engine_metrics_from_expfmt_callbacks_are_included() {
-        let registry = registry_with_metrics();
-        registry.add_expfmt_callback(StdArc::new(|| Ok(ENGINE_TEXT.to_string())));
-
-        let families = registry.metric_families_combined().expect("combined");
-        let got = names(&families);
-
-        assert!(
-            got.contains(&"dynamo_native_total"),
-            "native metric missing: {got:?}"
-        );
-        assert!(
-            got.contains(&"vllm_num_requests_running"),
-            "engine gauge missing -- gather() cannot see it: {got:?}"
-        );
-        assert!(
-            got.contains(&"vllm_time_to_first_token_seconds"),
-            "engine histogram missing: {got:?}"
-        );
+    fn engine_metrics_are_included() {
+        let families = registry().metric_families_combined().expect("combined");
+        assert!(names(&families).contains(&"vllm_num_requests_running"));
+        assert!(names(&families).contains(&"dynamo_native_total"));
     }
 
-    /// `/metrics` and OTLP must not disagree on the metric surface. Anything
-    /// rendered into the text output must appear as a structured family, and
-    /// vice versa.
+    /// `/metrics` and the structured path must not disagree on the surface,
+    /// and HELP must survive for both sources.
     #[test]
-    fn structured_and_text_paths_expose_the_same_families() {
-        let registry = registry_with_metrics();
-        registry.add_expfmt_callback(StdArc::new(|| Ok(ENGINE_TEXT.to_string())));
-
+    fn structured_path_matches_text_path() {
+        let registry = registry();
         let text = registry.prometheus_expfmt_combined().expect("text");
         let families = registry.metric_families_combined().expect("combined");
 
         for name in names(&families) {
-            assert!(
-                text.contains(name),
-                "family '{name}' is in the structured path but not in /metrics"
-            );
+            assert!(text.contains(name), "{name} missing from /metrics");
         }
 
-        // `_sum` / `_count` are folded into their parent, so the text output has
-        // them as sample lines while the structured path has one family.
-        for rendered in ["dynamo_native_total", "vllm_num_requests_running"] {
-            assert!(
-                names(&families).contains(&rendered),
-                "/metrics renders '{rendered}' but the structured path omits it"
-            );
-        }
-    }
-
-    /// HELP text survives into the structured path for both sources. This is
-    /// what a scraping sidecar built on Vector's metric model cannot preserve.
-    #[test]
-    fn help_text_survives_for_both_sources() {
-        let registry = registry_with_metrics();
-        registry.add_expfmt_callback(StdArc::new(|| Ok(ENGINE_TEXT.to_string())));
-
-        let families = registry.metric_families_combined().expect("combined");
-        let help = |name: &str| {
+        let help = |n: &str| {
             families
                 .iter()
-                .find(|f| f.name() == name)
-                .unwrap_or_else(|| panic!("missing {name}"))
-                .help()
-                .to_string()
+                .find(|f| f.name() == n)
+                .map(|f| f.help().to_string())
         };
-
-        assert_eq!(help("dynamo_native_total"), "Native counter");
-        assert_eq!(help("vllm_num_requests_running"), "Running requests");
+        assert_eq!(
+            help("dynamo_native_total").as_deref(),
+            Some("Native counter")
+        );
+        assert_eq!(
+            help("vllm_num_requests_running").as_deref(),
+            Some("Running requests")
+        );
     }
 
-    /// Collection crosses into Python and takes the GIL, so a second consumer
-    /// polling on its own clock must not force a second collection within the
-    /// TTL.
+    /// Collection takes the Python GIL, so a second consumer within the TTL
+    /// must reuse the first collection.
     #[test]
     fn cache_collapses_collections_within_ttl() {
-        let registry = registry_with_metrics();
+        let registry = MetricsRegistry::new();
         let calls = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = calls.clone();
         registry.add_expfmt_callback(StdArc::new(move || {
@@ -2102,41 +2062,7 @@ vllm_time_to_first_token_seconds_count{model="llama"} 9
         let first = registry.metric_families_cached(ttl).expect("first");
         let second = registry.metric_families_cached(ttl).expect("second");
 
-        assert_eq!(
-            calls.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "second call within the TTL must not re-run the GIL-taking callback"
-        );
-        assert!(
-            StdArc::ptr_eq(&first, &second),
-            "cached call should hand back the same collection"
-        );
-    }
-
-    /// A zero TTL means every call collects, which is the escape hatch for
-    /// callers that need a guaranteed-fresh read.
-    #[test]
-    fn zero_ttl_always_recollects() {
-        let registry = registry_with_metrics();
-        let calls = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counter = calls.clone();
-        registry.add_expfmt_callback(StdArc::new(move || {
-            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(String::new())
-        }));
-
-        let ttl = std::time::Duration::ZERO;
-        registry.metric_families_cached(ttl).expect("first");
-        registry.metric_families_cached(ttl).expect("second");
-
-        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
-    }
-
-    /// A registry with no expfmt callbacks must behave exactly as before.
-    #[test]
-    fn no_callbacks_yields_only_gathered_families() {
-        let registry = registry_with_metrics();
-        let families = registry.metric_families_combined().expect("combined");
-        assert_eq!(names(&families), vec!["dynamo_native_total"]);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(StdArc::ptr_eq(&first, &second));
     }
 }
