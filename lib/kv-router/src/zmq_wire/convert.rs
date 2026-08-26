@@ -168,6 +168,47 @@ pub fn convert_event(
     ))
 }
 
+/// Rewrite each `image_token_id` run in `token_ids` to `pad_value(mm_hash)`,
+/// assigning one MM hash per run in order and clamping excess runs to the last
+/// hash. Returns the normalized tokens and the number of discovered runs.
+///
+/// This is the shared request/event normalization contract. Callers decide
+/// whether a run/object count mismatch is acceptable for their use case.
+pub fn normalize_mm_token_runs(
+    token_ids: &[u32],
+    image_token_id: u32,
+    mm_hashes: &[u64],
+) -> Option<(Vec<u32>, usize)> {
+    let last_mm_hash = *mm_hashes.last()?;
+    let mut out = Vec::with_capacity(token_ids.len());
+    // `obj_idx` advances once per completed run, so run N fills with
+    // mm_hashes[N], clamped to the last object if runs outnumber hashes.
+    let mut obj_idx = 0usize;
+    let mut in_run = false;
+    let mut runs = 0usize;
+    // pad_value for the current run, computed once on entry and reused for the
+    // rest of the run (one mm_hash per run, so it's constant within a run).
+    let mut run_pad = 0u32;
+    for &t in token_ids {
+        if t == image_token_id {
+            if !in_run {
+                in_run = true;
+                runs += 1;
+                let mm_hash = mm_hashes.get(obj_idx).copied().unwrap_or(last_mm_hash);
+                run_pad = crate::protocols::pad_value_for_mm_hash(mm_hash);
+            }
+            out.push(run_pad);
+        } else {
+            if in_run {
+                in_run = false;
+                obj_idx += 1;
+            }
+            out.push(t);
+        }
+    }
+    Some((out, runs))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MmTokenKind {
     Image,
@@ -242,7 +283,6 @@ fn find_unique_object_mapping(
             }
         }
     }
-
     let mut solution = None;
     let mut ambiguous = false;
     visit(
@@ -569,6 +609,28 @@ pub fn create_stored_blocks(
 mod normalize_tests {
     use super::*;
     use crate::protocols::{BlockMmObjectInfo, pad_value_for_mm_hash};
+
+    #[test]
+    fn mm_token_run_normalization_uses_worker_order_and_clamps_excess_runs() {
+        let image_token_id = 99;
+        let (normalized, runs) =
+            normalize_mm_token_runs(&[10, 99, 42, 99, 20, 99], image_token_id, &[7, 8])
+                .expect("non-empty hashes normalize");
+
+        assert_eq!(runs, 3);
+        assert_eq!(
+            normalized,
+            vec![
+                10,
+                pad_value_for_mm_hash(7),
+                42,
+                pad_value_for_mm_hash(8),
+                20,
+                pad_value_for_mm_hash(8),
+            ]
+        );
+        assert!(normalize_mm_token_runs(&[99], image_token_id, &[]).is_none());
+    }
 
     /// A normalized vLLM block (image_token_id run + mm_hash) must hash
     /// identically to the frontend's pad_value scheme. The parity the

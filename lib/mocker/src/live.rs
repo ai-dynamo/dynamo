@@ -52,6 +52,33 @@ use request::{
 const SCHEDULER_EVENT_CAPACITY: usize = 8;
 const DEFAULT_REQUEST_OUTPUT_CAPACITY: usize = 8;
 
+/// Controls how much output one live request may retain before it is consumed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestOutputBuffering {
+    /// Cancel the request when its output queue reaches `capacity`.
+    CancelOnOverflow { capacity: NonZeroUsize },
+    /// Buffer the request's full declared response.
+    FullResponse,
+}
+
+impl Default for RequestOutputBuffering {
+    fn default() -> Self {
+        Self::CancelOnOverflow {
+            capacity: NonZeroUsize::new(DEFAULT_REQUEST_OUTPUT_CAPACITY).unwrap(),
+        }
+    }
+}
+
+impl RequestOutputBuffering {
+    fn capacity_for(self, output_length: usize) -> usize {
+        let output_length = output_length.max(1);
+        match self {
+            Self::CancelOnOverflow { capacity } => output_length.min(capacity.get()),
+            Self::FullResponse => output_length,
+        }
+    }
+}
+
 /// Runtime publishers used by one live Mocker scheduler.
 #[derive(Clone, Default)]
 pub struct LiveEngineConfig {
@@ -64,24 +91,13 @@ pub(crate) struct ObservedAdmission {
     pub(crate) observed_at: tokio::time::Instant,
 }
 
+#[derive(Default)]
 pub(crate) struct LiveEngineOptions {
     pub(crate) kv_event_publishers: KvEventPublishers,
     pub(crate) admission_tx: Option<mpsc::UnboundedSender<ObservedAdmission>>,
     pub(crate) fpm_publisher: FpmPublisher,
-    pub(crate) request_output_capacity: Option<NonZeroUsize>,
+    pub(crate) request_output_buffering: RequestOutputBuffering,
     pub(crate) allow_zero_output: bool,
-}
-
-impl Default for LiveEngineOptions {
-    fn default() -> Self {
-        Self {
-            kv_event_publishers: KvEventPublishers::default(),
-            admission_tx: None,
-            fpm_publisher: FpmPublisher::default(),
-            request_output_capacity: NonZeroUsize::new(DEFAULT_REQUEST_OUTPUT_CAPACITY),
-            allow_zero_output: false,
-        }
-    }
 }
 
 /// Map a wire-protocol request ID to a deterministic scheduler UUID.
@@ -124,7 +140,7 @@ struct LiveEngineInner {
     routes: Routes,
     handoff_routes: SharedHandoffRoutes,
     metrics_rx: tokio::sync::watch::Receiver<MockerMetrics>,
-    request_output_capacity: Option<NonZeroUsize>,
+    request_output_buffering: RequestOutputBuffering,
     allow_zero_output: bool,
     group: Arc<LiveEngineGroup>,
     cancel: CancellationToken,
@@ -210,12 +226,29 @@ impl LiveEngine {
         dp_rank: u32,
         config: LiveEngineConfig,
     ) -> anyhow::Result<Self> {
+        Self::start_with_config_and_request_output_buffering(
+            args,
+            dp_rank,
+            config,
+            RequestOutputBuffering::default(),
+        )
+    }
+
+    /// Start one live scheduler with runtime-owned publishers and an explicit
+    /// per-request output buffering policy.
+    pub fn start_with_config_and_request_output_buffering(
+        args: MockEngineArgs,
+        dp_rank: u32,
+        config: LiveEngineConfig,
+        request_output_buffering: RequestOutputBuffering,
+    ) -> anyhow::Result<Self> {
         Self::start_internal(
             args,
             dp_rank,
             LiveEngineOptions {
                 kv_event_publishers: config.kv_event_publishers,
                 fpm_publisher: config.fpm_publisher,
+                request_output_buffering,
                 ..LiveEngineOptions::default()
             },
             None,
@@ -231,11 +264,26 @@ impl LiveEngine {
         args: MockEngineArgs,
         configs: Vec<LiveEngineConfig>,
     ) -> anyhow::Result<Vec<Self>> {
+        Self::start_grouped_with_configs_and_request_output_buffering(
+            args,
+            configs,
+            RequestOutputBuffering::default(),
+        )
+    }
+
+    /// Start all attention-DP ranks with an explicit per-request output
+    /// buffering policy.
+    pub fn start_grouped_with_configs_and_request_output_buffering(
+        args: MockEngineArgs,
+        configs: Vec<LiveEngineConfig>,
+        request_output_buffering: RequestOutputBuffering,
+    ) -> anyhow::Result<Vec<Self>> {
         let options = configs
             .into_iter()
             .map(|config| LiveEngineOptions {
                 kv_event_publishers: config.kv_event_publishers,
                 fpm_publisher: config.fpm_publisher,
+                request_output_buffering,
                 ..LiveEngineOptions::default()
             })
             .collect();
@@ -321,7 +369,9 @@ impl LiveEngine {
             args,
             dp_rank,
             LiveEngineOptions {
-                request_output_capacity: Some(request_output_capacity),
+                request_output_buffering: RequestOutputBuffering::CancelOnOverflow {
+                    capacity: request_output_capacity,
+                },
                 ..LiveEngineOptions::default()
             },
             output_gate,
@@ -415,7 +465,7 @@ impl LiveEngine {
                 routes,
                 handoff_routes,
                 metrics_rx,
-                request_output_capacity: options.request_output_capacity,
+                request_output_buffering: options.request_output_buffering,
                 allow_zero_output: options.allow_zero_output,
                 group,
                 cancel,
@@ -452,10 +502,10 @@ impl LiveEngine {
         let client_id = request.uuid.unwrap_or_else(Uuid::new_v4);
         let scheduler_id = Uuid::new_v4();
         request.uuid = Some(scheduler_id);
-        let output_capacity = self.inner.request_output_capacity.map_or_else(
-            || output_length.max(1),
-            |capacity| output_length.max(1).min(capacity.get()),
-        );
+        let output_capacity = self
+            .inner
+            .request_output_buffering
+            .capacity_for(output_length);
         let (tx, rx) = mpsc::channel(output_capacity);
         let route = Arc::new(RequestRoute::new(client_id, scheduler_id, tx));
         match self.inner.routes.by_client.entry(client_id) {

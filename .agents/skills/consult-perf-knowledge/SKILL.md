@@ -144,7 +144,7 @@ Maintain one persistent search-calibration ledger for the engagement at
 hypothesis; each iteration's `knowledge-consult.md` records only the delta applied to it. The ledger is the
 authoritative family table. When submitting a stop-request, record in `knowledge-consult.md` the ledger path and
 the SHA256 of the ledger state being submitted, plus — whenever any granted budget is non-null — the derived
-budget consumption (wall clock from `manifest.yaml`'s session start; failed deploys from deployment ledgers marked failed; GPU-hours from summed `benchmark_execution.json` durations times the deployed GPU count); do not modify the ledger while that validation is pending. Before each hypothesis, update the ledger by delta, re-reviewing every row whose evidence regime changed
+budget consumption (wall clock from `manifest.yaml`'s session start; failed deploys from the deployment ledgers' `failed_attempts` records; GPU-hours from GPU allocation time (per deployment ledger: `allocated_at` to `torn_down_at`, or to now if live, times its `gpus_requested`, summed across deployments)); do not modify the ledger while that validation is pending. Before each hypothesis, update the ledger by delta, re-reviewing every row whose evidence regime changed
 (a topology adoption, new variance data, an answered ask). The ledger explicitly covers:
 
 1. deployment topology and fit, including model fit, parallelism, replication, aggregated versus disaggregated
@@ -156,8 +156,14 @@ budget consumption (wall clock from `manifest.yaml`'s session start; failed depl
 
 For each family, record its coverage as `tested`, `ruled-out`, `not-applicable`, `untested-promising`, `deferred`,
 or `reopened-by-new-evidence`, plus its expected upside — recorded BOTH as a quantitative estimate and on the
-fixed ordinal scale the stop-request check reads: `low` (below ~2% on the primary objective), `medium` (~2-10%),
-`high` (above ~10%) — and the evidence for that disposition. A `ruled-out` row must
+ordinal scale with cutoffs DERIVED per engagement, recorded for readers of the ledger: `low` (below the
+primary objective series' measured minimum detectable effect — indistinguishable from noise), `medium` (above
+the MDE but below the engagement's practical-significance threshold), `high` (above that threshold). The
+practical-significance threshold is the user's stated smallest-delta-that-matters when the interview captured
+one; otherwise DEFAULT it to twice the measured MDE and say so. Record both derived cutoffs and their
+derivation in the ledger header (`mde:`, `practical_significance:` lines above the family table) — and the
+evidence for that disposition. A `deferred` row's cost-estimate-vs-remaining-budget numbers live in its
+`Evidence and reason` cell. A `ruled-out` row must
 cite a measurement, a sourced hard constraint, a confirmed incompatibility, or an explicit operator decision;
 expected upside below the minimum detectable effect is `deferred` (still visible, and stackable under a documented
 one-variable exception), never `ruled-out`. Compare all applicable families for potential benefit and information value before choosing one.

@@ -18,8 +18,8 @@ pub mod media;
 mod mm_routing;
 pub mod prompt;
 pub mod speculative_prefill;
-mod structural_tag;
-mod tool_choice;
+pub(crate) mod structural_tag;
+pub(crate) mod tool_choice;
 pub mod tools;
 use anyhow::Context;
 use anyhow::{Result, bail};
@@ -31,7 +31,9 @@ use dynamo_protocols::types::{
     ChatCompletionToolChoiceOption, EncodingFormat,
 };
 use dynamo_renderer::{OAIPromptFormatter, PromptRenderError, RenderedPrompt};
-use dynamo_runtime::config::{is_truthy, parse_bool_opt};
+use dynamo_runtime::config::{
+    env_is_falsey, environment_names::llm as env_llm, is_truthy, parse_bool_opt,
+};
 use dynamo_runtime::error::{DynamoError, ErrorType};
 use either::Either;
 use futures::Stream;
@@ -587,7 +589,44 @@ struct ReasoningState {
     saw_terminal_error: bool,
 }
 
-/// Image routing payload used by the model-specific image expansion helpers.
+#[derive(Default)]
+struct DeferredUnifiedChoice {
+    pending_reasoning: String,
+    pending_content: String,
+    saw_visible_output: bool,
+    drained: bool,
+}
+
+impl DeferredUnifiedChoice {
+    fn release_split(&mut self) -> (Option<String>, Option<String>) {
+        let content = std::mem::take(&mut self.pending_content);
+        let reasoning = std::mem::take(&mut self.pending_reasoning);
+        (
+            (!content.is_empty()).then_some(content),
+            (!reasoning.is_empty()).then_some(reasoning),
+        )
+    }
+
+    fn drain(&mut self) -> (Option<String>, Option<String>) {
+        if self.drained {
+            return (None, None);
+        }
+        self.drained = true;
+        if self.saw_visible_output {
+            return self.release_split();
+        }
+        let reasoning = std::mem::take(&mut self.pending_reasoning);
+        let content = std::mem::take(&mut self.pending_content);
+        if !reasoning.trim().is_empty() {
+            (Some(reasoning), None)
+        } else {
+            ((!content.is_empty()).then_some(content), None)
+        }
+    }
+}
+
+/// Per-image routing payload accumulated by `gather_multi_modal_data` and
+/// consumed by `gather_mm_exact_routing_info`.
 #[derive(Debug, Clone, Copy)]
 pub struct MmImageEntry {
     pub mm_hash: u64,
@@ -3796,6 +3835,37 @@ impl OpenAIPreprocessor {
         Ok((builder.build()?, annotations))
     }
 
+    fn apply_unified_response_policies<S>(
+        stream: S,
+        emit_tool_calls: bool,
+        defer_reasoning_for_nonempty_content: bool,
+    ) -> Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = Box::pin(
+            Self::apply_tool_call_response_policy(stream, emit_tool_calls),
+        );
+        // Observe parser classification before force_nonempty deferral removes the
+        // reasoning delta. The annotated usage trailer can still be held below until
+        // every deferred recovery chunk has been emitted.
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> =
+            Box::pin(annotate_reasoning_usage(stream));
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if defer_reasoning_for_nonempty_content
+        {
+            Box::pin(Self::defer_unified_reasoning_for_nonempty_content(stream))
+        } else {
+            stream
+        };
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if defer_reasoning_for_nonempty_content
+        {
+            Box::pin(Self::hold_usage_until_stream_end(stream))
+        } else {
+            stream
+        };
+        stream
+    }
+
     pub fn postprocessor_parsing_stream<S>(
         &self,
         stream: S,
@@ -3808,25 +3878,67 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        // Muse serves through ONE unified parser (ordered reasoning + content +
-        // tool calls), default-on. Bypass the v1 reasoning stage — its muse parser
-        // is gone, so it falls back to `Basic`, which cannot read the
-        // `to=self<|message|>` grammar — and the tool jail. auto/none only; a forced
-        // tool_choice keeps the guided-decode + jail path (that emits guided JSON,
-        // not the native markup the unified parser reads), and a structural-tag
-        // request is excluded for the SAME reason by a different flag. `none` routes
-        // here so the markers are still stripped, but its calls are suppressed below.
-        // Runs regardless of has_tools: muse owns reasoning and strips its markers
-        // even with zero tools.
+        let guided_tool_constraint = crate::preprocessor::tool_choice::guided_tool_constraint(
+            request,
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+            uses_tool_call_structural_tag,
+        )?;
+        self.postprocessor_parsing_stream_with_constraint(
+            stream,
+            request,
+            prompt_injected_reasoning,
+            guided_tool_constraint,
+        )
+    }
+
+    fn postprocessor_parsing_stream_with_constraint<S>(
+        &self,
+        stream: S,
+        request: &NvCreateChatCompletionRequest,
+        prompt_injected_reasoning: bool,
+        guided_tool_constraint: crate::protocols::openai::GuidedToolConstraint,
+    ) -> anyhow::Result<
+        impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    >
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        use crate::protocols::openai::chat_completions::unified_parser;
+        let uses_tool_call_structural_tag = guided_tool_constraint.uses_structural_tag();
+        let defer_reasoning_for_nonempty_content =
+            Self::wants_reasoning_as_content_when_empty(request.chat_template_args.as_ref());
+        // Two different streaming paths can release a grammar-constrained tool call
+        // before its payload closes: the unified (v2) adapter below and the jail near
+        // the end of this function. Both must obey the same rollback lever, so
+        // `DYN_ENABLE_GUIDED_TOOL_STREAMING` is read ONCE, here, and the single decision
+        // is handed to whichever path runs. Reading it again at either site would be a
+        // second predicate that can drift; a site with no read at all makes the lever
+        // silently inert for every request routed through it.
+        let guided_tool_streaming = Self::guided_tool_streaming_release(
+            guided_tool_constraint.installs_guided_json(),
+            env_is_falsey(env_llm::DYN_ENABLE_GUIDED_TOOL_STREAMING),
+        );
+
+        // Two independent families each own ONE unified parser (ordered reasoning +
+        // content + tool calls) that replaces the v1 reasoning stage AND the tool
+        // jail outright: muse (`tool_parser_v2`, default-on — its v1 reasoning
+        // parser is gone, so `get_reasoning_parser_from_name` falls back to
+        // `Basic`, which cannot read the `to=self<|message|>` grammar) and Qwen3
+        // (`unified_parser`, gated on `DYN_ENABLE_EXPERIMENTAL_PARSERS_V2`). Both
+        // run regardless of has_tools — they own reasoning and strip its markers
+        // even with zero tools — and both route their output through the SAME
+        // shared response policy below, which is what suppresses `tool_calls` for
+        // a no-tools or `tool_choice: none` request, exactly as it does for every
+        // other family's jail output.
         //
-        // KNOWN GAP: this returns before `defer_reasoning_for_nonempty_content` is
-        // computed, so a `force_nonempty_content=true` request whose turn produced only
-        // reasoning streams empty `content` while the aggregator surfaces the reasoning
-        // AS content for the identical request. Closing it needs the per-choice
-        // buffering + EOF flush that `parse_reasoning_content_from_stream_inner` has;
-        // it is a follow-up, not a guard tweak. `stream_can_defer_all_output` already
-        // reports false for muse so nothing claims a deferral that does not happen.
-        // (`tool_parser_v2` is imported below; a `use` is in scope for the whole body.)
+        // A forced/structural-tag `tool_choice` still excludes muse: its
+        // `apply_unified_stream` only reads native markup, so a guided-JSON or
+        // structural-tag request would misparse the grammar it does not speak. The
+        // newer Qwen3 `apply_stream` handles every `tool_choice` itself (guided
+        // JSON for named/required, native markup for auto/none/structural-tag), so
+        // it does not need the same entry gate.
+        //
         if let Some(family) = tool_parser_v2::unified_family(
             self.tool_call_parser.as_deref(),
             self.runtime_config.reasoning_parser.as_deref(),
@@ -3847,21 +3959,44 @@ impl OpenAIPreprocessor {
                     })
                     .collect()
             });
-            // `none` routes here for the split and the stripping, but a caller that
-            // disabled tools must not get `tool_calls` back — every other family
-            // reaches that via `should_apply_tool_jail` returning false.
-            let emit_tool_calls = !matches!(
-                request.inner.tool_choice.as_ref(),
-                Some(ChatCompletionToolChoiceOption::None)
+            let unified: Pin<Box<dyn Stream<Item = _> + Send>> = Box::pin(
+                tool_parser_v2::apply_unified_stream(stream, tool_definitions, family, true),
             );
+            return Ok(Self::apply_unified_response_policies(
+                unified,
+                Self::tool_call_parsing_enabled(request),
+                defer_reasoning_for_nonempty_content,
+            ));
+        }
+
+        if let Some(family) = unified_parser::selected_family(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ) {
+            let tool_definitions = request.inner.tools.as_ref().map(|tools| {
+                tools
+                    .iter()
+                    .map(|tool| dynamo_parsers::tool_calling::ToolDefinition {
+                        name: tool.function.name.clone(),
+                        parameters: tool.function.parameters.clone(),
+                        strict: tool.function.strict,
+                    })
+                    .collect()
+            });
             let unified: Pin<Box<dyn Stream<Item = _> + Send>> =
-                Box::pin(tool_parser_v2::apply_unified_stream(
+                Box::pin(unified_parser::apply_stream_with_constraint(
                     stream,
                     tool_definitions,
+                    guided_tool_constraint,
+                    unified_parser::stream_prefill(family, prompt_injected_reasoning),
                     family,
-                    emit_tool_calls,
+                    guided_tool_streaming,
                 ));
-            return Ok(unified);
+            return Ok(Self::apply_unified_response_policies(
+                unified,
+                Self::tool_call_parsing_enabled(request),
+                defer_reasoning_for_nonempty_content,
+            ));
         }
 
         // Guided output may be bare JSON or `reasoning</think>JSON`. Supported
@@ -3941,8 +4076,6 @@ impl OpenAIPreprocessor {
         // per-token clone and the finish_reasoning_stream() flush off every
         // other request's path. Same predicate the aggregator uses, so the
         // streaming and non-streaming paths cannot disagree.
-        let defer_reasoning_for_nonempty_content =
-            Self::wants_reasoning_as_content_when_empty(request.chat_template_args.as_ref());
         let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
             Box::pin(Self::parse_reasoning_content_from_stream_inner(
                 stream,
@@ -4025,6 +4158,15 @@ impl OpenAIPreprocessor {
         // Immediate mode, since those rely on guided-decoded JSON rather than the
         // native markup the v2 parser reads. See tool_parser_v2::apply_stream.
         use crate::protocols::openai::chat_completions::tool_parser_v2;
+
+        // Guided JSON does NOT go to the jail. We installed the grammar that produced
+        // this output, so the shape is already known: a named choice's payload is the
+        // argument object itself, and a required choice's is an array of
+        // `{name, parameters}`. Routing comes from the SHARED constraint predicate, not
+        // from `tool_choice`, because a Kimi K3 forced request is indistinguishable
+        // there yet installs no JSON schema at all. That predicate is read once at the
+        // top of this function, into `guided_tool_streaming`.
+
         let parser_name = effective_tool_call_parser.as_deref();
         let use_parsers_v2 = tool_parser_v2::enabled()
             && parser_name.is_some_and(tool_parser_v2::supports_family)
@@ -4045,11 +4187,17 @@ impl OpenAIPreprocessor {
                         .to_string(),
                 ))
             } else if should_jail {
+                // A forced tool_choice installed a JSON grammar, so the jail may release
+                // calls as they arrive instead of buffering to the closing brace. The
+                // jail keeps its own native fallback, so a backend that ignores the
+                // grammar (MiniMax M2 emits XML under `required`) still parses normally.
+                // Same request-scoped decision the unified path above was given.
                 Box::pin(Self::apply_tool_calling_jail(
                     effective_tool_call_parser,
                     request.inner.tool_choice.clone(),
                     tool_definitions,
                     uses_tool_call_structural_tag,
+                    guided_tool_streaming,
                     stream,
                 ))
             } else {
@@ -4545,6 +4693,27 @@ impl OpenAIPreprocessor {
         }
     }
 
+    /// Whether a forced tool_choice's installed JSON grammar should release
+    /// calls incrementally, or fall back to buffer-to-completion.
+    ///
+    /// The SINGLE owner of that decision, for BOTH streaming paths that can act on
+    /// it: the tool-calling jail (`apply_tool_calling_jail`'s `guided_streaming`)
+    /// and the unified v2 adapter (`unified_parser::apply_stream_with_constraint`'s
+    /// `guided_streaming`, which becomes `StreamBestEffort` vs `RecoverAsText`).
+    /// `postprocessor_parsing_stream_with_constraint` calls this once per request
+    /// and hands the answer to whichever path runs; neither site re-reads the env
+    /// var, because two reads are two predicates that can drift.
+    ///
+    /// Rollback lever: the grammar-constrained decoding itself lives in the
+    /// published `dynamo-parsers` / `dynamo-parsers-v2` dependencies, not in this
+    /// repo, so a backend that misbehaves under guided decoding in production has
+    /// no same-release fix other than `DYN_ENABLE_GUIDED_TOOL_STREAMING`. On by
+    /// default; set it to a falsy value (`0`/`false`) to fall back to
+    /// buffer-to-completion.
+    fn guided_tool_streaming_release(installs_guided_json: bool, rollback_disabled: bool) -> bool {
+        installs_guided_json && !rollback_disabled
+    }
+
     /// Apply tool calling jail to the stream if needed.
     ///
     /// The jail itself now lives in `dynamo-parsers`
@@ -4564,13 +4733,15 @@ impl OpenAIPreprocessor {
         tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
         tool_definitions: Option<Vec<dynamo_parsers::tool_calling::ToolDefinition>>,
         uses_tool_call_structural_tag: bool,
+        guided_streaming: bool,
         stream: S,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
         use dynamo_parsers::tool_calling::jail::{
-            Annotated as JailAnnotated, apply_tool_calling_jail as jail_apply,
+            Annotated as JailAnnotated, apply_tool_calling_jail,
+            apply_tool_calling_jail_with_guided_streaming,
         };
         use std::sync::{Arc, Mutex};
 
@@ -4623,6 +4794,34 @@ impl OpenAIPreprocessor {
         let choice_recovery_in = Arc::clone(&choice_recovery);
         let glm47_start_jail = glm47_start.clone();
 
+        // The jail's own (vendored, out-of-scope) finalize logic cannot tell an
+        // error-terminated input stream from one that genuinely completed — it
+        // sees a plain EOF either way — so on a natural EOF it can synthesize a
+        // `tool_calls` finish chunk from whatever partial arguments it had
+        // buffered, even though the request actually failed upstream. Both
+        // unified adapters (`unified_parser::apply_stream_with_constraint`,
+        // `tool_parser_v2::apply_stream`/`apply_unified_stream`) already give a
+        // terminal upstream error this exact contract: `yield response; return;`,
+        // dropping everything after. Give the jail wrapper the same contract:
+        // `terminal_error` latches the first error `Annotated` observed on the
+        // way in, `take_while` below stops it from ever reaching the jail (so
+        // the jail's finalize never runs on an error-caused EOF at all), and the
+        // matching `take_while`/`chain` on the way out (below) drops anything
+        // the jail still emits after that point and substitutes the error
+        // instead — never letting a synthesized completion reach the caller.
+        let terminal_error: Arc<Mutex<Option<Annotated<NvCreateChatCompletionStreamResponse>>>> =
+            Arc::new(Mutex::new(None));
+        let terminal_error_in = Arc::clone(&terminal_error);
+        let stream = stream.take_while(move |a| {
+            let is_error = a.is_error();
+            if is_error {
+                *terminal_error_in
+                    .lock()
+                    .expect("jail terminal error poisoned") = Some(a.clone());
+            }
+            std::future::ready(!is_error)
+        });
+
         // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer llm_metrics)
         let jail_input = stream.map(move |mut a| {
             if let Some(metrics) = a.data.as_mut().and_then(|nv| nv.llm_metrics.take()) {
@@ -4671,175 +4870,224 @@ impl OpenAIPreprocessor {
         });
 
         // jail `Annotated<Create>` -> dynamo `Annotated<Nv>` (re-attach llm_metrics)
-        jail_apply(
-            tool_call_parser,
-            tool_choice,
-            tool_definitions,
-            uses_tool_call_structural_tag,
-            jail_input,
-        )
-        .flat_map(move |a| {
-            // Stamp the accumulated metrics onto the next emitted data chunk;
-            // data-less/synthesized chunks carry it forward (or `None`).
-            let llm_metrics = a.data.as_ref().and_then(|_| {
-                let mut p = pending.lock().expect("jail metrics buffer poisoned");
-                let chunk_tokens = p.chunk_tokens;
-                p.chunk_tokens = 0;
-                p.template.take().map(|mut metrics| {
-                    metrics.chunk_tokens = chunk_tokens;
-                    metrics
-                })
-            });
-            let mut nv_chunk = Annotated {
-                data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
-                    inner,
-                    nvext: None,
-                    llm_metrics,
-                }),
-                id: a.id,
-                event: a.event,
-                comment: a.comment,
-                error: a.error.map(DynamoError::msg),
-            };
-
-            // glm47: on finish_reason=length, recover the last incomplete
-            // <tool_call> block. rfind skips complete blocks so earlier parsed
-            // calls are never duplicated. Recovered content WILL contain raw
-            // markup — callers that require "no tool tags in content" must
-            // filter on finish_reason=length.
-            //
-            // TODO: this recovery runs inside apply_tool_calling_jail, which
-            // the v2 path bypasses (use_parsers_v2 branch above). Adding
-            // "glm47" to V2_FAMILIES in tool_parser_v2.rs silently disables
-            // streaming recovery while aggregator.rs keeps running. At that
-            // point hoist this above the jail/v2 branch — it only needs
-            // buffered input text + finish_reason, both available there.
-            // Pass 1 (immutable): compute the recovery tail per choice and
-            // whether the jail already released it as content on this chunk.
-            // We collect into a Vec so we can release the immutable borrow on
-            // nv_chunk before mutating it in pass 2.
-            let recoveries: Vec<PendingRecovery> = if is_glm47 {
-                let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
-                nv_chunk
-                    .data
-                    .iter()
-                    .flat_map(|data| data.inner.choices.iter())
-                    .filter_map(|choice| {
-                        let state = cr.entry(choice.index).or_default();
-                        if !state.recovered
-                            && let Some(ChatCompletionMessageContent::Text(t)) =
-                                &choice.delta.content
-                        {
-                            state.emitted_text.push_str(t);
-                            // Bound like input_text: retain only the suffix from
-                            // the last marker onward — all the contains(&tail)
-                            // check needs.
-                            let mut keep_from = match state.emitted_text.rfind(glm47_start.as_str())
-                            {
-                                Some(pos) => pos,
-                                None => state
-                                    .emitted_text
-                                    .len()
-                                    .saturating_sub(glm47_start.len() - 1),
-                            };
-                            while keep_from > 0 && !state.emitted_text.is_char_boundary(keep_from) {
-                                keep_from -= 1;
-                            }
-                            state.emitted_text.drain(..keep_from);
-                        }
-                        if state.recovered
-                            || !matches!(
-                                choice.finish_reason,
-                                Some(dynamo_protocols::types::FinishReason::Length)
-                            )
-                        {
-                            return None;
-                        }
-                        let tail =
-                            state
-                                .input_text
-                                .rfind(glm47_start.as_str())
-                                .and_then(|pos| {
-                                    let t = &state.input_text[pos..];
-                                    if !t.contains(glm47_end.as_str()) {
-                                        Some(t.to_string())
-                                    } else {
-                                        None
-                                    }
-                                })?;
-                        let tail_already_emitted = state.emitted_text.contains(&tail);
-                        state.recovered = true;
-                        Some(PendingRecovery {
-                            choice_idx: choice.index,
-                            tail,
-                            tail_already_emitted,
-                        })
+        // The crate encodes the opt-in in WHICH entry point you call, so pick here and
+        // box both arms to one type. `apply_tool_calling_jail` keeps the published
+        // five-argument signature for everyone else.
+        let jailed: Pin<
+            Box<
+                dyn Stream<
+                        Item = JailAnnotated<
+                            dynamo_protocols::types::CreateChatCompletionStreamResponse,
+                        >,
+                    > + Send,
+            >,
+        > = if guided_streaming {
+            Box::pin(apply_tool_calling_jail_with_guided_streaming(
+                tool_call_parser,
+                tool_choice,
+                tool_definitions,
+                uses_tool_call_structural_tag,
+                jail_input,
+            ))
+        } else {
+            Box::pin(apply_tool_calling_jail(
+                tool_call_parser,
+                tool_choice,
+                tool_definitions,
+                uses_tool_call_structural_tag,
+                jail_input,
+            ))
+        };
+        let terminal_error_out = Arc::clone(&terminal_error);
+        jailed
+            .flat_map(move |a| {
+                // Stamp the accumulated metrics onto the next emitted data chunk;
+                // data-less/synthesized chunks carry it forward (or `None`).
+                let llm_metrics = a.data.as_ref().and_then(|_| {
+                    let mut p = pending.lock().expect("jail metrics buffer poisoned");
+                    let chunk_tokens = p.chunk_tokens;
+                    p.chunk_tokens = 0;
+                    p.template.take().map(|mut metrics| {
+                        metrics.chunk_tokens = chunk_tokens;
+                        metrics
                     })
-                    .collect()
-            } else {
-                vec![]
-            };
+                });
+                let mut nv_chunk = Annotated {
+                    data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
+                        inner,
+                        nvext: None,
+                        llm_metrics,
+                    }),
+                    id: a.id,
+                    event: a.event,
+                    comment: a.comment,
+                    error: a.error.map(DynamoError::msg),
+                };
 
-            // Pass 2 (mutable): when the jail already released the tail verbatim,
-            // suppress the finish chunk's content entirely. The recovery chunk
-            // carries just the marker-onwards tail, matching the non-streaming
-            // path (rfind result only, no post-call prose).
-            for pr in &recoveries {
-                if !pr.tail_already_emitted {
-                    continue;
-                }
-                if let Some(ref mut data) = nv_chunk.data {
-                    for rc in data
-                        .inner
-                        .choices
-                        .iter_mut()
-                        .filter(|c| c.index == pr.choice_idx)
-                    {
-                        // The jail released the truncated block verbatim as content
-                        // on this chunk, potentially preceded by post-call prose.
-                        // glm47's parser drops post-call prose deliberately, so
-                        // suppress the whole content here and let the recovery
-                        // chunk carry just the marker-onwards tail — matching batch.
-                        rc.delta.content = None;
+                // glm47: on finish_reason=length, recover the last incomplete
+                // <tool_call> block. rfind skips complete blocks so earlier parsed
+                // calls are never duplicated. Recovered content WILL contain raw
+                // markup — callers that require "no tool tags in content" must
+                // filter on finish_reason=length.
+                //
+                // TODO: this recovery runs inside apply_tool_calling_jail, which
+                // the v2 path bypasses (use_parsers_v2 branch above). Adding
+                // "glm47" to V2_FAMILIES in tool_parser_v2.rs silently disables
+                // streaming recovery while aggregator.rs keeps running. At that
+                // point hoist this above the jail/v2 branch — it only needs
+                // buffered input text + finish_reason, both available there.
+                // Pass 1 (immutable): compute the recovery tail per choice and
+                // whether the jail already released it as content on this chunk.
+                // We collect into a Vec so we can release the immutable borrow on
+                // nv_chunk before mutating it in pass 2.
+                let recoveries: Vec<PendingRecovery> =
+                    if is_glm47 {
+                        let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
+                        nv_chunk
+                            .data
+                            .iter()
+                            .flat_map(|data| data.inner.choices.iter())
+                            .filter_map(|choice| {
+                                let state = cr.entry(choice.index).or_default();
+                                if !state.recovered
+                                    && let Some(ChatCompletionMessageContent::Text(t)) =
+                                        &choice.delta.content
+                                {
+                                    state.emitted_text.push_str(t);
+                                    // Bound like input_text: retain only the suffix from
+                                    // the last marker onward — all the contains(&tail)
+                                    // check needs.
+                                    let mut keep_from =
+                                        match state.emitted_text.rfind(glm47_start.as_str()) {
+                                            Some(pos) => pos,
+                                            None => state
+                                                .emitted_text
+                                                .len()
+                                                .saturating_sub(glm47_start.len() - 1),
+                                        };
+                                    while keep_from > 0
+                                        && !state.emitted_text.is_char_boundary(keep_from)
+                                    {
+                                        keep_from -= 1;
+                                    }
+                                    state.emitted_text.drain(..keep_from);
+                                }
+                                if state.recovered
+                                    || !matches!(
+                                        choice.finish_reason,
+                                        Some(dynamo_protocols::types::FinishReason::Length)
+                                    )
+                                {
+                                    return None;
+                                }
+                                let tail = state.input_text.rfind(glm47_start.as_str()).and_then(
+                                    |pos| {
+                                        let t = &state.input_text[pos..];
+                                        if !t.contains(glm47_end.as_str()) {
+                                            Some(t.to_string())
+                                        } else {
+                                            None
+                                        }
+                                    },
+                                )?;
+                                let tail_already_emitted = state.emitted_text.contains(&tail);
+                                state.recovered = true;
+                                Some(PendingRecovery {
+                                    choice_idx: choice.index,
+                                    tail,
+                                    tail_already_emitted,
+                                })
+                            })
+                            .collect()
+                    } else {
+                        vec![]
+                    };
+
+                // Pass 2 (mutable): when the jail already released the tail verbatim,
+                // suppress the finish chunk's content entirely. The recovery chunk
+                // carries just the marker-onwards tail, matching the non-streaming
+                // path (rfind result only, no post-call prose).
+                for pr in &recoveries {
+                    if !pr.tail_already_emitted {
+                        continue;
+                    }
+                    if let Some(ref mut data) = nv_chunk.data {
+                        for rc in data
+                            .inner
+                            .choices
+                            .iter_mut()
+                            .filter(|c| c.index == pr.choice_idx)
+                        {
+                            // The jail released the truncated block verbatim as content
+                            // on this chunk, potentially preceded by post-call prose.
+                            // glm47's parser drops post-call prose deliberately, so
+                            // suppress the whole content here and let the recovery
+                            // chunk carry just the marker-onwards tail — matching batch.
+                            rc.delta.content = None;
+                        }
                     }
                 }
-            }
 
-            // Pass 3: emit a recovery chunk per affected choice carrying just
-            // the truncated tail (marker onwards, no post-call prose).
-            let recovery_chunks: Vec<_> = recoveries
-                .into_iter()
-                .filter_map(|pr| {
-                    let PendingRecovery {
-                        choice_idx, tail, ..
-                    } = pr;
-                    tracing::warn!(
-                        choice_index = choice_idx,
-                        recovered_bytes = tail.len(),
-                        "glm47 streaming: partial <tool_call> emitted as content \
+                // Pass 3: emit a recovery chunk per affected choice carrying just
+                // the truncated tail (marker onwards, no post-call prose).
+                let recovery_chunks: Vec<_> = recoveries
+                    .into_iter()
+                    .filter_map(|pr| {
+                        let PendingRecovery {
+                            choice_idx, tail, ..
+                        } = pr;
+                        tracing::warn!(
+                            choice_index = choice_idx,
+                            recovered_bytes = tail.len(),
+                            "glm47 streaming: partial <tool_call> emitted as content \
                          on length finish"
-                    );
-                    let mut rec = nv_chunk.clone();
-                    rec.id = None;
-                    rec.event = None;
-                    rec.comment = None;
-                    rec.error = None;
-                    let rd = rec.data.as_mut()?;
-                    rd.inner.usage = None;
-                    rd.llm_metrics = None;
-                    rd.inner.choices.retain(|c| c.index == choice_idx);
-                    for rc in &mut rd.inner.choices {
-                        rc.delta.content = Some(ChatCompletionMessageContent::Text(tail.clone()));
-                        rc.delta.tool_calls = None;
-                        rc.finish_reason = None;
-                        rc.logprobs = None;
-                    }
-                    Some(rec)
-                })
-                .collect();
+                        );
+                        let mut rec = nv_chunk.clone();
+                        rec.id = None;
+                        rec.event = None;
+                        rec.comment = None;
+                        rec.error = None;
+                        let rd = rec.data.as_mut()?;
+                        rd.inner.usage = None;
+                        rd.llm_metrics = None;
+                        rd.inner.choices.retain(|c| c.index == choice_idx);
+                        for rc in &mut rd.inner.choices {
+                            rc.delta.content =
+                                Some(ChatCompletionMessageContent::Text(tail.clone()));
+                            rc.delta.tool_calls = None;
+                            rc.finish_reason = None;
+                            rc.logprobs = None;
+                        }
+                        Some(rec)
+                    })
+                    .collect();
 
-            futures::stream::iter(recovery_chunks.into_iter().chain(std::iter::once(nv_chunk)))
-        })
+                futures::stream::iter(recovery_chunks.into_iter().chain(std::iter::once(nv_chunk)))
+            })
+            // See the `terminal_error` comment above: once the upstream error was
+            // latched, `take_while` drops everything the jail still emits from that
+            // point on (its finalize output has no way to know the request already
+            // failed), and `chain` substitutes the latched error as the stream's
+            // final and only item from there. When no error occurred, `terminal_error`
+            // is never populated, `take_while` never stops early, and `chain`'s
+            // `filter_map` drops the `None` it reads back — this stage is then a
+            // no-op passthrough.
+            .take_while(move |_| {
+                let stop = terminal_error_out
+                    .lock()
+                    .expect("jail terminal error poisoned")
+                    .is_some();
+                std::future::ready(!stop)
+            })
+            .chain(
+                stream::once(async move {
+                    terminal_error
+                        .lock()
+                        .expect("jail terminal error poisoned")
+                        .take()
+                })
+                .filter_map(std::future::ready),
+            )
     }
 
     /// Whether the selected tool-call or reasoning parser depends on the
@@ -4985,21 +5233,20 @@ impl OpenAIPreprocessor {
     /// frames on an opt-in path rather than a silent stream — and closing it
     /// needs the guided-output derivation lifted out of the stream builder.
     pub(crate) fn stream_can_defer_all_output(
+        tool_call_parser: Option<&str>,
         reasoning_parser: Option<&str>,
         chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
     ) -> bool {
-        // Muse streams through the unified parser, which withholds nothing, so a
-        // muse request never defers all output. Claiming otherwise switched SSE
-        // keep-alive frames on for a stream that has no buffering to cover.
-        if crate::protocols::openai::chat_completions::tool_parser_v2::unified_family(
-            None,
-            reasoning_parser,
-        )
-        .is_some()
-        {
-            return false;
-        }
-        reasoning_parser.is_some()
+        // Unified Qwen and Muse now use the same force-nonempty deferral as the v1
+        // reasoning path, so their reasoning-only turns can withhold every meaningful
+        // output delta until the terminal decision too.
+        let has_reasoning_decoder = reasoning_parser.is_some()
+            || crate::protocols::openai::chat_completions::tool_parser_v2::unified_family(
+                tool_call_parser,
+                reasoning_parser,
+            )
+            .is_some();
+        has_reasoning_decoder
             && Self::wants_reasoning_as_content_when_empty(chat_template_args)
             && !Self::is_reasoning_disabled_by_request(reasoning_parser, chat_template_args)
     }
@@ -5509,6 +5756,198 @@ impl OpenAIPreprocessor {
         .fuse()
     }
 
+    /// Apply the request-level non-empty-content contract after a unified parser has
+    /// already split reasoning, content, and tool calls.
+    fn defer_unified_reasoning_for_nonempty_content<S>(
+        stream_in: S,
+    ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
+    where
+        S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+    {
+        async_stream::stream! {
+            let mut states: HashMap<u32, DeferredUnifiedChoice> = HashMap::new();
+            let mut last_response: Option<Annotated<NvCreateChatCompletionStreamResponse>> = None;
+            tokio::pin!(stream_in);
+
+            while let Some(mut response) = stream_in.next().await {
+                if response.is_error() {
+                    yield response;
+                    return;
+                }
+                let Some(data) = response.data.as_mut() else {
+                    yield response;
+                    continue;
+                };
+                let mut prefix_choices = Vec::new();
+
+                for choice in &mut data.inner.choices {
+                    let state = states.entry(choice.index).or_default();
+                    if choice.delta.content.is_some()
+                        || choice.delta.reasoning_content.is_some()
+                        || choice.delta.tool_calls.is_some()
+                    {
+                        state.drained = false;
+                    }
+
+                    if !state.saw_visible_output
+                        && let Some(reasoning) = choice.delta.reasoning_content.take()
+                    {
+                        state.pending_reasoning.push_str(&reasoning);
+                    }
+
+                    let carries_parts = matches!(
+                        choice.delta.content,
+                        Some(ChatCompletionMessageContent::Parts(_))
+                    );
+                    match choice.delta.content.take() {
+                        Some(ChatCompletionMessageContent::Text(text)) => {
+                            if !state.saw_visible_output && text.trim().is_empty() {
+                                state.pending_content.push_str(&text);
+                            } else {
+                                if !text.trim().is_empty() {
+                                    state.saw_visible_output = true;
+                                }
+                                let mut content = std::mem::take(&mut state.pending_content);
+                                content.push_str(&text);
+                                choice.delta.content =
+                                    Some(ChatCompletionMessageContent::Text(content));
+                            }
+                        }
+                        Some(parts @ ChatCompletionMessageContent::Parts(_)) => {
+                            choice.delta.content = Some(parts);
+                        }
+                        None => {}
+                    }
+
+                    let has_tool_calls = choice
+                        .delta
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|calls| !calls.is_empty());
+                    if carries_parts || has_tool_calls {
+                        state.saw_visible_output = true;
+                    }
+                    if carries_parts {
+                        state.pending_content.clear();
+                    }
+
+                    if state.saw_visible_output {
+                        let (content, reasoning) = state.release_split();
+                        if let Some(reasoning) = reasoning {
+                            let mut prefix = choice.clone();
+                            prefix.delta.role = None;
+                            prefix.delta.content = None;
+                            prefix.delta.tool_calls = None;
+                            prefix.delta.function_call = None;
+                            prefix.delta.refusal = None;
+                            prefix.delta.reasoning_content = Some(reasoning);
+                            prefix.finish_reason = None;
+                            prefix.logprobs = None;
+                            prefix_choices.push(prefix);
+                        }
+                        if let Some(content) = content {
+                            match choice.delta.content.as_mut() {
+                                Some(ChatCompletionMessageContent::Text(existing)) => {
+                                    existing.insert_str(0, &content);
+                                }
+                                Some(ChatCompletionMessageContent::Parts(_)) | None => {
+                                    let mut prefix = choice.clone();
+                                    prefix.delta.role = None;
+                                    prefix.delta.content =
+                                        Some(ChatCompletionMessageContent::Text(content));
+                                    prefix.delta.tool_calls = None;
+                                    prefix.delta.function_call = None;
+                                    prefix.delta.refusal = None;
+                                    prefix.delta.reasoning_content = None;
+                                    prefix.finish_reason = None;
+                                    prefix.logprobs = None;
+                                    prefix_choices.push(prefix);
+                                }
+                            }
+                        }
+                    }
+
+                    if choice.finish_reason.is_some() {
+                        let (content, reasoning) = state.drain();
+                        if let Some(content) = content {
+                            match choice.delta.content.as_mut() {
+                                Some(ChatCompletionMessageContent::Text(existing)) => {
+                                    existing.push_str(&content);
+                                }
+                                Some(ChatCompletionMessageContent::Parts(_)) => {}
+                                None => {
+                                    choice.delta.content =
+                                        Some(ChatCompletionMessageContent::Text(content));
+                                }
+                            }
+                        }
+                        if let Some(reasoning) = reasoning {
+                            choice
+                                .delta
+                                .reasoning_content
+                                .get_or_insert_default()
+                                .push_str(&reasoning);
+                        }
+                    }
+                }
+
+                if !data.inner.choices.is_empty() {
+                    last_response = Some(response.clone());
+                }
+                for prefix_choice in prefix_choices {
+                    let mut prefix_response = response.clone();
+                    if let Some(prefix_data) = prefix_response.data.as_mut() {
+                        prefix_data.inner.choices = vec![prefix_choice];
+                        prefix_data.inner.usage = None;
+                        prefix_data.nvext = None;
+                        prefix_data.llm_metrics = None;
+                    }
+                    prefix_response.id = None;
+                    prefix_response.event = None;
+                    prefix_response.comment = None;
+                    prefix_response.error = None;
+                    yield prefix_response;
+                }
+                yield response;
+            }
+
+            let mut indices: Vec<_> = states.keys().copied().collect();
+            indices.sort_unstable();
+            let flushed: Vec<_> = indices
+                .into_iter()
+                .filter_map(|index| {
+                    let (content, reasoning) = states.get_mut(&index)?.drain();
+                    (content.is_some() || reasoning.is_some())
+                        .then_some((index, content, reasoning))
+                })
+                .collect();
+            if !flushed.is_empty()
+                && let Some(mut response) = last_response
+                && scrub_synthetic_chunk_metadata(&mut response).is_some()
+                && let Some(data) = response.data.as_mut()
+                && let Some(template) = data.inner.choices.first().cloned()
+            {
+                data.inner.choices = flushed
+                    .into_iter()
+                    .map(|(index, content, reasoning)| {
+                        let mut choice = template.clone();
+                        choice.index = index;
+                        choice.delta.role = None;
+                        choice.delta.content = content.map(ChatCompletionMessageContent::Text);
+                        choice.delta.tool_calls = None;
+                        choice.delta.function_call = None;
+                        choice.delta.refusal = None;
+                        choice.delta.reasoning_content = reasoning;
+                        choice.finish_reason = None;
+                        choice.logprobs = None;
+                        choice
+                    })
+                    .collect();
+                yield response;
+            }
+        }
+    }
+
     /// Hold the trailing usage-only chunk until every parser recovery chunk has
     /// been emitted. A truncated upstream stream can end without
     /// `finish_reason`, so reasoning recovery happens at EOF; forwarding usage
@@ -5794,7 +6233,7 @@ impl
             .await?;
         attach_agent_context_from_context(&mut common_request, &context);
 
-        let uses_tool_call_structural_tag = self.apply_tool_choice_guided_decoding(
+        let guided_tool_constraint = self.apply_tool_choice_guided_decoding(
             &request,
             &mut common_request,
             prompt_injected_reasoning,
@@ -5852,11 +6291,11 @@ impl
             image_tokens,
         );
 
-        let transformed_stream = self.postprocessor_parsing_stream(
+        let transformed_stream = self.postprocessor_parsing_stream_with_constraint(
             stream,
             &request,
             prompt_injected_reasoning,
-            uses_tool_call_structural_tag,
+            guided_tool_constraint,
         )?;
         let transformed_stream = Self::normalize_chat_stream_roles(transformed_stream);
 
@@ -6179,6 +6618,27 @@ mod tests {
         FinishReason, Role,
     };
 
+    #[test]
+    fn guided_tool_streaming_release_only_when_guided_json_and_not_rolled_back() {
+        assert!(
+            OpenAIPreprocessor::guided_tool_streaming_release(true, false),
+            "a forced tool_choice with an installed grammar releases incrementally by default"
+        );
+        assert!(
+            !OpenAIPreprocessor::guided_tool_streaming_release(true, true),
+            "DYN_ENABLE_GUIDED_TOOL_STREAMING=false must fall back to buffer-to-completion \
+             even when guided JSON is installed"
+        );
+        assert!(
+            !OpenAIPreprocessor::guided_tool_streaming_release(false, false),
+            "no installed grammar means nothing to release incrementally, rollback or not"
+        );
+        assert!(
+            !OpenAIPreprocessor::guided_tool_streaming_release(false, true),
+            "no installed grammar means nothing to release incrementally, rollback or not"
+        );
+    }
+
     fn chat_stream_chunk(
         index: u32,
         role: Option<Role>,
@@ -6333,6 +6793,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn force_nonempty_deferral_preserves_reasoning_usage() {
+        let reasoning = reasoning_usage_chunk(Some("deferred thought"), None, 3);
+        let mut terminal = chat_stream_chunk(0, None);
+        let terminal_choice = &mut terminal.data.as_mut().unwrap().inner.choices[0];
+        terminal_choice.delta.content = None;
+        terminal_choice.finish_reason = Some(FinishReason::Stop);
+
+        let output = OpenAIPreprocessor::apply_unified_response_policies(
+            stream::iter(vec![reasoning, terminal, reasoning_usage_trailer(3, None)]),
+            true,
+            true,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let usage = output
+            .last()
+            .and_then(|response| response.data.as_ref())
+            .and_then(|chunk| chunk.inner.usage.as_ref())
+            .expect("held usage trailer");
+
+        assert_eq!(
+            usage
+                .completion_tokens_details
+                .as_ref()
+                .and_then(|details| details.reasoning_tokens),
+            Some(3),
+            "deferral must not erase the parser's reasoning classification"
+        );
+        assert_eq!(
+            output
+                .iter()
+                .filter_map(|response| response.data.as_ref())
+                .filter(|chunk| chunk.llm_metrics.is_some())
+                .count(),
+            2,
+            "one source metric and one usage-trailer metric must survive"
+        );
+    }
+
+    #[tokio::test]
     async fn test_normalize_chat_stream_roles_recovers_missing_first_role_per_choice() {
         let input = stream::iter(vec![
             // Mirrors a parser releasing buffered content without the role that
@@ -6388,6 +6888,8 @@ mod tests {
             Some("kimi_k3".to_string()),
             request.inner.tool_choice.clone(),
             None,
+            false,
+            // No tools and no forced choice, so no JSON grammar was installed.
             false,
             stream::iter(vec![
                 kimi_k3_reasoning_chunk(leaked_reasoning),
@@ -9367,6 +9869,21 @@ mod tests {
         // The force_nonempty_content=true → NOT disabled behavior is what lets a
         // reasoning-only non-streaming turn surface reasoning as content; verify
         // the aggregator half in test_move_reasoning_to_content_when_empty.
+    }
+
+    #[test]
+    fn muse_force_nonempty_stream_reports_that_it_can_defer_all_output() {
+        let mut args = std::collections::HashMap::new();
+        args.insert(
+            "force_nonempty_content".to_string(),
+            serde_json::Value::Bool(true),
+        );
+
+        assert!(OpenAIPreprocessor::stream_can_defer_all_output(
+            None,
+            Some("muse_glimmer"),
+            Some(&args),
+        ));
     }
 
     /// Different query strings must produce different hashes. `?v=1` and

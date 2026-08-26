@@ -25,9 +25,11 @@ mod types;
 
 pub use convert::{
     StoredBlockOptions, convert_event, create_stored_block_from_parts, create_stored_blocks,
+    normalize_mm_token_runs,
 };
 pub use extra_keys::{
-    extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace, parse_mm_hash_from_extra_key,
+    extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace, mark_mm_hash_for_extra_key,
+    parse_mm_hash_from_extra_key,
 };
 pub use filter::KvCacheSpecKind;
 pub use types::{

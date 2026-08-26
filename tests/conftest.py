@@ -235,6 +235,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "token_budget_parity: compares native backend and Dynamo prompt/output "
         "overflow behavior",
     )
+    config.addinivalue_line(
+        "markers",
+        "framework_with_efa: marks deployment tests that require an EFA-capable "
+        "cluster and an -efa image",
+    )
 
     models_dir = config.getoption("--models-dir", default=None)
     if models_dir and not Path(models_dir).is_dir():
