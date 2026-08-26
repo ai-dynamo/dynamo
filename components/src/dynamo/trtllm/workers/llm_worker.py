@@ -352,7 +352,9 @@ async def init_llm_worker(
         "max_seq_len": config.max_seq_len,
         "max_beam_width": config.max_beam_width,
         "max_batch_size": config.max_batch_size,
-        "return_perf_metrics": config.publish_events_and_metrics,
+        # Detailed perf metrics add a large per-step response payload. Fixed
+        # request metrics stay enabled through default_sampling_params below.
+        "return_perf_metrics": False,
         # enable_iter_perf_stats is required for PyTorch backend to compute iteration-level
         # stats (KV cache utilization, hit rate). TensorRT backend always has this enabled.
         # See TRT-LLM PR #11243: MetricsCollector.log_iteration_stats() needs these stats.
@@ -511,7 +513,7 @@ async def init_llm_worker(
         )
     default_sampling_params = SamplingParams()
 
-    # Enable perf metrics so prompt_tokens_details can be returned
+    # Enable fixed request metrics so prompt_tokens_details can be returned.
     if hasattr(default_sampling_params, "return_perf_metrics"):
         default_sampling_params.return_perf_metrics = True
     model_input = ModelInput.Tokens
