@@ -77,7 +77,10 @@ func TestMapResourceClaimToDCDRequests(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "gpu-claim", Namespace: "default"},
 	})
 
-	assert.Equal(t, []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: "default", Name: "matching"}}}, requests)
+	assert.ElementsMatch(t, []ctrl.Request{
+		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "matching"}},
+		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "single-node"}},
+	}, requests)
 }
 
 func TestMapResourceClaimTemplateToDGDRequests(t *testing.T) {
@@ -137,6 +140,9 @@ func TestMapDeviceClassToDCDRequests(t *testing.T) {
 			DynamoComponentDeploymentSharedSpec: testDRAClaimComponent("gpu-template", true),
 		},
 	}
+	singleNode := draBacked.DeepCopy()
+	singleNode.Name = "single-node"
+	singleNode.Spec.Multinode = nil
 	scalarGPU := &nvidiacomv1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "scalar-gpu", Namespace: "dra-workloads"},
 		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
@@ -148,7 +154,7 @@ func TestMapDeviceClassToDCDRequests(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
 	reconciler := &DynamoComponentDeploymentReconciler{
-		Client:        fake.NewClientBuilder().WithScheme(scheme).WithObjects(draBacked, draBackedOutsideScope, scalarGPU).Build(),
+		Client:        fake.NewClientBuilder().WithScheme(scheme).WithObjects(draBacked, singleNode, draBackedOutsideScope, scalarGPU).Build(),
 		Config:        &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "dra-workloads"}},
 		RuntimeConfig: &commonController.RuntimeConfig{},
 	}
@@ -158,7 +164,10 @@ func TestMapDeviceClassToDCDRequests(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "gpu.example.com"},
 	})
 
-	assert.Equal(t, []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: "dra-workloads", Name: "dra-backed"}}}, requests)
+	assert.ElementsMatch(t, []ctrl.Request{
+		{NamespacedName: types.NamespacedName{Namespace: "dra-workloads", Name: "dra-backed"}},
+		{NamespacedName: types.NamespacedName{Namespace: "dra-workloads", Name: "single-node"}},
+	}, requests)
 }
 
 func TestMapDeviceClassToDGDRequests(t *testing.T) {

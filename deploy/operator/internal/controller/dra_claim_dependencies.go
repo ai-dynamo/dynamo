@@ -103,9 +103,6 @@ func (r *DynamoComponentDeploymentReconciler) mapDRAClaimToDCDRequests(
 	requests := make([]ctrl.Request, 0)
 	for i := range deployments.Items {
 		deployment := &deployments.Items[i]
-		if !deployment.Spec.IsMultinode() {
-			continue
-		}
 		if componentReferencesDRAClaim(&deployment.Spec.DynamoComponentDeploymentSharedSpec, obj.GetName(), template) {
 			requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{
 				Namespace: deployment.Namespace,
@@ -130,7 +127,6 @@ func (r *DynamoComponentDeploymentReconciler) mapDeviceClassToDCDRequests(
 	for i := range deployments.Items {
 		deployment := &deployments.Items[i]
 		if commonController.NamespaceAllowed(r.Config, r.RuntimeConfig, deployment, deployment.Namespace) &&
-			deployment.Spec.IsMultinode() &&
 			componentUsesDRAClaims(&deployment.Spec.DynamoComponentDeploymentSharedSpec) {
 			requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{
 				Namespace: deployment.Namespace,

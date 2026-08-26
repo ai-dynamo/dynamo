@@ -50,6 +50,7 @@ import (
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -431,6 +432,23 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 }
 
 func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplicaStatus(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment, componentReconcileResult ComponentReconcileResult) error {
+	// Resolve the desired GPU shape before publishing the component status.
+	var gpuCountErr error
+	if componentReconcileResult.serviceReplicaStatus != nil {
+		componentReconcileResult.serviceReplicaStatus.GPUCountPerPod = nil
+		gpuCount, err := dynamo.ResolveContainerGPUs(
+			ctx,
+			r.Client,
+			dynamoComponentDeployment.Namespace,
+			&dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec,
+		)
+		if err != nil {
+			gpuCountErr = fmt.Errorf("resolve component GPU count: %w", err)
+		} else if gpuCount > 0 {
+			componentReconcileResult.serviceReplicaStatus.GPUCountPerPod = ptr.To(gpuCount)
+		}
+	}
+
 	availableCondition := metav1.Condition{
 		Type:    nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
 		Status:  componentReconcileResult.status,
@@ -457,13 +475,15 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplic
 	meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, availableCondition)
 	meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, componentReadyCondition)
 	dynamoComponentDeployment.Status.Component = componentReconcileResult.serviceReplicaStatus
-	dynamoComponentDeployment.Status.ObservedGeneration = dynamoComponentDeployment.Generation
+	if gpuCountErr == nil {
+		dynamoComponentDeployment.Status.ObservedGeneration = dynamoComponentDeployment.Generation
+	}
 
 	err := r.Status().Update(ctx, dynamoComponentDeployment)
 	if err != nil {
 		return fmt.Errorf("failed to update DynamoComponentDeployment status: %w", err)
 	}
-	return nil
+	return gpuCountErr
 }
 
 func getLeaderWorkerSetReplicasStatus(leaderWorkerSet *leaderworkersetv1.LeaderWorkerSet) nvidiacomv1beta1.ComponentReplicaStatus {

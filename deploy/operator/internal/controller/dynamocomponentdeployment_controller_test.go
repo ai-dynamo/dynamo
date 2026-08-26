@@ -50,6 +50,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
@@ -3349,6 +3350,73 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 			g.Expect(updatedDCD.Status.ObservedGeneration).To(gomega.Equal(generation))
 		})
 	}
+}
+
+func TestSetStatusConditionAndServiceReplicaStatusPublishesDRAResolvedGPUCount(t *testing.T) {
+	t.Log("Build a single-node DRA component with a resolvable GPU template")
+	draComponent := testDRAClaimComponent("gpu-template", true)
+	draComponent.ComponentName = "dra-worker"
+	draComponent.ComponentType = v1beta1.ComponentTypeDecode
+	draComponent.Multinode = nil
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "dra-worker",
+			Namespace:  "default",
+			Generation: 1,
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: draComponent,
+		},
+	}
+	claimTemplate := &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "gpu-template", Namespace: "default"},
+		Spec: resourcev1.ResourceClaimTemplateSpec{Spec: resourcev1.ResourceClaimSpec{
+			Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+				Name: "gpu",
+				Exactly: &resourcev1.ExactDeviceRequest{
+					DeviceClassName: "gpu.nvidia.com",
+					AllocationMode:  resourcev1.DeviceAllocationModeExactCount,
+					Count:           2,
+				},
+			}}},
+		}},
+	}
+	testScheme := runtime.NewScheme()
+	require.NoError(t, v1beta1.AddToScheme(testScheme))
+	require.NoError(t, resourcev1.AddToScheme(testScheme))
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithObjects(
+			dcd,
+			claimTemplate,
+			&resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "gpu.nvidia.com"}},
+		).
+		WithStatusSubresource(dcd).
+		Build()
+	reconciler := &DynamoComponentDeploymentReconciler{Client: kubeClient}
+	componentStatus := &v1beta1.ComponentReplicaStatus{
+		ComponentKind: v1beta1.ComponentKindDeployment,
+	}
+	reconcileResult := ComponentReconcileResult{
+		status:               metav1.ConditionTrue,
+		reason:               "DeploymentReady",
+		message:              "Deployment is ready",
+		serviceReplicaStatus: componentStatus,
+	}
+
+	t.Log("Publish the resolved per-Pod GPU count in DCD status")
+	require.NoError(t, reconciler.setStatusConditionAndServiceReplicaStatus(t.Context(), dcd, reconcileResult))
+	updated := &v1beta1.DynamoComponentDeployment{}
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(dcd), updated))
+	require.NotNil(t, updated.Status.Component.GPUCountPerPod)
+	assert.Equal(t, int64(2), *updated.Status.Component.GPUCountPerPod)
+
+	t.Log("Clear the published count when the DRA dependency becomes unresolvable")
+	require.NoError(t, kubeClient.Delete(t.Context(), claimTemplate))
+	err := reconciler.setStatusConditionAndServiceReplicaStatus(t.Context(), updated, reconcileResult)
+	require.ErrorContains(t, err, "gpu-template")
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(dcd), updated))
+	assert.Nil(t, updated.Status.Component.GPUCountPerPod)
 }
 
 func Test_generateDeployment_Strategy(t *testing.T) {
