@@ -466,10 +466,10 @@ def make_qwen35_custom_encoder_payload() -> ChatPayload:
 
 
 def make_qwen35_custom_encoder_multi_image_payload() -> ChatPayload:
-    """Two-image check for artifact ordering and placeholder expansion."""
+    """Two-image semantic check for multiple placeholder expansion."""
     return Base64LazyChatPayload(
-        prompt="How many images are provided? Answer with only the number.",
-        expected_response=["2", "two"],
+        prompt="What color is the large square in both images? Answer with one color.",
+        expected_response=["green"],
         expected_log=["Qwen35VisionEncoder", "Qwen3VLNativeAdapter"],
         max_tokens=16,
         temperature=0.0,

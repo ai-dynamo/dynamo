@@ -397,17 +397,12 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     )
                 ],
             ),
-        },
-    ),
-    MultimodalModelProfile(
-        name="Qwen/Qwen3.5-2B",
-        short_name="qwen3.5-2b-custom-encoder",
-        topologies={
             "agg_custom_qwen3_5": TopologyConfig(
-                marks=[pytest.mark.nightly, pytest.mark.h100],
+                marks=[pytest.mark.nightly],
                 timeout_s=900,
-                # Single-pass H100 peak: 44.5 GiB. Keep this sequential until a
-                # bounded --kv-cache-memory-bytes profile is available.
+                profiled_vram_gib=4.7,
+                # Reuse the aggregate profile's 2x-safe KV cache cap.
+                requested_vllm_kv_cache_bytes=920_126_000,
                 directory=os.path.join(WORKSPACE_DIR, "examples/custom_encoder"),
                 env={
                     "DYN_WORKER_GPU": "0",

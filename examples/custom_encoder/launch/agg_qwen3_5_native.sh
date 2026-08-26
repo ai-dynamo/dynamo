@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../../common/gpu_utils.sh"
 source "$SCRIPT_DIR/../../common/launch_utils.sh"
 
-MODEL="${DYN_MODEL:-Qwen/Qwen3.5-2B}"
+MODEL="${DYN_MODEL:-Qwen/Qwen3.5-0.8B}"
 ENCODER_CLASS="${DYN_ENCODER_CLASS:-examples.custom_encoder.qwen3_5_vision_encoder.Qwen35VisionEncoder}"
 WORKER_GPU="${DYN_WORKER_GPU:-${CUDA_VISIBLE_DEVICES:-0}}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
@@ -34,7 +34,7 @@ Usage: agg_qwen3_5_native.sh [OPTIONS]
 Run Qwen3.5 with the in-process teaching custom vision encoder.
 
 Options:
-  --model <id>           Qwen3.5 checkpoint (default: Qwen/Qwen3.5-2B)
+  --model <id>           Qwen3.5 checkpoint (default: Qwen/Qwen3.5-0.8B)
   --encoder-class <path> Dotted CustomEncoder class
   --gpu <index>          GPU index for the aggregated worker
   -h, --help             Show this help
@@ -45,8 +45,10 @@ EOF
     esac
 done
 
+# Match the bounded Qwen3.5-0.8B aggregate profile by default. The profiler and
+# test harness can replace this per run through the same override.
+: "${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:=920126000}"
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
-[[ -z "$GPU_MEM_ARGS" ]] && GPU_MEM_ARGS="--gpu-memory-utilization ${DYN_VLLM_GPU_MEMORY_UTILIZATION:-0.55}"
 
 print_launch_banner --multimodal "Qwen3.5 CustomEncoder — Aggregated" \
     "$MODEL" "$HTTP_PORT" \
