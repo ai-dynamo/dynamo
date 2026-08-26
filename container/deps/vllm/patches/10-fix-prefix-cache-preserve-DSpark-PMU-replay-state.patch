@@ -1,0 +1,124 @@
+From 1c6379a933251c1ccf58a2f0382e9e51f89c9a03 Mon Sep 17 00:00:00 2001
+From: Wei Zhao <weizha@oci-aga-slurm-1-vscode-02.cm.cluster>
+Date: Thu, 13 Aug 2026 14:38:56 -0700
+Subject: [PATCH 09/13] fix(prefix-cache): preserve DSpark PMU replay state
+
+Co-authored-by: OpenAI Codex <codex@openai.com>
+
+Signed-off-by: Shreyas Misra <shreyasm@nvidia.com>
+---
+ vllm/v1/core/kv_cache_coordinator.py         |  9 ++++++
+ vllm/v1/core/sched/scheduler.py              | 32 ++++++++++++--------
+ vllm/v1/core/single_type_kv_cache_manager.py | 10 ++++--
+ 3 files changed, 36 insertions(+), 15 deletions(-)
+
+diff --git a/vllm/v1/core/kv_cache_coordinator.py b/vllm/v1/core/kv_cache_coordinator.py
+index b4a4f43d44..ef4acb3d76 100644
+--- a/vllm/v1/core/kv_cache_coordinator.py
++++ b/vllm/v1/core/kv_cache_coordinator.py
+@@ -15,6 +15,7 @@ from vllm.v1.core.kv_cache_utils import (
+ )
+ from vllm.v1.core.single_type_kv_cache_manager import (
+     CrossAttentionManager,
++    MambaManager,
+     SingleTypeKVCacheManager,
+     get_manager_for_kv_cache_spec,
+ )
+@@ -673,6 +674,14 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
+                     ", ".join(sorted(unsupported_partial_hit_managers)),
+                 )
+ 
++        # A speculative attention group drops one fine-grained hash unit from
++        # its hit. Mamba has no draft layer, but its recurrent checkpoint must
++        # be cached at the same replay boundary.
++        if self.eagle_group_ids and self.enable_partial_hash_hits:
++            for manager in self.single_type_managers:
++                if isinstance(manager, MambaManager):
++                    manager.use_eagle = True
++
+     @property
+     def _cache_hit_alignment_tokens(self) -> int:
+         # Fine-grained partial hits may return hash-block-aligned lengths;
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index 7da422b2da..750537ab88 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -390,11 +390,12 @@ class Scheduler(SchedulerInterface):
+             return num_new_tokens
+ 
+         block_size = self.cache_config.block_size
+-        # The last block-aligned position whose state can be cached. With
+-        # Eagle, FullAttn prunes the last matching block, so back off one
+-        # block to avoid a Mamba cache miss.
++        # The last block-aligned position whose state can be cached. Without
++        # fine-grained hits, Eagle prunes the last matching block, so back off
++        # one block to avoid a Mamba cache miss. With a finer PMU, Eagle only
++        # rewinds one hash unit; keep the normal block boundary materialized.
+         last_cache_position = request.num_tokens - request.num_tokens % block_size
+-        if self.use_eagle:
++        if self.use_eagle and not self.mamba_partial_cache_hit:
+             last_cache_position = max(last_cache_position - block_size, 0)
+ 
+         end = start + num_new_tokens
+@@ -418,21 +419,28 @@ class Scheduler(SchedulerInterface):
+             if self.mamba_partial_cache_hit
+             else 0
+         )
+-        if tail_boundary and self.use_eagle:
+-            # Eagle matches one hash unit past the candidate and drops it, so
+-            # nothing proves the prompt's own last hash boundary. Materialize
+-            # the state one unit lower, where the hit can actually land.
+-            tail_boundary = max(tail_boundary - self.hash_block_size, 0)
++        speculative_replay_boundary = (
++            tail_boundary - self.hash_block_size
++            if self.use_eagle and tail_boundary >= self.hash_block_size
++            else 0
++        )
+         stops = (
+             # Same invariant: a chunk starting mid-block stops at the boundary
+             # rather than running past it.
+             next_block_boundary if start % block_size != 0 else 0,
+             # Never run past the last cacheable block boundary mid-chunk.
+             last_cache_position,
+-            # Fine-grained hits: the prompt's partial-tail entry can only be
+-            # registered by a chunk ending exactly at its last hash boundary.
++            # DSpark/EAGLE rewinds a fine-grained attention hit by one hash
++            # unit. Materialize the matching recurrent state before advancing
++            # to the lookahead boundary.
++            speculative_replay_boundary
++            if speculative_replay_boundary < request.num_prompt_tokens
++            else 0,
++            # Without speculative lookahead, the partial-tail state itself is
++            # the reusable checkpoint.
+             tail_boundary
+-            if last_cache_position < tail_boundary < request.num_prompt_tokens
++            if not self.use_eagle
++            and last_cache_position < tail_boundary < request.num_prompt_tokens
+             else 0,
+             # Marconi shared-prefix junction, block-floored (a sub-block
+             # junction's state is not separately cacheable): cache its state
+diff --git a/vllm/v1/core/single_type_kv_cache_manager.py b/vllm/v1/core/single_type_kv_cache_manager.py
+index ec65880cc4..c2c5e269c3 100644
+--- a/vllm/v1/core/single_type_kv_cache_manager.py
++++ b/vllm/v1/core/single_type_kv_cache_manager.py
+@@ -135,10 +135,14 @@ class SingleTypeKVCacheManager(ABC):
+         if num_local_computed_tokens % self.block_size == 0:
+             return False
+         block_idx = num_local_computed_tokens // self.block_size
++        if block_idx >= len(new_computed_blocks):
++            return False
++        boundary_block = new_computed_blocks[block_idx]
++        cached_boundary = boundary_block.block_hash_num_tokens
+         return (
+-            block_idx < len(new_computed_blocks)
+-            and new_computed_blocks[block_idx].block_hash_num_tokens
+-            == num_local_computed_tokens
++            not boundary_block.is_null
++            and cached_boundary is not None
++            and cached_boundary >= num_local_computed_tokens
+         )
+ 
+     def get_num_blocks_to_allocate(
+-- 
+2.34.1
+
