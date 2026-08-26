@@ -10,12 +10,19 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use dynamo_agent_rt::{
-    AgentRuntime, AgentRuntimeError, AgentStreamRuntimeError, AuthorizationScope,
-    CanonicalJsonFingerprinter, IdempotencyKey, InMemoryCheckpointStore, InMemoryStoreError,
-    InferenceFuture, InferenceIntent, InferenceInvoker, InferenceOutput, InferenceRequest,
-    MaterializationError, ModelStepKind, OpenAiResponses, ResponseId, ResponsesOutputError,
-    ResponsesOutputInterpreter, ResponsesRequestMaterializer, ResponsesStreamEventInterpreter,
-    RunStreamResult, RunTurn, RuntimeAuthorization, RuntimeLimits, SystemClock, UuidGenerator,
+    AgentRuntime, AgentRuntimeError, AgentStreamRuntimeError, AgentToolRuntimeError,
+    AuthorizationScope, Blake3ToolIdempotencyKeys, CanonicalJsonFingerprinter,
+    ConfiguredToolRouter, IdempotencyKey, InferenceFuture, InferenceIntent, InferenceInvoker,
+    InferenceOutput, InferenceRequest, MaterializationError, ModelStepKind, OpenAiResponses,
+    PolicyResponsesOutputInterpreter, ResponseId, ResponsesRequestMaterializer,
+    ResponsesStreamEventInterpreter, ResponsesToolAdapterError, ResponsesToolLoopAdapter,
+    RoutedResponsesOutcomeError, RoutedResponsesOutcomePolicy, RunStreamResult, RunTurn,
+    RuntimeAuthorization, RuntimeLimits, SystemClock, ToolRoute, ToolRunError, ToolRunner,
+    UuidGenerator,
+};
+use dynamo_agent_rt_store::{DuckDbStore, DuckDbStoreError, StoreInvariantError};
+use dynamo_agent_tools::{
+    BraveWebSearchError, BraveWebSearchExecutor, BraveWebSearchFailurePolicy, BraveWebSearchProfile,
 };
 use dynamo_protocols::types::responses::{
     ResponseCompletedEvent, ResponseCreatedEvent, ResponseInProgressEvent,
@@ -54,6 +61,9 @@ const PERMITTED_CONNECTORS_ENV: &str = "DYN_AGENT_RT_PERMITTED_CONNECTORS";
 const AUTH_HEADER: &str = "x-dynamo-agent-rt-auth";
 const TENANT_HEADER: &str = "x-dynamo-tenant-id";
 const PRINCIPAL_HEADER: &str = "x-dynamo-principal-id";
+const DUCKDB_PATH_ENV: &str = "DYN_AGENT_RT_DUCKDB_PATH";
+const WEB_SEARCH_API_KEY_ENV: &str = "BRAVE_SEARCH_API_KEY";
+const WEB_SEARCH_TOOL_NAME_ENV: &str = "DYN_AGENT_RT_WEB_SEARCH_TOOL_NAME";
 
 static AUTH_CONFIG: LazyLock<Result<AgentRuntimeAuthConfig, String>> =
     LazyLock::new(AgentRuntimeAuthConfig::from_environment);
@@ -214,9 +224,13 @@ fn ingress_authorization(
     })
 }
 
-pub(super) type ResponsesAgentRuntime = AgentRuntime<
+type ResponsesStore = DuckDbStore<OpenAiResponses>;
+type ResponsesRouter = ConfiguredToolRouter;
+type ResponsesOutcomePolicy = RoutedResponsesOutcomePolicy<ResponsesRouter>;
+type ResponsesOutputInterpreter = PolicyResponsesOutputInterpreter<ResponsesOutcomePolicy>;
+type ResponsesAgentRuntimeCore = AgentRuntime<
     OpenAiResponses,
-    InMemoryCheckpointStore<OpenAiResponses>,
+    ResponsesStore,
     ResponsesRequestMaterializer,
     CanonicalJsonFingerprinter,
     DynamoResponsesInvoker,
@@ -224,28 +238,119 @@ pub(super) type ResponsesAgentRuntime = AgentRuntime<
     UuidGenerator,
     SystemClock,
 >;
+type ResponsesToolAdapter = ResponsesToolLoopAdapter<ResponsesRouter>;
+type ResponsesToolRunner = ToolRunner<
+    ResponsesStore,
+    BraveWebSearchExecutor,
+    Blake3ToolIdempotencyKeys,
+    BraveWebSearchFailurePolicy,
+>;
+
+pub(super) struct ResponsesAgentRuntime {
+    runtime: Arc<ResponsesAgentRuntimeCore>,
+    tool_adapter: Arc<ResponsesToolAdapter>,
+    tool_runner: Arc<ResponsesToolRunner>,
+}
 
 type ResponsesRuntimeError = AgentRuntimeError<
-    InMemoryStoreError,
+    DuckDbStoreError,
     MaterializationError<Infallible>,
     serde_json::Error,
     DynamoResponsesInvocationError,
-    ResponsesOutputError,
+    RoutedResponsesOutcomeError,
 >;
 
 type ResponsesStreamRuntimeError =
-    AgentStreamRuntimeError<ResponsesRuntimeError, Infallible, InMemoryStoreError>;
+    AgentStreamRuntimeError<ResponsesRuntimeError, Infallible, DuckDbStoreError>;
+
+type ResponsesToolRunError = ToolRunError<DuckDbStoreError, BraveWebSearchError>;
+type ResponsesToolRuntimeError = AgentToolRuntimeError<
+    ResponsesRuntimeError,
+    ResponsesToolAdapterError,
+    ResponsesToolRunError,
+    DuckDbStoreError,
+>;
+type ResponsesToolStreamRuntimeError = AgentToolRuntimeError<
+    ResponsesStreamRuntimeError,
+    ResponsesToolAdapterError,
+    ResponsesToolRunError,
+    DuckDbStoreError,
+>;
 
 pub(super) fn new_responses_runtime() -> Arc<ResponsesAgentRuntime> {
-    Arc::new(AgentRuntime::new(
-        InMemoryCheckpointStore::default(),
+    let store = match std::env::var_os(DUCKDB_PATH_ENV) {
+        Some(path) if !path.is_empty() => ResponsesStore::open(path),
+        _ => {
+            if enabled() {
+                tracing::warn!(
+                    env = DUCKDB_PATH_ENV,
+                    "agent runtime is using an in-memory DuckDB store; set the path for restart durability"
+                );
+            }
+            ResponsesStore::open_in_memory()
+        }
+    }
+    .unwrap_or_else(|error| panic!("failed to initialize agent runtime DuckDB store: {error}"));
+    let (router, executor) = web_search_components();
+    let output_interpreter =
+        PolicyResponsesOutputInterpreter::new(RoutedResponsesOutcomePolicy::new(router.clone()));
+    let runtime = Arc::new(AgentRuntime::new(
+        store.clone(),
         ResponsesRequestMaterializer::default(),
         CanonicalJsonFingerprinter,
         DynamoResponsesInvoker,
-        ResponsesOutputInterpreter::default(),
+        output_interpreter,
         UuidGenerator,
         SystemClock,
-    ))
+    ));
+    Arc::new(ResponsesAgentRuntime {
+        runtime,
+        tool_adapter: Arc::new(ResponsesToolLoopAdapter::new(router)),
+        tool_runner: Arc::new(ToolRunner::new(
+            store,
+            executor,
+            Blake3ToolIdempotencyKeys,
+            BraveWebSearchFailurePolicy,
+        )),
+    })
+}
+
+fn web_search_components() -> (ResponsesRouter, BraveWebSearchExecutor) {
+    let api_key = match std::env::var(WEB_SEARCH_API_KEY_ENV) {
+        Ok(api_key) => Some(api_key),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("{WEB_SEARCH_API_KEY_ENV} must contain UTF-8")
+        }
+    };
+    let tool_name = std::env::var(WEB_SEARCH_TOOL_NAME_ENV).ok();
+    web_search_components_from_config(api_key, tool_name)
+}
+
+fn web_search_components_from_config(
+    api_key: Option<String>,
+    tool_name: Option<String>,
+) -> (ResponsesRouter, BraveWebSearchExecutor) {
+    let Some(api_key) = api_key else {
+        return (
+            ConfiguredToolRouter::default(),
+            BraveWebSearchExecutor::new([])
+                .expect("empty web-search executor configuration is valid"),
+        );
+    };
+    let tool_name = tool_name.unwrap_or_else(|| "web_search".to_owned());
+    validate_scope_component(&tool_name)
+        .unwrap_or_else(|error| panic!("invalid {WEB_SEARCH_TOOL_NAME_ENV}: {error}"));
+    let profile_name = "brave_default".to_owned();
+    let profile = BraveWebSearchProfile::new(api_key)
+        .unwrap_or_else(|error| panic!("invalid web-search deployment configuration: {error}"));
+    let router = ConfiguredToolRouter::new([(
+        tool_name,
+        ToolRoute::new("web_search", "search").with_profile(profile_name.clone()),
+    )]);
+    let executor = BraveWebSearchExecutor::new([(profile_name, profile)])
+        .unwrap_or_else(|error| panic!("failed to initialize web-search executor: {error}"));
+    (router, executor)
 }
 
 /// Dynamo-owned, explicitly filtered ingress data forwarded across model steps.
@@ -371,12 +476,18 @@ pub(super) async fn handle_responses(
     };
 
     if streaming {
-        let result = state
-            .responses_agent_runtime()
+        let agent_runtime = state.responses_agent_runtime();
+        let result = agent_runtime
+            .runtime
             .clone()
-            .run_stream(command, ResponsesStreamEventInterpreter::default())
+            .run_stream_with_tools(
+                command,
+                ResponsesStreamEventInterpreter::default(),
+                agent_runtime.tool_adapter.clone(),
+                agent_runtime.tool_runner.clone(),
+            )
             .await
-            .map_err(stream_runtime_error_response)?;
+            .map_err(tool_stream_runtime_error_response)?;
         let stream: AgentResponsesStream = match result {
             RunStreamResult::Live(stream) => {
                 Box::pin(stream.map(|event| event.map_err(axum::Error::new)))
@@ -399,11 +510,16 @@ pub(super) async fn handle_responses(
         ));
     }
 
-    let result = state
-        .responses_agent_runtime()
-        .run_unary(command)
+    let agent_runtime = state.responses_agent_runtime();
+    let result = agent_runtime
+        .runtime
+        .run_unary_with_tools(
+            command,
+            agent_runtime.tool_adapter.as_ref(),
+            agent_runtime.tool_runner.as_ref(),
+        )
         .await
-        .map_err(runtime_error_response)?;
+        .map_err(tool_runtime_error_response)?;
     let response = result.record().response.clone().ok_or_else(|| {
         openai::ErrorMessage::internal_server_error(
             "Agent runtime turn exists but has no replayable response",
@@ -425,6 +541,149 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .get(name)
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
+}
+
+fn tool_stream_runtime_error_response(
+    error: ResponsesToolStreamRuntimeError,
+) -> openai::ErrorResponse {
+    tool_error_response(error, stream_runtime_error_response)
+}
+
+fn tool_runtime_error_response(error: ResponsesToolRuntimeError) -> openai::ErrorResponse {
+    tool_error_response(error, runtime_error_response)
+}
+
+fn tool_error_response<R>(
+    error: AgentToolRuntimeError<
+        R,
+        ResponsesToolAdapterError,
+        ResponsesToolRunError,
+        DuckDbStoreError,
+    >,
+    runtime_error: impl FnOnce(R) -> openai::ErrorResponse,
+) -> openai::ErrorResponse
+where
+    R: std::error::Error + Send + Sync + 'static,
+{
+    let details = error.to_string();
+    let (status, message) = match error {
+        AgentToolRuntimeError::Runtime(error) => return runtime_error(error),
+        AgentToolRuntimeError::Adapter {
+            checkpoint_error, ..
+        } => (
+            checkpoint_failure_status(&checkpoint_error, StatusCode::BAD_GATEWAY),
+            "Inference backend returned an invalid server-tool call",
+        ),
+        AgentToolRuntimeError::ToolBatch {
+            errors,
+            checkpoint_error,
+            ..
+        } => (
+            checkpoint_failure_status(
+                &checkpoint_error,
+                errors
+                    .iter()
+                    .map(tool_run_error_status)
+                    .max_by_key(|status| status_severity(*status))
+                    .unwrap_or(StatusCode::BAD_GATEWAY),
+            ),
+            "Server-side tool execution failed",
+        ),
+        AgentToolRuntimeError::MissingCalls { checkpoint_error } => (
+            checkpoint_failure_status(&checkpoint_error, StatusCode::INTERNAL_SERVER_ERROR),
+            "Agent runtime could not resolve the server-tool call",
+        ),
+        AgentToolRuntimeError::ToolRoundLimit {
+            checkpoint_error, ..
+        }
+        | AgentToolRuntimeError::ParallelToolLimit {
+            checkpoint_error, ..
+        } => (
+            checkpoint_failure_status(&checkpoint_error, StatusCode::BAD_GATEWAY),
+            "Server-side tool execution exceeded deployment limits",
+        ),
+        AgentToolRuntimeError::MissingLease | AgentToolRuntimeError::MissingResponse => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Agent runtime lost server-tool turn state",
+        ),
+    };
+    agent_runtime_public_error(status, message, details)
+}
+
+fn checkpoint_failure_status(
+    checkpoint_error: &Option<DuckDbStoreError>,
+    otherwise: StatusCode,
+) -> StatusCode {
+    if checkpoint_error.is_some() {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        otherwise
+    }
+}
+
+fn tool_run_error_status(error: &ResponsesToolRunError) -> StatusCode {
+    match error {
+        ToolRunError::UnauthorizedConnector(_) => StatusCode::FORBIDDEN,
+        ToolRunError::Journal(_)
+        | ToolRunError::RecoveryLookup { .. }
+        | ToolRunError::OutcomeUnknown { .. }
+        | ToolRunError::CorruptJournal
+        | ToolRunError::JournalAfterExecution(_) => StatusCode::SERVICE_UNAVAILABLE,
+        ToolRunError::Executor {
+            error,
+            outcome_unknown,
+            journal_error,
+        } => {
+            if *outcome_unknown || journal_error.is_some() {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                web_search_error_status(error)
+            }
+        }
+        ToolRunError::PersistedFailure(failure) => {
+            if failure.retryable {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::BAD_GATEWAY
+            }
+        }
+        ToolRunError::OutputTooLarge { journal_error, .. } => {
+            if journal_error.is_some() {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::BAD_GATEWAY
+            }
+        }
+    }
+}
+
+fn web_search_error_status(error: &BraveWebSearchError) -> StatusCode {
+    match error {
+        BraveWebSearchError::Timeout
+        | BraveWebSearchError::Transport(_)
+        | BraveWebSearchError::ExecutorClosed => StatusCode::SERVICE_UNAVAILABLE,
+        BraveWebSearchError::ProviderStatus(status) if *status == 429 || *status >= 500 => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        BraveWebSearchError::UnsupportedRoute { .. } | BraveWebSearchError::UnknownProfile(_) => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+        BraveWebSearchError::InvalidArguments(_)
+        | BraveWebSearchError::ProviderStatus(_)
+        | BraveWebSearchError::ResponseTooLarge { .. }
+        | BraveWebSearchError::Decode(_)
+        | BraveWebSearchError::Normalize(_) => StatusCode::BAD_GATEWAY,
+    }
+}
+
+fn status_severity(status: StatusCode) -> u8 {
+    match status {
+        StatusCode::INTERNAL_SERVER_ERROR => 5,
+        StatusCode::SERVICE_UNAVAILABLE => 4,
+        StatusCode::BAD_GATEWAY => 3,
+        StatusCode::FORBIDDEN => 2,
+        _ => 1,
+    }
 }
 
 fn stream_runtime_error_response(error: ResponsesStreamRuntimeError) -> openai::ErrorResponse {
@@ -535,33 +794,42 @@ fn runtime_error_response(error: ResponsesRuntimeError) -> openai::ErrorResponse
     }
 }
 
-fn store_error_response(error: InMemoryStoreError) -> openai::ErrorResponse {
-    let (status, message) = match error {
-        InMemoryStoreError::NotFound => (
+fn store_error_response(error: DuckDbStoreError) -> openai::ErrorResponse {
+    let (status, message) = match &error {
+        DuckDbStoreError::Invariant(StoreInvariantError::NotFound) => (
             StatusCode::NOT_FOUND,
             "Previous response was not found or is not accessible",
         ),
-        InMemoryStoreError::IdempotencyConflict => (
+        DuckDbStoreError::Invariant(StoreInvariantError::IdempotencyConflict) => (
             StatusCode::CONFLICT,
             "Idempotency key was already used for a different request",
         ),
-        InMemoryStoreError::ResponseAlreadyExists(_)
-        | InMemoryStoreError::ParentNotReplayable(_)
-        | InMemoryStoreError::LeaseNotFound
-        | InMemoryStoreError::LeaseMismatch
-        | InMemoryStoreError::LeaseExpired
-        | InMemoryStoreError::VersionConflict => (
+        DuckDbStoreError::Invariant(
+            StoreInvariantError::ResponseAlreadyExists(_)
+            | StoreInvariantError::ParentNotReplayable(_)
+            | StoreInvariantError::LeaseNotFound
+            | StoreInvariantError::LeaseMismatch
+            | StoreInvariantError::LeaseExpired
+            | StoreInvariantError::VersionConflict
+            | StoreInvariantError::ToolAlreadyFinished(_),
+        ) => (
             StatusCode::CONFLICT,
             "Agent turn changed concurrently; retry with the same idempotency key",
         ),
-        InMemoryStoreError::Poisoned
-        | InMemoryStoreError::InvalidLeaseDeadline
-        | InMemoryStoreError::LeaseDeadlineNotExtended
-        | InMemoryStoreError::InvalidTransition { .. }
-        | InMemoryStoreError::VersionOverflow
-        | InMemoryStoreError::CorruptChain => (
+        DuckDbStoreError::Invariant(
+            StoreInvariantError::InvalidLeaseDeadline
+            | StoreInvariantError::LeaseDeadlineNotExtended
+            | StoreInvariantError::InvalidTransition { .. }
+            | StoreInvariantError::VersionOverflow
+            | StoreInvariantError::Corrupt,
+        )
+        | DuckDbStoreError::Json(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "Agent checkpoint store failed",
+        ),
+        DuckDbStoreError::Database(_) | DuckDbStoreError::Poisoned | DuckDbStoreError::Join(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Agent checkpoint store is unavailable",
         ),
     };
     agent_runtime_public_error(status, message, error)
@@ -699,8 +967,9 @@ mod tests {
     use axum::http::{HeaderMap, StatusCode};
 
     use dynamo_agent_rt::{
-        AgentRuntimeError, InMemoryStoreError, MaterializationError, ResponseId, TurnState,
+        AgentRuntimeError, MaterializationError, ResponseId, ToolRouter, TurnState,
     };
+    use dynamo_agent_rt_store::{DuckDbStoreError, StoreInvariantError};
     use futures::stream;
 
     use crate::protocols::common::extensions::{
@@ -715,12 +984,29 @@ mod tests {
         DynamoResponsesInvocationError, IngressAuthorizationError, LOCAL_PRINCIPAL_ENV,
         LOCAL_TENANT_ENV, PERMITTED_CONNECTORS_ENV, PRINCIPAL_HEADER, ResponsesRuntimeError,
         TENANT_HEADER, TRUSTED_PROXY_TOKEN_ENV, committed_response_events, runtime_error_response,
-        sse_response,
+        sse_response, web_search_components_from_config,
     };
 
     #[test]
+    fn web_search_route_exists_only_with_deployment_credentials() {
+        let (router, _) = web_search_components_from_config(None, None);
+        assert!(router.route("web_search").is_none());
+
+        let (router, _) = web_search_components_from_config(
+            Some("deployment-secret".to_owned()),
+            Some("search_the_web".to_owned()),
+        );
+        let route = router.route("search_the_web").expect("route configured");
+        assert_eq!(route.connector, "web_search");
+        assert_eq!(route.operation, "search");
+        assert_eq!(route.profile, "brave_default");
+        assert!(router.route("web_search").is_none());
+    }
+
+    #[test]
     fn runtime_errors_have_stable_non_leaking_http_statuses() {
-        let missing: ResponsesRuntimeError = AgentRuntimeError::Store(InMemoryStoreError::NotFound);
+        let missing: ResponsesRuntimeError =
+            AgentRuntimeError::Store(DuckDbStoreError::Invariant(StoreInvariantError::NotFound));
         let response = runtime_error_response(missing);
         assert_eq!(response.0, StatusCode::NOT_FOUND);
         assert_eq!(
@@ -728,8 +1014,9 @@ mod tests {
             "Previous response was not found or is not accessible"
         );
 
-        let conflict: ResponsesRuntimeError =
-            AgentRuntimeError::Store(InMemoryStoreError::IdempotencyConflict);
+        let conflict: ResponsesRuntimeError = AgentRuntimeError::Store(
+            DuckDbStoreError::Invariant(StoreInvariantError::IdempotencyConflict),
+        );
         assert_eq!(runtime_error_response(conflict).0, StatusCode::CONFLICT);
 
         let cross_scope: ResponsesRuntimeError = AgentRuntimeError::Materialize(
@@ -764,7 +1051,7 @@ mod tests {
                 status: StatusCode::BAD_REQUEST,
                 message: "bad request".to_owned(),
             },
-            checkpoint_error: Some(InMemoryStoreError::Poisoned),
+            checkpoint_error: Some(DuckDbStoreError::Poisoned),
         };
         assert_eq!(
             runtime_error_response(durability_unknown).0,
