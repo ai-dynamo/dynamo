@@ -98,7 +98,7 @@ async def test_extracts_mixed_url_data_url_and_decoded_media():
     processor.image_loader.load_image_batch.assert_awaited_once_with(
         image_items, preserve_uuid_slots=True
     )
-    processor.video_loader.load_video_batch.assert_awaited_once_with(video_items)
+    processor.video_loader.load_video_batch.assert_awaited_once_with(video_items, {})
     processor.audio_loader.load_audio_batch.assert_awaited_once_with(audio_items)
     processor.audio_loader.load_audio.assert_not_awaited()
 

@@ -103,6 +103,30 @@ def _build_forwarded_mm_uuids(
     return None
 
 
+def _video_media_io_kwargs(request: dict) -> dict:
+    """Request-level video decode options, shape-checked the way vLLM does.
+
+    vLLM types this field as `dict[str, dict[str, Any]] | None` on its own
+    OpenAI schemas, so pydantic rejects a malformed value before any handler
+    runs. Dynamo's frontend forwards the field verbatim by design, so the
+    same check has to land here -- otherwise a non-object reaches
+    `VideoMediaIO(**kwargs)` and surfaces as a server error instead of a
+    request error.
+    """
+    media_io_kwargs = request.get("media_io_kwargs")
+    if media_io_kwargs is None:
+        return {}
+    if not isinstance(media_io_kwargs, dict):
+        raise ValueError("media_io_kwargs must be an object")
+
+    video_kwargs = media_io_kwargs.get("video")
+    if video_kwargs is None:
+        return {}
+    if not isinstance(video_kwargs, dict):
+        raise ValueError("media_io_kwargs['video'] must be an object")
+    return video_kwargs
+
+
 def _build_user_mm_uuids(
     raw_uuids: Any,
     use_unified_vision_chunk: bool,
@@ -532,7 +556,7 @@ class VllmMultimodalRequestProcessor:
 
             video_items = mm_map.get(VIDEO_URL_KEY, [])
             if video_items:
-                video_io_kwargs = (request.get("media_io_kwargs") or {}).get("video")
+                video_io_kwargs = _video_media_io_kwargs(request)
                 videos = await self.video_loader.load_video_batch(
                     video_items, video_io_kwargs
                 )

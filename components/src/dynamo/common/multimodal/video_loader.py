@@ -123,7 +123,7 @@ class VideoLoader:
     ) -> Any:
         _, VideoMediaIO, ImageMediaIO = _require_vllm_video_media()
         video_io_kwargs = VideoMediaIO.merge_kwargs(
-            {"num_frames": self._num_frames}, media_io_kwargs
+            {"num_frames": self._num_frames}, media_io_kwargs or {}
         )
         return VideoMediaIO(
             ImageMediaIO(image_mode="RGB"),
