@@ -3415,8 +3415,11 @@ pub(super) async fn responses(
         // Streaming path: convert chat completion stream chunks to Responses API SSE events.
         // The engine yields Annotated<NvCreateChatCompletionStreamResponse>. We extract the
         // inner stream response data and convert it to Responses API events.
-        use crate::protocols::openai::responses::stream_converter::ResponseStreamConverter;
+        use crate::protocols::openai::responses::stream_converter::{
+            ResponseEventSerializer, ResponseStreamConverter,
+        };
 
+        let serializer = ResponseEventSerializer::new(&response_params);
         let mut converter = match responses_ctx {
             Some(ctx) => ResponseStreamConverter::with_context(model.clone(), response_params, ctx),
             None => ResponseStreamConverter::new(model.clone(), response_params),
@@ -3429,7 +3432,7 @@ pub(super) async fn responses(
             let mut events = Vec::with_capacity(4);
             converter.append_start_events(&mut events);
             for event in events.drain(..) {
-                yield event.map_err(axum::Error::new);
+                yield serializer.serialize(&event).map_err(axum::Error::new);
             }
 
             // Track whether the backend sent an error event during the stream.
@@ -3453,7 +3456,7 @@ pub(super) async fn responses(
 
                 converter.append_chunk_events(&stream_resp, &mut events);
                 for event in events.drain(..) {
-                    yield event.map_err(axum::Error::new);
+                    yield serializer.serialize(&event).map_err(axum::Error::new);
                 }
             }
 
@@ -3463,7 +3466,7 @@ pub(super) async fn responses(
                 converter.append_end_events(&mut events);
             }
             for event in events.drain(..) {
-                yield event.map_err(axum::Error::new);
+                yield serializer.serialize(&event).map_err(axum::Error::new);
             }
         };
 

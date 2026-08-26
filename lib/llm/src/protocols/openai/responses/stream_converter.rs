@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Converts a stream of chat completion SSE chunks into Responses API SSE events.
+//! Converts chat-completion chunks into native Responses stream events, then
+//! serializes those events at the HTTP boundary.
 //!
 //! The event sequence follows the OpenAI Responses API streaming spec:
 //! `response.created` -> `response.in_progress` -> `response.output_item.added` ->
@@ -199,42 +200,42 @@ impl ResponseStreamConverter {
     }
 
     /// Emit the initial lifecycle events: created + in_progress.
-    pub fn emit_start_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
+    pub fn emit_start_events(&mut self) -> Vec<ResponseStreamEvent> {
         let mut events = Vec::with_capacity(2);
         self.append_start_events(&mut events);
         events
     }
 
     /// Append the initial lifecycle events: created + in_progress.
-    pub fn append_start_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+    pub fn append_start_events(&mut self, events: &mut Vec<ResponseStreamEvent>) {
         let created = ResponseStreamEvent::ResponseCreated(ResponseCreatedEvent {
             sequence_number: self.next_seq(),
             response: self.make_response(Status::InProgress, vec![]),
         });
-        events.push(self.make_sse_event(&created));
+        events.push(created);
 
         let in_progress = ResponseStreamEvent::ResponseInProgress(ResponseInProgressEvent {
             sequence_number: self.next_seq(),
             response: self.make_response(Status::InProgress, vec![]),
         });
-        events.push(self.make_sse_event(&in_progress));
+        events.push(in_progress);
     }
 
-    /// Process a single chat completion stream chunk and return zero or more SSE events.
+    /// Process one chat-completion chunk into zero or more native events.
     pub fn process_chunk(
         &mut self,
         chunk: &NvCreateChatCompletionStreamResponse,
-    ) -> Vec<Result<Event, anyhow::Error>> {
+    ) -> Vec<ResponseStreamEvent> {
         let mut events = Vec::new();
         self.append_chunk_events(chunk, &mut events);
         events
     }
 
-    /// Process a single chat completion stream chunk and append zero or more SSE events.
+    /// Process one chat-completion chunk and append zero or more native events.
     pub fn append_chunk_events(
         &mut self,
         chunk: &NvCreateChatCompletionStreamResponse,
-        events: &mut Vec<Result<Event, anyhow::Error>>,
+        events: &mut Vec<ResponseStreamEvent>,
     ) {
         // Capture usage stats from the final chunk (sent when stream_options.include_usage=true)
         if let Some(ref u) = chunk.inner.usage {
@@ -292,7 +293,7 @@ impl ResponseStreamConverter {
                             }),
                         },
                     );
-                    events.push(self.make_sse_event(&item_added));
+                    events.push(item_added);
 
                     let part_added = ResponseStreamEvent::ResponseReasoningSummaryPartAdded(
                         ResponseReasoningSummaryPartAddedEvent {
@@ -305,7 +306,7 @@ impl ResponseStreamConverter {
                             }),
                         },
                     );
-                    events.push(self.make_sse_event(&part_added));
+                    events.push(part_added);
                 }
 
                 let reasoning_delta = ResponseStreamEvent::ResponseReasoningSummaryTextDelta(
@@ -317,7 +318,7 @@ impl ResponseStreamConverter {
                         delta: reasoning.to_string(),
                     },
                 );
-                events.push(self.make_sse_event(&reasoning_delta));
+                events.push(reasoning_delta);
             }
 
             // Handle text content deltas — extract text from the enum
@@ -357,7 +358,7 @@ impl ResponseStreamConverter {
                             }),
                         },
                     );
-                    events.push(self.make_sse_event(&item_added));
+                    events.push(item_added);
 
                     let part_added = ResponseStreamEvent::ResponseContentPartAdded(
                         ResponseContentPartAddedEvent {
@@ -372,7 +373,7 @@ impl ResponseStreamConverter {
                             }),
                         },
                     );
-                    events.push(self.make_sse_event(&part_added));
+                    events.push(part_added);
                 }
 
                 // Emit text delta
@@ -386,7 +387,7 @@ impl ResponseStreamConverter {
                         delta: content.to_string(),
                         logprobs: Some(vec![]),
                     });
-                events.push(self.make_sse_event(&text_delta));
+                events.push(text_delta);
             }
 
             // Handle tool call deltas
@@ -505,7 +506,7 @@ impl ResponseStreamConverter {
                                 }),
                             },
                         );
-                        events.push(self.make_sse_event(&item_added));
+                        events.push(item_added);
                     }
 
                     if let Some((item_id, output_index)) = argument_target {
@@ -519,7 +520,7 @@ impl ResponseStreamConverter {
                                         delta,
                                     },
                                 );
-                            events.push(self.make_sse_event(&args_delta));
+                            events.push(args_delta);
                         }
                     }
                 }
@@ -542,7 +543,7 @@ impl ResponseStreamConverter {
 
     fn append_reasoning_done_events(
         &mut self,
-        events: &mut Vec<Result<Event, anyhow::Error>>,
+        events: &mut Vec<ResponseStreamEvent>,
         output_status: OutputStatus,
     ) {
         if self.reasoning_done {
@@ -563,7 +564,7 @@ impl ResponseStreamConverter {
                 text: self.accumulated_reasoning.clone(),
             },
         );
-        events.push(self.make_sse_event(&text_done));
+        events.push(text_done);
 
         let summary = SummaryPart::SummaryText(SummaryTextContent {
             text: self.accumulated_reasoning.clone(),
@@ -577,7 +578,7 @@ impl ResponseStreamConverter {
                 part: summary.clone(),
             },
         );
-        events.push(self.make_sse_event(&part_done));
+        events.push(part_done);
 
         let item_done = ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
             sequence_number: self.next_seq(),
@@ -590,13 +591,10 @@ impl ResponseStreamConverter {
                 status: Some(output_status),
             }),
         });
-        events.push(self.make_sse_event(&item_done));
+        events.push(item_done);
     }
 
-    fn append_pending_function_call_done_events(
-        &mut self,
-        events: &mut Vec<Result<Event, anyhow::Error>>,
-    ) {
+    fn append_pending_function_call_done_events(&mut self, events: &mut Vec<ResponseStreamEvent>) {
         let output_status = self.output_status();
         // `started` is set only after `has_identity()` observes both required
         // fields, matching Anthropic's `is_emit_ready()` identity requirement.
@@ -629,7 +627,7 @@ impl ResponseStreamConverter {
                     name: Some(fc_name.clone()),
                 },
             );
-            events.push(self.make_sse_event(&args_done));
+            events.push(args_done);
 
             let item_done =
                 ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
@@ -644,7 +642,7 @@ impl ResponseStreamConverter {
                         status: Some(output_status),
                     }),
                 });
-            events.push(self.make_sse_event(&item_done));
+            events.push(item_done);
         }
     }
 
@@ -717,14 +715,14 @@ impl ResponseStreamConverter {
     }
 
     /// Emit remaining output completion events and `response.completed` at stream end.
-    pub fn emit_end_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
+    pub fn emit_end_events(&mut self) -> Vec<ResponseStreamEvent> {
         let mut events = Vec::new();
         self.append_end_events(&mut events);
         events
     }
 
     /// Append remaining output completion events and `response.completed` at stream end.
-    pub fn append_end_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+    pub fn append_end_events(&mut self, events: &mut Vec<ResponseStreamEvent>) {
         let output_status = self.output_status();
         // Without a later output item, the response finish reason determines
         // whether the still-open reasoning item completed or was truncated.
@@ -740,7 +738,7 @@ impl ResponseStreamConverter {
                 text: self.accumulated_text.clone(),
                 logprobs: Some(vec![]),
             });
-            events.push(self.make_sse_event(&text_done));
+            events.push(text_done);
 
             let part_done =
                 ResponseStreamEvent::ResponseContentPartDone(ResponseContentPartDoneEvent {
@@ -754,7 +752,7 @@ impl ResponseStreamConverter {
                         logprobs: Some(vec![]),
                     }),
                 });
-            events.push(self.make_sse_event(&part_done));
+            events.push(part_done);
 
             let item_done =
                 ResponseStreamEvent::ResponseOutputItemDone(ResponseOutputItemDoneEvent {
@@ -772,7 +770,7 @@ impl ResponseStreamConverter {
                         status: output_status,
                     }),
                 });
-            events.push(self.make_sse_event(&item_done));
+            events.push(item_done);
         }
 
         // Fallback for backends that end the transport without a finish-reason chunk.
@@ -791,32 +789,46 @@ impl ResponseStreamConverter {
                 response,
             })
         };
-        events.push(self.make_sse_event(&terminal));
+        events.push(terminal);
     }
 
     /// Emit error events when the stream ends due to a backend error.
-    pub fn emit_error_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
+    pub fn emit_error_events(&mut self) -> Vec<ResponseStreamEvent> {
         let mut events = Vec::new();
         self.append_error_events(&mut events);
         events
     }
 
     /// Append error events when the stream ends due to a backend error.
-    pub fn append_error_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+    pub fn append_error_events(&mut self, events: &mut Vec<ResponseStreamEvent>) {
         let failed = ResponseStreamEvent::ResponseFailed(ResponseFailedEvent {
             sequence_number: self.next_seq(),
             response: self.make_response(Status::Failed, vec![]),
         });
-        events.push(self.make_sse_event(&failed));
+        events.push(failed);
     }
 }
 
-impl ResponseStreamConverter {
-    /// Serialize a stream event, patching any embedded `response` object to
-    /// satisfy the OpenResponses schema. Takes `&self` so spec-required
-    /// sampling params can be sourced from the originating request via
-    /// `self.params` rather than hardcoded at each emit site.
-    fn make_sse_event(&self, event: &ResponseStreamEvent) -> Result<Event, anyhow::Error> {
+/// Stateless HTTP serializer for native Responses stream events.
+#[derive(Debug, Clone, Copy)]
+pub struct ResponseEventSerializer {
+    spec: ResponseSpecFields,
+}
+
+impl ResponseEventSerializer {
+    pub fn new(params: &ResponseParams) -> Self {
+        Self {
+            spec: ResponseSpecFields {
+                presence_penalty: params.presence_penalty.unwrap_or(0.0),
+                frequency_penalty: params.frequency_penalty.unwrap_or(0.0),
+                store: params.store.unwrap_or(false),
+            },
+        }
+    }
+
+    /// Serialize a native event, patching embedded response objects to satisfy
+    /// the OpenResponses wire schema.
+    pub fn serialize(&self, event: &ResponseStreamEvent) -> Result<Event, anyhow::Error> {
         let event_type = get_event_type(event);
         let data = self.serialize_event_data(event)?;
         Ok(Event::default().event(event_type).data(data))
@@ -826,19 +838,13 @@ impl ResponseStreamConverter {
         &self,
         event: &ResponseStreamEvent,
     ) -> Result<String, serde_json::Error> {
-        let spec = ResponseSpecFields {
-            presence_penalty: self.params.presence_penalty.unwrap_or(0.0),
-            frequency_penalty: self.params.frequency_penalty.unwrap_or(0.0),
-            store: self.params.store.unwrap_or(false),
-        };
-
         match event {
             ResponseStreamEvent::ResponseCreated(event) => {
                 serde_json::to_string(&ResponseEventForSpec::new(
                     "response.created",
                     event.sequence_number,
                     &event.response,
-                    spec,
+                    self.spec,
                 ))
             }
             ResponseStreamEvent::ResponseInProgress(event) => {
@@ -846,7 +852,7 @@ impl ResponseStreamConverter {
                     "response.in_progress",
                     event.sequence_number,
                     &event.response,
-                    spec,
+                    self.spec,
                 ))
             }
             ResponseStreamEvent::ResponseCompleted(event) => {
@@ -854,7 +860,7 @@ impl ResponseStreamConverter {
                     "response.completed",
                     event.sequence_number,
                     &event.response,
-                    spec,
+                    self.spec,
                 ))
             }
             ResponseStreamEvent::ResponseFailed(event) => {
@@ -862,7 +868,7 @@ impl ResponseStreamConverter {
                     "response.failed",
                     event.sequence_number,
                     &event.response,
-                    spec,
+                    self.spec,
                 ))
             }
             ResponseStreamEvent::ResponseIncomplete(event) => {
@@ -870,7 +876,7 @@ impl ResponseStreamConverter {
                     "response.incomplete",
                     event.sequence_number,
                     &event.response,
-                    spec,
+                    self.spec,
                 ))
             }
             ResponseStreamEvent::ResponseQueued(event) => {
@@ -878,7 +884,7 @@ impl ResponseStreamConverter {
                     "response.queued",
                     event.sequence_number,
                     &event.response,
-                    spec,
+                    self.spec,
                 ))
             }
             _ => serde_json::to_string(event),
@@ -886,7 +892,7 @@ impl ResponseStreamConverter {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct ResponseSpecFields {
     presence_penalty: f32,
     frequency_penalty: f32,
@@ -1265,21 +1271,11 @@ mod tests {
         chunk
     }
 
-    /// Extract the SSE event type from a Result<Event, _>.
-    fn event_type(event: &Result<Event, anyhow::Error>) -> String {
-        let debug = format!("{:?}", event.as_ref().unwrap());
-        // Event debug format: Event { ... event: "response.xxx" ... }
-        // Parse the event type from the serialized SSE data
-        if let Some(start) = debug.find("event: ") {
-            let rest = &debug[start + 7..];
-            if let Some(end) = rest.find("\\n") {
-                return rest[..end].to_string();
-            }
-        }
-        "unknown".to_string()
+    fn event_type(event: &ResponseStreamEvent) -> String {
+        get_event_type(event).to_owned()
     }
 
-    fn event_types(events: &[Result<Event, anyhow::Error>]) -> Vec<String> {
+    fn event_types(events: &[ResponseStreamEvent]) -> Vec<String> {
         events.iter().map(event_type).collect()
     }
 
@@ -1302,10 +1298,10 @@ mod tests {
     }
 
     fn optimized_event_json(
-        converter: &ResponseStreamConverter,
+        serializer: &ResponseEventSerializer,
         event: &ResponseStreamEvent,
     ) -> serde_json::Value {
-        serde_json::from_str(&converter.serialize_event_data(event).unwrap()).unwrap()
+        serde_json::from_str(&serializer.serialize_event_data(event).unwrap()).unwrap()
     }
 
     /// Parseable arguments remain open until an explicit tool-call finish reason.
@@ -1409,10 +1405,15 @@ mod tests {
                 .iter()
                 .find(|event| event_type(event) == expected_type)
                 .unwrap();
-            assert!(
-                format!("{event:?}").contains(r#"\"namespace\":\"agents\""#),
-                "{expected_type} did not preserve the namespace"
-            );
+            let item = match event {
+                ResponseStreamEvent::ResponseOutputItemAdded(event) => &event.item,
+                ResponseStreamEvent::ResponseOutputItemDone(event) => &event.item,
+                _ => unreachable!(),
+            };
+            let OutputItem::FunctionCall(call) = item else {
+                panic!("{expected_type} did not contain a function call")
+            };
+            assert_eq!(call.namespace.as_deref(), Some("agents"));
         }
 
         let OutputItem::FunctionCall(call) = &conv.completed_output()[0] else {
@@ -2218,6 +2219,7 @@ mod tests {
             ..Default::default()
         };
         let mut conv = ResponseStreamConverter::new("test-model".into(), params.clone());
+        let serializer = ResponseEventSerializer::new(&params);
 
         let response_event = ResponseStreamEvent::ResponseCreated(ResponseCreatedEvent {
             sequence_number: conv.next_seq(),
@@ -2247,12 +2249,12 @@ mod tests {
 
         for event in [&response_event, &text_event, &tool_event, &completed_event] {
             assert_eq!(
-                optimized_event_json(&conv, event),
+                optimized_event_json(&serializer, event),
                 legacy_event_json(event, &params)
             );
         }
 
-        let response_json = optimized_event_json(&conv, &response_event);
+        let response_json = optimized_event_json(&serializer, &response_event);
         assert_eq!(response_json["response"]["presence_penalty"], 0.25);
         assert_eq!(response_json["response"]["frequency_penalty"], 0.5);
         assert_eq!(response_json["response"]["store"], true);
