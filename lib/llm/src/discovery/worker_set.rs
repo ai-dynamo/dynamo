@@ -338,10 +338,9 @@ impl WorkerSet {
 
     /// Check whether this worker set advertises `capability` in its runtime configuration.
     pub fn supports_runtime_capability(&self, capability: &str) -> bool {
-        matches!(
-            self.card.runtime_config.runtime_data.get(capability),
-            Some(serde_json::Value::Bool(true))
-        )
+        self.card
+            .runtime_config
+            .supports_runtime_capability(capability)
     }
 
     /// Whether this set has any decode engine (chat or completions)

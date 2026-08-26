@@ -132,8 +132,9 @@ func newV1beta1DGDR() *v1beta1.DynamoGraphDeploymentRequest {
 				PVCMountPath: "/models",
 			},
 			Features: &v1beta1.FeaturesSpec{
-				Mocker:  &v1beta1.MockerSpec{Enabled: true},
-				Planner: &runtime.RawExtension{Raw: rawPlanner},
+				Mocker:   &v1beta1.MockerSpec{Enabled: true},
+				KVRouter: &v1beta1.KVRouterSpec{Enabled: true},
+				Planner:  &runtime.RawExtension{Raw: rawPlanner},
 			},
 		},
 		Status: v1beta1.DynamoGraphDeploymentRequestStatus{
