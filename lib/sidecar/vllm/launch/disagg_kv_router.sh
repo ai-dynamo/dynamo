@@ -4,6 +4,7 @@
 #
 # Disaggregated serving through four vLLM native-gRPC sidecars with KV-aware routing.
 # Requires four GPUs and a vLLM build that exposes KV-event source discovery.
+# See ../README.md for the validated vLLM/vllm-rs source state.
 
 set -e
 
@@ -188,26 +189,22 @@ vllm-rs serve "$MODEL" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
-OTEL_SERVICE_NAME=dynamo-worker-decode-1 \
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
     dynamo-vllm-sidecar \
     --vllm-endpoint "${VLLM_HOST}:${VLLM_DECODE1_GRPC_PORT}" \
     --disaggregation-mode decode &
 
-OTEL_SERVICE_NAME=dynamo-worker-decode-2 \
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
     dynamo-vllm-sidecar \
     --vllm-endpoint "${VLLM_HOST}:${VLLM_DECODE2_GRPC_PORT}" \
     --disaggregation-mode decode &
 
-OTEL_SERVICE_NAME=dynamo-worker-prefill-1 \
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT3:-8083}" \
     dynamo-vllm-sidecar \
     --vllm-endpoint "${VLLM_HOST}:${VLLM_PREFILL1_GRPC_PORT}" \
     --component prefill \
     --disaggregation-mode prefill &
 
-OTEL_SERVICE_NAME=dynamo-worker-prefill-2 \
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT4:-8084}" \
     dynamo-vllm-sidecar \
     --vllm-endpoint "${VLLM_HOST}:${VLLM_PREFILL2_GRPC_PORT}" \

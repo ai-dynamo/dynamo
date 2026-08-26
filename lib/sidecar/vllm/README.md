@@ -37,6 +37,12 @@ not preserve all parser-related request semantics.
 
 ## Run
 
+### Runtime compatibility
+
+The Python `vllm` package and `vllm-rs` must expose compatible EngineCore and gRPC contracts. Prefer artifacts built from the same vLLM source revision; do not combine a Python wheel from one nightly with a `vllm-rs` binary from another. The sidecar's vendored gRPC source revisions are recorded in [`proto/README.md`](proto/README.md).
+
+The aggregated and disaggregated KV-router launcher GPU validation used Python vLLM 0.27.1 and a `vllm-rs` binary built from a vLLM source tree created by checking out [`d1e3eee`](https://github.com/vllm-project/vllm/commit/d1e3eee) and cherry-picking [`7cfb97e`](https://github.com/vllm-project/vllm/commit/7cfb97e). This records the validated development state; release artifacts should use a coherent, versioned vLLM package rather than a floating nightly.
+
 Start vLLM with its gRPC listener:
 
 ```bash

@@ -4,6 +4,7 @@
 #
 # Two aggregated vLLM native-gRPC sidecars behind Dynamo's KV-aware router.
 # Requires two GPUs and a vLLM build that exposes KV-event source discovery.
+# See ../README.md for the validated vLLM/vllm-rs source state.
 
 set -e
 
@@ -129,12 +130,10 @@ vllm-rs serve "$MODEL" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
-OTEL_SERVICE_NAME=dynamo-worker-1 \
 DYN_SYSTEM_PORT="$SYSTEM_PORT1" \
     dynamo-vllm-sidecar \
     --vllm-endpoint "${VLLM_HOST}:${VLLM_WORKER1_GRPC_PORT}" &
 
-OTEL_SERVICE_NAME=dynamo-worker-2 \
 DYN_SYSTEM_PORT="$SYSTEM_PORT2" \
     dynamo-vllm-sidecar \
     --vllm-endpoint "${VLLM_HOST}:${VLLM_WORKER2_GRPC_PORT}" &
