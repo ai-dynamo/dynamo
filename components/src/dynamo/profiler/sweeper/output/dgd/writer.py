@@ -5,9 +5,11 @@
 
 from pathlib import Path
 
+from dynamo.profiler.sweeper.output.atomic import replace_text
+
 
 def write(rendered_dgd: str, output_dir: Path, *, stem: str) -> Path:
     """Write one DGD manifest and return its path."""
     artifact_path = output_dir / f"{stem}.yaml"
-    artifact_path.write_text(rendered_dgd, encoding="utf-8")
+    replace_text(artifact_path, rendered_dgd)
     return artifact_path

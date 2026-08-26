@@ -13,7 +13,7 @@ import yaml
 from dynamo.profiler.sweeper.renderers.base import (
     CandidateLike,
     CandidateMaterializationError,
-    DGDMaterializationOptions,
+    DGDGenerationOptions,
     patch_dgd_manifest,
 )
 
@@ -37,16 +37,16 @@ def _load_materializer() -> tuple[type[Exception], Any]:
 def render(
     candidate: CandidateLike,
     _workload: Any,
-    options: DGDMaterializationOptions,
+    options: DGDGenerationOptions,
     *,
-    candidate_index: int,
+    dgd_name: str,
 ) -> str:
     """Lower one Sweeper result directly through Dynamo's v1 config modifiers."""
     MaterializationError, materialize = _load_materializer()
     try:
         result = materialize(
             candidate.config,
-            image=options.backend_image,
+            image=options.runtime_image,
             num_gpus_per_node=options.num_gpus_per_node,
         )
     except MaterializationError as exc:
@@ -55,5 +55,5 @@ def render(
     return patch_dgd_manifest(
         yaml.safe_dump(result.dgd, sort_keys=False),
         options,
-        candidate_index=candidate_index,
+        dgd_name=dgd_name,
     )

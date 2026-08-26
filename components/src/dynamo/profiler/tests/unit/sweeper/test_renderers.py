@@ -8,7 +8,7 @@ import yaml
 
 from dynamo.profiler.sweeper.renderers import (
     CandidateMaterializationError,
-    DGDMaterializationOptions,
+    DGDGenerationOptions,
 )
 from dynamo.profiler.sweeper.renderers import base as base_module
 from dynamo.profiler.sweeper.renderers import render_dgd
@@ -33,17 +33,14 @@ def _candidate(**overrides):
     return SimpleNamespace(config=config)
 
 
-def _options(**overrides) -> DGDMaterializationOptions:
+def _options(**overrides) -> DGDGenerationOptions:
     values = {
-        "backend": "vllm",
-        "backend_version": "0.20.1",
-        "backend_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0",
-        "dynamo_version": "1.5.0",
+        "runtime_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0",
         "namespace": "demo",
         "num_gpus_per_node": 8,
     }
     values.update(overrides)
-    return DGDMaterializationOptions(**values)
+    return DGDGenerationOptions(**values)
 
 
 def test_materialize_uses_official_candidate_bridge(monkeypatch) -> None:
@@ -87,7 +84,7 @@ spec:
         candidate,
         workload,
         _options(),
-        candidate_index=4,
+        dgd_name="sweeper-dgd",
     )
 
     assert captured == {
@@ -107,12 +104,13 @@ spec:
     }
     dgd = yaml.safe_load(rendered)
     assert dgd["metadata"] == {
-        "name": "sweeper-dgd-004",
+        "name": "sweeper-dgd",
         "namespace": "demo",
     }
-    assert {
-        component["runtimeVersionOverride"] for component in dgd["spec"]["components"]
-    } == {"1.5.0"}
+    assert all(
+        "runtimeVersionOverride" not in component
+        for component in dgd["spec"]["components"]
+    )
 
 
 def test_materialize_direct_uses_config_modifiers(monkeypatch) -> None:
@@ -122,12 +120,13 @@ def test_materialize_direct_uses_config_modifiers(monkeypatch) -> None:
         pass
 
     class FakeResult:
-        dgd = {
-            "apiVersion": "nvidia.com/v1beta1",
-            "kind": "DynamoGraphDeployment",
-            "metadata": {"name": "direct"},
-            "spec": {"components": [{"name": "Worker"}]},
-        }
+        def __init__(self) -> None:
+            self.dgd = {
+                "apiVersion": "nvidia.com/v1beta1",
+                "kind": "DynamoGraphDeployment",
+                "metadata": {"name": "direct"},
+                "spec": {"components": [{"name": "Worker"}]},
+            }
 
     def fake_materialize(config, *, image, num_gpus_per_node):
         captured.update(
@@ -148,7 +147,7 @@ def test_materialize_direct_uses_config_modifiers(monkeypatch) -> None:
         candidate,
         SimpleNamespace(isl=4000, osl=1000),
         _options(),
-        candidate_index=2,
+        dgd_name="sweeper-dgd",
         renderer="direct",
     )
 
@@ -159,31 +158,26 @@ def test_materialize_direct_uses_config_modifiers(monkeypatch) -> None:
     }
     dgd = yaml.safe_load(rendered)
     assert dgd["metadata"] == {
-        "name": "sweeper-dgd-002",
+        "name": "sweeper-dgd",
         "namespace": "demo",
     }
-    assert dgd["spec"]["components"][0]["runtimeVersionOverride"] == "1.5.0"
+    assert "runtimeVersionOverride" not in dgd["spec"]["components"][0]
 
 
 @pytest.mark.parametrize(
     ("candidate", "message"),
     [
-        (_candidate(backend="sglang"), "does not match target backend"),
-        (
-            _candidate(backend_version="0.19.0"),
-            "does not match target backend version",
-        ),
+        (_candidate(backend="unknown"), "candidate backend must be one of"),
+        (_candidate(backend_version=""), "candidate backend_version must be"),
     ],
 )
-def test_materialize_requires_candidate_to_match_runtime_target(
-    candidate, message
-) -> None:
+def test_materialize_requires_renderer_candidate_fields(candidate, message) -> None:
     with pytest.raises(CandidateMaterializationError, match=message):
         render_dgd(
             candidate,
             SimpleNamespace(isl=4000, osl=1000),
             _options(),
-            candidate_index=0,
+            dgd_name="sweeper-dgd",
         )
 
 
@@ -205,7 +199,7 @@ spec:
     patched = base_module.patch_dgd_manifest(
         rendered,
         _options(),
-        candidate_index=1,
+        dgd_name="sweeper-dgd",
     )
 
     documents = list(yaml.safe_load_all(patched))
@@ -213,29 +207,57 @@ spec:
         "ConfigMap",
         "DynamoGraphDeployment",
     ]
-    assert documents[1]["metadata"]["name"] == "sweeper-dgd-001"
+    assert documents[1]["metadata"]["name"] == "sweeper-dgd"
+
+
+def test_runtime_version_override_is_only_written_when_explicit() -> None:
+    rendered = """
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: generated
+spec:
+  components:
+  - name: Worker
+"""
+
+    patched = base_module.patch_dgd_manifest(
+        rendered,
+        _options(runtime_version_override="1.4.2"),
+        dgd_name="sweeper-dgd",
+    )
+
+    component = yaml.safe_load(patched)["spec"]["components"][0]
+    assert component["runtimeVersionOverride"] == "1.4.2"
 
 
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("backend", "unknown", "backend must be one of"),
-        ("backend_version", "", "backend_version must not be empty"),
-        ("backend_image", "", "backend_image must not be empty"),
-        ("dynamo_version", "", "dynamo_version must not be empty"),
+        ("runtime_image", "", "runtime_image must not be empty"),
         ("num_gpus_per_node", 0, "num_gpus_per_node must be positive"),
+        (
+            "runtime_version_override",
+            "1.5",
+            "runtime_version_override must be a canonical",
+        ),
     ],
 )
-def test_materialization_options_validate_required_inputs(
+def test_generation_options_validate_inputs(
     field: str, value: object, message: str
 ) -> None:
     values = {
-        "backend": "vllm",
-        "backend_version": "0.20.1",
-        "backend_image": "image",
-        "dynamo_version": "1.5.0",
+        "runtime_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0",
         "num_gpus_per_node": 8,
     }
     values[field] = value
     with pytest.raises(ValueError, match=message):
-        DGDMaterializationOptions(**values)
+        DGDGenerationOptions(**values)
+
+
+def test_generation_options_require_semver_image_without_override() -> None:
+    with pytest.raises(ValueError, match="runtime_image must have a canonical"):
+        DGDGenerationOptions(
+            runtime_image="nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest",
+            num_gpus_per_node=8,
+        )

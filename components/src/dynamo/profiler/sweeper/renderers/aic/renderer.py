@@ -11,7 +11,7 @@ from typing import Any
 from dynamo.profiler.sweeper.renderers.base import (
     CandidateLike,
     CandidateMaterializationError,
-    DGDMaterializationOptions,
+    DGDGenerationOptions,
     patch_dgd_manifest,
 )
 
@@ -32,15 +32,17 @@ def _load_generator_api() -> tuple[Any, Any]:
         ) from exc
 
 
-def _generator_overrides(options: DGDMaterializationOptions) -> dict[str, Any]:
+def _generator_overrides(
+    options: DGDGenerationOptions, *, dgd_name: str
+) -> dict[str, Any]:
     k8s: dict[str, Any] = {
-        "k8s_image": options.backend_image,
-        "name_prefix": options.name_prefix,
+        "k8s_image": options.runtime_image,
+        "name_prefix": dgd_name,
     }
     if options.namespace:
         k8s["k8s_namespace"] = options.namespace
     return {
-        "generator_dynamo_version": options.dynamo_version,
+        "generator_dynamo_version": options.dynamo_runtime_version,
         "K8sConfig": k8s,
         "NodeConfig": {"num_gpus_per_node": options.num_gpus_per_node},
     }
@@ -49,9 +51,9 @@ def _generator_overrides(options: DGDMaterializationOptions) -> dict[str, Any]:
 def render(
     candidate: CandidateLike,
     workload: Any,
-    options: DGDMaterializationOptions,
+    options: DGDGenerationOptions,
     *,
-    candidate_index: int,
+    dgd_name: str,
 ) -> str:
     """Lower one Sweeper result through AIC and Dynamo's v1 templates."""
     from_sweeper_candidate, generate_from_request = _load_generator_api()
@@ -59,7 +61,7 @@ def render(
         candidate,
         workload=workload,
         deployment_target="dynamo-python",
-        generator_overrides=_generator_overrides(options),
+        generator_overrides=_generator_overrides(options, dgd_name=dgd_name),
     )
     artifacts = generate_from_request(request)
     rendered = artifacts.get("k8s_deploy.yaml")
@@ -70,5 +72,5 @@ def render(
     return patch_dgd_manifest(
         rendered,
         options,
-        candidate_index=candidate_index,
+        dgd_name=dgd_name,
     )

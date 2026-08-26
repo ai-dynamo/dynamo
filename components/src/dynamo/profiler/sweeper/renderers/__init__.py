@@ -11,8 +11,8 @@ from typing import Any, Literal
 from dynamo.profiler.sweeper.renderers.base import (
     CandidateLike,
     CandidateMaterializationError,
-    DGDMaterializationOptions,
-    validate_candidate_target,
+    DGDGenerationOptions,
+    validate_candidate,
 )
 
 DGDRenderer = Literal["aic", "direct"]
@@ -36,25 +36,25 @@ def _load_renderer(renderer: str) -> Any:
 def render_dgd(
     candidate: CandidateLike,
     workload: Any,
-    options: DGDMaterializationOptions,
+    options: DGDGenerationOptions,
     *,
-    candidate_index: int,
+    dgd_name: str,
     renderer: DGDRenderer = "aic",
 ) -> str:
     """Render one evaluated Sweeper result with the selected implementation."""
-    validate_candidate_target(candidate, options)
+    validate_candidate(candidate)
     render = _load_renderer(renderer)
     return render(
         candidate,
         workload,
         options,
-        candidate_index=candidate_index,
+        dgd_name=dgd_name,
     )
 
 
 __all__ = [
     "CandidateMaterializationError",
-    "DGDMaterializationOptions",
+    "DGDGenerationOptions",
     "DGDRenderer",
     "render_dgd",
 ]
