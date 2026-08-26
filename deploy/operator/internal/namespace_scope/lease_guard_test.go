@@ -165,6 +165,59 @@ func TestLeaseManager_Guard_ReleasesLeaseWhenRenewalIsUnrecoverable(t *testing.T
 	}
 }
 
+// guardUnwindDeadline is the ceiling this test allows for Guard to return once the lease has
+// gone unrecoverable: the production unwind budget floor plus the cleanup timeout, plus slack
+// for a loaded machine. It is a literal rather than a call to unwindBudget so that the test
+// still compiles — and still fails — against a Guard that has no bound on the unwind at all.
+const guardUnwindDeadline = 2*time.Second + guardCleanupTimeout
+
+// TestLeaseManager_Guard_BoundsUnwindWhenRenewalIsUnrecoverable pins the split-brain bound. The
+// renewal loop declares the lease unrecoverable one renewInterval before it can expire, and that
+// interval is all the operator has to shut down in. In production work ends in mgr.Start, whose
+// graceful shutdown drains for as long as controller-runtime lets it, so an unbounded wait here
+// lets the restricted operator keep acting on the namespace after the cluster-wide operator has
+// taken it back.
+func TestLeaseManager_Guard_BoundsUnwindWhenRenewalIsUnrecoverable(t *testing.T) {
+	t.Log("Given a lease manager whose renewals always fail")
+	client := fake.NewSimpleClientset()
+	rejectLeaseUpdates(client)
+	lm := newGuardTestLeaseManager(client, 30*time.Millisecond, 10*time.Millisecond)
+
+	t.Log("And work that ignores cancellation, the way a wedged graceful shutdown does")
+	releaseWork := make(chan struct{})
+	defer close(releaseWork)
+
+	t.Log("When Guard runs that work")
+	guardDone := make(chan error, 1)
+	go func() {
+		guardDone <- lm.Guard(context.Background(), guardCleanupTimeout, func(context.Context) error {
+			<-releaseWork
+			return nil
+		})
+	}()
+
+	t.Log("Then Guard gives up on work rather than waiting for it")
+	var err error
+	select {
+	case err = <-guardDone:
+	case <-time.After(guardUnwindDeadline):
+		t.Fatalf("Guard did not return within %v of the unrecoverable lease error; the operator outlives the lease it can no longer renew and overlaps with the cluster-wide operator", guardUnwindDeadline)
+	}
+
+	t.Log("And the lease is released on the way out")
+	if leaseExists(t, client) {
+		t.Error("marker lease still present when Guard returned; the namespace stays excluded until TTL expiry")
+	}
+
+	t.Log("And Guard reports the lease failure that forced the exit")
+	if err == nil {
+		t.Fatal("Guard() error = nil, want the unrecoverable lease error")
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Errorf("Guard() error = %v, want the lease failure rather than the derived cancellation", err)
+	}
+}
+
 // TestLeaseManager_Guard_ReturnsWorkErrorWhenLeaseIsHealthy is a negative control for the error
 // assertion above: with renewals succeeding there is no lease failure to report, so the
 // "unrecoverable" wrapper must not appear.

@@ -24,6 +24,28 @@ import (
 	"time"
 )
 
+// unwindBudgetFloor keeps the post-fatal wait useful for configurations whose renew interval
+// and cleanup timeout leave nothing to spend on it, where a small bound is still better than
+// none.
+const unwindBudgetFloor = time.Second
+
+// unwindBudget is how long Guard waits for work after lease renewal has become unrecoverable.
+//
+// The maxFailures arithmetic in NewLeaseManager exists to make renewalLoop declare the lease
+// unrecoverable roughly one renewInterval before the lease can expire, so that this operator is
+// gone before the cluster-wide operator stops excluding the namespace. That interval is the
+// whole budget for shutting down, and the deferred lease release still needs cleanupTimeout out
+// of it. With the shipped defaults — 10s renew interval, 5s cleanup — the unwind gets the
+// remaining 5s, and unwind plus cleanup fit inside the buffer exactly.
+func unwindBudget(renewInterval, cleanupTimeout time.Duration) time.Duration {
+	budget := renewInterval - cleanupTimeout
+	if budget < unwindBudgetFloor {
+		return unwindBudgetFloor
+	}
+
+	return budget
+}
+
 // Deprecated: Guard holds the namespace scope marker lease for the duration of work, for the
 // deprecated namespace-restricted operator mode.
 //
@@ -37,6 +59,13 @@ import (
 // inside work — or from a goroutine watching Errors — strands the marker lease in the API
 // server, and LeaseWatcher.Contains keeps excluding the namespace from cluster-wide
 // reconciliation until the lease TTL expires.
+//
+// Unwinding instead of exiting must not take longer than the lease has left to live, or the two
+// operators overlap on the namespace — the split-brain the lease protocol exists to prevent. So
+// once renewal is unrecoverable Guard waits for work for at most unwindBudget and then releases
+// the lease and returns regardless, leaving whatever work was still doing to be terminated with
+// the process. Guard puts no bound on the paths where nothing is expiring: work returning on its
+// own, or shutting down because ctx was cancelled.
 //
 // When work fails only because Guard cancelled its context, Guard returns the lease manager's
 // unrecoverable error, since that is the root cause; otherwise it returns work's own error.
@@ -59,27 +88,34 @@ func (lm *LeaseManager) Guard(ctx context.Context, cleanupTimeout time.Duration,
 	workCtx, cancelWork := context.WithCancel(ctx)
 	defer cancelWork()
 
-	// An unrecoverable lease error cancels work instead of ending the process, which lets the
-	// deferred release above run before the error reaches the caller.
-	var fatalErr error
-	monitorDone := make(chan struct{})
+	// work runs on its own goroutine so that an unrecoverable lease error can stop waiting for
+	// it. The channel is buffered so that abandoned work never blocks forever on the send.
+	workDone := make(chan error, 1)
 	go func() {
-		defer close(monitorDone)
-
-		select {
-		case err := <-lm.Errors():
-			fatalErr = err
-			cancelWork()
-		case <-workCtx.Done():
-		}
+		workDone <- work(workCtx)
 	}()
 
-	workErr := work(workCtx)
+	var workErr, fatalErr error
 
-	// Joining the monitor is what makes reading fatalErr race-free; cancelWork releases it
-	// when no fatal error arrived.
-	cancelWork()
-	<-monitorDone
+	select {
+	case workErr = <-workDone:
+	case fatalErr = <-lm.Errors():
+		// An unrecoverable lease error cancels work instead of ending the process, which lets
+		// the deferred release above run before the error reaches the caller. Waiting for work
+		// to notice is bounded, because the lease is expiring while it does.
+		cancelWork()
+
+		budget := unwindBudget(lm.renewInterval, cleanupTimeout)
+		expired := time.NewTimer(budget)
+		defer expired.Stop()
+
+		select {
+		case workErr = <-workDone:
+		case <-expired.C:
+			lm.logger.Error(nil, "Giving up on orderly shutdown after unrecoverable lease failure; releasing the lease before it expires to prevent split-brain",
+				"unwindBudget", budget)
+		}
+	}
 
 	if fatalErr != nil && (workErr == nil || errors.Is(workErr, context.Canceled)) {
 		return fmt.Errorf("namespace scope marker lease is unrecoverable: %w", fatalErr)
