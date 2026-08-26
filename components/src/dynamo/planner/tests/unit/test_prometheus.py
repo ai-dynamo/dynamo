@@ -559,6 +559,8 @@ class TestPrometheusAPIClientRouterSource:
         call_args = str(router_client.prom.custom_query.call_args)
         expected_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.INPUT_SEQUENCE_TOKENS}"
         assert expected_metric in call_args
+        query = router_client.prom.custom_query.call_args.kwargs["query"]
+        assert 'dynamo_namespace="test_fe_namespace"' in query
 
     def test_get_avg_output_sequence_tokens_dispatches_to_router_histogram(
         self, router_client
@@ -575,12 +577,16 @@ class TestPrometheusAPIClientRouterSource:
         """get_avg_kv_hit_rate with router source queries dynamo_component_router_kv_hit_rate."""
         # Return a plausible 0.0-1.0 ratio rather than the default 42.0 fixture.
         router_client.prom.custom_query.return_value = [{"value": [0, "0.35"]}]
-        result = router_client.get_avg_kv_hit_rate("60s", "mymodel")
+        result = router_client.get_avg_kv_hit_rate(
+            "60s", "mymodel", namespace="test-fe-namespace-workerhash"
+        )
         assert result == 0.35
 
-        call_args = str(router_client.prom.custom_query.call_args)
+        query = router_client.prom.custom_query.call_args.kwargs["query"]
         expected_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.KV_HIT_RATE}"
-        assert expected_metric in call_args
+        assert expected_metric in query
+        assert 'dynamo_namespace="test_fe_namespace"' in query
+        assert 'dynamo_namespace="test_fe_namespace_workerhash"' not in query
 
     def test_get_avg_kv_hit_rate_frontend_source_queries_router_histogram(self):
         """Frontend source can expose router component metrics, so kv_hit_rate

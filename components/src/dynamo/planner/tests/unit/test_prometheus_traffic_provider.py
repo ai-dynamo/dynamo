@@ -108,6 +108,48 @@ def test_accept_length_falls_back_to_configured_namespace():
 
 
 @pytest.mark.asyncio
+async def test_collect_traffic_uses_current_runtime_namespace_for_kv_hit_rate():
+    namespace_source = MagicMock()
+    namespace_source.runtime_namespace.return_value = "base-ns-workerhash"
+    provider, client, client_patch = _provider(namespace_source)
+    client.get_avg_time_to_first_token.return_value = 0.1
+    client.get_avg_inter_token_latency.return_value = 0.01
+    client.get_avg_request_count.return_value = 2.0
+    client.get_avg_request_duration.return_value = 0.2
+    client.get_avg_input_sequence_tokens.return_value = 100.0
+    client.get_avg_output_sequence_tokens.return_value = 20.0
+    client.get_avg_kv_hit_rate.return_value = 0.4
+    client.get_avg_spec_decode_accept_length.return_value = 2.5
+    try:
+        observation = await provider.collect_traffic()
+    finally:
+        client_patch.stop()
+
+    assert observation is not None
+    client.get_avg_kv_hit_rate.assert_called_once_with(
+        "30s", "Qwen/Qwen3", namespace="base-ns-workerhash"
+    )
+
+
+@pytest.mark.asyncio
+async def test_kv_observation_uses_current_runtime_namespace():
+    namespace_source = MagicMock()
+    namespace_source.runtime_namespace.return_value = "base-ns-workerhash"
+    provider, client, client_patch = _provider(namespace_source)
+    client.get_avg_kv_hit_rate.return_value = 0.4
+    client.get_avg_spec_decode_accept_length.return_value = 2.5
+    try:
+        observation = await provider.collect_kv_hit_rate_observation(30)
+    finally:
+        client_patch.stop()
+
+    assert observation is not None
+    client.get_avg_kv_hit_rate.assert_called_once_with(
+        "30s", "Qwen/Qwen3", namespace="base-ns-workerhash"
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "missing_method",
     [

@@ -447,14 +447,14 @@ class PrometheusAPIClient:
             f"{prometheus_names.router.KV_HIT_RATE}"
         )
         # Which namespace labels these series depends on which router publishes
-        # them, and the planner is not told which one the deployment has. An
-        # embedded KV router builds its metrics from the worker Component, so
-        # they carry the worker suffix the operator injects. A standalone
-        # LocalRouter registers under the base namespace and never receives that
-        # suffix. Try the worker namespace first, then the base one, so both
-        # topologies resolve without changing what the runtime emits.
+        # them. An embedded KV router builds its metrics from the worker
+        # Component, so they carry the worker suffix the operator injects. A
+        # standalone LocalRouter registers under the base namespace and never
+        # receives that suffix. Router-sourced traffic identifies the latter
+        # topology, where the base namespace is authoritative. Otherwise, try
+        # the worker namespace first and fall back to the base namespace.
         candidates = []
-        if namespace:
+        if self.metrics_source != "router" and namespace:
             candidates.append(namespace)
         if self.dynamo_namespace not in candidates:
             candidates.append(self.dynamo_namespace)
