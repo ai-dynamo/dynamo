@@ -532,7 +532,10 @@ class VllmMultimodalRequestProcessor:
 
             video_items = mm_map.get(VIDEO_URL_KEY, [])
             if video_items:
-                videos = await self.video_loader.load_video_batch(video_items)
+                video_io_kwargs = (request.get("media_io_kwargs") or {}).get("video")
+                videos = await self.video_loader.load_video_batch(
+                    video_items, video_io_kwargs
+                )
                 if videos:
                     vllm_mm_data["video"] = videos[0] if len(videos) == 1 else videos
 

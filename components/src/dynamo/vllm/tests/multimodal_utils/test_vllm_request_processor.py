@@ -1,13 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import base64
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import numpy as np
 import pytest
 from PIL import Image
 
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.multimodal.video_loader import VideoLoader
+from dynamo.common.utils.video_utils import encode_to_video_bytes
 from dynamo.vllm.multimodal_utils import request_processor as mod
 from dynamo.vllm.multimodal_utils.models import qwen as qwen_mod
 
@@ -25,12 +29,14 @@ def _processor(
     model: str = "Qwen/Qwen3-VL-2B-Instruct",
     enabled: bool = True,
     unified_vision_chunk: bool = False,
+    video_loader=None,
 ) -> mod.VllmMultimodalRequestProcessor:
     return mod.VllmMultimodalRequestProcessor(
         model=model,
         enable_multimodal=enabled,
         image_loader=SimpleNamespace(load_image_batch=AsyncMock(return_value=[])),
-        video_loader=SimpleNamespace(load_video_batch=AsyncMock(return_value=[])),
+        video_loader=video_loader
+        or SimpleNamespace(load_video_batch=AsyncMock(return_value=[])),
         audio_loader=SimpleNamespace(
             load_audio_batch=AsyncMock(return_value=[]),
             load_audio=AsyncMock(return_value=None),
@@ -95,6 +101,62 @@ async def test_extracts_mixed_url_data_url_and_decoded_media():
     processor.video_loader.load_video_batch.assert_awaited_once_with(video_items)
     processor.audio_loader.load_audio_batch.assert_awaited_once_with(audio_items)
     processor.audio_loader.load_audio.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_worker_video_media_io_kwargs_control_real_vllm_decode():
+    """Request-level video kwargs reach vLLM's real CPU media decoder.
+
+    The fixture is VP9, which is not in HW_ROUTED_CODECS, so should_use_nvdec is
+    False and the clip goes to vLLM -- the path that owns the media_io_kwargs
+    contract. With num_frames=2 vLLM linspace-samples the endpoints of a 4-frame
+    clip, so it must return source frames 0 and 3.
+    """
+    size = 16
+    colors = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]]
+    expected_sampled_frame_indices = [0, 3]
+
+    frames = np.array(
+        [np.full((size, size, 3), color, dtype=np.uint8) for color in colors],
+    )
+    video_uri = "data:video/mp4;base64," + base64.b64encode(
+        encode_to_video_bytes(frames, fps=4, output_format="mp4")
+    ).decode("ascii")
+    processor = _processor(
+        video_loader=VideoLoader(),
+    )
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2, 3],
+            "multi_modal_data": {"video_url": [{"Url": video_uri}]},
+            "media_io_kwargs": {
+                "video": {
+                    "num_frames": 2,
+                }
+            },
+        },
+        "real-video-request",
+        None,
+        DisaggregationMode.AGGREGATED,
+    )
+
+    decoded_frames, metadata = prepared.prompt["multi_modal_data"]["video"]
+
+    assert decoded_frames.shape == (2, 16, 16, 3)
+    assert metadata["frames_indices"] == expected_sampled_frame_indices
+    expected_frames = np.stack(
+        [
+            np.full((16, 16, 3), colors[i], dtype=np.uint8)
+            for i in expected_sampled_frame_indices
+        ]
+    )
+    np.testing.assert_allclose(
+        decoded_frames,
+        expected_frames,
+        atol=16,
+    )
 
 
 @pytest.mark.asyncio

@@ -118,18 +118,23 @@ class VideoLoader:
 
         return self._vllm_media_connector
 
-    def _create_vllm_video_io(self) -> Any:
+    def _create_vllm_video_io(
+        self, media_io_kwargs: Dict[str, Any] | None = None
+    ) -> Any:
         _, VideoMediaIO, ImageMediaIO = _require_vllm_video_media()
+        video_io_kwargs = VideoMediaIO.merge_kwargs(
+            {"num_frames": self._num_frames}, media_io_kwargs
+        )
         return VideoMediaIO(
             ImageMediaIO(image_mode="RGB"),
-            num_frames=self._num_frames,
+            **video_io_kwargs,
         )
 
     async def _load_video_with_vllm(
-        self, video_url: str
+        self, video_url: str, media_io_kwargs: Dict[str, Any] | None = None
     ) -> tuple[np.ndarray, Dict[str, Any]]:
         normalized_url = await validate_media_url(video_url, self._url_policy)
-        media_io = self._create_vllm_video_io()
+        media_io = self._create_vllm_video_io(media_io_kwargs)
 
         # HTTP(S) goes through our SSRF-safe fetcher so each redirect hop is
         # revalidated; vLLM's own fetcher honors redirects without re-checking.
@@ -167,6 +172,13 @@ class VideoLoader:
         codec and no remedy -- convert that into the actionable
         unsupported-codec error, which can name the codec because the probe
         already ran here.
+
+        Request ``media_io_kwargs`` do not apply on the NVDEC path: it
+        implements uniform ``num_frames`` sampling only, so ``fps`` and any
+        backend-specific keys are ignored for H.264/H.265. Only vLLM's video
+        backend owns the full ``media_io_kwargs`` contract, so it is reached
+        for royalty-free codecs, or for every clip when
+        ``DYN_DISABLE_NVDEC=1``.
         """
         codec = probe_video_codec(content)
         if should_use_nvdec(codec):
@@ -187,9 +199,13 @@ class VideoLoader:
                 "vllm", "opencv-python-headless", "cv2", codec, cause=str(exc)
             ) from exc
 
-    async def load_video(self, video_url: str) -> tuple[np.ndarray, Dict[str, Any]]:
+    async def load_video(
+        self, video_url: str, media_io_kwargs: Dict[str, Any] | None = None
+    ) -> tuple[np.ndarray, Dict[str, Any]]:
         try:
-            frames, metadata = await self._load_video_with_vllm(video_url)
+            frames, metadata = await self._load_video_with_vllm(
+                video_url, media_io_kwargs
+            )
             if frames.size == 0:
                 raise ValueError(
                     f"Failed to extract video frames from {video_url}. Decoded clip is empty."
@@ -232,13 +248,14 @@ class VideoLoader:
     async def load_video_batch(
         self,
         video_mm_items: List[Dict[str, Any]],
+        media_io_kwargs: Dict[str, Any] | None = None,
     ) -> List[tuple[np.ndarray, Dict[str, Any]]]:
         video_futures: List[Awaitable[tuple[np.ndarray, Dict[str, Any]]]] = []
 
         for item in video_mm_items:
             if isinstance(item, dict) and URL_VARIANT_KEY in item:
                 url = item[URL_VARIANT_KEY]
-                video_futures.append(self.load_video(url))
+                video_futures.append(self.load_video(url, media_io_kwargs))
                 logger.debug("Preparing to load video from URL: %s...", url[:80])
             elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
                 if self._enable_frontend_decoding:
