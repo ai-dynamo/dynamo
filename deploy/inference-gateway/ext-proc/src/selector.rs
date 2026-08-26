@@ -115,17 +115,7 @@ impl Selector {
         kv_router_config: KvRouterConfig,
         policy_registry: WorkerSelectionPolicyRegistry,
     ) -> Result<Self> {
-        let queueing_enabled = kv_router_config
-            .queueing_enabled(Some(&cfg.model_name))
-            .map_err(|e| anyhow!("resolving router policy for model {}: {e}", cfg.model_name))?;
-        if queueing_enabled && cfg.max_num_batched_tokens.unwrap_or(0) == 0 {
-            anyhow::bail!(
-                "DYN_EPP_MAX_NUM_BATCHED_TOKENS is required (and must be > 0) because the router \
-                 scheduling policy enables queueing for model {}; set it to the engine's \
-                 --max-num-batched-tokens",
-                cfg.model_name
-            );
-        }
+        Self::validate_queueing_worker_capacity(cfg, &kv_router_config)?;
 
         warn_for_unserved_worker_selection_policies(&kv_router_config, &[WorkerType::Aggregated])?;
         let replication = Self::replication(cfg).await?;
@@ -142,6 +132,24 @@ impl Selector {
                 .map_err(|e| anyhow!("building embedded selection service: {e}"))?,
         );
         Self::from_service_with_replication(cfg, service, replication).await
+    }
+
+    fn validate_queueing_worker_capacity(
+        cfg: &EppStandaloneConfig,
+        kv_router_config: &KvRouterConfig,
+    ) -> Result<()> {
+        let queueing_enabled = kv_router_config
+            .queueing_enabled(Some(&cfg.model_name))
+            .map_err(|e| anyhow!("resolving router policy for model {}: {e}", cfg.model_name))?;
+        if queueing_enabled && cfg.max_num_batched_tokens.unwrap_or(0) == 0 {
+            anyhow::bail!(
+                "DYN_EPP_MAX_NUM_BATCHED_TOKENS is required (and must be > 0) because the router \
+                 scheduling policy enables queueing for model {}; set it to the engine's \
+                 --max-num-batched-tokens",
+                cfg.model_name
+            );
+        }
+        Ok(())
     }
 
     async fn replication(cfg: &EppStandaloneConfig) -> Result<Option<(String, u16)>> {
