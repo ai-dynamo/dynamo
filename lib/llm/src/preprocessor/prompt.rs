@@ -30,11 +30,10 @@ use crate::protocols::openai::{
 };
 use dynamo_protocols::types::{
     ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestAssistantMessageContentPart,
-    ChatCompletionRequestDeveloperMessageContent, ChatCompletionRequestDeveloperMessageContentPart,
-    ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageContent,
-    ChatCompletionRequestSystemMessageContentPart, ChatCompletionRequestToolMessageContent,
-    ChatCompletionRequestToolMessageContentPart, ChatCompletionRequestUserMessageContent,
-    ChatCompletionRequestUserMessageContentPart,
+    ChatCompletionRequestDeveloperMessageContent, ChatCompletionRequestMessage,
+    ChatCompletionRequestSystemMessageContent, ChatCompletionRequestSystemMessageContentPart,
+    ChatCompletionRequestToolMessageContent, ChatCompletionRequestToolMessageContentPart,
+    ChatCompletionRequestUserMessageContent, ChatCompletionRequestUserMessageContentPart,
 };
 
 /// lib/llm-local extension carrying multimodal media-IO config. Kept off
@@ -631,13 +630,10 @@ fn message_text(message: &ChatCompletionRequestMessage) -> Option<&str> {
         },
         ChatCompletionRequestMessage::Developer(message) => match &message.content {
             ChatCompletionRequestDeveloperMessageContent::Text(text) => non_empty_str(text),
-            ChatCompletionRequestDeveloperMessageContent::Array(parts) => {
-                parts.iter().rev().find_map(|part| match part {
-                    ChatCompletionRequestDeveloperMessageContentPart::Text(part) => {
-                        non_empty_str(&part.text)
-                    }
-                })
-            }
+            // dynamo-protocols 5.3.1 re-exports DeveloperMessageContent from
+            // async-openai but not DeveloperMessageContentPart, so array parts
+            // cannot be named here. Text-only developer messages still work.
+            ChatCompletionRequestDeveloperMessageContent::Array(_) => None,
         },
         ChatCompletionRequestMessage::Tool(message) => match &message.content {
             ChatCompletionRequestToolMessageContent::Text(text) => non_empty_str(text),
