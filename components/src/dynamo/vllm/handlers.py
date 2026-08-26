@@ -825,7 +825,7 @@ def build_sampling_params(
         configured_default = default_sampling_params.get("max_tokens", dynamic_default)
         sampling_params.max_tokens = min(configured_default, dynamic_default)
 
-    _apply_kv_hints(sampling_params, request.get("kv_hints"))
+    _apply_kv_hint(sampling_params, request.get("kv_hint"))
 
     # Dynamo's internal token path consumes disjoint token deltas. This mirrors
     # the SGLang integration and lets vLLM's stream_interval gate reduce backend
@@ -836,9 +836,9 @@ def build_sampling_params(
     return sampling_params
 
 
-def _apply_kv_hints(sampling_params: SamplingParams, kv_hints: Any) -> None:
-    """Attach the complete Dynamo KV hint envelope to vLLM's private input."""
-    if not isinstance(kv_hints, Mapping):
+def _apply_kv_hint(sampling_params: SamplingParams, kv_hint: Any) -> None:
+    """Attach the complete Dynamo KV hint message to vLLM's private input."""
+    if not isinstance(kv_hint, Mapping):
         return
 
     extra_args = (
@@ -852,7 +852,7 @@ def _apply_kv_hints(sampling_params: SamplingParams, kv_hints: Any) -> None:
         if isinstance(existing_kv_transfer_params, dict)
         else {}
     )
-    kv_transfer_params[_KV_HINT_EXTRA_ARGS_KEY] = dict(kv_hints)
+    kv_transfer_params[_KV_HINT_EXTRA_ARGS_KEY] = dict(kv_hint)
     extra_args[_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY] = kv_transfer_params
     sampling_params.extra_args = extra_args
 

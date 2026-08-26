@@ -21,7 +21,7 @@ use dynamo_kv_router::{
         RoutingDecisionHashes,
     },
     kv_hints::{
-        KvHintAction, KvHintsEnvelope, KvSourceLocationsPayload, KvTransferCandidateSource,
+        KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferCandidateSource,
         KvTransferCandidates,
     },
     protocols::KV_EVENT_SUBJECT,
@@ -349,7 +349,7 @@ pub enum FindBestMatchOutcome {
         cached_tokens: usize,
         potential_decode_blocks: u64,
         routing_hashes: Option<RoutingDecisionHashes>,
-        kv_hints: Option<KvHintsEnvelope>,
+        kv_hint: Option<KvHint>,
     },
     QueueRejected {
         rejection: scheduling::QueueRejection,
@@ -1027,19 +1027,19 @@ where
         })
     }
 
-    fn kv_hints_for_selection(
+    fn kv_hint_for_selection(
         &self,
         message_id: Option<&str>,
         target: WorkerWithDpRank,
         target_cached_prefix_blocks: u32,
         transfer_candidates: Option<&KvTransferCandidates>,
-    ) -> Option<KvHintsEnvelope> {
+    ) -> Option<KvHint> {
         let payload = self.transfer_hint_for_selection(
             target,
             target_cached_prefix_blocks,
             transfer_candidates,
         )?;
-        Some(KvHintsEnvelope::new(
+        Some(KvHint::new(
             message_id.unwrap_or_default(),
             vec![KvHintAction::source_locations("a1", payload)],
         ))
@@ -1452,8 +1452,8 @@ where
                 Err(error) => return Err(map_scheduler_error(error)),
             },
         };
-        let kv_hints = if is_admitted_routing {
-            self.kv_hints_for_selection(
+        let kv_hint = if is_admitted_routing {
+            self.kv_hint_for_selection(
                 context_id,
                 response.best_worker,
                 response.target_cached_prefix_blocks,
@@ -1511,7 +1511,7 @@ where
                     cached_tokens: response.cached_tokens,
                     potential_decode_blocks: response.potential_decode_blocks as u64,
                     routing_hashes,
-                    kv_hints,
+                    kv_hint,
                 }),
             ),
             FindBestMatchAdmission::WithoutAdmission => Ok(
@@ -2580,7 +2580,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kv_hints_composer_wraps_transfer_from_another_dp_rank() {
+    async fn kv_hint_composer_wraps_transfer_from_another_dp_rank() {
         let mut workers = HashMap::new();
         workers.insert(
             7,
@@ -2607,7 +2607,7 @@ mod tests {
             routing_snapshot: None,
         };
 
-        let hint = router.kv_hints_for_selection(
+        let hint = router.kv_hint_for_selection(
             Some("msg-123"),
             WorkerWithDpRank::new(7, 0),
             0,
@@ -2616,7 +2616,7 @@ mod tests {
 
         assert_eq!(
             hint,
-            Some(KvHintsEnvelope::new(
+            Some(KvHint::new(
                 "msg-123",
                 vec![KvHintAction::source_locations(
                     "a1",

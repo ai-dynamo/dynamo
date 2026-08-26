@@ -33,7 +33,7 @@ pub struct KvSourceLocationsPayload {
     pub block_hashes: Vec<ExternalSequenceBlockHash>,
 }
 
-/// One versioned action in a [`KvHintsEnvelope`].
+/// One versioned action in a [`KvHint`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KvHintAction {
     pub action_id: String,
@@ -80,15 +80,15 @@ impl KvHintAction {
     }
 }
 
-/// Versioned actions for the selected backend request.
+/// One versioned KV hint message for the selected backend request.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct KvHintsEnvelope {
+pub struct KvHint {
     pub protocol_version: String,
     pub message_id: String,
     pub actions: Vec<KvHintAction>,
 }
 
-impl KvHintsEnvelope {
+impl KvHint {
     pub fn new(message_id: impl Into<String>, actions: Vec<KvHintAction>) -> Self {
         Self {
             protocol_version: KV_HINT_PROTOCOL_VERSION.to_string(),
@@ -149,7 +149,7 @@ mod tests {
 
     #[test]
     fn serializes_versioned_source_locations_action() {
-        let hints = KvHintsEnvelope::new(
+        let hint = KvHint::new(
             "msg-123",
             vec![KvHintAction::source_locations(
                 "a1",
@@ -164,7 +164,7 @@ mod tests {
         );
 
         assert_eq!(
-            serde_json::to_value(hints).unwrap(),
+            serde_json::to_value(hint).unwrap(),
             serde_json::json!({
                 "protocol_version": "0.1",
                 "message_id": "msg-123",
@@ -197,10 +197,10 @@ mod tests {
             }],
         });
 
-        let envelope: KvHintsEnvelope = serde_json::from_value(value.clone()).unwrap();
+        let hint: KvHint = serde_json::from_value(value.clone()).unwrap();
 
-        assert_eq!(envelope.actions[0].action_type, "kv.future_action");
-        assert_eq!(serde_json::to_value(envelope).unwrap(), value);
+        assert_eq!(hint.actions[0].action_type, "kv.future_action");
+        assert_eq!(serde_json::to_value(hint).unwrap(), value);
     }
 
     #[test]

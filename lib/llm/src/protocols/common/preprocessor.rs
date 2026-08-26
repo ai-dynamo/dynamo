@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use derive_builder::Builder;
 pub use dynamo_kv_router::kv_hints::{
-    KV_HINT_TRANSFER_CAPABILITY_KEY, KvHintAction, KvHintsEnvelope, KvSourceLocationsPayload,
+    KV_HINT_TRANSFER_CAPABILITY_KEY, KvHint, KvHintAction, KvSourceLocationsPayload,
 };
 use dynamo_kv_router::{
     config::RouterConfigOverride,
@@ -359,10 +359,10 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
 
-    /// Typed hints from Dynamo's routing layer for the selected backend request.
+    /// Versioned KV hint message from Dynamo's routing layer for the selected backend request.
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kv_hints: Option<KvHintsEnvelope>,
+    pub kv_hint: Option<KvHint>,
 
     /// Whether the backend should allow a reasoning phase before enforcing
     /// guided output. SGLang consumes this as its per-request

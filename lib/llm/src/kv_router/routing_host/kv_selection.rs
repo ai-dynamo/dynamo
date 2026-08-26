@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use dynamo_kv_router::{
     RouterConfigOverride,
     indexer::RoutingDecisionHashes,
-    kv_hints::KvHintsEnvelope,
+    kv_hints::KvHint,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
     scheduling::RoutingEligibility,
     selector::WorkerSelector,
@@ -33,7 +33,7 @@ pub(super) struct WorkerSelection {
     pub(super) effective_overlap_blocks: f64,
     pub(super) cached_tokens: usize,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
-    pub(super) kv_hints: Option<KvHintsEnvelope>,
+    pub(super) kv_hint: Option<KvHint>,
 }
 
 #[derive(Clone, Copy)]
@@ -119,14 +119,14 @@ where
                 cached_tokens,
                 potential_decode_blocks: _,
                 routing_hashes,
-                kv_hints,
+                kv_hint,
             } => Ok(WorkerSelection {
                 worker,
                 overlap_amount: overlap_blocks,
                 effective_overlap_blocks,
                 cached_tokens,
                 routing_hashes,
-                kv_hints,
+                kv_hint,
             }),
             FindBestMatchOutcome::QueueRejected { rejection } => Err(rejection.into()),
         }

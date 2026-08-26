@@ -1176,7 +1176,7 @@ class TestBenchmarkGrid:
             assert ctx_len <= total_kv
 
 
-def test_build_sampling_params_attaches_kv_hint_action_envelope():
+def test_build_sampling_params_attaches_kv_hint_message():
     from dynamo.vllm.handlers import build_sampling_params
 
     source_locations_payload = {
@@ -1200,7 +1200,7 @@ def test_build_sampling_params_attaches_kv_hint_action_envelope():
         "sampling_options": {},
         "stop_conditions": {},
         "output_options": {},
-        "kv_hints": kv_hint,
+        "kv_hint": kv_hint,
     }
 
     default_sampling_params = {
