@@ -71,6 +71,12 @@ pub struct NvCreateAudioSpeechRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
 
+    /// Extra parameters passed through to the backend without strict
+    /// validation. Meant for backend-specific knobs that have no typed
+    /// field yet. Stable ones can be promoted to typed fields over time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
+
     /// NVIDIA extensions (reserved for future use)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
@@ -245,10 +251,32 @@ mod tests {
             ref_text: None,
             max_new_tokens: None,
             user: None,
+            extra_body: None,
             nvext: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("data_source"));
+    }
+
+    #[test]
+    fn audio_request_extra_body_round_trips() {
+        let json = r#"{"input":"hello","extra_body":{"emotion":"calm","pitch":1.2}}"#;
+        let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+        let extra = req.extra_body.as_ref().unwrap();
+        assert_eq!(extra["emotion"], serde_json::json!("calm"));
+        assert_eq!(extra["pitch"], serde_json::json!(1.2));
+
+        let out = serde_json::to_string(&req).unwrap();
+        let back: NvCreateAudioSpeechRequest = serde_json::from_str(&out).unwrap();
+        assert_eq!(back.extra_body, req.extra_body);
+    }
+
+    #[test]
+    fn audio_request_extra_body_absent_is_none_and_omitted() {
+        let json = r#"{"input":"hello"}"#;
+        let req: NvCreateAudioSpeechRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.extra_body, None);
+        assert!(!serde_json::to_string(&req).unwrap().contains("extra_body"));
     }
 
     // --- AudioData ---

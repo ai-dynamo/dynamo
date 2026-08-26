@@ -50,6 +50,12 @@ pub struct NvCreateVideoRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
 
+    /// Extra parameters passed through to the backend without strict
+    /// validation. Meant for backend-specific knobs that have no typed
+    /// field yet. Stable ones can be promoted to typed fields over time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
+
     /// NVIDIA extensions
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
@@ -212,10 +218,41 @@ mod tests {
             response_format: None,
             output_format: None,
             stream: None,
+            extra_body: None,
             nvext: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("stream"));
+    }
+
+    #[test]
+    fn video_request_extra_body_round_trips() {
+        let json = r#"{"prompt":"cat","model":"cosmos","extra_body":{"generate_sound":true,"strength":0.7}}"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        let extra = req.extra_body.as_ref().unwrap();
+        assert_eq!(extra["generate_sound"], serde_json::json!(true));
+        assert_eq!(extra["strength"], serde_json::json!(0.7));
+
+        let out = serde_json::to_string(&req).unwrap();
+        let back: NvCreateVideoRequest = serde_json::from_str(&out).unwrap();
+        assert_eq!(back.extra_body, req.extra_body);
+    }
+
+    #[test]
+    fn video_request_extra_body_absent_is_none_and_omitted() {
+        let json = r#"{"prompt":"cat","model":"wan"}"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.extra_body, None);
+        assert!(!serde_json::to_string(&req).unwrap().contains("extra_body"));
+    }
+
+    #[test]
+    fn video_request_unknown_top_level_fields_still_ignored() {
+        // extra_body is the explicit passthrough. Stray unknown fields keep
+        // getting dropped rather than captured.
+        let json = r#"{"prompt":"cat","model":"wan","not_a_field":1}"#;
+        let req: NvCreateVideoRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.extra_body, None);
     }
 
     #[test]
