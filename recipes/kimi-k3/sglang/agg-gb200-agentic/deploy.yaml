@@ -1,0 +1,271 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: kimi-k3-sglang-gb200-agg-agentic-cd
+spec:
+  numNodes: 0
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: kimi-k3-sglang-gb200-agg-agentic-cd
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: kimi-k3-sglang-gb200-agg-agentic
+  labels:
+    app.kubernetes.io/name: kimi-k3-sglang-gb200-agg-agentic
+    app.kubernetes.io/part-of: dynamo
+    engine: sglang
+    hardware: gb200
+    mode: aggregate
+spec:
+  backendFramework: sglang
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          # Token for internal testing only
+          imagePullSecrets:
+            - name: k3-nvcr-token
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      # For internal testing only
+                      - key: dedicated
+                        operator: In
+                        values: [GoldenPrairie]
+                      # Replace with your clique / rack ID
+                      - key: nvidia.com/gpu.clique
+                        operator: In
+                        values: [9b7e5103-edf7-455e-975a-70622c68dd26.1]
+                      - key: kubernetes.io/arch
+                        operator: In
+                        values: [arm64]
+          tolerations:
+            - key: dedicated
+              operator: Equal
+              value: GoldenPrairie
+              effect: NoSchedule
+            - key: kubernetes.io/arch
+              operator: Equal
+              value: arm64
+              effect: NoSchedule
+          containers:
+            - name: main
+              image: nvcr.io/nvstaging/nim/alexandrem:sglang-runtime-pr12513-26ea9a09-arm64
+              imagePullPolicy: Always
+              command: [python3, -m, dynamo.frontend]
+              args:
+                - --http-port
+                - "8000"
+                - --router-mode
+                - least-loaded
+                - --router-kv-events
+                - --router-min-initial-workers
+                - "1"
+                - --dyn-chat-processor
+                - dynamo
+                - --model-name
+                - moonshotai/Kimi-K3
+                - --model-path
+                - /model
+                - --trust-remote-code
+              ports:
+                - name: http
+                  containerPort: 8000
+                  protocol: TCP
+              resources:
+                requests:
+                  cpu: "8"
+                  memory: 32Gi
+                  ephemeral-storage: 16Gi
+                limits:
+                  cpu: "8"
+                  memory: 32Gi
+                  ephemeral-storage: 16Gi
+              volumeMounts:
+                - name: model-weight
+                  mountPath: /model
+                  readOnly: true
+          volumes:
+            # For internal testing only - local storage
+            - name: model-weight
+              hostPath:
+                path: /mnt/stateful_partition/kube-ephemeral-ssd/models/model_weight
+                type: Directory
+
+    - name: SglangWorker
+      type: worker
+      replicas: 1
+      multinode:
+        nodeCount: 4
+      sharedMemorySize: 128Gi
+      podTemplate:
+        spec:
+          # Token for internal testing only
+          imagePullSecrets:
+            - name: k3-nvcr-token
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      # For internal testing only
+                      - key: dedicated
+                        operator: In
+                        values: [GoldenPrairie]
+                      # Replace with your clique / rack ID
+                      - key: nvidia.com/gpu.clique
+                        operator: In
+                        values: [9b7e5103-edf7-455e-975a-70622c68dd26.1]
+                      - key: kubernetes.io/arch
+                        operator: In
+                        values: [arm64]
+          tolerations:
+            - key: dedicated
+              operator: Equal
+              value: GoldenPrairie
+              effect: NoSchedule
+            - key: kubernetes.io/arch
+              operator: Equal
+              value: arm64
+              effect: NoSchedule
+          resourceClaims:
+            - name: kimi-k3-sglang-gb200-agg-agentic-cd
+              resourceClaimTemplateName: kimi-k3-sglang-gb200-agg-agentic-cd
+          terminationGracePeriodSeconds: 60
+          containers:
+            - name: main
+              image: nvcr.io/nvstaging/nim/alexandrem:sglang-runtime-pr12513-26ea9a09-arm64
+              imagePullPolicy: Always
+              command: [python3, -m, dynamo.sglang]
+              args:
+                - --model-path
+                - /model
+                - --served-model-name
+                - moonshotai/Kimi-K3
+                - --trust-remote-code
+                - --tp-size
+                - "16"
+                - --dcp-size
+                - "16"
+                - --ep-size
+                - "16"
+                - --context-length
+                - "1048576"
+                - --max-running-requests
+                - "64"
+                - --mem-fraction-static
+                - "0.88"
+                - --chunked-prefill-size
+                - "8192"
+                - --max-prefill-tokens
+                - "8192"
+                - --page-size
+                - "64"
+                - --schedule-policy
+                - fcfs
+                - --weight-loader-prefetch-checkpoints
+                - --enable-multimodal
+                - --dyn-reasoning-parser
+                - kimi_k3
+                - --dyn-tool-call-parser
+                - kimi_k3
+                - --dyn-enable-structural-tag
+                - --speculative-algorithm
+                - DSPARK
+                - --speculative-draft-model-path
+                - /draft
+                - --speculative-dspark-block-size
+                - "7"
+                - --enable-linear-replayssm-spec
+                - --moe-runner-backend
+                - deep_gemm
+                - --moe-a2a-backend
+                - megamoe
+                - --mamba-full-memory-ratio
+                - "0.9"
+                - --enable-nccl-nvls
+                - --enable-hierarchical-cache
+                - --hicache-size
+                - "100"
+                - --kv-cache-dtype
+                - fp8_e4m3
+                - --host
+                - 0.0.0.0
+                - --port
+                - "30000"
+                - --kv-events-config
+                - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}'
+                - --enable-metrics
+              env:
+                - name: DYN_FORWARDPASS_METRIC_PORT
+                  value: ""
+                - name: NCCL_MNNVL_ENABLE
+                  value: "1"
+                - name: NCCL_NVLS_ENABLE
+                  value: "1"
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+                - name: SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK
+                  value: "1024"
+                # For perf benchmarking only
+                # - name: SGLANG_RAGGED_VERIFY_MODE
+                #   value: static
+                # - name: SGLANG_SIMULATE_ACC_LEN
+                #   value: "4.05"
+                # - name: SGLANG_SIMULATE_ACC_METHOD
+                #   value: match-expected
+              ports:
+                - name: system
+                  containerPort: 9090
+                  protocol: TCP
+              resources:
+                claims:
+                  - name: kimi-k3-sglang-gb200-agg-agentic-cd
+                requests:
+                  cpu: "64"
+                  memory: 512Gi
+                  ephemeral-storage: 64Gi
+                  nvidia.com/gpu: "4"
+                limits:
+                  cpu: "64"
+                  memory: 512Gi
+                  ephemeral-storage: 64Gi
+                  nvidia.com/gpu: "4"
+              securityContext:
+                runAsUser: 0
+                capabilities:
+                  add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
+              startupProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                failureThreshold: 120
+                periodSeconds: 30
+                timeoutSeconds: 5
+              volumeMounts:
+                - name: model-weight
+                  mountPath: /model
+                  readOnly: true
+                - name: shared-model-cache
+                  mountPath: /draft
+                  subPath: models/RadixArk/Kimi-K3-DSpark
+                  readOnly: true
+          volumes:
+            # Internal testing only - local model
+            - name: model-weight
+              hostPath:
+                path: /mnt/stateful_partition/kube-ephemeral-ssd/models/model_weight
+                type: Directory
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
