@@ -15,10 +15,10 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::identity::RoutingPartitionId;
-use crate::indexer::KvIndexerMetrics;
+use crate::indexer::{ApproximateRetentionConfig, KvIndexerMetrics};
 use crate::protocols::WorkerId;
 
-use super::backend::{Indexer, create_indexer_with_metrics};
+use super::backend::{Indexer, create_indexer_with_retention};
 use super::listener::spawn_zmq_listener;
 
 pub struct IndexerEntry {
@@ -315,6 +315,7 @@ pub struct WorkerRegistry {
     watermarks: DashMap<(WorkerId, u32), Arc<AtomicU64>>,
     num_threads: usize,
     indexer_metrics: Arc<KvIndexerMetrics>,
+    approximate_retention: Option<ApproximateRetentionConfig>,
     ready_tx: watch::Sender<bool>,
     ready_rx: watch::Receiver<bool>,
     root_cancel_token: CancellationToken,
@@ -326,10 +327,19 @@ impl WorkerRegistry {
     }
 
     pub fn new_with_cancel_token(num_threads: usize, root_cancel_token: CancellationToken) -> Self {
+        Self::new_with_cancel_token_and_retention(num_threads, root_cancel_token, None)
+    }
+
+    pub fn new_with_cancel_token_and_retention(
+        num_threads: usize,
+        root_cancel_token: CancellationToken,
+        approximate_retention: Option<ApproximateRetentionConfig>,
+    ) -> Self {
         Self::new_inner(
             num_threads,
             Arc::new(KvIndexerMetrics::new_unregistered()),
             root_cancel_token,
+            approximate_retention,
         )
     }
 
@@ -337,7 +347,11 @@ impl WorkerRegistry {
         num_threads: usize,
         indexer_metrics: Arc<KvIndexerMetrics>,
     ) -> Self {
-        Self::new_inner(num_threads, indexer_metrics, CancellationToken::new())
+        Self::new_with_indexer_metrics_and_cancel_token(
+            num_threads,
+            indexer_metrics,
+            CancellationToken::new(),
+        )
     }
 
     pub(super) fn new_with_indexer_metrics_and_cancel_token(
@@ -345,13 +359,14 @@ impl WorkerRegistry {
         indexer_metrics: Arc<KvIndexerMetrics>,
         root_cancel_token: CancellationToken,
     ) -> Self {
-        Self::new_inner(num_threads, indexer_metrics, root_cancel_token)
+        Self::new_inner(num_threads, indexer_metrics, root_cancel_token, None)
     }
 
     fn new_inner(
         num_threads: usize,
         indexer_metrics: Arc<KvIndexerMetrics>,
         root_cancel_token: CancellationToken,
+        approximate_retention: Option<ApproximateRetentionConfig>,
     ) -> Self {
         let (ready_tx, ready_rx) = watch::channel(false);
         Self {
@@ -361,6 +376,7 @@ impl WorkerRegistry {
             watermarks: DashMap::new(),
             num_threads,
             indexer_metrics,
+            approximate_retention,
             ready_tx,
             ready_rx,
             root_cancel_token,
@@ -437,10 +453,11 @@ impl WorkerRegistry {
                 "Creating new indexer"
             );
             IndexerEntry {
-                indexer: create_indexer_with_metrics(
+                indexer: create_indexer_with_retention(
                     block_size,
                     self.num_threads,
                     self.indexer_metrics.clone(),
+                    self.approximate_retention.clone(),
                 ),
                 block_size,
             }
@@ -743,10 +760,11 @@ impl WorkerRegistry {
                 "Creating indexer from recovery dump"
             );
             IndexerEntry {
-                indexer: create_indexer_with_metrics(
+                indexer: create_indexer_with_retention(
                     block_size,
                     self.num_threads,
                     self.indexer_metrics.clone(),
+                    self.approximate_retention.clone(),
                 ),
                 block_size,
             }

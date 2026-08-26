@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::config::KvRouterConfig;
+use crate::config::{ApproximateCachePolicyKind, KvRouterConfig};
 use crate::protocols::WorkerId;
 use crate::scheduling::PotentialLoad;
 use crate::services::common::replica_sync::{
@@ -98,6 +98,15 @@ impl SelectionServiceBuilder {
         self.kv_router_config
             .validate_config()
             .map_err(anyhow::Error::msg)?;
+        if self.kv_router_config.router_approximate_cache_policy == ApproximateCachePolicyKind::Lru
+            && SelectionCore::approximate_retention_config(&self.kv_router_config).is_some()
+        {
+            anyhow::bail!(
+                "router_approximate_cache_policy=lru is not supported by the standalone \
+                 selection service: use_kv_events=false admissions do not create LRU \
+                 request leases; use router_approximate_cache_policy=ttl"
+            );
+        }
         let worker_selection_policy_factory = self
             .worker_selection_policy_registry
             .resolve_for_worker_type(&self.kv_router_config, self.worker_type)?;
@@ -438,6 +447,51 @@ mod tests {
             router_queue_threshold: None,
             ..Default::default()
         }
+    }
+
+    fn lru_approximate_test_config() -> KvRouterConfig {
+        KvRouterConfig {
+            router_approximate_cache_policy: ApproximateCachePolicyKind::Lru,
+            ..test_config()
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn build_rejects_lru_approximate_policy_without_kv_events() {
+        let result = SelectionServiceBuilder::new(
+            lru_approximate_test_config(),
+            WorkerType::Aggregated,
+            WorkerSelectionPolicyRegistry::default(),
+        )
+        .indexer_threads(1)
+        .build()
+        .await;
+        let err = result
+            .err()
+            .expect("standalone service must reject LRU approximate retention");
+        assert!(
+            err.to_string()
+                .contains("router_approximate_cache_policy=lru"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn build_allows_lru_approximate_policy_when_overlap_credit_disabled() {
+        let config = KvRouterConfig {
+            overlap_score_credit: 0.0,
+            ..lru_approximate_test_config()
+        };
+        let service = SelectionServiceBuilder::new(
+            config,
+            WorkerType::Aggregated,
+            WorkerSelectionPolicyRegistry::default(),
+        )
+        .indexer_threads(1)
+        .build()
+        .await
+        .expect("LRU policy is inert without overlap scoring");
+        service.shutdown().await;
     }
 
     fn reserve_tcp_port() -> u16 {

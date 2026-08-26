@@ -11,8 +11,10 @@ use parking_lot::RwLock;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
+use crate::config::ApproximateCachePolicyKind;
 use crate::identity::RoutingPartitionId;
-use crate::indexer::TieredMatchDetails;
+use crate::indexer::pruning::PruneConfig;
+use crate::indexer::{ApproximateRetentionConfig, TieredMatchDetails};
 use crate::protocols::{
     ActiveSequenceEvent, LocalBlockHash, PrefillLoadHint, RoutingConstraints, WorkerAffinityTarget,
     WorkerId, WorkerWithDpRank,
@@ -95,6 +97,7 @@ struct ReservationBooking {
     key: RoutingPartitionId,
     selection_id: String,
     worker: WorkerWithDpRank,
+    block_hashes: Vec<LocalBlockHash>,
     sequence_hashes: Vec<SequenceHash>,
     prefill_load_hint: Option<PrefillLoadHint>,
     expected_output_tokens: Option<u32>,
@@ -203,9 +206,24 @@ impl SelectionCore {
         tracking_hash: Arc<TrackingHashContext>,
     ) -> Self {
         let cancel_token = cancel_token.child_token();
-        let indexer_registry = Arc::new(WorkerRegistry::new_with_cancel_token(
+        let approximate_retention = Self::approximate_retention_config(&kv_router_config);
+        // Direct-admission mode has no request-guard lifecycle, so LRU is
+        // intentionally downgraded to TTL. SelectionServiceBuilder::build
+        // rejects this combination for the managed standalone service; the
+        // downgrade remains for intentionally local cores.
+        if kv_router_config.router_approximate_cache_policy == ApproximateCachePolicyKind::Lru
+            && approximate_retention.is_some()
+        {
+            tracing::info!(
+                approximate_cache_policy = %kv_router_config.router_approximate_cache_policy,
+                router_ttl_secs = kv_router_config.router_ttl_secs,
+                "standalone approximate mode downgrades LRU to TTL because request-guard lifecycles are unavailable"
+            );
+        }
+        let indexer_registry = Arc::new(WorkerRegistry::new_with_cancel_token_and_retention(
             indexer_threads,
             cancel_token.clone(),
+            approximate_retention,
         ));
         if signal_indexer_ready {
             indexer_registry.signal_ready();
@@ -222,6 +240,26 @@ impl SelectionCore {
             selection_cache: SelectionCache::new(&cache_config),
             tracking_hash,
         }
+    }
+
+    /// Compute the approximate retention configuration implied by the router
+    /// configuration. Returns `None` when KV events are enabled or when overlap
+    /// scoring is disabled, preserving the existing event-driven path.
+    ///
+    /// This is the single derivation of approximate-mode activation; callers
+    /// such as `SelectionServiceBuilder::build` consult it instead of
+    /// re-checking individual config fields.
+    pub(crate) fn approximate_retention_config(
+        kv_router_config: &crate::config::KvRouterConfig,
+    ) -> Option<ApproximateRetentionConfig> {
+        if kv_router_config.use_kv_events {
+            return None;
+        }
+        if kv_router_config.overlap_score_credit <= 0.0 {
+            return None;
+        }
+        let ttl = std::time::Duration::from_secs_f64(kv_router_config.router_ttl_secs.max(0.0));
+        Some(ApproximateRetentionConfig::Ttl(PruneConfig { ttl }))
     }
 
     /// Cancel core-scoped tasks (KV-event listeners, scheduling, replica sync,
@@ -754,6 +792,7 @@ impl SelectionCore {
         let cached_inputs = (!book).then(|| selection_id.clone()).flatten().map(|id| {
             (
                 id,
+                block_hashes.clone(),
                 sequence_hashes.clone(),
                 prompt.lora_name.clone(),
                 track_prefill_tokens,
@@ -763,6 +802,10 @@ impl SelectionCore {
             book.then(|| sequence_hashes.iter().map(|hash| *hash as i64).collect());
         let response_isl_tokens = book.then_some(isl_tokens);
         let response_track_prefill_tokens = book.then_some(track_prefill_tokens);
+
+        let should_record_routing_decision = book && entry.indexer.can_record_routing_decisions();
+        let routing_decision_hashes = should_record_routing_decision
+            .then(|| (block_hashes.clone(), sequence_hashes.to_vec()));
         let schedule_request = ScheduleRequest {
             mode,
             token_seq: Some(sequence_hashes),
@@ -806,14 +849,26 @@ impl SelectionCore {
             entry.block_size,
         );
 
+        // Record the routing decision in the approximate indexer when
+        // standalone recording is enabled.
+        if let Some((block_hashes, sequence_hashes)) = routing_decision_hashes {
+            let _ = entry
+                .indexer
+                .record_routing_decision(response.best_worker, block_hashes, sequence_hashes)
+                .await;
+        }
+
         let effective_prefill = effective_prefill_tokens(isl_tokens, response.cached_tokens);
 
-        if let Some((cache_id, sequence_hashes, lora_name, track_prefill_tokens)) = cached_inputs {
+        if let Some((cache_id, block_hashes, sequence_hashes, lora_name, track_prefill_tokens)) =
+            cached_inputs
+        {
             self.selection_cache.insert(
                 cache_id,
                 PendingSelection {
                     key: key.clone(),
                     worker: response.best_worker,
+                    block_hashes,
                     sequence_hashes,
                     isl_tokens,
                     effective_prefill_tokens: effective_prefill,
@@ -891,6 +946,7 @@ impl SelectionCore {
                 key: pending.key.clone(),
                 selection_id: req.selection_id.clone(),
                 worker: pending.worker,
+                block_hashes: pending.block_hashes.clone(),
                 sequence_hashes: pending.sequence_hashes.clone(),
                 prefill_load_hint: track_prefill_tokens.then_some(prefill_load_hint),
                 expected_output_tokens: pending.expected_output_tokens,
@@ -985,6 +1041,7 @@ impl SelectionCore {
                 key,
                 selection_id: req.selection_id,
                 worker,
+                block_hashes: Vec::new(),
                 sequence_hashes: normalized.sequence_hashes,
                 prefill_load_hint,
                 expected_output_tokens: req.expected_output_tokens,
@@ -1008,6 +1065,7 @@ impl SelectionCore {
             key,
             selection_id,
             worker,
+            block_hashes,
             sequence_hashes,
             prefill_load_hint,
             expected_output_tokens,
@@ -1021,7 +1079,7 @@ impl SelectionCore {
             .scheduler
             .add_request_if_registered(SequenceRequest {
                 request_id: selection_id.clone(),
-                token_sequence: Some(sequence_hashes),
+                token_sequence: Some(sequence_hashes.clone()),
                 track_prefill_tokens,
                 expected_output_tokens,
                 prefill_load_hint,
@@ -1029,6 +1087,15 @@ impl SelectionCore {
                 lora_name,
             })
             .await?;
+
+        // Record a standalone approximate routing decision after the cached
+        // reservation booking succeeds.
+        if !block_hashes.is_empty() && entry.indexer.can_record_routing_decisions() {
+            let _ = entry
+                .indexer
+                .record_routing_decision(worker, block_hashes, sequence_hashes)
+                .await;
+        }
 
         Ok(ReservationResponse {
             selection_id,
