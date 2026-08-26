@@ -384,11 +384,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_default_backend_actually_sleeps_on_timerfd() {
         let record = sleep_until_precise_measured(
-            Instant::now() + Duration::from_millis(2),
+            Instant::now() + Duration::from_millis(20),
             SleepBackend::Auto,
         )
         .await
-        .expect("a 2ms deadline is not expired, so a timer is armed");
+        .expect("a 20ms deadline is not expired, so a timer is armed");
 
         assert_eq!(
             record.backend,
@@ -427,11 +427,11 @@ mod tests {
             .expect("heartbeat task registered its 1s deadline on the time driver");
 
         let record = sleep_until_precise_measured(
-            Instant::now() + Duration::from_millis(2),
+            Instant::now() + Duration::from_millis(20),
             SleepBackend::TimeDriver,
         )
         .await
-        .expect("a 2ms deadline is not expired, so a timer is armed");
+        .expect("a 20ms deadline is not expired, so a timer is armed");
 
         assert_eq!(
             record.backend,
@@ -441,7 +441,7 @@ mod tests {
         );
         assert!(
             record.drift < Duration::from_millis(200),
-            "2ms sleep woke {:?} late (actual {:?}) on {}",
+            "20ms sleep woke {:?} late (actual {:?}) on {}",
             record.drift,
             record.actual,
             record.backend.label()
