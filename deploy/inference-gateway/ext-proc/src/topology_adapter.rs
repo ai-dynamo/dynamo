@@ -130,6 +130,7 @@ mod tests {
         EppStandaloneConfig {
             selector_threads: 1,
             peer_service: None,
+            replica_sync_port: 9092,
             inference_pool_name: "test-pool".to_string(),
             namespace: "test-ns".to_string(),
             model_name: "Qwen/Qwen3-0.6B".to_string(),

@@ -16,6 +16,8 @@ use validator::ValidationError;
 use crate::vllm_render_client::parse_tokenizer_service_base_url;
 
 const DEFAULT_KV_EVENT_PORT: u16 = 5557;
+/// ZMQ replica-sync port shared by every EPP selected by a peer Service.
+const DEFAULT_REPLICA_SYNC_PORT: u16 = 9092;
 const DEFAULT_SELECTOR_THREADS: usize = 4;
 const DEFAULT_TOKENIZATION_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_TOKENIZER_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -87,9 +89,15 @@ pub struct EppStandaloneConfig {
     /// KV indexer thread-pool size for the in-process selector.
     #[validate(range(min = 1))]
     pub selector_threads: usize,
-    /// EPP Service for peer discovery and state synchronization. The eventual
-    /// selector resolves its named `replica-agg` port from EndpointSlices.
+    /// EPP Service for peer discovery and state synchronization.
     pub peer_service: Option<String>,
+    /// ZMQ listener and peer dial port for replica synchronization. Every EPP
+    /// selected by `peer_service` must use the same port.
+    #[validate(range(
+        min = 1,
+        message = "DYN_EPP_REPLICA_SYNC_PORT must be greater than zero"
+    ))]
+    pub replica_sync_port: u16,
     /// `InferencePool` this EPP backs; its selector + target port drive discovery.
     #[validate(length(min = 1, message = "DYN_EPP_INFERENCE_POOL_NAME is required"))]
     pub inference_pool_name: String,
@@ -156,6 +164,8 @@ impl EppStandaloneConfig {
             selector_threads: opt_parse::<usize>(get, "DYN_EPP_SELECTION_INDEXER_THREADS")?
                 .unwrap_or(DEFAULT_SELECTOR_THREADS),
             peer_service: trimmed(get("DYN_EPP_PEER_SERVICE")),
+            replica_sync_port: opt_parse::<u16>(get, "DYN_EPP_REPLICA_SYNC_PORT")?
+                .unwrap_or(DEFAULT_REPLICA_SYNC_PORT),
             inference_pool_name: trimmed(get("DYN_EPP_INFERENCE_POOL_NAME")).unwrap_or_default(),
             namespace: trimmed(get("POD_NAMESPACE")).unwrap_or_default(),
             model_name: trimmed(get("DYN_MODEL_NAME")).unwrap_or_default(),
@@ -291,6 +301,7 @@ mod tests {
         assert_eq!(cfg.selector_threads, DEFAULT_SELECTOR_THREADS);
         // No peer service => single-replica (replica sync off).
         assert!(cfg.peer_service.is_none());
+        assert_eq!(cfg.replica_sync_port, DEFAULT_REPLICA_SYNC_PORT);
         assert_eq!(cfg.inference_pool_name, "vllm-qwen-pool");
         assert_eq!(cfg.namespace, "inference");
         assert_eq!(cfg.model_name, "Qwen/Qwen3-0.6B");
@@ -338,8 +349,42 @@ mod tests {
         ])
         .expect("peer service config should parse");
         assert_eq!(cfg.peer_service.as_deref(), Some("dynamo-epp"));
+        assert_eq!(cfg.replica_sync_port, DEFAULT_REPLICA_SYNC_PORT);
         assert_eq!(cfg.selector_threads, 8);
         assert_eq!(cfg.namespace, "inference");
+    }
+
+    #[test]
+    fn replica_sync_port_can_be_overridden() {
+        let cfg = parse_cfg(&[
+            ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+            ("DYN_EPP_REPLICA_SYNC_PORT", "9192"),
+            ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
+            ("POD_NAMESPACE", "inference"),
+            ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+            ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
+            ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
+            ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
+        ])
+        .expect("replica sync port override should parse");
+
+        assert_eq!(cfg.replica_sync_port, 9192);
+    }
+
+    #[test]
+    fn zero_replica_sync_port_fails() {
+        assert!(
+            parse_cfg(&[
+                ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
+                ("POD_NAMESPACE", "inference"),
+                ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+                ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
+                ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
+                ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
+                ("DYN_EPP_REPLICA_SYNC_PORT", "0"),
+            ])
+            .is_err()
+        );
     }
 
     #[test]

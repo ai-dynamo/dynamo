@@ -154,10 +154,10 @@ impl Selector {
 
     async fn replication(cfg: &EppStandaloneConfig) -> Result<Option<(String, u16)>> {
         match &cfg.peer_service {
-            Some(name) => Ok(Some((
-                name.clone(),
-                crate::peer_discovery::resolve_replica_sync_port(&cfg.namespace, name).await?,
-            ))),
+            Some(name) => {
+                crate::peer_discovery::ensure_peer_service_exists(&cfg.namespace, name).await?;
+                Ok(Some((name.clone(), cfg.replica_sync_port)))
+            }
             None => Ok(None),
         }
     }
@@ -436,6 +436,7 @@ models:
         EppStandaloneConfig {
             selector_threads: 1,
             peer_service: None,
+            replica_sync_port: 9092,
             inference_pool_name: "test-pool".to_string(),
             namespace: "test-ns".to_string(),
             model_name: "test-model".to_string(),

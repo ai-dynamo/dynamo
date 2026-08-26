@@ -159,7 +159,7 @@ kind: ServiceAccount
 metadata:
   name: dynamo-epp
 ---
-# Standalone discovery reads only namespaced worker, pool, and EndpointSlice state.
+# Standalone discovery reads only namespaced worker, pool, Service, and EndpointSlice state.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -173,6 +173,12 @@ rules:
       - get
       - list
       - watch
+  - apiGroups:
+      - ""
+    resources:
+      - services
+    verbs:
+      - get
   - apiGroups:
       - inference.networking.k8s.io
     resources:
@@ -260,8 +266,8 @@ spec:
               value: "8192"
             # Replication: watch THIS Deployment's own Service
             # (EndpointSlices) to find sibling EPP replicas and sync active load
-            # over its required named replica-agg port. Omit this env to run a
-            # single fully-local replica (and set replicas: 1).
+            # over the shared replica-sync port (9092 by default). Omit this env
+            # to run a single fully-local replica (and set replicas: 1).
             - name: DYN_EPP_PEER_SERVICE
               value: dynamo-epp
             # The reflector watches pods in the EPP's own namespace.
@@ -279,9 +285,6 @@ spec:
               containerPort: 9002
             - name: grpc-health
               containerPort: 9003
-            # ZMQ replica-sync between EPP replicas (embedded replication).
-            - name: replica-agg
-              containerPort: 9092
           readinessProbe:
             grpc:
               port: 9003
@@ -295,7 +298,7 @@ spec:
               drop:
                 - ALL
 ---
-# GAIE calls the gRPC port. EPP replicas use `replica-agg` for load-state sync.
+# GAIE calls the gRPC port. EPP replicas discover each other through this Service.
 apiVersion: v1
 kind: Service
 metadata:
@@ -308,9 +311,6 @@ spec:
       appProtocol: http2
       port: 9002
       targetPort: grpc
-    - name: replica-agg
-      port: 9092
-      targetPort: replica-agg
 ---
 # InferencePool selects the raw vLLM pods and delegates endpoint selection to
 # the EPP. The EPP reads this object (read-only) to learn the pod selector and
