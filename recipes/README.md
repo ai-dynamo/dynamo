@@ -22,7 +22,6 @@ These recipes compare Dynamo performance features with benchmark results, each i
 | Model | Framework | Configuration | GPUs | Features |
 |-------|-----------|---------------|------|----------|
 | **[Qwen3-32B](qwen3-32b/)** | vLLM | Disagg + KV-Router | 16x H200 | **Disaggregated Serving + KV-Aware Routing** — benchmark comparison with real-world Mooncake traces |
-| **[DeepSeek-V3.2-NVFP4](deepseek-v32-fp4/)** | TensorRT-LLM | Agg + Disagg WideEP | 32x GB200 | **Disaggregated Serving + KV-Aware Routing** — benchmark comparison with Mooncake-based synthetic coding trace |
 | **[Qwen3-VL-30B-A3B-FP8](qwen3-vl-30b/)** | vLLM | Agg + Embedding Cache | 1x GB200 | **Multimodal Embedding Cache** — benchmark comparison showing +16% throughput, -28% TTFT |
 
 ### Aggregated & Disaggregated Recipes
@@ -33,9 +32,6 @@ These recipes demonstrate aggregated or disaggregated serving:
 
 | Model | Framework | Mode | GPUs | Deployment | Benchmark | Notes | GAIE |
 |-------|-----------|------|------|------------|-----------|-------|------|
-| **[Llama-3-70B](llama-3-70b/vllm/agg/)** | vLLM | Aggregated | 4x H100/H200 | ✅ | ✅ | FP8 dynamic quantization | ✅ |
-| **[Llama-3-70B](llama-3-70b/vllm/disagg-single-node/)** | vLLM | Disagg (Single-Node) | 8x H100/H200 | ✅ | ✅ | Prefill + Decode separation | ❌ |
-| **[Llama-3-70B](llama-3-70b/vllm/disagg-multi-node/)** | vLLM | Disagg (Multi-Node) | 16x H100/H200 | ✅ | ✅ | 2 nodes, 8 GPUs each | ❌ |
 | **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/agg/)** | TensorRT-LLM | Aggregated | 2x H100/H200/A100 | ✅ | ✅ | FP8 quantization | ❌ |
 | **[Qwen3-32B-FP8](qwen3-32b-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 8x H100/H200/A100 | ✅ | ✅ | Prefill + Decode separation | ❌ |
 | **[Qwen3-32B-FP8](qwen3-32b-fp8/vllm/disagg/)** | vLLM | Disagg (Single-Node) | 8x A100 | ✅ | ✅ | 2× TP2 prefill + 1× TP4 decode, NixlConnector KV transfer | ❌ |
@@ -232,7 +228,7 @@ kubectl logs job/<benchmark-job-name> -n ${NAMESPACE} | tail -50
 
 ## Example Deployments
 
-### Llama-3-70B with vLLM (Aggregated)
+### Qwen3-32B-FP8 with TensorRT-LLM (Aggregated)
 
 ```bash
 export NAMESPACE=dynamo-demo
@@ -245,23 +241,23 @@ kubectl create secret generic hf-token-secret \
 
 # Deploy
 cd recipes
-kubectl apply -f llama-3-70b/model-cache/ -n ${NAMESPACE}
+kubectl apply -f qwen3-32b-fp8/model-cache/ -n ${NAMESPACE}
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=6000s
-kubectl apply -f llama-3-70b/vllm/agg/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f qwen3-32b-fp8/trtllm/agg/deploy.yaml -n ${NAMESPACE}
 
 # Test
-kubectl port-forward svc/llama3-70b-agg-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/qwen3-32b-fp8-agg-frontend 8000:8000 -n ${NAMESPACE}
 ```
 
 ### Inference Gateway (GAIE) Integration (Optional)
 
-For Llama-3-70B with vLLM (Aggregated), an example of integration with the Inference Gateway is provided.
+For Qwen3-0.6B with vLLM (Aggregated), an example of integration with the Inference Gateway is provided.
 
-First, deploy the Dynamo Graph per instructions above.
+First, deploy the Dynamo Graph per instructions above, substituting the Qwen3-0.6B recipe.
 
 Then follow [Deploy Inference Gateway Section 2](../deploy/inference-gateway/README.md#2-deploy-inference-gateway) to install GAIE.
 
-Update the containers.epp.image in the deployment file, i.e. llama-3-70b/vllm/agg/gaie/k8s-manifests/epp/deployment.yaml. It should match the release tag and be in the format `nvcr.io/nvidia/ai-dynamo/frontend:<version>` e.g. `nvcr.io/nvidia/ai-dynamo/frontend:0.9.0`
+Update the containers.epp.image in the deployment file, i.e. qwen3-0.6b/vllm/agg/gaie/deploy.yaml. It should match the release tag and be in the format `nvcr.io/nvidia/ai-dynamo/frontend:<version>` e.g. `nvcr.io/nvidia/ai-dynamo/frontend:0.9.0`
 The recipe assumes you are using Kubernetes discovery backend and sets the `DYN_DISCOVERY_BACKEND` env variable in the epp deployment. If you want to use etcd enable the lines below and remove the DYN_DISCOVERY_BACKEND env var.
 ```bash
 - name: ETCD_ENDPOINTS
@@ -269,9 +265,9 @@ The recipe assumes you are using Kubernetes discovery backend and sets the `DYN_
 ```
 
 ```bash
-export DEPLOY_PATH=llama-3-70b/vllm/agg/
+export DEPLOY_PATH=qwen3-0.6b/vllm/agg/
 # DEPLOY_PATH=<model>/<framework>/<mode>/
-kubectl apply -R -f "$DEPLOY_PATH/gaie/k8s-manifests" -n "$NAMESPACE"
+kubectl apply -R -f "$DEPLOY_PATH/gaie" -n "$NAMESPACE"
 ```
 
 ### DeepSeek-R1 on GB200 (Multi-node)
