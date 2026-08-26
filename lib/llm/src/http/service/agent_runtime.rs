@@ -21,9 +21,9 @@ use dynamo_agent_rt::{
     PolicyResponsesOutputInterpreter, ResponseId, ResponsesRequestMaterializer,
     ResponsesStreamEventInterpreter, ResponsesToolAdapterError, ResponsesToolLoopAdapter,
     RoutedResponsesOutcomeError, RoutedResponsesOutcomePolicy, RunStreamResult, RunTurn,
-    RuntimeAuthorization, RuntimeLimits, SystemClock, ToolExecutionFailure, ToolExecutionRequest,
-    ToolExecutionResult, ToolExecutor, ToolFailureDisposition, ToolFailurePolicy, ToolRoute,
-    ToolRouter, ToolRunError, ToolRunner, UuidGenerator,
+    RunTurnResult, RuntimeAuthorization, RuntimeLimits, SystemClock, ToolExecutionFailure,
+    ToolExecutionRequest, ToolExecutionResult, ToolExecutor, ToolFailureDisposition,
+    ToolFailurePolicy, ToolRoute, ToolRouter, ToolRunError, ToolRunner, TurnState, UuidGenerator,
 };
 use dynamo_agent_rt_store::{DuckDbStore, DuckDbStoreError, StoreInvariantError};
 use dynamo_agent_tools::{
@@ -315,16 +315,15 @@ impl ToolExecutor for ResponsesToolExecutor {
         })
     }
 
-    fn lookup(
-        &self,
-        request: &ToolExecutionRequest,
-    ) -> BoxFuture<'_, Result<Option<ToolExecutionResult>, Self::Error>> {
-        let request = request.clone();
+    fn lookup<'a>(
+        &'a self,
+        request: &'a ToolExecutionRequest,
+    ) -> BoxFuture<'a, Result<Option<ToolExecutionResult>, Self::Error>> {
         Box::pin(async move {
             match request.connector.as_str() {
                 "web_search" => self
                     .web_search
-                    .lookup(&request)
+                    .lookup(request)
                     .await
                     .map_err(ResponsesToolExecutorError::WebSearch),
                 "sandbox" => self
@@ -333,7 +332,7 @@ impl ToolExecutor for ResponsesToolExecutor {
                     .ok_or_else(|| {
                         ResponsesToolExecutorError::UnsupportedConnector("sandbox".to_owned())
                     })?
-                    .lookup(&request)
+                    .lookup(request)
                     .await
                     .map_err(ResponsesToolExecutorError::Sandbox),
                 connector => Err(ResponsesToolExecutorError::UnsupportedConnector(
@@ -411,7 +410,16 @@ type ResponsesToolStreamRuntimeError = AgentToolRuntimeError<
     DuckDbStoreError,
 >;
 
-pub(super) fn new_responses_runtime() -> Arc<ResponsesAgentRuntime> {
+#[derive(Debug, Error)]
+pub(super) enum ResponsesRuntimeInitError {
+    #[error("failed to initialize agent runtime DuckDB store: {0}")]
+    Store(#[from] DuckDbStoreError),
+    #[error("invalid agent runtime deployment configuration: {0}")]
+    Configuration(String),
+}
+
+pub(super) fn new_responses_runtime()
+-> Result<Arc<ResponsesAgentRuntime>, ResponsesRuntimeInitError> {
     let store = match std::env::var_os(DUCKDB_PATH_ENV) {
         Some(path) if !path.is_empty() => ResponsesStore::open(path),
         _ => {
@@ -423,10 +431,9 @@ pub(super) fn new_responses_runtime() -> Arc<ResponsesAgentRuntime> {
             }
             ResponsesStore::open_in_memory()
         }
-    }
-    .unwrap_or_else(|error| panic!("failed to initialize agent runtime DuckDB store: {error}"));
-    let (web_search_router, web_search) = web_search_components();
-    let (sandbox_router, sandbox) = sandbox_components();
+    }?;
+    let (web_search_router, web_search) = web_search_components()?;
+    let (sandbox_router, sandbox) = sandbox_components()?;
     let router = ResponsesRouter {
         web_search: web_search_router,
         sandbox: sandbox_router,
@@ -446,7 +453,7 @@ pub(super) fn new_responses_runtime() -> Arc<ResponsesAgentRuntime> {
         UuidGenerator,
         SystemClock,
     ));
-    Arc::new(ResponsesAgentRuntime {
+    Ok(Arc::new(ResponsesAgentRuntime {
         runtime,
         router: router.clone(),
         tool_adapter: Arc::new(ResponsesToolLoopAdapter::new(router)),
@@ -456,71 +463,83 @@ pub(super) fn new_responses_runtime() -> Arc<ResponsesAgentRuntime> {
             Blake3ToolIdempotencyKeys,
             ResponsesToolFailurePolicy,
         )),
-    })
+    }))
 }
 
-fn web_search_components() -> (ConfiguredToolRouter, BraveWebSearchExecutor) {
-    let api_key = match std::env::var(WEB_SEARCH_API_KEY_ENV) {
-        Ok(api_key) => Some(api_key),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(std::env::VarError::NotUnicode(_)) => {
-            panic!("{WEB_SEARCH_API_KEY_ENV} must contain UTF-8")
-        }
-    };
-    let tool_name = std::env::var(WEB_SEARCH_TOOL_NAME_ENV).ok();
+fn optional_environment(name: &'static str) -> Result<Option<String>, ResponsesRuntimeInitError> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(ResponsesRuntimeInitError::Configuration(
+            format!("{name} must contain UTF-8"),
+        )),
+    }
+}
+
+fn web_search_components()
+-> Result<(ConfiguredToolRouter, BraveWebSearchExecutor), ResponsesRuntimeInitError> {
+    let api_key = optional_environment(WEB_SEARCH_API_KEY_ENV)?;
+    let tool_name = optional_environment(WEB_SEARCH_TOOL_NAME_ENV)?;
     web_search_components_from_config(api_key, tool_name)
 }
 
 fn web_search_components_from_config(
     api_key: Option<String>,
     tool_name: Option<String>,
-) -> (ConfiguredToolRouter, BraveWebSearchExecutor) {
+) -> Result<(ConfiguredToolRouter, BraveWebSearchExecutor), ResponsesRuntimeInitError> {
     let Some(api_key) = api_key else {
-        return (
+        return Ok((
             ConfiguredToolRouter::default(),
             BraveWebSearchExecutor::new([])
-                .expect("empty web-search executor configuration is valid"),
-        );
+                .map_err(|error| ResponsesRuntimeInitError::Configuration(error.to_string()))?,
+        ));
     };
     let tool_name = tool_name.unwrap_or_else(|| "web_search".to_owned());
-    validate_scope_component(&tool_name)
-        .unwrap_or_else(|error| panic!("invalid {WEB_SEARCH_TOOL_NAME_ENV}: {error}"));
+    validate_scope_component(&tool_name).map_err(|error| {
+        ResponsesRuntimeInitError::Configuration(format!(
+            "invalid {WEB_SEARCH_TOOL_NAME_ENV}: {error}"
+        ))
+    })?;
     let profile_name = "brave_default".to_owned();
-    let profile = BraveWebSearchProfile::new(api_key)
-        .unwrap_or_else(|error| panic!("invalid web-search deployment configuration: {error}"));
+    let profile = BraveWebSearchProfile::new(api_key).map_err(|error| {
+        ResponsesRuntimeInitError::Configuration(format!(
+            "invalid web-search deployment configuration: {error}"
+        ))
+    })?;
     let router = ConfiguredToolRouter::new([(
         tool_name,
         ToolRoute::new("web_search", "search").with_profile(profile_name.clone()),
     )]);
-    let executor = BraveWebSearchExecutor::new([(profile_name, profile)])
-        .unwrap_or_else(|error| panic!("failed to initialize web-search executor: {error}"));
-    (router, executor)
+    let executor = BraveWebSearchExecutor::new([(profile_name, profile)]).map_err(|error| {
+        ResponsesRuntimeInitError::Configuration(format!(
+            "failed to initialize web-search executor: {error}"
+        ))
+    })?;
+    Ok((router, executor))
 }
 
-fn sandbox_components() -> (
-    ConfiguredToolRouter,
-    Option<SandboxProviderExecutor<HttpSandboxProvider>>,
-) {
-    let endpoint = match std::env::var(SANDBOX_ENDPOINT_ENV) {
-        Ok(endpoint) => Some(endpoint),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(std::env::VarError::NotUnicode(_)) => {
-            panic!("{SANDBOX_ENDPOINT_ENV} must contain UTF-8")
-        }
-    };
-    let token = std::env::var(SANDBOX_TOKEN_ENV).ok();
-    let allow_http = std::env::var(SANDBOX_ALLOW_HTTP_ENV)
-        .ok()
+fn sandbox_components() -> Result<
+    (
+        ConfiguredToolRouter,
+        Option<SandboxProviderExecutor<HttpSandboxProvider>>,
+    ),
+    ResponsesRuntimeInitError,
+> {
+    let endpoint = optional_environment(SANDBOX_ENDPOINT_ENV)?;
+    let token = optional_environment(SANDBOX_TOKEN_ENV)?;
+    let allow_http = optional_environment(SANDBOX_ALLOW_HTTP_ENV)?
         .map(|value| {
-            value
-                .parse::<bool>()
-                .unwrap_or_else(|_| panic!("{SANDBOX_ALLOW_HTTP_ENV} must be true or false"))
+            value.parse::<bool>().map_err(|_| {
+                ResponsesRuntimeInitError::Configuration(format!(
+                    "{SANDBOX_ALLOW_HTTP_ENV} must be true or false"
+                ))
+            })
         })
+        .transpose()?
         .unwrap_or(false);
-    let tool_name = std::env::var(SANDBOX_TOOL_NAME_ENV).ok();
-    let profile = std::env::var(SANDBOX_PROFILE_ENV).ok();
+    let tool_name = optional_environment(SANDBOX_TOOL_NAME_ENV)?;
+    let profile = optional_environment(SANDBOX_PROFILE_ENV)?;
     sandbox_components_from_config(endpoint, token, allow_http, tool_name, profile)
-        .unwrap_or_else(|error| panic!("invalid sandbox deployment configuration: {error}"))
 }
 
 fn sandbox_components_from_config(
@@ -534,32 +553,39 @@ fn sandbox_components_from_config(
         ConfiguredToolRouter,
         Option<SandboxProviderExecutor<HttpSandboxProvider>>,
     ),
-    String,
+    ResponsesRuntimeInitError,
 > {
     let Some(endpoint) = endpoint else {
         return Ok((ConfiguredToolRouter::default(), None));
     };
     let token = token.ok_or_else(|| {
-        format!("{SANDBOX_TOKEN_ENV} is required when sandbox execution is enabled")
+        ResponsesRuntimeInitError::Configuration(format!(
+            "{SANDBOX_TOKEN_ENV} is required when sandbox execution is enabled"
+        ))
     })?;
     let tool_name = tool_name.unwrap_or_else(|| "python".to_owned());
     let profile = profile.unwrap_or_else(|| "python-deny-egress".to_owned());
-    validate_scope_component(&tool_name)
-        .map_err(|error| format!("invalid {SANDBOX_TOOL_NAME_ENV}: {error}"))?;
-    validate_scope_component(&profile)
-        .map_err(|error| format!("invalid {SANDBOX_PROFILE_ENV}: {error}"))?;
+    validate_scope_component(&tool_name).map_err(|error| {
+        ResponsesRuntimeInitError::Configuration(format!(
+            "invalid {SANDBOX_TOOL_NAME_ENV}: {error}"
+        ))
+    })?;
+    validate_scope_component(&profile).map_err(|error| {
+        ResponsesRuntimeInitError::Configuration(format!("invalid {SANDBOX_PROFILE_ENV}: {error}"))
+    })?;
     let provider = HttpSandboxProvider::new(HttpSandboxProviderConfig {
         endpoint,
         bearer_token: token,
         allow_http,
         ..HttpSandboxProviderConfig::default()
     })
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| ResponsesRuntimeInitError::Configuration(error.to_string()))?;
     let router = ConfiguredToolRouter::new([(
         tool_name,
         ToolRoute::new("sandbox", "python").with_profile(profile),
     )]);
-    let executor = SandboxProviderExecutor::new(provider, SandboxToolExecutorConfig::default());
+    let executor = SandboxProviderExecutor::new(provider, SandboxToolExecutorConfig::default())
+        .map_err(|error| ResponsesRuntimeInitError::Configuration(error.to_string()))?;
     Ok((router, Some(executor)))
 }
 
@@ -710,11 +736,7 @@ pub(super) async fn handle_responses(
                 Box::pin(stream.map(|event| event.map_err(axum::Error::new)))
             }
             RunStreamResult::Existing(record) => {
-                let response = record.response.clone().ok_or_else(|| {
-                    openai::ErrorMessage::internal_server_error(
-                        "Agent runtime turn exists but has no replayable response",
-                    )
-                })?;
+                let response = existing_response(record)?;
                 Box::pin(stream::iter(
                     committed_response_events(response).into_iter().map(Ok),
                 ))
@@ -736,11 +758,14 @@ pub(super) async fn handle_responses(
         )
         .await
         .map_err(tool_runtime_error_response)?;
-    let response = result.record().response.clone().ok_or_else(|| {
-        openai::ErrorMessage::internal_server_error(
-            "Agent runtime turn exists but has no replayable response",
-        )
-    })?;
+    let response = match result {
+        RunTurnResult::Committed { record, .. } => record.response.ok_or_else(|| {
+            openai::ErrorMessage::internal_server_error(
+                "Agent runtime committed a turn without a response",
+            )
+        })?,
+        RunTurnResult::Existing(record) => existing_response(record)?,
+    };
     let response = NvResponse {
         inner: response,
         nvext: None,
@@ -750,6 +775,34 @@ pub(super) async fn handle_responses(
     };
 
     Ok(axum::Json(response).into_response())
+}
+
+fn existing_response(
+    record: Box<dynamo_agent_rt::CheckpointRecord<OpenAiResponses>>,
+) -> Result<dynamo_protocols::types::responses::Response, openai::ErrorResponse> {
+    match record.state {
+        TurnState::Completed | TurnState::AwaitingClientToolOutput => {
+            record.response.ok_or_else(|| {
+                openai::ErrorMessage::internal_server_error(
+                    "Agent runtime replayable turn has no response",
+                )
+            })
+        }
+        TurnState::InFlight | TurnState::ToolStarted => {
+            Err(openai::ErrorMessage::agent_runtime_error(
+                StatusCode::CONFLICT,
+                "Agent runtime turn is still in progress",
+            ))
+        }
+        TurnState::OutcomeUnknown => Err(openai::ErrorMessage::agent_runtime_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Agent runtime turn outcome is unknown",
+        )),
+        TurnState::Failed => Err(openai::ErrorMessage::agent_runtime_error(
+            StatusCode::CONFLICT,
+            "Agent runtime turn previously failed",
+        )),
+    }
 }
 
 fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -842,6 +895,8 @@ fn tool_run_error_status(error: &ResponsesToolRunError) -> StatusCode {
         ToolRunError::UnauthorizedConnector(_) => StatusCode::FORBIDDEN,
         ToolRunError::Journal(_)
         | ToolRunError::RecoveryLookup { .. }
+        | ToolRunError::ExecutionTimedOut { .. }
+        | ToolRunError::RecoveryTimedOut { .. }
         | ToolRunError::OutcomeUnknown { .. }
         | ToolRunError::CorruptJournal
         | ToolRunError::JournalAfterExecution(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -1081,7 +1136,10 @@ fn store_error_response(error: DuckDbStoreError) -> openai::ErrorResponse {
             StatusCode::INTERNAL_SERVER_ERROR,
             "Agent checkpoint store failed",
         ),
-        DuckDbStoreError::Database(_) | DuckDbStoreError::Poisoned | DuckDbStoreError::Join(_) => (
+        DuckDbStoreError::Database(_)
+        | DuckDbStoreError::Poisoned
+        | DuckDbStoreError::Closed
+        | DuckDbStoreError::Join(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
             "Agent checkpoint store is unavailable",
         ),
@@ -1221,8 +1279,9 @@ mod tests {
     use axum::http::{HeaderMap, StatusCode};
 
     use dynamo_agent_rt::{
-        AgentRuntimeError, ConfiguredToolRouter, MaterializationError, ResponseId, ToolRoute,
-        ToolRouter, TurnState,
+        AgentRuntimeError, AuthorizationScope, CheckpointRecord, CheckpointVersion,
+        ConfiguredToolRouter, IdempotencyKey, MaterializationError, RequestFingerprint, ResponseId,
+        ToolRoute, ToolRouter, TurnState,
     };
     use dynamo_agent_rt_store::{DuckDbStoreError, StoreInvariantError};
     use dynamo_protocols::types::responses::CreateResponse;
@@ -1239,7 +1298,7 @@ mod tests {
         AUTH_HEADER, AUTH_MODE_ENV, AgentRuntimeAuthConfig, DynamoInvocationCarrier,
         DynamoResponsesInvocationError, IngressAuthorizationError, LOCAL_PRINCIPAL_ENV,
         LOCAL_TENANT_ENV, PERMITTED_CONNECTORS_ENV, PRINCIPAL_HEADER, ResponsesRuntimeError,
-        TENANT_HEADER, TRUSTED_PROXY_TOKEN_ENV, committed_response_events,
+        TENANT_HEADER, TRUSTED_PROXY_TOKEN_ENV, committed_response_events, existing_response,
         request_uses_runtime_tools, runtime_error_response, sandbox_components_from_config,
         sse_response, web_search_components_from_config,
     };
@@ -1274,13 +1333,15 @@ mod tests {
 
     #[test]
     fn web_search_route_exists_only_with_deployment_credentials() {
-        let (router, _) = web_search_components_from_config(None, None);
+        let (router, _) =
+            web_search_components_from_config(None, None).expect("disabled configuration is valid");
         assert!(router.route("web_search").is_none());
 
         let (router, _) = web_search_components_from_config(
             Some("deployment-secret".to_owned()),
             Some("search_the_web".to_owned()),
-        );
+        )
+        .expect("web-search configuration is valid");
         let route = router.route("search_the_web").expect("route configured");
         assert_eq!(route.connector, "web_search");
         assert_eq!(route.operation, "search");
@@ -1302,7 +1363,7 @@ mod tests {
             None,
             None,
         );
-        assert!(matches!(missing_token, Err(error) if error.contains("SANDBOX_TOKEN")));
+        assert!(matches!(missing_token, Err(error) if error.to_string().contains("SANDBOX_TOKEN")));
 
         let (router, executor) = sandbox_components_from_config(
             Some("http://127.0.0.1:8090".to_owned()),
@@ -1317,6 +1378,30 @@ mod tests {
         assert_eq!(route.operation, "python");
         assert_eq!(route.profile, "python-deny-egress");
         assert!(executor.is_some());
+    }
+
+    #[test]
+    fn active_runtime_tool_turn_is_not_replayed_as_complete() {
+        let record = Box::new(CheckpointRecord {
+            response_id: ResponseId::from("resp-1"),
+            parent_response_id: None,
+            scope: AuthorizationScope {
+                tenant_id: "tenant".to_owned(),
+                principal_id: "principal".to_owned(),
+            },
+            idempotency_key: IdempotencyKey::from("idem-1"),
+            request_fingerprint: RequestFingerprint::new([0; 32]),
+            state: TurnState::ToolStarted,
+            version: CheckpointVersion(1),
+            request: CreateResponse::default(),
+            output_items: Vec::new(),
+            response: None,
+        });
+
+        assert_eq!(
+            existing_response(record).unwrap_err().0,
+            StatusCode::CONFLICT
+        );
     }
 
     #[test]

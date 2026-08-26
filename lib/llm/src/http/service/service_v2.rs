@@ -466,8 +466,8 @@ impl State {
         discovery_client: Arc<dyn Discovery>,
         cancel_token: CancellationToken,
         config: StateConfig,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        Ok(Self {
             manager,
             metrics: Arc::new(Metrics::new_with_prefix(config.metrics_config.prefix())),
             discovery_client,
@@ -492,8 +492,8 @@ impl State {
             frontend_api_config: config.frontend_api_config,
             sse_keep_alive: config.sse_keep_alive,
             #[cfg(feature = "agent-rt-poc")]
-            responses_agent_runtime: new_responses_runtime(),
-        }
+            responses_agent_runtime: new_responses_runtime()?,
+        })
     }
 
     /// Get the Prometheus [`Metrics`] object which tracks request counts and inflight requests
@@ -1163,7 +1163,7 @@ impl HttpServiceConfigBuilder {
                 nvext_enabled,
                 sse_keep_alive: config.sse_keep_alive,
             },
-        ));
+        )?);
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
