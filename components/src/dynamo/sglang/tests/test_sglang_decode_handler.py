@@ -1049,6 +1049,7 @@ async def test_process_token_stream_passes_through_encoded_routed_experts():
                             "id": "request-1",
                             "finish_reason": None,
                             "routed_experts": "AQIDBA==",
+                            "weight_version": "7",
                         },
                     }
                 ]
@@ -1058,6 +1059,7 @@ async def test_process_token_stream_passes_through_encoded_routed_experts():
     )
 
     assert chunks[0]["engine_data"]["routed_experts"] == "AQIDBA=="
+    assert chunks[0]["engine_data"]["weight_version"] == "7"
 
 
 @pytest.mark.asyncio
