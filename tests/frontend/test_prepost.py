@@ -2098,7 +2098,7 @@ def recording_reasoning_parser():
         needs skip_special_tokens=False so those markers survive detokenisation.
         """
 
-        def __init__(self, tokenizer, chat_template_kwargs=None):
+        def __init__(self, tokenizer, chat_template_kwargs=None, model_config=None):
             self.tokenizer = tokenizer
             self.chat_template_kwargs = chat_template_kwargs
             self.called = False

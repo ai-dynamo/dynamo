@@ -936,7 +936,7 @@ class TestReasoningParserMetadata:
         from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
 
         class FakeReasoningParser:
-            def __init__(self, tokenizer, *, chat_template_kwargs):
+            def __init__(self, tokenizer, *, chat_template_kwargs, model_config=None):
                 self.tokenizer = tokenizer
                 self.chat_template_kwargs = chat_template_kwargs
 
@@ -961,7 +961,7 @@ class TestReasoningParserMetadata:
         from dynamo.frontend.vllm_processor import _build_reasoning_parser_metadata
 
         class FakeReasoningParser:
-            def __init__(self, tokenizer, *, chat_template_kwargs):
+            def __init__(self, tokenizer, *, chat_template_kwargs, model_config=None):
                 self.tokenizer = tokenizer
                 self.chat_template_kwargs = chat_template_kwargs
 
@@ -1191,6 +1191,9 @@ async def test_generator_preserves_zero_top_logprobs(
         generation_config_fields={},
         renderer=SimpleNamespace(process_for_engine_async=AsyncMock(return_value={})),
         process_inputs=process_inputs,
+        # Real InputProcessor always carries this (vllm_config.model_config);
+        # _generator_inner forwards it to the reasoning parser.
+        model_config=None,
     )
 
     processor = vllm_processor_module.VllmProcessor(
@@ -1230,7 +1233,7 @@ async def test_include_reasoning_false_keeps_response_parser_active(
     class FakeReasoningParser:
         engine_based_streaming = False
 
-        def __init__(self, tokenizer, *, chat_template_kwargs):
+        def __init__(self, tokenizer, *, chat_template_kwargs, model_config=None):
             self.tokenizer = tokenizer
             self.chat_template_kwargs = chat_template_kwargs
             self.adjusted_prompt_token_ids = None
@@ -1296,6 +1299,9 @@ async def test_include_reasoning_false_keeps_response_parser_active(
         generation_config_fields={},
         renderer=SimpleNamespace(process_for_engine_async=AsyncMock(return_value={})),
         process_inputs=process_inputs,
+        # Real InputProcessor always carries this (vllm_config.model_config);
+        # _generator_inner forwards it to the reasoning parser.
+        model_config=None,
     )
     processor = vllm_processor_module.VllmProcessor(
         tokenizer=SimpleNamespace(eos_token_id=2, all_special_tokens=[]),
@@ -1377,6 +1383,68 @@ async def test_include_reasoning_false_keeps_response_parser_active(
         "finish_reason": "stop",
         "logprobs": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_generator_inner_forwards_reasoning_parser_and_model_config(
+    vllm_processor_module,
+    monkeypatch,
+):
+    """The processor must hand its own parser AND model config to preprocessing.
+
+    Every other reasoning-parser test calls preprocess_chat_request or
+    _prepare_request directly with an explicit reasoning_parser_class, so all of
+    them keep passing if the production call in _generator_inner stops forwarding
+    them. This is the boundary check that does not: it reads the arguments off the
+    real call site. Deleting either wiring line makes exactly this test fail.
+
+    model_config is checked alongside because it is equally load-bearing and
+    equally invisible: without it the shipped Cohere parsers return the request
+    untouched and adjust_request() is a silent no-op.
+    """
+
+    class _SentinelReasoningParser:
+        """Identity is the whole point -- this is never instantiated."""
+
+    class _StopAfterPreprocess(Exception):
+        """Ends the generator at the boundary under test."""
+
+    sentinel_model_config = SimpleNamespace(architecture="SentinelForCausalLM")
+    captured: dict = {}
+
+    async def spy_preprocess_chat_request(request, **kwargs):
+        captured.update(kwargs)
+        raise _StopAfterPreprocess
+
+    monkeypatch.setattr(
+        vllm_processor_module,
+        "preprocess_chat_request",
+        spy_preprocess_chat_request,
+    )
+
+    processor = vllm_processor_module.VllmProcessor(
+        tokenizer=SimpleNamespace(eos_token_id=2),
+        input_processor=SimpleNamespace(
+            renderer=object(), model_config=sentinel_model_config
+        ),
+        output_processor=object(),
+        tool_parser_class=None,
+        reasoning_parser_class=_SentinelReasoningParser,
+        routed_engine=object(),
+    )
+
+    with pytest.raises(_StopAfterPreprocess):
+        await anext(
+            processor._generator_inner(
+                {
+                    "model": "test",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                }
+            )
+        )
+
+    assert captured.get("reasoning_parser_class") is _SentinelReasoningParser
+    assert captured.get("model_config") is sentinel_model_config
 
 
 def _make_processor(module, routed_engine):
@@ -1715,8 +1783,9 @@ class _FakeStructuralTagReasoningParser:
     structural tag its model actually speaks.
     """
 
-    def __init__(self, tokenizer, chat_template_kwargs=None):
+    def __init__(self, tokenizer, chat_template_kwargs=None, model_config=None):
         del tokenizer, chat_template_kwargs
+        self._model_config = model_config
 
     def adjust_request(self, request):
         request.skip_special_tokens = False
@@ -1729,6 +1798,22 @@ class _FakeStructuralTagReasoningParser:
 class _FakePassthroughReasoningParser(_FakeStructuralTagReasoningParser):
     def adjust_request(self, request):
         return request
+
+
+class _ModelConfigGatedReasoningParser(_FakeStructuralTagReasoningParser):
+    """Rewrites the constraint only when it was given a model_config.
+
+    This is the shipped Cohere parsers' actual contract:
+    BaseCohereCommandReasoningParser.adjust_request reads
+    ``self._model_config.architecture`` and returns the request untouched when the
+    config is absent. A fake that ignores model_config cannot tell a working call
+    from a no-op, which is how the missing kwarg went unnoticed.
+    """
+
+    def adjust_request(self, request):
+        if self._model_config is None:
+            return request
+        return super().adjust_request(request)
 
 
 class TestReasoningParserGuidanceForwarding:
@@ -1791,12 +1876,6 @@ class TestReasoningParserGuidanceForwarding:
         assert result.guided_decoding == {"json": {"type": "object"}}
 
     @pytest.mark.asyncio
-    async def test_no_reasoning_parser_keeps_the_caller_constraint(self, tokenizer):
-        result = await self._preprocess(tokenizer, reasoning_parser_class=None)
-
-        assert result.guided_decoding == {"json": {"type": "object"}}
-
-    @pytest.mark.asyncio
     async def test_thinking_disabled_does_not_recompute(self, tokenizer):
         """The gate is off, so no parser runs and nothing may be recomputed.
 
@@ -1845,6 +1924,36 @@ class TestReasoningParserGuidanceForwarding:
             request=self._request(tools=TOOL_REQUEST["tools"], tool_choice="auto"),
             tool_parser_class=_FakeAdjustRequestGrammarToolParser,
             reasoning_parser_class=_FakePassthroughReasoningParser,
+        )
+
+        assert result.guided_decoding == {"json": {"type": "object"}}
+
+    @pytest.mark.asyncio
+    async def test_model_config_reaches_the_parser(self, tokenizer):
+        """A parser that needs model_config must actually receive it.
+
+        Without it the shipped Cohere parsers return the request untouched, which
+        made the whole adjust_request() call a no-op for the only parser in vLLM
+        that overrides it.
+        """
+        result = await self._preprocess(
+            tokenizer,
+            reasoning_parser_class=_ModelConfigGatedReasoningParser,
+            model_config=SimpleNamespace(architecture="CohereForCausalLM"),
+        )
+
+        assert result.guided_decoding == {"structural_tag": '{"format": "reasoning"}'}
+
+    @pytest.mark.asyncio
+    async def test_without_model_config_the_gated_parser_is_a_no_op(self, tokenizer):
+        """The negative control: same parser, no config, caller's constraint stands.
+
+        This is the behaviour the PR shipped before model_config was threaded
+        through -- kept so the pair documents the difference.
+        """
+        result = await self._preprocess(
+            tokenizer,
+            reasoning_parser_class=_ModelConfigGatedReasoningParser,
         )
 
         assert result.guided_decoding == {"json": {"type": "object"}}

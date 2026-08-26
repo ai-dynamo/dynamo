@@ -193,6 +193,7 @@ def _build_reasoning_parser_metadata(
     chat_template_kwargs: dict[str, Any],
     request_for_sampling: Any,
     prompt_token_ids: list[int],
+    model_config: Any = None,
 ) -> _ReasoningParserMetadata:
     if reasoning_parser_class is None:
         return _ReasoningParserMetadata(None, None, None)
@@ -203,9 +204,17 @@ def _build_reasoning_parser_metadata(
     if getattr(request_for_sampling, "_grammar_from_tool_parser", False):
         return _ReasoningParserMetadata(True, True, parser_kwargs)
 
+    # Same construction as the other two sites. is_reasoning_end() does not read
+    # model_config, but constructing this one differently is exactly the drift that
+    # let the missing model_config go unnoticed at the adjust_request() site.
+    #
+    # Deliberately NOT added to parser_kwargs: that dict goes on the wire as
+    # dynamo_preproc["reasoning_parser_kwargs"], and ModelConfig is not
+    # serializable -- the worker builds its own.
     reasoning_parser = reasoning_parser_class(
         tokenizer,
         chat_template_kwargs=chat_template_kwargs,
+        model_config=model_config,
     )
     response_reasoning_ended = reasoning_parser.is_reasoning_end(prompt_token_ids)
     # include_reasoning controls response projection, not whether the model may
@@ -543,6 +552,7 @@ class VllmProcessor:
                 renderer=self.input_processor.renderer,
                 tool_parser_class=self.tool_parser_class,
                 reasoning_parser_class=self.reasoning_parser_class,
+                model_config=self.input_processor.model_config,
                 exclude_tools_when_tool_choice_none=self.exclude_tools_when_tool_choice_none,
                 enable_auto_tool_choice=self.enable_auto_tool_choice,
                 default_chat_template_kwargs=self.default_chat_template_kwargs,
@@ -645,6 +655,7 @@ class VllmProcessor:
             chat_template_kwargs,
             request_for_sampling,
             tokens,
+            self.input_processor.model_config,
         )
 
         # Convert to a Python object that has fields that match our PreprocessedRequest
@@ -746,6 +757,7 @@ class VllmProcessor:
                     tool_parser=choice_tool_parser,
                     reasoning_parser_class=self.reasoning_parser_class,
                     chat_template_kwargs=chat_template_kwargs,
+                    model_config=self.input_processor.model_config,
                     response_reasoning_ended=(
                         reasoning_metadata.response_reasoning_ended
                     ),
