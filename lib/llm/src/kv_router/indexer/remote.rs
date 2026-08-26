@@ -586,6 +586,7 @@ mod tests {
             lower_tier: LowerTierIndexers::new(1, 4),
             approx: Some(SideIndexer::KvIndexer(side)),
             primary_records_routing_decisions: false,
+            session_prefix_index: None,
         };
 
         assert_eq!(
@@ -638,6 +639,7 @@ mod tests {
             lower_tier: LowerTierIndexers::new(1, 4),
             approx: None,
             primary_records_routing_decisions: false,
+            session_prefix_index: None,
         };
 
         // Worker owns [11, 12] on device and [11, 12, 13] on host-pinned.
@@ -737,6 +739,7 @@ mod tests {
             lower_tier: LowerTierIndexers::new(1, 4),
             approx: None,
             primary_records_routing_decisions: false,
+            session_prefix_index: None,
         };
 
         indexer

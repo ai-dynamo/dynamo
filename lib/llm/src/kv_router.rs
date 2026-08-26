@@ -16,7 +16,7 @@ use dynamo_kv_router::{
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::{
         ApproximateLruIncarnation, ApproximateLruRequestId, ApproximateLruStats, KvRouterError,
-        MatchDetails, RoutingDecisionHashes,
+        RoutingDecisionHashes,
     },
     protocols::KV_EVENT_SUBJECT,
     protocols::{
@@ -565,24 +565,40 @@ where
     session_prefix_index: Option<Arc<SessionPrefixIndexer>>,
 }
 
-/// Returns the deepest device-tier match with stable hash tie-breaking.
+/// Returns the deepest match across all tiers with stable hash tie-breaking.
 /// Lineage records matched prefix depth rather than the selected worker.
-fn deepest_matched_hash(details: &MatchDetails) -> Option<ExternalSequenceBlockHash> {
-    details
+fn deepest_matched_hash(
+    details: &indexer::TieredMatchDetails,
+) -> Option<ExternalSequenceBlockHash> {
+    let device_matches = details
+        .device
         .last_matched_hashes
         .iter()
-        .max_by_key(|(worker, hash)| {
-            (
-                details
-                    .overlap_scores
-                    .scores
-                    .get(*worker)
-                    .copied()
-                    .unwrap_or(0),
-                **hash,
-            )
-        })
-        .map(|(_, hash)| *hash)
+        .map(|(worker, hash)| {
+            let depth = details
+                .device
+                .overlap_scores
+                .scores
+                .get(worker)
+                .copied()
+                .unwrap_or(0) as usize;
+            (depth, *hash)
+        });
+    let lower_tier_matches = details.lower_tier.values().flat_map(|matches| {
+        matches
+            .next_continuations
+            .values()
+            .filter_map(|continuation| {
+                continuation
+                    .last_matched_hash
+                    .map(|hash| (continuation.start_pos, hash))
+            })
+    });
+
+    device_matches
+        .chain(lower_tier_matches)
+        .max_by_key(|(depth, hash)| (*depth, *hash))
+        .map(|(_, hash)| hash)
 }
 
 fn resolve_tracking_model_name(
@@ -727,6 +743,9 @@ where
         let cancellation_token = parent_token.child_token();
         let cancellation_guard = cancellation_token.clone().drop_guard();
         let min_initial_workers = min_initial_workers_from_env()?;
+        let session_prefix_index = kv_router_config
+            .enable_session_prefix_index
+            .then(|| Arc::new(SessionPrefixIndexer::new()));
 
         let indexer = if cache_required {
             Indexer::new(
@@ -735,6 +754,7 @@ where
                 block_size,
                 model_name.as_deref(),
                 cancellation_token.child_token(),
+                session_prefix_index.clone(),
             )
             .await?
         } else {
@@ -874,10 +894,6 @@ where
         } else {
             None
         };
-
-        let session_prefix_index = kv_router_config
-            .enable_session_prefix_index
-            .then(|| Arc::new(SessionPrefixIndexer::new()));
 
         tracing::info!("KV Routing initialized");
         let cancellation_token = cancellation_guard.disarm();
@@ -1611,7 +1627,7 @@ where
         if let Some(index) = self.session_prefix_index.as_ref()
             && let Some(session) = session_context.as_ref()
         {
-            if let Some(matched_hash) = deepest_matched_hash(&tiered_matches.device)
+            if let Some(matched_hash) = deepest_matched_hash(&tiered_matches)
                 && let Err(err) =
                     index.update_session_from_match(session.session_id(), matched_hash)
             {
@@ -2355,7 +2371,7 @@ mod tests {
             CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
             RoutingScopeId, StableDpSlotId,
         },
-        indexer::{LowerTierMatchDetails, MatchDetails},
+        indexer::{LowerTierContinuation, LowerTierMatchDetails, MatchDetails},
         protocols::{
             ExternalSequenceBlockHash, OverlapScores, ResidencyOwner, ResidencyProjection,
             ResidencyRoutingSnapshot, RouterHintSourceMetadata, StorageTier,
@@ -2529,12 +2545,12 @@ mod tests {
     }
 
     #[test]
-    fn deepest_matched_hash_follows_the_largest_overlap() {
+    fn deepest_matched_hash_follows_the_largest_tiered_overlap() {
         let shallow = WorkerWithDpRank::new(1, 0);
         let deep = WorkerWithDpRank::new(2, 0);
 
         assert_eq!(
-            deepest_matched_hash(&MatchDetails::default()),
+            deepest_matched_hash(&indexer::TieredMatchDetails::default()),
             None,
             "no match means nothing to record"
         );
@@ -2542,7 +2558,7 @@ mod tests {
         let mut overlap_scores = OverlapScores::new();
         overlap_scores.scores.insert(shallow, 1);
         overlap_scores.scores.insert(deep, 4);
-        let details = MatchDetails {
+        let device = MatchDetails {
             overlap_scores,
             last_matched_hashes: [
                 (shallow, ExternalSequenceBlockHash(101)),
@@ -2552,10 +2568,19 @@ mod tests {
             .collect(),
             ..Default::default()
         };
+        let mut host = LowerTierMatchDetails::default();
+        host.next_continuations.insert(
+            deep,
+            LowerTierContinuation::new(6, ExternalSequenceBlockHash(106)),
+        );
+        let details = indexer::TieredMatchDetails {
+            device,
+            lower_tier: [(StorageTier::HostPinned, host)].into_iter().collect(),
+        };
         assert_eq!(
             deepest_matched_hash(&details),
-            Some(ExternalSequenceBlockHash(104)),
-            "the session reached as far as the best-matching worker proves it did"
+            Some(ExternalSequenceBlockHash(106)),
+            "the session reached as far as the deepest tier proves it did"
         );
     }
 
