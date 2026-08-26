@@ -190,7 +190,9 @@ engine stream
 
 The stream is pull-based end to end. `agent-rt` does not spawn a producer, create an `mpsc` token queue, parse SSE, serialize protocol events, or hold a client socket. Backpressure and disconnect cancellation propagate through Dynamo’s existing response body and engine context.
 
-For a model step with no runtime-owned tool call, typed deltas pass through with only identity/state observation. For a runtime-owned tool call, `agent-rt` consumes the completed call, durably journals and executes the tool, appends its result, and requests another typed Dynamo model stream while the same Dynamo public response writer stays open. A client-owned Codex or Claude tool call is committed as `AwaitingClientToolOutput` and returned to the client for execution; it does not create an internal model round.
+For a request that declares no runtime-routed tool, typed deltas pass through with only identity/state observation. A request using `tool_choice: auto` can reveal a runtime-owned call only after its model step has already produced deltas, and public events cannot be retracted. Dynamo therefore selects bounded per-step staging up front whenever the request declares a function routed to the runtime. The initial `response.created` and `response.in_progress` lifecycle events may pass immediately; subsequent typed events are serialized only for byte accounting and held up to the trusted `RuntimeLimits.max_staged_model_event_bytes` limit. A runtime-tool step is discarded, while the final assistant step is released only after its checkpoint commits. Crossing the bound fails the turn closed without a false terminal event. Requests without runtime-routed tools—including normal Codex and Claude client-owned tool traffic—retain direct incremental streaming.
+
+For a runtime-owned tool call, `agent-rt` consumes the completed call, durably journals and executes the tool, appends its result, and requests another typed Dynamo model stream while the same Dynamo public response writer stays open. A client-owned Codex or Claude tool call is committed as `AwaitingClientToolOutput` and returned to the client for execution; it does not create an internal model round. Each internal Dynamo model stream disarms its cancellation guard before yielding a terminal typed event, because `agent-rt` intentionally stops polling that completed step. Dropping the stream before a terminal event remains armed and cancels the active engine context. This distinguishes runtime step completion from an actual public-client disconnect without moving socket ownership into `agent-rt`.
 
 The final typed response is retained for checkpoint replay. Dynamo may emit nonterminal deltas immediately, but it must not serialize `response.completed` until the terminal checkpoint commit succeeds. The first recovery contract is live, non-resumable delivery plus idempotent retrieval of the committed final response.
 
@@ -308,12 +310,12 @@ Runtime-owned tools remain external to Dynamo:
 
 - The first connector is read-only web search with deployment-owned credentials, an allowlisted provider endpoint, timeout/concurrency limits, bounded normalized results, and citation metadata.
 - Broad MCP support is deferred. Future MCP connectors are deployment/tenant configured; clients cannot submit arbitrary server URLs or credential headers.
-- Sandboxes are a Kubernetes-native isolated execution plane with filesystem, network, identity, resource, artifact, and retention policy.
+- Sandboxes use a provider-neutral external execution contract with filesystem, network, identity, resource, artifact, and retention policy. Kubernetes Agent Sandbox is the first reference provider, not a runtime requirement.
 - Workers receive a scoped tool-execution request, not raw Dynamo headers or backend credentials.
 
 Before dispatch, `agent-rt` writes a durable tool journal record keyed by response, tool-call ID, execution/idempotency key, and attempt. A `started` record alone cannot prove a side effect did not occur. Auto-retry is permitted only when the executor supports durable idempotency plus outcome lookup, or the tool is explicitly read-only/idempotent. Otherwise recovery transitions to `OutcomeUnknown` and follows a documented resolution policy.
 
-### Kubernetes-Native Sandbox Plane
+### Sandbox Plane and Kubernetes Reference Provider
 
 `agent-rt` invokes a generic `ToolExecutor`; it never creates Pods, calls `pods/exec`, mounts volumes, or manages sandbox credentials. The sandbox implementation is a separate service with a durable execution API:
 
@@ -326,6 +328,8 @@ agent-rt ToolExecutor
           -> AgentENV/E2B provider (future)
           -> Modal provider (external deployment option)
 ```
+
+Kubernetes is one `SandboxProvider` implementation. The frontend always stops at the authenticated provider contract: Dynamo and `agent-rt` do not depend on Kubernetes APIs or types. A deployment can replace the executor service with a Modal-compatible implementation, or assemble Agent Substrate, AgentENV, or another provider behind the same service contract. The isolation acceptance requirements below are therefore requirements for shipping the Kubernetes provider, not blockers for the provider abstraction or non-Kubernetes implementations.
 
 The Kubernetes reference provider targets the Kubernetes SIG Apps Agent Sandbox APIs: `SandboxTemplate` defines an operator-approved image and security policy, `SandboxWarmPool` bounds prewarmed capacity, and a tenant-scoped `SandboxClaim` obtains one stable sandbox. Agent Sandbox is the Kubernetes lifecycle/control plane; it does not itself provide the container-isolation boundary. The template therefore selects an operator-allowlisted `RuntimeClass`: gVisor by default and Kata Containers when VM-grade isolation is required.
 
@@ -358,7 +362,7 @@ Every reference template is fail-closed:
 
 The operator catalog is the capability boundary. It maps authenticated tenant IDs to namespaces and trusted profile names to warm pools, allowed executable, workspace TTL, and maximum timeout/output/artifact sizes. Client and model payloads can only reduce these ceilings. Claim metadata uses the upstream allowlisted `sandbox.users.io` label domain and a non-propagated workspace fingerprint annotation; callers cannot forge system selector labels.
 
-The local Kind overlay is deliberately an orchestration proof, not an isolation certification. It validates service authentication, PostgreSQL durability, claim/warm-pool binding, sandboxd execution, idempotent lookup, artifact recovery, cancellation, foreground cleanup, and pool replenishment. It removes gVisor because the stock Kind node does not provide that RuntimeClass, and stock Kind networking must not be treated as proof that NetworkPolicy is enforced. Production acceptance therefore requires a cluster with an enforcing CNI plus the selected gVisor/Kata RuntimeClass and negative tests for host escape, cross-tenant/internal/metadata egress, resource exhaustion, cancellation, and cleanup.
+The local Kind overlay is deliberately an orchestration proof, not an isolation certification. It validates service authentication, PostgreSQL durability, claim/warm-pool binding, sandboxd execution, idempotent lookup, artifact recovery, cancellation, foreground cleanup, and pool replenishment. It removes gVisor because the stock Kind node does not provide that RuntimeClass, and stock Kind networking must not be treated as proof that NetworkPolicy is enforced. Shipping this Kubernetes provider for untrusted production execution therefore requires a cluster with an enforcing CNI plus the selected gVisor/Kata RuntimeClass and negative tests for host escape, cross-tenant/internal/metadata egress, resource exhaustion, cancellation, and cleanup. Those checks do not apply to a hosted provider such as Modal; that provider needs its own threat-model and acceptance suite.
 
 Provider assessment:
 
@@ -441,13 +445,18 @@ Implemented:
 - DuckDB and PostgreSQL implement checkpoint and tool-journal contracts with their intended single-process versus multi-replica guarantees; PostgreSQL integration tests exercise two independent store clients and stale-owner fencing.
 - Brave web search runs through the durable tool loop with a deployment-owned credential, read-only recovery, timeout/concurrency/output limits, and normalized results.
 - The authenticated external sandbox service, PostgreSQL execution store, Kubernetes Agent Sandbox provider, sandboxd adapter, hardened base manifests, images, and disposable Kind proof are implemented. Kind currently proves execution, lookup, artifacts, cancellation, and cleanup—not gVisor/Kata or CNI isolation.
+- Qwen3.8-27B-FP8 on `try6767` completed a two-step runtime-owned Python call through Dynamo and the local Kubernetes provider. The public stream exposed only lifecycle plus final assistant events; PostgreSQL independently recorded `42\n` and the 16-byte `model-proof.txt` artifact. The exact replay returned the same response ID in 26 ms without another sandbox execution.
+- A post-fix `codex exec` client-owned shell round trip completed through the same Dynamo frontend, and a forced 352 ms client timeout was recorded as cancellation while all normally completed internal steps were recorded as success. After replacing the frontend process, replay of a pre-restart key returned the original response ID in 24 ms without inference or sandbox execution.
 
-Remaining acceptance work, in order:
+Remaining cross-provider acceptance work, in order:
 
-1. Run the production sandbox manifest on an enforcing-CNI cluster with gVisor and, where required, Kata; execute the negative isolation/network/resource suite.
-2. Run the full Dynamo Responses path against the local sandbox service so a model emits the trusted Python tool, receives its normalized result, and completes a second inference step.
-3. Validate the same stream/tool path with Codex against Qwen3.8-27B-FP8 on `try6767`, including TTFT, disconnect cancellation, restart recovery, idempotent replay, and commit-failure-without-false-completion.
-4. Exercise one live Brave request when deployment credentials are available.
+1. Add a deployment-level checkpoint-store failure injector if live fault testing beyond the deterministic runtime contract test is required; `agent-rt` already proves that an injected terminal commit failure releases neither staged deltas nor `response.completed`.
+2. Exercise one live Brave request when deployment credentials are available.
+
+Kubernetes-provider-specific acceptance, which does not block other `SandboxProvider` implementations:
+
+1. Run the production manifest on an enforcing-CNI cluster with gVisor and, where required, Kata.
+2. Execute the negative host-escape, cross-tenant/internal/metadata-egress, resource-exhaustion, cancellation, and cleanup suite.
 
 ### Phase 2: Dynamo GAIE/EPP path
 
@@ -474,7 +483,7 @@ Remaining acceptance work, in order:
 - No bearer tokens, arbitrary inbound headers, tool credentials, or raw traces enter checkpoint storage.
 - DuckDB survives process restart in a single-process deployment; PostgreSQL prevents stale-owner commits and duplicate inference across two frontend replicas.
 - A real web-search call executes server-side, is journaled, feeds a second Dynamo model step, and recovers without blind redispatch.
-- A Kubernetes-native sandbox execution is tenant-scoped, deny-network by default, bounded, cancellable, lookup-safe by execution ID, and cleaned up deterministically.
+- The Kubernetes sandbox provider is tenant-scoped, deny-network by default, bounded, cancellable, lookup-safe by execution ID, and cleaned up deterministically; other providers satisfy the same behavioral contract with provider-specific isolation evidence.
 - The same direct POC works against all engines already configured behind Dynamo without agent-runtime engine code.
 
 ## Open Decisions
