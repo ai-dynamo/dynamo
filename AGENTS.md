@@ -152,11 +152,40 @@ Sibling repositories this repo integrates with:
 | `components/src/dynamo/` | Python packages: `frontend`, `planner`, `router`, `vllm`/`sglang`/`trtllm` backends, `mocker`, `profiler`, and more |
 | `deploy/` | Kubernetes `operator`, Helm charts, `inference-gateway` ext-proc, `observability` |
 | `container/` | Dockerfiles and build scripts for runtime and dev images |
-| `docs/`, `fern/` | Documentation sources and the Fern docs-site config — read [`docs/AGENTS.md`](docs/fern/AGENTS.md) before editing |
-| `examples/`, `recipes/` | Runnable examples and deployment recipes — also covered by [`docs/AGENTS.md`](docs/fern/AGENTS.md) |
+| `docs/`, `fern/` | Documentation sources and the Fern docs-site config — read [`docs/fern/AGENTS.md`](docs/fern/AGENTS.md) before editing |
+| `examples/`, `recipes/` | Runnable examples and deployment recipes — also covered by [`docs/fern/AGENTS.md`](docs/fern/AGENTS.md) |
 | `benchmarks/`, `tests/` | Benchmark harnesses and the top-level pytest suite |
 | `.ai/` | Agent topic guidelines: `bash-launch-guidelines.md`, `ci-guidelines.md`, `linear-ticket-refs.md`, `pytest-guidelines.md`, `python-guidelines.md`, `test-model-size-guardrails.md` |
 | `.agents/skills/` | Agent skills (see [Skills](#skills)) |
+
+## Component guides
+
+This file is the whole-repository view. Each major tier carries its own agent
+guide with the crate or package map and the rules that are local to it, and many
+individual crates and modules nest a further one inside that. Read the guide for
+the tier you are working in rather than inferring its layout from here:
+
+| Tier | Guide |
+|------|-------|
+| Rust workspace | [`lib/AGENTS.md`](lib/AGENTS.md), and [`lib/runtime/AGENTS.md`](lib/runtime/AGENTS.md) for the runtime crate |
+| Python components | [`components/src/dynamo/AGENTS.md`](components/src/dynamo/AGENTS.md) |
+| Kubernetes | [`deploy/AGENTS.md`](deploy/AGENTS.md), and [`deploy/operator/AGENTS.md`](deploy/operator/AGENTS.md) for the operator |
+| Docs, examples, recipes | [`docs/fern/AGENTS.md`](docs/fern/AGENTS.md), [`recipes/AGENTS.md`](recipes/AGENTS.md) |
+
+Agents read every `AGENTS.md` and `CLAUDE.md` on the path they descend. When a
+nested file and a broader one both apply, the nested one wins.
+
+## Concepts
+
+The architecture is documented once, under
+[`docs/fern/pages/developer-guide/knowledge-base/`](docs/fern/pages/developer-guide/knowledge-base/).
+Read it there rather than reconstructing it from source:
+
+- [Architecture flow](docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/architecture-flow.md) — what happens to a request, end to end
+- [Distributed runtime](docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/distributed-runtime.md) — the runtime/namespace/component/endpoint model
+- [Disaggregated serving](docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md) — splitting prefill from decode
+- [Routing concepts](docs/fern/pages/developer-guide/knowledge-base/modular-components/router/routing-concepts.md) — KV-aware routing
+- [KVBM overview](docs/fern/pages/developer-guide/knowledge-base/modular-components/kvbm/overview.md) — multi-tier KV cache management
 
 ## Build
 
@@ -229,7 +258,7 @@ See [`docs/contribution-guide.md`](docs/fern/pages/community/contributing/overvi
 ## Docs, Examples, Recipes
 
 Any change under `docs/`, `examples/`, or `recipes/` must follow
-[`docs/AGENTS.md`](docs/fern/AGENTS.md) and the
+[`docs/fern/AGENTS.md`](docs/fern/AGENTS.md) and the
 [documentation style guide](docs/fern/pages/community/contributing/documentation/documentation-style-guide.md): SPDX headers, Fern
 frontmatter (no body `# H1`), GitHub-style admonitions, and backend casing
 (vLLM / SGLang / TensorRT-LLM). The deterministic subset is enforced pre-merge.
