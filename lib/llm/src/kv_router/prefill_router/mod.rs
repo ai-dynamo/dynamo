@@ -126,24 +126,16 @@ fn extract_bootstrap_info(params: &serde_json::Value) -> Option<BootstrapInfo> {
     })
 }
 
-/// Build the decode leg's KV handoff for a prefill worker running vLLM's
-/// `NixlPushConnector`, from the coordinates it published to discovery.
+/// Build the decode leg's KV handoff from the coordinates a `NixlPushConnector`
+/// prefill worker published to discovery.
 ///
-/// This is the whole reason push mode can overlap the two legs: the payload
-/// names the prefill engine, and everything else the transfer needs (which
-/// blocks, and where they land) is negotiated worker-to-worker over NIXL rather
-/// than relayed through the frontend. Pull mode cannot do this -- its handoff
-/// carries `remote_block_ids`, which do not exist until prefill has run.
+/// This is why push mode can overlap: the payload only names the prefill
+/// engine, and the rest -- which blocks, where they land -- is negotiated
+/// worker-to-worker over NIXL. Pull mode cannot, since its handoff carries
+/// `remote_block_ids`, which do not exist until prefill has run.
 ///
-/// Shaped as the `kv_transfer_params` the vLLM backend forwards straight into
-/// the engine. Only a vLLM worker configured for push mode publishes these
-/// coordinates, so no other backend can reach this path.
-///
-/// `request_id` identifies the request on the prefill worker, which decode
-/// echoes back in its heartbeats so prefill knows the blocks are still wanted.
-/// Both legs run under this same id (each is dispatched with the frontend's
-/// context id), so it names the prefill-side request without a second lookup.
-/// vLLM reads it unconditionally as `remote_request_id`.
+/// Both legs are dispatched under the frontend's context id, so `request_id`
+/// names the prefill-side request that decode echoes back in its heartbeats.
 fn nixl_push_handoff(endpoint: &NixlPushEndpoint, request_id: &str) -> PrefillResult {
     PrefillResult {
         disaggregated_params: serde_json::json!({
@@ -675,6 +667,10 @@ where
         let disaggregated_endpoint = self
             .model_manager
             .get_disaggregated_endpoint(endpoint_id, worker_id);
+        // Built unconditionally, but `bootstrap_info` takes precedence at
+        // dispatch. No worker advertises both -- bootstrap is SGLang, push is
+        // vLLM -- so this is a discarded allocation only in a configuration
+        // that does not exist.
         let push_handoff = push_handoff_for(
             request,
             disaggregated_endpoint
@@ -1086,8 +1082,12 @@ mod tests {
         assert!(push_handoff_for(&multimodal_request(), None, "req-42").is_none());
     }
 
-    /// vLLM matches these keys by name off `kv_transfer_params`, so the shape
-    /// is a wire contract with the engine, not an internal detail.
+    /// A wire contract with vLLM, not an internal detail. Asserted whole
+    /// because both presence and absence matter:
+    /// `NixlConnectorMetadata::add_new_req_to_recv` indexes these keys rather
+    /// than `.get()`-ing them, so a missing one kills the decode engine with a
+    /// `KeyError` mid-step; and `remote_block_ids` must stay absent, since
+    /// vLLM's push scheduler seeds it itself once decode has allocated.
     #[test]
     fn nixl_push_handoff_names_the_prefill_engine() {
         let handoff = nixl_push_handoff(&push_endpoint(), "req-42");
@@ -1107,42 +1107,6 @@ mod tests {
                 }
             })
         );
-    }
-
-    /// `NixlConnectorMetadata::add_new_req_to_recv` indexes these keys directly
-    /// rather than `.get()`-ing them, so a missing one kills the decode engine
-    /// with a `KeyError` mid-step instead of failing the request.
-    #[test]
-    fn nixl_push_handoff_carries_every_key_vllm_indexes() {
-        let handoff = nixl_push_handoff(&push_endpoint(), "req-42");
-
-        let params = handoff.disaggregated_params["kv_transfer_params"]
-            .as_object()
-            .expect("kv_transfer_params is an object");
-        // `remote_block_ids` is the one exception: vLLM's push scheduler seeds
-        // it itself in `update_state_after_alloc`, because decode allocates the
-        // blocks it will receive into.
-        for key in [
-            "remote_engine_id",
-            "remote_request_id",
-            "remote_host",
-            "remote_port",
-        ] {
-            assert!(params.contains_key(key), "missing {key}");
-        }
-    }
-
-    /// Push mode's decode leg allocates its own blocks and tells the prefill
-    /// worker where they are. Sending `remote_block_ids` would be pull mode's
-    /// contract, and the ids do not exist yet in any case.
-    #[test]
-    fn nixl_push_handoff_omits_pull_mode_block_ids() {
-        let handoff = nixl_push_handoff(&push_endpoint(), "req-42");
-
-        let params = handoff.disaggregated_params["kv_transfer_params"]
-            .as_object()
-            .expect("kv_transfer_params is an object");
-        assert!(!params.contains_key("remote_block_ids"));
     }
 
     /// Prefill has not run when this handoff is built, so there is no usage

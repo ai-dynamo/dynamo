@@ -3,18 +3,14 @@
 
 """Discovery advertisement for vLLM's push-mode NIXL KV connector.
 
-Pull mode keeps the prefill engine's NIXL coordinates private: the decode
-worker learns them from the prefill response and then READs. Push mode
-inverts the transfer -- decode registers its freshly allocated blocks with
-prefill, which WRITEs into them -- so decode has to be able to name the
-prefill engine *before* prefill has produced anything. Publishing the
-coordinates to discovery is what lets the frontend dispatch both legs at
-once, which is the entire performance argument for push mode.
+Push mode inverts the transfer -- decode registers its blocks and prefill
+WRITEs into them -- so decode must be able to name the prefill engine before
+prefill has produced anything. Publishing these coordinates is what lets the
+frontend dispatch both legs at once.
 
-Advertising is optional in the strict sense: without it the frontend falls
-back to the sequential handoff, where the prefill worker holds its finished
-blocks until decode's late registration arrives. That is correct but forfeits
-the overlap, so the cases below that decline to advertise log why.
+Advertising is optional: without it the frontend falls back to the sequential
+handoff, which is correct but forfeits the overlap. The paths below that
+decline log why.
 """
 
 from __future__ import annotations
@@ -34,13 +30,11 @@ logger = logging.getLogger(__name__)
 
 
 def _side_channel_endpoint(vllm_config: VllmConfig) -> Optional[tuple[str, int]]:
-    """Mirror how vLLM's NIXL scheduler derives its own listening address.
+    """Mirror ``NixlBaseConnectorScheduler.__init__``: host verbatim from the
+    env var, port offset by the data-parallel index.
 
-    See ``NixlBaseConnectorScheduler.__init__``: the host is the env var
-    verbatim, and the port is the configured base offset by the engine's
-    data-parallel index. Recomputing it here rather than reading it back off
-    the connector is deliberate -- the connector is constructed inside the
-    engine core process and is not reachable from registration.
+    Recomputed rather than read back off the connector, which is constructed
+    inside the engine core process and unreachable from registration.
     """
     host = vllm_envs.VLLM_NIXL_SIDE_CHANNEL_HOST
     if not host:
@@ -53,17 +47,13 @@ def _side_channel_endpoint(vllm_config: VllmConfig) -> Optional[tuple[str, int]]
 
 
 def _nixl_agent_engine_id(engine_id: Any, parallel_config: Any) -> str:
-    """Mirror how vLLM names the NIXL agent for this engine.
+    """Mirror how vLLM names the NIXL agent: ``kv_transfer_config.engine_id``
+    is only the base identity, rewritten per rank to ``<base>_dp<rank>`` when
+    the engine is data-parallel (``EngineCoreProc.run_engine_core``). A dense
+    engine -- TP and TEP with one DP rank included -- keeps it unsuffixed.
 
-    ``kv_transfer_config.engine_id`` is only the *base* identity. When the
-    engine is data-parallel, vLLM rewrites it per rank as it spawns the engine
-    core (``EngineCoreProc.run_engine_core``, and the Ray actor manager does
-    the same), so the agent decode has to name is ``<base>_dp<rank>``. A dense
-    engine keeps the base ID unsuffixed -- TP and TEP with one DP rank included.
-
-    Getting this wrong in either direction is silent: the peer rejects the
-    handshake with "Remote NIXL agent engine ID mismatch" and the transfer
-    falls back rather than failing loudly.
+    Wrong in either direction is silent: the peer rejects the handshake with
+    "Remote NIXL agent engine ID mismatch" and the transfer falls back.
     """
     is_data_parallel = (
         parallel_config.data_parallel_size > 1

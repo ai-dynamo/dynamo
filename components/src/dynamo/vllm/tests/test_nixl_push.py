@@ -63,6 +63,11 @@ def side_channel(monkeypatch):
 
 
 def test_publishes_engine_id_and_side_channel_for_push_prefill(side_channel):
+    """A dense engine keeps vLLM's base engine ID: it only rewrites
+    ``engine_id`` when ``data_parallel_size > 1 or dp_rank > 0``. Advertising
+    ``_dp0`` for a TP/TEP engine names an agent that does not exist and every
+    handshake is rejected with "Remote NIXL agent engine ID mismatch".
+    """
     runtime_config = MagicMock()
 
     assert (
@@ -76,19 +81,23 @@ def test_publishes_engine_id_and_side_channel_for_push_prefill(side_channel):
     )
 
 
-def test_port_is_offset_by_data_parallel_index(side_channel):
-    """vLLM gives each DP rank its own side channel at base + index; publishing
-    the base for a non-zero rank would point decode at the wrong engine."""
+def test_nonzero_dp_rank_suffixes_engine_id_and_offsets_port(side_channel):
+    """External load balancing hands a worker rank N with a local size of one.
+    vLLM still suffixes (its guard is ``size > 1 or rank > 0``) and still gives
+    the rank its own side channel at base + index; publishing the base for
+    either would point decode at an engine that does not exist.
+    """
     runtime_config = MagicMock()
 
     publish_nixl_push_endpoint(
         runtime_config,
-        _vllm_config(data_parallel_index=3),
+        _vllm_config(data_parallel_size=1, data_parallel_index=3),
         WorkerType.Prefill,
         (3, 1),
     )
 
-    _, _, port, _, _ = runtime_config.set_nixl_push_endpoint.call_args.args
+    engine_id, _, port, _, _ = runtime_config.set_nixl_push_endpoint.call_args.args
+    assert engine_id == "prefill-engine-001_dp3"
     assert port == 5603
 
 
@@ -222,27 +231,6 @@ def test_declines_when_engine_id_is_missing(side_channel, caplog):
     assert "engine_id" in caplog.text
 
 
-def test_dense_engine_advertises_the_unsuffixed_engine_id(side_channel):
-    """TP/TEP with a single DP rank keeps vLLM's base engine ID.
-
-    vLLM only rewrites ``engine_id`` when ``data_parallel_size > 1 or
-    dp_rank > 0`` (``EngineCoreProc.run_engine_core``). Advertising ``_dp0``
-    for a dense TEP engine names an agent that does not exist, and every push
-    handshake is rejected with "Remote NIXL agent engine ID mismatch".
-    """
-    runtime_config = MagicMock()
-
-    publish_nixl_push_endpoint(
-        runtime_config,
-        _vllm_config(data_parallel_size=1, data_parallel_index=0),
-        WorkerType.Prefill,
-        (0, 1),
-    )
-
-    engine_id = runtime_config.set_nixl_push_endpoint.call_args.args[0]
-    assert engine_id == "prefill-engine-001"
-
-
 def test_data_parallel_engine_advertises_the_dp_suffixed_engine_id(side_channel):
     """Each DP rank gets its own NIXL agent named ``<base>_dp<global_rank>``."""
     runtime_config = MagicMock()
@@ -257,22 +245,6 @@ def test_data_parallel_engine_advertises_the_dp_suffixed_engine_id(side_channel)
     engine_id, _, port, _, _ = runtime_config.set_nixl_push_endpoint.call_args.args
     assert engine_id == "prefill-engine-001_dp2"
     assert port == 5602
-
-
-def test_nonzero_dp_index_is_suffixed_even_when_size_is_one(side_channel):
-    """External load balancing can hand a worker rank N with a local size of
-    one; vLLM still suffixes, because its guard is ``size > 1 or rank > 0``."""
-    runtime_config = MagicMock()
-
-    publish_nixl_push_endpoint(
-        runtime_config,
-        _vllm_config(data_parallel_size=1, data_parallel_index=3),
-        WorkerType.Prefill,
-        (3, 1),
-    )
-
-    engine_id = runtime_config.set_nixl_push_endpoint.call_args.args[0]
-    assert engine_id == "prefill-engine-001_dp3"
 
 
 def test_declines_when_dynamo_range_disagrees_with_vllm_rank(side_channel, caplog):

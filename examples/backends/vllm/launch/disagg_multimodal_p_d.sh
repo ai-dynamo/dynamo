@@ -20,11 +20,7 @@ WORKER_MODULE="dynamo.vllm"
 # Default values
 MODEL_NAME="Qwen/Qwen3-VL-2B-Instruct"
 SINGLE_GPU=false
-# Pull mode by default. Push mode inverts the transfer -- decode registers its
-# blocks and prefill WRITEs into them -- which lets the router dispatch both
-# legs at once. A multimodal request cannot take that overlap (decode needs
-# embedding metadata only prefill can produce), so this flag exercises the
-# fallback to the sequential handoff.
+# --kv-push selects the push connector; see the vLLM reference guide.
 KV_CONNECTOR="NixlConnector"
 
 # Parse command line arguments
