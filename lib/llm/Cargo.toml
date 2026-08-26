@@ -59,6 +59,11 @@ name = "transfer_context_v2"
 harness = false
 required-features = ["block-manager", "testing-cuda"]
 
+[[test]]
+name = "agent_runtime_mcp_http"
+path = "tests/agent_runtime_mcp_http.rs"
+required-features = ["agent-rt-poc"]
+
 [[bench]]
 name = "kv_router_bench"
 harness = false
