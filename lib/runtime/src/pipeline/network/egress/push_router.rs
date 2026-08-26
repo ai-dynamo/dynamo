@@ -337,6 +337,24 @@ impl SinkEntry {
     }
 }
 
+async fn fan_out_removed(sinks: Vec<Arc<SinkEntry>>, id: &EndpointInstanceId) {
+    futures::future::join_all(
+        sinks
+            .into_iter()
+            .map(|sink| async move { sink.on_instance_removed(id).await }),
+    )
+    .await;
+}
+
+async fn fan_out_added(sinks: Vec<Arc<SinkEntry>>, id: &EndpointInstanceId) {
+    futures::future::join_all(
+        sinks
+            .into_iter()
+            .map(|sink| async move { sink.on_instance_added(id).await }),
+    )
+    .await;
+}
+
 #[async_trait]
 impl<T, U> LifecycleSink for DispatchSink<T, U>
 where
@@ -583,9 +601,7 @@ fn spawn_endpoint_watcher_task(
                                 instance_id = eid.instance_id,
                                 "Instance disappeared while the discovery watch was down"
                             );
-                            for sink in watcher.sinks() {
-                                sink.on_instance_removed(&eid).await;
-                            }
+                            fan_out_removed(watcher.sinks(), &eid).await;
                         }
                     }
                     Err(e) => {
@@ -605,17 +621,13 @@ fn spawn_endpoint_watcher_task(
                             Some(Ok(DiscoveryEvent::Removed(id))) => {
                                 if let DiscoveryInstanceId::Endpoint(eid) = &id {
                                     watcher.record_removed(eid);
-                                    for sink in watcher.sinks() {
-                                        sink.on_instance_removed(eid).await;
-                                    }
+                                    fan_out_removed(watcher.sinks(), eid).await;
                                 }
                             }
                             Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)))) => {
                                 let eid: EndpointInstanceId = inst.endpoint_instance_id();
                                 watcher.record_added(&eid);
-                                for sink in watcher.sinks() {
-                                    sink.on_instance_added(&eid).await;
-                                }
+                                fan_out_added(watcher.sinks(), &eid).await;
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
