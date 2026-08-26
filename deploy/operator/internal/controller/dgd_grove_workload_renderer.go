@@ -164,11 +164,14 @@ func applyGroveWorkerHashSuffix(
 	if err != nil {
 		return fmt.Errorf("compute Grove worker hash suffix: %w", err)
 	}
+	rolloutCohortRouting := rolloutCohortRoutingEnabled(renderDeployment)
+
 	for i := range renderDeployment.Spec.Components {
 		component := &renderDeployment.Spec.Components[i]
+		// Select every worker plus the frontend that routes to this worker cohort.
 		isWorker := dynamo.IsWorkerComponent(string(component.ComponentType))
 		isCohortFrontend := component.ComponentType == nvidiacomv1beta1.ComponentTypeFrontend &&
-			rolloutCohortRoutingEnabled(renderDeployment)
+			rolloutCohortRouting
 		if !isWorker && !isCohortFrontend {
 			continue
 		}
@@ -179,6 +182,12 @@ func applyGroveWorkerHashSuffix(
 			component.PodTemplate.Labels = make(map[string]string)
 		}
 		component.PodTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
+		if rolloutCohortRouting {
+			if component.PodTemplate.Annotations == nil {
+				component.PodTemplate.Annotations = make(map[string]string)
+			}
+			component.PodTemplate.Annotations[commonconsts.KubeAnnotationRolloutCohortRouting] = commonconsts.KubeLabelValueTrue
+		}
 	}
 	return nil
 }

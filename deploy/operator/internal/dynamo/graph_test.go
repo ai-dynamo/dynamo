@@ -9492,7 +9492,7 @@ func TestGenerateComponentContext_WorkerHashSuffix(t *testing.T) {
 	compCtxLegacy := generateComponentContext(betaComponent(t, componentLegacy), "dgd", "ns", 1, DiscoveryContext{Backend: "kubernetes", Mode: configv1alpha1.KubeDiscoveryModePod})
 	assert.Equal(t, commonconsts.LegacyWorkerHash, compCtxLegacy.WorkerHashSuffix)
 
-	// A frontend stamped with the worker hash belongs to the same rollout cohort.
+	t.Log("Verify a frontend stamped with the worker hash joins the rollout cohort")
 	component3 := &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		ComponentType: commonconsts.ComponentTypeFrontend,
 		Labels:        map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"},
@@ -9552,6 +9552,7 @@ func TestFrontendDefaults_NamespacePrefixEnvVar(t *testing.T) {
 }
 
 func TestFrontendDefaults_RolloutCohortNamespace(t *testing.T) {
+	t.Log("Build frontend defaults for an enabled worker-hash cohort")
 	f := NewFrontendDefaults()
 	container, err := f.GetBaseContainer(ComponentContext{
 		DynamoNamespace:      "myns-mydgd",
@@ -9561,6 +9562,7 @@ func TestFrontendDefaults_RolloutCohortNamespace(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	t.Log("Verify exact namespace discovery replaces prefix discovery")
 	foundNamespace := false
 	for _, env := range container.Env {
 		assert.NotEqual(t, commonconsts.DynamoNamespacePrefixEnvVar, env.Name,
@@ -9609,6 +9611,15 @@ func envVarsToMap(envs []corev1.EnvVar) map[string]string {
 		out[env.Name] = env.Value
 	}
 	return out
+}
+
+func assertEnvVarsAbsent(t *testing.T, envs []corev1.EnvVar, absentNames ...string) {
+	t.Helper()
+	for _, absentName := range absentNames {
+		for _, env := range envs {
+			assert.NotEqual(t, absentName, env.Name, "env var %s must be absent", absentName)
+		}
+	}
 }
 
 func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
@@ -9892,11 +9903,7 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 					assert.Equal(t, v, envVars[k], "sidecar env var %s", k)
 				}
 			}
-			for _, absentName := range tt.wantSidecarEnvAbsent {
-				for _, env := range sidecar.Env {
-					assert.NotEqual(t, absentName, env.Name, "sidecar env var %s must be absent", absentName)
-				}
-			}
+			assertEnvVarsAbsent(t, sidecar.Env, tt.wantSidecarEnvAbsent...)
 
 			if tt.wantSidecarEnvFrom > 0 {
 				assert.Equal(t, tt.wantSidecarEnvFrom, len(sidecar.EnvFrom), "sidecar envFrom count")

@@ -260,6 +260,11 @@ func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {
 				require.NoError(t, err)
 				require.NotNil(t, worker.PodTemplate)
 				assert.Equal(t, wantHash, worker.PodTemplate.Labels[consts.KubeLabelDynamoWorkerHash])
+				if tt.rolloutCohortRouting {
+					assert.Equal(t, consts.KubeLabelValueTrue, worker.PodTemplate.Annotations[consts.KubeAnnotationRolloutCohortRouting])
+				} else {
+					assert.NotContains(t, worker.PodTemplate.Annotations, consts.KubeAnnotationRolloutCohortRouting)
+				}
 			} else {
 				assert.Nil(t, worker.PodTemplate)
 			}
@@ -268,6 +273,10 @@ func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {
 				require.NoError(t, err)
 				require.NotNil(t, frontend.PodTemplate)
 				assert.Equal(t, wantHash, frontend.PodTemplate.Labels[consts.KubeLabelDynamoWorkerHash])
+				assert.Equal(t, consts.KubeLabelValueTrue, frontend.PodTemplate.Annotations[consts.KubeAnnotationRolloutCohortRouting])
+
+				t.Log("Verify the DGD annotation produces exact frontend discovery in the final Grove PodSpec")
+				assertGroveCohortFrontendEnv(t, rendered, wantHash)
 			} else {
 				assert.Nil(t, frontend.PodTemplate)
 			}
@@ -275,6 +284,47 @@ func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {
 			assert.Nil(t, dgd.GetComponentByName("frontend").PodTemplate)
 		})
 	}
+}
+
+func assertGroveCohortFrontendEnv(t *testing.T, dgd *nvidiacomv1beta1.DynamoGraphDeployment, workerHash string) {
+	t.Helper()
+	pcs, err := dynamo.GenerateGrovePodCliqueSet(
+		context.Background(),
+		dgd,
+		&configv1alpha1.OperatorConfiguration{},
+		&commonController.RuntimeConfig{},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+
+	var frontend *grovev1alpha1.PodCliqueTemplateSpec
+	for _, clique := range pcs.Spec.Template.Cliques {
+		if clique.Labels[consts.KubeLabelDynamoComponent] == "frontend" {
+			frontend = clique
+			break
+		}
+	}
+	require.NotNil(t, frontend)
+
+	var main *corev1.Container
+	for i := range frontend.Spec.PodSpec.Containers {
+		if frontend.Spec.PodSpec.Containers[i].Name == consts.MainContainerName {
+			main = &frontend.Spec.PodSpec.Containers[i]
+			break
+		}
+	}
+	require.NotNil(t, main)
+
+	envs := make(map[string]string, len(main.Env))
+	for _, env := range main.Env {
+		envs[env.Name] = env.Value
+	}
+	assert.Equal(t, "default-test-dgd-"+workerHash, envs[consts.DynamoNamespaceEnvVar])
+	assert.NotContains(t, envs, consts.DynamoNamespacePrefixEnvVar)
 }
 
 func TestShouldTriggerRollingUpdate(t *testing.T) {
