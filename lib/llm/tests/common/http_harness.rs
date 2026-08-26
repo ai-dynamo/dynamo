@@ -14,6 +14,7 @@ use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::protocols::codec::create_message_stream;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use dynamo_runtime::CancellationToken;
+use dynamo_runtime::error::DynamoError;
 use futures::StreamExt;
 use serde::Serialize;
 use serde_json::Value;
@@ -51,6 +52,14 @@ impl HarnessService {
     pub async fn start_with_gated_tail(script: Script, split_at: usize) -> (Self, ScriptGate) {
         let (engine, gate) = ScriptedChatEngine::with_gated_tail(script, split_at);
         (Self::start_with_engine(Arc::new(engine)).await, gate)
+    }
+
+    #[allow(dead_code)]
+    pub async fn start_with_backend_error(chunks: Script, error: DynamoError) -> Self {
+        Self::start_with_engine(Arc::new(ScriptedChatEngine::with_backend_error(
+            chunks, error,
+        )))
+        .await
     }
 
     async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
