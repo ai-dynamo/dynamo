@@ -5,8 +5,9 @@
 
 vLLM and TRT-LLM expose logprobs through ``CompletionOutput.logprobs``
 (list aligned with ``token_ids``, dicts of ``token_id -> LogprobInfo``).
-SGLang exposes them through ``meta_info["output_token_logprobs"]`` as
-incremental tuples ``(logprob, token_id, text_or_None)``.
+SGLang exposes them through ``meta_info["output_token_logprobs"]`` as tuples
+``(logprob, token_id, text_or_None)``. Depending on the SGLang release, the
+arrays are cumulative or aligned with the current incremental output chunk.
 
 Both paths emit the same Dynamo wire format on ``GenerateChunk``:
 ``log_probs`` is a flat ``list[float]``, ``top_logprobs`` is
@@ -313,33 +314,47 @@ def build_sglang_logprob_kwargs(
 
 def extract_from_sglang_meta(
     meta_info: dict[str, Any],
+    num_output_logprobs_so_far: int = 0,
     *,
     num_output_tokens_in_chunk: Optional[int] = None,
     return_tokens_as_token_ids: bool = False,
-) -> tuple[Optional[list[float]], Optional[list[list[dict[str, Any]]]]]:
-    """Extract logprobs from SGLang's ``meta_info`` dict.
+) -> tuple[Optional[list[float]], Optional[list[list[dict[str, Any]]]], int]:
+    """Extract logprobs from SGLang ``meta_info`` across stream shapes.
 
-    The pinned SGLang release and its N-1 predecessor align
-    ``output_token_logprobs`` and ``output_top_logprobs`` with each incremental
-    ``output_ids`` chunk. When provided, ``num_output_tokens_in_chunk`` keeps
-    malformed trailing metadata out of Dynamo's response.
+    Some SGLang releases emit cumulative logprob metadata, while others emit
+    metadata aligned with only the current disjoint ``output_ids`` chunk. The
+    caller supplies both its running count and current chunk length so this
+    helper can preserve compatibility with both forms.
     """
     output_token_logprobs = meta_info.get("output_token_logprobs")
     if not output_token_logprobs:
-        return None, None
+        return None, None, num_output_logprobs_so_far
 
-    new_logprobs = output_token_logprobs
-    if num_output_tokens_in_chunk is not None:
-        new_logprobs = new_logprobs[:num_output_tokens_in_chunk]
+    per_chunk = (
+        num_output_tokens_in_chunk is not None
+        and len(output_token_logprobs) <= num_output_tokens_in_chunk
+    )
+    if per_chunk:
+        start = 0
+        end = len(output_token_logprobs)
+        next_logprobs_total = num_output_logprobs_so_far + end
+    else:
+        start = num_output_logprobs_so_far
+        end = len(output_token_logprobs)
+        if num_output_tokens_in_chunk is not None:
+            end = min(end, start + num_output_tokens_in_chunk)
+        next_logprobs_total = len(output_token_logprobs)
+
+    new_logprobs = output_token_logprobs[start:end]
     if not new_logprobs:
-        return None, None
+        return None, None, num_output_logprobs_so_far
 
     log_probs = [float(entry[0]) for entry in new_logprobs]
 
     top_logprobs: Optional[list[list[dict[str, Any]]]] = None
     output_top = meta_info.get("output_top_logprobs")
     if output_top:
-        new_top = output_top[: len(new_logprobs)]
+        new_top = output_top[start:end]
         if new_top:
             top_logprobs = []
             for position_entries in new_top:
@@ -362,4 +377,4 @@ def extract_from_sglang_meta(
                     )
                 top_logprobs.append(position_list)
 
-    return log_probs, top_logprobs
+    return log_probs, top_logprobs, next_logprobs_total

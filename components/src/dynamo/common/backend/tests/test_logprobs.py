@@ -396,7 +396,19 @@ def test_sglang_gate_reads_env(monkeypatch):
 
 
 def test_sglang_extract_returns_none_when_meta_empty():
-    assert extract_from_sglang_meta({}) == (None, None)
+    assert extract_from_sglang_meta({}) == (None, None, 0)
+
+
+def test_sglang_extract_slices_cumulative_array():
+    meta = {
+        "output_token_logprobs": [(-0.1, 1, "a"), (-0.2, 2, "b"), (-0.3, 3, "c")],
+    }
+    log_probs, top_logprobs, new_total = extract_from_sglang_meta(
+        meta, 1, num_output_tokens_in_chunk=2
+    )
+    assert log_probs == [-0.2, -0.3]
+    assert top_logprobs is None
+    assert new_total == 3
 
 
 def test_sglang_extract_supports_incremental_streaming_metadata():
@@ -405,8 +417,8 @@ def test_sglang_extract_supports_incremental_streaming_metadata():
         "output_token_logprobs": [(-0.2, 2, "b")],
         "output_top_logprobs": [[(-0.2, 2, "b"), (-1.2, 20, "B")]],
     }
-    log_probs, top_logprobs = extract_from_sglang_meta(
-        meta, num_output_tokens_in_chunk=1
+    log_probs, top_logprobs, new_total = extract_from_sglang_meta(
+        meta, 0, num_output_tokens_in_chunk=1
     )
     assert log_probs == [-0.2]
     assert top_logprobs == [
@@ -415,6 +427,27 @@ def test_sglang_extract_supports_incremental_streaming_metadata():
             {"rank": 2, "token_id": 20, "token": "B", "logprob": -1.2},
         ]
     ]
+    assert new_total == 1
+
+
+def test_sglang_extract_accepts_incremental_array_after_prior_chunk():
+    meta = {
+        "output_token_logprobs": [(-0.2, 2, "b")],
+        "output_top_logprobs": [[(-0.2, 2, "b"), (-1.2, 20, "B")]],
+    }
+
+    log_probs, top_logprobs, new_total = extract_from_sglang_meta(
+        meta, 1, num_output_tokens_in_chunk=1
+    )
+
+    assert log_probs == [-0.2]
+    assert top_logprobs == [
+        [
+            {"rank": 1, "token_id": 2, "token": "b", "logprob": -0.2},
+            {"rank": 2, "token_id": 20, "token": "B", "logprob": -1.2},
+        ]
+    ]
+    assert new_total == 2
 
 
 def test_sglang_extract_with_top():
@@ -422,7 +455,7 @@ def test_sglang_extract_with_top():
         "output_token_logprobs": [(-0.1, 101, "a")],
         "output_top_logprobs": [[(-0.1, 101, "a"), (-0.2, 102, "b")]],
     }
-    log_probs, top_logprobs = extract_from_sglang_meta(meta)
+    log_probs, top_logprobs, _ = extract_from_sglang_meta(meta)
     assert log_probs == [-0.1]
     assert top_logprobs == [
         [
@@ -437,7 +470,7 @@ def test_sglang_extract_return_tokens_as_token_ids():
         "output_token_logprobs": [(-0.1, 101, "a")],
         "output_top_logprobs": [[(-0.1, 101, "a")]],
     }
-    _, top_logprobs = extract_from_sglang_meta(meta, return_tokens_as_token_ids=True)
+    _, top_logprobs, _ = extract_from_sglang_meta(meta, return_tokens_as_token_ids=True)
     assert top_logprobs[0][0]["token"] == "token_id:101"
 
 
@@ -449,7 +482,7 @@ def test_sglang_extract_none_top_position_becomes_empty_list():
         "output_token_logprobs": [(-0.1, 101, "a"), (-0.2, 102, "b")],
         "output_top_logprobs": [None, [(-0.2, 102, "b")]],
     }
-    _, top_logprobs = extract_from_sglang_meta(meta)
+    _, top_logprobs, _ = extract_from_sglang_meta(meta)
     assert top_logprobs == [
         [],
         [{"rank": 1, "token_id": 102, "token": "b", "logprob": -0.2}],
@@ -460,8 +493,16 @@ def test_sglang_extract_clamps_metadata_to_output_chunk():
     meta = {
         "output_token_logprobs": [(-0.1, 1, "a"), (-0.2, 2, "b")],
     }
-    log_probs, _ = extract_from_sglang_meta(meta, num_output_tokens_in_chunk=1)
+    log_probs, _, _ = extract_from_sglang_meta(meta, num_output_tokens_in_chunk=1)
     assert log_probs == [-0.1]
+
+
+def test_sglang_extract_returns_cursor_unchanged_when_no_new_entries():
+    meta = {"output_token_logprobs": [(-0.1, 1, "a")]}
+    log_probs, top_logprobs, new_total = extract_from_sglang_meta(meta, 1)
+    assert log_probs is None
+    assert top_logprobs is None
+    assert new_total == 1
 
 
 # ---------------------------------------------------------------------------

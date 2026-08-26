@@ -472,11 +472,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     @staticmethod
     def _extract_logprobs(
         meta_info: Dict[str, Any],
-        num_output_tokens_in_chunk: Optional[int] = None,
+        num_output_logprobs_so_far: int = 0,
+        *,
+        num_output_tokens_in_chunk: int | None = None,
         return_tokens_as_token_ids: bool = False,
     ) -> tuple:
         return _shared_logprobs.extract_from_sglang_meta(
             meta_info,
+            num_output_logprobs_so_far,
             num_output_tokens_in_chunk=num_output_tokens_in_chunk,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
@@ -773,6 +776,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         pending_log_probs_per_choice: dict[int, list[Any]] = {}
         pending_top_logprobs_per_choice: dict[int, list[Any]] = {}
         completion_tokens_per_choice: dict[int, int] = {}
+        # SGLang output_ids are disjoint deltas. Logprob metadata is cumulative
+        # on some releases and incremental on others, so retain a per-choice
+        # cursor while also passing each chunk's token count to the extractor.
+        output_logprobs_per_choice: dict[int, int] = {}
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
                 meta_info = res.get("meta_info", {})
@@ -812,11 +819,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 top_logprobs = None
                 if metadata_uploader is None:
                     # Extract logprobs for new tokens if available.
-                    log_probs, top_logprobs = self._extract_logprobs(
+                    (
+                        log_probs,
+                        top_logprobs,
+                        next_logprobs_total,
+                    ) = self._extract_logprobs(
                         meta_info,
+                        output_logprobs_per_choice.get(output_idx, 0),
                         num_output_tokens_in_chunk=len(raw_output_ids),
                         return_tokens_as_token_ids=return_tokens_as_token_ids,
                     )
+                    output_logprobs_per_choice[output_idx] = next_logprobs_total
 
                 output_ids = pending_stop_tokens_per_choice.pop(output_idx, [])
                 output_ids.extend(raw_output_ids)

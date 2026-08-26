@@ -931,12 +931,12 @@ def test_build_logprob_kwargs_allows_top_logprobs_with_escape_hatch(monkeypatch)
 
 
 def test_extract_logprobs_formats_top_tokens_as_token_ids():
-    log_probs, top_logprobs = DecodeWorkerHandler._extract_logprobs(
+    log_probs, top_logprobs, _ = DecodeWorkerHandler._extract_logprobs(
         {
             "output_token_logprobs": [(-0.1, 101, "a")],
             "output_top_logprobs": [[(-0.1, 101, "a"), (-0.2, 102, "b")]],
         },
-        1,
+        num_output_tokens_in_chunk=1,
         return_tokens_as_token_ids=True,
     )
 
@@ -1222,6 +1222,50 @@ async def test_process_token_stream_passes_through_encoded_routed_experts():
     )
 
     assert chunks[0]["engine_data"]["routed_experts"] == "AQIDBA=="
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_preserves_incremental_logprobs_after_interval():
+    handler = _new_decode_handler()
+    stream_items = []
+    cumulative_output_ids = []
+    for chunk_index in range(4):
+        first_token = chunk_index * 30
+        output_ids = list(range(first_token, first_token + 30))
+        cumulative_output_ids.extend(output_ids)
+        stream_items.append(
+            {
+                "index": 0,
+                "output_ids": output_ids,
+                "meta_info": {
+                    "id": "request-1",
+                    "finish_reason": None,
+                    "output_token_logprobs": [
+                        (-float(token_id + 1), token_id, f"token-{token_id}")
+                        for token_id in cumulative_output_ids
+                    ],
+                    "output_top_logprobs": [
+                        [(-float(token_id + 1), token_id, f"token-{token_id}")]
+                        for token_id in cumulative_output_ids
+                    ],
+                },
+            }
+        )
+
+    chunks = await _collect(
+        handler._process_token_stream(_stream(stream_items), _Context())
+    )
+
+    assert [len(chunk["log_probs"]) for chunk in chunks] == [30, 30, 30, 30]
+    assert [len(chunk["top_logprobs"]) for chunk in chunks] == [30, 30, 30, 30]
+    assert [value for chunk in chunks for value in chunk["log_probs"]] == [
+        -float(token_id + 1) for token_id in range(120)
+    ]
+    assert [
+        position[0]["token_id"]
+        for chunk in chunks
+        for position in chunk["top_logprobs"]
+    ] == list(range(120))
 
 
 @pytest.mark.asyncio
@@ -1798,6 +1842,72 @@ async def test_process_token_stream_buffers_split_hidden_stop_token_sequence():
             "index": 0,
             "finish_reason": "stop",
             "token_ids": [],
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_aligns_cumulative_logprobs_with_buffered_stop():
+    handler = _new_decode_handler()
+    cumulative_logprobs = [
+        (-0.1, 101, "a"),
+        (-0.2, 128001, "<|im_start|>"),
+        (-0.3, 128009, "<|im_end|>"),
+    ]
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [101, 128001],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": None,
+                            "output_token_logprobs": cumulative_logprobs[:2],
+                            "output_top_logprobs": [
+                                [entry] for entry in cumulative_logprobs[:2]
+                            ],
+                        },
+                    },
+                    {
+                        "index": 0,
+                        "output_ids": [128009],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {
+                                "type": "stop",
+                                "matched": [128001, 128009],
+                            },
+                            "output_token_logprobs": cumulative_logprobs,
+                            "output_top_logprobs": [
+                                [entry] for entry in cumulative_logprobs
+                            ],
+                        },
+                    },
+                ]
+            ),
+            _Context(),
+            suppressed_stop_token_ids={128001, 128009},
+        )
+    )
+
+    assert chunks == [
+        {
+            "index": 0,
+            "token_ids": [101],
+            "log_probs": [-0.1],
+            "top_logprobs": [
+                [{"rank": 1, "token_id": 101, "token": "a", "logprob": -0.1}]
+            ],
+        },
+        {
+            "index": 0,
+            "finish_reason": "stop",
+            "token_ids": [],
+            "log_probs": [],
+            "top_logprobs": [],
         },
     ]
 
