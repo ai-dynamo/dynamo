@@ -504,7 +504,7 @@ where
         .worker_selection_policy_registry(policy_registry);
     let rt = tokio::runtime::Runtime::new()?;
     let service = rt.block_on(builder.build())?;
-    rt.block_on(selection::run_server_with_service(config.port, service))
+    rt.block_on(selection::run_server(config.port, service))
 }
 
 /// Map a [`SelectionError`] to a Python exception: invalid input becomes a

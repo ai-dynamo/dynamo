@@ -31,7 +31,7 @@ pub use policy_registry::{
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistry,
     WorkerSelectionPolicyRegistryError,
 };
-pub use server::{AppState, run_server, run_server_with_service};
+pub use server::{AppState, run_server};
 pub use service::{
     SelectionService, SelectionServiceBuilder, warn_for_unserved_worker_selection_policies,
 };
