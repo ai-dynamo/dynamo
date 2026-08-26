@@ -161,10 +161,12 @@ pub(super) async fn emit(
     storage_tier: StorageTier,
     residency_domain: ResidencyDomain,
     event: KvCacheEvent,
+    session_id: Option<String>,
     output: &mut Vec<RouterEvent>,
 ) -> bool {
-    let router_event =
+    let mut router_event =
         RouterEvent::with_residency_domain(worker_id, event, storage_tier, residency_domain);
+    router_event.session_id = session_id;
     let applied = match admit_local_event(local_indexer.as_deref(), &router_event).await {
         Ok(()) => true,
         Err(error) => {

@@ -516,6 +516,7 @@ impl ConcurrentRadixTree {
                 let event = RouterEvent {
                     worker_id: worker.worker_id,
                     state_source: None,
+                    session_id: None,
                     storage_tier: crate::protocols::StorageTier::Device,
                     residency_domain: crate::protocols::WireResidencyDomain::explicit(
                         crate::protocols::ResidencyDomain::Worker,
