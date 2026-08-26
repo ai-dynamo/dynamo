@@ -116,9 +116,7 @@ Read it there rather than reconstructing it from source:
 
 ## Nested agent files
 
-Some crates and modules carry their own `AGENTS.md` or `CLAUDE.md` with local rules —
-`backend-common/`, `bench/`, `data-gen/`, `kv-router/` and six of its subdirectories,
-`kvbm-engine/`, `kvbm-kernels/`, `kvbm-logical/`, `llm/` and four of its subdirectories,
-and `runtime/`. Agents read every such file on the path they descend, so this file
-frames the neighbourhood and the nested file states the local rule. When both apply,
-the nested file wins.
+Crates and modules may carry their own `AGENTS.md` or `CLAUDE.md` with local rules.
+Before editing a path, inspect that path and each ancestor under `lib/` for both file
+names rather than relying on a directory list in this guide. Read every file you find.
+This guide frames the workspace; a nested guide provides the more specific rule.
