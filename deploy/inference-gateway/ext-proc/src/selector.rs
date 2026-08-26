@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, anyhow};
 
@@ -195,6 +195,9 @@ impl Selector {
             kv_router_config,
             factory,
             replication.as_ref().map(|config| config.ports.replica_sync),
+            replication
+                .as_ref()
+                .is_some_and(|config| config.ports.selection_http.is_some()),
         )
         .await?;
         Self::from_service_with_replication(cfg, Arc::new(service), replication).await
@@ -205,6 +208,7 @@ impl Selector {
         kv_router_config: KvRouterConfig,
         factory: Option<WorkerSelectionPolicyFactory>,
         replica_sync_port: Option<u16>,
+        defer_indexer_listener_start: bool,
     ) -> Result<SelectionService> {
         // If queueing is enabled, we need to validate that the max_num_batched_tokens is set.
         // Done once at startup to avoid validating on every reconcile.
@@ -219,6 +223,9 @@ impl Selector {
 
         if let Some(peer_sync_port) = replica_sync_port {
             builder = builder.replica_sync(peer_sync_port, Vec::new());
+        }
+        if defer_indexer_listener_start {
+            builder = builder.defer_indexer_listener_start();
         }
 
         builder
@@ -260,6 +267,13 @@ impl Selector {
                     "prebuilt SelectionService replica-sync port {replica_sync_port} does not match \
                      EndpointSlice port {}",
                     replication.ports.replica_sync
+                );
+            }
+            if replication.ports.selection_http.is_some() && service.indexer_listeners_started() {
+                anyhow::bail!(
+                    "replicated peer recovery requires a prebuilt SelectionService with \
+                     deferred indexer listener start; construct it with \
+                     SelectionServiceBuilder::defer_indexer_listener_start()"
                 );
             }
         }
@@ -382,12 +396,6 @@ impl Selector {
             .selection_http
             .expect("guarded by construction");
 
-        // Give the topology adapter a moment to register workers before the
-        // dump: the snapshot then overlaps the live event stream rather than
-        // racing ahead of it. Bounded — a slow cold start must not hang the
-        // replica forever; the peer dump is still the best available state.
-        wait_for_registered_worker(&self.service, &self.cancel).await?;
-
         crate::peer_discovery::spawn(
             self.service.clone(),
             &recovery.namespace,
@@ -396,13 +404,25 @@ impl Selector {
             selection_http_port,
             recovery.self_ip.to_string(),
             self.cancel.clone(),
-            recovery.recovered.clone(),
         )
-        .await
+        .await?;
+
+        self.service.start_indexer_listeners();
+        self.service.wait_for_indexer_listeners_active().await?;
+        recovery.recovered.store(true, Ordering::Release);
+        Ok(())
     }
 
     pub fn peer_ready(&self) -> Option<Arc<AtomicBool>> {
         self.peer_ready.clone()
+    }
+
+    pub(crate) fn peer_recovery_required(&self) -> bool {
+        self.peer_recovery.is_some()
+    }
+
+    pub(crate) async fn wait_for_indexer_listeners_buffering(&self) -> Result<()> {
+        self.service.wait_for_indexer_listeners_buffering().await
     }
 
     fn worker_request(reg: &WorkerRegistration) -> CoreWorkerRequest {
@@ -557,58 +577,6 @@ impl Selector {
     /// Returns `true` once the selector can schedule at least one worker.
     pub async fn any_ready(&self) -> bool {
         self.service.ready().ready
-    }
-}
-
-/// Bounded wait for at least one registered worker before the peer dump, so
-/// the snapshot overlaps the already-buffered live event stream (subscribe-
-/// first).
-///
-/// LIMITATION: this is a best-effort timeout, not a correctness guarantee, and
-/// the `5s` value is a magic number — there is no measured basis for how long
-/// the topology adapter's first reconcile takes (in the common restart case
-/// workers register within ~1s and the wait is a no-op). If a worker registers
-/// only after this window, the dump still runs ahead of the live subscription
-/// and leaves a gap; a longer wait would not help because the worker simply
-/// was not there to subscribe to. The precise fix would be to await a
-/// deterministic "first reconcile complete" signal from the topology adapter
-/// instead of a wall-clock timeout; this bound exists only so a slow cold start
-/// does not hang forever.
-const PEER_RECOVERY_WORKER_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
-
-async fn wait_for_registered_worker(
-    service: &SelectionService,
-    cancel: &CancellationToken,
-) -> Result<()> {
-    if !service.list_workers(None, None).is_empty() {
-        return Ok(());
-    }
-    tracing::info!(
-        "Waiting up to {PEER_RECOVERY_WORKER_WAIT:?} for a registered worker before peer \
-         KV-index recovery (subscribe-first)"
-    );
-    let deadline = tokio::time::Instant::now() + PEER_RECOVERY_WORKER_WAIT;
-    loop {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                anyhow::bail!(
-                    "EPP startup cancelled while waiting for workers before peer recovery"
-                )
-            }
-            _ = tokio::time::sleep_until(deadline) => {
-                tracing::warn!(
-                    "No worker registered within {PEER_RECOVERY_WORKER_WAIT:?}; proceeding with \
-                     peer KV-index recovery anyway (best effort)"
-                );
-                return Ok(());
-            }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
-                if !service.list_workers(None, None).is_empty() {
-                    return Ok(());
-                }
-            }
-        }
     }
 }
 
@@ -789,6 +757,7 @@ models:
                 )
             })),
             None,
+            false,
         )
         .await
         .expect("custom selection service should build");
@@ -809,6 +778,23 @@ models:
             .free_reservation("custom-policy")
             .await
             .expect("custom-policy reservation should be releasable");
+    }
+
+    #[tokio::test]
+    async fn deferred_selection_service_keeps_listener_gate_closed() {
+        let service = Selector::build_selection_service(
+            &test_config(),
+            KvRouterConfig::default(),
+            None,
+            None,
+            true,
+        )
+        .await
+        .expect("deferred selection service should build");
+        assert!(!service.indexer_listeners_started());
+        service.start_indexer_listeners();
+        assert!(service.indexer_listeners_started());
+        service.shutdown().await;
     }
 
     /// Item 1: a successful reserve books load, and the final free releases it.

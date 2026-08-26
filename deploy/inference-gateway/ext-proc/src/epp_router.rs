@@ -109,16 +109,25 @@ impl EppRouter {
         selector: Arc<Selector>,
     ) -> Result<Self> {
         let peer_ready = selector.peer_ready();
+        let recovery_required = selector.peer_recovery_required();
+
+        if recovery_required {
+            reflector.wait_until_ready().await?;
+        }
 
         let defaults = RegistrationDefaults::from_config(&cfg);
-        let adapter =
+        let mut adapter =
             TopologyAdapter::spawn(reflector.as_ref().clone(), selector.clone(), defaults);
 
-        // Subscribe-first: the topology adapter registers workers (their ZMQ
-        // KV-event listeners begin buffering live events) before the peer dump,
-        // so recovery overlaps the live event stream instead of leaving a gap.
-        // `is_ready` stays false (and /dump stays 503) until recovery completes.
-        selector.start_peer_recovery().await?;
+        if recovery_required {
+            // The reflector is synchronized before the adapter starts, so this
+            // barrier represents the authoritative initial topology, including
+            // a valid empty pool. Each registered listener connects and enters
+            // Buffering before the peer dump is requested.
+            adapter.wait_initial_reconcile().await?;
+            selector.wait_for_indexer_listeners_buffering().await?;
+            selector.start_peer_recovery().await?;
+        }
 
         // Readiness is driven solely by the live pod+pool signal (see `is_ready`);
         // we do not block startup on a schedulable worker. A valid, empty pool is

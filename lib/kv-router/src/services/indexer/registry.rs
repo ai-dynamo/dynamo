@@ -168,6 +168,7 @@ pub struct ListenerRecord {
     block_size: u32,
     indexer: Indexer,
     watermark: Arc<AtomicU64>,
+    snapshot_bootstrap_first_batch: Arc<std::sync::atomic::AtomicBool>,
     runtime: Mutex<ListenerRuntime>,
 }
 
@@ -185,6 +186,7 @@ impl ListenerRecord {
             block_size,
             indexer,
             watermark,
+            snapshot_bootstrap_first_batch: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             runtime: Mutex::new(ListenerRuntime {
                 status: ListenerStatus::Pending,
                 last_error: None,
@@ -214,6 +216,10 @@ impl ListenerRecord {
         self.watermark.clone()
     }
 
+    pub(super) fn snapshot_bootstrap_first_batch(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.snapshot_bootstrap_first_batch.clone()
+    }
+
     pub(super) fn start_pending(
         &self,
         root_cancel_token: &CancellationToken,
@@ -224,6 +230,8 @@ impl ListenerRecord {
         runtime.status = ListenerStatus::Pending;
         runtime.last_error = None;
         runtime.cancel_token = Some(cancel_token.clone());
+        self.snapshot_bootstrap_first_batch
+            .store(false, std::sync::atomic::Ordering::Release);
         (runtime.generation, cancel_token)
     }
 
@@ -273,6 +281,8 @@ impl ListenerRecord {
                 runtime.status = ListenerStatus::Pending;
                 runtime.last_error = None;
                 runtime.cancel_token = Some(cancel_token.clone());
+                self.snapshot_bootstrap_first_batch
+                    .store(false, std::sync::atomic::Ordering::Release);
                 Ok((runtime.generation, cancel_token))
             }
             status => Err(ListenerControlError::InvalidResumeState {
@@ -316,6 +326,11 @@ impl ListenerRecord {
         runtime.status = ListenerStatus::CatchingUp;
         runtime.last_error = None;
         true
+    }
+
+    pub(super) fn mark_snapshot_bootstrapped(&self) {
+        self.snapshot_bootstrap_first_batch
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     pub(super) fn try_mark_failed(&self, generation: u64, error: impl Into<String>) {
@@ -421,6 +436,14 @@ impl WorkerRegistry {
 
     pub fn listeners_started(&self) -> bool {
         *self.ready_rx.borrow()
+    }
+
+    pub fn mark_current_listeners_snapshot_bootstrapped(&self) {
+        for worker in self.workers.iter() {
+            for record in worker.listeners.values() {
+                record.mark_snapshot_bootstrapped();
+            }
+        }
     }
 
     pub async fn wait_for_listeners_buffering(&self) -> Result<()> {
@@ -1050,6 +1073,32 @@ mod tests {
         .unwrap();
         assert_eq!(listener_status(&registry, 4, 0), ListenerStatus::Active);
         assert_eq!(listener_status(&registry, 4, 1), ListenerStatus::Active);
+        registry.root_cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn snapshot_bootstrap_marks_current_streams_only() {
+        let registry = test_registry();
+        register_test_listener(&registry, 5, 0).await;
+        registry.wait_for_listeners_buffering().await.unwrap();
+
+        let record = registry
+            .workers
+            .get(&5)
+            .and_then(|worker| worker.listeners.get(&0).cloned())
+            .expect("test listener should be registered");
+        assert!(
+            !record
+                .snapshot_bootstrap_first_batch()
+                .load(Ordering::Acquire)
+        );
+
+        registry.mark_current_listeners_snapshot_bootstrapped();
+        assert!(
+            record
+                .snapshot_bootstrap_first_batch()
+                .load(Ordering::Acquire)
+        );
         registry.root_cancel_token.cancel();
     }
 

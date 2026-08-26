@@ -67,6 +67,7 @@ pub async fn recover_from_peers(peers: &[String], registry: &WorkerRegistry) -> 
     for peer_url in peers {
         match try_recover_from_peer(&client, peer_url, registry).await {
             Ok(()) => {
+                registry.mark_current_listeners_snapshot_bootstrapped();
                 tracing::info!(peer = %peer_url, "recovery from peer succeeded");
                 return Ok(true);
             }

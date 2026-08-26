@@ -281,6 +281,14 @@ impl SelectionCore {
         self.indexer_registry.listeners_started()
     }
 
+    pub(crate) async fn wait_for_indexer_listeners_buffering(&self) -> anyhow::Result<()> {
+        self.indexer_registry.wait_for_listeners_buffering().await
+    }
+
+    pub(crate) async fn wait_for_indexer_listeners_active(&self) -> anyhow::Result<()> {
+        self.indexer_registry.wait_for_listeners_active().await
+    }
+
     pub(crate) async fn dump_indexer_events(&self) -> serde_json::Value {
         crate::services::indexer::server::dump_registry(&self.indexer_registry).await
     }

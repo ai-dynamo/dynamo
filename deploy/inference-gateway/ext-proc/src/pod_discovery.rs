@@ -64,6 +64,7 @@ type WorkerIndex = HashMap<u64, WorkerEntry>;
 pub struct PodDiscovery {
     index: Arc<RwLock<WorkerIndex>>,
     changes: watch::Receiver<u64>,
+    ready_changes: watch::Receiver<bool>,
 }
 
 impl PodDiscovery {
@@ -99,6 +100,7 @@ impl PodDiscovery {
         );
 
         let (changes_tx, changes_rx) = watch::channel(0u64);
+        let (ready_tx, ready_changes) = watch::channel(false);
 
         let kv_event_port = cfg.kv_event_port;
         let replay_port = cfg.replay_port;
@@ -193,7 +195,9 @@ impl PodDiscovery {
                 };
 
                 // Readiness based on initial pods being synced and the pool being resolved.
-                ready_task.store(pod_synced && pool_rx.borrow().is_some(), Ordering::Release);
+                let is_ready = pod_synced && pool_rx.borrow().is_some();
+                ready_task.store(is_ready, Ordering::Release);
+                let _ = ready_tx.send(is_ready);
                 if index_changed {
                     generation = generation.wrapping_add(1);
                     let _ = changes_tx.send(generation);
@@ -201,6 +205,7 @@ impl PodDiscovery {
             }
             // Watch stream has ended, so stop advertising readiness and clear the index.
             ready_task.store(false, Ordering::Release);
+            let _ = ready_tx.send(false);
             index_task.write().unwrap().clear();
         });
 
@@ -208,6 +213,7 @@ impl PodDiscovery {
             Self {
                 index,
                 changes: changes_rx,
+                ready_changes,
             },
             ready,
         ))
@@ -270,6 +276,15 @@ impl PodDiscovery {
         self.changes.clone()
     }
 
+    pub async fn wait_until_ready(&self) -> Result<()> {
+        let mut ready = self.ready_changes.clone();
+        ready
+            .wait_for(|value| *value)
+            .await
+            .map(|_| ())
+            .map_err(|_| anyhow::anyhow!("PodDiscovery readiness channel closed"))
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(workers: Vec<RawWorker>) -> (Self, watch::Sender<u64>) {
         let index = workers
@@ -277,10 +292,12 @@ impl PodDiscovery {
             .map(|worker| (worker.worker_id, WorkerEntry::from_raw(worker)))
             .collect();
         let (changes_tx, changes) = watch::channel(0u64);
+        let (_, ready_changes) = watch::channel(true);
         (
             Self {
                 index: Arc::new(RwLock::new(index)),
                 changes,
+                ready_changes,
             },
             changes_tx,
         )
@@ -866,9 +883,11 @@ mod tests {
             })
             .collect();
         let (_, changes) = watch::channel(0u64);
+        let (_, ready_changes) = watch::channel(true);
         PodDiscovery {
             index: Arc::new(RwLock::new(index)),
             changes,
+            ready_changes,
         }
     }
 
@@ -890,5 +909,17 @@ mod tests {
 
         // No match -> empty.
         assert!(discovery.ready_worker_ids_matching(|_| false).is_empty());
+    }
+
+    #[tokio::test]
+    async fn for_test_discovery_is_immediately_ready() {
+        let (discovery, _changes_tx) = PodDiscovery::for_test(Vec::new());
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            discovery.wait_until_ready(),
+        )
+        .await
+        .expect("test discovery readiness should be immediate")
+        .expect("test discovery readiness channel should remain open");
     }
 }

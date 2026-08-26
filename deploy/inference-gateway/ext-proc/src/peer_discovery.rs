@@ -12,7 +12,6 @@ use std::future::Future;
 use std::hash::BuildHasher;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use k8s_openapi::api::discovery::v1::{Endpoint, EndpointSlice};
@@ -198,7 +197,6 @@ pub async fn spawn(
     selection_http_port: u16,
     self_ip: String,
     cancel: CancellationToken,
-    recovered: Arc<AtomicBool>,
 ) -> Result<()> {
     use futures::StreamExt;
     use kube::{Api, Client, runtime::WatchStreamExt, runtime::reflector, runtime::watcher};
@@ -284,9 +282,6 @@ pub async fn spawn(
     )
     .await?;
 
-    // Recovery/bootstrap finished: the /dump endpoint may now serve a
-    // non-empty snapshot (see `peer_http` gating on this flag).
-    recovered.store(true, Ordering::Release);
     tracing::info!("EPP peer discovery and KV-index bootstrap complete");
 
     tokio::spawn(async move {
@@ -491,11 +486,12 @@ fn live_peer_ips(store: &Store, self_ip: &str) -> BTreeSet<String> {
 
 /// Recovery targets only siblings that are actively serving and not
 /// terminating. Not-ready siblings cannot contribute a meaningful index: this
-/// replica starts worker KV listeners only *after* recovery completes, so a
-/// not-ready sibling's index is empty by construction. Treating those as
-/// recovery candidates turns a cold start (all replicas empty, none serving)
-/// into a mutual-recovery deadlock. An empty candidate set means "no eligible
-/// peer" and bootstraps an empty index immediately.
+/// replica only advertises readiness after recovery and the buffered listener
+/// handoff completes, so a not-ready sibling's index is not an authoritative
+/// recovery source. Treating those as recovery candidates turns a cold start
+/// (all replicas empty, none serving) into a mutual-recovery deadlock. An empty
+/// candidate set means "no eligible peer" and bootstraps an empty index
+/// immediately.
 /// Deterministic eligible peer URL set. Used for change detection and as the
 /// input to an attempt-scoped shuffle. Unlike a shuffled vector, the BTreeSet
 /// order is stable, so equality across calls detects only real membership
