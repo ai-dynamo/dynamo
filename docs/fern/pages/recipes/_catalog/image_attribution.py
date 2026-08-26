@@ -188,6 +188,11 @@ def recipe_image_errors(artifacts, deploy_paths, label) -> list[str]:
             "[%s] artifacts.recipe_specific_image_periods must be an array" % label
         )
         periods = []
+    elif not periods:
+        errors.append(
+            "[%s] artifacts.recipe_specific_image_periods must contain at least one item"
+            % label
+        )
     period_errors, tracked_images, open_images, release_images = _period_sets(
         periods, label
     )

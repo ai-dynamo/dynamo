@@ -421,6 +421,14 @@ def test_recipe_image_validation_rejects_same_start_overlapping_periods() -> Non
     )
 
 
+def test_recipe_image_validation_rejects_empty_ownership_periods() -> None:
+    errors = catalog_validate._image_attribution.recipe_image_errors(
+        {"recipe_specific_image_periods": []}, [], "empty-periods"
+    )
+
+    assert any("must contain at least one item" in error for error in errors)
+
+
 def test_recipe_image_validation_rejects_invalid_calendar_date() -> None:
     artifacts = {
         "recipe_specific_images": [
