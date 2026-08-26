@@ -130,6 +130,7 @@ mod tests {
         EppStandaloneConfig {
             selector_threads: 1,
             peer_service: None,
+            pod_ip: None,
             replica_sync_port: 9092,
             inference_pool_name: "test-pool".to_string(),
             namespace: "test-ns".to_string(),

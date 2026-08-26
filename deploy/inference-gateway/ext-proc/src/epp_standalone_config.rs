@@ -90,6 +90,9 @@ pub struct EppStandaloneConfig {
     pub selector_threads: usize,
     /// EPP Service for peer discovery and state synchronization.
     pub peer_service: Option<String>,
+    /// Local EPP Pod IP (from `POD_IP`, downward API). Required when peer
+    /// discovery is enabled so this replica can exclude itself from peers.
+    pub pod_ip: Option<String>,
     /// ZMQ listener and peer dial port for replica synchronization. Every EPP
     /// selected by `peer_service` must use the same port.
     #[validate(range(
@@ -163,6 +166,7 @@ impl EppStandaloneConfig {
             selector_threads: opt_parse::<usize>(get, "DYN_EPP_SELECTION_INDEXER_THREADS")?
                 .unwrap_or(DEFAULT_SELECTOR_THREADS),
             peer_service: trimmed(get("DYN_EPP_PEER_SERVICE")),
+            pod_ip: trimmed(get("POD_IP")),
             replica_sync_port: opt_parse::<u16>(get, "DYN_EPP_REPLICA_SYNC_PORT")?
                 .unwrap_or(DEFAULT_REPLICA_SYNC_PORT),
             inference_pool_name: trimmed(get("DYN_EPP_INFERENCE_POOL_NAME")).unwrap_or_default(),
@@ -192,7 +196,14 @@ impl EppStandaloneConfig {
     /// Enforce the `validator` constraints, mapping the failure to `anyhow`.
     pub fn validate_config(&self) -> anyhow::Result<()> {
         self.validate()
-            .map_err(|e| anyhow::anyhow!("invalid {STANDALONE_MODE} EPP config: {e}"))
+            .map_err(|e| anyhow::anyhow!("invalid {STANDALONE_MODE} EPP config: {e}"))?;
+        if self.peer_service.is_some() && self.pod_ip.is_none() {
+            anyhow::bail!(
+                "invalid {STANDALONE_MODE} EPP config: DYN_EPP_PEER_SERVICE is set but POD_IP is unavailable; \
+                 inject POD_IP via the downward API (fieldRef status.podIP)"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -300,6 +311,7 @@ mod tests {
         assert_eq!(cfg.selector_threads, DEFAULT_SELECTOR_THREADS);
         // No peer service => single-replica (replica sync off).
         assert!(cfg.peer_service.is_none());
+        assert!(cfg.pod_ip.is_none());
         assert_eq!(cfg.replica_sync_port, DEFAULT_REPLICA_SYNC_PORT);
         assert_eq!(cfg.inference_pool_name, "vllm-qwen-pool");
         assert_eq!(cfg.namespace, "inference");
@@ -338,6 +350,7 @@ mod tests {
     fn peer_service_config_parsed() {
         let cfg = parse_cfg(&[
             ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+            ("POD_IP", "10.0.0.10"),
             ("DYN_EPP_SELECTION_INDEXER_THREADS", "8"),
             ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
             ("POD_NAMESPACE", "inference"),
@@ -348,6 +361,7 @@ mod tests {
         ])
         .expect("peer service config should parse");
         assert_eq!(cfg.peer_service.as_deref(), Some("dynamo-epp"));
+        assert_eq!(cfg.pod_ip.as_deref(), Some("10.0.0.10"));
         assert_eq!(cfg.replica_sync_port, DEFAULT_REPLICA_SYNC_PORT);
         assert_eq!(cfg.selector_threads, 8);
         assert_eq!(cfg.namespace, "inference");
@@ -357,6 +371,7 @@ mod tests {
     fn replica_sync_port_can_be_overridden() {
         let cfg = parse_cfg(&[
             ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+            ("POD_IP", "10.0.0.10"),
             ("DYN_EPP_REPLICA_SYNC_PORT", "9192"),
             ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
             ("POD_NAMESPACE", "inference"),
@@ -368,6 +383,22 @@ mod tests {
         .expect("replica sync port override should parse");
 
         assert_eq!(cfg.replica_sync_port, 9192);
+    }
+
+    #[test]
+    fn peer_service_requires_pod_ip() {
+        let error = parse_cfg(&[
+            ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+            ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
+            ("POD_NAMESPACE", "inference"),
+            ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+            ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
+            ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
+            ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
+        ])
+        .expect_err("peer service without POD_IP must fail");
+
+        assert!(error.to_string().contains("POD_IP"));
     }
 
     #[test]

@@ -170,18 +170,10 @@ impl Selector {
         let cancel = CancellationToken::new();
 
         let peer_ready = if let Some((service_name, peer_sync_port)) = replication {
-            // In replicated mode, we need to exclude ourselves from the peer set which requires the POD_IP
-            let self_ip = std::env::var("POD_IP")
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| {
-                    anyhow!(
-                        "DYN_EPP_PEER_SERVICE is set but POD_IP is unavailable; inject POD_IP \
-                         via the downward API (fieldRef status.podIP) so this replica can \
-                         exclude itself from its peer set"
-                    )
-                })?;
+            let self_ip = cfg
+                .pod_ip
+                .clone()
+                .expect("validated peer discovery config must include POD_IP");
             Some(
                 crate::peer_discovery::spawn(
                     service.clone(),
@@ -436,6 +428,7 @@ models:
         EppStandaloneConfig {
             selector_threads: 1,
             peer_service: None,
+            pod_ip: None,
             replica_sync_port: 9092,
             inference_pool_name: "test-pool".to_string(),
             namespace: "test-ns".to_string(),
