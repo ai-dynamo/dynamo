@@ -3175,10 +3175,6 @@ impl OpenAIPreprocessor {
             return Self::dimensions_from_image_bytes(&bytes, dimension_policy);
         }
 
-        // This dimension probe fetches only HTTP(S). Other schemes stay the
-        // backend's responsibility. Return a plain error so the caller skips
-        // MM-routing metadata instead of turning s3/gs/file passthrough into a
-        // terminal policy rejection. No connection is made on this branch.
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             anyhow::bail!("unsupported url scheme for dim fetch: {}", url);
         }
