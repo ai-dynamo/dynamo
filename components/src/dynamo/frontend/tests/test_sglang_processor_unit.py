@@ -17,6 +17,7 @@ import types
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine, FakeRoutedItem
+from _thinking_parity import RESOLVED_DISABLED, RESOLVED_ENABLED, THINKING_PARITY_CASES
 from _tool_guidance_parity import (
     TOOL_GUIDANCE_PARITY_CASES,
     assistant_response_format,
@@ -1094,17 +1095,9 @@ class _CapturingReasoningParser:
         self.force_reasoning = force_reasoning
 
 
-@pytest.mark.parametrize(
-    "request_update",
-    [
-        {"thinking": False},
-        {"thinking": {"type": "disabled"}},
-        {"reasoning_effort": "none"},
-    ],
-)
-def test_minimax_m3_openai_disabled_thinking_sets_thinking_mode(
-    request_update, monkeypatch
-):
+def test_minimax_m3_openai_disabled_thinking_sets_thinking_mode(monkeypatch):
+    """`thinking:false`, `{"type":"disabled"}` and `reasoning_effort:none` all
+    arrive here as the same resolved kwargs, so one case covers them."""
     monkeypatch.setattr(
         sglang_prepost_module,
         "ReasoningParser",
@@ -1114,8 +1107,8 @@ def test_minimax_m3_openai_disabled_thinking_sets_thinking_mode(
     request = {
         "model": MODEL,
         "messages": [{"role": "user", "content": "Hello"}],
+        "chat_template_args": RESOLVED_DISABLED,
     }
-    request.update(request_update)
 
     class CapturingTokenizer:
         chat_template = "template"
@@ -2417,7 +2410,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         request = {
             "model": "deepseek-ai/DeepSeek-V4-Pro",
             "messages": [{"role": "user", "content": "Hello"}],
-            "thinking": {"type": "enabled"},
+            "chat_template_args": {**RESOLVED_ENABLED, "reasoning_effort": "max"},
             "reasoning_effort": "max",
         }
 
@@ -2447,7 +2440,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         request = {
             "model": "generic-model",
             "messages": [{"role": "user", "content": "Hello"}],
-            "thinking": {"type": "enabled"},
+            "chat_template_args": RESOLVED_ENABLED,
         }
 
         result = preprocess_chat_request(
@@ -2466,16 +2459,7 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert result.request["chat_template_kwargs"]["thinking_mode"] == "enabled"
         assert "chat_template_kwargs" not in request
 
-    @pytest.mark.parametrize(
-        "request_update",
-        [
-            {"thinking": {"type": "disabled"}},
-            {"reasoning_effort": "none"},
-        ],
-    )
-    def test_reasoning_disabled_openai_inputs_set_qwen3_template_flags(
-        self, request_update
-    ):
+    def test_reasoning_disabled_openai_inputs_set_qwen3_template_flags(self):
         captured = {}
 
         class CapturingTokenizer:
@@ -2488,8 +2472,8 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         request = {
             "model": MODEL,
             "messages": [{"role": "user", "content": "Hello"}],
+            "chat_template_args": RESOLVED_DISABLED,
         }
-        request.update(request_update)
 
         result = preprocess_chat_request(
             request,
@@ -3787,3 +3771,26 @@ class TestChatTemplateKwargsForwarding:
             tokenizer,
         )
         assert think.prompt_token_ids != no_think.prompt_token_ids
+
+
+class TestThinkingControlParity:  # FRONTEND.10
+    # Keep SGLang's thinking kwargs aligned with the shared backend matrix.
+    @pytest.mark.parametrize("case", THINKING_PARITY_CASES, ids=lambda case: case.name)
+    def test_shared_thinking_policy(self, case):
+        class CapturingTokenizer:
+            chat_template = "template"
+
+            def apply_chat_template(self, messages, **kwargs):
+                return [1, 2, 3]
+
+        result = preprocess_chat_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                **case.request,
+            },
+            tokenizer=CapturingTokenizer(),
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+        assert result.request.get("chat_template_kwargs", {}) == case.expected

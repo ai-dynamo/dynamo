@@ -1979,9 +1979,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         it can be deferred until the first engine output (used in disagg decode
         mode to avoid aborting during an active NIXL KV transfer).
         """
+        wait_for = []
         try:
             # Build list of futures/tasks to wait for
-            wait_for = [context.async_killed_or_stopped()]
+            wait_for.append(context.async_killed_or_stopped())
             shutdown_task = None
 
             if self.shutdown_event:
@@ -2041,6 +2042,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             raise
         except Exception as e:
             logger.error(f"Error in abort monitor for request {request_id}: {e}")
+        finally:
+            to_drain = []
+            for task in wait_for:
+                if not task.done():
+                    task.cancel()
+                    to_drain.append(task)
+            # Avoid suspending with EngineShutdown in flight. The owner can
+            # otherwise cancel this monitor and replace the pending exception.
+            if to_drain:
+                await asyncio.gather(*to_drain, return_exceptions=True)
 
     @asynccontextmanager
     async def _abort_monitor(
@@ -3137,6 +3148,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         shutdown_event: asyncio.Event | None = None,
         enable_frontend_decoding: bool = False,
         encode_worker_client: Client | None = None,
+        first_token_source: Any | None = None,
     ):
         super().__init__(
             runtime,
@@ -3152,13 +3164,18 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             enable_frontend_decoding=enable_frontend_decoding,
             encode_worker_client=encode_worker_client,
         )
+        self._first_token_source = first_token_source
 
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation
         request_id = context.id()
         logger.debug(f"Decode Request ID: {request_id}")
+        routing = request.get("routing") or {}
+        if self._first_token_source is not None:
+            self._first_token_source.bind(context, routing.get("dp_rank"))
         self._multimodal_request_processor.validate_multimodal_request(request)
         first_token = True
+        first_token_output_seen = False
         with time_and_log_code_section(
             f"[DECODE] request: {request_id} generate"
         ) as decode_timer:
@@ -3173,6 +3190,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if first_token:
                     decode_timer.stop_interval()
                     first_token = False
+                if not self.use_vllm_tokenizer and not first_token_output_seen:
+                    token_ids = chunk.get("token_ids") or []
+                    if token_ids:
+                        first_token_output_seen = True
+                        context.notify_first_token()
                 yield chunk
 
     async def _assemble_custom_encoder_prompt(
@@ -3500,6 +3522,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         priority = -int(routing.get("priority", 0))
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text_per_choice: dict[int, str] = {}
+        first_token_output_seen = False
 
         trace_headers = context.trace_headers()
 
@@ -3557,6 +3580,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     for output in res.outputs:
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
+                        if not first_token_output_seen and getattr(
+                            output, "token_ids", None
+                        ):
+                            first_token_output_seen = True
+                            context.notify_first_token()
                         output_idx = getattr(output, "index", 0) or 0
                         previous_text = previous_text_per_choice.get(output_idx, "")
                         # Calculate the delta text (new text since last chunk)
@@ -3840,11 +3868,12 @@ class EmbeddingWorkerHandler:
         embedding path (no ``is_prefill``, no ``abort_guard``).
         """
         shutdown_task: Optional[asyncio.Task] = None
+        wait_for: list[Any] = []
         try:
             # `list[Any]` mirrors BaseWorkerHandler._monitor_abort: the
             # iterable mixes the Future from async_killed_or_stopped() with
             # the Task from shutdown_event.wait().
-            wait_for: list[Any] = [context.async_killed_or_stopped()]
+            wait_for.append(context.async_killed_or_stopped())
             if self.shutdown_event is not None:
                 shutdown_task = asyncio.create_task(self.shutdown_event.wait())
                 wait_for.append(shutdown_task)
@@ -3884,18 +3913,13 @@ class EmbeddingWorkerHandler:
             )
             raise
         finally:
-            # On the success path the wrapping ``_abort_monitor`` cancels
-            # this coroutine while it's blocked in ``asyncio.wait``, which
-            # short-circuits past the pending-task cleanup loop above and
-            # leaves ``shutdown_task`` (the ``shutdown_event.wait()`` task)
-            # pending forever — one leaked task per embedding request.
-            # Cancel it here on every exit path.
-            if shutdown_task is not None and not shutdown_task.done():
-                shutdown_task.cancel()
-                try:
-                    await shutdown_task
-                except asyncio.CancelledError:
-                    pass
+            to_drain = []
+            for task in wait_for:
+                if not task.done():
+                    task.cancel()
+                    to_drain.append(task)
+            if to_drain:
+                await asyncio.gather(*to_drain, return_exceptions=True)
 
     @asynccontextmanager
     async def _abort_monitor(self, context: Context, request_id: str):

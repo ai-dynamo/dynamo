@@ -89,6 +89,8 @@ impl AnthropicStreamConverter {
             text_block_index: 0,
             usage: AnthropicUsage {
                 input_tokens: estimated_input_tokens,
+                // Keep the field present when the backend does not report usage.
+                cache_creation_input_tokens: Some(0),
                 ..Default::default()
             },
             saw_backend_usage: false,
@@ -1064,6 +1066,7 @@ mod tests {
         assert!(events.is_empty(), "usage-only chunk emits no SSE events");
         assert_eq!(conv.usage.input_tokens, 1);
         assert_eq!(conv.usage.cache_read_input_tokens, Some(11));
+        assert_eq!(conv.usage.cache_creation_input_tokens, Some(0));
         assert_eq!(conv.usage.output_tokens, 5);
 
         let delta = conv.emit_end_events_tagged();
@@ -1075,6 +1078,7 @@ mod tests {
             AnthropicStreamEvent::MessageDelta { usage, .. } => {
                 assert_eq!(usage.input_tokens, 1);
                 assert_eq!(usage.cache_read_input_tokens, Some(11));
+                assert_eq!(usage.cache_creation_input_tokens, Some(0));
                 assert_eq!(usage.output_tokens, 5);
             }
             other => panic!("expected MessageDelta, got {other:?}"),
@@ -1089,6 +1093,7 @@ mod tests {
     fn test_fallback_counter_advances_before_each_token_chunk() {
         let mut conv = AnthropicStreamConverter::new("test-model".into(), 7);
         let mut events = Vec::new();
+        assert_eq!(conv.usage.cache_creation_input_tokens, Some(0));
 
         // First content chunk: content_block_start + content_block_delta. The
         // fallback advances output_tokens to 1 before the delta is serialized.

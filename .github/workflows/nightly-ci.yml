@@ -56,7 +56,7 @@ jobs:
         run: |
           echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
       - name: Create and bootstrap fresh K8s builder
-        uses: ./.github/actions/bootstrap-buildkit
+        uses: $/.github/actions/bootstrap-buildkit
         with:
           builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
           buildkit_worker_addresses: ''
@@ -251,7 +251,7 @@ jobs:
   vllm-build:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [create-fresh-builder, resolve-source-sha, compute-dev-version]
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: vllm
       target: runtime
@@ -280,7 +280,7 @@ jobs:
   sglang-build:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [create-fresh-builder, resolve-source-sha, compute-dev-version]
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: sglang
       target: runtime
@@ -306,7 +306,7 @@ jobs:
   trtllm-build:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [create-fresh-builder, resolve-source-sha, compute-dev-version]
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
       target: runtime
@@ -330,8 +330,8 @@ jobs:
     secrets: inherit
 
   # ============================================================================
-  # OPTIONAL NIGHTLY IMAGES (operator, planner, frontend, snapshot agent,
-  # runtime EFA variants)
+  # OPTIONAL NIGHTLY IMAGES (operator, planner, frontend, runtime EFA
+  # variants)
   # ============================================================================
   # Built HERE — not reused from post-merge — for two reasons:
   #   1. OSRB from the get-go: GitLab's nvbug:attach-compliance resolves
@@ -361,7 +361,7 @@ jobs:
         # Do not use fetch-depth: 0 — it fetches all 1600+ branches (~3 min)
       - name: Build and push operator (nightly tag)
         id: build
-        uses: ./.github/actions/build-deploy-component
+        uses: $/.github/actions/build-deploy-component
         with:
           component: operator
           image_tag: ${{ github.sha }}-operator-nightly
@@ -387,7 +387,7 @@ jobs:
   planner-build:
     name: dynamo-planner
     needs: [create-fresh-builder, resolve-source-sha, compute-dev-version]
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
       target: planner
@@ -415,7 +415,7 @@ jobs:
   frontend-build:
     name: dynamo-frontend
     needs: [create-fresh-builder, resolve-source-sha, compute-dev-version]
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
       target: frontend
@@ -440,7 +440,7 @@ jobs:
   vllm-efa-build:
     name: vllm-runtime-efa
     needs: [create-fresh-builder, resolve-source-sha, compute-dev-version]
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: vllm
       target: runtime
@@ -464,7 +464,7 @@ jobs:
   sglang-efa-build:
     name: sglang-runtime-efa
     needs: [create-fresh-builder, resolve-source-sha, compute-dev-version]
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: sglang
       target: runtime
@@ -488,7 +488,7 @@ jobs:
   trtllm-efa-build:
     name: trtllm-runtime-efa
     needs: [create-fresh-builder, resolve-source-sha, compute-dev-version]
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: trtllm
       target: runtime
@@ -519,7 +519,7 @@ jobs:
     name: vllm-runtime-nightly
     needs: [compute-release-mode, vllm-build]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-copy.yml
+    uses: $/.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ format('{0}-nightly', needs.vllm-build.outputs.target_tag_plain) }}
       cuda_version: '["13.0"]'
@@ -530,7 +530,7 @@ jobs:
     name: sglang-runtime-nightly
     needs: [compute-release-mode, sglang-build]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-copy.yml
+    uses: $/.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ format('{0}-nightly', needs.sglang-build.outputs.target_tag_plain) }}
       cuda_version: '["13.0"]'
@@ -541,7 +541,7 @@ jobs:
     name: trtllm-runtime-nightly
     needs: [compute-release-mode, trtllm-build]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-copy.yml
+    uses: $/.github/workflows/shared-copy.yml
     with:
       target_tag_plain: ${{ format('{0}-nightly', needs.trtllm-build.outputs.target_tag_plain) }}
       cuda_version: '["13.1"]'
@@ -563,7 +563,7 @@ jobs:
           ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       - name: Setup vCluster and operator
         id: setup
-        uses: ./.github/actions/setup-dynamo-operator
+        uses: $/.github/actions/setup-dynamo-operator
         with:
           # Sole writer of this vCluster name; every other caller recovers into it.
           reset_existing: 'true'
@@ -584,7 +584,7 @@ jobs:
     name: vLLM Nightly Deploy Test
     needs: [compute-release-mode, deploy-operator, vllm-build, vllm-copy-to-acr]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-deploy-test.yml
+    uses: $/.github/workflows/shared-deploy-test.yml
     with:
       framework: vllm
       profiles: '["agg", "agg_router_kv_approx"]'
@@ -598,10 +598,10 @@ jobs:
     name: sglang Nightly Deploy Test
     needs: [compute-release-mode, deploy-operator, sglang-build, sglang-copy-to-acr]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-deploy-test.yml
+    uses: $/.github/workflows/shared-deploy-test.yml
     with:
       framework: sglang
-      profiles: '["agg"]'
+      profiles: '["agg", "agg_logging"]'
       image_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
@@ -612,7 +612,7 @@ jobs:
     name: TensorRT-LLM Nightly Deploy Test
     needs: [compute-release-mode, deploy-operator, trtllm-build, trtllm-copy-to-acr]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-deploy-test.yml
+    uses: $/.github/workflows/shared-deploy-test.yml
     with:
       framework: trtllm
       profiles: '["agg"]'
@@ -633,10 +633,156 @@ jobs:
           persist-credentials: false
       - name: Teardown vCluster
         if: needs.deploy-operator.outputs.namespace != '' && needs.deploy-operator.outputs.vcluster_name != ''
-        uses: ./.github/actions/teardown-dynamo-operator
+        uses: $/.github/actions/teardown-dynamo-operator
         with:
           vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
+
+  # ============================================================================
+  # EFA DEPLOY TEST
+  # ============================================================================
+  # The only job here that runs against real EFA hardware. Everything else
+  # validates the -efa images statically; this one deploys a 1P1D vLLM stack on
+  # aws-dev-02 (p5 / H100, 32 EFA devices per node) and proves the prefill->decode
+  # KV transfer rode NIXL -> LIBFABRIC -> EFA instead of silently falling back to
+  # UCX.
+  #
+  # It cannot reuse shared-deploy-test.yml: that workflow hardcodes its runner,
+  # timeout, ACR image reference and `-m framework_only` selector, and forwards no
+  # kube context, and this needs the Teleport kubeconfig pointed at aws-dev-02.
+  #
+  # No tolerations or nodeSelector appear in tests/deploy/efa/disagg-efa.yaml --
+  # the cluster's Kyverno deploy-test-pod-policy injects them for GPU pods in the
+  # dynamo-deploy-test namespace, and what it injects differs per cluster.
+  #
+  # Split setup / test / cleanup into three jobs, matching deploy-operator ->
+  # deploy-test-* -> deploy-cleanup above. Two properties of that shape matter and
+  # neither survives collapsing it into one job:
+  #
+  #   * Setup carries no timeout-minutes. setup-dynamo-operator's own waits
+  #     (vCluster 900s, CRD 1800s, operator readiness 1800s) can exceed any
+  #     reasonable job ceiling, so a ceiling spanning setup + test can expire
+  #     before the test even starts.
+  #   * Cleanup is a separate job with job-level `if: always()` over `needs:`, so
+  #     it fires however the upstream ended -- including job timeout, cancellation
+  #     and a dead runner, none of which a step-level `if: always()` survives.
+  #     That matters here because setup-dynamo-operator deliberately skips the
+  #     nscleanup/ttl label for dynamo-deploy-test, so a leaked vCluster holds p5
+  #     GPUs and EFA interfaces on a shared cluster with no automated reaper.
+  efa-deploy-operator:
+    name: vLLM EFA Deploy Operator
+    needs: [compute-release-mode, operator-build, resolve-source-sha]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    runs-on: prod-deploy-tester-v1
+    permissions:
+      contents: read
+    env:
+      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02
+    outputs:
+      namespace: ${{ steps.setup.outputs.namespace }}
+      vcluster_name: ${{ steps.setup.outputs.vcluster_name }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+
+      - name: Set kubectl context to aws-dev-02
+        uses: ./.github/actions/set-kube-context
+
+      # An empty vcluster_namespace makes the action resolve the shared
+      # dynamo-deploy-test namespace, which is what aws-dev-02 expects.
+      - name: Setup vCluster and operator
+        id: setup
+        uses: ./.github/actions/setup-dynamo-operator
+        with:
+          vcluster_name: nightly-efa-${{ github.run_id }}
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          repository: ${{ vars.ACR_REPOSITORY }}
+          operator_tag: ${{ needs.operator-build.outputs.operator_default_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
+          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
+
+  efa-deploy-test-vllm:
+    name: vLLM EFA Deploy Test
+    needs: [compute-release-mode, operator-build, resolve-source-sha, vllm-efa-build, efa-deploy-operator]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    runs-on: prod-deploy-tester-v1
+    # Setup is already done in efa-deploy-operator, so this bounds the test alone.
+    # The test carries @pytest.mark.timeout(1200) and its readiness wait is capped
+    # at 900s below that, so pytest fails with a report first; this is the backstop
+    # for a hang outside pytest. Safe to keep tight now that teardown is a separate
+    # always() job rather than a step this would skip.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+          ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+
+      - name: Set kubectl context to aws-dev-02
+        uses: ./.github/actions/set-kube-context
+
+      - name: Connect to vCluster
+        id: connect-vcluster
+        uses: ./.github/actions/connect-vcluster
+        with:
+          vcluster_name: ${{ needs.efa-deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.efa-deploy-operator.outputs.namespace }}
+
+      - name: Run EFA deploy test
+        uses: ./.github/actions/dynamo-deploy-test
+        with:
+          kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
+          namespace: default
+          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          operator_tag: ${{ needs.operator-build.outputs.operator_default_tag }}
+          hf_token: ${{ secrets.HF_TOKEN }}
+          framework: vllm
+          test_name: vllm_efa
+          test_file: tests/deploy/test_deploy_efa.py
+          extra_pytest_args: -m framework_with_efa
+          # Pulled straight from ECR, no copy-to-ACR hop and no imagePullSecret:
+          # aws-dev-02 is an AWS cluster whose node instance role already grants
+          # ECR read. Tag shape must stay in sync with calculate-target-tag in
+          # shared-build-image.yml (cuda13 is the default, so it adds no suffix).
+          image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ needs.resolve-source-sha.outputs.source_sha }}-${{ needs.vllm-efa-build.outputs.target_tag_plain }}-nightly
+          platform_arch: amd64
+
+  efa-deploy-cleanup:
+    name: vLLM EFA Deploy Cleanup
+    if: always()
+    needs: [efa-deploy-operator, efa-deploy-test-vllm]
+    runs-on: prod-deploy-tester-v1
+    permissions:
+      contents: read
+    env:
+      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-aws-dev-02
+    steps:
+      # No ref: here, matching deploy-cleanup above. Teardown needs only the
+      # vCluster name and namespace, both passed in from efa-deploy-operator's
+      # outputs, so it does not depend on the commit this job checks out. Pinning
+      # the resolved SHA also tripped CodeQL's untrusted-checkout and
+      # cache-poisoning rules -- a false positive on a workflow with no
+      # pull_request trigger, but not worth carrying for no behavioural gain.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set kubectl context to aws-dev-02
+        uses: ./.github/actions/set-kube-context
+
+      - name: Teardown vCluster
+        if: needs.efa-deploy-operator.outputs.vcluster_name != '' && needs.efa-deploy-operator.outputs.namespace != ''
+        uses: ./.github/actions/teardown-dynamo-operator
+        with:
+          vcluster_name: ${{ needs.efa-deploy-operator.outputs.vcluster_name }}
+          vcluster_namespace: ${{ needs.efa-deploy-operator.outputs.namespace }}
 
   # ============================================================================
   # COMPLIANCE
@@ -656,7 +802,7 @@ jobs:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [vllm-build, resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
@@ -683,24 +829,44 @@ jobs:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [vllm-build, resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
       test_suite_name: vllm
-      test_type: Multi-GPU Test
+      test_type: 2-GPU Test
+      amd_runner: prod-tester-amd-gpu-2-v2
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]' # No ARM GPUs available
+      enable_coverage: true
+      run_sanity_check: false
+      gpu_test_markers: vllm and gpu_2 and not h100
+      gpu_test_timeout_minutes: 45
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+    secrets: inherit
+
+  vllm-4-gpu-test:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [vllm-build, resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
+      test_suite_name: vllm
+      test_type: 4-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       enable_coverage: true
       run_sanity_check: false
-      # Includes elastic_ep, locally validated DP=2->4->2 on H200 GPUs with
-      # vLLM 0.24.0. That test remains pytest-skipped because this runner has
-      # 24 GiB/GPU, while its unquantized EPLB model needs >=80 GiB/GPU.
+      # elastic_ep remains skipped because it needs at least 80 GiB per GPU.
       # The long four-GPU nightly KVBM case runs in its own lane below so this
       # shared suite retains its existing 45-minute budget.
-      gpu_test_markers: vllm and (gpu_2 or gpu_4) and not h100 and not (kvbm and nightly and gpu_4)
+      gpu_test_markers: vllm and gpu_4 and not h100 and not (kvbm and nightly and gpu_4)
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
@@ -732,7 +898,7 @@ jobs:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
     needs: [vllm-build, resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
@@ -758,7 +924,7 @@ jobs:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [sglang-build, resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
@@ -787,19 +953,41 @@ jobs:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [sglang-build, resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
       test_suite_name: sglang
-      test_type: Multi-GPU Test
+      test_type: 2-GPU Test
+      amd_runner: prod-tester-amd-gpu-2-v2
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]' # No ARM GPUs available
+      enable_coverage: true
+      run_sanity_check: false
+      gpu_test_markers: sglang and gpu_2 and not h100
+      gpu_test_timeout_minutes: 45
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
+      image_tag_suffix: '-nightly'
+    secrets: inherit
+
+  sglang-4-gpu-test:
+    name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
+    needs: [sglang-build, resolve-source-sha, compute-release-mode]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      dd_env: nightly
+      dd_flaky_retry_enabled: 'false'
+      test_suite_name: sglang
+      test_type: 4-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       enable_coverage: true
       run_sanity_check: false
-      gpu_test_markers: sglang and (gpu_2 or gpu_4) and not h100
+      gpu_test_markers: sglang and gpu_4 and not h100
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
@@ -809,7 +997,7 @@ jobs:
     name: sglang-runtime # This name overlaps with other sglang jobs to group them in the UI
     needs: [sglang-build, resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
@@ -835,7 +1023,7 @@ jobs:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [trtllm-build, resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
@@ -863,19 +1051,19 @@ jobs:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [trtllm-build, resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
       test_suite_name: trtllm
-      test_type: Multi-GPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
+      test_type: 2-GPU Test
+      amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
       enable_coverage: true
       run_sanity_check: false
-      gpu_test_markers: trtllm and (gpu_2 or gpu_4) and not h100
+      gpu_test_markers: trtllm and gpu_2 and not h100
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'
@@ -885,7 +1073,7 @@ jobs:
     name: trtllm-runtime # This name overlaps with other trtllm jobs to group them in the UI
     needs: [trtllm-build, resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       dd_env: nightly
       dd_flaky_retry_enabled: 'false'
@@ -915,7 +1103,7 @@ jobs:
     name: vllm-xpu
     needs: [resolve-source-sha, compute-release-mode]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
-    uses: ./.github/workflows/xpu-ci.yaml
+    uses: $/.github/workflows/xpu-ci.yaml
     with:
       framework: vllm
       pytest_markers: 'vllm'
@@ -927,7 +1115,7 @@ jobs:
   dynamo-pipeline:
     name: dynamo-runtime
     needs: [create-fresh-builder, compute-dev-version, resolve-source-sha]
-    uses: ./.github/workflows/dynamo-pipeline.yml
+    uses: $/.github/workflows/dynamo-pipeline.yml
     with:
       builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
       fresh_builder: true
@@ -1053,8 +1241,8 @@ jobs:
     # strictly: release.yml copies their -nightly ECR images to NGC and extracts
     # wheels from the dynamo-pipeline image, so a failed build must not publish a
     # partial release. manual-release-approval is `skipped` on cron, `success` on dispatch.
-    # The optional-image builds (operator, planner, frontend, snapshot agent,
-    # EFA variants) are ORDERING-ONLY needs (deliberately absent from the
+    # The optional-image builds (operator, planner, frontend, EFA variants)
+    # are ORDERING-ONLY needs (deliberately absent from the
     # gate below): release.yml copies them fail-soft, so a flake in any of
     # them must not block the runtime nightly — but the copy step has to run
     # after they finish or the crane probe would race the builds.
@@ -1066,7 +1254,7 @@ jobs:
         && needs.dynamo-pipeline.result == 'success'
         && (needs.manual-release-approval.result == 'success'
             || needs.manual-release-approval.result == 'skipped') }}
-    uses: ./.github/workflows/release.yml
+    uses: $/.github/workflows/release.yml
     with:
       commit_sha: ${{ needs.resolve-source-sha.outputs.source_sha }}
       nightly: true
@@ -1091,7 +1279,7 @@ jobs:
   coverage-report:
     name: Generate Coverage Report
     runs-on: ubuntu-latest
-    needs: [vllm-test, vllm-multi-gpu-test, vllm-kvbm-multi-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, rust-tests]
+    needs: [vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test, vllm-kvbm-multi-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-4-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, rust-tests]
     if: always()
     permissions:
       contents: read
@@ -1303,7 +1491,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - name: Register K8s builder context (skip bootstrap)
-        uses: ./.github/actions/bootstrap-buildkit
+        uses: $/.github/actions/bootstrap-buildkit
         continue-on-error: true
         with:
           builder_name: ${{ needs.create-fresh-builder.outputs.builder_name }}
@@ -1318,11 +1506,11 @@ jobs:
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     if: always()
-    needs: [vllm-test, vllm-multi-gpu-test, vllm-kvbm-multi-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, deploy-cleanup, rust-tests]
+    needs: [vllm-test, vllm-multi-gpu-test, vllm-4-gpu-test, vllm-kvbm-multi-gpu-test, vllm-h100-test, sglang-test, sglang-multi-gpu-test, sglang-4-gpu-test, sglang-h100-test, trtllm-test, trtllm-multi-gpu-test, trtllm-h100-test, deploy-cleanup, rust-tests]
     permissions:
       contents: read
       actions: read   # grant the reusable notifier read access to list this run's jobs
-    uses: ./.github/workflows/notify-slack.yml
+    uses: $/.github/workflows/notify-slack.yml
     with:
       pipeline_name: Nightly
       runs_on: prod-default-v2

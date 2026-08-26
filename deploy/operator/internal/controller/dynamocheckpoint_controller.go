@@ -339,6 +339,15 @@ func (r *CheckpointReconciler) failPendingCheckpoint(
 }
 
 func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint) (ctrl.Result, error) {
+	if !r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+		if ckpt.Status.Message == checkpointDisabledMessage {
+			return ctrl.Result{}, nil
+		}
+		ckpt.Status.Message = checkpointDisabledMessage
+		r.Recorder.Eventf(ckpt, nil, corev1.EventTypeWarning, "CheckpointDisabled", "Validate", checkpointDisabledMessage)
+		return ctrl.Result{}, r.Status().Update(ctx, ckpt)
+	}
+
 	if ckpt.Status.JobName == "" {
 		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhasePending
 		ckpt.Status.Message = "checkpoint job is missing from status"
@@ -377,14 +386,6 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		// not the source pod has appeared (k8s sets JobFailed/DeadlineExceeded on unschedulable Jobs).
 		if failed, message := checkpointJobFailed(job); failed {
 			return r.failCreating(ctx, ckpt, "JobFailed", message)
-		}
-		if !r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
-			if ckpt.Status.Message == checkpointDisabledMessage {
-				return ctrl.Result{}, nil
-			}
-			ckpt.Status.Message = checkpointDisabledMessage
-			r.Recorder.Eventf(ckpt, nil, corev1.EventTypeWarning, "CheckpointDisabled", "Validate", checkpointDisabledMessage)
-			return ctrl.Result{}, r.Status().Update(ctx, ckpt)
 		}
 
 		pod, perr := r.findSourcePod(ctx, job)
