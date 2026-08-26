@@ -370,3 +370,24 @@ def test_engine_and_dynamo_mains_apply_identical_aic_capacity_lowering(
     assert engine_blocks == dynamo_blocks == 444
     assert len(estimator_calls) == 2
     assert all("nextn" not in call for call in estimator_calls)
+
+
+def test_missing_npz_planner_profile_data_is_rejected(tmp_path) -> None:
+    # The .npz short-circuit exists so replay does not import planner-only
+    # dependencies. It used to report any .npz path as already resolved,
+    # including one that is not there, and the engine answers an unreadable
+    # profile by falling back to a synthetic polynomial model rather than
+    # failing, so a typo quietly changed what was being simulated.
+    missing = tmp_path / "not-there.npz"
+
+    with pytest.raises(FileNotFoundError, match="not-there.npz"):
+        replay_main.resolve_planner_profile_data(missing)
+
+
+def test_existing_npz_planner_profile_data_still_short_circuits(tmp_path) -> None:
+    # Pins the reason the suffix check exists: a real .npz is taken at its word
+    # without reading it, so no planner import happens on this path.
+    present = tmp_path / "profile.npz"
+    present.write_bytes(b"")
+
+    assert replay_main.resolve_planner_profile_data(present).npz_path == present

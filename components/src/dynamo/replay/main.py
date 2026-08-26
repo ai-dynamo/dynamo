@@ -69,6 +69,14 @@ def resolve_planner_profile_data(
         return SimpleNamespace(npz_path=None)
 
     if planner_profile_data.suffix == ".npz":
+        # Existence only. Reading the file to check its contents would pull in
+        # the planner dependencies this short-circuit exists to avoid, but a
+        # path that is not there cannot be a profile under any definition, and
+        # the engine's response to one is to fall back to a synthetic model.
+        if not planner_profile_data.is_file():
+            raise FileNotFoundError(
+                f"planner profile data '{planner_profile_data}' does not exist"
+            )
         return SimpleNamespace(npz_path=planner_profile_data)
 
     try:
