@@ -931,6 +931,16 @@ class StreamingPostProcessor:
     # case where skip_special_tokens was forced off), and only over the `<|...|>`
     # control-token shape. `reasoning` is left untouched -- it is already clean, and
     # rewriting it would risk mangling legitimate text the model quoted.
+    #
+    # Why a shape rather than `self._control_markers` (this class already collects
+    # `tokenizer.all_special_tokens` for _is_control_only_content): one of the three
+    # call sites seeds `delta_message` from the raw `delta_text` *before* tool
+    # parsing, and its result reaches the `_tool_start_markers()` scan that decides
+    # whether to buffer for tool extraction. A blanket special-token strip there
+    # would delete a tool-call marker that is also a special token and silently
+    # break tool detection. The two are near-identical in practice -- for
+    # Qwen/Qwen3-0.6B every entry of `all_special_tokens` matches this pattern --
+    # but the shape cannot reach a marker a parser owns.
     _CONTROL_MARKER_RE = re.compile(r"<\|[A-Za-z0-9_]+\|>")
 
     def _strip_control_markers(self, text: str | None) -> str | None:
@@ -938,7 +948,16 @@ class StreamingPostProcessor:
             return text
         if self.reasoning_parser is None and self.tool_parser is None:
             return text
-        return self._CONTROL_MARKER_RE.sub("", text)
+        # A tool parser may own a marker of this shape (`<|tool_call|>` and
+        # friends). Those belong to its wire format and are consumed downstream, so
+        # stripping them here would blind the tool-start scan described above.
+        preserved = self._tool_start_markers() + self._tool_end_markers()
+        if not preserved:
+            return self._CONTROL_MARKER_RE.sub("", text)
+        return self._CONTROL_MARKER_RE.sub(
+            lambda match: match.group(0) if match.group(0) in preserved else "",
+            text,
+        )
 
     def _compose_delta_message(
         self, reasoning: str | None, content: str | None
