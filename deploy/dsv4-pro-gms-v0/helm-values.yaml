@@ -1,0 +1,32 @@
+# Overlay for helm upgrade of dynamo-platform inside schwinns-vcluster.
+# Substitute __OPERATOR_IMAGE__ after Build on Demand.
+global:
+  etcd:
+    install: false
+  nats:
+    install: false
+  grove:
+    install: false
+  snapshot:
+    install: false
+
+dynamo-operator:
+  enabled: true
+  upgradeCRD: true
+  namespaceRestriction:
+    enabled: false
+    targetNamespace: schwinns-vcluster
+  checkpoint:
+    enabled: true
+    storage:
+      type: pvc
+      pvc:
+        create: false
+        pvcName: snapshot-pvc
+        basePath: /checkpoints
+  controllerManager:
+    manager:
+      image:
+        repository: dynamoci.azurecr.io/ai-dynamo/dynamo
+        tag: __OPERATOR_TAG__
+        pullPolicy: Always

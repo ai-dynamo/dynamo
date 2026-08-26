@@ -1,0 +1,135 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# UUID-pinned DRA claims for nscale-dev node s2877 (8x B200).
+# Intra-pod GMS failover shares one destination claim across engine-0, engine-1,
+# and gms-server. The source claim is unused unless a checkpoint job is added.
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: dsv4pro-vllm-gmsv0-s2877-destination-gpus
+  namespace: schwinns-vcluster
+spec:
+  devices:
+    requests:
+    - name: gpu-0
+      exactly:
+        deviceClassName: gpu.nvidia.com
+        count: 1
+        selectors:
+        - cel:
+            expression: device.attributes['gpu.nvidia.com'].uuid == 'GPU-02ff0cc1-647f-dee7-8365-921738e945a6'
+    - name: gpu-1
+      exactly:
+        deviceClassName: gpu.nvidia.com
+        count: 1
+        selectors:
+        - cel:
+            expression: device.attributes['gpu.nvidia.com'].uuid == 'GPU-0d5ad102-eb8f-922a-173e-e91033320e0f'
+    - name: gpu-2
+      exactly:
+        deviceClassName: gpu.nvidia.com
+        count: 1
+        selectors:
+        - cel:
+            expression: device.attributes['gpu.nvidia.com'].uuid == 'GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa'
+    - name: gpu-3
+      exactly:
+        deviceClassName: gpu.nvidia.com
+        count: 1
+        selectors:
+        - cel:
+            expression: device.attributes['gpu.nvidia.com'].uuid == 'GPU-4fba7684-5a96-6280-91ff-b41f7484564c'
+    - name: gpu-4
+      exactly:
+        deviceClassName: gpu.nvidia.com
+        count: 1
+        selectors:
+        - cel:
+            expression: device.attributes['gpu.nvidia.com'].uuid == 'GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683'
+    - name: gpu-5
+      exactly:
+        deviceClassName: gpu.nvidia.com
+        count: 1
+        selectors:
+        - cel:
+            expression: device.attributes['gpu.nvidia.com'].uuid == 'GPU-32a6c51c-d07d-7513-86b5-813b64e452d2'
+    - name: gpu-6
+      exactly:
+        deviceClassName: gpu.nvidia.com
+        count: 1
+        selectors:
+        - cel:
+            expression: device.attributes['gpu.nvidia.com'].uuid == 'GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f'
+    - name: gpu-7
+      exactly:
+        deviceClassName: gpu.nvidia.com
+        count: 1
+        selectors:
+        - cel:
+            expression: device.attributes['gpu.nvidia.com'].uuid == 'GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51'
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: dsv4pro-vllm-gmsv0-s2877-source-gpus
+  namespace: schwinns-vcluster
+spec:
+  devices:
+    requests:
+    - name: gpu-0
+      exactly:
+        deviceClassName: gpu.nvidia.com
+        count: 1
+        selectors:
+        - cel:
+            expression: device.attributes['gpu.nvidia.com'].uuid == 'GPU-02ff0cc1-647f-dee7-8365-921738e945a6'
+    - name: gpu-1
+      exactly:
+        deviceClassName: gpu.nvidia.com
+        count: 1
+        selectors:
+        - cel:
+            expression: device.attributes['gpu.nvidia.com'].uuid == 'GPU-0d5ad102-eb8f-922a-173e-e91033320e0f'
+    - name: gpu-2
+      exactly:
+        deviceClassName: gpu.nvidia.com
+        count: 1
+        selectors:
+        - cel:
+            expression: device.attributes['gpu.nvidia.com'].uuid == 'GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa'
+    - name: gpu-3
+      exactly:
+        deviceClassName: gpu.nvidia.com
+        count: 1
+        selectors:
+        - cel:
+            expression: device.attributes['gpu.nvidia.com'].uuid == 'GPU-4fba7684-5a96-6280-91ff-b41f7484564c'
+    - name: gpu-4
+      exactly:
+        deviceClassName: gpu.nvidia.com
+        count: 1
+        selectors:
+        - cel:
+            expression: device.attributes['gpu.nvidia.com'].uuid == 'GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683'
+    - name: gpu-5
+      exactly:
+        deviceClassName: gpu.nvidia.com
+        count: 1
+        selectors:
+        - cel:
+            expression: device.attributes['gpu.nvidia.com'].uuid == 'GPU-32a6c51c-d07d-7513-86b5-813b64e452d2'
+    - name: gpu-6
+      exactly:
+        deviceClassName: gpu.nvidia.com
+        count: 1
+        selectors:
+        - cel:
+            expression: device.attributes['gpu.nvidia.com'].uuid == 'GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f'
+    - name: gpu-7
+      exactly:
+        deviceClassName: gpu.nvidia.com
+        count: 1
+        selectors:
+        - cel:
+            expression: device.attributes['gpu.nvidia.com'].uuid == 'GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51'

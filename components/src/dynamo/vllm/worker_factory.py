@@ -48,6 +48,7 @@ from .health_check import (
 )
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .multimodal_handlers import EncodeWorkerHandler
+from .phase_timer import mark as phase_mark
 from .pooling_handlers import ClassifyWorkerHandler
 from .publisher import StatLoggerFactory
 from .realtime import RealtimeHandler, RealtimeTranscriptionHandler
@@ -1199,6 +1200,7 @@ class WorkerFactory:
                 prometheus_temp_dir,
                 component_gauges,
             ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+        phase_mark("setup_vllm_engine")
         lifecycle.engine_client = engine_client
         lifecycle.vllm_config = vllm_config
         await configure_kv_event_block_size(engine_client, vllm_config)
@@ -1304,6 +1306,7 @@ class WorkerFactory:
         was_failover = await self._maybe_wait_for_failover_lock(
             handler, runtime, config, failover_metrics
         )
+        phase_mark("failover_lock")
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
@@ -1342,6 +1345,7 @@ class WorkerFactory:
             worker_type=worker_type,
             needs=needs,
         )
+        phase_mark("register_model")
         # Serving now: a failover that got here succeeded. Gated on was_failover
         # (same as the attempt) so bootup isn't counted and success pairs with attempt.
         if failover_metrics is not None:
@@ -1580,6 +1584,7 @@ class WorkerFactory:
         was_failover = await self._maybe_wait_for_failover_lock(
             handler, runtime, config, failover_metrics
         )
+        phase_mark("failover_lock")
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")

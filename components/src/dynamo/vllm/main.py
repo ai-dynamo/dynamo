@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from dynamo.vllm.omni.args import OmniConfig
+from dynamo.vllm import phase_timer
 
 import uvloop
 from huggingface_hub import try_to_load_from_cache
@@ -51,7 +52,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.router_hints import enable_router_hint_support
 from dynamo.vllm.worker_factory import WorkerFactory
 
-from . import envs
+from . import envs, phase_timer
 from .args import Config, _uses_dynamo_connector, configure_rl_logprobs_mode, parse_args
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import (
@@ -147,9 +148,11 @@ def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
 
 
 async def worker(argv: list[str] | None = None) -> None:
+    phase_timer.start("worker_entry")
     if argv is None:
         argv = sys.argv[1:]
     config = parse_args(argv)
+    phase_timer.mark("parse_args")
 
     dump_config(config.dump_config_to, config)
 
@@ -173,6 +176,7 @@ async def worker(argv: list[str] | None = None) -> None:
     # that path (ideally via a shared folder).
     if should_prefetch_model(config):
         await fetch_model(config.model)
+    phase_timer.mark("prefetch_model")
 
     # Snapshot mode: load engine before runtime creation so there are no
     # runtime connections when CRIU captures GPU state.
@@ -202,6 +206,7 @@ async def worker(argv: list[str] | None = None) -> None:
         request_plane=config.request_plane,
         event_plane=config.event_plane,
     )
+    phase_timer.mark("create_runtime")
 
     # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
     # there
@@ -230,6 +235,7 @@ async def worker(argv: list[str] | None = None) -> None:
         shutdown_endpoints,
         snapshot_engine=snapshot_engine,
     )
+    phase_timer.mark("factory_create_done")
 
     logger.debug("Worker function completed, exiting...")
 
@@ -631,6 +637,7 @@ def setup_vllm_engine(
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    phase_timer.mark("create_engine_config")
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 
@@ -673,8 +680,9 @@ def setup_vllm_engine(
     if stat_logger:
         factory.append(stat_logger)
 
-    # Time engine initialization
+    # Time engine initialization (model load, compile, CUDA graphs).
     start_time = time.time()
+    phase_timer.mark("async_llm_start")
     engine_client = AsyncLLM.from_vllm_config(
         vllm_config=vllm_config,
         usage_context=usage_context,
@@ -683,6 +691,7 @@ def setup_vllm_engine(
         disable_log_stats=engine_args.disable_log_stats,
     )
     load_time = time.time() - start_time
+    phase_timer.mark("async_llm_done")
 
     # Record model load time. ``component_gauges`` is None on the
     # embedding-worker path -- pooling engines have no chat-shaped gauges

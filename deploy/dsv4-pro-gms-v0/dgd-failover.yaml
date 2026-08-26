@@ -1,0 +1,193 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# GMS V0 intra-pod shadow failover for DeepSeek-V4-Pro TEP8 on vLLM.
+# Substitute __IMAGE__ with the Build-on-Demand runtime tag before apply.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv4pro-vllm-gmsv0-fo
+  namespace: schwinns-vcluster
+  annotations:
+    nvidia.com/dynamo-kube-discovery-mode: container
+    nvidia.com/enable-grove: "false"
+    nvidia.com/workload-provider: component
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    runtimeVersionOverride: "1.4.0"
+    podTemplate:
+      spec:
+        imagePullSecrets:
+        - name: acr-token-secret
+        nodeSelector:
+          kubernetes.io/hostname: cluster-0967a26d-pool-14bee067-prctr-s2877
+        tolerations:
+        - operator: Exists
+        containers:
+        - name: main
+          image: __IMAGE__
+          imagePullPolicy: Always
+          workingDir: /workspace
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          command: ["python3"]
+          args: ["-m", "dynamo.frontend", "--trust-remote-code", "--http-port", "8000"]
+          env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+          - name: HF_HOME
+            value: /model-cache
+          - name: HF_HUB_CACHE
+            value: /model-cache/hub
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          volumeMounts:
+          - name: model-cache
+            mountPath: /model-cache
+            readOnly: true
+        volumes:
+        - name: model-cache
+          nfs:
+            server: 192.168.0.223
+            path: /unikorn-identity-03cfadd31877-551/pvc-92b73e65-4eb9-486c-a773-8f58c2f32abd
+            readOnly: true
+  - name: VllmDecodeWorker
+    type: worker
+    replicas: 1
+    runtimeVersionOverride: "1.4.0"
+    experimental:
+      failover:
+        mode: IntraPod
+        numShadows: 1
+      gpuMemoryService:
+        mode: IntraPod
+        deviceClassName: gpu.nvidia.com
+    podTemplate:
+      metadata:
+        annotations:
+          vcluster.loft.sh/skip-hostpath-translation: "true"
+      spec:
+        runtimeClassName: nvidia
+        schedulerName: default-scheduler
+        imagePullSecrets:
+        - name: acr-token-secret
+        nodeSelector:
+          kubernetes.io/hostname: cluster-0967a26d-pool-14bee067-prctr-s2877
+        tolerations:
+        - operator: Exists
+        resourceClaims:
+        - name: intrapod-shared-gpu
+          resourceClaimName: dsv4pro-vllm-gmsv0-s2877-destination-gpus
+        containers:
+        - name: main
+          image: __IMAGE__
+          imagePullPolicy: Always
+          workingDir: /workspace
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+          command: ["python3"]
+          args:
+          - -m
+          - dynamo.vllm
+          - --model
+          - nvidia/DeepSeek-V4-Pro-NVFP4
+          - --served-model-name
+          - nvidia/DeepSeek-V4-Pro-NVFP4
+          - --trust-remote-code
+          - --load-format
+          - gms
+          - --tensor-parallel-size
+          - "8"
+          - --enable-expert-parallel
+          - --moe-backend
+          - flashinfer_trtllm
+          - --kv-cache-dtype
+          - fp8
+          - --block-size
+          - "256"
+          - --max-model-len
+          - "32768"
+          - --gpu-memory-utilization
+          - "0.80"
+          - --max-num-seqs
+          - "32"
+          - --tokenizer-mode
+          - deepseek_v4
+          - --dyn-reasoning-parser
+          - deepseek_v4
+          - --dyn-tool-call-parser
+          - deepseek_v4
+          - --attention-config
+          - '{"use_fp4_indexer_cache":true}'
+          - --compilation-config
+          - '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}'
+          - --enable-prefix-caching
+          - --enable-chunked-prefill
+          - --no-enable-flashinfer-autotune
+          - --model-loader-extra-config
+          - '{"enable_multithread_load":true,"num_threads":32}'
+          env:
+          - name: HF_HOME
+            value: /model-cache
+          - name: HF_HUB_CACHE
+            value: /model-cache/hub
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: VLLM_SKIP_P2P_CHECK
+            value: "1"
+          - name: NCCL_CUMEM_ENABLE
+            value: "1"
+          - name: VLLM_ALLREDUCE_USE_FLASHINFER
+            value: "1"
+          - name: VLLM_ENGINE_READY_TIMEOUT_S
+            value: "5400"
+          - name: VLLM_CACHE_ROOT
+            value: /vllm-cache
+          - name: TORCHINDUCTOR_CACHE_DIR
+            value: /vllm-cache/torchinductor
+          - name: TRITON_CACHE_DIR
+            value: /vllm-cache/triton
+          - name: DYN_GMS_VLLM_LOG_LEVEL
+            value: INFO
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            claims:
+            - name: intrapod-shared-gpu
+            requests:
+              memory: 400Gi
+            limits:
+              memory: 800Gi
+          volumeMounts:
+          - name: model-cache
+            mountPath: /model-cache
+            readOnly: true
+          - name: vllm-cache
+            mountPath: /vllm-cache
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 540
+        volumes:
+        - name: model-cache
+          nfs:
+            server: 192.168.0.223
+            path: /unikorn-identity-03cfadd31877-551/pvc-92b73e65-4eb9-486c-a773-8f58c2f32abd
+            readOnly: true
+        - name: vllm-cache
+          hostPath:
+            path: /mnt/nvme2/schwinns-vcluster/dsv4-pro-vllm-cache
+            type: DirectoryOrCreate
+    sharedMemorySize: 200Gi
