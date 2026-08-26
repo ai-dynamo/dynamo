@@ -22,10 +22,6 @@ const SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
 type Store = kube::runtime::reflector::Store<EndpointSlice>;
 
 /// Verifies the peer Service exists before enabling replica synchronization.
-///
-/// The Service scopes EndpointSlice membership only. EPP replicas bind and
-/// dial their configured replica-sync port directly, so Service and
-/// EndpointSlice port definitions are not part of this contract.
 pub(crate) async fn ensure_peer_service_exists(namespace: &str, service_name: &str) -> Result<()> {
     use kube::{Api, Client};
 
@@ -72,10 +68,6 @@ pub async fn spawn(
         "Starting EPP peer EndpointSlice watch (embedded replication)"
     );
 
-    // Reconcile only when the reflector's Store holds a coherent snapshot:
-    // InitDone completes a LIST/relist, while Apply/Delete update a live Store.
-    // The watcher retries transient errors internally; its stream ends only when
-    // its writer drops.
     tokio::spawn(async move {
         tokio::pin!(reflect);
         let mut known = BTreeSet::new();
