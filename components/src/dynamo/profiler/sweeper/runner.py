@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,9 @@ class SweepResult:
 
     config: Any
     candidates: list[Any]
+
+
+RoundCallback = Callable[[int, list[Any]], None]
 
 
 def _load_sweeper_api() -> tuple[type[Any], type[Any]]:
@@ -40,14 +44,27 @@ def _load_runner_factory() -> type[Any]:
         raise RuntimeError("Dynamo Replay runner is unavailable") from exc
 
 
-def run_sweep(config_path: str | Path, *, show_progress: bool = True) -> SweepResult:
-    """Execute one AI Simulate sweep using Dynamo Replay."""
-    SmartSearchConfig, Sweeper = _load_sweeper_api()
+def load_sweep_config(config_path: str | Path) -> Any:
+    """Load and validate one native AI Simulate SmartSearchConfig."""
+    SmartSearchConfig, _ = _load_sweeper_api()
+    return SmartSearchConfig.from_yaml(str(config_path))
+
+
+def run_sweep(
+    config: Any,
+    *,
+    show_progress: bool = True,
+    on_round: RoundCallback | None = None,
+) -> SweepResult:
+    """Execute one validated AI Simulate config using Dynamo Replay."""
+    _, Sweeper = _load_sweeper_api()
 
     DynamoReplayRunnerFactory = _load_runner_factory()
-    config = SmartSearchConfig.from_yaml(str(config_path))
     sweeper = Sweeper(
         runner_factory=DynamoReplayRunnerFactory(),
         show_progress=show_progress,
     )
-    return SweepResult(config=config, candidates=list(sweeper.run(config)))
+    return SweepResult(
+        config=config,
+        candidates=list(sweeper.run(config, on_round=on_round)),
+    )
