@@ -23,7 +23,10 @@ use futures::Future;
 use once_cell::sync::OnceCell;
 use std::{
     mem::ManuallyDrop,
-    sync::{Arc, atomic::Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::{signal, sync::Mutex, task::JoinHandle};
@@ -31,6 +34,12 @@ use tokio::{signal, sync::Mutex, task::JoinHandle};
 pub use tokio_util::sync::CancellationToken;
 
 const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 15 * 60;
+
+/// Slack added on top of [`graceful_shutdown_timeout`] to bound how long the teardown
+/// thread keeps an owned Tokio runtime alive waiting for the shutdown coordinator.
+/// A coordinator that never reaches phase 3 then leaks one parked thread instead of
+/// pinning the executor and all of its worker threads for the life of the process.
+const TEARDOWN_WAIT_MARGIN: Duration = Duration::from_secs(30);
 
 pub(crate) fn graceful_shutdown_timeout() -> Duration {
     let timeout_secs = std::env::var(
@@ -50,6 +59,18 @@ enum RuntimeType {
     External(tokio::runtime::Handle),
 }
 
+/// Shutdown state shared by a [`Runtime`] and every clone of it.
+#[derive(Debug)]
+struct ShutdownState {
+    /// Latched by the first [`Runtime::shutdown`] call so that later calls cannot start a
+    /// second coordinator task or a second teardown thread.
+    initiated: AtomicBool,
+
+    /// Cancelled by the coordinator once phase 3 has cancelled the primary token. It is
+    /// awaitable from async code and also observable from a plain thread.
+    complete: CancellationToken,
+}
+
 /// Local [Runtime] which provides access to shared resources local to the physical node/machine.
 #[derive(Debug, Clone)]
 pub struct Runtime {
@@ -59,6 +80,7 @@ pub struct Runtime {
     cancellation_token: CancellationToken,
     endpoint_shutdown_token: CancellationToken,
     graceful_shutdown_tracker: Arc<GracefulShutdownTracker>,
+    shutdown_state: Arc<ShutdownState>,
     compute_pool: Option<Arc<compute::ComputePool>>,
     block_in_place_permits: Option<Arc<tokio::sync::Semaphore>>,
 }
@@ -100,6 +122,10 @@ impl Runtime {
             cancellation_token,
             endpoint_shutdown_token,
             graceful_shutdown_tracker: Arc::new(GracefulShutdownTracker::new()),
+            shutdown_state: Arc::new(ShutdownState {
+                initiated: AtomicBool::new(false),
+                complete: CancellationToken::new(),
+            }),
             compute_pool,
             block_in_place_permits,
         })
@@ -321,21 +347,68 @@ impl Runtime {
         self.compute_pool.as_ref()
     }
 
-    /// Shuts down the [`Runtime`] instance
+    /// A [`CancellationToken`] that is cancelled once the shutdown phases started by
+    /// [`Runtime::shutdown`] have completed, that is once phase 3 has cancelled the
+    /// primary token. It stays un-cancelled if `shutdown` was never called.
+    pub fn shutdown_complete_token(&self) -> CancellationToken {
+        self.shutdown_state.complete.clone()
+    }
+
+    /// Resolves once the shutdown phases started by [`Runtime::shutdown`] have completed.
+    /// Never resolves if `shutdown` was never called.
+    pub async fn shutdown_complete(&self) {
+        self.shutdown_state.complete.cancelled().await
+    }
+
+    /// Shuts down the [`Runtime`] instance.
+    ///
+    /// Phase 1 runs on the calling thread, so the endpoint shutdown token is always
+    /// cancelled by the time this returns. Phase 2 (waiting for registered graceful
+    /// endpoints, bounded by `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`) and phase 3
+    /// (cancelling the primary token) run on the primary runtime;
+    /// [`Runtime::shutdown_complete`] resolves once phase 3 has run.
+    ///
+    /// When this [`Runtime`] owns its Tokio runtime, that runtime is kept alive until the
+    /// phases reach that point even if the last [`Runtime`] handle is dropped first —
+    /// without that, dropping the last handle from an async context calls Tokio's
+    /// `shutdown_background` and discards the queued coordinator. Externally owned
+    /// runtimes are never torn down here.
+    ///
+    /// Calling this more than once is a no-op after the first call.
     pub fn shutdown(&self) {
+        if self.shutdown_state.initiated.swap(true, Ordering::SeqCst) {
+            tracing::debug!("Runtime shutdown already initiated; ignoring repeat request");
+            return;
+        }
+
         tracing::info!("Runtime shutdown initiated");
 
-        // Spawn the shutdown coordination task BEFORE cancelling tokens
+        // Phase 1 runs here rather than in the coordinator task so that it cannot be lost
+        // along with that task, and so that callers get an unconditional postcondition.
+        tracing::info!("Phase 1: Cancelling endpoint shutdown token");
+        self.endpoint_shutdown_token.cancel();
+
         let tracker = self.graceful_shutdown_tracker.clone();
         let main_token = self.cancellation_token.clone();
-        let endpoint_token = self.endpoint_shutdown_token.clone();
+        let complete = self.shutdown_state.complete.clone();
+
+        let owns_executor = matches!(self.primary, RuntimeType::Shared(_))
+            || matches!(self.secondary, RuntimeType::Shared(_));
+
+        // Nothing is ever sent on this channel. The teardown thread blocks on the receiver
+        // so that dropping the coordinator task — whether it finished or was discarded —
+        // wakes it immediately instead of leaving it on the timeout.
+        let (coordinator_alive, coordinator_done) = if owns_executor {
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
 
         // Use the runtime handle to spawn the task
         let handle = self.primary();
         handle.spawn(async move {
-            // Phase 1: Cancel endpoint shutdown token to stop accepting new requests
-            tracing::info!("Phase 1: Cancelling endpoint shutdown token");
-            endpoint_token.cancel();
+            let _coordinator_alive = coordinator_alive;
 
             // Phase 2: Wait for all graceful endpoints to complete
             tracing::info!("Phase 2: Waiting for graceful endpoints to complete");
@@ -361,7 +434,58 @@ impl Runtime {
             // Phase 3: Now connections will be disconnected to backend services (e.g. NATS/ETCD) by cancelling the main token
             tracing::info!("Phase 3: Connections to backend services will now be disconnected");
             main_token.cancel();
+            complete.cancel();
         });
+
+        if let Some(coordinator_done) = coordinator_done {
+            self.spawn_owned_teardown(coordinator_done);
+        }
+    }
+
+    /// Hand clones of the owned Tokio runtimes to a thread that outlives the shutdown
+    /// phases and then drops them where blocking is legal.
+    ///
+    /// Only [`Runtime::shutdown`] may call this. An owned runtime that is dropped without
+    /// a `shutdown` call — `transports::etcd` and `storage::kv::etcd` both build one,
+    /// `block_on` it and drop it — must keep the plain drop behaviour.
+    fn spawn_owned_teardown(&self, coordinator_done: std::sync::mpsc::Receiver<()>) {
+        if std::env::var("REVERT_TEARDOWN").is_ok() {
+            drop(coordinator_done);
+            return;
+        }
+        // Holding these clones is what keeps `Arc::get_mut` in `Drop for RuntimeType` from
+        // succeeding on the caller's thread, so a drop from an async context short-circuits
+        // instead of calling `shutdown_background` on the executor the coordinator is
+        // queued on.
+        let primary = self.primary.clone();
+        let secondary = self.secondary.clone();
+        let wait_bound = graceful_shutdown_timeout() + TEARDOWN_WAIT_MARGIN;
+
+        let spawned = std::thread::Builder::new()
+            .name("dyn-rt-teardown".to_string())
+            .spawn(move || {
+                if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                    coordinator_done.recv_timeout(wait_bound)
+                {
+                    tracing::error!(
+                        wait_secs = wait_bound.as_secs(),
+                        "Shutdown coordinator did not finish in time; tearing down the owned runtime anyway"
+                    );
+                }
+
+                // This thread is not inside a Tokio context, so these drops take the
+                // blocking branch of `Drop for RuntimeType`.
+                drop(primary);
+                drop(secondary);
+            });
+
+        if let Err(err) = spawned {
+            tracing::error!(
+                %err,
+                "Failed to spawn the runtime teardown thread; the owned runtime keeps the \
+                 pre-existing drop behaviour and its shutdown phases may not complete"
+            );
+        }
     }
 }
 
@@ -404,10 +528,9 @@ impl Drop for RuntimeType {
                 } else {
                     // We are not inside an async context, dropping the runtime is safe.
                     //
-                    // We never reach this case. I'm not sure why, something about the interaction
-                    // with pyo3 and Python lifetimes.
-                    //
-                    // Process is gone so doesn't really matter, but TODO now that we realize it.
+                    // This is the branch the teardown thread spawned by `Runtime::shutdown`
+                    // takes, so it is the normal end of life for an owned runtime that was
+                    // shut down: a real blocking drop after the shutdown phases have run.
                     unsafe { ManuallyDrop::drop(md_runtime) };
                 }
             }
@@ -454,5 +577,108 @@ mod tests {
             },
         )
         .await;
+    }
+
+    /// Occupy the sole worker thread of the runtime behind `handle`, so that anything
+    /// queued on it afterwards provably cannot be polled. Returns the sender that
+    /// releases the worker again.
+    ///
+    /// Without this the reproduction is a coin flip: `RuntimeConfig::single_threaded`
+    /// builds a multi-thread runtime with one worker, so that worker may or may not get
+    /// to the coordinator before the runtime is torn down.
+    fn occupy_sole_worker(handle: &tokio::runtime::Handle) -> std::sync::mpsc::Sender<()> {
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+        handle.spawn(async move {
+            let _ = started_tx.send(());
+            let _ = release_rx.recv();
+        });
+        started_rx.recv().expect("worker occupying task never ran");
+
+        release_tx
+    }
+
+    /// Call `shutdown()` on a runtime that owns its executor and immediately drop the last
+    /// handle from an async context, then check that phase 1 already happened and that the
+    /// coordinator still reaches phase 3.
+    async fn assert_owned_shutdown_survives_immediate_drop(runtime: Runtime) {
+        let tracker = runtime.graceful_shutdown_tracker();
+        let guard = tracker.register_task();
+        let main_token = runtime.primary_token();
+        let endpoint_token = runtime.child_token();
+        let shutdown_complete = runtime.shutdown_complete_token();
+
+        let release_worker = occupy_sole_worker(&runtime.primary());
+
+        runtime.shutdown();
+
+        // No yield before these: the coordinator task cannot have run, so phase 1 must have
+        // happened on this thread.
+        assert!(
+            endpoint_token.is_cancelled(),
+            "phase 1 must complete before shutdown() returns"
+        );
+        assert!(!main_token.is_cancelled());
+        assert_eq!(tracker.get_count(), 1);
+
+        // Dropping the last owner from an async context is what used to call
+        // `shutdown_background` on the executor the coordinator is queued on.
+        drop(runtime);
+
+        // Release the graceful task before the worker, so phase 2 observes a zero count and
+        // returns without waiting. That keeps the test off both the wall clock and a
+        // `Notify` wakeup, either of which would make it timing-dependent.
+        drop(guard);
+        let _ = release_worker.send(());
+
+        tokio::time::timeout(Duration::from_secs(30), shutdown_complete.cancelled())
+            .await
+            .expect("shutdown coordinator never reached phase 3");
+        assert!(main_token.is_cancelled());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn single_threaded_runtime_completes_shutdown_after_immediate_drop() {
+        assert_owned_shutdown_survives_immediate_drop(Runtime::single_threaded().unwrap()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn from_settings_runtime_completes_shutdown_after_immediate_drop() {
+        temp_env::async_with_vars(
+            [(env_runtime::DYN_RUNTIME_NUM_WORKER_THREADS, Some("1"))],
+            async {
+                assert_owned_shutdown_survives_immediate_drop(Runtime::from_settings().unwrap())
+                    .await;
+            },
+        )
+        .await;
+    }
+
+    /// Keeping the executor alive forever would also make the two tests above pass, so
+    /// check that the teardown thread really does let go of it afterwards.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owned_executor_is_torn_down_once_shutdown_completes() {
+        let runtime = Runtime::single_threaded().unwrap();
+        let stale_handle = runtime.primary();
+        let shutdown_complete = runtime.shutdown_complete_token();
+
+        runtime.shutdown();
+        drop(runtime);
+
+        tokio::time::timeout(Duration::from_secs(30), shutdown_complete.cancelled())
+            .await
+            .expect("shutdown coordinator never reached phase 3");
+
+        // The teardown thread drops the executor just after the completion signal fires, so
+        // poll until a task spawned on the stale handle comes back cancelled.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while stale_handle.spawn(async {}).await.is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the owned executor was never torn down"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 }
