@@ -189,11 +189,8 @@ impl<'a> LookupPipeline<'a> {
         Ok(merge_side_or_warn(self.side, primary_details, sequence).await)
     }
 
-    /// Device-tier match details from the primary indexer, with no lower-tier
-    /// walk and no side-indexer merge. Serves peer routers' `device_only`
-    /// queries through the remote indexer server.
-    ///
-    /// Carries the same empty-sequence short-circuit as `find_matches_by_tier`.
+    /// Primary-only device match, serving peer routers' `device_only`
+    /// queries; same empty-sequence short-circuit as `find_matches_by_tier`.
     async fn find_primary_match_details(
         &self,
         sequence: HashInput<'_>,
@@ -204,15 +201,8 @@ impl<'a> LookupPipeline<'a> {
         self.primary.find_match_details(sequence).await
     }
 
-    /// Full tiered match for `sequence`: device-tier overlap merged with side
-    /// scores, plus per-tier lower-tier hits.
-    ///
-    /// An empty hash sequence can match nothing, so it is answered here
-    /// instead of paying the primary, lower-tier, and side queries (a full
-    /// network round trip for remote primaries). Empty sequences are routine:
-    /// any prompt shorter than one KV block hashes to zero blocks, as do
-    /// empty-token PotentialLoads probes (#10566). Mirrors the
-    /// `PrimaryLookup::None` arm below.
+    /// Full tiered match for `sequence`; an empty sequence yields the empty
+    /// result without querying any indexer.
     async fn find_matches_by_tier(
         &self,
         sequence: HashInput<'_>,
@@ -280,11 +270,8 @@ impl<'a> LookupPipeline<'a> {
         }
     }
 
-    /// Tiered match built from the primary indexer only, skipping the
-    /// side-indexer merge. Serves peer routers' tiered queries through the
-    /// remote indexer server.
-    ///
-    /// Carries the same empty-sequence short-circuit as `find_matches_by_tier`.
+    /// Primary-only tiered match, serving peer routers' tiered queries; same
+    /// empty-sequence short-circuit as `find_matches_by_tier`.
     async fn find_primary_matches_by_tier(
         &self,
         sequence: HashInput<'_>,
@@ -465,9 +452,20 @@ mod tests {
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
 
-    /// The empty-sequence short-circuit must answer without consulting any
-    /// indexer. A cancelled `KvIndexer` cannot answer real queries, so the
-    /// only way the empty query can still succeed is by never reaching it.
+    fn assert_empty_device(details: &MatchDetails) {
+        assert!(details.overlap_scores.scores.is_empty());
+        assert!(details.overlap_scores.frequencies.is_empty());
+        assert!(details.last_matched_hashes.is_empty());
+        assert!(details.router_hint_root_candidates.is_none());
+    }
+
+    fn assert_empty_tiered(details: &TieredMatchDetails) {
+        assert_empty_device(&details.device);
+        assert!(details.lower_tier.is_empty());
+    }
+
+    /// Empty queries succeed against a cancelled indexer they can never have
+    /// reached; the non-empty control proves that indexer answers nothing.
     #[tokio::test]
     async fn empty_sequence_short_circuits_before_the_indexer() {
         let token = CancellationToken::new();
@@ -479,7 +477,6 @@ mod tests {
         );
         let lower_tier = LowerTierIndexers::new(1, 4);
         token.cancel();
-        tokio::time::sleep(Duration::from_millis(50)).await;
 
         let pipeline = LookupPipeline {
             primary: PrimaryLookup::KvIndexer(&kv),
@@ -487,50 +484,38 @@ mod tests {
             side: None,
         };
 
-        let empty = pipeline
-            .find_matches_by_tier(
-                HashInput::Owned(Vec::new()),
-                LowerTierQueryOptions::default(),
-            )
-            .await
-            .expect("empty sequence must not touch the (dead) indexer");
-        assert_eq!(
-            format!("{empty:?}"),
-            format!("{:?}", TieredMatchDetails::default())
-        );
-
-        // The other two entry points carry the same guard.
-        let empty_primary = pipeline
-            .find_primary_matches_by_tier(HashInput::Owned(Vec::new()))
-            .await
-            .expect("empty primary tier query must not touch the (dead) indexer");
-        assert_eq!(
-            format!("{empty_primary:?}"),
-            format!("{:?}", TieredMatchDetails::default())
-        );
-
-        let empty_device = pipeline
-            .find_primary_match_details(HashInput::Owned(Vec::new()))
-            .await
-            .expect("empty device_only query must not touch the (dead) indexer");
-        assert_eq!(
-            format!("{empty_device:?}"),
-            format!("{:?}", MatchDetails::new())
-        );
-
-        // Control: the same query with one hash has to reach the cancelled
-        // indexer, which can no longer answer it.
-        let non_empty = tokio::time::timeout(
+        // Control first: a non-empty query must fail, proving the cancelled
+        // indexer cannot answer anything the empty queries below might ask.
+        tokio::time::timeout(
             Duration::from_secs(2),
             pipeline.find_matches_by_tier(
                 HashInput::Owned(vec![LocalBlockHash(1)]),
                 LowerTierQueryOptions::default(),
             ),
         )
-        .await;
-        assert!(
-            !matches!(non_empty, Ok(Ok(_))),
-            "control query unexpectedly succeeded against a cancelled indexer"
-        );
+        .await
+        .expect("control query must resolve")
+        .expect_err("control query must fail against a cancelled indexer");
+
+        let empty = pipeline
+            .find_matches_by_tier(
+                HashInput::Owned(Vec::new()),
+                LowerTierQueryOptions::default(),
+            )
+            .await
+            .expect("empty sequence must not touch the dead indexer");
+        assert_empty_tiered(&empty);
+
+        let empty_primary = pipeline
+            .find_primary_matches_by_tier(HashInput::Owned(Vec::new()))
+            .await
+            .expect("empty primary tier query must not touch the dead indexer");
+        assert_empty_tiered(&empty_primary);
+
+        let empty_device = pipeline
+            .find_primary_match_details(HashInput::Owned(Vec::new()))
+            .await
+            .expect("empty device_only query must not touch the dead indexer");
+        assert_empty_device(&empty_device);
     }
 }

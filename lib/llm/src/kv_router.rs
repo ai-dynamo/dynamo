@@ -1708,7 +1708,9 @@ mod tests {
 
     use async_trait::async_trait;
     use dynamo_kv_router::{
-        indexer::{LowerTierMatchDetails, MatchDetails},
+        indexer::{
+            KvIndexer, KvIndexerMetrics, LowerTierIndexers, LowerTierMatchDetails, MatchDetails,
+        },
         protocols::{
             ExternalSequenceBlockHash, OverlapScores, StorageTier, compute_seq_hash_for_block,
         },
@@ -2442,12 +2444,11 @@ mod tests {
         );
     }
 
-    /// Empty-token PotentialLoads is a pure load probe: with no blocks to
-    /// hash or match, the projection must equal the current per-worker load
-    /// snapshot, with no cache-hit credit and no indexer contribution (#10566).
+    /// Empty-token PotentialLoads must equal the current load snapshot even
+    /// when the indexer cannot answer, because the probe never consults it.
     #[tokio::test]
     async fn empty_token_potential_loads_match_current_load_snapshot() {
-        let router = make_test_router(
+        let mut router = make_test_router(
             InspectingSelector {
                 expected_hits: None,
                 selected_worker: WorkerWithDpRank::from_worker_id(0),
@@ -2455,6 +2456,23 @@ mod tests {
             None,
         )
         .await;
+
+        // Route lookups through a cancelled indexer: without the empty-hash
+        // guard the probe below would surface IndexerOffline, not a snapshot.
+        let token = CancellationToken::new();
+        let dead = KvIndexer::new_with_pruning(
+            token.clone(),
+            2,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+            None,
+        );
+        token.cancel();
+        router.indexer = Indexer::KvIndexer {
+            primary: dead,
+            lower_tier: LowerTierIndexers::new(1, 2),
+            approx: None,
+            primary_records_routing_decisions: false,
+        };
 
         // One live sequence makes the snapshot non-trivial.
         router
@@ -2479,7 +2497,7 @@ mod tests {
         let mut potential = router
             .get_potential_loads(&[], None, None, None, None)
             .await
-            .expect("empty-token potential loads");
+            .expect("empty-token potential loads must not consult the indexer");
 
         let key = |load: &PotentialLoad| (load.worker_id, load.dp_rank);
         snapshot.sort_by_key(key);
