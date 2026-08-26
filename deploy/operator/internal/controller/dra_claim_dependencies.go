@@ -35,12 +35,14 @@ func deploymentEventFilter(
 	})
 }
 
+// componentReferencesDRAClaim reports whether the non-nil component references
+// the named ResourceClaim or ResourceClaimTemplate from its main container.
 func componentReferencesDRAClaim(
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	objectName string,
 	template bool,
 ) bool {
-	if component == nil || component.PodTemplate == nil {
+	if component.PodTemplate == nil {
 		return false
 	}
 	mainContainer := dynamo.GetMainContainer(component)
@@ -67,8 +69,10 @@ func componentReferencesDRAClaim(
 	return false
 }
 
+// componentUsesDRAClaims reports whether the non-nil component's main
+// container references any DRA claims.
 func componentUsesDRAClaims(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
-	return component != nil && len(dynamo.GetMainContainerResources(component).Claims) > 0
+	return len(dynamo.GetMainContainerResources(component).Claims) > 0
 }
 
 func (r *DynamoComponentDeploymentReconciler) mapResourceClaimToDCDRequests(
