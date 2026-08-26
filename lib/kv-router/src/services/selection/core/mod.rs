@@ -189,31 +189,8 @@ impl SelectionCore {
         ))
     }
 
-    pub(super) fn new_managed(
-        kv_router_config: crate::config::KvRouterConfig,
-        indexer_threads: usize,
-        cancel_token: CancellationToken,
-        replica_config: Option<ReplicaSyncConfig>,
-        worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
-        worker_type: WorkerType,
-        cache_config: SelectionCacheConfig,
-        tracking_hash: Arc<TrackingHashContext>,
-    ) -> Self {
-        Self::new_inner(
-            kv_router_config,
-            indexer_threads,
-            cancel_token,
-            replica_config,
-            worker_selection_policy_factory,
-            worker_type,
-            false,
-            cache_config,
-            tracking_hash,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
-    fn new_inner(
+    pub(super) fn new_inner(
         kv_router_config: crate::config::KvRouterConfig,
         indexer_threads: usize,
         cancel_token: CancellationToken,

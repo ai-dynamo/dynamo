@@ -117,13 +117,14 @@ impl SelectionServiceBuilder {
             );
         }
         let replica_config = replica_runtime.as_ref().map(ReplicaSyncRuntime::config);
-        let core = Arc::new(SelectionCore::new_managed(
+        let core = Arc::new(SelectionCore::new_inner(
             self.kv_router_config,
             self.indexer_threads,
             cancel_token.clone(),
             replica_config,
             worker_selection_policy_factory,
             self.worker_type,
+            false,
             self.selection_cache,
             tracking_hash,
         ));

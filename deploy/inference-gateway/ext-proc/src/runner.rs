@@ -147,85 +147,6 @@ fn init_tracing() {
         .try_init();
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use dynamo_kv_router::WorkerSelectionPolicyFactory;
-    use dynamo_kv_router::services::selection::WorkerSelectionPolicyProviderError;
-    use tokio::sync::mpsc;
-
-    use super::*;
-    use crate::epp_standalone_config::{DYN_EPP_MODE, DYNAMO_RUNTIME_MODE};
-
-    static EPP_MODE_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    #[tokio::test]
-    async fn background_tasks_shutdown_aborts_and_joins_every_task() {
-        let (sender, mut receiver) = mpsc::channel::<()>(1);
-        let health_task = tokio::spawn({
-            let sender = sender.clone();
-            async move {
-                let _sender = sender;
-                std::future::pending::<()>().await;
-            }
-        });
-        let metrics_task = tokio::spawn({
-            let sender = sender.clone();
-            async move {
-                let _sender = sender;
-                std::future::pending::<()>().await;
-            }
-        });
-        let shutdown_task = tokio::spawn(async move {
-            let _sender = sender;
-            std::future::pending::<()>().await;
-        });
-
-        BackgroundTasks {
-            health_task,
-            metrics_task: Some(metrics_task),
-            shutdown_task,
-        }
-        .shutdown()
-        .await;
-
-        assert!(receiver.recv().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn linked_policy_registry_requires_standalone_mode() {
-        let mut registry = WorkerSelectionPolicyRegistry::default();
-        registry
-            .register(
-                "test",
-                Arc::new(
-                    |_| -> std::result::Result<
-                        WorkerSelectionPolicyFactory,
-                        WorkerSelectionPolicyProviderError,
-                    > {
-                        Err(WorkerSelectionPolicyProviderError::new("not invoked"))
-                    },
-                ),
-            )
-            .unwrap();
-
-        let _lock = EPP_MODE_ENV_LOCK.lock().unwrap();
-        let previous = std::env::var_os(DYN_EPP_MODE);
-        unsafe { std::env::set_var(DYN_EPP_MODE, DYNAMO_RUNTIME_MODE) };
-        let result = run(Some(registry)).await;
-        match previous {
-            Some(value) => unsafe { std::env::set_var(DYN_EPP_MODE, value) },
-            None => unsafe { std::env::remove_var(DYN_EPP_MODE) },
-        }
-
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "linked worker-selection policies require DYN_EPP_MODE=standalone"
-        );
-    }
-}
-
 /// Wait for SIGTERM (kubelet pod termination) or SIGINT (Ctrl-C).
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
@@ -568,5 +489,84 @@ async fn serve<P: crate::EndpointPicker>(
         readiness_task.abort();
         let _ = readiness_task.await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use dynamo_kv_router::WorkerSelectionPolicyFactory;
+    use dynamo_kv_router::services::selection::WorkerSelectionPolicyProviderError;
+    use tokio::sync::{Mutex, mpsc};
+
+    use super::*;
+    use crate::epp_standalone_config::{DYN_EPP_MODE, DYNAMO_RUNTIME_MODE};
+
+    static EPP_MODE_ENV_LOCK: Mutex<()> = Mutex::const_new(());
+
+    #[tokio::test]
+    async fn background_tasks_shutdown_aborts_and_joins_every_task() {
+        let (sender, mut receiver) = mpsc::channel::<()>(1);
+        let health_task = tokio::spawn({
+            let sender = sender.clone();
+            async move {
+                let _sender = sender;
+                std::future::pending::<()>().await;
+            }
+        });
+        let metrics_task = tokio::spawn({
+            let sender = sender.clone();
+            async move {
+                let _sender = sender;
+                std::future::pending::<()>().await;
+            }
+        });
+        let shutdown_task = tokio::spawn(async move {
+            let _sender = sender;
+            std::future::pending::<()>().await;
+        });
+
+        BackgroundTasks {
+            health_task,
+            metrics_task: Some(metrics_task),
+            shutdown_task,
+        }
+        .shutdown()
+        .await;
+
+        assert!(receiver.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn linked_policy_registry_requires_standalone_mode() {
+        let mut registry = WorkerSelectionPolicyRegistry::default();
+        registry
+            .register(
+                "test",
+                Arc::new(
+                    |_| -> std::result::Result<
+                        WorkerSelectionPolicyFactory,
+                        WorkerSelectionPolicyProviderError,
+                    > {
+                        Err(WorkerSelectionPolicyProviderError::new("not invoked"))
+                    },
+                ),
+            )
+            .unwrap();
+
+        let _lock = EPP_MODE_ENV_LOCK.lock().await;
+        let previous = std::env::var_os(DYN_EPP_MODE);
+        unsafe { std::env::set_var(DYN_EPP_MODE, DYNAMO_RUNTIME_MODE) };
+        let result = run(Some(registry)).await;
+        match previous {
+            Some(value) => unsafe { std::env::set_var(DYN_EPP_MODE, value) },
+            None => unsafe { std::env::remove_var(DYN_EPP_MODE) },
+        }
+
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "linked worker-selection policies require DYN_EPP_MODE=standalone"
+        );
     }
 }
