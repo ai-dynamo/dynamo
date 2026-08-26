@@ -2863,6 +2863,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn direct_zmq_multi_node_replacement_isolated_by_global_rank() {
         tokio::time::timeout(Duration::from_secs(30), async {
             let store = tempfile::tempdir().unwrap();

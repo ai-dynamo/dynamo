@@ -832,6 +832,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn active_sequence_replica_sync_isolated_by_endpoint() -> Result<()> {
         let runtime = Runtime::from_current()?;
         let distributed =
@@ -924,6 +925,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn worker_completion_ingress_runs_without_router_replica_sync() -> Result<()> {
         let runtime = Runtime::from_current()?;
         let distributed =
