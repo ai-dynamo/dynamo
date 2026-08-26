@@ -40,7 +40,8 @@ spec:
                 # Must match the DGD behind ENDPOINT below so the benchmark Job co-locates
                 # with the target frontend. Change this together with ENDPOINT when you
                 # switch variants (one of:
-                # deepseek-v4-pro-0813-vllm-h200-{agg,disagg}-{agentic,1m}).
+                # dsv4-pro-0813-{agg,disagg}-h200-{agentic,1m},
+                # dsv4-pro-0813-{agg,disagg}-gb200-agentic).
                 - dsv4-pro-0813-agg-h200-agentic
             topologyKey: kubernetes.io/hostname
       containers:

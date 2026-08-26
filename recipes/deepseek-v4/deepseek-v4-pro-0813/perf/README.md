@@ -24,6 +24,8 @@ Edit the `env` block in [`perf.yaml`](perf.yaml) and update the `podAffinity` `v
 | H200 disaggregated agentic | `dsv4-pro-0813-disagg-h200-agentic-frontend:8000` | `7` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
 | H200 aggregated 1M | `dsv4-pro-0813-agg-h200-1m-frontend:8000` | `1` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
 | H200 disaggregated 1M | `dsv4-pro-0813-disagg-h200-1m-frontend:8000` | `1` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+| GB200 aggregated agentic | `dsv4-pro-0813-agg-gb200-agentic-frontend:8000` | `8` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
+| GB200 disaggregated agentic | `dsv4-pro-0813-disagg-gb200-agentic-frontend:8000` | `12` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
 
 If you run more than one benchmark in the same namespace, also update
 `metadata.name` and `labels.app` so Jobs and artifact directories stay

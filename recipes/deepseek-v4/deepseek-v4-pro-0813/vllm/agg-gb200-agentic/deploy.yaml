@@ -1,0 +1,178 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# DeepSeek-V4-Pro-0813 - aggregated, 8x GB200 (2 nodes), agentic workload (64K ISL / 400 OSL).
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: dsv4-pro-0813-agg-gb200-agentic-compute-domain
+spec:
+  numNodes: 0
+  channel:
+    resourceClaimTemplate:
+      name: dsv4-pro-0813-agg-gb200-agentic-compute-domain-channel
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dsv4-pro-0813-agg-gb200-agentic-config
+  labels:
+    app.kubernetes.io/name: dsv4-pro-0813-agg-gb200-agentic
+data:
+  speculative-config: |
+    {"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic"}
+  # Benchmark only. Fabricates accepted tokens; overstates throughput ~36.5%.
+  speculative-config-synthetic: |
+    {"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"synthetic","synthetic_acceptance_length":2.27}
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv4-pro-0813-agg-gb200-agentic
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-e3ca1b40dd877531f3276116cb773c6a782b1122-vllm-runtime
+              imagePullPolicy: Always
+              workingDir: /workspace
+              env:
+                - name: DYN_ROUTER_MODE
+                  value: kv
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                periodSeconds: 15
+                failureThreshold: 200
+              command:
+                - /bin/bash
+                - -lc
+              args:
+                - |
+                  python3 -m dynamo.frontend \
+                    --trust-remote-code \
+                    --http-host 0.0.0.0 \
+                    --http-port 8000
+    - name: VllmDecodeWorker
+      type: worker
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      podTemplate:
+        spec:
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-GB200
+          tolerations:
+            - key: kubernetes.io/arch
+              operator: Equal
+              value: arm64
+              effect: NoSchedule
+          resourceClaims:
+            - name: compute-domain-channel
+              resourceClaimTemplateName: dsv4-pro-0813-agg-gb200-agentic-compute-domain-channel
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 200Gi
+          containers:
+            - name: main
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-e3ca1b40dd877531f3276116cb773c6a782b1122-vllm-runtime
+              imagePullPolicy: Always
+              workingDir: /workspace/examples/backends/vllm
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+                - name: dshm
+                  mountPath: /dev/shm
+              env:
+                - name: NCCL_MNNVL_ENABLE
+                  value: "1"
+                - name: NCCL_NVLS_ENABLE
+                  value: "1"
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+                - name: UCX_CUDA_IPC_ENABLE_MNNVL
+                  value: "y"
+                - name: NCCL_P2P_LEVEL
+                  value: NVL
+                - name: NCCL_SOCKET_IFNAME
+                  value: eth0
+                - name: GLOO_SOCKET_IFNAME
+                  value: eth0
+                - name: NCCL_STORE_TIMEOUT
+                  value: "7200"
+                - name: UCX_TLS
+                  value: cuda_copy,cuda_ipc,tcp
+                - name: UCX_MEMTYPE_CACHE
+                  value: "n"
+                - name: NVIDIA_GDRCOPY
+                  value: "1"
+                - name: VLLM_USE_NCCL_SYMM_MEM
+                  value: "0"
+                - name: TILELANG_CLEANUP_TEMP_FILES
+                  value: "1"
+                - name: HF_HOME
+                  value: /model-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: SPECULATIVE_CONFIG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: dsv4-pro-0813-agg-gb200-agentic-config
+                      key: speculative-config
+                - name: VLLM_ENGINE_READY_TIMEOUT_S
+                  value: "21600"
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 9090
+                periodSeconds: 10
+                timeoutSeconds: 10
+                failureThreshold: 2160
+              command:
+                - /bin/sh
+                - -c
+              args:
+                - |
+                  exec python3 -m dynamo.vllm \
+                    --model deepseek-ai/DeepSeek-V4-Pro-0813 \
+                    --served-model-name deepseek-ai/DeepSeek-V4-Pro-0813 \
+                    --trust-remote-code \
+                    --tensor-parallel-size 8 \
+                    --pipeline-parallel-size 1 \
+                    --enable-expert-parallel \
+                    --kv-cache-dtype fp8 \
+                    --block-size 256 \
+                    --max-num-seqs 256 \
+                    --max-num-batched-tokens 16384 \
+                    --max-model-len 1048576 \
+                    --gpu-memory-utilization 0.9 \
+                    --tokenizer-mode deepseek_v4 \
+                    --dyn-reasoning-parser deepseek_v4 \
+                    --dyn-tool-call-parser deepseek_v4 \
+                    --attention-config '{"use_fp4_indexer_cache":true}' \
+                    --moe-backend deep_gemm_mega_moe \
+                    --compilation-config '{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}' \
+                    --speculative-config "${SPECULATIVE_CONFIG}" \
+                    --enable-prefix-caching \
+                    --enable-chunked-prefill \
+                    --no-enable-flashinfer-autotune
+              resources:
+                claims:
+                  - name: compute-domain-channel
+                requests:
+                  cpu: "16"
+                  memory: 256Gi
+                  nvidia.com/gpu: "4"
+                limits:
+                  nvidia.com/gpu: "4"

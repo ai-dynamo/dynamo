@@ -13,21 +13,20 @@ Recipes for [DeepSeek-V4-Pro-0813](https://huggingface.co/deepseek-ai/DeepSeek-V
 
 ## Configurations
 
-Dynamo + vLLM deployment profiles. GB200 profiles are a separate contribution and are not
-filled in yet.
+Dynamo + vLLM deployment profiles.
 
-|                          | H200 aggregated agentic | H200 disaggregated agentic       | H200 aggregated 1M      | H200 disaggregated 1M            | GB200 aggregated | GB200 disaggregated |
-| ------------------------ | ----------------------- | -------------------------------- | ----------------------- | -------------------------------- | ---------------- | ------------------- |
-| **GPU** (per worker)     | 8x H200                 | 8x H200 prefill + 8x H200 decode  | 8x H200                 | 8x H200 prefill + 8x H200 decode  | TBD              | TBD                 |
-| **Mode**                 | Aggregated              | Prefill/decode disaggregated      | Aggregated              | Prefill/decode disaggregated      | TBD              | TBD                 |
-| **Framework**            | vLLM                    | vLLM                              | vLLM                    | vLLM                              | TBD              | TBD                 |
-| **Precision**            | MXFP4 experts + FP8 KV  | MXFP4 experts + FP8 KV            | MXFP4 experts + FP8 KV  | MXFP4 experts + FP8 KV            | TBD              | TBD                 |
-| **Parallelism**          | TP8/EP8                 | TP8/EP8 prefill / TP8/EP8 decode  | TP8/EP8                 | TP8/EP8 prefill / TP8/EP8 decode  | TBD              | TBD                 |
-| **Routing**              | KV-aware                | KV-aware                          | KV-aware                | KV-aware                          | TBD              | TBD                 |
-| **Speculative decoding** | None                    | None                              | None                    | None                              | TBD              | TBD                 |
-| **Context length**       | 86,016                  | 86,016                            | 1,048,576               | 1,048,576                         | TBD              | TBD                 |
-| **KV cache offloading**  | None                    | None                              | `SimpleCPUOffload` (CPU)| `SimpleCPUOffload` (CPU, decode)  | TBD              | TBD                 |
-| **KV transfer**          | N/A                     | NIXL                              | N/A                     | NIXL (via `MultiConnector`)       | TBD              | TBD                 |
+|                          | H200 aggregated agentic | H200 disaggregated agentic       | H200 aggregated 1M       | H200 disaggregated 1M            | GB200 aggregated       | GB200 disaggregated |
+| ------------------------ | ----------------------- | -------------------------------- | ------------------------ | -------------------------------- | ---------------------- | ------------------- |
+| **GPU** (per worker)     | 8x H200                 | 8x H200 prefill + 8x H200 decode | 8x H200                  | 8x H200 prefill + 8x H200 decode | 8x GB200 (2 nodes)     | 8x GB200 prefill + 8x GB200 decode (2 nodes each) |
+| **Mode**                 | Aggregated              | Prefill/decode disaggregated     | Aggregated               | Prefill/decode disaggregated     | Aggregated             | Prefill/decode disaggregated |
+| **Framework**            | vLLM                    | vLLM                             | vLLM                     | vLLM                             | vLLM                   | vLLM |
+| **Precision**            | MXFP4 experts + FP8 KV  | MXFP4 experts + FP8 KV           | MXFP4 experts + FP8 KV   | MXFP4 experts + FP8 KV           | MXFP4 experts + FP8 KV | MXFP4 experts + FP8 KV |
+| **Parallelism**          | TP8/EP8                 | TP8/EP8 prefill / TP8/EP8 decode | TP8/EP8                  | TP8/EP8 prefill / TP8/EP8 decode | TP8/EP8                | TP8/EP8 prefill / TP8/EP8 decode |
+| **Routing**              | KV-aware                | KV-aware                         | KV-aware                 | KV-aware                         | KV-aware               | KV-aware |
+| **Speculative decoding** | None                    | None                             | None                     | None                             | DSpark k=5             | DSpark k=5 (decode only) |
+| **Context length**       | 86,016                  | 86,016                           | 1,048,576                | 1,048,576                        | 1,048,576              | 1,048,576 |
+| **KV cache offloading**  | None                    | None                             | `SimpleCPUOffload` (CPU) | `SimpleCPUOffload` (CPU, decode) | None                   | None |
+| **KV transfer**          | N/A                     | NIXL                             | N/A                      | NIXL (via `MultiConnector`)      | N/A                    | NIXL |
 
 ## Supported features
 
@@ -74,9 +73,10 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 ### 4. Deploy the DGD
 
 ```bash
-MODE=agg        # or disagg
+MODE=agg         # or disagg
+SKU=h200         # or gb200 (agentic only)
 WORKLOAD=agentic # or 1m
-kubectl apply -f vllm/${MODE}-h200-${WORKLOAD}/deploy.yaml -n ${NAMESPACE}
+kubectl apply -f vllm/${MODE}-${SKU}-${WORKLOAD}/deploy.yaml -n ${NAMESPACE}
 ```
 
 ### 5. Benchmark
@@ -100,3 +100,9 @@ offloading, see [perf/README.md](perf/README.md) for details.
 
 | Workload | Recipe | SKU | Concurrency | System output tok/s/gpu | User output tok/s (P50) | TTFT P50 (ms) |
 | -------- | ------ | --- | ----------- | ----------------------- | ----------------------- | ------------- |
+| Agentic 64K | `agg-gb200-agentic` | 8x GB200 | 8 | 64.88 | 55.906 | 383.3 |
+| Agentic 64K | `disagg-gb200-agentic` | 16x GB200 | 12 | 50.31 | 50.042 | 2370.3 |
+
+Both GB200 rows were measured on the same 3,541-row 15% agentic trace, each at its own
+iso-SLA operating point against the joint gate of >= 50 tok/s/user and TTFT p50 < 5 s.
+
