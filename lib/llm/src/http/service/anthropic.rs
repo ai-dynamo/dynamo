@@ -40,11 +40,12 @@ use super::{
     service_v2,
 };
 use crate::engines::ValidateRequest;
-use crate::protocols::anthropic::stream_converter::AnthropicStreamConverter;
+use crate::protocols::anthropic::stream_converter::{AnthropicStreamConverter, make_sse_event};
 use crate::protocols::anthropic::types::{
     AnthropicContentBlock, AnthropicCountTokensRequest, AnthropicCountTokensResponse,
     AnthropicCreateMessageRequest, AnthropicErrorBody, AnthropicErrorResponse, AnthropicMessage,
-    AnthropicMessageContent, AnthropicTool, SystemContent, chat_completion_to_anthropic_response,
+    AnthropicMessageContent, AnthropicStreamEvent, AnthropicTool, SystemContent,
+    chat_completion_to_anthropic_response,
 };
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, SESSION_AFFINITY_CONTEXT_KEY, agent_context_from_headers,
@@ -349,14 +350,114 @@ async fn handler_anthropic_messages(
 
 /// Core logic for the Anthropic Messages endpoint.
 #[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id()))]
-async fn anthropic_messages(
+pub(super) async fn anthropic_messages(
+    state: Arc<service_v2::State>,
+    template: Option<RequestTemplate>,
+    request: Context<AnthropicCreateMessageRequest>,
+    headers: HeaderMap,
+    stream_handle: ConnectionHandle,
+    inflight_guard: InflightGuard,
+) -> Result<Response, Response> {
+    match anthropic_messages_inner(
+        state,
+        template,
+        request,
+        headers,
+        stream_handle,
+        inflight_guard,
+        false,
+    )
+    .await?
+    {
+        AnthropicExecution::Http(response) => Ok(response),
+        AnthropicExecution::Native(_) => Err(anthropic_sanitized_error_with_details(
+            SanitizedError::Internal,
+            "HTTP Anthropic execution returned a native stream",
+        )),
+    }
+}
+
+#[cfg(feature = "agent-rt-poc")]
+pub(super) async fn anthropic_messages_native_stream(
+    state: Arc<service_v2::State>,
+    template: Option<RequestTemplate>,
+    request: Context<AnthropicCreateMessageRequest>,
+    headers: HeaderMap,
+    stream_handle: ConnectionHandle,
+    inflight_guard: InflightGuard,
+) -> Result<NativeAnthropicStream, Response> {
+    match anthropic_messages_inner(
+        state,
+        template,
+        request,
+        headers,
+        stream_handle,
+        inflight_guard,
+        true,
+    )
+    .await?
+    {
+        AnthropicExecution::Native(stream) => Ok(stream),
+        AnthropicExecution::Http(_) => Err(anthropic_sanitized_error_with_details(
+            SanitizedError::Internal,
+            "Native Anthropic execution returned an HTTP response",
+        )),
+    }
+}
+
+pub(super) type NativeAnthropicStream =
+    Pin<Box<dyn futures::Stream<Item = AnthropicStreamEvent> + Send + 'static>>;
+
+#[cfg(feature = "agent-rt-poc")]
+fn native_anthropic_stream(
+    stream: impl futures::Stream<Item = AnthropicStreamEvent> + Send + 'static,
+    mut inflight_guard: InflightGuard,
+    mut stream_handle: ConnectionHandle,
+) -> NativeAnthropicStream {
+    stream_handle.arm();
+    inflight_guard.mark_error(ErrorType::Cancelled);
+    Box::pin(async_stream::stream! {
+        tokio::pin!(stream);
+        let mut saw_terminal = false;
+        while let Some(event) = stream.next().await {
+            match event {
+                AnthropicStreamEvent::MessageStop {} => {
+                    saw_terminal = true;
+                    inflight_guard.mark_ok();
+                    stream_handle.disarm();
+                }
+                AnthropicStreamEvent::Error { .. } => {
+                    saw_terminal = true;
+                    inflight_guard.mark_error(ErrorType::Internal);
+                    stream_handle.disarm();
+                }
+                _ => {}
+            }
+            yield event;
+        }
+        if !saw_terminal {
+            inflight_guard.mark_error(ErrorType::Internal);
+            stream_handle.disarm();
+        }
+    })
+}
+
+enum AnthropicExecution {
+    Http(Response),
+    Native(NativeAnthropicStream),
+}
+
+/// Core logic for the Anthropic Messages endpoint.
+#[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id()))]
+async fn anthropic_messages_inner(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
     mut request: Context<AnthropicCreateMessageRequest>,
     headers: HeaderMap,
     mut stream_handle: ConnectionHandle,
     mut inflight_guard: InflightGuard,
-) -> Result<Response, Response> {
+    native_output: bool,
+) -> Result<AnthropicExecution, Response> {
     let streaming = request.stream;
     let request_id = request.id().to_string();
 
@@ -600,8 +701,6 @@ async fn anthropic_messages(
     > = Box::pin(engine_stream);
 
     if streaming {
-        stream_handle.arm();
-
         let mut converter = match anthropic_ctx {
             Some(ctx) => {
                 AnthropicStreamConverter::with_context(model_for_resp, estimated_input_tokens, ctx)
@@ -616,11 +715,11 @@ async fn anthropic_messages(
         let cancel_ctx = ctx.clone();
 
         let (activity_tx, activity_rx) = tokio::sync::mpsc::unbounded_channel();
-        let full_stream = async_stream::stream! {
+        let typed_stream = async_stream::stream! {
             let mut events = Vec::with_capacity(4);
             converter.append_start_events(&mut events);
             for event in events.drain(..) {
-                yield event.map_err(axum::Error::new);
+                yield event;
             }
 
             let mut saw_error = false;
@@ -640,7 +739,9 @@ async fn anthropic_messages(
                         let Some(annotated_chunk) = maybe_chunk else {
                             break; // backend stream ended normally
                         };
-                        let _ = activity_tx.send(());
+                        if !native_output {
+                            let _ = activity_tx.send(());
+                        }
                         process_response_and_observe_metrics(
                             &annotated_chunk,
                             &mut response_collector,
@@ -656,10 +757,10 @@ async fn anthropic_messages(
 
                         converter.append_chunk_events(&stream_resp, &mut events);
                         for event in events.drain(..) {
-                            yield event.map_err(axum::Error::new);
+                            yield event;
                         }
                     }
-                    _ = &mut stopped => {
+                    _ = &mut stopped, if !native_output => {
                         // Client disconnected (or the request was otherwise
                         // cancelled). Best-effort flush the terminal usage +
                         // message_stop below so a still-writable proxy records
@@ -676,7 +777,7 @@ async fn anthropic_messages(
                 converter.append_end_events(&mut events);
             }
             for event in events.drain(..) {
-                yield event.map_err(axum::Error::new);
+                yield event;
             }
 
             if cancelled {
@@ -687,6 +788,21 @@ async fn anthropic_messages(
                 std::future::pending::<()>().await;
             }
         };
+
+        #[cfg(feature = "agent-rt-poc")]
+        if native_output {
+            return Ok(AnthropicExecution::Native(native_anthropic_stream(
+                typed_stream,
+                inflight_guard,
+                stream_handle,
+            )));
+        }
+        #[cfg(not(feature = "agent-rt-poc"))]
+        debug_assert!(!native_output);
+
+        stream_handle.arm();
+        let full_stream =
+            typed_stream.map(|event| make_sse_event(&event).map_err(axum::Error::new));
 
         let keep_alive = state.sse_keep_alive_for_response(stream_can_defer_all_output);
         let stream = monitor_for_disconnects_with_activity(
@@ -701,7 +817,7 @@ async fn anthropic_messages(
         if let Some(keep_alive) = keep_alive {
             sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
         }
-        Ok(sse_stream.into_response())
+        Ok(AnthropicExecution::Http(sse_stream.into_response()))
     } else {
         // Non-streaming path: aggregate stream into single response
 
@@ -761,7 +877,7 @@ async fn anthropic_messages(
 
         inflight_guard.mark_ok();
 
-        Ok(Json(response).into_response())
+        Ok(AnthropicExecution::Http(Json(response).into_response()))
     }
 }
 
@@ -1110,7 +1226,7 @@ fn find_invalid_argument_in_chain<'a>(
 
 /// Build an Anthropic-formatted error response.
 /// Maps HTTP status codes to Anthropic error types following the Anthropic API spec.
-fn anthropic_error(status: StatusCode, error_type: &str, message: &str) -> Response {
+pub(super) fn anthropic_error(status: StatusCode, error_type: &str, message: &str) -> Response {
     let mapped_type = match status.as_u16() {
         400 => "invalid_request_error",
         401 => "authentication_error",

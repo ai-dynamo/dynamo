@@ -159,15 +159,10 @@ impl AnthropicStreamConverter {
         }
     }
 
-    /// Drain buffered tool blocks into taggable events. Each event carries an
-    /// optional usage override: `Some` for `input_json_delta` fragments (the
-    /// per-fragment snapshot taken at record time), `None` for the surrounding
-    /// `content_block_start`/`content_block_stop` (which stamp the current usage
-    /// like any other non-fragment event).
-    #[allow(clippy::type_complexity)]
-    fn drain_buffered_tool_events(
-        &mut self,
-    ) -> Vec<(&'static str, AnthropicStreamEvent, Option<AnthropicUsage>)> {
+    /// Drain buffered tool blocks into native Anthropic events. Argument
+    /// fragments retain the per-chunk usage snapshot captured when the backend
+    /// produced them; this matters because the blocks are flushed lazily.
+    fn drain_buffered_tool_events(&mut self) -> Vec<AnthropicStreamEvent> {
         if self.tool_blocks_flushed {
             return Vec::new();
         }
@@ -187,37 +182,26 @@ impl AnthropicStreamConverter {
                 emitted_id = %emitted_id,
                 "minting Anthropic tool_use id"
             );
-            events.push((
-                "content_block_start",
-                AnthropicStreamEvent::ContentBlockStart {
-                    index: block_index,
-                    content_block: AnthropicResponseContentBlock::ToolUse {
-                        id: emitted_id,
-                        name: tool_call.name.clone(),
-                        input: serde_json::json!({}),
-                    },
+            events.push(AnthropicStreamEvent::ContentBlockStart {
+                index: block_index,
+                content_block: AnthropicResponseContentBlock::ToolUse {
+                    id: emitted_id,
+                    name: tool_call.name.clone(),
+                    input: serde_json::json!({}),
                 },
-                None,
-            ));
+            });
 
             for (arguments, usage_snapshot) in &tool_call.argument_fragments {
-                events.push((
-                    "content_block_delta",
-                    AnthropicStreamEvent::ContentBlockDelta {
-                        index: block_index,
-                        delta: AnthropicDelta::InputJsonDelta {
-                            partial_json: arguments.clone(),
-                        },
+                events.push(AnthropicStreamEvent::ContentBlockDelta {
+                    index: block_index,
+                    delta: AnthropicDelta::InputJsonDelta {
+                        partial_json: arguments.clone(),
                     },
-                    Some(usage_snapshot.clone()),
-                ));
+                    usage: Some(usage_snapshot.clone()),
+                });
             }
 
-            events.push((
-                "content_block_stop",
-                AnthropicStreamEvent::ContentBlockStop { index: block_index },
-                None,
-            ));
+            events.push(AnthropicStreamEvent::ContentBlockStop { index: block_index });
             block_index += 1;
         }
 
@@ -225,15 +209,8 @@ impl AnthropicStreamConverter {
         events
     }
 
-    fn append_buffered_tool_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
-        for (event_type, event, usage_override) in self.drain_buffered_tool_events() {
-            // Route through serialize_event so tool-argument `content_block_delta`
-            // chunks also carry the per-chunk usage triple. Fragments carry the
-            // snapshot taken when their chunk was processed; everything else uses
-            // the current usage.
-            let usage = usage_override.as_ref().unwrap_or(&self.usage);
-            events.push(self.serialize_event_with_usage(event_type, &event, usage));
-        }
+    fn append_buffered_tool_events(&mut self, events: &mut Vec<AnthropicStreamEvent>) {
+        events.extend(self.drain_buffered_tool_events());
     }
 
     fn record_usage(&mut self, usage: &CompletionUsage) {
@@ -247,48 +224,15 @@ impl AnthropicStreamConverter {
         self.saw_backend_usage = true;
     }
 
-    /// Serialize an event to SSE, stamping the current cumulative `usage` onto
-    /// every `content_block_delta`.
-    ///
-    /// Anthropic's native protocol only reports usage on `message_start` and the
-    /// terminal `message_delta`, so a proxy that reads the stream for live
-    /// per-token accounting gets nothing until the stream ends — and nothing at
-    /// all if the client aborts mid-stream. Mirroring OpenAI's
-    /// `continuous_usage_stats`, we attach a `usage` triple to each token chunk.
-    /// This is a Dynamo extension to the wire format (the field is additive;
-    /// spec-compliant clients ignore unknown fields).
-    fn serialize_event(
-        &self,
-        event_type: &'static str,
-        event: &AnthropicStreamEvent,
-    ) -> Result<Event, anyhow::Error> {
-        self.serialize_event_with_usage(event_type, event, &self.usage)
-    }
-
-    /// Like `serialize_event` but stamps an explicit `usage` onto the
-    /// `content_block_delta`. Used to replay buffered tool-argument fragments
-    /// with the usage snapshot from their own chunk (see `record_tool_call`).
-    fn serialize_event_with_usage(
-        &self,
-        event_type: &'static str,
-        event: &AnthropicStreamEvent,
-        usage: &AnthropicUsage,
-    ) -> Result<Event, anyhow::Error> {
-        let value = event_json_with_usage(event, usage)?;
-        Ok(Event::default()
-            .event(event_type)
-            .data(serde_json::to_string(&value)?))
-    }
-
     /// Emit the initial `message_start` event.
-    pub fn emit_start_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
+    pub fn emit_start_events(&mut self) -> Vec<AnthropicStreamEvent> {
         let mut events = Vec::with_capacity(1);
         self.append_start_events(&mut events);
         events
     }
 
     /// Append the initial `message_start` event.
-    pub fn append_start_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+    pub fn append_start_events(&mut self, events: &mut Vec<AnthropicStreamEvent>) {
         // TODO: When AnthropicMessageResponse gains a `service_tier` field,
         // populate it from `self.api_context` (if the original request specified one).
         let message = AnthropicMessageResponse {
@@ -303,14 +247,14 @@ impl AnthropicStreamConverter {
         };
 
         let event = AnthropicStreamEvent::MessageStart { message };
-        events.push(make_sse_event("message_start", &event));
+        events.push(event);
     }
 
     /// Process a single chat completion stream chunk and return zero or more SSE events.
     pub fn process_chunk(
         &mut self,
         chunk: &NvCreateChatCompletionStreamResponse,
-    ) -> Vec<Result<Event, anyhow::Error>> {
+    ) -> Vec<AnthropicStreamEvent> {
         let mut events = Vec::new();
         self.append_chunk_events(chunk, &mut events);
         events
@@ -320,7 +264,7 @@ impl AnthropicStreamConverter {
     pub fn append_chunk_events(
         &mut self,
         chunk: &NvCreateChatCompletionStreamResponse,
-        events: &mut Vec<Result<Event, anyhow::Error>>,
+        events: &mut Vec<AnthropicStreamEvent>,
     ) {
         // Replace the initial estimate when the engine reports authoritative
         // usage (typically on the final chunk). This also applies Anthropic's
@@ -409,7 +353,7 @@ impl AnthropicStreamConverter {
                             signature: String::new(),
                         },
                     };
-                    events.push(make_sse_event("content_block_start", &block_start));
+                    events.push(block_start);
                 }
 
                 // Emit thinking delta
@@ -418,8 +362,9 @@ impl AnthropicStreamConverter {
                     delta: AnthropicDelta::ThinkingDelta {
                         thinking: reasoning.clone(),
                     },
+                    usage: Some(self.usage.clone()),
                 };
-                events.push(self.serialize_event("content_block_delta", &block_delta));
+                events.push(block_delta);
             }
 
             // Handle text content deltas
@@ -447,13 +392,14 @@ impl AnthropicStreamConverter {
                         delta: AnthropicDelta::SignatureDelta {
                             signature: "erased".to_string(),
                         },
+                        usage: Some(self.usage.clone()),
                     };
-                    events.push(self.serialize_event("content_block_delta", &sig_delta));
+                    events.push(sig_delta);
 
                     let block_stop = AnthropicStreamEvent::ContentBlockStop {
                         index: self.thinking_block_index,
                     };
-                    events.push(make_sse_event("content_block_stop", &block_stop));
+                    events.push(block_stop);
                 }
 
                 // Emit content_block_start on first text
@@ -469,7 +415,7 @@ impl AnthropicStreamConverter {
                             citations: None,
                         },
                     };
-                    events.push(make_sse_event("content_block_start", &block_start));
+                    events.push(block_start);
                 }
 
                 // Emit text delta
@@ -478,8 +424,9 @@ impl AnthropicStreamConverter {
                     delta: AnthropicDelta::TextDelta {
                         text: text.to_string(),
                     },
+                    usage: Some(self.usage.clone()),
                 };
-                events.push(self.serialize_event("content_block_delta", &block_delta));
+                events.push(block_delta);
             }
 
             // Handle tool call deltas
@@ -492,12 +439,13 @@ impl AnthropicStreamConverter {
                         delta: AnthropicDelta::SignatureDelta {
                             signature: "erased".to_string(),
                         },
+                        usage: Some(self.usage.clone()),
                     };
-                    events.push(self.serialize_event("content_block_delta", &sig_delta));
+                    events.push(sig_delta);
                     let block_stop = AnthropicStreamEvent::ContentBlockStop {
                         index: self.thinking_block_index,
                     };
-                    events.push(make_sse_event("content_block_stop", &block_stop));
+                    events.push(block_stop);
                 }
 
                 // Close the text block before opening any tool blocks.
@@ -508,7 +456,7 @@ impl AnthropicStreamConverter {
                     let block_stop = AnthropicStreamEvent::ContentBlockStop {
                         index: self.text_block_index,
                     };
-                    events.push(make_sse_event("content_block_stop", &block_stop));
+                    events.push(block_stop);
                 }
 
                 for tool_call in tool_calls {
@@ -528,14 +476,14 @@ impl AnthropicStreamConverter {
     }
 
     /// Emit the final events when the stream ends.
-    pub fn emit_end_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
+    pub fn emit_end_events(&mut self) -> Vec<AnthropicStreamEvent> {
         let mut events = Vec::new();
         self.append_end_events(&mut events);
         events
     }
 
     /// Append the final events when the stream ends.
-    pub fn append_end_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+    pub fn append_end_events(&mut self, events: &mut Vec<AnthropicStreamEvent>) {
         // Close thinking block if started and not already closed mid-stream
         if self.thinking_block_started && !self.thinking_block_closed {
             self.thinking_block_closed = true;
@@ -544,12 +492,13 @@ impl AnthropicStreamConverter {
                 delta: AnthropicDelta::SignatureDelta {
                     signature: "erased".to_string(),
                 },
+                usage: Some(self.usage.clone()),
             };
-            events.push(self.serialize_event("content_block_delta", &sig_delta));
+            events.push(sig_delta);
             let block_stop = AnthropicStreamEvent::ContentBlockStop {
                 index: self.thinking_block_index,
             };
-            events.push(make_sse_event("content_block_stop", &block_stop));
+            events.push(block_stop);
         }
 
         // Close text block if started and not already closed mid-stream
@@ -557,7 +506,7 @@ impl AnthropicStreamConverter {
             let block_stop = AnthropicStreamEvent::ContentBlockStop {
                 index: self.text_block_index,
             };
-            events.push(make_sse_event("content_block_stop", &block_stop));
+            events.push(block_stop);
         }
 
         // EOF remains a fallback for backends that omit a terminal finish reason.
@@ -572,44 +521,56 @@ impl AnthropicStreamConverter {
             },
             usage: self.usage.clone(),
         };
-        events.push(make_sse_event("message_delta", &message_delta));
+        events.push(message_delta);
 
         // Emit message_stop
         let message_stop = AnthropicStreamEvent::MessageStop {};
-        events.push(make_sse_event("message_stop", &message_stop));
+        events.push(message_stop);
     }
 
     /// Emit error events when the stream ends due to a backend error.
-    pub fn emit_error_events(&mut self) -> Vec<Result<Event, anyhow::Error>> {
+    pub fn emit_error_events(&mut self) -> Vec<AnthropicStreamEvent> {
         let mut events = Vec::with_capacity(1);
         self.append_error_events(&mut events);
         events
     }
 
     /// Append error events when the stream ends due to a backend error.
-    pub fn append_error_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+    pub fn append_error_events(&mut self, events: &mut Vec<AnthropicStreamEvent>) {
         let error_event = AnthropicStreamEvent::Error {
             error: AnthropicErrorBody {
                 error_type: "api_error".to_string(),
                 message: "An internal error occurred during generation.".to_string(),
             },
         };
-        events.push(make_sse_event("error", &error_event));
+        events.push(error_event);
     }
 }
 
-fn make_sse_event(event_type: &str, event: &AnthropicStreamEvent) -> Result<Event, anyhow::Error> {
-    let data = serde_json::to_string(event)?;
-    Ok(Event::default().event(event_type).data(data))
+pub(crate) fn make_sse_event(event: &AnthropicStreamEvent) -> Result<Event, anyhow::Error> {
+    let data = serde_json::to_string(&event_json_with_usage(event)?)?;
+    Ok(Event::default().event(stream_event_type(event)).data(data))
+}
+
+pub(crate) fn stream_event_type(event: &AnthropicStreamEvent) -> &'static str {
+    match event {
+        AnthropicStreamEvent::MessageStart { .. } => "message_start",
+        AnthropicStreamEvent::ContentBlockStart { .. } => "content_block_start",
+        AnthropicStreamEvent::ContentBlockDelta { .. } => "content_block_delta",
+        AnthropicStreamEvent::ContentBlockStop { .. } => "content_block_stop",
+        AnthropicStreamEvent::MessageDelta { .. } => "message_delta",
+        AnthropicStreamEvent::MessageStop {} => "message_stop",
+        AnthropicStreamEvent::Ping {} => "ping",
+        AnthropicStreamEvent::Error { .. } => "error",
+    }
 }
 
 /// Serialize an Anthropic stream event to JSON, injecting a `usage` triple onto
 /// `content_block_delta` events (and leaving every other event untouched).
 ///
-/// `dynamo-protocols`'s `AnthropicStreamEvent::ContentBlockDelta` has no `usage`
-/// field — the type is an external crate we don't own — so the field is added at
-/// the JSON layer. The triple is `{input_tokens, output_tokens, total_tokens}`
-/// (plus any Anthropic cache fields).
+/// The native event carries the cumulative Anthropic usage. Dynamo adds the
+/// derived `total_tokens` field at its HTTP boundary so typed in-process users
+/// do not depend on a wire-only extension.
 ///
 /// `total_tokens` counts the *complete* prompt plus the output, i.e.
 /// `input_tokens + cache_read_input_tokens + cache_creation_input_tokens +
@@ -619,24 +580,22 @@ fn make_sse_event(event_type: &str, event: &AnthropicStreamEvent) -> Result<Even
 /// under-report and disagree with the `total_tokens` a proxy sees on the
 /// equivalent `/v1/chat/completions` request (`prompt_tokens + completion_tokens`,
 /// cached tokens included). Saturating arithmetic guards against overflow.
-fn event_json_with_usage(
-    event: &AnthropicStreamEvent,
-    usage: &AnthropicUsage,
-) -> Result<serde_json::Value, anyhow::Error> {
+fn event_json_with_usage(event: &AnthropicStreamEvent) -> Result<serde_json::Value, anyhow::Error> {
     let mut value = serde_json::to_value(event)?;
-    if let (AnthropicStreamEvent::ContentBlockDelta { .. }, serde_json::Value::Object(map)) =
-        (event, &mut value)
+    if let (
+        AnthropicStreamEvent::ContentBlockDelta {
+            usage: Some(usage), ..
+        },
+        serde_json::Value::Object(map),
+    ) = (event, &mut value)
+        && let Some(serde_json::Value::Object(usage_map)) = map.get_mut("usage")
     {
-        let mut usage_value = serde_json::to_value(usage)?;
-        if let serde_json::Value::Object(usage_map) = &mut usage_value {
-            let total = usage
-                .input_tokens
-                .saturating_add(usage.cache_read_input_tokens.unwrap_or(0))
-                .saturating_add(usage.cache_creation_input_tokens.unwrap_or(0))
-                .saturating_add(usage.output_tokens);
-            usage_map.insert("total_tokens".to_string(), serde_json::json!(total));
-        }
-        map.insert("usage".to_string(), usage_value);
+        let total = usage
+            .input_tokens
+            .saturating_add(usage.cache_read_input_tokens.unwrap_or(0))
+            .saturating_add(usage.cache_creation_input_tokens.unwrap_or(0))
+            .saturating_add(usage.output_tokens);
+        usage_map.insert("total_tokens".to_string(), serde_json::json!(total));
     }
     Ok(value)
 }
@@ -666,204 +625,18 @@ impl AnthropicStreamConverter {
         &mut self,
         chunk: &NvCreateChatCompletionStreamResponse,
     ) -> Vec<TaggedEvent> {
-        let mut events = Vec::new();
-
-        if let Some(usage) = &chunk.inner.usage {
-            self.record_usage(usage);
-        }
-
-        let usage_snapshot = self.usage.clone();
-
-        let mut should_flush_tool_blocks = false;
-        for choice in &chunk.inner.choices {
-            let delta = &choice.delta;
-
-            if let Some(ref fr) = choice.finish_reason {
-                should_flush_tool_blocks |= matches!(
-                    fr,
-                    dynamo_protocols::types::FinishReason::ToolCalls
-                        | dynamo_protocols::types::FinishReason::FunctionCall
-                );
-                self.stop_reason = Some(match fr {
-                    dynamo_protocols::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
-                    dynamo_protocols::types::FinishReason::Length => AnthropicStopReason::MaxTokens,
-                    dynamo_protocols::types::FinishReason::ToolCalls => {
-                        AnthropicStopReason::ToolUse
-                    }
-                    dynamo_protocols::types::FinishReason::ContentFilter => {
-                        AnthropicStopReason::EndTurn
-                    }
-                    dynamo_protocols::types::FinishReason::FunctionCall => {
-                        AnthropicStopReason::ToolUse
-                    }
-                });
-            }
-
-            // Handle reasoning/thinking content deltas
-            if let Some(ref reasoning) = delta.reasoning_content
-                && !reasoning.is_empty()
-            {
-                if !self.thinking_block_started {
-                    self.thinking_block_started = true;
-                    self.thinking_block_index = self.next_block_index;
-                    self.next_block_index += 1;
-
-                    let ev = AnthropicStreamEvent::ContentBlockStart {
-                        index: self.thinking_block_index,
-                        content_block: AnthropicResponseContentBlock::Thinking {
-                            thinking: String::new(),
-                            signature: String::new(),
-                        },
-                    };
-                    events.push(make_tagged_event("content_block_start", &ev));
-                }
-
-                let ev = AnthropicStreamEvent::ContentBlockDelta {
-                    index: self.thinking_block_index,
-                    delta: AnthropicDelta::ThinkingDelta {
-                        thinking: reasoning.clone(),
-                    },
-                };
-                events.push(make_tagged_event("content_block_delta", &ev));
-            }
-
-            let content_text = match &delta.content {
-                Some(ChatCompletionMessageContent::Text(text)) => Some(text.as_str()),
-                _ => None,
-            };
-
-            if let Some(text) = content_text
-                && !text.is_empty()
-            {
-                // Close thinking block before text starts
-                if self.thinking_block_started && !self.thinking_block_closed {
-                    self.thinking_block_closed = true;
-                    let ev = AnthropicStreamEvent::ContentBlockDelta {
-                        index: self.thinking_block_index,
-                        delta: AnthropicDelta::SignatureDelta {
-                            signature: "erased".to_string(),
-                        },
-                    };
-                    events.push(make_tagged_event("content_block_delta", &ev));
-                    let ev = AnthropicStreamEvent::ContentBlockStop {
-                        index: self.thinking_block_index,
-                    };
-                    events.push(make_tagged_event("content_block_stop", &ev));
-                }
-
-                if !self.text_block_started {
-                    self.text_block_started = true;
-                    self.text_block_index = self.next_block_index;
-                    self.next_block_index += 1;
-
-                    let ev = AnthropicStreamEvent::ContentBlockStart {
-                        index: self.text_block_index,
-                        content_block: AnthropicResponseContentBlock::Text {
-                            text: String::new(),
-                            citations: None,
-                        },
-                    };
-                    events.push(make_tagged_event("content_block_start", &ev));
-                }
-
-                self.usage.output_tokens += 1;
-                let ev = AnthropicStreamEvent::ContentBlockDelta {
-                    index: self.text_block_index,
-                    delta: AnthropicDelta::TextDelta {
-                        text: text.to_string(),
-                    },
-                };
-                events.push(make_tagged_event("content_block_delta", &ev));
-            }
-
-            if let Some(tool_calls) = &delta.tool_calls {
-                // Close thinking block before tool blocks
-                if self.thinking_block_started && !self.thinking_block_closed {
-                    self.thinking_block_closed = true;
-                    let ev = AnthropicStreamEvent::ContentBlockDelta {
-                        index: self.thinking_block_index,
-                        delta: AnthropicDelta::SignatureDelta {
-                            signature: "erased".to_string(),
-                        },
-                    };
-                    events.push(make_tagged_event("content_block_delta", &ev));
-                    let ev = AnthropicStreamEvent::ContentBlockStop {
-                        index: self.thinking_block_index,
-                    };
-                    events.push(make_tagged_event("content_block_stop", &ev));
-                }
-
-                if self.text_block_started && !self.text_block_closed {
-                    self.text_block_closed = true;
-                    let ev = AnthropicStreamEvent::ContentBlockStop {
-                        index: self.text_block_index,
-                    };
-                    events.push(make_tagged_event("content_block_stop", &ev));
-                }
-
-                for tool_call in tool_calls {
-                    self.record_tool_call(tool_call, &usage_snapshot);
-                }
-            }
-        }
-
-        // Keep this test path aligned with `process_chunk`: normal tool-call
-        // streams carry a tool-call finish reason, while interrupted streams use
-        // the EOF fallback in `emit_end_events_tagged`.
-        if should_flush_tool_blocks {
-            for (event_type, event, _usage) in self.drain_buffered_tool_events() {
-                events.push(make_tagged_event(event_type, &event));
-            }
-        }
-
-        events
+        self.process_chunk(chunk)
+            .into_iter()
+            .map(|event| make_tagged_event(stream_event_type(&event), &event))
+            .collect()
     }
 
     /// Like `emit_end_events` but returns tagged events for test assertions.
     fn emit_end_events_tagged(&mut self) -> Vec<TaggedEvent> {
-        let mut events = Vec::new();
-
-        // Close thinking block if not already closed
-        if self.thinking_block_started && !self.thinking_block_closed {
-            self.thinking_block_closed = true;
-            let ev = AnthropicStreamEvent::ContentBlockDelta {
-                index: self.thinking_block_index,
-                delta: AnthropicDelta::SignatureDelta {
-                    signature: "erased".to_string(),
-                },
-            };
-            events.push(make_tagged_event("content_block_delta", &ev));
-            let ev = AnthropicStreamEvent::ContentBlockStop {
-                index: self.thinking_block_index,
-            };
-            events.push(make_tagged_event("content_block_stop", &ev));
-        }
-
-        if self.text_block_started && !self.text_block_closed {
-            let ev = AnthropicStreamEvent::ContentBlockStop {
-                index: self.text_block_index,
-            };
-            events.push(make_tagged_event("content_block_stop", &ev));
-        }
-
-        // EOF fallback; a finish-triggered drain leaves no events here.
-        for (event_type, event, _usage) in self.drain_buffered_tool_events() {
-            events.push(make_tagged_event(event_type, &event));
-        }
-
-        let ev = AnthropicStreamEvent::MessageDelta {
-            delta: AnthropicMessageDeltaBody {
-                stop_reason: self.stop_reason.clone(),
-                stop_sequence: None,
-            },
-            usage: self.usage.clone(),
-        };
-        events.push(make_tagged_event("message_delta", &ev));
-
-        let ev = AnthropicStreamEvent::MessageStop {};
-        events.push(make_tagged_event("message_stop", &ev));
-
-        events
+        self.emit_end_events()
+            .into_iter()
+            .map(|event| make_tagged_event(stream_event_type(&event), &event))
+            .collect()
     }
 }
 
@@ -966,7 +739,6 @@ mod tests {
 
         conv.append_start_events(&mut events);
         assert_eq!(events.len(), 1);
-        assert!(events.iter().all(Result::is_ok));
 
         events.clear();
         let capacity = events.capacity();
@@ -977,7 +749,6 @@ mod tests {
         // interim message_delta event.
         assert_eq!(events.len(), 2);
         assert_eq!(events.capacity(), capacity);
-        assert!(events.iter().all(Result::is_ok));
 
         events.clear();
         conv.append_chunk_events(
@@ -991,25 +762,21 @@ mod tests {
         );
         assert_eq!(events.len(), 1);
         assert_eq!(events.capacity(), capacity);
-        assert!(events.iter().all(Result::is_ok));
 
         events.clear();
         conv.append_chunk_events(&finish_chunk(FinishReason::ToolCalls), &mut events);
         assert_eq!(events.len(), 3);
         assert_eq!(events.capacity(), capacity);
-        assert!(events.iter().all(Result::is_ok));
 
         events.clear();
         conv.append_end_events(&mut events);
         assert_eq!(events.len(), 2);
         assert_eq!(events.capacity(), capacity);
-        assert!(events.iter().all(Result::is_ok));
 
         events.clear();
         conv.append_error_events(&mut events);
         assert_eq!(events.len(), 1);
         assert_eq!(events.capacity(), capacity);
-        assert!(events.iter().all(Result::is_ok));
     }
 
     /// A chunk carrying engine usage (typically the final chunk).
@@ -1124,8 +891,9 @@ mod tests {
             delta: AnthropicDelta::TextDelta {
                 text: "hi".to_string(),
             },
+            usage: Some(usage),
         };
-        let value = event_json_with_usage(&delta, &usage).expect("serialize");
+        let value = event_json_with_usage(&delta).expect("serialize");
         let usage_obj = value
             .get("usage")
             .expect("content_block_delta must carry usage");
@@ -1154,7 +922,14 @@ mod tests {
             cache_read_input_tokens: Some(9),
             cache_creation_input_tokens: Some(1),
         };
-        let cached_value = event_json_with_usage(&delta, &cached_usage).expect("serialize");
+        let cached_delta = AnthropicStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: AnthropicDelta::TextDelta {
+                text: "hi".to_string(),
+            },
+            usage: Some(cached_usage),
+        };
+        let cached_value = event_json_with_usage(&cached_delta).expect("serialize");
         let cached_usage_obj = cached_value
             .get("usage")
             .expect("content_block_delta must carry usage");
@@ -1187,7 +962,7 @@ mod tests {
 
         // A non-delta event carries no injected usage.
         let stop = AnthropicStreamEvent::ContentBlockStop { index: 0 };
-        let stop_value = event_json_with_usage(&stop, &usage).expect("serialize");
+        let stop_value = event_json_with_usage(&stop).expect("serialize");
         assert!(
             stop_value.get("usage").is_none(),
             "only content_block_delta gets injected usage"
@@ -1399,14 +1174,12 @@ mod tests {
         let fragment_outputs: Vec<u32> = conv
             .drain_buffered_tool_events()
             .iter()
-            .filter_map(|(event_type, event, usage)| match (event_type, event) {
-                (
-                    &"content_block_delta",
-                    AnthropicStreamEvent::ContentBlockDelta {
-                        delta: AnthropicDelta::InputJsonDelta { .. },
-                        ..
-                    },
-                ) => Some(
+            .filter_map(|event| match event {
+                AnthropicStreamEvent::ContentBlockDelta {
+                    delta: AnthropicDelta::InputJsonDelta { .. },
+                    usage,
+                    ..
+                } => Some(
                     usage
                         .as_ref()
                         .expect("tool-argument fragment carries a usage snapshot")
