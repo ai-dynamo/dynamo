@@ -1183,14 +1183,12 @@ impl KvRouterConfig {
         })
     }
 
-    /// Return whether a custom worker-selection setting was configured for another worker role.
+    /// Return worker roles with an explicit non-default policy selection.
     ///
-    /// Single-role hosts use this to warn about policy settings that their selection service does
-    /// not consume.
-    pub fn has_explicit_worker_selection_policy_for_other_worker_types(
+    /// Global worker-selection policy overrides apply to every role and are not returned.
+    pub fn explicit_worker_selection_policy_types(
         &self,
-        worker_type: WorkerType,
-    ) -> Result<bool, WorkerSelectionPolicyConfigError> {
+    ) -> Result<Vec<WorkerType>, WorkerSelectionPolicyConfigError> {
         fn is_custom(value: Option<&str>) -> bool {
             value.is_some_and(|name| {
                 let name = name.trim();
@@ -1198,24 +1196,24 @@ impl KvRouterConfig {
             })
         }
 
-        let configured_for_other_worker_type = |configured_worker_type, value| {
-            configured_worker_type != worker_type && is_custom(value)
-        };
         let policy_config = self
             .worker_selection_config()
             .map_err(|source| WorkerSelectionPolicyConfigError::Config { source })?;
-        Ok(configured_for_other_worker_type(
-            WorkerType::Prefill,
-            self.router_prefill_policy.as_deref(),
-        ) || configured_for_other_worker_type(
-            WorkerType::Decode,
-            self.router_decode_policy.as_deref(),
-        ) || policy_config.is_some_and(|config| {
-            configured_for_other_worker_type(WorkerType::Aggregated, config.aggregated_instance())
-                || configured_for_other_worker_type(WorkerType::Prefill, config.prefill_instance())
-                || configured_for_other_worker_type(WorkerType::Decode, config.decode_instance())
-                || configured_for_other_worker_type(WorkerType::Encode, config.encode_instance())
-        }))
+        let mut worker_types = Vec::new();
+        let mut push_if_custom = |worker_type, value| {
+            if is_custom(value) && !worker_types.contains(&worker_type) {
+                worker_types.push(worker_type);
+            }
+        };
+        if let Some(config) = policy_config {
+            push_if_custom(WorkerType::Aggregated, config.aggregated_instance());
+            push_if_custom(WorkerType::Prefill, config.prefill_instance());
+            push_if_custom(WorkerType::Decode, config.decode_instance());
+            push_if_custom(WorkerType::Encode, config.encode_instance());
+        }
+        push_if_custom(WorkerType::Prefill, self.router_prefill_policy.as_deref());
+        push_if_custom(WorkerType::Decode, self.router_decode_policy.as_deref());
+        Ok(worker_types)
     }
 
     #[cfg(test)]
@@ -1972,15 +1970,14 @@ worker_selection:
             }
         );
 
-        assert!(
-            config
-                .has_explicit_worker_selection_policy_for_other_worker_types(WorkerType::Aggregated)
-                .unwrap()
-        );
-        assert!(
-            config
-                .has_explicit_worker_selection_policy_for_other_worker_types(WorkerType::Prefill)
-                .unwrap()
+        assert_eq!(
+            config.explicit_worker_selection_policy_types().unwrap(),
+            vec![
+                WorkerType::Aggregated,
+                WorkerType::Prefill,
+                WorkerType::Decode,
+                WorkerType::Encode,
+            ]
         );
 
         assert_eq!(
@@ -1988,18 +1985,6 @@ worker_selection:
                 .selected_worker_selection_policy_instance_for(WorkerType::Encode)
                 .unwrap(),
             Some("yaml-encode".to_string())
-        );
-
-        config.router_policy_config = None;
-        assert!(
-            config
-                .has_explicit_worker_selection_policy_for_other_worker_types(WorkerType::Aggregated)
-                .unwrap()
-        );
-        assert!(
-            !KvRouterConfig::default()
-                .has_explicit_worker_selection_policy_for_other_worker_types(WorkerType::Aggregated)
-                .unwrap()
         );
 
         let default_policy_file = tempfile::NamedTempFile::new().unwrap();
@@ -2020,24 +2005,21 @@ worker_selection:
             ..Default::default()
         };
         assert!(
-            !default_config
-                .has_explicit_worker_selection_policy_for_other_worker_types(WorkerType::Aggregated)
+            default_config
+                .explicit_worker_selection_policy_types()
                 .unwrap()
+                .is_empty()
         );
 
         let prefill_only_config = KvRouterConfig {
             router_prefill_policy: Some("custom".to_string()),
             ..Default::default()
         };
-        assert!(
+        assert_eq!(
             prefill_only_config
-                .has_explicit_worker_selection_policy_for_other_worker_types(WorkerType::Aggregated)
-                .unwrap()
-        );
-        assert!(
-            !prefill_only_config
-                .has_explicit_worker_selection_policy_for_other_worker_types(WorkerType::Prefill)
-                .unwrap()
+                .explicit_worker_selection_policy_types()
+                .unwrap(),
+            vec![WorkerType::Prefill]
         );
     }
 

@@ -38,6 +38,26 @@ pub struct SelectionServiceBuilder {
     worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
 }
 
+/// Warn when a host does not construct workers for explicitly configured policy roles.
+pub fn warn_for_unserved_worker_selection_policies(
+    kv_router_config: &KvRouterConfig,
+    served_worker_types: &[WorkerType],
+) -> anyhow::Result<()> {
+    let unserved_worker_types = kv_router_config
+        .explicit_worker_selection_policy_types()?
+        .into_iter()
+        .filter(|worker_type| !served_worker_types.contains(worker_type))
+        .collect::<Vec<_>>();
+    if !unserved_worker_types.is_empty() {
+        tracing::warn!(
+            ?served_worker_types,
+            ?unserved_worker_types,
+            "worker-selection policies configured for unserved worker types are ignored"
+        );
+    }
+    Ok(())
+}
+
 impl SelectionServiceBuilder {
     pub fn new(kv_router_config: KvRouterConfig) -> Self {
         Self {
@@ -111,15 +131,6 @@ impl SelectionServiceBuilder {
         self.kv_router_config
             .validate_config()
             .map_err(anyhow::Error::msg)?;
-        if self
-            .kv_router_config
-            .has_explicit_worker_selection_policy_for_other_worker_types(self.worker_type)?
-        {
-            tracing::warn!(
-                worker_type = %self.worker_type,
-                "worker-selection policies configured for other worker types are ignored by this selection service"
-            );
-        }
         let worker_selection_policy_factory = match (
             self.worker_selection_policy_factory,
             self.worker_selection_policy_registry.as_ref(),

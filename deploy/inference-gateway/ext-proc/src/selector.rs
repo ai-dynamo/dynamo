@@ -19,7 +19,7 @@ use dynamo_kv_router::protocols::RoutingConstraints;
 use dynamo_kv_router::services::selection::{
     PromptRequest, SelectAndReserveRequest as CoreSelectAndReserveRequest, SelectionError,
     SelectionService, SelectionServiceBuilder, WorkerLifecycle, WorkerRequest as CoreWorkerRequest,
-    WorkerSelectionPolicyRegistry,
+    WorkerSelectionPolicyRegistry, warn_for_unserved_worker_selection_policies,
 };
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -130,6 +130,7 @@ impl Selector {
         kv_router_config: KvRouterConfig,
         policy_registry: Option<WorkerSelectionPolicyRegistry>,
     ) -> Result<Self> {
+        warn_for_unserved_worker_selection_policies(&kv_router_config, &[WorkerType::Aggregated])?;
         let replication = Self::replication(cfg).await?;
         let mut builder = SelectionServiceBuilder::new(kv_router_config)
             .worker_type(WorkerType::Aggregated)

@@ -32,7 +32,9 @@ pub use policy_registry::{
     WorkerSelectionPolicyRegistryError,
 };
 pub use server::{AppState, run_server, run_server_with_service};
-pub use service::{SelectionService, SelectionServiceBuilder};
+pub use service::{
+    SelectionService, SelectionServiceBuilder, warn_for_unserved_worker_selection_policies,
+};
 pub use types::{
     ModelLoadResponse, OutputBlockRequest, OverlapScoresRequest, OverlapScoresResponse,
     PotentialLoadsRequest, ReadyResponse, ReservationRequest, ReservationResponse,

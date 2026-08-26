@@ -38,6 +38,7 @@ use dynamo_kv_router::services::selection::{
     SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig, SelectionError,
     SelectionService as RustSelectionService, SelectionServiceBuilder, SelectionServiceConfig,
     WorkerPatchRequest, WorkerRequest, WorkerSelectionPolicyRegistry,
+    warn_for_unserved_worker_selection_policies,
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
@@ -483,6 +484,7 @@ where
     if let Some(key_id) = cli.router_tracking_key_id {
         kv_router_config.router_tracking_key_id = Some(key_id);
     }
+    warn_for_unserved_worker_selection_policies(&kv_router_config, &[WorkerType::Aggregated])?;
     let config = SelectionServiceConfig {
         port: cli.port,
         threads: cli.threads,
@@ -597,6 +599,11 @@ impl SelectionService {
         }
         let kv_router_config =
             try_kv_router_config_from_dynamo_env().map_err(PyValueError::new_err)?;
+        warn_for_unserved_worker_selection_policies(
+            &kv_router_config,
+            &[WorkerType::Aggregated],
+        )
+        .map_err(to_pyerr)?;
         let mut builder = SelectionServiceBuilder::new(kv_router_config)
             .worker_type(WorkerType::Aggregated)
             .worker_selection_policy_registry(crate::linked_worker_selection_policy_registry())
