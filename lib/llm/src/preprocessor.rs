@@ -2891,6 +2891,10 @@ impl OpenAIPreprocessor {
             return Ok((w, h));
         }
 
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            anyhow::bail!("unsupported url scheme for dim fetch: {}", url);
+        }
+
         // `DIM_FETCH_MEDIA_FETCHER` and `DIM_FETCH_HTTP_CLIENT` are
         // module-scope `LazyLock`s forced at startup in `new_with_parts`
         // for MM-routable preprocessors — see their definitions for the
@@ -8490,9 +8494,17 @@ mod tests {
         assert!(!MediaFetcher::is_policy_rejection(&recoverable));
     }
 
+    /// A blocked destination on the URL-passthrough path must fail the whole
+    /// request. The IP literal is refused before DNS, so no socket is opened.
     #[cfg(feature = "mm-routing")]
     #[tokio::test]
     async fn url_passthrough_policy_rejection_is_terminal() {
+        // The probe's fetcher is built from the environment. The opt-in allows
+        // this destination, so there would be nothing to assert.
+        if std::env::var("DYN_MM_ALLOW_INTERNAL").as_deref() == Ok("1") {
+            return;
+        }
+
         let mdc = ModelDeploymentCard::load_from_disk(
             "tests/data/sample-models/mock-llama-3.1-8b-instruct",
             None,
@@ -8508,7 +8520,7 @@ mod tests {
                 "content": [{
                     "type": "image_url",
                     "image_url": {
-                        "url": "ftp://example.com/private-image.png"
+                        "url": "https://169.254.169.254/latest/meta-data/private-image.png"
                     }
                 }]
             }]
@@ -8522,6 +8534,26 @@ mod tests {
             .expect_err("URL-passthrough must stop at the policy rejection");
 
         assert!(MediaFetcher::is_policy_rejection(&error));
+    }
+
+    /// Object-store and file URLs are backend-owned passthrough schemes, so a
+    /// failed dimension probe must remain recoverable rather than become 4xx.
+    #[cfg(feature = "mm-routing")]
+    #[tokio::test]
+    async fn dim_fetch_declines_passthrough_schemes_without_rejecting_them() {
+        for url in [
+            "s3://bucket/private-image.png",
+            "gs://bucket/private-image.png",
+            "file:///tmp/private-image.png",
+        ] {
+            let error = OpenAIPreprocessor::fetch_image_dims_uncached(url)
+                .await
+                .expect_err("a non-fetchable scheme cannot yield dimensions");
+            assert!(
+                !MediaFetcher::is_policy_rejection(&error),
+                "{url} must be a skippable dim-fetch failure, not a terminal 4xx: {error:#}"
+            );
+        }
     }
 
     /// Rotating S3 / GCS / Azure SAS signatures change the URL and

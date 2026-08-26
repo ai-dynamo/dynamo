@@ -22,6 +22,8 @@ from tests.utils.port_utils import ServicePorts
 
 MODEL_NAME = "test-http-status-prop"
 ENDPOINT_PATH = "test.http_status_prop.generate"
+PASSTHROUGH_MODEL_NAME = "test-http-status-prop-passthrough"
+PASSTHROUGH_ENDPOINT_PATH = "test.http_status_prop.generate_passthrough"
 EXPECTED_STATUS = 415
 EXPECTED_MESSAGE = "unsupported-media-via-wire"
 
@@ -57,7 +59,9 @@ class _WorkerProcess(ManagedProcess):
             data = response.json()
         except (ValueError, KeyError):
             return False
-        return any(m.get("id") == MODEL_NAME for m in data.get("data", []))
+        # Ready only when both models have been registered and advertised
+        listed = {m.get("id") for m in data.get("data", [])}
+        return {MODEL_NAME, PASSTHROUGH_MODEL_NAME} <= listed
 
 
 @pytest.fixture(scope="function")
@@ -103,11 +107,15 @@ def test_python_backend_ssrf_rejection_is_4xx_with_zero_egress(
     services: int,
     outbound_canary: ConnectionCanary,
 ) -> None:
-    """Public HTTP -> Python batch loader must reject before any connection."""
+    """Python's batch loader must reject a blocked URL before any connection.
+
+    The ModelInput.Text endpoint bypasses Rust media preprocessing, so the
+    rejection comes from the Python loader in the worker.
+    """
     response = requests.post(
         f"http://localhost:{services}/v1/chat/completions",
         json={
-            "model": MODEL_NAME,
+            "model": PASSTHROUGH_MODEL_NAME,
             "messages": [
                 {
                     "role": "user",
@@ -125,7 +133,7 @@ def test_python_backend_ssrf_rejection_is_4xx_with_zero_egress(
     )
 
     assert 400 <= response.status_code < 500, response.text
-    assert "blocked range" in response.text
+    assert "is in a blocked range" in response.text, response.text
     outbound_canary.assert_no_connection()
 
 

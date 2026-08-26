@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import os
 import tempfile
-import time
 from typing import Any, Generator
 
 import pytest
@@ -22,7 +21,6 @@ from tests.conftest import EtcdServer, NatsServer
 from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.network_canary import ConnectionCanary, running_canary
-from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_ports
 
 VLLM_MM_MODEL = os.getenv("DYN_TEST_VLLM_MM_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
@@ -52,6 +50,19 @@ def _check_ready(response) -> bool:
         return (response.json() or {}).get("status") == "ready"
     except ValueError:
         return False
+
+
+def _model_registered(response) -> bool:
+    """Returns True once the frontend advertises this worker's model.
+    The ID appears only after the worker's registration is discovered.
+    """
+    try:
+        if response.status_code != 200:
+            return False
+        data = response.json()
+    except ValueError:
+        return False
+    return any(m.get("id") == VLLM_MM_MODEL for m in data.get("data") or [])
 
 
 def _strict_media_env(**extra: str) -> dict[str, str]:
@@ -123,7 +134,7 @@ class _FrontendProcess(ManagedProcess):
             command=command,
             env=_strict_media_env(),
             health_check_urls=[
-                (f"http://localhost:{frontend_port}/v1/models", check_models_api)
+                (f"http://localhost:{frontend_port}/v1/models", _model_registered)
             ],
             timeout=240,
             straggler_commands=["-m dynamo.frontend"],
@@ -150,8 +161,8 @@ def frontend_topology(
 ) -> Generator[tuple[str, int], None, None]:
     topology = request.param
     frontend_port, system_port = allocate_ports(count=2, start_port=13000)
+    # The frontend waits until this worker's model appears in /v1/models.
     with _VllmWorkerProcess(request, topology=topology, system_port=system_port):
-        time.sleep(2)  # let discovery settle before the frontend registers
         with _FrontendProcess(request, topology=topology, frontend_port=frontend_port):
             yield topology, frontend_port
 
