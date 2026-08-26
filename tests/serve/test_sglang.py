@@ -652,7 +652,7 @@ sglang_configs = {
             pytest.mark.profiled_vram_gib(10.0),
             pytest.mark.requested_sglang_kv_tokens(8736),
             pytest.mark.timeout(390),
-            pytest.mark.post_merge,
+            pytest.mark.pre_merge,
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=[
