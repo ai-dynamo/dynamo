@@ -5,17 +5,16 @@ title: Support Coverage
 subtitle: What NVIDIA Enterprise Support commits to for the covered Dynamo artifacts.
 ---
 
-This page summarizes the parts of the NVIDIA Enterprise Support policy that a customer plans around. A live subscription and the terms in the applicable license agreement govern the specifics.
+This page summarizes the parts of the NVIDIA Enterprise Support policy that a customer plans around. An active NVIDIA AI Enterprise subscription is required for commercial support.
 
 ## Support Case Intake
 
 Commercial support cases are opened through NVIDIA Enterprise Experience (NVEX) using an active NVAIE subscription. See [Get Help](#get-help) for the entry points.
 
-## Response Time on Critical and High CVEs
+## Remediation Time on Critical and High CVEs
 
-CVEs affecting the supported artifacts carry a 30-day response commitment for Critical and High severity findings. Three qualifiers apply:
+CVEs affecting the supported artifacts carry a 30-day remediation commitment for Critical and High severity findings. Medium and Low severity findings are addressed on a best-effort basis. Two qualifiers apply:
 
-- **Response, not fix.** The commitment sets the time by which NVIDIA acknowledges and begins triaging the vulnerability, not the time by which a fix is available.
 - **Clock starts at identification.** The 30-day window begins when the vulnerability is identified against a supported artifact. It does not wait on public disclosure or upstream patch availability.
 - **PSIRT track for NVIDIA-owned code.** Vulnerabilities in NVIDIA-owned code that ships inside the supported artifacts are handled through the NVIDIA Product Security Incident Response Team (PSIRT) process, on the PSIRT schedule, separate from this window. The 30-day commitment applies to vulnerabilities in the open-source packages that ship inside the supported artifacts.
 
@@ -23,7 +22,7 @@ CVEs affecting the supported artifacts carry a 30-day response commitment for Cr
 
 Defect fixes ship as new releases on the supported release line. NVIDIA does not backport fixes to earlier releases and does not cut on-demand off-cycle releases in response to individual cases. Cadence follows the standard Dynamo release train.
 
-Bug-fix patch releases on the supported line inherit the release line's support scope and do not carry a separate QA validation pass. Design changes and new feature work land in the next release, not in a patch.
+Bug-fix patch releases on the supported line inherit the release line's support scope. A patch does not always carry a full QA validation pass. Design changes and new feature work land in the next release, not in a patch.
 
 ## Third-Party Package Support Boundary
 
@@ -31,7 +30,7 @@ Open-source packages that ship inside the supported enterprise artifacts are cov
 
 ## Hardware Scope
 
-Dynamo Enterprise coverage is currently scoped to Blackwell and GB200 systems. Other GPU generations are not in scope.
+Support covers the hardware, operating systems, and architectures listed in the published [Compatibility](https://docs.nvidia.com/dynamo/latest/reference/compatibility) matrix and is not scoped to individual models.
 
 ## Lifecycle and End-of-Life
 
