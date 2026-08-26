@@ -16,7 +16,8 @@ use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
 use dynamo_kv_router::{
     DefaultWorkerSelector, KvRouterConfig, SchedulingRequest, WorkerCandidate, WorkerFilter,
     WorkerInputView, WorkerInputs, WorkerLoadProjection, WorkerPicker, WorkerScorer,
-    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelector,
+    WorkerSelectionContext, WorkerSelectionInput, WorkerSelectionPolicy,
+    WorkerSelectionPolicyError, WorkerSelector,
 };
 use rustc_hash::FxHashMap;
 
@@ -63,7 +64,7 @@ struct BenchScorer;
 
 impl WorkerScorer for BenchScorer {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::CACHE | WorkerInputs::LOAD | WorkerInputs::ROUTING
+        WorkerInputs::CACHE | WorkerInputs::LOAD | WorkerInputs::PREFERRED_TAINT
     }
 
     fn score(
@@ -77,15 +78,41 @@ impl WorkerScorer for BenchScorer {
         let load = candidate
             .load()
             .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        let routing = candidate
-            .routing()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("routing input unavailable"))?;
         let uncached_blocks =
             (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
         let load_blocks = load.active_prefill_tokens() as f64 / context.block_size() as f64
             + load.decode_cost_blocks()
             + load.active_requests() as f64;
-        Ok((uncached_blocks + load_blocks) * routing.preferred_taint_multiplier().unwrap_or(1.0))
+        Ok((uncached_blocks + load_blocks) * candidate.preferred_taint_multiplier().unwrap_or(1.0))
+    }
+}
+
+/// Matches normal custom-policy cache/load work while deliberately not observing preferred-taint
+/// metadata. This isolates the cost of materializing metadata that a policy does not use.
+struct IgnoringPreferenceScorer;
+
+impl WorkerScorer for IgnoringPreferenceScorer {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::CACHE | WorkerInputs::LOAD
+    }
+
+    fn score(
+        &mut self,
+        context: &WorkerSelectionContext<'_>,
+        candidate: &WorkerCandidate,
+    ) -> Result<f64, WorkerSelectionPolicyError> {
+        let cache = candidate
+            .cache()
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
+        let load = candidate
+            .load()
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
+        let uncached_blocks =
+            (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
+        let load_blocks = load.active_prefill_tokens() as f64 / context.block_size() as f64
+            + load.decode_cost_blocks()
+            + load.active_requests() as f64;
+        Ok(uncached_blocks + load_blocks)
     }
 }
 
@@ -108,6 +135,15 @@ impl WorkerPicker for LowestCostPicker {
 }
 
 fn fixture(worker_count: usize) -> (HashMap<WorkerId, BenchWorkerConfig>, SchedulingRequest) {
+    fixture_with_preferred_taints(worker_count, 0)
+}
+
+fn fixture_with_preferred_taints(
+    worker_count: usize,
+    preferred_taint_count: usize,
+) -> (HashMap<WorkerId, BenchWorkerConfig>, SchedulingRequest) {
+    const PREFERRED_TAINTS: [&str; 4] = ["rack-a", "zone-a", "gpu-a", "node-a"];
+    assert!(preferred_taint_count <= PREFERRED_TAINTS.len());
     let mut workers = HashMap::with_capacity(worker_count);
     let mut effective_overlap_blocks = HashMap::with_capacity(worker_count);
     let mut effective_cached_tokens = HashMap::with_capacity(worker_count);
@@ -116,7 +152,16 @@ fn fixture(worker_count: usize) -> (HashMap<WorkerId, BenchWorkerConfig>, Schedu
     for worker_id in 0..worker_count as WorkerId {
         let worker = WorkerWithDpRank::from_worker_id(worker_id);
         let cached_tokens = (worker_id as usize % 32) * 64;
-        workers.insert(worker_id, BenchWorkerConfig::default());
+        let taints = if worker_id % 2 == 0 {
+            PREFERRED_TAINTS
+                .iter()
+                .take(preferred_taint_count)
+                .map(|taint| (*taint).to_string())
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        workers.insert(worker_id, BenchWorkerConfig { taints });
         effective_overlap_blocks.insert(worker, cached_tokens as f64 / 16.0);
         effective_cached_tokens.insert(worker, cached_tokens);
         worker_loads.insert(
@@ -138,7 +183,14 @@ fn fixture(worker_count: usize) -> (HashMap<WorkerId, BenchWorkerConfig>, Schedu
         expected_output_tokens: Some(256),
         pinned_worker: None,
         allowed_worker_ids: None,
-        routing_constraints: RoutingConstraints::default(),
+        routing_constraints: RoutingConstraints {
+            required_taints: HashSet::new(),
+            preferred_taints: PREFERRED_TAINTS
+                .iter()
+                .take(preferred_taint_count)
+                .map(|taint| ((*taint).to_string(), 0.5))
+                .collect(),
+        },
         router_config_override: None,
         track_prefill_tokens: true,
         priority_jump: 0.0,
@@ -190,12 +242,12 @@ fn worker_selection(c: &mut Criterion) {
                         b.iter(|| {
                             black_box(
                                 selector
-                                    .select_worker(
+                                    .select_worker(WorkerSelectionInput::configured(
                                         black_box(&workers),
                                         black_box(&request),
                                         request.eligibility(),
                                         black_box(16),
-                                    )
+                                    ))
                                     .unwrap(),
                             )
                         })
@@ -238,12 +290,12 @@ fn custom_worker_selection(c: &mut Criterion) {
         b.iter(|| {
             black_box(
                 custom_no_filter
-                    .select_worker(
+                    .select_worker(WorkerSelectionInput::configured(
                         black_box(&workers),
                         black_box(&request),
                         request.eligibility(),
                         black_box(16),
-                    )
+                    ))
                     .unwrap(),
             )
         })
@@ -252,16 +304,58 @@ fn custom_worker_selection(c: &mut Criterion) {
         b.iter(|| {
             black_box(
                 custom_keep_all_filter
-                    .select_worker(
+                    .select_worker(WorkerSelectionInput::configured(
                         black_box(&workers),
                         black_box(&request),
                         request.eligibility(),
                         black_box(16),
-                    )
+                    ))
                     .unwrap(),
             )
         })
     });
+    group.finish();
+}
+
+fn unused_preferred_taint_metadata(c: &mut Criterion) {
+    const WORKER_COUNT: usize = 10_000;
+    let config = KvRouterConfig {
+        router_temperature: 0.0,
+        ..Default::default()
+    };
+    let mut group = c.benchmark_group("unused_preferred_taint_metadata/10_000");
+    group.warm_up_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(50);
+    group.throughput(Throughput::Elements(WORKER_COUNT as u64));
+
+    for preferred_taint_count in [0, 1, 4] {
+        let (workers, request) = fixture_with_preferred_taints(WORKER_COUNT, preferred_taint_count);
+        let policy = WorkerSelectionPolicy::new(
+            config.clone(),
+            "prefill",
+            vec![Box::new(IgnoringPreferenceScorer)],
+            Box::new(LowestCostPicker),
+        );
+        group.bench_with_input(
+            BenchmarkId::new("preferred_taints", preferred_taint_count),
+            &preferred_taint_count,
+            |b, _| {
+                b.iter(|| {
+                    black_box(
+                        policy
+                            .select_worker(WorkerSelectionInput::configured(
+                                black_box(&workers),
+                                black_box(&request),
+                                request.eligibility(),
+                                black_box(16),
+                            ))
+                            .unwrap(),
+                    )
+                })
+            },
+        );
+    }
     group.finish();
 }
 
@@ -288,12 +382,12 @@ fn default_policy_wrapper(c: &mut Criterion) {
                 b.iter(|| {
                     black_box(
                         direct
-                            .select_worker(
+                            .select_worker(WorkerSelectionInput::configured(
                                 black_box(&workers),
                                 black_box(&request),
                                 request.eligibility(),
                                 black_box(16),
-                            )
+                            ))
                             .unwrap(),
                     )
                 })
@@ -306,12 +400,12 @@ fn default_policy_wrapper(c: &mut Criterion) {
                 b.iter(|| {
                     black_box(
                         policy
-                            .select_worker(
+                            .select_worker(WorkerSelectionInput::configured(
                                 black_box(&workers),
                                 black_box(&request),
                                 request.eligibility(),
                                 black_box(16),
-                            )
+                            ))
                             .unwrap(),
                     )
                 })
@@ -325,6 +419,7 @@ criterion_group!(
     benches,
     worker_selection,
     custom_worker_selection,
+    unused_preferred_taint_metadata,
     default_policy_wrapper
 );
 criterion_main!(benches);

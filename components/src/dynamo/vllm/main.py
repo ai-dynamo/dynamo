@@ -749,8 +749,16 @@ async def register_vllm_model(
         publish_source_endpoints=not state_agent_enabled,
     )
     runtime_config.context_length = vllm_config.model_config.max_model_len
+    tower_connector_lora_enabled = bool(
+        vllm_config.lora_config
+        and getattr(vllm_config.lora_config, "enable_tower_connector_lora", False)
+    )
     if publish_engine_generate_capability(
-        runtime_config, model_input, model_type, worker_type
+        runtime_config,
+        model_input,
+        model_type,
+        worker_type,
+        tower_connector_lora_enabled,
     ):
         logging.info("Published vLLM engine-native generate capability")
     if model_type != ModelType.Embedding:
