@@ -504,6 +504,15 @@ jobs:
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --locked --no-deps --features custom-policy,select-service --all-targets -- -D warnings
+    - name: Lint the NVTX feature
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      # The default job builds this crate with the feature off, so the feature-on
+      # half of every `#[cfg(feature = "nvtx")]` — including the tests gated the
+      # other way — is otherwise never linted under -D warnings. Scoped to
+      # dynamo-runtime: a bare --features nvtx at the root also selects
+      # kvbm-engine's, whose markers have no runtime switch.
+      run: "cargo clippy --locked --no-deps -p dynamo-runtime --features nvtx --all-targets -- -D warnings"
     - name: Lint feature-gated benchmark entrypoints
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}

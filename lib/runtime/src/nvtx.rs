@@ -816,7 +816,12 @@ mod tests {
     #[test]
     fn enabled_is_always_false_without_the_feature() {
         assert!(!super::enabled());
-        super::init();
+        // `init` still validates the switch without the feature, so it returns a
+        // `Result`. The outcome depends on whatever `DYN_NVTX` the developer's
+        // shell happens to carry and is asserted by
+        // `switch_parsing_matches_the_python_half`; what matters here is that no
+        // value of it can turn annotations on in this build.
+        let _ = super::init();
         assert!(!super::enabled());
     }
 
