@@ -17,6 +17,7 @@ use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -56,6 +57,7 @@ use super::publication::{
     RelayPublicationSource,
 };
 use super::resolution::stable_dc_id;
+use super::stats::RelayStatsRuntime;
 use super::topology::{TopologyPublisher, TopologySnapshot};
 use crate::discovery::{
     KvSourceMembershipCoordinator, KvSourceMembershipView, KvSourceMembershipWatch,
@@ -120,6 +122,7 @@ pub struct KvDcRelayProducerConfig {
     pub publication_threshold: usize,
     pub publication_delay_ms: u64,
     pub recovery_attempt_timeout_ms: u64,
+    pub grpc_listen_address: Option<SocketAddr>,
 }
 
 impl Default for KvDcRelayProducerConfig {
@@ -129,6 +132,7 @@ impl Default for KvDcRelayProducerConfig {
             publication_threshold: DEFAULT_PUBLICATION_THRESHOLD,
             publication_delay_ms: DEFAULT_PUBLICATION_DELAY.as_millis() as u64,
             recovery_attempt_timeout_ms: DEFAULT_RECOVERY_ATTEMPT_TIMEOUT.as_millis() as u64,
+            grpc_listen_address: None,
         }
     }
 }
@@ -313,7 +317,7 @@ pub struct KvDcRelayDiagnosticSnapshot {
     pub buckets: Vec<u64>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SlotLifecycle {
+pub(super) enum SlotLifecycle {
     Discovered,
     Starting,
     Active,
@@ -337,11 +341,11 @@ impl SlotLifecycle {
 }
 
 #[derive(Clone)]
-struct EndpointSlotStatus {
-    lifecycle: SlotLifecycle,
-    layout_generation: u64,
-    membership: Option<EndpointMembership>,
-    actor: Option<KvDcRelayHandle>,
+pub(super) struct EndpointSlotStatus {
+    pub(super) lifecycle: SlotLifecycle,
+    pub(super) layout_generation: u64,
+    pub(super) membership: Option<EndpointMembership>,
+    pub(super) actor: Option<KvDcRelayHandle>,
     #[cfg(test)]
     settled_membership_generation: Option<u64>,
     #[cfg(feature = "ckf-diagnostics")]
@@ -363,7 +367,7 @@ impl Default for EndpointSlotStatus {
     }
 }
 
-type SharedEndpointStatus = Arc<RwLock<EndpointSlotStatus>>;
+pub(super) type SharedEndpointStatus = Arc<RwLock<EndpointSlotStatus>>;
 
 struct EndpointSlotTask {
     metadata: watch::Sender<Option<EndpointMembership>>,
@@ -606,6 +610,7 @@ pub struct KvDcRelay {
     cancel: CancellationToken,
     membership: Mutex<Option<DcMembershipWatch>>,
     supervisor: Mutex<Option<JoinHandle<()>>>,
+    stats: Mutex<Option<RelayStatsRuntime>>,
     supervisor_complete: CancellationToken,
     terminal: Arc<HostTerminalState>,
     statuses: Arc<RwLock<HashMap<EndpointId, SharedEndpointStatus>>>,
@@ -682,6 +687,21 @@ impl KvDcRelay {
             DEFAULT_SNAPSHOT_PROGRESS_TIMEOUT,
         ));
         let terminal = Arc::new(HostTerminalState::default());
+        let stats = if let Some(listen_address) = config.producer.grpc_listen_address {
+            Some(
+                RelayStatsRuntime::start(
+                    component.clone(),
+                    relay_identity,
+                    statuses.clone(),
+                    pools.clone(),
+                    listen_address,
+                    cancel.child_token(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
         let host = tokio::spawn(run_host_supervisor(
             component,
             ckf_dc_id,
@@ -711,6 +731,7 @@ impl KvDcRelay {
             cancel,
             membership: Mutex::new(Some(membership)),
             supervisor: Mutex::new(Some(supervisor)),
+            stats: Mutex::new(stats),
             supervisor_complete,
             terminal,
             statuses,
@@ -872,6 +893,10 @@ impl KvDcRelay {
         if let Some(membership) = membership {
             membership.shutdown().await;
         }
+        let stats = self.stats.lock().take();
+        if let Some(stats) = stats {
+            stats.shutdown().await;
+        }
         Ok(())
     }
 }
@@ -886,7 +911,7 @@ fn new_relay_incarnation() -> anyhow::Result<u64> {
     let random_id = rand::rngs::OsRng
         .try_next_u64()
         .map_err(|error| anyhow::anyhow!("failed to generate Relay incarnation: {error}"))?;
-    Ok(random_id & (i64::MAX as u64))
+    Ok((random_id & (i64::MAX as u64)).max(1))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2980,6 +3005,7 @@ mod tests {
             cancel,
             membership: Mutex::new(None),
             supervisor: Mutex::new(Some(supervisor)),
+            stats: Mutex::new(None),
             supervisor_complete,
             terminal,
             statuses: Arc::new(RwLock::new(HashMap::new())),
@@ -3073,6 +3099,7 @@ mod tests {
             cancel: cancel.clone(),
             membership: Mutex::new(None),
             supervisor: Mutex::new(Some(supervisor)),
+            stats: Mutex::new(None),
             supervisor_complete,
             terminal,
             statuses: Arc::new(RwLock::new(HashMap::new())),
@@ -3190,6 +3217,7 @@ mod tests {
             cancel,
             membership: Mutex::new(None),
             supervisor: Mutex::new(None),
+            stats: Mutex::new(None),
             supervisor_complete: CancellationToken::new(),
             terminal: Arc::new(HostTerminalState::default()),
             statuses,

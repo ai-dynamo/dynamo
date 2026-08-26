@@ -11,6 +11,7 @@ mod load;
 mod pool_registry;
 mod publication;
 mod resolution;
+mod stats;
 mod topology;
 
 pub use discovery::KvDcRelayDiscoveryConfig;
@@ -35,6 +36,7 @@ pub use publication::{
     PoolPublicationStream, PublicationError, PublicationErrorKind, PublicationFrame,
     PublicationFrameKind, RelayPublicationSource,
 };
+pub use stats::proto;
 pub use topology::{
     AdapterReadiness, TopologyEntry, TopologyMember, TopologyReadinessState, TopologySnapshot,
 };

@@ -156,6 +156,7 @@ struct StateConfig {
     frontend_api_config: FrontendApiConfig,
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
+    runtime: Option<Arc<DistributedRuntime>>,
 }
 
 fn parse_sse_keep_alive(value: Result<String, std::env::VarError>) -> Option<Duration> {
@@ -465,11 +466,22 @@ impl State {
         cancel_token: CancellationToken,
         config: StateConfig,
     ) -> Self {
+        let metrics = Arc::new(Metrics::new_with_prefix(config.metrics_config.prefix()));
+        let service_observer = Arc::new(ServiceObserver::default());
+        if let Some(runtime) = config.runtime {
+            crate::frontend_load::start_frontend_load_publisher(
+                runtime,
+                manager.clone(),
+                service_observer.clone(),
+                metrics.frontend_load(),
+                cancel_token.child_token(),
+            );
+        }
         Self {
             manager,
-            metrics: Arc::new(Metrics::new_with_prefix(config.metrics_config.prefix())),
+            metrics,
             discovery_client,
-            service_observer: Arc::new(ServiceObserver::default()),
+            service_observer,
             nvext_enabled: config.nvext_enabled,
             flags: StateFlags {
                 chat_endpoints_enabled: AtomicBool::new(false),
@@ -495,6 +507,15 @@ impl State {
     /// Get the Prometheus [`Metrics`] object which tracks request counts and inflight requests
     pub fn metrics_clone(&self) -> Arc<Metrics> {
         self.metrics.clone()
+    }
+
+    pub(super) fn create_response_collector(
+        &self,
+        model: &str,
+        request: &metrics::InflightGuard,
+    ) -> metrics::ResponseMetricCollector {
+        self.metrics_clone()
+            .create_response_collector_for_request(model, request)
     }
 
     pub fn manager(&self) -> &ModelManager {
@@ -1154,6 +1175,7 @@ impl HttpServiceConfigBuilder {
                 frontend_api_config,
                 nvext_enabled,
                 sse_keep_alive: config.sse_keep_alive,
+                runtime: config.runtime.clone(),
             },
         ));
         state

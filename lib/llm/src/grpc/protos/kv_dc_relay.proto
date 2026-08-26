@@ -1,0 +1,201 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package dynamo.kvdc.relay.v1;
+
+import "google/protobuf/empty.proto";
+
+service KvDcRelay
+{
+  rpc WatchKvCuckooFilter(google.protobuf.Empty) returns (stream KvCuckooFilterUpdate);
+  rpc WatchKvUsage(google.protobuf.Empty) returns (stream KvUsageSnapshot);
+  rpc WatchLoad(google.protobuf.Empty) returns (stream LoadSnapshot);
+}
+
+message RelayMessageMetadata
+{
+  fixed64 drt_instance_id = 1;
+  fixed64 relay_incarnation = 2;
+  uint64 observed_at_unix_ms = 3;
+}
+
+enum DataStatus {
+  DATA_STATUS_UNSPECIFIED = 0;
+  DATA_STATUS_COMPLETE = 1;
+  DATA_STATUS_DEGRADED = 2;
+  DATA_STATUS_UNAVAILABLE = 3;
+}
+
+enum IdentitySource {
+  IDENTITY_SOURCE_UNSPECIFIED = 0;
+  IDENTITY_SOURCE_DEFAULT_DERIVED = 1;
+  IDENTITY_SOURCE_EXPLICIT = 2;
+}
+
+enum WorkerRole {
+  WORKER_ROLE_UNSPECIFIED = 0;
+  WORKER_ROLE_AGGREGATED = 1;
+  WORKER_ROLE_PREFILL = 2;
+  WORKER_ROLE_DECODE = 3;
+  WORKER_ROLE_ENCODE = 4;
+}
+
+message PoolIdentity
+{
+  bytes cache_semantics_digest = 1;
+  IdentitySource cache_semantics_source = 2;
+  bytes routing_scope_digest = 3;
+  IdentitySource routing_scope_source = 4;
+  fixed64 dc_id = 5;
+}
+
+message ModelRegistration
+{
+  string model = 1;
+  string base_model = 2;
+  optional string adapter = 3;
+  repeated string aliases = 4;
+}
+
+message CuckooFormat
+{
+  uint32 format_version = 1;
+  fixed64 seed = 2;
+  uint64 bucket_count = 3;
+  uint32 fingerprint_bits = 4;
+  uint32 slots_per_bucket = 5;
+}
+
+message CuckooProducerIdentity
+{
+  PoolIdentity pool = 1;
+  fixed64 producer_incarnation = 2;
+  uint64 layout_generation = 3;
+  CuckooFormat format = 4;
+}
+
+message CuckooPoolSnapshot
+{
+  CuckooProducerIdentity producer = 1;
+  uint64 sequence = 2;
+  bytes packed_buckets = 3;
+  DataStatus status = 4;
+  CuckooPoolStats stats = 5;
+}
+
+message CuckooBucketImage
+{
+  uint64 bucket_index = 1;
+  fixed64 packed_bucket = 2;
+}
+
+message CuckooPoolDelta
+{
+  CuckooProducerIdentity producer = 1;
+  uint64 base_sequence = 2;
+  uint64 sequence = 3;
+  repeated CuckooBucketImage buckets = 4;
+}
+
+message CuckooPoolRetired
+{
+  PoolIdentity pool = 1;
+  fixed64 producer_incarnation = 2;
+  uint64 layout_generation = 3;
+}
+
+message CuckooPoolStats
+{
+  CuckooProducerIdentity producer = 1;
+  uint64 publication_sequence = 2;
+  uint64 materialized_ranks = 3;
+  uint64 unique_blocks = 4;
+  DataStatus status = 5;
+  uint64 capacity_omissions = 6;
+  uint64 source_observed_at_unix_ms = 7;
+}
+
+message CuckooStreamHeartbeat
+{
+  uint64 catalog_revision = 1;
+  bool initial_sync_complete = 2;
+}
+
+message KvCuckooFilterUpdate
+{
+  RelayMessageMetadata metadata = 1;
+  oneof update
+  {
+    CuckooPoolSnapshot snapshot = 2;
+    CuckooPoolDelta delta = 3;
+    CuckooPoolRetired retired = 4;
+    CuckooPoolStats stats = 5;
+    CuckooStreamHeartbeat heartbeat = 6;
+  }
+}
+
+message KvUsageSnapshot
+{
+  RelayMessageMetadata metadata = 1;
+  repeated PoolKvUsage pools = 2;
+}
+
+message PoolKvUsage
+{
+  PoolIdentity pool = 1;
+  repeated ModelRegistration models = 2;
+  WorkerRole role = 3;
+  uint32 block_size_tokens = 4;
+  uint64 expected_ranks = 5;
+  uint64 observed_ranks = 6;
+  optional uint64 capacity_blocks = 7;
+  optional uint64 used_blocks = 8;
+  DataStatus status = 9;
+  uint64 source_observed_at_unix_ms = 10;
+}
+
+message LoadSnapshot
+{
+  RelayMessageMetadata metadata = 1;
+  uint32 window_ms = 2;
+  repeated PoolLoad pools = 3;
+  repeated ModelLoad models = 4;
+}
+
+message PoolLoad
+{
+  PoolIdentity pool = 1;
+  WorkerRole role = 2;
+  optional uint64 live_workers = 3;
+  optional uint64 active_prefill_tokens = 4;
+  optional uint64 active_decode_blocks = 5;
+  optional uint64 max_concurrency = 6;
+  DataStatus scheduler_status = 7;
+  uint64 scheduler_observed_at_unix_ms = 8;
+}
+
+message ModelLoad
+{
+  ModelRegistration model = 1;
+  optional uint64 ready_frontends = 2;
+  optional uint64 pending_first_output_requests = 3;
+  optional uint64 pending_first_output_input_tokens = 4;
+  optional uint64 live_input_tokens = 5;
+  optional uint64 input_processing_requests = 6;
+  optional uint64 output_generation_requests = 7;
+  repeated PoolIdentity serving_pools = 8;
+
+  uint64 requests_started = 10;
+  uint64 requests_completed = 11;
+  uint64 requests_failed = 12;
+  uint64 requests_cancelled = 13;
+  optional uint64 input_tokens = 14;
+  uint64 output_tokens = 15;
+
+  DataStatus status = 20;
+  uint32 expected_frontends = 21;
+  uint32 observed_frontends = 22;
+  uint64 source_observed_at_unix_ms = 23;
+}

@@ -466,6 +466,7 @@ struct MetricsHandlerState {
 }
 
 pub struct Metrics {
+    frontend_load: crate::frontend_load::FrontendLoadMetrics,
     request_started_counter: IntCounterVec,
     request_counter: IntCounterVec,
     /// Deprecated: use `active_requests_gauge`. Kept for backwards compatibility.
@@ -527,6 +528,7 @@ pub struct HttpQueueGuard {
 /// the counter with `status` label [`frontend_service::status::SUCCESS`]
 pub struct InflightGuard {
     metrics: Arc<Metrics>,
+    frontend_load: crate::frontend_load::FrontendLoadRequest,
     model: String,
     endpoint: Endpoint,
     request_type: RequestType,
@@ -644,6 +646,7 @@ pub enum ErrorType {
 /// Track response-specific metrics
 pub struct ResponseMetricCollector {
     metrics: Arc<Metrics>,
+    frontend_load: Option<crate::frontend_load::FrontendLoadRequest>,
     model: String,
     // Per-model metric handles cached for the request. Most are resolved at construction;
     // ITL is resolved lazily on its first observation so requests that never produce ITL
@@ -1119,6 +1122,7 @@ impl Metrics {
         .unwrap();
 
         Metrics {
+            frontend_load: crate::frontend_load::FrontendLoadMetrics::default(),
             request_started_counter,
             request_counter,
             inflight_gauge,
@@ -1501,6 +1505,20 @@ impl Metrics {
         ResponseMetricCollector::new(self, model.to_string())
     }
 
+    pub(crate) fn create_response_collector_for_request(
+        self: Arc<Self>,
+        model: &str,
+        request: &InflightGuard,
+    ) -> ResponseMetricCollector {
+        let mut collector = ResponseMetricCollector::new(self, model.to_string());
+        collector.frontend_load = Some(request.frontend_load.clone());
+        collector
+    }
+
+    pub(crate) fn frontend_load(&self) -> crate::frontend_load::FrontendLoadMetrics {
+        self.frontend_load.clone()
+    }
+
     /// Create a new [`HttpQueueGuard`] for tracking HTTP processing queue
     ///
     /// This guard tracks requests from HTTP handler start until first token generation,
@@ -1535,6 +1553,7 @@ impl InflightGuard {
         request_id: String,
     ) -> Self {
         let timer = Instant::now();
+        let frontend_load = metrics.frontend_load.start_request(&model);
         metrics.inc_inflight_gauge(&model);
         metrics.inc_request_started_counter(&model, &endpoint, &request_type);
 
@@ -1550,6 +1569,7 @@ impl InflightGuard {
 
         InflightGuard {
             metrics,
+            frontend_load,
             model,
             endpoint,
             request_type,
@@ -1615,6 +1635,14 @@ impl Drop for InflightGuard {
             .request_duration
             .with_label_values(&[&self.model])
             .observe(duration);
+        let outcome = match (&self.status, &self.error_type) {
+            (Status::Success, _) => crate::frontend_load::RequestOutcome::Completed,
+            (Status::Error, ErrorType::Cancelled) => {
+                crate::frontend_load::RequestOutcome::Cancelled
+            }
+            (Status::Error, _) => crate::frontend_load::RequestOutcome::Failed,
+        };
+        self.frontend_load.finish(outcome);
 
         let completion = self.request_completion();
         self.span.record("request.outcome", completion.as_str());
@@ -1777,6 +1805,7 @@ impl ResponseMetricCollector {
             .with_label_values(&[&model]);
         ResponseMetricCollector {
             metrics,
+            frontend_load: None,
             model,
             output_tokens_counter,
             time_to_first_token,
@@ -1811,6 +1840,12 @@ impl ResponseMetricCollector {
             decode_dp_rank: None,
             decode_worker_type: None,
             decode_itl_gauge: None,
+        }
+    }
+
+    fn observe_frontend_load(&self, input_tokens: usize, generated_tokens: usize) {
+        if let Some(request) = &self.frontend_load {
+            request.observe(input_tokens, generated_tokens);
         }
     }
 
@@ -2180,6 +2215,7 @@ fn observe_llm_metrics(
     response_collector: &mut ResponseMetricCollector,
     http_queue_guard: &mut Option<HttpQueueGuard>,
 ) {
+    response_collector.observe_frontend_load(metrics.input_tokens, metrics.chunk_tokens);
     response_collector.observe_current_osl(metrics.output_tokens);
     response_collector.observe_cached_tokens(metrics.cached_tokens);
     response_collector.observe_multimodal_metrics(

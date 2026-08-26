@@ -1261,6 +1261,14 @@ impl PoolRegistry {
         self.catalog_tx.subscribe()
     }
 
+    pub(super) fn active_handle(&self, pool_id: PoolId) -> Option<KvDcRelayHandle> {
+        self.state
+            .lock()
+            .pools
+            .get(&pool_id)
+            .and_then(|entry| (entry.state == PoolEntryState::Active).then(|| entry.handle.clone()))
+    }
+
     pub(super) fn load_snapshots(&self) -> Vec<PoolLoadSnapshot> {
         self.load_tx.borrow().clone()
     }
