@@ -1053,7 +1053,7 @@ def test_service_get_gpu_count_missing_raises_error():
 
 
 def test_service_get_gpu_count_invalid_raises_error():
-    """Test that get_gpu_count raises ValueError for invalid GPU count"""
+    """An invalid scalar GPU count cannot fall back to resolved DRA status."""
     service = Service(
         name="test-service",
         service={
@@ -1070,8 +1070,15 @@ def test_service_get_gpu_count_invalid_raises_error():
             },
         },
     )
+    deployment = {
+        "metadata": {"generation": 1},
+        "status": {
+            "observedGeneration": 1,
+            "components": {"test-service": {"gpuCountPerPod": 2}},
+        },
+    }
     with pytest.raises(ValueError) as exc_info:
-        service.get_gpu_count()
+        service.get_gpu_count(deployment)
     assert "Invalid GPU count" in str(exc_info.value)
 
 
@@ -1154,6 +1161,42 @@ def test_get_gpu_counts_decode_only(kubernetes_connector, mock_kube_api):
 
     assert prefill_gpu == 0
     assert decode_gpu == 4
+
+
+def test_get_gpu_counts_from_operator_resolved_dra_status(
+    kubernetes_connector, mock_kube_api
+):
+    """DRA-backed workers use the GPU count published in current DGD status."""
+    mock_deployment = _deployment(_component("decode-worker", "decode", replicas=1))
+    mock_deployment["metadata"]["generation"] = 2
+    mock_deployment["status"] = {
+        "observedGeneration": 2,
+        "components": {"decode-worker": {"gpuCountPerPod": 2}},
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    assert kubernetes_connector.get_gpu_counts(
+        require_prefill=False, require_decode=True
+    ) == (0, 2)
+
+
+@pytest.mark.parametrize("observed_generation", [1, 3])
+def test_get_gpu_counts_rejects_noncurrent_dra_status(
+    kubernetes_connector, mock_kube_api, observed_generation
+):
+    """Only the current generation's resolved count can authorize GPU budget."""
+    mock_deployment = _deployment(_component("decode-worker", "decode", replicas=1))
+    mock_deployment["metadata"]["generation"] = 2
+    mock_deployment["status"] = {
+        "observedGeneration": observed_generation,
+        "components": {"decode-worker": {"gpuCountPerPod": 2}},
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    with pytest.raises(
+        DeploymentValidationError, match="Resolved GPU count.*not current"
+    ):
+        kubernetes_connector.get_gpu_counts(require_prefill=False, require_decode=True)
 
 
 def test_get_gpu_counts_missing_gpu_raises_error(kubernetes_connector, mock_kube_api):

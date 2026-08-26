@@ -404,7 +404,7 @@ class KubernetesConnector(PlannerConnector):
                     deployment,
                     SubComponentType.PREFILL,
                 )
-                prefill_gpu_count = prefill_service.get_gpu_count()
+                prefill_gpu_count = prefill_service.get_gpu_count(deployment)
             except (PlannerError, ValueError) as e:
                 errors.append(f"Failed to get prefill GPU count: {e}")
 
@@ -414,7 +414,7 @@ class KubernetesConnector(PlannerConnector):
                     deployment,
                     SubComponentType.DECODE,
                 )
-                decode_gpu_count = decode_service.get_gpu_count()
+                decode_gpu_count = decode_service.get_gpu_count(deployment)
             except (PlannerError, ValueError) as e:
                 errors.append(f"Failed to get decode GPU count: {e}")
 

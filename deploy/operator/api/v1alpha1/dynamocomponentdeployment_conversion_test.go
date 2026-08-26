@@ -759,6 +759,7 @@ func TestDCD_RoundTrip_Status(t *testing.T) {
 			Component: &v1beta1.ComponentReplicaStatus{
 				ComponentKind:   v1beta1.ComponentKindDeployment,
 				ComponentNames:  []string{"dcd-0"},
+				GPUCountPerPod:  ptr.To(int64(2)),
 				Replicas:        3,
 				UpdatedReplicas: 3,
 				ReadyReplicas:   ptr.To(int32(3)),

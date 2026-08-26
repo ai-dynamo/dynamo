@@ -124,6 +124,10 @@ func (p *componentProgram) Reconcile(
 		checkpoints.Infos,
 	)
 	if err != nil {
+		// Preserve newly observed component status while leaving the generation unobserved.
+		if result.ComponentStatus != nil {
+			programResult.Status.Components = result.ComponentStatus
+		}
 		return programResult, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
 	}
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)

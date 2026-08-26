@@ -930,6 +930,7 @@ func TestDGD_RoundTrip_Status(t *testing.T) {
 					ComponentKind:     v1beta1.ComponentKindDeployment,
 					ComponentNames:    []string{"dgd-worker-0", "dgd-worker-1"},
 					RuntimeNamespace:  "ns-status-worker-abc123",
+					GPUCountPerPod:    ptr.To(int64(2)),
 					Replicas:          2,
 					UpdatedReplicas:   2,
 					ReadyReplicas:     ptr.To(int32(2)),

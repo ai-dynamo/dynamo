@@ -164,11 +164,13 @@ class Service(BaseModel):
         except ValueError:
             return None
 
-    def get_gpu_count(self) -> int:
+    def get_gpu_count(self, deployment: Optional[dict] = None) -> int:
         """Get the GPU count from the component's resource specification.
 
         GPU count is read from the v1beta1 main container resources
-        (``nvidia.com/gpu``).
+        (``nvidia.com/gpu``). When ``deployment`` is provided, DRA-backed
+        components fall back to the operator-resolved ``gpuCountPerPod`` in
+        the current DGD status.
 
         Returns:
             The number of GPUs configured for this component
@@ -183,13 +185,39 @@ class Service(BaseModel):
         # Prefer limits, fall back to requests. For GPUs, Kubernetes device plugins
         # typically treat requests and limits as equivalent since GPUs are
         # non-compressible and allocated exclusively (no fractional sharing).
-        gpu_str = limits.get(GPU_RESOURCE_KEY) or requests.get(GPU_RESOURCE_KEY)
+        if GPU_RESOURCE_KEY in limits:
+            gpu_str = limits[GPU_RESOURCE_KEY]
+        else:
+            gpu_str = requests.get(GPU_RESOURCE_KEY)
+
+        if gpu_str is None and deployment is not None:
+            component_status = (
+                deployment.get("status", {}).get("components", {}).get(self.name, {})
+            )
+            gpu_str = component_status.get("gpuCountPerPod")
+            if gpu_str is not None:
+                generation = deployment.get("metadata", {}).get("generation")
+                observed_generation = deployment.get("status", {}).get(
+                    "observedGeneration"
+                )
+                if (
+                    generation is None
+                    or observed_generation is None
+                    or observed_generation != generation
+                ):
+                    raise ValueError(
+                        f"Resolved GPU count for component '{self.name}' is not current: "
+                        f"metadata.generation={generation}, "
+                        f"status.observedGeneration={observed_generation}."
+                    )
 
         if gpu_str is None:
             raise ValueError(
                 f"No GPU count specified for component '{self.name}'. "
                 f"Please set main container resources.limits.{GPU_RESOURCE_KEY} "
-                f"or resources.requests.{GPU_RESOURCE_KEY} in the DGD."
+                f"or resources.requests.{GPU_RESOURCE_KEY} in the DGD, or ensure "
+                "the operator publishes status.components.<name>.gpuCountPerPod "
+                "for DRA-backed components."
             )
 
         try:

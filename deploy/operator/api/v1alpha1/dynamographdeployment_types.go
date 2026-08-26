@@ -306,6 +306,12 @@ type ServiceReplicaStatus struct {
 	// +optional
 	RuntimeNamespace string `json:"runtimeNamespace,omitempty"`
 
+	// GPUCountPerPod is the number of GPUs requested by the main container in
+	// each Pod, resolved from scalar resources or DRA ResourceClaims.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	GPUCountPerPod *int64 `json:"gpuCountPerPod,omitempty"`
+
 	// Replicas is the total number of non-terminated replicas.
 	// Required for all component kinds.
 	// +kubebuilder:validation:Minimum=0

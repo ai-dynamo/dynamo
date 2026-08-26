@@ -13,7 +13,6 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -53,24 +52,24 @@ func testDRAClaimComponent(objectName string, template bool) nvidiacomv1beta1.Dy
 }
 
 func TestMapResourceClaimToDCDRequests(t *testing.T) {
-	t.Log("Create one matching and one unrelated component deployment")
+	t.Log("Create matching multinode and single-node component deployments")
 	matching := &nvidiacomv1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "matching", Namespace: "default"},
 		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: testDRAClaimComponent("gpu-claim", false),
 		},
 	}
-	unrelated := &nvidiacomv1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "unrelated", Namespace: "default"},
+	singleNode := &nvidiacomv1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "single-node", Namespace: "default"},
 		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: testDRAClaimComponent("gpu-claim", false),
 		},
 	}
-	unrelated.Spec.Multinode = nil
+	singleNode.Spec.Multinode = nil
 	scheme := runtime.NewScheme()
 	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
 	reconciler := &DynamoComponentDeploymentReconciler{
-		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(matching, unrelated).Build(),
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(matching, singleNode).Build(),
 	}
 
 	t.Log("Map a ResourceClaim event to its dependent component deployment")
@@ -82,7 +81,7 @@ func TestMapResourceClaimToDCDRequests(t *testing.T) {
 }
 
 func TestMapResourceClaimTemplateToDGDRequests(t *testing.T) {
-	t.Log("Create one matching and one unrelated graph deployment")
+	t.Log("Create matching Grove, single-node, and component-path graph deployments")
 	matching := &nvidiacomv1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "matching", Namespace: "default"},
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
@@ -92,15 +91,15 @@ func TestMapResourceClaimTemplateToDGDRequests(t *testing.T) {
 			},
 		},
 	}
-	unrelated := &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "unrelated", Namespace: "default"},
+	singleNode := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "single-node", Namespace: "default"},
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 				testDRAClaimComponent("gpu-template", true),
 			},
 		},
 	}
-	unrelated.Spec.Components[0].Multinode = nil
+	singleNode.Spec.Components[0].Multinode = nil
 	component := matching.DeepCopy()
 	component.Name = "component"
 	component.Annotations = map[string]string{
@@ -109,8 +108,7 @@ func TestMapResourceClaimTemplateToDGDRequests(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, nvidiacomv1beta1.AddToScheme(scheme))
 	reconciler := &DynamoGraphDeploymentReconciler{
-		Client:        fake.NewClientBuilder().WithScheme(scheme).WithObjects(matching, unrelated, component).Build(),
-		RuntimeConfig: &commonController.RuntimeConfig{Gate: features.Gates{Grove: true}},
+		Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(matching, singleNode, component).Build(),
 	}
 
 	t.Log("Map a ResourceClaimTemplate event to its dependent graph deployment")
@@ -118,65 +116,11 @@ func TestMapResourceClaimTemplateToDGDRequests(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "gpu-template", Namespace: "default"},
 	})
 
-	assert.Equal(t, []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: "default", Name: "matching"}}}, requests)
-}
-
-func TestShouldMapDRAEventToDGD(t *testing.T) {
-	tests := []struct {
-		name         string
-		groveEnabled bool
-		annotations  map[string]string
-		want         bool
-	}{
-		{
-			name:         "selected Grove provider receives DGD-level DRA events",
-			groveEnabled: true,
-			annotations: map[string]string{
-				commonconsts.KubeAnnotationWorkloadProvider: commonconsts.WorkloadProviderGrove,
-			},
-			want: true,
-		},
-		{
-			name:         "selected component provider relies on DCD-level DRA events",
-			groveEnabled: true,
-			annotations: map[string]string{
-				commonconsts.KubeAnnotationWorkloadProvider: commonconsts.WorkloadProviderComponent,
-			},
-		},
-		{
-			name:         "unselected legacy DGD remains eligible until adoption",
-			groveEnabled: true,
-			want:         true,
-		},
-		{
-			name: "disabled Grove provider receives no DGD-level DRA events",
-			annotations: map[string]string{
-				commonconsts.KubeAnnotationWorkloadProvider: commonconsts.WorkloadProviderGrove,
-			},
-		},
-		{
-			name:         "unsupported provider receives no DGD-level DRA events",
-			groveEnabled: true,
-			annotations: map[string]string{
-				commonconsts.KubeAnnotationWorkloadProvider: "unknown",
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Build the provider state visible to the DRA event mapper")
-			reconciler := &DynamoGraphDeploymentReconciler{
-				RuntimeConfig: &commonController.RuntimeConfig{Gate: features.Gates{Grove: tt.groveEnabled}},
-			}
-			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Annotations: tt.annotations},
-			}
-
-			t.Log("Decide whether the DGD-level Grove program consumes the DRA event")
-			assert.Equal(t, tt.want, reconciler.shouldMapDRAEventToDGD(dgd))
-		})
-	}
+	assert.ElementsMatch(t, []ctrl.Request{
+		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "matching"}},
+		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "single-node"}},
+		{NamespacedName: types.NamespacedName{Namespace: "default", Name: "component"}},
+	}, requests)
 }
 
 func TestMapDeviceClassToDCDRequests(t *testing.T) {
@@ -242,7 +186,7 @@ func TestMapDeviceClassToDGDRequests(t *testing.T) {
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        fake.NewClientBuilder().WithScheme(scheme).WithObjects(draBacked, draBackedOutsideScope, unrelated).Build(),
 		Config:        &configv1alpha1.OperatorConfiguration{Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "dra-workloads"}},
-		RuntimeConfig: &commonController.RuntimeConfig{Gate: features.Gates{Grove: true}},
+		RuntimeConfig: &commonController.RuntimeConfig{},
 	}
 
 	t.Log("Map a cluster-scoped DeviceClass event to every DRA-backed graph deployment")

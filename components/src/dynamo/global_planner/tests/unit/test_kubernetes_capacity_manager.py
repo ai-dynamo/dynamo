@@ -23,16 +23,13 @@ pytestmark = [
 
 
 def _component(name, replicas, gpu=1, ctype=None, node_count=None):
+    main_container = {"name": "main"}
+    if gpu is not None:
+        main_container["resources"] = {"limits": {"nvidia.com/gpu": gpu}}
     component = {
         "name": name,
         "replicas": replicas,
-        "podTemplate": {
-            "spec": {
-                "containers": [
-                    {"name": "main", "resources": {"limits": {"nvidia.com/gpu": gpu}}}
-                ]
-            }
-        },
+        "podTemplate": {"spec": {"containers": [main_container]}},
     }
     if ctype is not None:
         component["type"] = ctype
@@ -251,6 +248,29 @@ def test_observe_multinode_scales_gpu_count():
     )
     # gpu_per_replica = main-container GPUs (2) × nodeCount (2) = 4.
     assert cm.observe()["default/my-dgd"]["prefill"].gpu_per_replica == 4
+
+
+def test_observe_dra_worker_uses_operator_resolved_gpu_count():
+    cm = KubernetesCapacityManager("default")
+    deployment = {
+        "metadata": {"generation": 2},
+        "spec": {
+            "components": [
+                _component(
+                    "decode-svc", replicas=1, gpu=None, ctype="decode", node_count=2
+                )
+            ]
+        },
+        "status": {
+            "observedGeneration": 2,
+            "components": {"decode-svc": {"gpuCountPerPod": 2}},
+        },
+    }
+    _install_connector(cm, "default/my-dgd", deployment)
+
+    pools = cm.observe(require_complete=True)["default/my-dgd"]
+
+    assert pools["decode"].gpu_per_replica == 4
 
 
 def test_observe_generic_worker_keyed_by_name_then_role_hint():

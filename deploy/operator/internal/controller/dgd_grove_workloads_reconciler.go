@@ -126,7 +126,13 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	}
 
 	resources := append(stableResources, podCliqueSetResource)
-	return checkGroveResourcesReadiness(resources, readiness.Classification), nil
+	result := checkGroveResourcesReadiness(resources, readiness.Classification)
+
+	// Publish the resolved GPU shape with the authoritative workload status.
+	if err := populateComponentGPUCounts(ctx, r.reader, dgd, result.ComponentStatus); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 func (r *groveWorkloadsReconciler) reconcilePodCliqueSet(

@@ -11653,6 +11653,13 @@ spec:
                       items:
                         type: string
                       type: array
+                    gpuCountPerPod:
+                      description: |-
+                        GPUCountPerPod is the number of GPUs requested by the main container in
+                        each Pod, resolved from scalar resources or DRA ResourceClaims.
+                      format: int64
+                      minimum: 1
+                      type: integer
                     readyReplicas:
                       description: |-
                         ReadyReplicas is the number of ready replicas.
@@ -20534,6 +20541,13 @@ spec:
                       items:
                         type: string
                       type: array
+                    gpuCountPerPod:
+                      description: |-
+                        gpuCountPerPod is the number of GPUs requested by the main container in
+                        each Pod, resolved from scalar resources or DRA ResourceClaims.
+                      format: int64
+                      minimum: 1
+                      type: integer
                     readyReplicas:
                       description: |-
                         readyReplicas is the number of ready replicas. Populated for

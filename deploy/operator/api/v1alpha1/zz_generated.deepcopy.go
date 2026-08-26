@@ -1887,6 +1887,11 @@ func (in *ServiceReplicaStatus) DeepCopyInto(out *ServiceReplicaStatus) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.GPUCountPerPod != nil {
+		in, out := &in.GPUCountPerPod, &out.GPUCountPerPod
+		*out = new(int64)
+		**out = **in
+	}
 	if in.ReadyReplicas != nil {
 		in, out := &in.ReadyReplicas, &out.ReadyReplicas
 		*out = new(int32)
