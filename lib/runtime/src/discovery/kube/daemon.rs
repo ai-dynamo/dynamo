@@ -254,10 +254,8 @@ impl DiscoveryDaemon {
 
         let notify = Arc::new(Notify::new());
 
-        // Cancelled by the caller's token and by every exit below, so a reflector
-        // cannot outlive the daemon that started it. It is a child rather than the
-        // caller's own token so the receiver-dropped exit can stop the reflectors
-        // without cancelling unrelated work that shares the caller's token.
+        // A child token so the receiver-dropped exit can stop the reflectors
+        // without cancelling unrelated work sharing the caller's token.
         let reflector_token = cancel_token.child_token();
 
         // Readiness source — EndpointSlice or Pod depending on mode
@@ -741,9 +739,8 @@ mod tests {
 
     #[tokio::test]
     async fn lost_snapshot_receiver_stops_both_reflectors() {
-        // The daemon only sends when the aggregated snapshot changed, so this
-        // test has to drive a real ready entry and its CR through both streams
-        // to reach the send-failed exit.
+        // The daemon only sends on a changed snapshot, so reaching the
+        // send-failed exit needs a real ready entry and its CR.
         let (readiness, readiness_finished) =
             synthetic_watch(initial_state(vec![ready_endpoint_slice("worker-0")]));
         let (cr_watch, cr_finished) =
