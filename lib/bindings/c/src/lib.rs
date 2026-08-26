@@ -210,6 +210,11 @@ unsafe fn parse_endpoint_config(
         }
     };
 
+    if kv_block_size == 0 {
+        tracing::error!("kv_block_size must be greater than zero");
+        return None;
+    }
+
     Some(EndpointConfig {
         namespace,
         component,
