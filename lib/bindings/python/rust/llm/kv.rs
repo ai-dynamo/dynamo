@@ -86,15 +86,17 @@ impl LoadThresholdConfig {
         active_prefill_tokens_threshold: Option<u64>,
         active_prefill_tokens_threshold_frac: Option<f64>,
     ) -> PyResult<Self> {
-        let config = Self {
+        let config = validate_load_threshold_config(
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
-        };
-        config.as_rust().validate().map_err(|error| {
-            PyValueError::new_err(format!("invalid load threshold config: {error}"))
-        })?;
-        Ok(config)
+        )
+        .map_err(PyValueError::new_err)?;
+        Ok(Self {
+            active_decode_blocks_threshold: config.active_decode_blocks_threshold,
+            active_prefill_tokens_threshold: config.active_prefill_tokens_threshold,
+            active_prefill_tokens_threshold_frac: config.active_prefill_tokens_threshold_frac,
+        })
     }
 }
 
@@ -106,6 +108,22 @@ impl LoadThresholdConfig {
             active_prefill_tokens_threshold_frac: self.active_prefill_tokens_threshold_frac,
         }
     }
+}
+
+fn validate_load_threshold_config(
+    active_decode_blocks_threshold: Option<f64>,
+    active_prefill_tokens_threshold: Option<u64>,
+    active_prefill_tokens_threshold_frac: Option<f64>,
+) -> Result<RsLoadThresholdConfig, String> {
+    let config = RsLoadThresholdConfig {
+        active_decode_blocks_threshold,
+        active_prefill_tokens_threshold,
+        active_prefill_tokens_threshold_frac,
+    };
+    config
+        .validate()
+        .map_err(|error| format!("invalid load threshold config: {error}"))?;
+    Ok(config)
 }
 
 #[cfg(any(feature = "slot-tracker", feature = "select-service"))]
@@ -1814,15 +1832,15 @@ mod load_threshold_config_tests {
 
     #[test]
     fn default_config_disables_overload_thresholds() {
-        let config = LoadThresholdConfig::new(None, None, None).unwrap();
-        assert!(!config.as_rust().is_configured());
+        let config = validate_load_threshold_config(None, None, None).unwrap();
+        assert!(!config.is_configured());
     }
 
     #[test]
     fn valid_config_preserves_all_thresholds() {
-        let config = LoadThresholdConfig::new(Some(0.75), Some(512), Some(0.5)).unwrap();
+        let config = validate_load_threshold_config(Some(0.75), Some(512), Some(0.5)).unwrap();
         assert_eq!(
-            config.as_rust(),
+            config,
             RsLoadThresholdConfig {
                 active_decode_blocks_threshold: Some(0.75),
                 active_prefill_tokens_threshold: Some(512),
@@ -1832,9 +1850,9 @@ mod load_threshold_config_tests {
     }
 
     #[test]
-    fn invalid_config_returns_value_error() {
-        let error = LoadThresholdConfig::new(Some(1.1), None, None).unwrap_err();
-        assert!(error.to_string().contains(
+    fn invalid_config_returns_validation_error() {
+        let error = validate_load_threshold_config(Some(1.1), None, None).unwrap_err();
+        assert!(error.contains(
             "invalid load threshold config: active_decode_blocks_threshold must be between 0.0 and 1.0"
         ));
     }

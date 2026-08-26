@@ -60,7 +60,7 @@ impl RouterLoadSource {
         })
     }
 
-    const fn monitors_sequence_load(self) -> bool {
+    pub(crate) const fn monitors_sequence_load(self) -> bool {
         !matches!(self, Self::Encode)
     }
 }
@@ -250,87 +250,6 @@ fn scheduler_load_channel_with_capacity(
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
-
-    fn snapshot(worker_id: u64, active_decode_blocks: u64) -> SchedulerLoadSnapshot {
-        SchedulerLoadSnapshot {
-            worker: WorkerWithDpRank::new(worker_id, 0),
-            active_decode_blocks,
-            active_prefill_tokens: 0,
-        }
-    }
-
-    #[tokio::test]
-    async fn saturated_channel_coalesces_batch_and_later_absolute_state_converges() {
-        let token = CancellationToken::new();
-        let (sender, mut receiver) =
-            scheduler_load_channel_with_capacity(RouterLoadSource::Decode, token, 1);
-
-        sender.publish(snapshot(1, 90));
-        sender.publish_batch(vec![snapshot(1, 80), snapshot(2, 70)]);
-
-        let expected = vec![snapshot(1, 90), snapshot(1, 80), snapshot(2, 70)];
-        let received = tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            let mut received = Vec::new();
-            while !expected.iter().all(|snapshot| received.contains(snapshot)) {
-                received.extend(receiver.recv().await.unwrap());
-            }
-            received
-        })
-        .await
-        .expect("queued and coalesced scheduler snapshots were not received");
-        for snapshot in expected {
-            assert!(received.contains(&snapshot));
-        }
-
-        sender.publish(snapshot(1, 0));
-        assert_eq!(receiver.recv().await.unwrap(), vec![snapshot(1, 0)]);
-    }
-
-    #[tokio::test]
-    async fn encode_context_retains_client_with_sequence_load_monitoring_disabled() {
-        let runtime = Runtime::from_current().unwrap();
-        let distributed =
-            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
-                .await
-                .unwrap();
-        let endpoint = distributed
-            .namespace("encode-routing-load".to_string())
-            .unwrap()
-            .component("workers".to_string())
-            .unwrap()
-            .endpoint("generate".to_string());
-        let client = endpoint.client().await.unwrap();
-        let parent_token = distributed.child_token();
-
-        let load_context = RoutingLoadContext::start(
-            client.clone(),
-            RouterLoadSource::Encode,
-            LoadThresholdHandle::new(Default::default()),
-            &parent_token,
-            None,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(load_context.source(), RouterLoadSource::Encode);
-        assert_eq!(load_context.client().endpoint.id(), client.endpoint.id());
-        assert!(load_context.monitor().is_none());
-        assert!(!load_context.scheduler_load_sender().is_enabled());
-        load_context
-            .scheduler_load_sender()
-            .publish(snapshot(1, 100));
-        assert_eq!(client.overloaded_instance_ids(), None);
-
-        drop(load_context);
-        assert!(!parent_token.is_cancelled());
-        runtime.shutdown();
-    }
-}
-
 /// Owns the load lifecycle for one typed routing endpoint.
 ///
 /// Every selection and dispatch plane receives a clone of this context's
@@ -418,13 +337,24 @@ impl Drop for RoutingLoadContext {
 }
 
 /// Standalone KV selection surface plus the context that owns its load tasks.
-#[derive(Clone)]
 pub struct ManagedKvRouter<Sel = dynamo_kv_router::selector::DefaultWorkerSelector>
 where
     Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
 {
     load_context: Arc<RoutingLoadContext>,
     router: Arc<KvRouter<Sel>>,
+}
+
+impl<Sel> Clone for ManagedKvRouter<Sel>
+where
+    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
+{
+    fn clone(&self) -> Self {
+        Self {
+            load_context: self.load_context.clone(),
+            router: self.router.clone(),
+        }
+    }
 }
 
 impl<Sel> std::ops::Deref for ManagedKvRouter<Sel>
@@ -455,5 +385,86 @@ where
 
     pub fn router(&self) -> &Arc<KvRouter<Sel>> {
         &self.router
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+
+    fn snapshot(worker_id: u64, active_decode_blocks: u64) -> SchedulerLoadSnapshot {
+        SchedulerLoadSnapshot {
+            worker: WorkerWithDpRank::new(worker_id, 0),
+            active_decode_blocks,
+            active_prefill_tokens: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn saturated_channel_coalesces_batch_and_later_absolute_state_converges() {
+        let token = CancellationToken::new();
+        let (sender, mut receiver) =
+            scheduler_load_channel_with_capacity(RouterLoadSource::Decode, token, 1);
+
+        sender.publish(snapshot(1, 90));
+        sender.publish_batch(vec![snapshot(1, 80), snapshot(2, 70)]);
+
+        let expected = vec![snapshot(1, 90), snapshot(1, 80), snapshot(2, 70)];
+        let received = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let mut received = Vec::new();
+            while !expected.iter().all(|snapshot| received.contains(snapshot)) {
+                received.extend(receiver.recv().await.unwrap());
+            }
+            received
+        })
+        .await
+        .expect("queued and coalesced scheduler snapshots were not received");
+        for snapshot in expected {
+            assert!(received.contains(&snapshot));
+        }
+
+        sender.publish(snapshot(1, 0));
+        assert_eq!(receiver.recv().await.unwrap(), vec![snapshot(1, 0)]);
+    }
+
+    #[tokio::test]
+    async fn encode_context_retains_client_with_sequence_load_monitoring_disabled() {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed =
+            DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let endpoint = distributed
+            .namespace("encode-routing-load".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let client = endpoint.client().await.unwrap();
+        let parent_token = distributed.child_token();
+
+        let load_context = RoutingLoadContext::start(
+            client.clone(),
+            RouterLoadSource::Encode,
+            LoadThresholdHandle::new(Default::default()),
+            &parent_token,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(load_context.source(), RouterLoadSource::Encode);
+        assert_eq!(load_context.client().endpoint.id(), client.endpoint.id());
+        assert!(load_context.monitor().is_none());
+        assert!(!load_context.scheduler_load_sender().is_enabled());
+        load_context
+            .scheduler_load_sender()
+            .publish(snapshot(1, 100));
+        assert_eq!(client.overloaded_instance_ids(), None);
+
+        drop(load_context);
+        assert!(!parent_token.is_cancelled());
+        runtime.shutdown();
     }
 }

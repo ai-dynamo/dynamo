@@ -1605,6 +1605,12 @@ mod tests {
                 .as_ref()
                 .is_some_and(WorkerSet::has_generate_engine)
         );
+        let source = RouterLoadSource::from_worker_type(effective_worker_type(
+            spec.representative.card.worker_type,
+            spec.representative.card.model_type,
+        ));
+        assert_eq!(source, RouterLoadSource::Encode);
+        assert!(!source.monitors_sequence_load());
         runtime.shutdown();
     }
 
