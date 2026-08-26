@@ -23,6 +23,9 @@ model worker and can continue serving other discovered models. The orchestrator
 owns dependency scheduling, fan-out, joins, cancellation, and stage-result
 validation; all three stages run behind discovery-backed remote endpoints.
 
+The workflow module contains only logical authoring. The orchestrator worker
+binds each stage to its discovery endpoint when it starts.
+
 ```text
 OpenAI client -> generic Dynamo frontend -> orchestrator worker --+--> remote Hello --+
                                                                 +--> remote World --+--> remote Merge

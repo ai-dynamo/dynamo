@@ -1,25 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Author and compile the declarative Hello World workflow."""
+"""Author the declarative Hello World workflow."""
 
-from dynamo.experimental.workflow import (
-    DeploymentSpec,
-    ExecutionPlan,
-    Workflow,
-    compile_workflow,
-)
+from dynamo.experimental.workflow import Workflow
 from examples.experimental.workflow.hello_world.stages import (
     HelloStage,
     MergeStage,
     WorldStage,
 )
-
-ENDPOINTS = {
-    "hello": "workflow-hello-world.hello.generate",
-    "world": "workflow-hello-world.world.generate",
-    "merge": "workflow-hello-world.merge.generate",
-}
 
 
 def define_workflow() -> Workflow:
@@ -35,10 +24,3 @@ def define_workflow() -> Workflow:
     )
     workflow.output("chunk", merge.chunk)
     return workflow
-
-
-def compile_remote_workflow() -> ExecutionPlan:
-    return compile_workflow(
-        define_workflow(),
-        DeploymentSpec.remote(**ENDPOINTS),
-    )

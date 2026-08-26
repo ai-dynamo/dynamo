@@ -7,17 +7,12 @@ from typing import Any
 
 import pytest
 
-from dynamo.experimental.workflow import (
-    RemoteBinding,
-    RemoteStageServer,
-    WorkflowEndpointHandler,
-    WorkflowOrchestrator,
+from dynamo.experimental.workflow import RemoteStageServer, WorkflowEndpointHandler
+from examples.experimental.workflow.hello_world.orchestrator_worker import (
+    ENDPOINTS,
+    build_orchestrator,
 )
 from examples.experimental.workflow.hello_world.stages import STAGES
-from examples.experimental.workflow.hello_world.workflow import (
-    ENDPOINTS,
-    compile_remote_workflow,
-)
 
 pytestmark = [
     pytest.mark.asyncio,
@@ -88,15 +83,12 @@ class _Runtime:
 
 
 async def test_orchestrator_worker_calls_three_remote_stages() -> None:
-    plan = compile_remote_workflow()
-    assert all(isinstance(binding, RemoteBinding) for binding in plan.bindings.values())
-
     clients = {
         endpoint_id: _LoopbackClient(RemoteStageServer(stage_id, STAGES[stage_id]()))
         for stage_id, endpoint_id in ENDPOINTS.items()
     }
     runtime = _Runtime(clients)
-    orchestrator = await WorkflowOrchestrator.bind(plan, runtime=runtime)
+    orchestrator = await build_orchestrator(runtime)
 
     chunks = [
         chunk

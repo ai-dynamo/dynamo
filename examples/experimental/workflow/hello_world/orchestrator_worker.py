@@ -6,22 +6,39 @@
 import asyncio
 import os
 
-from dynamo.experimental.workflow import WorkflowEndpointHandler, WorkflowOrchestrator
+from dynamo.experimental.workflow import (
+    RemoteBinding,
+    WorkflowEndpointHandler,
+    WorkflowOrchestrator,
+)
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
-from examples.experimental.workflow.hello_world.workflow import compile_remote_workflow
+from examples.experimental.workflow.hello_world.workflow import define_workflow
 
 ORCHESTRATOR_ENDPOINT = "workflow-hello-world.orchestrator.generate"
 MODEL_NAME = "hello-world"
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
+ENDPOINTS = {
+    "hello": "workflow-hello-world.hello.generate",
+    "world": "workflow-hello-world.world.generate",
+    "merge": "workflow-hello-world.merge.generate",
+}
+
+
+async def build_orchestrator(runtime: DistributedRuntime) -> WorkflowOrchestrator:
+    return await WorkflowOrchestrator.bind(
+        define_workflow(),
+        bindings={
+            stage_id: RemoteBinding(endpoint_id)
+            for stage_id, endpoint_id in ENDPOINTS.items()
+        },
+        runtime=runtime,
+    )
 
 
 @dynamo_worker()
 async def worker(runtime: DistributedRuntime) -> None:
-    orchestrator = await WorkflowOrchestrator.bind(
-        compile_remote_workflow(),
-        runtime=runtime,
-    )
+    orchestrator = await build_orchestrator(runtime)
     endpoint = runtime.endpoint(ORCHESTRATOR_ENDPOINT)
     await register_model(
         ModelInput.Tokens,
