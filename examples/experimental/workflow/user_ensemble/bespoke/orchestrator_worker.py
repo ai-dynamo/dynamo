@@ -10,7 +10,11 @@ from collections.abc import AsyncIterator, Mapping
 from typing import Any
 
 from dynamo.experimental.workflow import StageContext
-from dynamo.experimental.workflow.vllm import ExternalEncoderRequestStage
+from dynamo.experimental.workflow.generate import GenerateEndpointInvoker
+from dynamo.experimental.workflow.vllm import (
+    DynamoVllmStage,
+    ExternalEncoderRequestStage,
+)
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from examples.experimental.workflow.user_ensemble.common.config import (
@@ -37,13 +41,13 @@ class BespokeEnsembleHandler:
         classifier: Any,
         request_adapter: Any,
         response: Any,
-        generator_client: Any,
+        generator: GenerateEndpointInvoker,
     ) -> None:
         self._encoder = encoder
         self._classifier = classifier
         self._request_adapter = request_adapter
         self._response = response
-        self._generator_client = generator_client
+        self._generator = generator
 
     async def generate(
         self,
@@ -79,7 +83,6 @@ class BespokeEnsembleHandler:
         request: Mapping[str, Any],
         context: Any,
     ) -> dict[str, Any]:
-        _validate_generate_request(request)
         attempt_id = context.id()
         encoder_context = StageContext(
             workflow_name=None,
@@ -95,7 +98,6 @@ class BespokeEnsembleHandler:
             ),
             name=f"bespoke-classifier:{attempt_id}",
         )
-        generator_context = None
         generator_task = None
         try:
             prepared = await self._request_adapter.run(
@@ -106,17 +108,17 @@ class BespokeEnsembleHandler:
                 },
                 StageContext(None, "request_adapter", attempt_id),
             )
-            generator_context = context.detached(f"{attempt_id}:generator")
-            stream = await self._generator_client.round_robin(
-                prepared["request"],
-                annotated=False,
-                context=generator_context,
-            )
             generator_task = asyncio.create_task(
-                _collect_generation(stream),
+                self._generator.run(
+                    "generator",
+                    DynamoVllmStage.request_complete_contract,
+                    {"request": prepared["request"]},
+                    StageContext(None, "generator", attempt_id),
+                    request_context=context,
+                ),
                 name=f"bespoke-generator:{attempt_id}",
             )
-            classified, completion = await asyncio.gather(
+            classified, generated = await asyncio.gather(
                 classifier_task,
                 generator_task,
             )
@@ -124,8 +126,6 @@ class BespokeEnsembleHandler:
             classifier_task.cancel()
             if generator_task is not None:
                 generator_task.cancel()
-            if generator_context is not None:
-                generator_context.stop_generating()
             await asyncio.gather(
                 classifier_task,
                 *([generator_task] if generator_task is not None else []),
@@ -135,63 +135,12 @@ class BespokeEnsembleHandler:
 
         result = await self._response.run(
             {
-                "completion": completion,
+                "completion": generated["completion"],
                 "scores": classified["scores"],
             },
             StageContext(None, "response", attempt_id),
         )
         return dict(result["chunk"])
-
-
-def _validate_generate_request(request: Mapping[str, Any]) -> None:
-    """Match the unary restrictions enforced by GenerateEndpointBinding."""
-
-    sampling_options = request.get("sampling_options", {})
-    if not isinstance(sampling_options, Mapping):
-        raise TypeError("sampling_options must be an object")
-    if sampling_options.get("n") not in (None, 1):
-        raise ValueError("user ensemble requires n=1")
-    output_options = request.get("output_options", {})
-    if not isinstance(output_options, Mapping):
-        raise TypeError("output_options must be an object")
-    if (
-        output_options.get("logprobs") is not None
-        or output_options.get("prompt_logprobs") is not None
-    ):
-        raise ValueError("user ensemble does not support logprobs")
-
-
-async def _collect_generation(stream: AsyncIterator[Any]) -> dict[str, Any]:
-    """Fold stock Generate deltas without using workflow runtime adapters."""
-
-    token_ids: list[int] = []
-    terminal: dict[str, Any] | None = None
-    async for value in stream:
-        if terminal is not None:
-            raise RuntimeError("generator returned data after its terminal chunk")
-        if not isinstance(value, Mapping):
-            raise TypeError("generator returned a non-object chunk")
-        chunk = dict(value)
-        if chunk.get("index") != 0:
-            raise RuntimeError("user ensemble requires generator choice index 0")
-        delta = chunk.get("token_ids")
-        if not isinstance(delta, list) or any(
-            isinstance(token_id, bool) or not isinstance(token_id, int)
-            for token_id in delta
-        ):
-            raise TypeError("generator returned invalid token_ids")
-        if "log_probs" in chunk or "top_logprobs" in chunk:
-            raise RuntimeError("user ensemble does not support generator logprobs")
-        token_ids.extend(delta)
-        finish_reason = chunk.get("finish_reason")
-        if finish_reason is not None:
-            if not isinstance(finish_reason, str) or not finish_reason:
-                raise TypeError("generator returned invalid finish_reason")
-            terminal = chunk
-    if terminal is None:
-        raise RuntimeError("generator returned no terminal chunk")
-    terminal["token_ids"] = token_ids
-    return terminal
 
 
 @dynamo_worker()
@@ -205,7 +154,7 @@ async def worker(runtime: DistributedRuntime) -> None:
             classifier=DummyClassifier(),
             request_adapter=ExternalEncoderRequestStage(),
             response=EnsembleResponseStage(),
-            generator_client=generator_client,
+            generator=GenerateEndpointInvoker(generator_client),
         )
         endpoint = runtime.endpoint(ORCHESTRATOR_ENDPOINT)
         await register_model(

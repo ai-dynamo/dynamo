@@ -7,9 +7,10 @@ from typing import Any
 
 import pytest
 
+from dynamo.experimental.workflow import WorkflowExecutionError
+from dynamo.experimental.workflow.generate import GenerateEndpointInvoker
 from examples.experimental.workflow.user_ensemble.bespoke.orchestrator_worker import (
     BespokeEnsembleHandler,
-    _collect_generation,
 )
 from examples.experimental.workflow.user_ensemble.common.stages import (
     EnsembleResponseStage,
@@ -94,7 +95,7 @@ def _handler(
         classifier=classifier or _Runner({"scores": {"dummy-positive": 1.0}}),
         request_adapter=_RequestAdapter(),
         response=EnsembleResponseStage(),
-        generator_client=client,
+        generator=GenerateEndpointInvoker(client),
     )
 
 
@@ -172,7 +173,7 @@ async def test_bespoke_handler_propagates_caller_cancellation() -> None:
 
 
 @pytest.mark.parametrize(
-    "request,match",
+    "request_value,match",
     [
         ({"sampling_options": {"n": 2}}, "requires n=1"),
         ({"output_options": {"logprobs": 1}}, "does not support logprobs"),
@@ -182,49 +183,9 @@ async def test_bespoke_handler_propagates_caller_cancellation() -> None:
         ),
     ],
 )
-async def test_bespoke_handler_matches_generate_option_restrictions(
-    request: dict[str, Any],
+async def test_bespoke_handler_reuses_generate_option_validation(
+    request_value: dict[str, Any],
     match: str,
 ) -> None:
-    with pytest.raises(ValueError, match=match):
-        await anext(_handler(_Client()).generate(request, _Context()))
-
-
-@pytest.mark.parametrize(
-    "chunks,match",
-    [
-        ([{"token_ids": [1], "index": 0}], "no terminal"),
-        (
-            [
-                {"token_ids": [1], "index": 0, "finish_reason": "stop"},
-                {"token_ids": [2], "index": 0},
-            ],
-            "after its terminal",
-        ),
-        (
-            [
-                {
-                    "token_ids": [1],
-                    "index": 0,
-                    "finish_reason": "stop",
-                    "log_probs": [-0.1],
-                }
-            ],
-            "generator logprobs",
-        ),
-        (
-            [{"token_ids": [1], "index": 0, "finish_reason": ""}],
-            "invalid finish_reason",
-        ),
-    ],
-)
-async def test_bespoke_stream_validation_parity(
-    chunks: list[dict[str, Any]],
-    match: str,
-) -> None:
-    async def values() -> AsyncIterator[dict[str, Any]]:
-        for chunk in chunks:
-            yield chunk
-
-    with pytest.raises((RuntimeError, TypeError), match=match):
-        await _collect_generation(values())
+    with pytest.raises(WorkflowExecutionError, match=match):
+        await anext(_handler(_Client()).generate(request_value, _Context()))
