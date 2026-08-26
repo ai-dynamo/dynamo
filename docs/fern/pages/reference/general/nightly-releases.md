@@ -27,9 +27,8 @@ Every night, the [Nightly CI pipeline](https://github.com/ai-dynamo/dynamo/blob/
 - **Runtime container images (CUDA 13):** `vllm-runtime-nightly`, `sglang-runtime-nightly`, and `tensorrtllm-runtime-nightly` to NGC, each with an EFA variant under a `-efa` tag suffix.
 - **Component container images:** `kubernetes-operator-nightly`, `dynamo-planner-nightly`, and `dynamo-frontend-nightly` to NGC.
 - **Python wheels:** `ai-dynamo`, `ai-dynamo-runtime`, and `kvbm` to the NVIDIA prerelease index at [pypi.nvidia.com](https://pypi.nvidia.com/).
-- **Helm chart:** `dynamo-platform` at a dated pre-release version, `X.Y.Z-dev.YYYYMMDD.g<shortsha>`.
 
-The three runtime images and the wheels gate the release: if one of them fails to build, the whole nightly is held back. The component images and the Helm chart are staged fail-soft, so a failure there skips only that artifact for that night. Nightly does not publish Rust crates — for those, use a [stable or pre-release build](release-artifacts.mdx).
+The three runtime images and the wheels gate the release: if one of them fails to build, the whole nightly is held back. The component images are staged fail-soft, so a failure there skips only that image for that night. Nightly does not publish Helm charts or Rust crates — for those, use a [stable or pre-release build](release-artifacts.mdx).
 
 ## Installing Nightly Containers
 
