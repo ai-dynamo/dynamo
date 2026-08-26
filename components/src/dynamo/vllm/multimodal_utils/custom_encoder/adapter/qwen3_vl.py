@@ -21,6 +21,7 @@ _NATIVE_QWEN_VLM_ARCHITECTURES = frozenset(
         "Qwen3VLForConditionalGeneration",
         "Qwen3VLMoeForConditionalGeneration",
         "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
     }
 )
 

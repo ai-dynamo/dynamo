@@ -71,7 +71,11 @@ def _item(grid: tuple[int, int, int]) -> Qwen35ImageInputs:
 def _png_data_url() -> str:
     stream = io.BytesIO()
     Image.new("RGB", (2, 2), color="green").save(stream, format="PNG")
-    encoded = base64.b64encode(stream.getvalue()).decode()
+    return _image_data_url(stream.getvalue())
+
+
+def _image_data_url(image_bytes: bytes) -> str:
+    encoded = base64.b64encode(image_bytes).decode()
     return f"data:image/png;base64,{encoded}"
 
 
@@ -110,6 +114,31 @@ def test_preprocess_rejects_invalid_base64():
 
     with pytest.raises(ValueError, match="invalid base64"):
         encoder.preprocess("data:image/png;base64,not_valid!")
+
+
+def test_preprocess_normalizes_invalid_image_errors():
+    encoder = Qwen35VisionEncoder()
+    encoder._processor = SimpleNamespace(image_processor=_FakeImageProcessor())
+
+    with pytest.raises(ValueError, match="could not be decoded"):
+        encoder.preprocess(_image_data_url(b"not-an-image"))
+
+
+def test_preprocess_rejects_decoded_images_over_pixel_limit(monkeypatch):
+    encoder = Qwen35VisionEncoder()
+    encoder._processor = SimpleNamespace(image_processor=_FakeImageProcessor())
+    raw = _png_data_url()
+    monkeypatch.setattr(
+        "examples.custom_encoder.qwen3_5_vision_encoder._MAX_IMAGE_PIXELS", 3
+    )
+    monkeypatch.setattr(
+        Image.Image,
+        "convert",
+        lambda *_args, **_kwargs: pytest.fail("oversized image was converted"),
+    )
+
+    with pytest.raises(ValueError, match="decoded pixels"):
+        encoder.preprocess(raw)
 
 
 def test_preprocess_rejects_oversized_inline_image(monkeypatch):

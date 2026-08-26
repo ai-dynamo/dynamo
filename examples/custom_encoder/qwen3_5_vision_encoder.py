@@ -33,6 +33,7 @@ from dynamo.vllm.multimodal_utils.custom_encoder import (
 
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
 _MAX_BASE64_CHARS = 4 * ((_MAX_IMAGE_BYTES + 2) // 3)
+_MAX_IMAGE_PIXELS = 16_777_216
 
 
 def _decode_image_data_url(raw: str) -> bytes:
@@ -56,6 +57,20 @@ def _decode_image_data_url(raw: str) -> bytes:
     if len(image_bytes) > _MAX_IMAGE_BYTES:
         raise ValueError(f"Inline image exceeds {_MAX_IMAGE_BYTES} bytes")
     return image_bytes
+
+
+def _open_bounded_image(image_bytes: bytes) -> Image.Image:
+    """Decode one RGB image without exceeding the processor's pixel ceiling."""
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            width, height = source.size
+            if width < 1 or height < 1 or width * height > _MAX_IMAGE_PIXELS:
+                raise ValueError(
+                    f"Inline image exceeds {_MAX_IMAGE_PIXELS} decoded pixels"
+                )
+            return source.convert("RGB")
+    except (Image.DecompressionBombError, OSError) as exc:
+        raise ValueError("Inline image could not be decoded") from exc
 
 
 @dataclass(frozen=True)
@@ -107,8 +122,13 @@ class Qwen35VisionEncoder(
         if self._processor is None:
             raise RuntimeError("Qwen35VisionEncoder is not loaded")
 
-        image = Image.open(io.BytesIO(_decode_image_data_url(raw))).convert("RGB")
-        inputs = self._processor.image_processor(images=[image], return_tensors="pt")
+        image = _open_bounded_image(_decode_image_data_url(raw))
+        try:
+            inputs = self._processor.image_processor(
+                images=[image], return_tensors="pt"
+            )
+        finally:
+            image.close()
         return Preprocessed(
             Qwen35ImageInputs(
                 pixel_values=inputs["pixel_values"].contiguous(),

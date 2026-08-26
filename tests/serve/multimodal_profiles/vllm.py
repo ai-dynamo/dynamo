@@ -405,7 +405,6 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 requested_vllm_kv_cache_bytes=920_126_000,
                 directory=os.path.join(WORKSPACE_DIR, "examples/custom_encoder"),
                 env={
-                    "DYN_WORKER_GPU": "0",
                     "PYTHONPATH": str(WORKSPACE_DIR),
                 },
                 tests=[

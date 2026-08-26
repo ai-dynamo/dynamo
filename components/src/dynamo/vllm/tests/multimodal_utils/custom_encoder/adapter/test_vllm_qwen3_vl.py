@@ -49,6 +49,7 @@ def _adapter(architecture: str = "Qwen3VLForConditionalGeneration"):
         "Qwen3VLForConditionalGeneration",
         "Qwen3VLMoeForConditionalGeneration",
         "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
     ],
 )
 def test_supported_qwen_decoder_selects_native_adapter(architecture):
