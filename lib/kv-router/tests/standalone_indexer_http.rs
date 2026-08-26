@@ -573,6 +573,18 @@ fn raw_block_stored(
     }
 }
 
+fn raw_block_removed(block_hash: u64) -> RawKvEvent {
+    RawKvEvent::BlockRemoved {
+        block_hashes: vec![BlockHashValue::Unsigned(block_hash)],
+        medium: Some("GPU".to_string()),
+        group_idx: None,
+        kv_cache_spec_kind: None,
+        kv_cache_spec_sliding_window: None,
+        locality: None,
+        ownership: None,
+    }
+}
+
 /// Encode a one-event batch into the wire payload the listener expects:
 /// msgpack-array of `(timestamp, [events], dp_rank)`.
 fn encode_batch(event: RawKvEvent, dp_rank: i32) -> Vec<u8> {
@@ -752,6 +764,168 @@ async fn zmq_published_tiered_events_appear_in_http_query() {
         (2 * BLOCK_SIZE) as u64,
         "longest_matched should reflect the full device + host reach"
     );
+
+    server_cancel.cancel();
+    server_task.await.expect("server task join");
+    drop(pub_socket);
+}
+
+/// A listener opened with its gate closed must retain PUB messages until the
+/// peer snapshot has been applied. The overlapping Store is idempotent and the
+/// subsequent Remove wins once the gate opens and drains the socket queue.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn peer_dump_is_applied_before_buffered_zmq_removal() {
+    const BLOCK_SIZE: u32 = 4;
+    const MODEL: &str = "test-model";
+    const ROUTING_GROUP: &str = "default";
+    const INSTANCE_ID: u64 = 41;
+    let token_ids = vec![10_u32, 11, 12, 13];
+    let block_hash =
+        compute_block_hash_for_seq(&token_ids, BLOCK_SIZE, BlockHashOptions::default())
+            .first()
+            .expect("one complete block")
+            .0;
+
+    let registry = Arc::new(WorkerRegistry::new(1));
+    let zmq_endpoint = reserve_zmq_endpoint();
+    let zmq_ctx = zmq::Context::new();
+    let pub_socket = zmq_ctx.socket(zmq::PUB).expect("create PUB socket");
+    pub_socket.set_linger(0).expect("set_linger");
+    pub_socket.bind(&zmq_endpoint).expect("bind PUB socket");
+
+    registry
+        .register(
+            INSTANCE_ID,
+            zmq_endpoint.clone(),
+            0,
+            MODEL.to_string(),
+            ROUTING_GROUP.to_string(),
+            BLOCK_SIZE,
+            None,
+        )
+        .await
+        .expect("register deferred listener");
+    registry
+        .wait_for_listeners_buffering()
+        .await
+        .expect("listener should enter buffering");
+    assert!(!registry.listeners_started(), "gate must remain closed");
+
+    let state = make_app_state(registry.clone());
+    let (base_url, server_cancel, server_task) = spawn_indexer_http(state).await;
+
+    // Apply the peer dump baseline before releasing the listener gate.
+    let key = RoutingPartitionId::new(MODEL, ROUTING_GROUP);
+    let indexer = registry.get_or_create_indexer(key, BLOCK_SIZE);
+    indexer
+        .apply_event_routed(RouterEvent::with_storage_tier(
+            INSTANCE_ID,
+            KvCacheEvent {
+                event_id: 100,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(block_hash),
+                        tokens_hash: LocalBlockHash(block_hash),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: 0,
+            },
+            StorageTier::Device,
+        ))
+        .await
+        .expect("apply peer dump store");
+    drop(indexer.dump_events().await.expect("flush peer dump store"));
+
+    let client = reqwest::Client::new();
+    let query = json!({
+        "block_hashes": [block_hash as i64],
+        "model_name": MODEL,
+        "routing_group": ROUTING_GROUP,
+    });
+    let baseline = client
+        .post(format!("{base_url}/query_by_hash"))
+        .json(&query)
+        .send()
+        .await
+        .expect("query peer dump baseline")
+        .json::<serde_json::Value>()
+        .await
+        .expect("parse peer dump baseline");
+    assert_eq!(
+        baseline["instances"][INSTANCE_ID.to_string()]["gpu"],
+        BLOCK_SIZE
+    );
+
+    // The listener is still gated. Both messages must remain queued, including
+    // the overlapping Store, so the baseline remains visible until release.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    // Flush the slow-joiner handshake before the stateful messages. Ignored
+    // probes are harmless if they are delivered while the gate is closed.
+    for seq in 0..3 {
+        send_live_message(&pub_socket, seq, &encode_batch(RawKvEvent::Ignored, 0));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    send_live_message(
+        &pub_socket,
+        3,
+        &encode_batch(
+            raw_block_stored(block_hash, None, token_ids, BLOCK_SIZE as usize, "GPU"),
+            0,
+        ),
+    );
+    send_live_message(
+        &pub_socket,
+        4,
+        &encode_batch(raw_block_removed(block_hash), 0),
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let gated = client
+        .post(format!("{base_url}/query_by_hash"))
+        .json(&query)
+        .send()
+        .await
+        .expect("query while listener gate is closed")
+        .json::<serde_json::Value>()
+        .await
+        .expect("parse gated query");
+    assert_eq!(
+        gated["instances"][INSTANCE_ID.to_string()]["gpu"],
+        BLOCK_SIZE
+    );
+
+    registry.start_listeners();
+    registry
+        .wait_for_listeners_active()
+        .await
+        .expect("listener should drain buffered events before active");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let response = client
+            .post(format!("{base_url}/query_by_hash"))
+            .json(&query)
+            .send()
+            .await
+            .expect("query after listener drain")
+            .json::<serde_json::Value>()
+            .await
+            .expect("parse drained query");
+        if response["instances"][INSTANCE_ID.to_string()]["gpu"]
+            .as_u64()
+            .unwrap_or(0)
+            == 0
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "queued removal did not win after listener drain: {response}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     server_cancel.cancel();
     server_task.await.expect("server task join");
