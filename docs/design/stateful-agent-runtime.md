@@ -1,14 +1,14 @@
 # Stateful Agent Traffic Runtime
 
-**Status:** Direct-path production vertical slice implemented; GAIE/EPP integration and production-cluster acceptance remain
+**Status:** Direct-path Responses and Anthropic Messages vertical slices implemented; MCP design, observability completion, and GAIE/EPP integration remain
 **Scope:** A composition model for native OpenAI Responses and Anthropic Messages traffic, durable state, external tools, Kubernetes-native sandboxes, and Dynamo inference.
 **Decision horizon:** Productionize the direct Dynamo path first; preserve the same boundaries for Dynamo GAIE/EPP Kubernetes deployments.
 
 ## Decision
 
-Build `agent-rt` as an optional stateful module used by the existing **protocol frontends**. It owns durable turn state, protocol-specific continuation materialization, and coordination of external tools. It is not a second public gateway, an engine adapter, an EPP extension, or a Dynamo concept.
+Build `agent-rt` as an optional stateful module hosted by the existing **Dynamo protocol frontends**. It owns only durable turn records, protocol-specific continuation materialization, fenced checkpoint transitions, and coordination records for external tools. It is not a second public gateway, an engine adapter, an EPP extension, a process supervisor, or a replacement for Dynamo's request lifecycle.
 
-Dynamo remains responsible for request preprocessing, `UnifiedRequest` conversion, `AgentContext` creation, routing, EPP, engine selection, and inference. `agent-rt` invokes Dynamo through one narrow `InferenceInvoker` boundary:
+Dynamo remains responsible for request preprocessing, `UnifiedRequest` conversion, `AgentContext` creation, routing, EPP, engine selection, inference, cancellation, task/process lifecycle, ingress retry policy, public HTTP errors, transport, and metrics. `agent-rt` invokes Dynamo through one narrow `InferenceInvoker` boundary:
 
 - **Direct Dynamo invoker** for the local/non-EPP path.
 - **Private Gateway/EPP invoker** for Kubernetes GAIE deployments.
@@ -69,6 +69,10 @@ Two components are called “frontend” in a GAIE deployment. They have differe
 | Inference invocation | Configure | Call injected invoker | Direct route or EPP worker selection | No |
 | Native typed event contract | Own conversion from engine deltas | Observe for orchestration/commit | Produce engine deltas | No |
 | SSE/WebSocket framing and client backpressure | Own | No | No | No |
+| Client cancellation and request-task lifetime | Own | Invocation/stream is dropped by host | Cancel active engine context | Tool cancellation follows connector contract |
+| Inference process loss and retry classification | Own detection, public status, and retry policy | Record only the resulting durable checkpoint transition | Own backend/process health signal | No |
+| Public HTTP status/envelope mapping | Own | Return typed runtime/store errors | Return typed inference errors | Return typed connector errors |
+| Metrics and tracing registry | Own | Emit structured lifecycle observations through host integration | Own engine/router metrics | Own connector/provider metrics |
 | Request lowering / preprocessing | No | No | Own | No |
 | KV-aware routing | No | Never select workers | Own: frontend router locally, EPP in GAIE | No |
 | Engine/model selection | No | No | Own | No |
@@ -102,6 +106,8 @@ native Responses or Anthropic request
 Output interpretation is protocol-specific. Responses output items become Responses replay items; Anthropic responses become native assistant Messages. Tool ownership remains trusted deployment policy rather than an inference from client-supplied tool names.
 
 At Dynamo ingress, approved request metadata is decoded into Dynamo’s `AgentContext`. Dynamo derives the context needed by each internal model step from its own typed invocation carrier. `agent-rt` never constructs or stores `AgentContext`, raw headers, credentials, or transport state.
+
+The direct in-process implementation carries only allowlisted Dynamo routing values between model steps. Dynamo recreates the native request context and `AgentContext`, applies header-over-body routing policy, performs `UnifiedRequest` conversion, and selects the engine on every invocation. The carrier is ephemeral and is not part of a checkpoint.
 
 ### Narrow Runtime Contracts
 
@@ -144,7 +150,9 @@ The direct-path vertical slice is split by responsibility rather than by engine:
 | Read-only server tools | `frontend-crates/agent-tools`: bounded Brave web search behind `ToolExecutor`. |
 | Sandbox contract and adapters | `frontend-crates/agent-sandbox`: `SandboxProvider`, HTTP provider client, Kubernetes Agent Sandbox control plane, sandboxd data plane, and the durable execution supervisor. |
 | Sandbox service | `frontend-crates/agent-sandbox-service`: authenticated HTTP service, PostgreSQL execution fencing, operator catalog, container images, and Kubernetes manifests. It is deployed separately from Dynamo. |
-| Dynamo composition | `dynamo-llm`'s optional `agent-rt-poc` feature: trusted ingress scope, filtered Dynamo carrier, native typed streaming/SSE ownership, DuckDB runtime construction, and deployment-selected web-search/sandbox routes. |
+| Dynamo composition | `dynamo-llm`'s optional `agent-rt-poc` feature: trusted ingress scope, filtered Dynamo carrier, native typed Responses and Anthropic streaming with Dynamo-owned SSE, DuckDB runtime construction, and deployment-selected web-search/sandbox routes. |
+
+Anthropic selection is trusted host policy. Ordinary Claude Code requests and client-owned tools stay on Dynamo's stateless Messages path. A request enters the durable runtime only when it declares a deployment-configured runtime tool or the operator sets `DYN_AGENT_RT_STATEFUL_ANTHROPIC=true`. Every model step then re-enters Dynamo's native Messages core; `agent-rt` does not perform Anthropic-to-chat conversion itself.
 
 The current Dynamo sandbox route is enabled only when `DYN_AGENT_RT_SANDBOX_ENDPOINT` and a bearer token of at least 32 bytes are configured. `DYN_AGENT_RT_SANDBOX_PROFILE` selects an operator-known profile and `DYN_AGENT_RT_SANDBOX_TOOL_NAME` selects the model-visible name; the model cannot choose an image, namespace, executable, RuntimeClass, or network policy. Plain HTTP requires the explicit local/service-mesh opt-in `DYN_AGENT_RT_SANDBOX_ALLOW_HTTP=true`. `RuntimeAuthorization.permitted_connectors` must independently allow `sandbox`, so endpoint configuration alone does not authorize execution.
 
@@ -276,6 +284,22 @@ Required rules:
 - Persist the final response checkpoint before emitting the terminal public completion event.
 - Re-authorize each continuation against current `RuntimeAuthorization`; a recovered carrier is never proof of caller authorization.
 
+### Host Failure Contract
+
+The durable state machine does not duplicate Dynamo's request/task state machine. The boundary is:
+
+| Event | Dynamo host responsibility | Durable runtime consequence |
+| --- | --- | --- |
+| Client cancellation | Stop polling the public body, cancel/drop the active invocation, classify cancellation metrics, and decide whether an HTTP response is still possible. | No independent cancellation watcher or HTTP mapping. An unfinished claim remains lease-governed and is recovered through the normal fenced claim path. |
+| Backend process loss before terminal inference output | Detect the failed/missing-terminal invocation and apply the host's backend retry policy. | If the invocation is returned as failed, attempt a fenced `Failed` checkpoint; if the process itself disappears, the lease protects takeover. |
+| Process loss before tool dispatch | Own task loss detection. | If no durable tool claim exists, takeover resumes from the prior checkpoint. Once the pre-dispatch claim exists, recovery uses the connector's idempotency/outcome contract even if the external call may not have started. |
+| Process loss after tool dispatch | Own task loss detection; do not guess whether the external side effect happened. | Recover through `ToolJournal` lookup. Retry only for a connector with an idempotency/outcome contract; otherwise record `OutcomeUnknown`. |
+| Terminal response | Serialize the native terminal event only after the runtime returns a successful fenced commit. | Compare-and-swap the terminal checkpoint with the active lease/version. |
+
+There is intentionally no second generic `Cancelled` terminal state in v1. Cancellation is a Dynamo host outcome; durable ambiguity is represented by an active/expired lease or `OutcomeUnknown` after an external dispatch. If product semantics later require cancelled turns to be queryable as durable objects, that is a schema/API addition rather than an inference-lifecycle implementation in `agent-rt`.
+
+The public mappings remain Dynamo policy: unknown/inaccessible state is `404`; idempotency mismatch, active turns, and non-replayable terminal turns are `409`; malformed native payloads are normalized by the protocol handler (`422` parsing failures become the protocol's validation response); and unavailable stores or unknown durable outcomes are `503`. `agent-rt` returns typed errors and never constructs an HTTP envelope.
+
 ### Streaming and Cancellation
 
 The Dynamo protocol frontend remains the authority for client-facing protocol events. `agent-rt` observes events typed by the selected native protocol family and yields approved typed events back to Dynamo.
@@ -314,6 +338,37 @@ Runtime-owned tools remain external to Dynamo:
 - Workers receive a scoped tool-execution request, not raw Dynamo headers or backend credentials.
 
 Before dispatch, `agent-rt` writes a durable tool journal record keyed by response, tool-call ID, execution/idempotency key, and attempt. A `started` record alone cannot prove a side effect did not occur. Auto-retry is permitted only when the executor supports durable idempotency plus outcome lookup, or the tool is explicitly read-only/idempotent. Otherwise recovery transitions to `OutcomeUnknown` and follows a documented resolution policy.
+
+### Configured MCP Plan
+
+MCP is a configured runtime connector, not a client-supplied network capability and not an inference feature. The intended v1 path is:
+
+```text
+Dynamo protocol frontend policy
+  -> versioned MCP catalog entry and trusted tool schema
+  -> agent-rt ToolRouter (connector=mcp, server/profile/tool)
+  -> durable ToolJournal claim
+  -> external MCP executor/bridge
+  -> configured Streamable HTTP MCP server
+```
+
+The catalog is deployment or tenant policy and contains the public model tool name, MCP server/profile ID, remote tool name, trusted JSON schema, schema/catalog version, authorization profile, timeout/output limits, and side-effect classification. A client may opt into an allowed public name, but cannot set the server URL, transport, credential, remote method, or replace the trusted schema. A later policy may inject tools without a client declaration; that is a Dynamo frontend policy operation before the native request enters `agent-rt`.
+
+The MCP executor owns initialization, capability negotiation, connection pooling, `tools/list` verification, `tools/call`, OAuth/service credentials, provider errors, and bounded result normalization. The first remote transport is Streamable HTTP. Local `stdio` servers run only behind the external executor service; the Dynamo frontend does not spawn arbitrary commands. V1 excludes MCP sampling, elicitation, roots, arbitrary resources/prompts, and client-selected servers.
+
+Catalog and tool-schema versions are pinned for an active turn so a mid-turn deployment update cannot silently change model-visible tool semantics. At startup or catalog refresh, the executor compares configured schemas with `tools/list` and fails the affected route closed on incompatibility. Checkpoints store connector/profile/tool identity and schema digest, never server credentials.
+
+MCP does not supply exactly-once execution. Each catalog entry declares `read_only`, `idempotent_with_key`, or `side_effecting_unknown`. Read-only calls may be retried within the bounded tool policy. An idempotent entry must define how the execution key is transmitted and how outcome lookup works. An unknown side-effecting call is never blindly redispatched after a lost response; its journal becomes `OutcomeUnknown`.
+
+Implementation order:
+
+1. Freeze the catalog/config schema and tenant authorization lookup.
+2. Implement one external Streamable HTTP MCP executor with initialize/list/call, fixed credentials, bounds, and normalized errors.
+3. Add the `mcp` route to the existing protocol-neutral Dynamo executor mux and require a request-declared trusted tool for the first slice.
+4. Prove unary and streaming Responses plus Anthropic runtime-tool rounds, idempotent replay, catalog mismatch, timeout, lost-response, and credential non-persistence.
+5. Decide whether trusted frontend tool injection is required before adding dynamic discovery or more MCP capabilities.
+
+No MCP implementation should begin until steps 1 and the side-effect classifications are reviewed.
 
 ### Sandbox Plane and Kubernetes Reference Provider
 
@@ -401,9 +456,19 @@ ForwardedCarrierSnapshot (optional)
 
 Large artifacts and raw tool payloads are externalized with redacted checkpoint metadata. The state store enforces retention, maximum retained model-visible items/tokens, and a versioned compaction policy.
 
-- DuckDB implements `CheckpointStore` and `ToolJournal` for embedded development, local durable execution, restart tests, and single-process deployments. Access is serialized inside one frontend process; DuckDB is not presented as a shared multi-replica writer.
-- PostgreSQL implements the same traits for production shared state. It owns scoped uniqueness, transactional turn claims, lease renewal and expired-owner takeover, fenced commits, tool outcome lookup, and concurrent replica behavior.
+- DuckDB is the v1 store for embedded development, local durable execution, restart tests, and explicitly single-replica deployments. Access is serialized inside one frontend process; it is not presented as a shared writer, an HA database, or a Kubernetes multi-replica configuration.
+- PostgreSQL implements the same traits and remains available for shared-state development, but wiring it into the Dynamo deployment is post-v1. Shipping DuckDB does not imply that the PostgreSQL HA acceptance matrix is complete.
 - Both stores use parent-linked append-oriented rows so write amplification is O(current turn), not O(conversation history).
+
+Before v1, add a deliberately small DuckDB migration policy: a monotonic internal schema version; only forward, transactional migrations supported by the running binary; fail closed on a newer on-disk version; and restore-from-backup rather than reverse migration for downgrade. Any migration that rewrites checkpoint semantics requires a compatibility test with a database produced by the previous release. The current single `0001` bootstrap migration does not yet satisfy this release requirement.
+
+## Observability Boundary
+
+Dynamo owns the metrics registry, request spans, public request IDs, protocol/HTTP status, cancellation classification, engine timing, and EPP/router telemetry. `agent-rt` must not create a competing metrics server or redefine Dynamo request success.
+
+The runtime exposes structured lifecycle observations to its host for durable-only facts: protocol family, new versus replayed turn, checkpoint state transition, claim/commit latency, lease conflict/takeover, staged bytes, model-step count, tool-round count, connector/profile, tool journal recovery path, and terminal checkpoint failure. Labels never contain response IDs, idempotency keys, tenant/principal IDs, prompts, tool arguments, credentials, or arbitrary tool names; those belong in scoped traces/logs when permitted, not metric cardinality.
+
+The direct implementation already records each re-entered native Dynamo model step under the existing Responses or Anthropic endpoint metrics and preserves Dynamo disconnect cancellation. Remaining v1 work is to add runtime/store/tool observations through a host-supplied sink or tracing events, correlate them with the public request span, and add dashboards/alerts for checkpoint-store unavailability, active-turn conflicts, unknown outcomes, terminal-commit failures, tool latency/errors, and replay ratio.
 
 ## Comparison with vLLM Agentic API
 
@@ -440,9 +505,10 @@ This agrees with the desired “responses next-hop proxy” shape without making
 Implemented:
 
 - Dynamo converts engine output into native typed Responses events, owns SSE serialization/keepalive/backpressure/disconnect context, and withholds the terminal completion event until the runtime commits it.
+- Dynamo now exposes the same typed in-process seam for Anthropic Messages. Stateful Anthropic requests preserve native Messages DTOs, runtime tool rounds append native assistant/tool-result blocks, public IDs use `msg_...`, and Dynamo remains the SSE serializer and inference host.
 - `agent-rt` observes the pull-based stream, rewrites public identity, coordinates multiple model/tool steps, and owns no socket, SSE encoder, or token queue.
 - Trusted local/proxy authorization, typed non-leaking HTTP failures, a filtered non-durable Dynamo invocation carrier, and connector authorization are wired at ingress.
-- DuckDB and PostgreSQL implement checkpoint and tool-journal contracts with their intended single-process versus multi-replica guarantees; PostgreSQL integration tests exercise two independent store clients and stale-owner fencing.
+- DuckDB and PostgreSQL implement checkpoint and tool-journal traits. The v1 Dynamo deployment target is one frontend replica with a durable DuckDB path; PostgreSQL wiring and multi-replica claims are not part of the v1 promise.
 - Brave web search runs through the durable tool loop with a deployment-owned credential, read-only recovery, timeout/concurrency/output limits, and normalized results.
 - The authenticated external sandbox service, PostgreSQL execution store, Kubernetes Agent Sandbox provider, sandboxd adapter, hardened base manifests, images, and disposable Kind proof are implemented. Kind currently proves execution, lookup, artifacts, cancellation, and cleanup—not gVisor/Kata or CNI isolation.
 - Qwen3.8-27B-FP8 on `try6767` completed a two-step runtime-owned Python call through Dynamo and the local Kubernetes provider. The public stream exposed only lifecycle plus final assistant events; PostgreSQL independently recorded `42\n` and the 16-byte `model-proof.txt` artifact. The exact replay returned the same response ID in 26 ms without another sandbox execution.
@@ -450,8 +516,11 @@ Implemented:
 
 Remaining cross-provider acceptance work, in order:
 
-1. Add a deployment-level checkpoint-store failure injector if live fault testing beyond the deterministic runtime contract test is required; `agent-rt` already proves that an injected terminal commit failure releases neither staged deltas nor `response.completed`.
-2. Exercise one live Brave request when deployment credentials are available.
+1. Implement and test the versioned DuckDB migration/startup policy described above.
+2. Add host-integrated runtime/store/tool observations and the first dashboard/alerts without duplicating Dynamo inference metrics.
+3. Complete the configured MCP design review; implementation remains the next separate feature.
+4. Add a deployment-level checkpoint-store failure injector if live fault testing beyond the deterministic runtime contract test is required; `agent-rt` already proves that an injected terminal commit failure releases neither staged deltas nor `response.completed`.
+5. Exercise one live Brave request when deployment credentials are available.
 
 Kubernetes-provider-specific acceptance, which does not block other `SandboxProvider` implementations:
 
@@ -481,7 +550,7 @@ Kubernetes-provider-specific acceptance, which does not block other `SandboxProv
 - Lease/fencing prevents duplicate inference for concurrent continuation submissions.
 - Terminal public completion is never emitted before durable terminal state.
 - No bearer tokens, arbitrary inbound headers, tool credentials, or raw traces enter checkpoint storage.
-- DuckDB survives process restart in a single-process deployment; PostgreSQL prevents stale-owner commits and duplicate inference across two frontend replicas.
+- DuckDB survives process restart in a single-replica deployment, rejects incompatible schema versions, and applies supported forward migrations transactionally. Multi-replica Dynamo deployment is explicitly unsupported until PostgreSQL is wired and accepted.
 - A real web-search call executes server-side, is journaled, feeds a second Dynamo model step, and recovers without blind redispatch.
 - The Kubernetes sandbox provider is tenant-scoped, deny-network by default, bounded, cancellable, lookup-safe by execution ID, and cleaned up deterministically; other providers satisfy the same behavioral contract with provider-specific isolation evidence.
 - The same direct POC works against all engines already configured behind Dynamo without agent-runtime engine code.
