@@ -15,6 +15,7 @@ use serde::Serialize;
 use super::ModelManagerError;
 use super::worker_monitor::LoadThresholdConfig;
 use super::worker_set::WorkerSet;
+use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
 use crate::protocols::openai::ParsingOptions;
 
 use crate::types::{
@@ -75,6 +76,15 @@ pub struct ModelReadiness {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     pub namespaces: std::collections::BTreeMap<String, NamespaceReadiness>,
+}
+
+/// A generate engine and the routing metadata advertised by the same WorkerSet.
+#[derive(Clone)]
+pub(crate) struct GenerateEngineSelection {
+    pub(crate) engine: GenerateStreamingEngine,
+    pub(crate) kv_cache_block_size: u32,
+    pub(crate) lora_name: Option<String>,
+    pub(crate) tower_connector_lora_enabled: bool,
 }
 
 /// Readiness facts for one namespace, from [`Model::evaluate_namespace`].
@@ -355,92 +365,32 @@ impl Model {
     /// the same `needs`). A legacy card (no `worker_type`) bypasses the strict
     /// check: ready iff any worker is live. Empty `wsets` is not ready.
     fn evaluate_namespace(&self, wsets: &[Arc<WorkerSet>]) -> NamespaceReadinessEval {
-        let mut present: std::collections::HashSet<crate::worker_type::WorkerType> =
-            std::collections::HashSet::new();
-        let mut missing: std::collections::HashSet<crate::worker_type::WorkerType> =
-            std::collections::HashSet::new();
-        let mut has_legacy = false;
-        let mut legacy_live_workers = 0usize;
-        let mut has_live_worker = false;
-        let mut live_sets_by_type = std::collections::HashMap::new();
-
-        // First pass: which worker types have a live worker (+ legacy detection).
-        for ws in wsets {
-            let count = ws.worker_count();
-            if count > 0 {
-                has_live_worker = true;
-            }
-            match Self::ws_type_and_needs(ws) {
-                Some((wt, _needs)) => {
-                    if count > 0 {
-                        present.insert(wt);
-                        *live_sets_by_type.entry(wt).or_insert(0usize) += 1;
-                    }
-                }
-                // No declared worker_type → legacy card.
-                None => {
-                    has_legacy = true;
-                    legacy_live_workers += count;
-                }
-            }
-        }
-
-        // COMPAT branch: a legacy card disables strict gating; the disaggregated
-        // worker types can't be reconstructed, so ready iff any worker is live.
-        if has_legacy {
-            warn_legacy_readiness_once(&self.name, wsets[0].namespace());
-            return NamespaceReadinessEval {
-                ready: has_live_worker,
-                has_legacy,
-                legacy_live_workers,
-                present,
-                missing,
-                ambiguous: std::collections::HashSet::new(),
-            };
-        }
-
-        let ambiguous = live_sets_by_type
-            .into_iter()
-            .filter_map(|(worker_type, count)| {
-                (worker_type != crate::worker_type::WorkerType::Aggregated && count > 1)
-                    .then_some(worker_type)
+        let units = wsets
+            .iter()
+            .map(|ws| match Self::ws_type_and_needs(ws) {
+                Some((worker_type, needs)) => super::readiness::ReadinessUnit {
+                    worker_type: Some(worker_type),
+                    live_count: ws.worker_count(),
+                    needs,
+                },
+                None => super::readiness::ReadinessUnit {
+                    worker_type: None,
+                    live_count: ws.worker_count(),
+                    needs: Vec::new(),
+                },
             })
-            .collect::<std::collections::HashSet<_>>();
-
-        // Strict path: a registered worker type with no live worker anywhere is
-        // missing; a *live* WorkerSet whose `needs` DNF is unsatisfied flags its
-        // absent peers.
-        for ws in wsets {
-            let Some((wt, needs)) = Self::ws_type_and_needs(ws) else {
-                continue;
-            };
-            if !present.contains(&wt) {
-                missing.insert(wt);
-            }
-            if ws.worker_count() == 0 || needs.is_empty() {
-                continue;
-            }
-            let satisfied = needs
-                .iter()
-                .any(|alt| alt.iter().all(|t| present.contains(t)));
-            if !satisfied {
-                for alt in &needs {
-                    for t in alt {
-                        if !present.contains(t) {
-                            missing.insert(*t);
-                        }
-                    }
-                }
-            }
+            .collect::<Vec<_>>();
+        let eval = super::readiness::evaluate_readiness(&units);
+        if eval.has_legacy {
+            warn_legacy_readiness_once(&self.name, wsets[0].namespace());
         }
-
         NamespaceReadinessEval {
-            ready: has_live_worker && missing.is_empty() && ambiguous.is_empty(),
-            has_legacy,
-            legacy_live_workers,
-            present,
-            missing,
-            ambiguous,
+            ready: eval.ready,
+            has_legacy: eval.has_legacy,
+            legacy_live_workers: eval.legacy_live_workers,
+            present: eval.present,
+            missing: eval.missing,
+            ambiguous: eval.ambiguous,
         }
     }
 
@@ -461,7 +411,7 @@ impl Model {
     /// Structured per-namespace worker readiness for this model — the data
     /// behind the `GET /v1/models/{model}/ready` observability endpoint.
     ///
-    /// Built on the same [`Self::evaluate_namespace`] facts the serving gate
+    /// Built on the same `Self::evaluate_namespace` facts the serving gate
     /// uses, so the reported `ready`/`missing` can never disagree with routing;
     /// this method only layers display data (per-type counts, reason strings).
     pub fn namespace_readiness(&self) -> ModelReadiness {
@@ -569,7 +519,7 @@ impl Model {
     /// where a `ModelDeploymentCard` is registered before its WorkerSet has
     /// been wired up.
     ///
-    /// Delegates to [`Self::select_worker_set_with`] so readiness reports
+    /// Delegates to `Self::select_worker_set_with` so readiness reports
     /// exactly what request routing would accept — including the namespace
     /// completeness gate. Without that, a live decode-only WorkerSet with a
     /// chat engine but no prefill peer would report ready while every request
@@ -667,6 +617,30 @@ impl Model {
                 .supports_runtime_capability(capability)
                 .then(|| worker_set.generate_engine.clone())
                 .flatten()
+        })
+        .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
+    }
+
+    /// Select a generate engine and its routing metadata atomically from the
+    /// same WorkerSet. Request-side KV hashing must use the block size and LoRA
+    /// identity advertised by the worker set that will route the request.
+    pub(crate) fn get_generate_engine_for_capability_with_routing(
+        &self,
+        capability: &str,
+    ) -> Result<GenerateEngineSelection, ModelManagerError> {
+        self.select_worker_set_with(|ws| {
+            ws.supports_runtime_capability(capability)
+                .then(|| ws.generate_engine.clone())
+                .flatten()
+                .map(|engine| GenerateEngineSelection {
+                    engine,
+                    kv_cache_block_size: ws.card().kv_cache_block_size,
+                    lora_name: ws.card().lora.as_ref().map(|lora| lora.name.clone()),
+                    tower_connector_lora_enabled: ws
+                        .card()
+                        .runtime_config
+                        .runtime_flag_enabled(VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY),
+                })
         })
         .ok_or_else(|| self.engine_error(self.has_generate_engine_for_capability(capability)))
     }
@@ -835,8 +809,30 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_card::ModelDeploymentCard;
+    use crate::local_model::runtime_config::{
+        VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+    };
+    use crate::model_card::{LoraInfo, ModelDeploymentCard};
+    use crate::protocols::common::preprocessor::PreprocessedRequest;
+    use crate::protocols::{Annotated, common::llm_backend::LLMEngineOutput};
+    use async_trait::async_trait;
+    use dynamo_runtime::engine::AsyncEngine;
+    use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
     use tokio::sync::watch;
+
+    struct StubGenerateEngine;
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for StubGenerateEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            unimplemented!("stub for generate engine selection tests only")
+        }
+    }
 
     fn make_worker_set(namespace: &str, mdcsum: &str) -> Arc<WorkerSet> {
         Arc::new(WorkerSet::new(
@@ -844,6 +840,40 @@ mod tests {
             mdcsum.to_string(),
             ModelDeploymentCard::default(),
         ))
+    }
+
+    fn make_generate_worker_set(
+        namespace: &str,
+        block_size: u32,
+        lora_name: Option<&str>,
+        tower_connector_lora_enabled: bool,
+    ) -> (
+        Arc<WorkerSet>,
+        GenerateStreamingEngine,
+        watch::Sender<Vec<u64>>,
+    ) {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        card.kv_cache_block_size = block_size;
+        card.lora = lora_name.map(|name| LoraInfo {
+            name: name.to_string(),
+            max_gpu_lora_count: None,
+        });
+        card.runtime_config.runtime_data.insert(
+            VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
+            true.into(),
+        );
+        card.runtime_config.runtime_data.insert(
+            VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY.to_string(),
+            tower_connector_lora_enabled.into(),
+        );
+        let engine: GenerateStreamingEngine = Arc::new(StubGenerateEngine);
+        let mut worker_set =
+            WorkerSet::new(namespace.to_string(), format!("{namespace}-checksum"), card);
+        worker_set.generate_engine = Some(engine.clone());
+        let (worker_tx, worker_rx) = watch::channel(vec![1]);
+        worker_set.set_instance_watcher(worker_rx);
+        (Arc::new(worker_set), engine, worker_tx)
     }
 
     /// Create a WorkerSet backed by a watch channel so worker_count reflects the vec length.
@@ -992,6 +1022,38 @@ mod tests {
         assert!(model.get_images_engine().is_err());
         assert!(model.get_tensor_engine().is_err());
         assert!(model.get_realtime_engine().is_err());
+        assert!(model.get_generate_engine().is_err());
+    }
+
+    #[test]
+    fn test_generate_engine_selection_keeps_worker_set_metadata_atomic() {
+        let model = Model::new("generate-model".to_string());
+        let (worker_set_a, engine_a, worker_tx_a) =
+            make_generate_worker_set("ns-a", 16, None, false);
+        let (worker_set_b, engine_b, worker_tx_b) =
+            make_generate_worker_set("ns-b", 32, Some("adapter-b"), true);
+        worker_tx_b.send(vec![]).expect("disable worker set B");
+        model.add_worker_set("ns-a".to_string(), worker_set_a);
+        model.add_worker_set("ns-b".to_string(), worker_set_b);
+
+        let selection_a = model
+            .get_generate_engine_for_capability_with_routing(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+            .expect("select live worker set A");
+        assert!(Arc::ptr_eq(&selection_a.engine, &engine_a));
+        assert_eq!(selection_a.kv_cache_block_size, 16);
+        assert_eq!(selection_a.lora_name, None);
+        assert!(!selection_a.tower_connector_lora_enabled);
+
+        worker_tx_a.send(vec![]).expect("disable worker set A");
+        worker_tx_b.send(vec![2]).expect("enable worker set B");
+
+        let selection_b = model
+            .get_generate_engine_for_capability_with_routing(VLLM_INFERENCE_V1_GENERATE_CAPABILITY)
+            .expect("select live worker set B");
+        assert!(Arc::ptr_eq(&selection_b.engine, &engine_b));
+        assert_eq!(selection_b.kv_cache_block_size, 32);
+        assert_eq!(selection_b.lora_name.as_deref(), Some("adapter-b"));
+        assert!(selection_b.tower_connector_lora_enabled);
     }
 
     fn make_realtime_worker_set(namespace: &str) -> Arc<WorkerSet> {

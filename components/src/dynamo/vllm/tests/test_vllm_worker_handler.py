@@ -744,7 +744,7 @@ class TestDecodeWorkerMultimodalBranching:
             disaggregation_mode="DECODE",
         )
         handler._build_prompt_from_request = MagicMock(
-            return_value=(None, {"status": "error", "message": "test stop"})
+            side_effect=RuntimeError("test stop")
         )
         request = {
             "token_ids": [1, 2, 3],
@@ -759,13 +759,12 @@ class TestDecodeWorkerMultimodalBranching:
             },
         }
         context = MagicMock()
-        chunks = []
-        async for chunk in handler._generate_token_mode(request, context, "req-1"):
-            chunks.append(chunk)
+        with pytest.raises(RuntimeError, match="test stop"):
+            async for _ in handler._generate_token_mode(request, context, "req-1"):
+                pass
 
         # Should reach _build_prompt_from_request (not error at decode guard)
-        assert len(chunks) == 1
-        assert chunks[0]["message"] == "test stop"
+        handler._build_prompt_from_request.assert_called_once()
 
     async def test_aggregated_mode_calls_extract_multimodal_data(self):
         """Aggregated mode delegates media loading to the shared processor."""
@@ -774,10 +773,10 @@ class TestDecodeWorkerMultimodalBranching:
             return_value=None
         )
 
-        # Return an error from _build_prompt_from_request so _generate_token_mode
-        # yields it and returns early — no need to mock the engine.
+        # Raise from _build_prompt_from_request so generation stops before the
+        # engine call — no need to mock the engine.
         handler._build_prompt_from_request = MagicMock(
-            return_value=(None, {"status": "error", "message": "test stop"})
+            side_effect=RuntimeError("test stop")
         )
 
         request = {
@@ -789,13 +788,11 @@ class TestDecodeWorkerMultimodalBranching:
         }
         context = MagicMock()
 
-        chunks = []
-        async for chunk in handler._generate_token_mode(request, context, "req-1"):
-            chunks.append(chunk)
+        with pytest.raises(RuntimeError, match="test stop"):
+            async for _ in handler._generate_token_mode(request, context, "req-1"):
+                pass
 
         handler._multimodal_request_processor.extract_multimodal_data.assert_awaited_once()
-        assert len(chunks) == 1
-        assert chunks[0]["status"] == "error"
 
     async def test_decode_only_bypass_annotation_runs_as_agg(self):
         """Decode worker with conditional-disagg bypass annotation runs as AGG."""
@@ -807,7 +804,7 @@ class TestDecodeWorkerMultimodalBranching:
             return_value=None
         )
         handler._build_prompt_from_request = MagicMock(
-            return_value=(None, {"status": "error", "message": "test stop"})
+            side_effect=RuntimeError("test stop")
         )
 
         request = {
@@ -820,22 +817,18 @@ class TestDecodeWorkerMultimodalBranching:
         }
         context = MagicMock()
 
-        chunks = []
-        async for chunk in handler._generate_token_mode(request, context, "req-1"):
-            chunks.append(chunk)
+        with pytest.raises(RuntimeError, match="test stop"):
+            async for _ in handler._generate_token_mode(request, context, "req-1"):
+                pass
 
         handler._multimodal_request_processor.extract_multimodal_data.assert_awaited_once()
-        assert len(chunks) == 1
-        assert chunks[0]["message"] == "test stop"
 
     async def test_decode_only_bypass_annotation_text_only_does_not_require_prefill_kv_params(
         self,
     ):
         """Text-only bypass does not require incoming prefill KV params."""
         handler = _make_decode_handler(disaggregation_mode="DECODE")
-        handler._build_prompt_from_request = MagicMock(
-            return_value=(None, {"status": "error", "message": "stop"})
-        )
+        handler._build_prompt_from_request = MagicMock(side_effect=RuntimeError("stop"))
 
         request = {
             "token_ids": [1, 2, 3],
@@ -846,12 +839,9 @@ class TestDecodeWorkerMultimodalBranching:
         }
         context = MagicMock()
 
-        chunks = []
-        async for chunk in handler._generate_token_mode(request, context, "req-1"):
-            chunks.append(chunk)
-
-        assert len(chunks) == 1
-        assert chunks[0]["message"] == "stop"
+        with pytest.raises(RuntimeError, match="stop"):
+            async for _ in handler._generate_token_mode(request, context, "req-1"):
+                pass
 
     async def test_decode_only_bypass_annotation_text_mode_runs_as_agg(self):
         """Text-mode conditional-disagg bypass is not treated as decode-only."""
@@ -911,18 +901,42 @@ class TestDecodeWorkerMultimodalBranching:
     ):
         handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
 
-        prompt, error = handler._build_prompt_from_request(
+        prompt = handler._build_prompt_from_request(
             {"token_ids": [1, 2, 3]},
             "request-prompt",
             multi_modal_data=None,
             mm_processor_kwargs=mm_processor_kwargs,
         )
 
-        assert error is None
         if mm_processor_kwargs is None:
             assert "mm_processor_kwargs" not in prompt
         else:
             assert prompt["mm_processor_kwargs"] is mm_processor_kwargs
+
+    async def test_handler_prompt_builder_rejects_disabled_prompt_embeds(self):
+        handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+        handler.config.engine_args.enable_prompt_embeds = False
+
+        with pytest.raises(mod.InvalidArgument, match="--enable-prompt-embeds"):
+            handler._build_prompt_from_request(
+                {"prompt_embeds": "unused"},
+                "request-prompt",
+                multi_modal_data=None,
+            )
+
+    async def test_handler_prompt_builder_preserves_server_errors(self):
+        handler = _make_decode_handler(disaggregation_mode="AGGREGATED")
+        server_error = RuntimeError("backend allocation failed")
+        handler._create_prompt_from_embeddings = MagicMock(side_effect=server_error)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            handler._build_prompt_from_request(
+                {"prompt_embeds": "unused"},
+                "request-prompt",
+                multi_modal_data=None,
+            )
+
+        assert exc_info.value is server_error
 
 
 @pytest.mark.asyncio
@@ -941,23 +955,16 @@ async def test_prefill_delegates_mode_policy_to_shared_processor():
         )
     )
     handler._multimodal_request_processor = processor
-    handler._build_prompt_from_request = MagicMock(
-        return_value=(None, {"status": "error", "message": "stop"})
-    )
+    handler._build_prompt_from_request = MagicMock(side_effect=RuntimeError("stop"))
     context = MagicMock()
 
-    chunks = [
-        chunk
-        async for chunk in handler._generate_token_mode(
+    with pytest.raises(RuntimeError, match="stop"):
+        async for _ in handler._generate_token_mode(
             {"token_ids": [1, 2]},
             context,
             "request-prefill",
-        )
-    ]
-
-    assert chunks == [
-        {"status": "error", "message": "stop", "disaggregated_params": None}
-    ]
+        ):
+            pass
     processor.prepare_input.assert_awaited_once_with(
         {"token_ids": [1, 2]},
         "request-prefill",
@@ -1129,6 +1136,70 @@ class TestDeferredAbort:
 
         handler.engine_client.abort.assert_awaited_once_with("req-6")
 
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_abort_monitor_cleans_waitables_after_normal_completion(self):
+        handler = _make_handler()
+        handler.shutdown_event = asyncio.Event()
+
+        killed_future = asyncio.get_running_loop().create_future()
+        context = MagicMock()
+        context.async_killed_or_stopped.return_value = killed_future
+
+        async with handler._abort_monitor(context, "req-cleanup"):
+            for _ in range(10):
+                if handler.shutdown_event._waiters:
+                    break
+                await asyncio.sleep(0)
+            assert len(handler.shutdown_event._waiters) == 1
+
+        assert killed_future.cancelled()
+        assert not handler.shutdown_event._waiters
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_abort_monitor_preserves_engine_shutdown_during_cleanup(self):
+        handler = _make_handler()
+        handler.engine_client = MagicMock()
+        handler.engine_client.abort = AsyncMock()
+        handler.shutdown_event = asyncio.Event()
+
+        killed_future = asyncio.get_running_loop().create_future()
+        context = MagicMock()
+        context.async_killed_or_stopped.return_value = killed_future
+
+        real_gather = asyncio.gather
+        gather_entered = asyncio.Event()
+        gather_release = asyncio.Event()
+
+        async def delayed_gather(*args, **kwargs):
+            gather_entered.set()
+            await gather_release.wait()
+            return await real_gather(*args, **kwargs)
+
+        with patch.object(mod.asyncio, "gather", side_effect=delayed_gather):
+            with pytest.raises(mod.EngineShutdown):
+                async with handler._abort_monitor(
+                    context, "req-shutdown"
+                ) as monitor_task:
+                    for _ in range(10):
+                        if handler.shutdown_event._waiters:
+                            break
+                        await asyncio.sleep(0)
+                    assert len(handler.shutdown_event._waiters) == 1
+
+                    handler.shutdown_event.set()
+                    for _ in range(10):
+                        if monitor_task.done() or gather_entered.is_set():
+                            break
+                        await asyncio.sleep(0)
+                    assert monitor_task.done() or gather_entered.is_set()
+
+        handler.engine_client.abort.assert_awaited_once_with("req-shutdown")
+        assert killed_future.cancelled()
+        assert not handler.shutdown_event._waiters
+        assert not gather_entered.is_set()
+
     # close() cleanup tests: case 1b safety
 
     @pytest.mark.asyncio
@@ -1235,7 +1306,7 @@ class TestDeferredAbort:
         handler.input_param_manager = MagicMock()
         handler.input_param_manager.get_input_param.return_value = [1, 2, 3]
         handler._resolve_lora_request = MagicMock(return_value=None)
-        handler._build_prompt_from_request = MagicMock(return_value=(MagicMock(), None))
+        handler._build_prompt_from_request = MagicMock(return_value=MagicMock())
 
         # Capture the guard created inside the handler and wrap close() so
         # the test can assert that the handler awaited it.
@@ -1392,6 +1463,22 @@ class TestEmbeddingWorkerHandlerCancellation:
             asyncio.get_event_loop().create_future()
         )
         return context
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_abort_monitor_cleans_up_all_waiters(self):
+        handler = self._make_embedding_handler()
+        handler.shutdown_event = asyncio.Event()
+        context = self._make_context()
+        killed_or_stopped = context.async_killed_or_stopped.return_value
+
+        async with handler._abort_monitor(context, "test-req"):
+            while not handler.shutdown_event._waiters:
+                await asyncio.sleep(0)
+            assert len(handler.shutdown_event._waiters) == 1
+
+        assert killed_or_stopped.cancelled()
+        assert not handler.shutdown_event._waiters
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)

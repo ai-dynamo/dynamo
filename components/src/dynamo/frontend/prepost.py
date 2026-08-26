@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -41,6 +41,13 @@ class _Renderer(Protocol):
     async def render_messages_async(
         self, messages: Any, params: ChatParams
     ) -> tuple[Any, dict[str, Any]]:
+        ...
+
+
+class _EngineBasedStreamingParser(Protocol):
+    engine_based_streaming: bool
+
+    def finish_streaming(self) -> DeltaMessage | None:
         ...
 
 
@@ -487,9 +494,6 @@ def _prepare_request(
             isinstance(request, dict) and request.get("thinking") is not None
         ),
     )
-    # Don't let an absent top-level field clobber a nested reasoning_effort.
-    if request_for_sampling.reasoning_effort is None:
-        chat_template_kwargs.setdefault("reasoning_effort", None)
 
     # Mistral warns that tokenize=False is unsafe for chat templates.
     is_mistral_tokenizer = (
@@ -657,6 +661,7 @@ class StreamingPostProcessor:
         tool_parser: ToolParser | None,
         reasoning_parser_class: type[ReasoningParser] | None,
         chat_template_kwargs: dict[str, Any],
+        response_reasoning_ended: bool | None = None,
         stream_response: bool = True,
         uses_dynamo_json_tool_call_fallback: bool = False,
     ) -> None:
@@ -665,6 +670,7 @@ class StreamingPostProcessor:
         self.sampling_params = sampling_params
         self.tool_parser = tool_parser
         self.stream_response = stream_response
+        self.reasoning_is_done = bool(response_reasoning_ended)
         self._uses_dynamo_json_tool_call_fallback = uses_dynamo_json_tool_call_fallback
         # See https://github.com/ai-dynamo/dynamo/issues/8636 —
         # when the chat template runs with enable_thinking=False,
@@ -681,14 +687,32 @@ class StreamingPostProcessor:
                 tokenizer,
                 chat_template_kwargs=chat_template_kwargs,
             )
-            if reasoning_parser_class and not thinking_disabled
+            if reasoning_parser_class
+            and not thinking_disabled
+            and response_reasoning_ended is not True
             else None
+        )
+        if self.reasoning_parser is not None:
+            if response_reasoning_ended is None:
+                self.reasoning_is_done = self.reasoning_parser.is_reasoning_end(
+                    prompt_token_ids
+                )
+            if not self.reasoning_is_done:
+                self.reasoning_parser.adjust_initial_state_from_prompt(prompt_token_ids)
+        # The parser must still consume hidden reasoning so it cannot leak into
+        # content, but neither the parsed reasoning nor its token metadata should
+        # be projected into the response when the caller opted out.
+        self._suppress_reasoning_output = (
+            self.reasoning_parser is not None
+            and not request_for_sampling.include_reasoning
         )
         self._fast_plain_text = (
             self.tool_parser is None
             and self.reasoning_parser is None
             and not self._uses_dynamo_json_tool_call_fallback
         )
+        self._reasoning_parser_streaming_started = False
+        self._tool_parser_streaming_started = False
 
         self._control_markers = tuple(
             t for t in getattr(tokenizer, "all_special_tokens", ()) if t
@@ -696,7 +720,6 @@ class StreamingPostProcessor:
 
         self.previous_text = ""
         self.previous_token_ids: list[int] = []
-        self.reasoning_is_done = False
         self.in_progress_tool_calls: dict[int, DeltaToolCall] = {}
         # Per-choice tracking (https://github.com/ai-dynamo/dynamo/issues/8636) of whether a tool_call delta was
         # emitted on that choice, keyed by `output.index`. Required because
@@ -901,6 +924,30 @@ class StreamingPostProcessor:
             return None
         return delta_message
 
+    @staticmethod
+    def _merge_delta_messages(
+        current: DeltaMessage | None,
+        incoming: DeltaMessage | None,
+    ) -> DeltaMessage | None:
+        """Append a parser flush delta to the delta produced for this chunk."""
+        if incoming is None:
+            return current
+        if current is None:
+            return incoming
+        if incoming.content:
+            current.content = (current.content or "") + incoming.content
+        if incoming.reasoning:
+            current.reasoning = (current.reasoning or "") + incoming.reasoning
+        if incoming.tool_calls:
+            current.tool_calls = (current.tool_calls or []) + incoming.tool_calls
+        return current
+
+    @staticmethod
+    def _finish_engine_parser(parser: Any) -> DeltaMessage | None:
+        if parser is None or not parser.engine_based_streaming:
+            return None
+        return cast(_EngineBasedStreamingParser, parser).finish_streaming()
+
     def _add_tool_call_from_extracted(self, index: int, tool_call: Any) -> None:
         tool_delta = DeltaToolCall(
             index=index,
@@ -920,6 +967,9 @@ class StreamingPostProcessor:
         if self.tool_parser is None:
             return self._compose_delta_message(saved_reasoning, None)
 
+        # A buffered parse replaces the streaming path; do not flush stale
+        # engine-stream state again when finish_reason is processed.
+        self._tool_parser_streaming_started = False
         extracted = self.tool_parser.extract_tool_calls(text, self.request_for_sampling)
         if extracted.tools_called:
             for i, tool_call in enumerate(extracted.tool_calls):
@@ -940,6 +990,7 @@ class StreamingPostProcessor:
     ) -> DeltaMessage | None:
         if self.tool_parser is None:
             return None
+        self._tool_parser_streaming_started = True
         return self.tool_parser.extract_tool_calls_streaming(
             previous_text=self.previous_text,
             current_text=current_text,
@@ -986,7 +1037,7 @@ class StreamingPostProcessor:
             "finish_reason": self._remap_finish_reason(
                 output.index, output.finish_reason
             ),
-            "logprobs": output.logprobs,
+            "logprobs": (None if self._suppress_reasoning_output else output.logprobs),
         }
         self.in_progress_tool_calls.clear()
         return choice
@@ -1000,7 +1051,7 @@ class StreamingPostProcessor:
             "finish_reason": self._remap_finish_reason(
                 output.index, output.finish_reason
             ),
-            "logprobs": output.logprobs,
+            "logprobs": (None if self._suppress_reasoning_output else output.logprobs),
         }
 
     def _process_non_streaming_tool_output(self, output: Any) -> dict[str, Any] | None:
@@ -1100,6 +1151,7 @@ class StreamingPostProcessor:
                 return None
 
         elif not self.reasoning_is_done and self.reasoning_parser:
+            self._reasoning_parser_streaming_started = True
             delta_message = self.reasoning_parser.extract_reasoning_streaming(
                 self.previous_text,
                 current_text,
@@ -1114,9 +1166,21 @@ class StreamingPostProcessor:
             # buffer it for non-streaming extraction rather than feeding it
             # to the streaming tool parser which cannot handle the combined
             # reasoning-end + tool-start in a single chunk.
-            if self.reasoning_parser.is_reasoning_end_streaming(
-                current_token_ids, delta_token_ids
-            ):
+            if self.reasoning_parser.engine_based_streaming:
+                reasoning_ended = (
+                    self.reasoning_parser.has_engine_confirmed_reasoning_end()
+                )
+            else:
+                reasoning_ended = self.reasoning_parser.is_reasoning_end_streaming(
+                    current_token_ids, delta_token_ids
+                )
+
+            if reasoning_ended:
+                delta_message = self._merge_delta_messages(
+                    delta_message,
+                    self._finish_engine_parser(self.reasoning_parser),
+                )
+                self._reasoning_parser_streaming_started = False
                 self.reasoning_is_done = True
                 saved_reasoning = delta_message.reasoning if delta_message else None
                 post_content = (delta_message.content if delta_message else None) or ""
@@ -1186,37 +1250,59 @@ class StreamingPostProcessor:
                         delta_token_ids=delta_token_ids,
                     )
 
+        if output.finish_reason:
+            if self._reasoning_parser_streaming_started:
+                delta_message = self._merge_delta_messages(
+                    delta_message,
+                    self._finish_engine_parser(self.reasoning_parser),
+                )
+                self._reasoning_parser_streaming_started = False
+            if self._tool_parser_streaming_started:
+                delta_message = self._merge_delta_messages(
+                    delta_message,
+                    self._finish_engine_parser(self.tool_parser),
+                )
+                self._tool_parser_streaming_started = False
+
         choice = None
         if delta_message is None:
             if self.in_progress_tool_calls:
                 choice = self._emit_tool_calls_choice(output)
             elif output.finish_reason:
                 choice = self._build_choice(output, {})
-        elif delta_message.tool_calls:
-            self._merge_streaming_tool_calls(delta_message.tool_calls)
-            if output.finish_reason and self.in_progress_tool_calls:
-                # Tool calls and finish_reason arrived in the same chunk.
-                # Emit now — there will be no subsequent process_output call
-                # to drain the buffer.
+        else:
+            if delta_message.tool_calls:
+                self._merge_streaming_tool_calls(delta_message.tool_calls)
+
+            reasoning = (
+                None if self._suppress_reasoning_output else delta_message.reasoning
+            )
+            if delta_message.content or reasoning:
+                delta = {"role": "assistant"}
+                content = delta_message.content
+                if self.in_progress_tool_calls and self._is_control_only_content(
+                    content
+                ):
+                    content = None
+                if content:
+                    delta["content"] = content
+                if reasoning:
+                    delta["reasoning_content"] = reasoning
+                if self.in_progress_tool_calls:
+                    delta["tool_calls"] = self._dump_in_progress_tool_calls()
+                    self.in_progress_tool_calls.clear()
+                if len(delta) > 1:
+                    choice = self._build_choice(output, delta)
+            elif delta_message.tool_calls:
+                if output.finish_reason and self.in_progress_tool_calls:
+                    # Tool calls and finish_reason arrived in the same chunk.
+                    # Emit now — there will be no subsequent process_output call
+                    # to drain the buffer.
+                    choice = self._emit_tool_calls_choice(output)
+            elif self.in_progress_tool_calls:
                 choice = self._emit_tool_calls_choice(output)
-        elif delta_message.content or delta_message.reasoning:
-            delta = {"role": "assistant"}
-            content = delta_message.content
-            if self.in_progress_tool_calls and self._is_control_only_content(content):
-                content = None
-            if content:
-                delta["content"] = content
-            if delta_message.reasoning:
-                delta["reasoning_content"] = delta_message.reasoning
-            if self.in_progress_tool_calls:
-                delta["tool_calls"] = self._dump_in_progress_tool_calls()
-                self.in_progress_tool_calls.clear()
-            if len(delta) > 1:
-                choice = self._build_choice(output, delta)
-        elif self.in_progress_tool_calls:
-            choice = self._emit_tool_calls_choice(output)
-        elif output.finish_reason:
-            choice = self._build_choice(output, {})
+            elif output.finish_reason:
+                choice = self._build_choice(output, {})
 
         self.previous_text = current_text
         self.previous_token_ids = current_token_ids

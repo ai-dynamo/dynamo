@@ -69,41 +69,52 @@ def _router_hint_source_host(host: str | None) -> str | None:
     return address.compressed
 
 
-def _router_hint_source_control_endpoint(
-    tier: Mapping[str, Any], port_offset: int = 0
-) -> str | None:
-    """Build one advertisable source-control endpoint for a tier and DP offset."""
-    configured_port = tier.get("control_port")
-    if not isinstance(configured_port, (int, str)):
+def _router_hint_source_port(configured_port: object) -> int | None:
+    """Normalize one configured source-control port."""
+    if isinstance(configured_port, bool) or not isinstance(configured_port, (int, str)):
         return None
     try:
-        control_port = int(configured_port) + port_offset
+        control_port = int(configured_port)
     except ValueError:
         return None
     if not 0 < control_port <= 65535:
         return None
-    configured_host = tier.get("control_advertise_host") or tier.get("control_host")
-    host = _router_hint_source_host(
-        configured_host if isinstance(configured_host, str) else None
-    )
-    if host is None:
-        return None
-    return f"tcp://{host}:{control_port}"
+    return control_port
 
 
 def _router_hint_source_control_endpoints(
     tier: Mapping[str, Any], dp_range: tuple[int, int]
 ) -> dict[str, str] | None:
-    """Build source-control endpoints keyed by global DP rank."""
+    """Build source-control endpoints keyed by global DP rank.
+
+    ``control_ports`` is local to this worker: entry 0 belongs to dp_start,
+    entry 1 belongs to dp_start + 1, and so on. vLLM/KVCR selects from the
+    same list with data_parallel_rank_local.
+    """
     dp_start, dp_size = dp_range
     if dp_start < 0 or dp_size <= 0:
         return None
+    control_ports = tier.get("control_ports")
+    if not isinstance(control_ports, list):
+        raise ValueError("router_hint support requires control_ports to be a list")
+    if len(control_ports) != dp_size:
+        raise ValueError(
+            "router_hint support requires control_ports to contain exactly "
+            f"{dp_size} entries for the worker-local DP ranks; "
+            f"got {len(control_ports)}"
+        )
+    configured_host = tier.get("control_advertise_host")
+    host = _router_hint_source_host(
+        configured_host if isinstance(configured_host, str) else None
+    )
+    if host is None:
+        return None
     endpoints: dict[str, str] = {}
-    for local_dp_rank in range(dp_size):
-        endpoint = _router_hint_source_control_endpoint(tier, local_dp_rank)
-        if endpoint is None:
+    for local_dp_rank, global_dp_rank in enumerate(range(dp_start, dp_start + dp_size)):
+        control_port = _router_hint_source_port(control_ports[local_dp_rank])
+        if control_port is None:
             return None
-        endpoints[str(dp_start + local_dp_rank)] = endpoint
+        endpoints[str(global_dp_rank)] = f"tcp://{host}:{control_port}"
     return endpoints
 
 

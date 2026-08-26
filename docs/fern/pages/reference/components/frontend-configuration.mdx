@@ -302,6 +302,23 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
   Environment variable: `DYN_ROUTER_POLICY_CONFIG`
 </ParamField>
 
+<ParamField path="--router-prefill-policy" type="string" default="null">
+  Worker-selection instance for disaggregated prefill workers in the current router process. This
+  option overrides `worker_selection.prefill` from `--router-policy-config`. It is not included in
+  worker model cards. Set it to `default` to use Dynamo's built-in worker selector.
+
+  Environment variable: `DYN_ROUTER_PREFILL_POLICY`
+</ParamField>
+
+<ParamField path="--router-decode-policy" type="string" default="null">
+  Worker-selection instance for decode workers in the current router process. This option
+  overrides `worker_selection.decode` from `--router-policy-config`. It is not included in worker
+  model cards. Set it to `default` to use Dynamo's built-in worker selector. Configure an aggregated
+  pool with `worker_selection.aggregated` or `DYN_ROUTER_WORKER_SELECTION_POLICY`.
+
+  Environment variable: `DYN_ROUTER_DECODE_POLICY`
+</ParamField>
+
 ## AIC prefill load model
 
 These options apply only when `--router-mode kv` is combined with `--router-prefill-load-model aic`.
@@ -669,12 +686,16 @@ Environment variables controlling frontend extensions. Extensions are enabled by
 truthy value (`1`, `true`, `yes`, or `on`, case-insensitive) to disable the corresponding surface.
 
 <ParamField path="DYN_DISABLE_FRONTEND_NVEXT" type="boolean" default="false">
-  When truthy, the frontend drops `request.nvext` on `/v1/chat/completions`, `/v1/completions`,
-  `/v1/responses`, `/v1/embeddings`, and `/v1/messages`; ignores the
+  When truthy, the frontend drops all request NvExt fields except `cache_salt` on
+  `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, and `/v1/messages`; ignores the
   `x-dynamo-worker-instance-id`, `x-dynamo-prefill-instance-id`, `x-dynamo-dp-rank`,
   `x-dynamo-prefill-dp-rank`, `x-dynamo-request-priority`, and
   `x-dynamo-request-strict-priority` routing headers and their compatibility aliases; and ignores
-  the response-side `nvext.extra_fields` opt-in.
+  the response-side `nvext.extra_fields` opt-in. Cache isolation remains active. The frontend
+  continues to use non-empty `nvext.cache_salt` and `x-tenant-id` values on these four endpoint
+  groups. Top-level cache salts remain active on chat completions, completions, classify, and
+  pooling. On embeddings, classify, and pooling, the switch only drops legacy NvExt annotations;
+  these endpoints do not use `x-tenant-id` or `x-dynamo-*` routing headers in either mode.
 </ParamField>
 
 <ParamField path="DYN_DISABLE_FRONTEND_ADMIN_API" type="boolean" default="false">
