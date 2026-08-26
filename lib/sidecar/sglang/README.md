@@ -42,6 +42,7 @@ SGLang can load the Python entry point and supply the gRPC endpoint arguments:
 python3 -m sglang.launch_server \
     <args> \
     --grpc-port 30001 \
+    --incremental-streaming-output \
     --sidecar dynamo.sglang.sidecar
 ```
 

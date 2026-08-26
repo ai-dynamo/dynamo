@@ -104,6 +104,7 @@ spec:
           - "30000"
           - --grpc-port
           - "30001"
+          - --incremental-streaming-output
           - --disaggregation-mode
           - prefill
           - --disaggregation-bootstrap-port
@@ -192,6 +193,7 @@ spec:
           - "30000"
           - --grpc-port
           - "30001"
+          - --incremental-streaming-output
           - --disaggregation-mode
           - decode
           - --disaggregation-bootstrap-port

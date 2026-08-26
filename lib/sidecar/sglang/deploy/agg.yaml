@@ -85,6 +85,7 @@ spec:
           - "30000"
           - --grpc-port
           - "30001"
+          - --incremental-streaming-output
         containers:
         # Sidecar worker. No published image yet — build from
         # lib/sidecar/sglang/Dockerfile, set <your-registry> (see README), add
