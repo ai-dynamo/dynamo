@@ -12,7 +12,17 @@ metadata:
   name: dsv4-bench
 spec:
   backoffLimit: 1
-  activeDeadlineSeconds: 7200
+  # NOTE on the deadline (issue #12971): with ignore_eos:true a full-trace replay must
+  # generate the trace's entire output-token sum. For the default 15% agentic subset that
+  # is 8,694,196 tokens (OSL median 399, but MEAN 2,455 with p90 6,943 - the tail
+  # dominates wall-clock). At the published H200 AGG throughput (4x145.4 = 581.6 tok/s)
+  # that is ~4.15h; the slowest documented target (Pro AGG H200, 8 x 45.9 = 367.2 tok/s)
+  # needs ~6.6h - and setup (apt/pip install, model-ready wait, warmup) counts against
+  # this deadline too. The previous 7200s killed the Job mid-run and AIPerf writes its
+  # summary only at completion, so the run was a total loss. 43200s covers the slowest
+  # documented row plus overhead with margin; for quick paired comparisons set
+  # NUM_REQUESTS (below) instead of relying on the deadline.
+  activeDeadlineSeconds: 43200
   completions: 1
   parallelism: 1
   template:
@@ -81,8 +91,16 @@ spec:
           mkdir -p "${RUN_DIR}"
 
           TRACE_LINES=$(wc -l < "${TRACE_FILE}")
+          # NUM_REQUESTS (default 400) bounds the run: the first N trace rows are
+          # identical across runs, keeping paired A/B comparisons content-identical, and
+          # a 400-request run finishes in minutes rather than hours. Set NUM_REQUESTS=0
+          # to replay the full trace (see the deadline note above for the wall-clock
+          # arithmetic before doing so).
+          if [ "${NUM_REQUESTS:-400}" -gt 0 ] && [ "${NUM_REQUESTS:-400}" -lt "${TRACE_LINES}" ]; then
+            TRACE_LINES="${NUM_REQUESTS:-400}"
+          fi
 
-          echo "AIPerf trace replay: endpoint=${ENDPOINT} model=${TARGET_MODEL} trace=${TRACE_FILE} lines=${TRACE_LINES} concurrency=${CONCURRENCY}"
+          echo "AIPerf trace replay: endpoint=${ENDPOINT} model=${TARGET_MODEL} trace=${TRACE_FILE} requests=${TRACE_LINES} concurrency=${CONCURRENCY}"
           aiperf profile \
             -m "${TARGET_MODEL}" \
             --tokenizer "${TARGET_MODEL}" \
@@ -115,6 +133,10 @@ spec:
           value: /model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
         - name: CONCURRENCY
           value: "16"
+        - name: NUM_REQUESTS
+          # 400 = bounded default (minutes, content-identical across configs for A/B).
+          # 0 = full-trace replay (hours - see the activeDeadlineSeconds note).
+          value: "400"
         - name: REQUEST_TIMEOUT_SECONDS
           value: "1200"
         - name: AIPERF_VERSION

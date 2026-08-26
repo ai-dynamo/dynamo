@@ -70,7 +70,7 @@ kubectl cp perf/traces ${NAMESPACE}/pvc-helper:/model-cache/
 ```bash
 kubectl apply -f perf/perf.yaml -n ${NAMESPACE}
 kubectl logs -n ${NAMESPACE} -l job-name=dsv4-bench -f
-kubectl wait --for=condition=Complete job/dsv4-bench -n ${NAMESPACE} --timeout=7200s
+kubectl wait --for=condition=Complete job/dsv4-bench -n ${NAMESPACE} --timeout=43200s
 ```
 
 ### 3. Fetch Artifacts
@@ -98,6 +98,7 @@ validated for the deployed frontend/backend path.
 
 | Variable | Default | Notes |
 |---|---|---|
+| `NUM_REQUESTS` | `400` | Bounded run (minutes); first N trace rows are identical across runs for paired A/B. Set `0` for the full-trace replay (hours - see the deadline note in `perf.yaml`). |
 | `ENDPOINT` | `dsv4-pro-agg-b200-agentic-frontend:8000` | DGD frontend service and port |
 | `TARGET_MODEL` | `nvidia/DeepSeek-V4-Pro-NVFP4` | Must match `/v1/models` |
 | `TRACE_FILE` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | Mooncake JSONL on PVC |

@@ -7,7 +7,10 @@ SPDX-License-Identifier: Apache-2.0
 
 Dynamo + vLLM serving recipes for **DeepSeek-V4-Pro** and **DeepSeek-V4-Flash**,
 tuned for the **agentic** workload (64k ISL / 400 OSL / 90% KV reuse) at a floor of
-**≥ 50 output tok/s/user**. Each variant is a `DynamoGraphDeployment` (DGD); a single
+**≥ 50 output tok/s/user**. (400 OSL is the trace *median*; the mean is ~2,455 with a heavy
+right tail, which is what determines benchmark wall-clock - see the deadline note in
+[`perf/perf.yaml`](perf/perf.yaml). The perf Job defaults to a bounded 400-request run;
+set `NUM_REQUESTS=0` for a full-trace replay and budget several hours.) Each variant is a `DynamoGraphDeployment` (DGD); a single
 shared [`perf/`](perf) Job replays the benchmark traces against any variant.
 
 ## Recipes by model
@@ -124,3 +127,13 @@ TCP transfer or fails NIXL setup.
   root-owned `site-packages` directory, which a non-root user cannot write during
   `determine_available_memory`. The fix (make that directory group-writable in the image) is tracked
   separately; drop `runAsUser: 0` once it lands.
+
+## Known issues
+
+- **Do not raise `--max-num-batched-tokens` to 24576 or above** on
+  `vllm-runtime:1.3.0` when serving DeepSeek-V4-Flash with tensor parallelism on
+  Hopper GPUs (reproduced on H100 TP4; H200 runs the same sm90 kernel path, so treat
+  the boundary as unvalidated there rather than safe): the fused attention kernel crashes the EngineCore a few minutes into
+  sustained load (init and readiness pass, so the failure only appears under traffic).
+  16384 is the validated-stable ceiling. Tracked in
+  [#12972](https://github.com/ai-dynamo/dynamo/issues/12972).
