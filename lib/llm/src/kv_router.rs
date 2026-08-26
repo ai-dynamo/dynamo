@@ -61,8 +61,8 @@ pub mod metrics;
 pub mod prefill_router;
 pub mod publisher;
 mod route_lookup;
-mod routing_host;
 pub(crate) mod routing_graph;
+mod routing_host;
 pub mod scheduler;
 pub mod sequence;
 pub mod shared_cache;
@@ -73,8 +73,8 @@ pub use dynamo_kv_router::scheduling::{
 pub use encoder_router::EncoderRouter;
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
-pub use routing_host::{KvPushRouter, RoutingHost};
 pub use routing_graph::{KvRoutingGraph, RouterLoadSource, SchedulerLoadSender, TypedRoutingGraph};
+pub use routing_host::{KvPushRouter, RoutingHost};
 
 use crate::{
     discovery::{KvSourceMembershipWatch, RuntimeConfigWatch},

@@ -113,8 +113,7 @@ async fn builtin_host_constructs_only_declared_capabilities() {
     let inner = PushRouter::from_client(client.clone(), RouterMode::RoundRobin)
         .await
         .unwrap();
-    let host =
-        RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, graph.clone()).unwrap();
+    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, graph.clone()).unwrap();
 
     assert_eq!(host.required_worker_inputs(), WorkerInputs::NONE);
     assert!(host.hosted_occupancy.is_none());
@@ -215,10 +214,9 @@ async fn builtin_direct_without_worker_is_invalid_argument() {
     let inner = PushRouter::from_client(client, RouterMode::Direct)
         .await
         .unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
-        inner, graph, None,
-    )
-    .unwrap();
+    let host =
+        RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(inner, graph, None)
+            .unwrap();
 
     let error = host.generate(Context::new(request())).await.unwrap_err();
     assert!(match_error_chain(
@@ -295,10 +293,9 @@ async fn builtin_direct_dispatch_ignores_local_inhibition() {
     )
     .await
     .unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
-        inner, graph, None,
-    )
-    .unwrap();
+    let host =
+        RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(inner, graph, None)
+            .unwrap();
 
     client.report_instance_down(worker_id);
     assert!(client.instance_ids().contains(&worker_id));
@@ -778,11 +775,7 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
         .unwrap();
     assert!(
         router
-            .dispatch_selection(
-                failed_request,
-                failed_selection,
-                failed_dispatch_guard,
-            )
+            .dispatch_selection(failed_request, failed_selection, failed_dispatch_guard,)
             .await
             .is_err()
     );
@@ -1358,8 +1351,7 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
             .await
             .unwrap();
     let chooser = Arc::new(chooser);
-    let kv_router =
-        Arc::new(RoutingHost::new(push_router, chooser.clone(), graph, None).unwrap());
+    let kv_router = Arc::new(RoutingHost::new(push_router, chooser.clone(), graph, None).unwrap());
     let next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> = kv_router;
     let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));
 

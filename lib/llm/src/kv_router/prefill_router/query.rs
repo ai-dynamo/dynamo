@@ -303,9 +303,8 @@ mod tests {
         let push_router = PushRouter::from_client_with_dispatch(client, mode, dispatch)
             .await
             .unwrap();
-        let shared = Arc::new(
-            RoutingHost::new_builtin_with_coordinator(push_router, graph, None).unwrap(),
-        );
+        let shared =
+            Arc::new(RoutingHost::new_builtin_with_coordinator(push_router, graph, None).unwrap());
         let prefill = PrefillRouter::disabled(Arc::new(ModelManager::new()), mode, None);
         prefill.binding.store(Some(Arc::new(
             crate::kv_router::prefill_router::PrefillBinding {
