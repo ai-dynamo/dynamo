@@ -24,6 +24,7 @@ from _tool_guidance_parity import (
 )
 from transformers import AutoTokenizer
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.tool_parsers import ToolParser
 
 from dynamo.frontend import prepost as prepost_module
 from dynamo.frontend.prepost import (
@@ -1708,29 +1709,30 @@ class TestPreprocessRawRequestControls:
         assert "thinking_mode" not in result.chat_template_kwargs
 
 
-class _PassthroughStreamingToolParser(_FakeGrammarToolParser):
+class _PassthroughStreamingToolParser(ToolParser):
     """A tool parser that finds no tool call and passes the raw delta through.
+
+    Subclasses the real ToolParser so every attribute the postprocessor touches
+    (engine_based_streaming, vocab, ...) exists; a bare stub only has whatever
+    the paths exercised today happen to read.
 
     Returning the *unstripped* delta_text is what a real parser does -- it is
     handed `delta_text`, not the seeded delta_message -- so this exercises the
     funnel rather than the seed strip.
     """
 
-    def __init__(self, tokenizer=None, tools=None):
-        del tokenizer, tools
-
     def extract_tool_calls_streaming(self, **kwargs):
         return prepost_module.DeltaMessage(content=kwargs["delta_text"])
 
+    def get_structural_tag(self, request, *, reasoning=False):
+        return None
 
-class _MarkerOwningToolParser(_FakeGrammarToolParser):
+
+class _MarkerOwningToolParser(_PassthroughStreamingToolParser):
     """A tool parser whose own marker happens to match the control-token shape."""
 
     tool_call_start_token = "<|tool_call|>"
     tool_call_end_token = "<|tool_call_end|>"
-
-    def __init__(self, tokenizer=None, tools=None):
-        del tokenizer, tools
 
 
 class TestControlMarkerStrip:
@@ -1767,7 +1769,9 @@ class TestControlMarkerStrip:
         Uses the passthrough parser so every path through process_output stays
         callable, not just the ones these tests reach today.
         """
-        return self._post(tokenizer, tool_parser=_PassthroughStreamingToolParser())
+        return self._post(
+            tokenizer, tool_parser=_PassthroughStreamingToolParser(tokenizer)
+        )
 
     # -- the strip itself -------------------------------------------------
 
@@ -1804,7 +1808,7 @@ class TestControlMarkerStrip:
         extraction. Stripping the parser's own marker there would silently break
         tool detection.
         """
-        post = self._post(tokenizer, tool_parser=_MarkerOwningToolParser())
+        post = self._post(tokenizer, tool_parser=_MarkerOwningToolParser(tokenizer))
         assert (
             post._strip_control_markers("<|tool_call|>{}<|tool_call_end|>")
             == "<|tool_call|>{}<|tool_call_end|>"
