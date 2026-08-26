@@ -347,74 +347,84 @@ mod tests {
     }
 
     #[test]
-    fn peer_service_config_parsed() {
-        let cfg = parse_cfg(&[
-            ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
-            ("POD_IP", "10.0.0.10"),
-            ("DYN_EPP_SELECTION_INDEXER_THREADS", "8"),
+    fn peer_replication_config() {
+        let required = [
             ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
             ("POD_NAMESPACE", "inference"),
             ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
             ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
             ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
             ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
-        ])
-        .expect("peer service config should parse");
-        assert_eq!(cfg.peer_service.as_deref(), Some("dynamo-epp"));
-        assert_eq!(cfg.pod_ip.as_deref(), Some("10.0.0.10"));
-        assert_eq!(cfg.replica_sync_port, DEFAULT_REPLICA_SYNC_PORT);
-        assert_eq!(cfg.selector_threads, 8);
-        assert_eq!(cfg.namespace, "inference");
-    }
+        ];
+        let cases: [(&str, &[(&str, &str)], Result<(u16, usize), &str>); 6] = [
+            (
+                "default port",
+                &[
+                    ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+                    ("POD_IP", "10.0.0.10"),
+                    ("DYN_EPP_SELECTION_INDEXER_THREADS", "8"),
+                ],
+                Ok((DEFAULT_REPLICA_SYNC_PORT, 8)),
+            ),
+            (
+                "overridden port",
+                &[
+                    ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+                    ("POD_IP", "10.0.0.10"),
+                    ("DYN_EPP_REPLICA_SYNC_PORT", "9192"),
+                ],
+                Ok((9192, DEFAULT_SELECTOR_THREADS)),
+            ),
+            (
+                "missing pod ip",
+                &[("DYN_EPP_PEER_SERVICE", "dynamo-epp")],
+                Err("POD_IP"),
+            ),
+            (
+                "blank pod ip",
+                &[("DYN_EPP_PEER_SERVICE", "dynamo-epp"), ("POD_IP", " ")],
+                Err("POD_IP"),
+            ),
+            (
+                "zero port",
+                &[
+                    ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+                    ("POD_IP", "10.0.0.10"),
+                    ("DYN_EPP_REPLICA_SYNC_PORT", "0"),
+                ],
+                Err("DYN_EPP_REPLICA_SYNC_PORT"),
+            ),
+            (
+                "out of range port",
+                &[
+                    ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+                    ("POD_IP", "10.0.0.10"),
+                    ("DYN_EPP_REPLICA_SYNC_PORT", "65536"),
+                ],
+                Err("DYN_EPP_REPLICA_SYNC_PORT"),
+            ),
+        ];
 
-    #[test]
-    fn replica_sync_port_can_be_overridden() {
-        let cfg = parse_cfg(&[
-            ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
-            ("POD_IP", "10.0.0.10"),
-            ("DYN_EPP_REPLICA_SYNC_PORT", "9192"),
-            ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
-            ("POD_NAMESPACE", "inference"),
-            ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
-            ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
-            ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
-            ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
-        ])
-        .expect("replica sync port override should parse");
-
-        assert_eq!(cfg.replica_sync_port, 9192);
-    }
-
-    #[test]
-    fn peer_service_requires_pod_ip() {
-        let error = parse_cfg(&[
-            ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
-            ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
-            ("POD_NAMESPACE", "inference"),
-            ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
-            ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
-            ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
-            ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
-        ])
-        .expect_err("peer service without POD_IP must fail");
-
-        assert!(error.to_string().contains("POD_IP"));
-    }
-
-    #[test]
-    fn zero_replica_sync_port_fails() {
-        assert!(
-            parse_cfg(&[
-                ("DYN_EPP_INFERENCE_POOL_NAME", "vllm-qwen-pool"),
-                ("POD_NAMESPACE", "inference"),
-                ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
-                ("DYN_EPP_TOKENIZER_SERVICE_URL", "http://vllm-render:8000"),
-                ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
-                ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
-                ("DYN_EPP_REPLICA_SYNC_PORT", "0"),
-            ])
-            .is_err()
-        );
+        for (name, extra, expected) in cases {
+            let mut env = required.to_vec();
+            env.extend_from_slice(extra);
+            match expected {
+                Ok((port, selector_threads)) => {
+                    let cfg = parse_cfg(&env).unwrap_or_else(|error| panic!("{name}: {error}"));
+                    assert_eq!(cfg.peer_service.as_deref(), Some("dynamo-epp"), "{name}");
+                    assert_eq!(cfg.pod_ip.as_deref(), Some("10.0.0.10"), "{name}");
+                    assert_eq!(cfg.replica_sync_port, port, "{name}");
+                    assert_eq!(cfg.selector_threads, selector_threads, "{name}");
+                }
+                Err(expected_error) => {
+                    let error = parse_cfg(&env).expect_err(name);
+                    assert!(
+                        error.to_string().contains(expected_error),
+                        "{name}: {error}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

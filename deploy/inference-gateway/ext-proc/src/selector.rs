@@ -791,6 +791,15 @@ worker_selection:
     }
 
     #[tokio::test]
+    async fn selector_without_peer_service_disables_replica_sync() {
+        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
+            .await
+            .expect("selector should build");
+
+        assert_eq!(selector.service.replica_sync_port(), None);
+    }
+
+    #[tokio::test]
     async fn queueing_model_rejects_missing_capacity_before_peer_discovery() {
         let policy_file = model_policy_file();
         let mut cfg = test_config();
