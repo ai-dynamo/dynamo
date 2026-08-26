@@ -1227,8 +1227,7 @@ impl DistributedRuntime {
             }
         });
 
-        // Wraps the same `RT` the bridge was just given, so multiple
-        // DistributedRuntime instances continue to share one tokio runtime.
+        // The bridge needed the tokio runtime; this wraps that same one in a dynamo `Runtime`.
         let runtime = rs::Worker::runtime_from_existing().map_err(to_pyerr)?;
 
         let nats_enabled = request_plane.is_nats()

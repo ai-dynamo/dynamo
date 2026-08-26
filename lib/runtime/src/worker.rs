@@ -123,7 +123,7 @@ impl Worker {
     /// Exists because the pyo3 bridge needs a `&'static tokio::runtime::Runtime`, which
     /// [`Worker::from_config`] cannot provide — it errors when a runtime already exists.
     pub fn ensure_process_runtime() -> anyhow::Result<&'static tokio::runtime::Runtime> {
-        // Fast path: already built by this function or by `Worker::from_config`.
+        // Fast path — `get_or_try_init` below would also return it, just less cheaply.
         if let Some(rt) = RT.get() {
             return Ok(rt);
         }
@@ -131,7 +131,6 @@ impl Worker {
         // If two threads arrive together, one builds and both observe the same runtime.
         RT.get_or_try_init(|| -> anyhow::Result<tokio::runtime::Runtime> {
             let config = RuntimeConfig::from_settings()?;
-            // Logged so a running deployment can show whether DYN_RUNTIME_* was applied.
             tracing::info!("dynamo runtime configuration: {config}");
             let rt = config.create_runtime()?;
             let _ = RTCONFIG.set(config);
