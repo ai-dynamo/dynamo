@@ -1708,7 +1708,22 @@ class TestPreprocessRawRequestControls:
         assert "thinking_mode" not in result.chat_template_kwargs
 
 
-class _MarkerOwningToolParser:
+class _PassthroughStreamingToolParser(_FakeGrammarToolParser):
+    """A tool parser that finds no tool call and passes the raw delta through.
+
+    Returning the *unstripped* delta_text is what a real parser does -- it is
+    handed `delta_text`, not the seeded delta_message -- so this exercises the
+    funnel rather than the seed strip.
+    """
+
+    def __init__(self, tokenizer=None, tools=None):
+        del tokenizer, tools
+
+    def extract_tool_calls_streaming(self, **kwargs):
+        return prepost_module.DeltaMessage(content=kwargs["delta_text"])
+
+
+class _MarkerOwningToolParser(_FakeGrammarToolParser):
     """A tool parser whose own marker happens to match the control-token shape."""
 
     tool_call_start_token = "<|tool_call|>"
@@ -1747,8 +1762,12 @@ class TestControlMarkerStrip:
         )
 
     def _active(self, tokenizer):
-        """A postprocessor with a parser active, which is the only gated case."""
-        return self._post(tokenizer, tool_parser=_FakeGrammarToolParser())
+        """A postprocessor with a parser active, which is the only gated case.
+
+        Uses the passthrough parser so every path through process_output stays
+        callable, not just the ones these tests reach today.
+        """
+        return self._post(tokenizer, tool_parser=_PassthroughStreamingToolParser())
 
     # -- the strip itself -------------------------------------------------
 
@@ -1831,8 +1850,13 @@ class TestControlMarkerStrip:
         assert delta.content == "408"
         assert delta.reasoning == "thought about <|end_message|>"
 
-    def test_process_output_strips_the_directly_seeded_delta(self, tokenizer):
-        """End to end through process_output, the third strip site."""
+    def test_process_output_strips_markers_end_to_end(self, tokenizer):
+        """End to end through process_output with a parser active.
+
+        The parser re-seeds content from the raw delta_text, so this asserts the
+        funnel guarantee rather than the seed strip: whatever a producer puts in
+        `delta["content"]`, no control marker reaches the client.
+        """
         post = self._active(tokenizer)
         choice = post.process_output(
             SimpleNamespace(
