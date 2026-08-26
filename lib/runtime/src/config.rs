@@ -369,8 +369,14 @@ impl RuntimeConfig {
         }
     }
 
-    /// Create a new default runtime configuration
-    pub(crate) fn create_runtime(&self) -> std::io::Result<tokio::runtime::Runtime> {
+    /// The Tokio builder this configuration describes, not yet built.
+    ///
+    /// Separate from [`Self::create_runtime`] because some runtimes are not built by us.
+    /// `pyo3_async_runtimes::tokio::init` takes a builder and calls `build()` on it later,
+    /// at a point we do not control; handing it this builder is the only way to bound the
+    /// size of a runtime the bridge constructs on its own. Both paths must agree, so both
+    /// go through here.
+    pub fn tokio_builder(&self) -> tokio::runtime::Builder {
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         builder
             .worker_threads(
@@ -386,7 +392,12 @@ impl RuntimeConfig {
             );
             builder.enable_metrics_poll_time_histogram();
         }
-        builder.build()
+        builder
+    }
+
+    /// Create a new default runtime configuration
+    pub(crate) fn create_runtime(&self) -> std::io::Result<tokio::runtime::Runtime> {
+        self.tokio_builder().build()
     }
 }
 
@@ -553,6 +564,24 @@ mod tests {
             assert_eq!(config.num_worker_threads, Some(7), "{WORKERS} was not read");
             assert_eq!(config.max_blocking_threads, 11, "{BLOCKING} was not read");
         });
+    }
+
+    /// The builder handed to the pyo3 bridge carries the configured worker count.
+    ///
+    /// The bridge stores a builder and calls `build()` on it itself, so nothing on our side
+    /// observes the result. If `tokio_builder` ever stopped applying the config, a runtime the
+    /// bridge built would silently fall back to `available_parallelism()` — the original
+    /// DYN-4127 symptom, reintroduced somewhere no test looks.
+    #[test]
+    fn test_tokio_builder_applies_configured_worker_threads() -> Result<()> {
+        let config = RuntimeConfig::builder()
+            .num_worker_threads(Some(3))
+            .max_blocking_threads(5)
+            .build()?;
+
+        let runtime = config.tokio_builder().build()?;
+        assert_eq!(runtime.metrics().num_workers(), 3);
+        Ok(())
     }
 
     /// `Default` sets `max_blocking_threads` to the core count, not the `#[builder(default)]`
