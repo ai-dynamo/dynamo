@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Protocol, cast
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
@@ -651,6 +652,22 @@ async def preprocess_chat_request(
     )
 
 
+@lru_cache(maxsize=64)
+def _compile_marker_strip_re(strippable: tuple[str, ...]) -> "re.Pattern[str] | None":
+    """Alternation over the literals to remove, or None if there are none.
+
+    Memoised: the set is a property of (tokenizer, active parser), so a server
+    sees a handful of distinct values, but a StreamingPostProcessor is built per
+    request and re.compile over ~15 escaped literals is ~12 us -- worth paying
+    once per process rather than once per request.
+    """
+    if not strippable:
+        return None
+    # Longest-first so a marker that prefixes another cannot win.
+    ordered = sorted(strippable, key=len, reverse=True)
+    return re.compile("|".join(re.escape(m) for m in ordered))
+
+
 class StreamingPostProcessor:
     def __init__(
         self,
@@ -718,6 +735,21 @@ class StreamingPostProcessor:
         self._control_markers = tuple(
             t for t in getattr(tokenizer, "all_special_tokens", ()) if t
         )
+
+        # Markers that may be removed from user-visible content: the tokenizer's
+        # actual special tokens, minus any the active parser owns. Membership in
+        # all_special_tokens is the test -- a literal that merely looks like a
+        # control token (`<|not_a_real_special_token|>`) is ordinary generated
+        # text and must survive. Built once: it cannot change for the lifetime of
+        # this postprocessor, and compiled once per process (see the memo above).
+        self._marker_strip_re: re.Pattern[str] | None = None
+        if self.reasoning_parser is not None or self.tool_parser is not None:
+            # A tool parser's own markers are its wire format, consumed
+            # downstream; removing them here would blind the tool-start scan.
+            owned = set(self._tool_start_markers()) | set(self._tool_end_markers())
+            self._marker_strip_re = _compile_marker_strip_re(
+                tuple(m for m in self._control_markers if m not in owned)
+            )
 
         self.previous_text = ""
         self.previous_token_ids: list[int] = []
@@ -928,41 +960,19 @@ class StreamingPostProcessor:
     # the residue afterwards.
     #
     # Scope is deliberately narrow: only when a parser is actually active (the only
-    # case where skip_special_tokens was forced off), and only over the `<|...|>`
-    # control-token shape. `reasoning` is left untouched -- it is already clean, and
-    # rewriting it would risk mangling legitimate text the model quoted.
-    #
-    # Why a shape rather than `self._control_markers` (this class already collects
-    # `tokenizer.all_special_tokens` for _is_control_only_content): one of the three
-    # call sites seeds `delta_message` from the raw `delta_text` *before* tool
-    # parsing, and its result reaches the `_tool_start_markers()` scan that decides
-    # whether to buffer for tool extraction. A blanket special-token strip there
-    # would delete a tool-call marker that is also a special token and silently
-    # break tool detection. The two are near-identical in practice -- for
-    # Qwen/Qwen3-0.6B every entry of `all_special_tokens` matches this pattern --
-    # but the shape cannot reach a marker a parser owns.
-    _CONTROL_MARKER_RE = re.compile(r"<\|[A-Za-z0-9_]+\|>")
-
+    # case where skip_special_tokens was forced off), and only over literals that
+    # are genuinely in `tokenizer.all_special_tokens`. `reasoning` is left untouched
+    # -- it is already clean, and rewriting it would risk mangling legitimate text
+    # the model quoted.
     def _strip_control_markers(self, text: str | None) -> str | None:
-        if not text:
+        if not text or self._marker_strip_re is None:
             return text
-        if self.reasoning_parser is None and self.tool_parser is None:
-            return text
-        # A tool parser may own a marker of this shape (`<|tool_call|>` and
-        # friends). Those belong to its wire format and are consumed downstream, so
-        # stripping them here would blind the tool-start scan described above.
-        preserved = self._tool_start_markers() + self._tool_end_markers()
-        if not preserved:
-            return self._CONTROL_MARKER_RE.sub("", text)
-        return self._CONTROL_MARKER_RE.sub(
-            lambda match: match.group(0) if match.group(0) in preserved else "",
-            text,
-        )
+        return self._marker_strip_re.sub("", text)
 
+    @staticmethod
     def _compose_delta_message(
-        self, reasoning: str | None, content: str | None
+        reasoning: str | None, content: str | None
     ) -> DeltaMessage | None:
-        content = self._strip_control_markers(content)
         delta_message = DeltaMessage(reasoning=reasoning, content=content)
         if not delta_message.reasoning and not delta_message.content:
             return None
@@ -1089,11 +1099,10 @@ class StreamingPostProcessor:
     def _build_choice(self, output: Any, delta: dict[str, Any]) -> dict[str, Any]:
         if delta.get("tool_calls"):
             self._tool_call_choices_emitted.add(output.index)
-        # _compose_delta_message covers the parser paths, but _build_choice has
-        # several call sites and some seed `delta["content"]` directly, so a leading
-        # marker survives a strip applied only at the composer. This is the last
-        # point every choice passes through, so the invariant "no control markers
-        # reach the client" is enforced here once rather than at each producer.
+        # The single strip point. Every choice this class emits passes through here,
+        # so the invariant "no unconsumed control marker reaches the client" is
+        # enforced once at the funnel rather than at each producer -- stripping at
+        # the producers as well only re-scans text that is about to be scanned.
         if isinstance(delta.get("content"), str):
             stripped = self._strip_control_markers(delta["content"])
             if stripped:
@@ -1179,11 +1188,7 @@ class StreamingPostProcessor:
         current_text = self.previous_text + delta_text
         current_token_ids = self.previous_token_ids + delta_token_ids
 
-        # Seeds the delta directly rather than through _compose_delta_message, so it
-        # needs the same control-marker strip.
-        delta_message: DeltaMessage | None = DeltaMessage(
-            content=self._strip_control_markers(delta_text)
-        )
+        delta_message: DeltaMessage | None = DeltaMessage(content=delta_text)
 
         # ------------------------------------------------------------------
         # Drain the tool-text buffer (populated when </think> and <tool_call>

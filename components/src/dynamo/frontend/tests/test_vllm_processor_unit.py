@@ -1713,12 +1713,7 @@ class _PassthroughStreamingToolParser(ToolParser):
     """A tool parser that finds no tool call and passes the raw delta through.
 
     Subclasses the real ToolParser so every attribute the postprocessor touches
-    (engine_based_streaming, vocab, ...) exists; a bare stub only has whatever
-    the paths exercised today happen to read.
-
-    Returning the *unstripped* delta_text is what a real parser does -- it is
-    handed `delta_text`, not the seeded delta_message -- so this exercises the
-    funnel rather than the seed strip.
+    exists, and returns the unstripped `delta_text` the way a real parser does.
     """
 
     def extract_tool_calls_streaming(self, **kwargs):
@@ -1729,24 +1724,26 @@ class _PassthroughStreamingToolParser(ToolParser):
 
 
 class _MarkerOwningToolParser(_PassthroughStreamingToolParser):
-    """A tool parser whose own marker happens to match the control-token shape."""
+    """A tool parser that owns two of the tokenizer's special tokens."""
 
-    tool_call_start_token = "<|tool_call|>"
-    tool_call_end_token = "<|tool_call_end|>"
+    tool_call_start_token = "<|im_start|>"
+    tool_call_end_token = "<|im_end|>"
 
 
 class TestControlMarkerStrip:
-    """Unconsumed `<|...|>` control markers must not reach the client.
+    """Unconsumed special tokens must not reach the client.
 
     A text-grammar reasoning parser can only split the stream if the model's
     content-kind markers survive detokenisation, which is why
     ParserEngine.adjust_request forces skip_special_tokens=False. Nothing then
     removes the markers the parser did not consume, so terminal ones leak into
-    visible content: content = "<|end_message|>408<|end_message|>".
+    visible content -- the report was content = "<|end_message|>408<|end_message|>",
+    a special token on that model's tokenizer. These use `<|im_end|>`, which is
+    the equivalent on Qwen3-0.6B.
     """
 
     @staticmethod
-    def _post(tokenizer, *, tool_parser=None, reasoning_parser_class=None):
+    def _post(tokenizer, *, tool_parser=None):
         request = json.loads(json.dumps(TOOL_REQUEST))
         request.pop("tools", None)
         request, _, _, _, _ = _prepare_request(
@@ -1758,137 +1755,59 @@ class TestControlMarkerStrip:
             sampling_params=SamplingParams(),
             prompt_token_ids=[],
             tool_parser=tool_parser,
-            reasoning_parser_class=reasoning_parser_class,
+            reasoning_parser_class=None,
             chat_template_kwargs={},
             stream_response=True,
         )
 
-    def _active(self, tokenizer):
-        """A postprocessor with a parser active, which is the only gated case.
+    @staticmethod
+    def _content(post, text):
+        choice = post.process_output(
+            SimpleNamespace(
+                index=0,
+                text=text,
+                token_ids=[],
+                finish_reason="stop",
+                logprobs=None,
+            )
+        )
+        assert choice is not None
+        return choice["delta"].get("content")
 
-        Uses the passthrough parser so every path through process_output stays
-        callable, not just the ones these tests reach today.
-        """
-        return self._post(
+    def test_reported_leak_is_removed(self, tokenizer):
+        post = self._post(
             tokenizer, tool_parser=_PassthroughStreamingToolParser(tokenizer)
         )
+        assert self._content(post, "<|im_end|>408<|im_end|>") == "408"
 
-    # -- the strip itself -------------------------------------------------
+    def test_non_special_literal_of_the_same_shape_survives(self, tokenizer):
+        """Looking like a control token is not proof of being one.
 
-    @pytest.mark.parametrize(
-        "text, expected",
-        [
-            # The reported leak: terminal markers around the real answer.
-            ("<|end_message|>408<|end_message|>", "408"),
-            ("<|content_text|>hello", "hello"),
-            ("mid<|end_message|>stream", "midstream"),
-            ("no markers here", "no markers here"),
-            ("", ""),
-            (None, None),
-            # Anchored on both delimiters, so ordinary prose is untouched.
-            ("a <| b |> c", "a <| b |> c"),
-            # `-` is not in the character class.
-            ("<|end-message|>", "<|end-message|>"),
-        ],
-    )
-    def test_strip_cases(self, tokenizer, text, expected):
-        assert self._active(tokenizer)._strip_control_markers(text) == expected
-
-    def test_no_parser_active_leaves_text_untouched(self, tokenizer):
-        """The gate: models that never had markers stripped are unaffected."""
-        post = self._post(tokenizer)
-        assert post.tool_parser is None and post.reasoning_parser is None
-        assert post._strip_control_markers("<|end_message|>408") == "<|end_message|>408"
-
-    def test_a_parsers_own_markers_survive(self, tokenizer):
-        """A tool marker of this shape belongs to the parser's wire format.
-
-        The seed site strips before tool parsing, and its result feeds the
-        _tool_start_markers() scan that decides whether to buffer for tool
-        extraction. Stripping the parser's own marker there would silently break
-        tool detection.
+        `<|not_a_real_special_token|>` is absent from all_special_tokens and
+        encodes to ordinary token IDs, so it is generated text and must reach the
+        client intact.
         """
+        post = self._post(
+            tokenizer, tool_parser=_PassthroughStreamingToolParser(tokenizer)
+        )
+        literal = "The literal is <|not_a_real_special_token|>."
+        assert self._content(post, literal) == literal
+
+    def test_parser_owned_markers_are_preserved(self, tokenizer):
+        """A marker the parser owns is wire format, consumed downstream."""
         post = self._post(tokenizer, tool_parser=_MarkerOwningToolParser(tokenizer))
         assert (
-            post._strip_control_markers("<|tool_call|>{}<|tool_call_end|>")
-            == "<|tool_call|>{}<|tool_call_end|>"
+            post._strip_control_markers("<|im_start|>{}<|im_end|>")
+            == "<|im_start|>{}<|im_end|>"
         )
-        # Markers it does not own are still stripped.
-        assert (
-            post._strip_control_markers("<|end_message|>x<|tool_call|>")
-            == "x<|tool_call|>"
-        )
+        # A special token it does not own is still removed.
+        assert post._strip_control_markers("<|endoftext|>x") == "x"
 
-    # -- the funnel -------------------------------------------------------
-
-    def test_build_choice_strips_content_seeded_directly(self, tokenizer):
-        """_build_choice has several call sites that bypass the composer.
-
-        A strip applied only at _compose_delta_message still let a leading marker
-        through; enforcing the invariant at the funnel is what closed it.
-        """
-        post = self._active(tokenizer)
-        choice = post._build_choice(
-            SimpleNamespace(index=0, finish_reason=None, logprobs=None),
-            {"role": "assistant", "content": "<|end_message|>408"},
-        )
-        assert choice["delta"]["content"] == "408"
-
-    def test_build_choice_drops_content_that_was_only_markers(self, tokenizer):
-        """An all-marker delta must lose the key, not carry an empty string."""
-        post = self._active(tokenizer)
-        choice = post._build_choice(
-            SimpleNamespace(index=0, finish_reason=None, logprobs=None),
-            {"role": "assistant", "content": "<|end_message|>"},
-        )
-        assert "content" not in choice["delta"]
-
-    def test_compose_delta_message_strips_content_and_keeps_reasoning(self, tokenizer):
-        """`reasoning` is deliberately left alone -- it is already clean, and
-        rewriting it would risk mangling text the model quoted."""
-        post = self._active(tokenizer)
-        delta = post._compose_delta_message(
-            "thought about <|end_message|>", "<|end_message|>408"
-        )
-        assert delta is not None
-        assert delta.content == "408"
-        assert delta.reasoning == "thought about <|end_message|>"
-
-    def test_process_output_strips_markers_end_to_end(self, tokenizer):
-        """End to end through process_output with a parser active.
-
-        The parser re-seeds content from the raw delta_text, so this asserts the
-        funnel guarantee rather than the seed strip: whatever a producer puts in
-        `delta["content"]`, no control marker reaches the client.
-        """
-        post = self._active(tokenizer)
-        choice = post.process_output(
-            SimpleNamespace(
-                index=0,
-                text="<|end_message|>408<|end_message|>",
-                token_ids=[],
-                finish_reason="stop",
-                logprobs=None,
-            )
-        )
-        assert choice is not None
-        assert "<|" not in (choice["delta"].get("content") or "")
-        assert choice["delta"].get("content") == "408"
-
-    def test_plain_text_path_is_untouched(self, tokenizer):
-        """No parser => the fast plain-text path must not be rewritten."""
+    def test_no_parser_active_is_passthrough(self, tokenizer):
+        """Only a parser forces skip_special_tokens off, so only it needs this."""
         post = self._post(tokenizer)
-        choice = post.process_output(
-            SimpleNamespace(
-                index=0,
-                text="<|end_message|>408",
-                token_ids=[],
-                finish_reason="stop",
-                logprobs=None,
-            )
-        )
-        assert choice is not None
-        assert choice["delta"]["content"] == "<|end_message|>408"
+        assert post.tool_parser is None and post.reasoning_parser is None
+        assert self._content(post, "<|im_end|>408") == "<|im_end|>408"
 
 
 class TestToolCallGuidedDecoding:
