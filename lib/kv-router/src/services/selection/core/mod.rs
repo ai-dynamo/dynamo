@@ -273,8 +273,12 @@ impl SelectionCore {
         recovery::recover_from_peers(peers, &self.indexer_registry).await
     }
 
-    pub(crate) fn signal_indexer_ready(&self) {
-        self.indexer_registry.signal_ready();
+    pub(crate) fn start_indexer_listeners(&self) {
+        self.indexer_registry.start_listeners();
+    }
+
+    pub(crate) fn indexer_listeners_started(&self) -> bool {
+        self.indexer_registry.listeners_started()
     }
 
     pub(crate) async fn dump_indexer_events(&self) -> serde_json::Value {

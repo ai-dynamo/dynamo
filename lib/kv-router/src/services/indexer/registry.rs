@@ -30,17 +30,28 @@ pub struct IndexerEntry {
 #[serde(rename_all = "snake_case")]
 pub enum ListenerStatus {
     Pending,
+    Buffering,
+    CatchingUp,
     Active,
     Paused,
     Failed,
 }
 
 impl ListenerStatus {
-    pub const ALL: [Self; 4] = [Self::Pending, Self::Active, Self::Paused, Self::Failed];
+    pub const ALL: [Self; 6] = [
+        Self::Pending,
+        Self::Buffering,
+        Self::CatchingUp,
+        Self::Active,
+        Self::Paused,
+        Self::Failed,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
+            Self::Buffering => "buffering",
+            Self::CatchingUp => "catching_up",
             Self::Active => "active",
             Self::Paused => "paused",
             Self::Failed => "failed",
@@ -50,20 +61,26 @@ impl ListenerStatus {
     pub fn metric_index(self) -> usize {
         match self {
             Self::Pending => 0,
-            Self::Active => 1,
-            Self::Paused => 2,
-            Self::Failed => 3,
+            Self::Buffering => 1,
+            Self::CatchingUp => 2,
+            Self::Active => 3,
+            Self::Paused => 4,
+            Self::Failed => 5,
         }
     }
 
     pub fn aggregate(statuses: impl IntoIterator<Item = Self>) -> Self {
         let mut saw_pending = false;
+        let mut saw_buffering = false;
+        let mut saw_catching_up = false;
         let mut saw_active = false;
 
         for status in statuses {
             match status {
                 Self::Failed => return Self::Failed,
                 Self::Pending => saw_pending = true,
+                Self::Buffering => saw_buffering = true,
+                Self::CatchingUp => saw_catching_up = true,
                 Self::Active => saw_active = true,
                 Self::Paused => {}
             }
@@ -71,6 +88,10 @@ impl ListenerStatus {
 
         if saw_pending {
             Self::Pending
+        } else if saw_buffering {
+            Self::Buffering
+        } else if saw_catching_up {
+            Self::CatchingUp
         } else if saw_active {
             Self::Active
         } else {
@@ -213,7 +234,10 @@ impl ListenerRecord {
     ) -> std::result::Result<CancellationToken, ListenerControlError> {
         let mut runtime = self.runtime.lock();
         match runtime.status {
-            ListenerStatus::Pending | ListenerStatus::Active => {
+            ListenerStatus::Pending
+            | ListenerStatus::Buffering
+            | ListenerStatus::CatchingUp
+            | ListenerStatus::Active => {
                 let cancel_token =
                     runtime
                         .cancel_token
@@ -270,6 +294,26 @@ impl ListenerRecord {
             return false;
         }
         runtime.status = ListenerStatus::Active;
+        runtime.last_error = None;
+        true
+    }
+
+    pub(super) fn try_mark_buffering(&self, generation: u64) -> bool {
+        let mut runtime = self.runtime.lock();
+        if runtime.generation != generation || runtime.cancel_token.is_none() {
+            return false;
+        }
+        runtime.status = ListenerStatus::Buffering;
+        runtime.last_error = None;
+        true
+    }
+
+    pub(super) fn try_mark_catching_up(&self, generation: u64) -> bool {
+        let mut runtime = self.runtime.lock();
+        if runtime.generation != generation || runtime.cancel_token.is_none() {
+            return false;
+        }
+        runtime.status = ListenerStatus::CatchingUp;
         runtime.last_error = None;
         true
     }
@@ -367,8 +411,64 @@ impl WorkerRegistry {
         }
     }
 
-    pub fn signal_ready(&self) {
+    pub fn start_listeners(&self) {
         let _ = self.ready_tx.send(true);
+    }
+
+    pub fn signal_ready(&self) {
+        self.start_listeners();
+    }
+
+    pub fn listeners_started(&self) -> bool {
+        *self.ready_rx.borrow()
+    }
+
+    pub async fn wait_for_listeners_buffering(&self) -> Result<()> {
+        self.wait_for_listener_status("buffering", |status| {
+            matches!(
+                status,
+                ListenerStatus::Buffering | ListenerStatus::CatchingUp | ListenerStatus::Active
+            )
+        })
+        .await
+    }
+
+    pub async fn wait_for_listeners_active(&self) -> Result<()> {
+        self.wait_for_listener_status("active", |status| matches!(status, ListenerStatus::Active))
+            .await
+    }
+
+    async fn wait_for_listener_status<F>(&self, target: &str, ready: F) -> Result<()>
+    where
+        F: Fn(ListenerStatus) -> bool,
+    {
+        loop {
+            if self.root_cancel_token.is_cancelled() {
+                bail!("indexer listener startup cancelled while waiting for {target}");
+            }
+
+            let mut all_ready = true;
+            for worker in self.workers.iter() {
+                for (dp_rank, record) in &worker.listeners {
+                    let status = record.status();
+                    if status == ListenerStatus::Failed {
+                        bail!(
+                            "ZMQ listener for worker {} dp_rank {} failed while waiting for {target}",
+                            worker.key(),
+                            dp_rank
+                        );
+                    }
+                    if !ready(status) {
+                        all_ready = false;
+                    }
+                }
+            }
+
+            if all_ready {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     pub fn ready_rx(&self) -> watch::Receiver<bool> {
@@ -392,7 +492,7 @@ impl WorkerRegistry {
         let models = self.indexers.len();
         let workers = self.workers.len();
 
-        let mut listener_counts = [0_i64; 4];
+        let mut listener_counts = [0_i64; 6];
         for entry in self.workers.iter() {
             for record in entry.value().listeners.values() {
                 listener_counts[record.status().metric_index()] += 1;
@@ -823,6 +923,134 @@ mod tests {
 
     fn test_registry() -> WorkerRegistry {
         WorkerRegistry::new(1)
+    }
+
+    async fn register_test_listener(
+        registry: &WorkerRegistry,
+        instance_id: WorkerId,
+        dp_rank: u32,
+    ) {
+        registry
+            .register(
+                instance_id,
+                format!(
+                    "tcp://127.0.0.1:{}",
+                    20_000 + instance_id as u16 * 10 + dp_rank as u16
+                ),
+                dp_rank,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    fn listener_status(
+        registry: &WorkerRegistry,
+        instance_id: WorkerId,
+        dp_rank: u32,
+    ) -> ListenerStatus {
+        registry
+            .workers
+            .get(&instance_id)
+            .and_then(|worker| worker.listeners.get(&dp_rank).map(|record| record.status()))
+            .expect("test listener should be registered")
+    }
+
+    #[tokio::test]
+    async fn listener_enters_buffering_before_gate_opens() {
+        let registry = test_registry();
+        register_test_listener(&registry, 1, 0).await;
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            registry.wait_for_listeners_buffering(),
+        )
+        .await
+        .expect("listener should enter buffering")
+        .unwrap();
+        assert_eq!(listener_status(&registry, 1, 0), ListenerStatus::Buffering);
+        assert!(!registry.listeners_started());
+        registry.root_cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn wait_for_listeners_buffering_requires_every_worker_and_dp_rank() {
+        let registry = test_registry();
+        register_test_listener(&registry, 2, 0).await;
+        register_test_listener(&registry, 2, 1).await;
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            registry.wait_for_listeners_buffering(),
+        )
+        .await
+        .expect("all listeners should enter buffering")
+        .unwrap();
+        assert_eq!(listener_status(&registry, 2, 0), ListenerStatus::Buffering);
+        assert_eq!(listener_status(&registry, 2, 1), ListenerStatus::Buffering);
+        registry.root_cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn wait_for_listeners_buffering_returns_for_empty_registry() {
+        let registry = test_registry();
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            registry.wait_for_listeners_buffering(),
+        )
+        .await
+        .expect("empty registry should satisfy the barrier")
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_for_listeners_buffering_fails_on_listener_error_or_cancellation() {
+        let registry = test_registry();
+        registry
+            .register(
+                3,
+                "not-a-zmq-endpoint".to_string(),
+                0,
+                "test-model".to_string(),
+                "default".to_string(),
+                1,
+                None,
+            )
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            registry.wait_for_listeners_buffering(),
+        )
+        .await
+        .expect("listener failure should stop the barrier");
+        assert!(result.is_err());
+
+        let cancelled = test_registry();
+        cancelled.root_cancel_token.cancel();
+        assert!(cancelled.wait_for_listeners_buffering().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn wait_for_listeners_active_requires_every_initial_stream() {
+        let registry = test_registry();
+        register_test_listener(&registry, 4, 0).await;
+        register_test_listener(&registry, 4, 1).await;
+        registry.wait_for_listeners_buffering().await.unwrap();
+        registry.start_listeners();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            registry.wait_for_listeners_active(),
+        )
+        .await
+        .expect("all listeners should become active")
+        .unwrap();
+        assert_eq!(listener_status(&registry, 4, 0), ListenerStatus::Active);
+        assert_eq!(listener_status(&registry, 4, 1), ListenerStatus::Active);
+        registry.root_cancel_token.cancel();
     }
 
     #[tokio::test]

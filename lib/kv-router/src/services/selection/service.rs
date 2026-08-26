@@ -33,6 +33,7 @@ pub struct SelectionServiceBuilder {
     replica_sync_peers: Vec<String>,
     selection_cache: SelectionCacheConfig,
     worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
+    defer_indexer_listener_start: bool,
 }
 
 impl SelectionServiceBuilder {
@@ -45,11 +46,17 @@ impl SelectionServiceBuilder {
             replica_sync_peers: Vec::new(),
             selection_cache: SelectionCacheConfig::default(),
             worker_selection_policy_factory: None,
+            defer_indexer_listener_start: false,
         }
     }
 
     pub fn indexer_threads(mut self, indexer_threads: usize) -> Self {
         self.indexer_threads = indexer_threads;
+        self
+    }
+
+    pub fn defer_indexer_listener_start(mut self) -> Self {
+        self.defer_indexer_listener_start = true;
         self
     }
 
@@ -135,7 +142,9 @@ impl SelectionServiceBuilder {
                 }
             }
         }
-        core.signal_indexer_ready();
+        if !self.defer_indexer_listener_start {
+            core.start_indexer_listeners();
+        }
 
         let peer_manager = if replica_runtime.is_some() {
             let weak_core = Arc::downgrade(&core);
@@ -249,6 +258,14 @@ impl SelectionService {
     /// The port this service uses for replica synchronization, if enabled.
     pub fn replica_sync_port(&self) -> Option<u16> {
         self.replica_sync_port
+    }
+
+    pub fn start_indexer_listeners(&self) {
+        self.core.start_indexer_listeners();
+    }
+
+    pub fn indexer_listeners_started(&self) -> bool {
+        self.core.indexer_listeners_started()
     }
 
     pub async fn patch_worker(
@@ -527,5 +544,32 @@ mod tests {
         let service = build.await.unwrap().unwrap();
         service.shutdown().await;
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn builder_starts_indexer_listeners_by_default() {
+        let service = SelectionServiceBuilder::new(test_config())
+            .indexer_threads(1)
+            .build()
+            .await
+            .unwrap();
+        assert!(service.indexer_listeners_started());
+        service.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn deferred_builder_requires_explicit_listener_start() {
+        let service = SelectionServiceBuilder::new(test_config())
+            .indexer_threads(1)
+            .defer_indexer_listener_start()
+            .build()
+            .await
+            .unwrap();
+        assert!(!service.indexer_listeners_started());
+        service.start_indexer_listeners();
+        assert!(service.indexer_listeners_started());
+        service.start_indexer_listeners();
+        assert!(service.indexer_listeners_started());
+        service.shutdown().await;
     }
 }
