@@ -19,14 +19,18 @@ use minijinja::value::Value;
 
 use dynamo_renderer::{
     ChatTemplate, ChatTemplateValue, ContextMixins, OAIChatLikeRequest, PromptFormatter,
-    PromptInput, TextInput, TokenInput, deepseek_formatter_for, kimi_k3_formatter_for,
-    may_be_fix_tool_schema,
+    PromptInput, RenderedPrompt, TextInput, TokenInput, deepseek_formatter_for,
+    kimi_k3_formatter_for, may_be_fix_tool_schema,
 };
 
 use crate::model_card::{ModelDeploymentCard, PromptFormatterArtifact};
 use crate::preprocessor::media::MediaDecoder;
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
+};
+use dynamo_protocols::types::{
+    ChatCompletionRequestAssistantMessageContent,
+    ChatCompletionRequestAssistantMessageContentPart, ChatCompletionRequestMessage,
 };
 
 /// lib/llm-local extension carrying multimodal media-IO config. Kept off
@@ -272,8 +276,12 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     }
 
     fn should_add_generation_prompt(&self) -> bool {
-        // Using vLLM default behavior
-        true
+        // vLLM / HF: continue_final_message leaves the last assistant turn open,
+        // which is incompatible with appending a new generation prompt.
+        if self.common.continue_final_message == Some(true) {
+            return false;
+        }
+        self.common.add_generation_prompt.unwrap_or(true)
     }
 
     fn extract_text(&self) -> Option<TextInput> {
@@ -478,6 +486,60 @@ pub fn prompt_formatter_from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptForm
     }
 }
 
+/// HuggingFace `apply_chat_template(continue_final_message=True)`: after render,
+/// drop closing tokens so the prompt ends at the last assistant text.
+pub(crate) fn apply_continue_final_message(
+    prompt: RenderedPrompt,
+    messages: Option<&[ChatCompletionRequestMessage]>,
+) -> RenderedPrompt {
+    let Some(final_text) = last_assistant_text(messages.unwrap_or(&[])) else {
+        return prompt;
+    };
+    let rendered = prompt.as_str();
+    let trimmed = final_text.trim();
+    let (idx, len) = match rendered.rfind(&final_text) {
+        Some(idx) => (idx, final_text.len()),
+        None if !trimmed.is_empty() && trimmed != final_text => match rendered.rfind(trimmed) {
+            Some(idx) => (idx, trimmed.len()),
+            None => {
+                tracing::warn!(
+                    "continue_final_message: last assistant text not found in rendered prompt"
+                );
+                return prompt;
+            }
+        },
+        None => {
+            tracing::warn!(
+                "continue_final_message: last assistant text not found in rendered prompt"
+            );
+            return prompt;
+        }
+    };
+    RenderedPrompt::text(rendered[..idx + len].to_string())
+}
+
+fn last_assistant_text(messages: &[ChatCompletionRequestMessage]) -> Option<String> {
+    let ChatCompletionRequestMessage::Assistant(message) = messages.last()? else {
+        return None;
+    };
+    match message.content.as_ref()? {
+        ChatCompletionRequestAssistantMessageContent::Text(text) if !text.is_empty() => {
+            Some(text.clone())
+        }
+        ChatCompletionRequestAssistantMessageContent::Array(parts) => {
+            parts.iter().rev().find_map(|part| match part {
+                ChatCompletionRequestAssistantMessageContentPart::Text(part)
+                    if !part.text.is_empty() =>
+                {
+                    Some(part.text.clone())
+                }
+                _ => None,
+            })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::normalize_tool_call_arguments;
@@ -589,5 +651,92 @@ mod tests {
             args.as_str().unwrap(),
             r#"{"location": "San Francisco", "unit": "celsius"}"#
         );
+    }
+
+    #[test]
+    fn continue_final_message_truncates_after_last_assistant_text() {
+        use dynamo_protocols::types::ChatCompletionRequestMessage;
+        use dynamo_renderer::RenderedPrompt;
+
+        let prompt = RenderedPrompt::text(
+            "user text<|im_end|>LLM-Native Interaction<|im_end|><|im_start|>assistant".to_string(),
+        );
+        let messages: Vec<ChatCompletionRequestMessage> = serde_json::from_value(serde_json::json!([
+            {"role": "user", "content": "user text"},
+            {"role": "assistant", "content": "LLM-Native Interaction"}
+        ]))
+        .unwrap();
+
+        let rendered = super::apply_continue_final_message(prompt, Some(&messages));
+        assert_eq!(rendered.as_str(), "user text<|im_end|>LLM-Native Interaction");
+    }
+
+    #[test]
+    fn continue_final_message_uses_trimmed_content_when_template_trims() {
+        use dynamo_protocols::types::ChatCompletionRequestMessage;
+        use dynamo_renderer::RenderedPrompt;
+
+        let prompt = RenderedPrompt::text("hello world extra".to_string());
+        let messages: Vec<ChatCompletionRequestMessage> = serde_json::from_value(serde_json::json!([
+            {"role": "assistant", "content": "  world  "}
+        ]))
+        .unwrap();
+
+        let rendered = super::apply_continue_final_message(prompt, Some(&messages));
+        assert_eq!(rendered.as_str(), "hello world");
+    }
+
+    #[test]
+    fn continue_final_message_uses_last_occurrence_when_text_repeats() {
+        use dynamo_protocols::types::ChatCompletionRequestMessage;
+        use dynamo_renderer::RenderedPrompt;
+
+        let prompt = RenderedPrompt::text(
+            "LLM-Native Interaction in the user turn. LLM-Native Interaction<|im_end|>".to_string(),
+        );
+        let messages: Vec<ChatCompletionRequestMessage> = serde_json::from_value(serde_json::json!([
+            {"role": "user", "content": "LLM-Native Interaction in the user turn."},
+            {"role": "assistant", "content": "LLM-Native Interaction"}
+        ]))
+        .unwrap();
+
+        let rendered = super::apply_continue_final_message(prompt, Some(&messages));
+        assert_eq!(
+            rendered.as_str(),
+            "LLM-Native Interaction in the user turn. LLM-Native Interaction"
+        );
+    }
+
+    #[test]
+    fn continue_final_message_reads_last_text_part_from_array_content() {
+        use dynamo_protocols::types::ChatCompletionRequestMessage;
+        use dynamo_renderer::RenderedPrompt;
+
+        let prompt = RenderedPrompt::text("prefix Design extra".to_string());
+        let messages: Vec<ChatCompletionRequestMessage> = serde_json::from_value(serde_json::json!([
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "ignored"},
+                {"type": "text", "text": "Design"}
+            ]}
+        ]))
+        .unwrap();
+
+        let rendered = super::apply_continue_final_message(prompt, Some(&messages));
+        assert_eq!(rendered.as_str(), "prefix Design");
+    }
+
+    #[test]
+    fn continue_final_message_keeps_prompt_when_assistant_text_is_missing() {
+        use dynamo_protocols::types::ChatCompletionRequestMessage;
+        use dynamo_renderer::RenderedPrompt;
+
+        let prompt = RenderedPrompt::text("unchanged".to_string());
+        let messages: Vec<ChatCompletionRequestMessage> = serde_json::from_value(serde_json::json!([
+            {"role": "assistant", "content": "not-in-the-prompt"}
+        ]))
+        .unwrap();
+
+        let rendered = super::apply_continue_final_message(prompt, Some(&messages));
+        assert_eq!(rendered.as_str(), "unchanged");
     }
 }

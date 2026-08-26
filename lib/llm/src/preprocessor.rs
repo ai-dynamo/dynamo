@@ -90,7 +90,10 @@ use crate::protocols::{
 };
 use crate::tokenizers::traits::Tokenizer;
 
-use crate::preprocessor::prompt::{MediaRequestExt, prompt_formatter_from_mdc};
+use crate::preprocessor::prompt::{
+    MediaRequestExt, apply_continue_final_message, prompt_formatter_from_mdc,
+};
+use crate::protocols::openai::common_ext::CommonExtProvider;
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
 
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
@@ -2044,7 +2047,8 @@ impl OpenAIPreprocessor {
             + SamplingOptionsProvider
             + StopConditionsProvider
             + OutputOptionsProvider
-            + NvExtProvider,
+            + NvExtProvider
+            + CommonExtProvider,
     >(
         &self,
         request: &R,
@@ -2068,7 +2072,8 @@ impl OpenAIPreprocessor {
             + SamplingOptionsProvider
             + StopConditionsProvider
             + OutputOptionsProvider
-            + NvExtProvider,
+            + NvExtProvider
+            + CommonExtProvider,
     >(
         &self,
         request: &R,
@@ -2451,15 +2456,24 @@ impl OpenAIPreprocessor {
             + SamplingOptionsProvider
             + StopConditionsProvider
             + OutputOptionsProvider
-            + NvExtProvider,
+            + NvExtProvider
+            + CommonExtProvider,
     >(
         &self,
         request: &R,
     ) -> Result<Option<RenderedPrompt>> {
-        if self.normalize_tool_call_args {
-            return self.apply_template_inner(&NormalizedArgsRequest(request));
-        }
-        self.apply_template_inner(request)
+        let formatted_prompt = if self.normalize_tool_call_args {
+            self.apply_template_inner(&NormalizedArgsRequest(request))?
+        } else {
+            self.apply_template_inner(request)?
+        };
+        Ok(formatted_prompt.map(|prompt| {
+            if request.get_continue_final_message() == Some(true) {
+                apply_continue_final_message(prompt, request.typed_messages())
+            } else {
+                prompt
+            }
+        }))
     }
 
     fn apply_template_inner<
@@ -8513,6 +8527,225 @@ mod tests {
         let rendered = render_through_preprocessor(formatter.as_ref(), &request).unwrap();
 
         assert_eq!(rendered.as_str(), "hello");
+    }
+
+    #[test]
+    fn continue_final_message_leaves_last_assistant_open_on_llama_template() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.set_name("test-model");
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+
+        let default_request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "user", "content": "Continue this sentence"},
+                    {"role": "assistant", "content": "LLM-Native Interaction"}
+                ]
+            }))
+            .unwrap();
+        let continue_request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "user", "content": "Continue this sentence"},
+                    {"role": "assistant", "content": "LLM-Native Interaction"}
+                ],
+                "add_generation_prompt": false,
+                "continue_final_message": true
+            }))
+            .unwrap();
+
+        let default_prompt = preprocessor
+            .apply_template(&default_request)
+            .unwrap()
+            .unwrap();
+        let continue_prompt = preprocessor
+            .apply_template(&continue_request)
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            default_prompt
+                .as_str()
+                .ends_with("<|start_header_id|>assistant<|end_header_id|>\n\n"),
+            "default render should start a new assistant turn, got {:?}",
+            default_prompt.as_str()
+        );
+        assert!(
+            continue_prompt
+                .as_str()
+                .ends_with("LLM-Native Interaction"),
+            "continue_final_message should leave the last assistant open, got {:?}",
+            continue_prompt.as_str()
+        );
+        assert!(
+            !continue_prompt.as_str().contains(
+                "LLM-Native Interaction<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
+            ),
+            "continue_final_message must not close the last assistant and start a new turn, got {:?}",
+            continue_prompt.as_str()
+        );
+    }
+
+    #[test]
+    fn continue_final_message_without_explicit_add_generation_prompt_still_continues() {
+        use dynamo_renderer::OAIChatLikeRequest;
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Continue this sentence"},
+                {"role": "assistant", "content": "LLM-Native Interaction"}
+            ],
+            "continue_final_message": true
+        }))
+        .unwrap();
+
+        assert!(
+            !request.should_add_generation_prompt(),
+            "continue_final_message must suppress the generation prompt when add_generation_prompt is omitted"
+        );
+
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.set_name("test-model");
+        let prompt = OpenAIPreprocessor::new(mdc)
+            .unwrap()
+            .apply_template(&request)
+            .unwrap()
+            .unwrap();
+        assert!(
+            prompt.as_str().ends_with("LLM-Native Interaction"),
+            "omitting add_generation_prompt must still leave the last assistant open, got {:?}",
+            prompt.as_str()
+        );
+    }
+
+    #[test]
+    fn should_add_generation_prompt_defaults_true_and_continue_forces_false() {
+        use dynamo_renderer::OAIChatLikeRequest;
+
+        let unset: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        assert!(unset.should_add_generation_prompt());
+
+        let explicit_false: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "add_generation_prompt": false
+            }))
+            .unwrap();
+        assert!(!explicit_false.should_add_generation_prompt());
+
+        let continue_only: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "partial"}
+                ],
+                "continue_final_message": true
+            }))
+            .unwrap();
+        assert!(!continue_only.should_add_generation_prompt());
+    }
+
+    /// Qwen-style templates close every turn, including the last assistant. Truncate
+    /// after render is what actually leaves the prefix open; Llama's mock template
+    /// already omits the last eot when `add_generation_prompt` is false.
+    const QWEN_STYLE_TEMPLATE: &str = "\
+{%- for message in messages -%}\
+{%- if message.role == 'user' -%}{{ '<|im_start|>user\n' + message.content + '<|im_end|>\n' }}\
+{%- elif message.role == 'assistant' -%}{{ '<|im_start|>assistant\n' + message.content + '<|im_end|>\n' }}\
+{%- endif -%}\
+{%- endfor -%}\
+{%- if add_generation_prompt -%}{{ '<|im_start|>assistant\n' }}{%- endif -%}";
+
+    fn continue_request() -> NvCreateChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Continue this sentence"},
+                {"role": "assistant", "content": "LLM-Native Interaction"}
+            ],
+            "add_generation_prompt": false,
+            "continue_final_message": true
+        }))
+        .unwrap()
+    }
+
+    fn render_with_continue_final_message(
+        formatter: &dyn OAIPromptFormatter,
+        request: &NvCreateChatCompletionRequest,
+    ) -> RenderedPrompt {
+        use crate::protocols::openai::common_ext::CommonExtProvider;
+        use dynamo_renderer::OAIChatLikeRequest;
+
+        let rendered = formatter.render_prompt(request).unwrap();
+        if request.get_continue_final_message() == Some(true) {
+            apply_continue_final_message(rendered, request.typed_messages())
+        } else {
+            rendered
+        }
+    }
+
+    #[test]
+    fn continue_final_message_strips_qwen_style_closing_tokens() {
+        let formatter = test_prompt_formatter(QWEN_STYLE_TEMPLATE);
+        let default_request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "user", "content": "Continue this sentence"},
+                    {"role": "assistant", "content": "LLM-Native Interaction"}
+                ]
+            }))
+            .unwrap();
+        let closed_only: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "user", "content": "Continue this sentence"},
+                    {"role": "assistant", "content": "LLM-Native Interaction"}
+                ],
+                "add_generation_prompt": false
+            }))
+            .unwrap();
+
+        let default_prompt =
+            render_with_continue_final_message(formatter.as_ref(), &default_request);
+        let closed_prompt = render_with_continue_final_message(formatter.as_ref(), &closed_only);
+        let continue_prompt =
+            render_with_continue_final_message(formatter.as_ref(), &continue_request());
+
+        assert!(
+            default_prompt.as_str().ends_with("<|im_start|>assistant\n"),
+            "default Qwen render should start a new assistant turn, got {:?}",
+            default_prompt.as_str()
+        );
+        assert!(
+            closed_prompt
+                .as_str()
+                .ends_with("LLM-Native Interaction<|im_end|>\n"),
+            "add_generation_prompt=false alone must still close the last assistant, got {:?}",
+            closed_prompt.as_str()
+        );
+        assert_eq!(
+            continue_prompt.as_str(),
+            "<|im_start|>user\nContinue this sentence<|im_end|>\n<|im_start|>assistant\nLLM-Native Interaction"
+        );
     }
 
     #[test]

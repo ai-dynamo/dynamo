@@ -620,6 +620,11 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_top_k(self.get_top_k())?;
         // Cross-field validation
         validate::validate_n_with_temperature(self.inner.n, self.inner.temperature)?;
+        validate::validate_continue_final_message(
+            self.common.add_generation_prompt,
+            self.common.continue_final_message,
+            &self.inner.messages,
+        )?;
 
         Ok(())
     }
@@ -1147,6 +1152,79 @@ mod tests {
                 "unexpected error for {arguments:?}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn test_validate_continue_final_message_rejects_both_true() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Continue this sentence"},
+                {"role": "assistant", "content": "LLM-Native Interaction"}
+            ],
+            "add_generation_prompt": true,
+            "continue_final_message": true
+        }))
+        .expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request)
+            .expect_err("continue_final_message and add_generation_prompt cannot both be true");
+        assert!(
+            err.to_string()
+                .contains("Cannot set both `continue_final_message` and `add_generation_prompt`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_continue_final_message_requires_last_assistant() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "continue_final_message": true
+        }))
+        .expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request)
+            .expect_err("continue_final_message requires last assistant");
+        assert!(
+            err.to_string().contains("last message to be an assistant"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_continue_final_message_omitted_add_generation_prompt_ok() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Continue this sentence"},
+                {"role": "assistant", "content": "LLM-Native Interaction"}
+            ],
+            "continue_final_message": true
+        }))
+        .expect("Failed to deserialize request");
+
+        ValidateRequest::validate(&request)
+            .expect("omitting add_generation_prompt with continue_final_message must be accepted");
+    }
+
+    #[test]
+    fn test_validate_continue_final_message_with_explicit_false_add_generation_prompt() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Continue this sentence"},
+                {"role": "assistant", "content": "LLM-Native Interaction"}
+            ],
+            "add_generation_prompt": false,
+            "continue_final_message": true
+        }))
+        .expect("Failed to deserialize request");
+
+        ValidateRequest::validate(&request).expect(
+            "add_generation_prompt=false with continue_final_message=true must be accepted",
+        );
     }
 
     #[test]
