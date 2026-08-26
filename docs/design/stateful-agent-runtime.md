@@ -1,6 +1,6 @@
 # Stateful Agent Traffic Runtime
 
-**Status:** Direct-path Responses and Anthropic Messages vertical slices implemented; MCP design, observability completion, and GAIE/EPP integration remain
+**Status:** Direct-path Responses and Anthropic Messages vertical slices implemented; narrow MCP implementation, observability completion, and GAIE/EPP integration remain
 **Scope:** A composition model for native OpenAI Responses and Anthropic Messages traffic, durable state, external tools, Kubernetes-native sandboxes, and Dynamo inference.
 **Decision horizon:** Productionize the direct Dynamo path first; preserve the same boundaries for Dynamo GAIE/EPP Kubernetes deployments.
 
@@ -43,7 +43,7 @@ Two components are called “frontend” in a GAIE deployment. They have differe
 - Keep stateless requests off the state-store and agent-runtime path.
 - Keep server-owned tools outside Dynamo, with separate credentials, egress, execution budgets, and recovery semantics.
 - Run the same state runtime against direct Dynamo locally and through Dynamo EPP in Kubernetes.
-- Provide one real runtime-owned web-search connector and one Kubernetes-native sandbox provider without moving either implementation into Dynamo or `agent-rt`.
+- Provide one real runtime-owned web-search connector and one Kubernetes-native sandbox provider without moving either implementation into Dynamo or `agent-rt/core`.
 
 ## Non-Goals
 
@@ -145,12 +145,13 @@ The direct-path vertical slice is split by responsibility rather than by engine:
 
 | Component | Current implementation |
 | --- | --- |
-| Runtime contracts and orchestration | `frontend-crates/agent-rt`: native Responses materialization, pull-based stream observation, public response identity, tool rounds, checkpoint gating, and the traits above. |
-| Durable response/tool state | `frontend-crates/agent-rt-store`: embedded DuckDB and shared PostgreSQL implementations. |
-| Read-only server tools | `frontend-crates/agent-tools`: bounded Brave web search behind `ToolExecutor`. |
-| Sandbox contract and adapters | `frontend-crates/agent-sandbox`: `SandboxProvider`, HTTP provider client, Kubernetes Agent Sandbox control plane, sandboxd data plane, and the durable execution supervisor. |
-| Sandbox service | `frontend-crates/agent-sandbox-service`: authenticated HTTP service, PostgreSQL execution fencing, operator catalog, container images, and Kubernetes manifests. It is deployed separately from Dynamo. |
-| Dynamo composition | `dynamo-llm`'s optional `agent-rt-poc` feature: trusted ingress scope, filtered Dynamo carrier, native typed Responses and Anthropic streaming with Dynamo-owned SSE, DuckDB runtime construction, and deployment-selected web-search/sandbox routes. |
+| Runtime contracts and orchestration | `frontend-crates/agent-rt/core`: native Responses materialization, pull-based stream observation, public response identity, tool rounds, checkpoint gating, and the traits above. |
+| Durable response/tool state | `frontend-crates/agent-rt/store`: embedded SQLite and shared PostgreSQL implementations. |
+| Read-only server tools | `frontend-crates/agent-rt/tools`: bounded Brave web search behind `ToolExecutor`. |
+| Configured MCP connector (next) | `frontend-crates/agent-rt/mcp`: an `rmcp`-backed `ToolExecutor` for trusted Streamable HTTP servers. The runtime core does not depend on the MCP SDK. |
+| Sandbox contract and adapters | `frontend-crates/agent-rt/sandbox`: `SandboxProvider`, HTTP provider client, Kubernetes Agent Sandbox control plane, sandboxd data plane, and the durable execution supervisor. |
+| Sandbox service | `frontend-crates/agent-rt/sandbox-service`: authenticated HTTP service, PostgreSQL execution fencing, operator catalog, container images, and Kubernetes manifests. It is deployed separately from Dynamo. |
+| Dynamo composition | `dynamo-llm`'s optional `agent-rt-poc` feature: trusted ingress scope, filtered Dynamo carrier, native typed Responses and Anthropic streaming with Dynamo-owned SSE, SQLite runtime construction, and deployment-selected web-search/sandbox routes. |
 
 Anthropic selection is trusted host policy. Ordinary Claude Code requests and client-owned tools stay on Dynamo's stateless Messages path. A request enters the durable runtime only when it declares a deployment-configured runtime tool or the operator sets `DYN_AGENT_RT_STATEFUL_ANTHROPIC=true`. Every model step then re-enters Dynamo's native Messages core; `agent-rt` does not perform Anthropic-to-chat conversion itself.
 
@@ -341,34 +342,34 @@ Before dispatch, `agent-rt` writes a durable tool journal record keyed by respon
 
 ### Configured MCP Plan
 
-MCP is a configured runtime connector, not a client-supplied network capability and not an inference feature. The intended v1 path is:
+MCP is a configured runtime connector, not a client-supplied network capability and not an inference feature. The first seam is deliberately narrow:
 
 ```text
 Dynamo protocol frontend policy
-  -> versioned MCP catalog entry and trusted tool schema
-  -> agent-rt ToolRouter (connector=mcp, server/profile/tool)
+  -> request-declared tool matched against trusted name and schema
+  -> agent-rt ToolRouter (connector=mcp, fixed profile/tool)
   -> durable ToolJournal claim
-  -> external MCP executor/bridge
-  -> configured Streamable HTTP MCP server
+  -> agent-rt/mcp ToolExecutor (rmcp)
+  -> one configured Streamable HTTP MCP server
 ```
 
-The catalog is deployment or tenant policy and contains the public model tool name, MCP server/profile ID, remote tool name, trusted JSON schema, schema/catalog version, authorization profile, timeout/output limits, and side-effect classification. A client may opt into an allowed public name, but cannot set the server URL, transport, credential, remote method, or replace the trusted schema. A later policy may inject tools without a client declaration; that is a Dynamo frontend policy operation before the native request enters `agent-rt`.
+`frontend-crates/agent-rt/mcp` is a separate crate implementing the existing `ToolExecutor`; it does not add a new public registry, catalog, or MCP-specific runtime trait. `agent-rt/core` remains SDK- and transport-independent. Dynamo owns concrete deployment assembly and enables the route only when its trusted configuration is valid.
 
-The MCP executor owns initialization, capability negotiation, connection pooling, `tools/list` verification, `tools/call`, OAuth/service credentials, provider errors, and bounded result normalization. The first remote transport is Streamable HTTP. Local `stdio` servers run only behind the external executor service; the Dynamo frontend does not spawn arbitrary commands. V1 excludes MCP sampling, elicitation, roots, arbitrary resources/prompts, and client-selected servers.
+The first configuration contains one operator-selected server URL, one deployment-owned authorization profile, and a small allowlist of public tool name, remote tool name, expected JSON schema, timeout, and output limit. The request must declare an allowed public tool with the trusted schema; clients cannot set the server URL, transport, headers, credentials, remote method, or replacement schema. Trusted frontend tool injection is deferred.
 
-Catalog and tool-schema versions are pinned for an active turn so a mid-turn deployment update cannot silently change model-visible tool semantics. At startup or catalog refresh, the executor compares configured schemas with `tools/list` and fails the affected route closed on incompatibility. Checkpoints store connector/profile/tool identity and schema digest, never server credentials.
+The executor uses the official Rust MCP SDK for initialization, protocol-version and capability negotiation, Streamable HTTP session lifecycle, `tools/list`, and `tools/call`. It verifies the configured allowlist against `tools/list`, fails the affected route closed on name/schema incompatibility, bounds the returned content, normalizes structured or textual content into the existing tool result, and preserves MCP's error-result signal separately from transport/protocol failure.
 
-MCP does not supply exactly-once execution. Each catalog entry declares `read_only`, `idempotent_with_key`, or `side_effecting_unknown`. Read-only calls may be retried within the bounded tool policy. An idempotent entry must define how the execution key is transmitted and how outcome lookup works. An unknown side-effecting call is never blindly redispatched after a lost response; its journal becomes `OutcomeUnknown`.
+Every first-slice tool is operator-classified as read-only. A completed `ToolJournal` entry is replayed without another remote call; a lost response may be retried only under the existing bounded read-only policy. Side-effecting tools, transmitted idempotency keys, outcome lookup, and `OutcomeUnknown` resolution are later extensions and require an explicit executor contract.
+
+V1 excludes client-supplied servers or headers, multiple servers, `stdio`, tool injection, resources, prompts, sampling, elicitation, roots, tasks, and dynamic tenant catalogs. If credential isolation or independent scaling later requires an external MCP bridge, it can implement the same `ToolExecutor` seam without changing core orchestration.
 
 Implementation order:
 
-1. Freeze the catalog/config schema and tenant authorization lookup.
-2. Implement one external Streamable HTTP MCP executor with initialize/list/call, fixed credentials, bounds, and normalized errors.
-3. Add the `mcp` route to the existing protocol-neutral Dynamo executor mux and require a request-declared trusted tool for the first slice.
-4. Prove unary and streaming Responses plus Anthropic runtime-tool rounds, idempotent replay, catalog mismatch, timeout, lost-response, and credential non-persistence.
-5. Decide whether trusted frontend tool injection is required before adding dynamic discovery or more MCP capabilities.
-
-No MCP implementation should begin until steps 1 and the side-effect classifications are reviewed.
+1. Add `frontend-crates/agent-rt/mcp`, pin `rmcp`, and define the one-server configuration with secret-safe debug/serialization behavior.
+2. Extend the generic tool result only as needed to preserve MCP `isError`, then implement initialize/list/schema verification/call/result normalization with strict bounds.
+3. Add the fixed `mcp` route to Dynamo's existing executor mux; require exact trusted request declarations and connector authorization.
+4. Prove unary and streaming Responses plus Anthropic runtime-tool rounds, completed-result replay, read-only lost-response recovery, schema mismatch, timeout, size limits, and credential non-persistence.
+5. Reassess multi-server catalogs, tool injection, side effects, and an external bridge only from demonstrated deployment requirements.
 
 ### Sandbox Plane and Kubernetes Reference Provider
 
@@ -456,11 +457,11 @@ ForwardedCarrierSnapshot (optional)
 
 Large artifacts and raw tool payloads are externalized with redacted checkpoint metadata. The state store enforces retention, maximum retained model-visible items/tokens, and a versioned compaction policy.
 
-- DuckDB is the v1 store for embedded development, local durable execution, restart tests, and explicitly single-replica deployments. Access is serialized inside one frontend process; it is not presented as a shared writer, an HA database, or a Kubernetes multi-replica configuration.
-- PostgreSQL implements the same traits and remains available for shared-state development, but wiring it into the Dynamo deployment is post-v1. Shipping DuckDB does not imply that the PostgreSQL HA acceptance matrix is complete.
+- SQLite is the v1 store for embedded development, local durable execution, restart tests, and explicitly single-replica deployments. It runs with foreign keys, WAL, `synchronous=FULL`, and a bounded busy timeout; store operations use blocking workers and serialized connection access. It is not presented as a shared HA database or a Kubernetes multi-replica configuration. Dynamo selects a durable file with `DYN_AGENT_RT_SQLITE_PATH`; omitting it uses an explicitly non-durable in-memory store.
+- PostgreSQL implements the same traits and remains available for shared-state development, but wiring it into the Dynamo deployment is post-v1. Shipping SQLite does not imply that the PostgreSQL HA acceptance matrix is complete.
 - Both stores use parent-linked append-oriented rows so write amplification is O(current turn), not O(conversation history).
 
-Before v1, add a deliberately small DuckDB migration policy: a monotonic internal schema version; only forward, transactional migrations supported by the running binary; fail closed on a newer on-disk version; and restore-from-backup rather than reverse migration for downgrade. Any migration that rewrites checkpoint semantics requires a compatibility test with a database produced by the previous release. The current single `0001` bootstrap migration does not yet satisfy this release requirement.
+Before v1, add a deliberately small SQLite migration policy: a monotonic internal schema version; only forward, transactional migrations supported by the running binary; fail closed on a newer on-disk version; and restore-from-backup rather than reverse migration for downgrade. Any migration that rewrites checkpoint semantics requires a compatibility test with a database produced by the previous release. The current single `0001` bootstrap migration does not yet satisfy this release requirement.
 
 ## Observability Boundary
 
@@ -508,7 +509,7 @@ Implemented:
 - Dynamo now exposes the same typed in-process seam for Anthropic Messages. Stateful Anthropic requests preserve native Messages DTOs, runtime tool rounds append native assistant/tool-result blocks, public IDs use `msg_...`, and Dynamo remains the SSE serializer and inference host.
 - `agent-rt` observes the pull-based stream, rewrites public identity, coordinates multiple model/tool steps, and owns no socket, SSE encoder, or token queue.
 - Trusted local/proxy authorization, typed non-leaking HTTP failures, a filtered non-durable Dynamo invocation carrier, and connector authorization are wired at ingress.
-- DuckDB and PostgreSQL implement checkpoint and tool-journal traits. The v1 Dynamo deployment target is one frontend replica with a durable DuckDB path; PostgreSQL wiring and multi-replica claims are not part of the v1 promise.
+- SQLite and PostgreSQL implement checkpoint and tool-journal traits. The v1 Dynamo deployment target is one frontend replica with a durable SQLite path; PostgreSQL wiring and multi-replica claims are not part of the v1 promise.
 - Brave web search runs through the durable tool loop with a deployment-owned credential, read-only recovery, timeout/concurrency/output limits, and normalized results.
 - The authenticated external sandbox service, PostgreSQL execution store, Kubernetes Agent Sandbox provider, sandboxd adapter, hardened base manifests, images, and disposable Kind proof are implemented. Kind currently proves execution, lookup, artifacts, cancellation, and cleanup—not gVisor/Kata or CNI isolation.
 - Qwen3.8-27B-FP8 on `try6767` completed a two-step runtime-owned Python call through Dynamo and the local Kubernetes provider. The public stream exposed only lifecycle plus final assistant events; PostgreSQL independently recorded `42\n` and the 16-byte `model-proof.txt` artifact. The exact replay returned the same response ID in 26 ms without another sandbox execution.
@@ -516,9 +517,9 @@ Implemented:
 
 Remaining cross-provider acceptance work, in order:
 
-1. Implement and test the versioned DuckDB migration/startup policy described above.
+1. Implement and test the versioned SQLite migration/startup policy described above.
 2. Add host-integrated runtime/store/tool observations and the first dashboard/alerts without duplicating Dynamo inference metrics.
-3. Complete the configured MCP design review; implementation remains the next separate feature.
+3. Implement the narrow configured MCP slice above; broader catalogs, side effects, and MCP capability breadth remain deferred.
 4. Add a deployment-level checkpoint-store failure injector if live fault testing beyond the deterministic runtime contract test is required; `agent-rt` already proves that an injected terminal commit failure releases neither staged deltas nor `response.completed`.
 5. Exercise one live Brave request when deployment credentials are available.
 
@@ -536,7 +537,7 @@ Kubernetes-provider-specific acceptance, which does not block other `SandboxProv
 
 ### Phase 3: later tool breadth
 
-- Configured MCP connector catalog and tenant policy.
+- Multiple MCP servers, dynamic tenant catalogs, trusted tool injection, and additional MCP capabilities only after the narrow connector is accepted.
 - Additional sandbox providers only through the stable external provider contract.
 - Parallel tool scheduling only after call dependencies, idempotency, output ordering, and resource accounting are established.
 
@@ -550,15 +551,16 @@ Kubernetes-provider-specific acceptance, which does not block other `SandboxProv
 - Lease/fencing prevents duplicate inference for concurrent continuation submissions.
 - Terminal public completion is never emitted before durable terminal state.
 - No bearer tokens, arbitrary inbound headers, tool credentials, or raw traces enter checkpoint storage.
-- DuckDB survives process restart in a single-replica deployment, rejects incompatible schema versions, and applies supported forward migrations transactionally. Multi-replica Dynamo deployment is explicitly unsupported until PostgreSQL is wired and accepted.
+- SQLite survives process restart in a single-replica deployment, rejects incompatible schema versions, and applies supported forward migrations transactionally. Multi-replica Dynamo deployment is explicitly unsupported until PostgreSQL is wired and accepted.
 - A real web-search call executes server-side, is journaled, feeds a second Dynamo model step, and recovers without blind redispatch.
+- One configured read-only MCP tool executes through Streamable HTTP, is schema-verified and journaled, feeds a second native model step, and cannot receive a client-selected endpoint, header, credential, or remote method.
 - The Kubernetes sandbox provider is tenant-scoped, deny-network by default, bounded, cancellable, lookup-safe by execution ID, and cleaned up deterministically; other providers satisfy the same behavioral contract with provider-specific isolation evidence.
 - The same direct POC works against all engines already configured behind Dynamo without agent-runtime engine code.
 
 ## Open Decisions
 
 1. What production capability/token format replaces the current local or trusted-proxy construction of `RuntimeAuthorization`?
-2. What retention/compaction policy and artifact store are acceptable for DuckDB/PostgreSQL deployments?
+2. What retention/compaction policy and artifact store are acceptable for SQLite/PostgreSQL deployments?
 3. What later use case justifies adding resumable SSE beyond live streaming plus final-result retrieval?
 4. Does any stable Dynamo affinity metadata need durable recovery beyond the current per-request filtered carrier? The default decision remains no until a measured recovery case requires it.
 5. What is the endpoint-neutral renderer/tokenizer contract used by Rust EPP for native Responses requests?
@@ -575,6 +577,7 @@ Kubernetes-provider-specific acceptance, which does not block other `SandboxProv
 - [vLLM Agentic API gateway integration ADR](https://github.com/vllm-project/agentic-api/blob/main/docs/adr/ADR-03_gateway_integration.md)
 - [vLLM Agentic API KV-affine routing plan](https://github.com/vllm-project/agentic-api/issues/69)
 - [vLLM Agentic API exact Responses/llm-d routing plan](https://github.com/vllm-project/agentic-api/issues/73)
+- [Official Model Context Protocol Rust SDK](https://github.com/modelcontextprotocol/rust-sdk)
 - [Kubernetes SIG Agent Sandbox](https://agent-sandbox.sigs.k8s.io/docs/)
 - [Agent Sandbox threat model](https://github.com/kubernetes-sigs/agent-sandbox/blob/main/docs/security/threat_model.md)
 - [Agent Substrate](https://github.com/agent-substrate/substrate)
