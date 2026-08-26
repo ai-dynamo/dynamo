@@ -94,6 +94,7 @@ CUDA_VISIBLE_DEVICES="$SGLANG_WORKER1_GPU" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_WORKER1_HTTP_PORT" \
     --grpc-port "$SGLANG_WORKER1_GRPC_PORT" \
+    --incremental-streaming-output \
     --kv-events-config "$KV_EVENTS_CONFIG_1" \
     --page-size "$SGLANG_PAGE_SIZE" \
     --context-length "$MAX_MODEL_LEN" \
@@ -108,6 +109,7 @@ CUDA_VISIBLE_DEVICES="$SGLANG_WORKER2_GPU" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_WORKER2_HTTP_PORT" \
     --grpc-port "$SGLANG_WORKER2_GRPC_PORT" \
+    --incremental-streaming-output \
     --kv-events-config "$KV_EVENTS_CONFIG_2" \
     --page-size "$SGLANG_PAGE_SIZE" \
     --context-length "$MAX_MODEL_LEN" \
@@ -118,11 +120,11 @@ CUDA_VISIBLE_DEVICES="$SGLANG_WORKER2_GPU" \
 OTEL_SERVICE_NAME=dynamo-worker-1 \
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
     dynamo-sglang-sidecar \
-    --sglang-endpoint "${SGLANG_HOST}:${SGLANG_WORKER1_GRPC_PORT}" &
+    --grpc-endpoint "${SGLANG_HOST}:${SGLANG_WORKER1_GRPC_PORT}" &
 
 OTEL_SERVICE_NAME=dynamo-worker-2 \
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
     dynamo-sglang-sidecar \
-    --sglang-endpoint "${SGLANG_HOST}:${SGLANG_WORKER2_GRPC_PORT}" &
+    --grpc-endpoint "${SGLANG_HOST}:${SGLANG_WORKER2_GRPC_PORT}" &
 
 wait_any_exit
