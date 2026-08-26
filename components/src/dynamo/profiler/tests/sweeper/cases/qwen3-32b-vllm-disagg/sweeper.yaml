@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Native AI Simulate SmartSearchConfig for the same core intent as
+# dgdr-v1beta1.yaml. The disaggregated mode is pinned to match recipe-dgd.yaml;
+# v1beta1 has no equivalent topology constraint and may select another mode.
+search_space:
+  model_name: Qwen/Qwen3-32B
+  hardware_sku: h200_sxm
+  deployment_mode: [disagg]
+  backend: [vllm]
+  gpu_budget: 16
+  context_length: 131072
+
+workload:
+  isl: 1024
+  osl: 1024
+  request_rate: 10
+  num_request_ratio: 10
+
+goal:
+  target: goodput_per_gpu
+  sla:
+    ttft_ms: 2000
+    itl_ms: 25
+
+# Keep the first learning run short. Increase these native Sweeper controls
+# when the comparison needs a representative search rather than a smoke run.
+sweep:
+  max_rounds: 1
+  candidates_per_round: 2
+  parallel_evals: 1
+  max_eval_seconds: 120
