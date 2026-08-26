@@ -21,15 +21,21 @@ def _load_generator_api() -> tuple[Any, Any]:
     try:
         generator_api = importlib.import_module("aiconfigurator.generator.api")
         generator_request = importlib.import_module("aiconfigurator.generator.request")
-        return (
-            generator_request.from_sweeper_candidate,
-            generator_api.generate_from_request,
-        )
-    except (AttributeError, ModuleNotFoundError) as exc:
+    except ModuleNotFoundError as exc:
         raise RuntimeError(
-            "the AIC renderer requires an aiconfigurator generator containing "
-            "the Sweeper-result bridge (ai-dynamo/aisimulate#11)"
+            "the AIC renderer requires the aiconfigurator generator"
         ) from exc
+
+    from_sweeper_candidate = getattr(generator_request, "from_sweeper_candidate", None)
+    if from_sweeper_candidate is None:
+        # The currently published AI Simulate release predates its official
+        # candidate bridge. Remove this fallback after Dynamo pins a release
+        # containing ai-dynamo/aisimulate#11.
+        from dynamo.profiler.sweeper.renderers.aic.sweeper_request_compat import (
+            from_sweeper_candidate,
+        )
+
+    return from_sweeper_candidate, generator_api.generate_from_request
 
 
 def _generator_overrides(

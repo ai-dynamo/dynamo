@@ -113,6 +113,75 @@ spec:
     )
 
 
+def test_installed_aic_renders_real_disaggregated_candidate(monkeypatch) -> None:
+    from aiconfigurator.generator.request.schema import ModelFacts
+
+    from dynamo.profiler.utils.config_modifiers import vllm
+
+    # Keep this package-boundary test deterministic and offline. Model facts
+    # are part of the request; the runtime finalizer is covered separately.
+    monkeypatch.setattr(vllm, "get_model_context_length", lambda _model: None)
+    monkeypatch.setattr(vllm, "get_mamba_cache_align_block_size", lambda _model: None)
+    candidate = {
+        "config": {
+            "deployment_mode": "disagg",
+            "backend": "vllm",
+            "backend_version": "0.20.1",
+            "model_name": "Qwen/Qwen3-32B",
+            "hardware_sku": "h200_sxm",
+            "prefill_tp": 2,
+            "prefill_pp": 1,
+            "prefill_attention_dp": 1,
+            "prefill_moe_tp": 1,
+            "prefill_moe_ep": 1,
+            "prefill_replicas": 1,
+            "prefill_max_num_batched_tokens": 4096,
+            "prefill_max_num_seqs": 64,
+            "prefill_block_size": 64,
+            "prefill_gpu_memory_utilization": 0.9,
+            "prefill_enable_prefix_caching": True,
+            "decode_tp": 2,
+            "decode_pp": 1,
+            "decode_attention_dp": 1,
+            "decode_moe_tp": 1,
+            "decode_moe_ep": 1,
+            "decode_replicas": 1,
+            "decode_max_num_batched_tokens": 4096,
+            "decode_max_num_seqs": 128,
+            "decode_block_size": 64,
+            "decode_gpu_memory_utilization": 0.9,
+            "decode_enable_prefix_caching": False,
+        },
+        "used_gpus": 4,
+    }
+    from_candidate, generate = aic_renderer._load_generator_api()
+    request = from_candidate(
+        candidate,
+        workload={"isl": 1024, "osl": 256},
+        deployment_target="dynamo-python",
+        generator_overrides={
+            "generator_dynamo_version": "1.5.0",
+            "K8sConfig": {
+                "k8s_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0",
+                "name_prefix": "sweeper-dgd",
+            },
+            "NodeConfig": {"num_gpus_per_node": 8},
+        },
+        model_facts=ModelFacts(is_moe=False, architecture="Qwen3ForCausalLM"),
+    )
+
+    rendered = yaml.safe_load(generate(request)["k8s_deploy.yaml"])
+
+    assert rendered["kind"] == "DynamoGraphDeployment"
+    workers = {
+        component["name"]: component
+        for component in rendered["spec"]["components"]
+        if component["name"] in {"VllmPrefillWorker", "VllmDecodeWorker"}
+    }
+    assert workers["VllmPrefillWorker"]["replicas"] == 1
+    assert workers["VllmDecodeWorker"]["replicas"] == 1
+
+
 def test_materialize_direct_uses_config_modifiers(monkeypatch) -> None:
     captured = {}
 
