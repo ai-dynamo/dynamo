@@ -2,29 +2,33 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::BTreeSet;
-use std::convert::Infallible;
 use std::sync::{Arc, LazyLock};
 
 use axum::body::to_bytes;
 use axum::http::HeaderMap;
-use axum::response::sse::{Event, Sse};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use dynamo_agent_rt::{
     AgentRuntime, AuthorizationScope, CanonicalJsonFingerprinter, IdempotencyKey,
     InMemoryCheckpointStore, InferenceFuture, InferenceIntent, InferenceInvoker, InferenceOutput,
     InferenceRequest, ModelStepKind, OpenAiResponses, ResponseId, ResponsesOutputInterpreter,
-    ResponsesRequestMaterializer, RunTurn, RuntimeAuthorization, RuntimeLimits, SystemClock,
-    UuidGenerator,
+    ResponsesRequestMaterializer, ResponsesStreamEventInterpreter, RunStreamResult, RunTurn,
+    RuntimeAuthorization, RuntimeLimits, SystemClock, UuidGenerator,
+};
+use dynamo_protocols::types::responses::{
+    ResponseCompletedEvent, ResponseCreatedEvent, ResponseInProgressEvent,
+    ResponseOutputItemDoneEvent, ResponseStreamEvent, Status,
 };
 use dynamo_runtime::pipeline::AsyncEngineContextProvider;
-use futures::stream;
+use futures::{Stream, StreamExt, stream};
 use thiserror::Error;
 
 use super::disconnect::create_connection_monitor;
 use super::metrics::{CancellationLabels, Endpoint};
 use super::{openai, service_v2};
 use crate::protocols::common::extensions::NvExt;
-use crate::protocols::openai::responses::{NvCreateResponse, NvResponse};
+use crate::protocols::openai::responses::stream_converter::ResponseEventSerializer;
+use crate::protocols::openai::responses::{NvCreateResponse, NvResponse, ResponseParams};
 use crate::request_template::{RequestTemplate, resolve_request_model};
 
 static ENABLED: LazyLock<bool> = LazyLock::new(|| {
@@ -49,8 +53,8 @@ pub(super) type ResponsesAgentRuntime = AgentRuntime<
     SystemClock,
 >;
 
-pub(super) fn new_responses_runtime() -> ResponsesAgentRuntime {
-    AgentRuntime::new(
+pub(super) fn new_responses_runtime() -> Arc<ResponsesAgentRuntime> {
+    Arc::new(AgentRuntime::new(
         InMemoryCheckpointStore::default(),
         ResponsesRequestMaterializer::default(),
         CanonicalJsonFingerprinter,
@@ -58,7 +62,7 @@ pub(super) fn new_responses_runtime() -> ResponsesAgentRuntime {
         ResponsesOutputInterpreter::default(),
         UuidGenerator,
         SystemClock,
-    )
+    ))
 }
 
 /// Ephemeral Dynamo ingress state forwarded across model steps.
@@ -99,6 +103,7 @@ pub(super) async fn handle_responses(
 ) -> Result<Response, openai::ErrorResponse> {
     let streaming = request.inner.stream.unwrap_or(false);
     let store = request.inner.store.unwrap_or(false);
+    let response_params = ResponseParams::from_create_response(&request.inner);
     let parent_response_id = request
         .inner
         .previous_response_id
@@ -125,20 +130,52 @@ pub(super) async fn handle_responses(
     } else {
         ModelStepKind::Initial
     };
+    let command = RunTurn {
+        request: request.inner,
+        parent_response_id,
+        authorization,
+        idempotency_key: IdempotencyKey::from(idempotency_key),
+        invocation_context,
+        inference_intent: InferenceIntent { step_kind },
+        lease_duration_millis: 120_000,
+    };
+
+    if streaming {
+        let result = state
+            .responses_agent_runtime()
+            .clone()
+            .run_stream(command, ResponsesStreamEventInterpreter::default())
+            .await
+            .map_err(|error| {
+                openai::ErrorMessage::internal_server_error(&format!(
+                    "Agent runtime failed: {error}"
+                ))
+            })?;
+        let stream: AgentResponsesStream = match result {
+            RunStreamResult::Live(stream) => {
+                Box::pin(stream.map(|event| event.map_err(axum::Error::new)))
+            }
+            RunStreamResult::Existing(record) => {
+                let response = record.response.clone().ok_or_else(|| {
+                    openai::ErrorMessage::internal_server_error(
+                        "Agent runtime turn exists but has no replayable response",
+                    )
+                })?;
+                Box::pin(stream::iter(
+                    committed_response_events(response).into_iter().map(Ok),
+                ))
+            }
+        };
+        return Ok(sse_response(
+            stream,
+            ResponseEventSerializer::new(&response_params),
+            state.sse_keep_alive(),
+        ));
+    }
+
     let result = state
         .responses_agent_runtime()
-        .run_unary(RunTurn {
-            request: request.inner,
-            parent_response_id,
-            authorization,
-            idempotency_key: IdempotencyKey::from(idempotency_key),
-            invocation_context,
-            inference_intent: InferenceIntent {
-                step_kind,
-                session_final: false,
-            },
-            lease_duration_millis: 120_000,
-        })
+        .run_unary(command)
         .await
         .map_err(|error| {
             openai::ErrorMessage::internal_server_error(&format!("Agent runtime failed: {error}"))
@@ -156,11 +193,7 @@ pub(super) async fn handle_responses(
         store,
     };
 
-    if streaming {
-        completed_sse(response)
-    } else {
-        Ok(axum::Json(response).into_response())
-    }
+    Ok(axum::Json(response).into_response())
 }
 
 fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -170,58 +203,84 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn completed_sse(response: NvResponse) -> Result<Response, openai::ErrorResponse> {
-    let response_value = serde_json::to_value(&response).map_err(|error| {
-        openai::ErrorMessage::internal_server_error(&format!(
-            "Failed to serialize agent runtime response: {error}"
-        ))
-    })?;
-    let mut sequence_number = 0_u32;
-    let mut events = Vec::with_capacity(response.inner.output.len() + 2);
-    events.push(sse_event(
-        "response.created",
-        serde_json::json!({
-            "type": "response.created",
-            "sequence_number": sequence_number,
-            "response": response_value,
-        }),
+fn committed_response_events(
+    response: dynamo_protocols::types::responses::Response,
+) -> Vec<ResponseStreamEvent> {
+    let mut initial = response.clone();
+    initial.status = Status::InProgress;
+    initial.output.clear();
+    let mut sequence_number = 0_u64;
+    let mut events = Vec::with_capacity(response.output.len() + 3);
+    events.push(ResponseStreamEvent::ResponseCreated(ResponseCreatedEvent {
+        sequence_number,
+        response: initial.clone(),
+    }));
+    sequence_number += 1;
+    events.push(ResponseStreamEvent::ResponseInProgress(
+        ResponseInProgressEvent {
+            sequence_number,
+            response: initial,
+        },
     ));
     sequence_number += 1;
-    for (output_index, item) in response.inner.output.iter().enumerate() {
-        events.push(sse_event(
-            "response.output_item.done",
-            serde_json::json!({
-                "type": "response.output_item.done",
-                "sequence_number": sequence_number,
-                "output_index": output_index,
-                "item": item,
-            }),
+    for (output_index, item) in response.output.iter().cloned().enumerate() {
+        events.push(ResponseStreamEvent::ResponseOutputItemDone(
+            ResponseOutputItemDoneEvent {
+                sequence_number,
+                output_index: output_index as u32,
+                item,
+            },
         ));
         sequence_number += 1;
     }
-    events.push(sse_event(
-        "response.completed",
-        serde_json::json!({
-            "type": "response.completed",
-            "sequence_number": sequence_number,
-            "response": response_value,
-        }),
+    events.push(ResponseStreamEvent::ResponseCompleted(
+        ResponseCompletedEvent {
+            sequence_number,
+            response,
+        },
     ));
-
-    Ok(Sse::new(stream::iter(events)).into_response())
+    events
 }
 
-fn sse_event(event_type: &'static str, data: serde_json::Value) -> Result<Event, Infallible> {
-    Ok(Event::default().event(event_type).data(data.to_string()))
+type AgentResponsesStream =
+    std::pin::Pin<Box<dyn Stream<Item = Result<ResponseStreamEvent, axum::Error>> + Send>>;
+
+fn sse_response(
+    stream: AgentResponsesStream,
+    serializer: ResponseEventSerializer,
+    keep_alive: Option<std::time::Duration>,
+) -> Response {
+    let stream = async_stream::stream! {
+        tokio::pin!(stream);
+        while let Some(event) = stream.next().await {
+            let event = match event {
+                Ok(event) => event,
+                Err(error) => {
+                    yield Err(error);
+                    return;
+                }
+            };
+            yield serializer.serialize(&event).map_err(axum::Error::new);
+        }
+        yield Ok::<Event, axum::Error>(Event::default().data("[DONE]"));
+    };
+    let mut response = Sse::new(stream);
+    if let Some(keep_alive) = keep_alive {
+        response = response.keep_alive(KeepAlive::default().interval(keep_alive));
+    }
+    response.into_response()
 }
 
 #[cfg(test)]
 mod tests {
     use axum::body::to_bytes;
 
-    use crate::protocols::openai::responses::NvResponse;
+    use futures::stream;
 
-    use super::completed_sse;
+    use crate::protocols::openai::responses::ResponseParams;
+    use crate::protocols::openai::responses::stream_converter::ResponseEventSerializer;
+
+    use super::{committed_response_events, sse_response};
 
     #[tokio::test]
     async fn completed_response_is_exposed_as_codex_compatible_sse() {
@@ -245,14 +304,14 @@ mod tests {
             "status": "completed"
         }))
         .unwrap();
-        let response = completed_sse(NvResponse {
-            inner,
-            nvext: None,
-            presence_penalty: 0.0,
-            frequency_penalty: 0.0,
-            store: false,
-        })
-        .unwrap();
+        let stream = Box::pin(stream::iter(
+            committed_response_events(inner).into_iter().map(Ok),
+        ));
+        let response = sse_response(
+            stream,
+            ResponseEventSerializer::new(&ResponseParams::default()),
+            None,
+        );
 
         assert_eq!(response.headers()["content-type"], "text/event-stream");
         let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
@@ -287,10 +346,8 @@ impl InferenceInvoker<OpenAiResponses> for DynamoResponsesInvoker {
         request: &'a InferenceRequest<OpenAiResponses, Self::Context>,
     ) -> InferenceFuture<'a, OpenAiResponses, Self::Error> {
         Box::pin(async move {
-            let mut inner = request.request.clone();
-            // The runtime owns public streaming and persistence. Dynamo's
-            // existing Responses path aggregates its internal engine stream.
-            inner.stream = Some(false);
+            let inner = request.request.clone();
+            let streaming = inner.stream.unwrap_or(false);
             let model = resolve_request_model(
                 inner.model.as_deref().unwrap_or(""),
                 request.context.template.as_ref(),
@@ -319,7 +376,12 @@ impl InferenceInvoker<OpenAiResponses> for DynamoResponsesInvoker {
                     .metric_model_for(&model)
                     .to_owned(),
                 endpoint: Endpoint::Responses.to_string(),
-                request_type: "agent_runtime_unary".to_owned(),
+                request_type: if streaming {
+                    "agent_runtime_stream"
+                } else {
+                    "agent_runtime_unary"
+                }
+                .to_owned(),
             };
             let (mut connection_handle, stream_handle) = create_connection_monitor(
                 engine_context,
@@ -327,6 +389,25 @@ impl InferenceInvoker<OpenAiResponses> for DynamoResponsesInvoker {
                 labels,
             )
             .await;
+
+            if streaming {
+                let stream = openai::responses_native_stream(
+                    request.context.state.clone(),
+                    request.context.template.clone(),
+                    pipeline_request,
+                    stream_handle,
+                )
+                .await
+                .map_err(|(status, message)| {
+                    DynamoResponsesInvocationError::Dynamo(format!(
+                        "Dynamo Responses invocation failed ({status}): {}",
+                        message.message()
+                    ))
+                })?;
+                connection_handle.disarm();
+                return Ok(InferenceOutput::Streaming(Box::pin(stream.map(Ok))));
+            }
+
             let response = openai::responses(
                 request.context.state.clone(),
                 request.context.template.clone(),

@@ -28,7 +28,7 @@ use dynamo_runtime::{
     pipeline::{AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
 };
-use futures::{StreamExt, stream};
+use futures::{Stream, StreamExt, stream};
 use http_body_util::LengthLimitError;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -88,6 +88,7 @@ use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
+use dynamo_protocols::types::responses::ResponseStreamEvent;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
@@ -3192,13 +3193,49 @@ async fn handler_responses(
     response
 }
 
-#[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id()))]
 pub(super) async fn responses(
+    state: Arc<service_v2::State>,
+    template: Option<RequestTemplate>,
+    request: Context<NvCreateResponse>,
+    stream_handle: ConnectionHandle,
+) -> Result<Response, ErrorResponse> {
+    match responses_inner(state, template, request, stream_handle, false).await? {
+        ResponsesExecution::Http(response) => Ok(response),
+        ResponsesExecution::Native(_) => unreachable!("HTTP Responses requested native output"),
+    }
+}
+
+#[cfg(feature = "agent-rt-poc")]
+pub(super) async fn responses_native_stream(
+    state: Arc<service_v2::State>,
+    template: Option<RequestTemplate>,
+    request: Context<NvCreateResponse>,
+    stream_handle: ConnectionHandle,
+) -> Result<NativeResponsesStream, ErrorResponse> {
+    match responses_inner(state, template, request, stream_handle, true).await? {
+        ResponsesExecution::Native(stream) => Ok(stream),
+        ResponsesExecution::Http(_) => Err(ErrorMessage::internal_server_error(
+            "Native Responses execution returned an HTTP response",
+        )),
+    }
+}
+
+pub(super) type NativeResponsesStream =
+    std::pin::Pin<Box<dyn Stream<Item = ResponseStreamEvent> + Send + 'static>>;
+
+enum ResponsesExecution {
+    Http(Response),
+    Native(NativeResponsesStream),
+}
+
+#[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id()))]
+async fn responses_inner(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
     mut request: Context<NvCreateResponse>,
     stream_handle: ConnectionHandle,
-) -> Result<Response, ErrorResponse> {
+    native_output: bool,
+) -> Result<ResponsesExecution, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
@@ -3246,7 +3283,10 @@ pub(super) async fn responses(
     // and early return a 501 NOT_IMPLEMENTED status code.
     if let Some(resp) = validate_response_unsupported_fields(&request) {
         inflight_guard.mark_error(ErrorType::NotImplemented);
-        return Ok(resp.into_response());
+        if native_output {
+            return Err(resp);
+        }
+        return Ok(ResponsesExecution::Http(resp.into_response()));
     }
 
     // Validate sampling and output parameters
@@ -3257,34 +3297,7 @@ pub(super) async fn responses(
 
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
-    let response_params = ResponseParams {
-        model: request.inner.model.clone(),
-        temperature: request.inner.temperature,
-        top_p: request.inner.top_p,
-        max_output_tokens: request.inner.max_output_tokens,
-        parallel_tool_calls: request.inner.parallel_tool_calls,
-        store: request.inner.store,
-        tools: request.inner.tools.clone(),
-        tool_choice: request.inner.tool_choice.clone(),
-        instructions: request.inner.instructions.clone(),
-        reasoning: request.inner.reasoning.clone(),
-        text: request.inner.text.clone(),
-        service_tier: request.inner.service_tier,
-        include: request.inner.include.clone(),
-        truncation: request.inner.truncation,
-        // Upstream `CreateResponse` doesn't carry these yet; plumbed through so
-        // the response serializer can default to 0.0 without hardcoding at the
-        // build site. When upstream (or our shadow) adds the fields, sourcing
-        // from the request becomes a one-line change here.
-        presence_penalty: None,
-        frequency_penalty: None,
-        // Pass-through metadata — accepted on the request, echoed back on the
-        // response so the caller can confirm receipt. Dynamo doesn't act on
-        // these; see `validate_response_unsupported_fields` for rationale.
-        prompt_cache_key: request.inner.prompt_cache_key.clone(),
-        prompt_cache_retention: request.inner.prompt_cache_retention,
-        safety_identifier: request.inner.safety_identifier.clone(),
-    };
+    let response_params = ResponseParams::from_create_response(&request.inner);
     let request_id = request.id().to_string();
     let (orig_request, context) = request.into_parts();
 
@@ -3412,7 +3425,8 @@ pub(super) async fn responses(
                 >,
         };
 
-        // Streaming path: convert chat completion stream chunks to Responses API SSE events.
+        // Convert backend chunks to native Responses events before selecting a
+        // native runtime consumer or the public SSE serializer.
         // The engine yields Annotated<NvCreateChatCompletionStreamResponse>. We extract the
         // inner stream response data and convert it to Responses API events.
         use crate::protocols::openai::responses::stream_converter::{
@@ -3428,11 +3442,11 @@ pub(super) async fn responses(
         let mut http_queue_guard = Some(http_queue_guard);
 
         let mut engine_stream = Box::pin(engine_stream);
-        let full_stream = async_stream::stream! {
+        let typed_stream = async_stream::stream! {
             let mut events = Vec::with_capacity(4);
             converter.append_start_events(&mut events);
             for event in events.drain(..) {
-                yield serializer.serialize(&event).map_err(axum::Error::new);
+                yield event;
             }
 
             // Track whether the backend sent an error event during the stream.
@@ -3456,7 +3470,7 @@ pub(super) async fn responses(
 
                 converter.append_chunk_events(&stream_resp, &mut events);
                 for event in events.drain(..) {
-                    yield serializer.serialize(&event).map_err(axum::Error::new);
+                    yield event;
                 }
             }
 
@@ -3466,9 +3480,27 @@ pub(super) async fn responses(
                 converter.append_end_events(&mut events);
             }
             for event in events.drain(..) {
-                yield serializer.serialize(&event).map_err(axum::Error::new);
+                yield event;
             }
         };
+
+        if native_output {
+            let mut stream_handle = stream_handle;
+            stream_handle.arm();
+            inflight_guard.mark_error(ErrorType::Cancelled);
+            let stream = async_stream::stream! {
+                tokio::pin!(typed_stream);
+                while let Some(event) = typed_stream.next().await {
+                    yield event;
+                }
+                inflight_guard.mark_ok();
+                stream_handle.disarm();
+            };
+            return Ok(ResponsesExecution::Native(Box::pin(stream)));
+        }
+
+        let full_stream =
+            typed_stream.map(move |event| serializer.serialize(&event).map_err(axum::Error::new));
 
         // Wrap with disconnect monitoring: detects client disconnects, cancels generation,
         // and defers inflight_guard.mark_ok() until the stream completes.
@@ -3479,7 +3511,7 @@ pub(super) async fn responses(
             sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
         }
 
-        Ok(sse_stream.into_response())
+        Ok(ResponsesExecution::Http(sse_stream.into_response()))
     } else {
         // Non-streaming path: aggregate stream into single response
 
@@ -3535,15 +3567,13 @@ pub(super) async fn responses(
             inflight_guard.mark_error(ErrorType::Cancelled);
         }
 
-        Ok(Json(response).into_response())
+        Ok(ResponsesExecution::Http(Json(response).into_response()))
     }
 }
 
 /// Checks for unsupported fields in the request.
 /// Returns Some(response) if unsupported fields are present.
-pub fn validate_response_unsupported_fields(
-    request: &NvCreateResponse,
-) -> Option<impl IntoResponse> {
+pub fn validate_response_unsupported_fields(request: &NvCreateResponse) -> Option<ErrorResponse> {
     let inner = &request.inner;
 
     if let Some(field) = request

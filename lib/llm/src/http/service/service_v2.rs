@@ -146,7 +146,7 @@ pub struct State {
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
     #[cfg(feature = "agent-rt-poc")]
-    responses_agent_runtime: ResponsesAgentRuntime,
+    responses_agent_runtime: Arc<ResponsesAgentRuntime>,
 }
 
 /// Typed config needed only to construct HTTP shared state.
@@ -502,7 +502,7 @@ impl State {
     }
 
     #[cfg(feature = "agent-rt-poc")]
-    pub(super) fn responses_agent_runtime(&self) -> &ResponsesAgentRuntime {
+    pub(super) fn responses_agent_runtime(&self) -> &Arc<ResponsesAgentRuntime> {
         &self.responses_agent_runtime
     }
 

@@ -2439,8 +2439,9 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 [[package]]
 name = "dynamo-agent-rt"
 version = "0.1.0"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=b7ba63adc734e8c9b84ae96852afb208e80ec107#b7ba63adc734e8c9b84ae96852afb208e80ec107"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=a4febba6a294611a77d09a58c618f8e6a437a1f0#a4febba6a294611a77d09a58c618f8e6a437a1f0"
 dependencies = [
+ "async-stream",
  "blake3",
  "dynamo-protocols",
  "futures",
@@ -2901,8 +2902,8 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "5.3.1"
-source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=b7ba63adc734e8c9b84ae96852afb208e80ec107#b7ba63adc734e8c9b84ae96852afb208e80ec107"
+version = "5.4.0"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?rev=a4febba6a294611a77d09a58c618f8e6a437a1f0#a4febba6a294611a77d09a58c618f8e6a437a1f0"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -7439,7 +7440,7 @@ version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "itertools 0.14.0",
  "log",
  "multimap",
@@ -7459,7 +7460,7 @@ version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "343d3bd7056eda839b03204e68deff7d1b13aba7af2b2fd16890697274262ee7"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "itertools 0.14.0",
  "log",
  "multimap",

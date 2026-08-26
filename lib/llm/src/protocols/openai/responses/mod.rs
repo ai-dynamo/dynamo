@@ -6,10 +6,10 @@ pub mod stream_converter;
 use std::collections::HashMap;
 
 use dynamo_protocols::types::responses::{
-    AssistantRole, FunctionCallOutput, FunctionToolCall, IncludeEnum, IncompleteDetails,
-    InputContent, InputItem, InputOutputMessageContent, InputParam, InputRole, InputTokenDetails,
-    Instructions, Item, MessageItem, NamespaceToolParamTool, OutputItem, OutputMessage,
-    OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
+    AssistantRole, CreateResponse, FunctionCallOutput, FunctionToolCall, IncludeEnum,
+    IncompleteDetails, InputContent, InputItem, InputOutputMessageContent, InputParam, InputRole,
+    InputTokenDetails, Instructions, Item, MessageItem, NamespaceToolParamTool, OutputItem,
+    OutputMessage, OutputMessageContent, OutputStatus, OutputTextContent, OutputTokenDetails,
     PromptCacheRetention, Reasoning, ReasoningItem, Response, ResponseTextParam, ResponseUsage,
     Role as ResponseRole, ServiceTier, Status, SummaryPart, SummaryTextContent,
     TextResponseFormatConfiguration, Tool, ToolChoiceOptions, ToolChoiceParam, Truncation,
@@ -1016,6 +1016,30 @@ pub struct ResponseParams {
 }
 
 impl ResponseParams {
+    pub fn from_create_response(request: &CreateResponse) -> Self {
+        Self {
+            model: request.model.clone(),
+            temperature: request.temperature,
+            top_p: request.top_p,
+            max_output_tokens: request.max_output_tokens,
+            parallel_tool_calls: request.parallel_tool_calls,
+            store: request.store,
+            tools: request.tools.clone(),
+            tool_choice: request.tool_choice.clone(),
+            instructions: request.instructions.clone(),
+            reasoning: request.reasoning.clone(),
+            text: request.text.clone(),
+            service_tier: request.service_tier,
+            include: request.include.clone(),
+            truncation: request.truncation,
+            presence_penalty: None,
+            frequency_penalty: None,
+            prompt_cache_key: request.prompt_cache_key.clone(),
+            prompt_cache_retention: request.prompt_cache_retention,
+            safety_identifier: request.safety_identifier.clone(),
+        }
+    }
+
     fn reasoning_summary_requested(&self) -> bool {
         self.reasoning
             .as_ref()
