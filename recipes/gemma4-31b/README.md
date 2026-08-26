@@ -124,3 +124,8 @@ Modified Mooncake traces are provided to showcase the value of KV-aware routing 
 
 - MTP support has not been verified on H200 and is not enabled in the H200
   deployment.
+- Audio is not a supported modality (the model itself does not support it).
+- For streaming responses with multimodal inputs, there is a known issue where the HTTP status code
+  can be misreported. This is fixed in newer versions of dynamo by setting the
+  `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS` env var to e.g. a value of 500. However, at time of writing,
+  it is not yet included in the latest dynamo release (v1.4.0).
