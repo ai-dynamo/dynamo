@@ -80,6 +80,7 @@ func WithSharedOwnership() SyncOption {
 	}
 }
 
+// checkControllerOwnership treats a nil parent as an explicit request to leave ownership unchanged.
 func checkControllerOwnership(existing client.Object, parentResource client.Object, scheme *runtime.Scheme) (adopt bool, err error) {
 	if parentResource == nil {
 		return false, nil
