@@ -1767,6 +1767,7 @@ class KvRouterConfig:
         router_track_prefill_tokens: bool = True,
         router_prefill_load_model: str = "none",
         router_ttl_secs: float = 120.0,
+        router_approximate_cache_policy: Literal["ttl", "lru"] = "ttl",
         router_queue_threshold: Optional[float] = None,
         router_event_threads: int = 4,
         router_queue_policy: str = "fcfs",
@@ -1824,6 +1825,8 @@ class KvRouterConfig:
                 "none" keeps static prompt load accounting.
                 "aic" decays the oldest active prefill request using AIC-predicted duration.
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
+            router_approximate_cache_policy: Process-local approximate-index retention policy,
+                "ttl" or "lru" (default: "ttl"). LRU requires use_kv_events=False.
             router_queue_threshold: Optional queue threshold fraction for prefill token capacity (default: None).
                 Requests are queued if all workers exceed this fraction of max_num_batched_tokens.
                 Enables priority scheduling via request priority hints.
@@ -2287,10 +2290,10 @@ def lora_name_to_id(lora_name: str) -> int:
     ...
 
 def resolve_routing_image_token_id(model_id: str, model_dir: str) -> Optional[int]:
-    """Routing-side image-placeholder token id for a model, resolved with the
-    same per-family logic the frontend's MM-aware KV routing uses. Returns None
-    when the model isn't in the MM-routing registry or its config can't be read.
-    Only present when the bindings are built with the ``mm-routing`` feature.
+    """Routing-side image-placeholder token id resolved with the frontend's static
+    checks. Returns None when its model prerequisites are unavailable. Request-time
+    gates require a frontend-issued canonical MM UUID in worker KV events. Only
+    present when the bindings are built with the ``mm-routing`` feature.
     """
     ...
 

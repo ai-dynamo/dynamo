@@ -16,7 +16,7 @@ use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 use crate::{
     kv_router::{
         FindBestMatchAdmission, FindBestMatchInnerOutcome, FindBestMatchOutcome,
-        push_router::KvPushRouter,
+        routing_host::RoutingHost,
     },
     local_model::runtime_config::ModelRuntimeConfig,
     preprocessor::PreprocessedRequest,
@@ -24,6 +24,7 @@ use crate::{
         TokenIdType,
         common::{preprocessor::RoutingHints, timing::RequestPhase},
     },
+    session_affinity::AffinityTarget,
 };
 
 pub(super) struct WorkerSelection {
@@ -52,7 +53,7 @@ impl<'a> RoutingRequestParts<'a> {
 }
 
 pub(super) struct SelectionOptions {
-    pub(super) affinity_worker: Option<WorkerWithDpRank>,
+    pub(super) affinity_target: Option<AffinityTarget>,
     pub(super) policy_class: Option<String>,
     pub(super) session_context: Option<dynamo_kv_router::SessionContext>,
 }
@@ -75,13 +76,13 @@ struct BestMatchArgs<'a> {
     routing_constraints: RoutingConstraints,
 }
 
-impl<Sel> KvPushRouter<Sel>
+impl<Sel> RoutingHost<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     async fn select_best_match(&self, args: BestMatchArgs<'_>) -> Result<WorkerSelection, Error> {
         let outcome = self
-            .chooser
+            .kv_router()
             .find_best_match_details_with_policy_class_inner(
                 Some(args.context_id),
                 args.routing_parts.token_ids,
@@ -163,7 +164,7 @@ where
             .map(|state| state.excluded_worker_ids())
             .unwrap_or_default();
         if explicit_pin.is_none() && !migration_excluded_worker_ids.is_empty() {
-            let workers = self.chooser.workers_with_configs.borrow();
+            let workers = self.kv_router().workers_with_configs.borrow();
             let eligible =
                 allowed_worker_ids.get_or_insert_with(|| workers.keys().copied().collect());
             eligible.retain(|worker_id| {
@@ -181,13 +182,39 @@ where
             }
         }
         let return_routing_hashes =
-            !is_query_only && self.chooser.indexer().records_routing_decisions();
+            !is_query_only && self.kv_router().indexer().records_routing_decisions();
         let SelectionOptions {
-            affinity_worker,
+            affinity_target,
             policy_class,
             session_context,
         } = options;
-        let affinity_pin = affinity_worker.map(|worker| (worker.worker_id, Some(worker.dp_rank)));
+        let worker_only_affinity = affinity_target.filter(|target| target.dp_rank.is_none());
+        if let Some(target) = worker_only_affinity {
+            match &mut allowed_worker_ids {
+                Some(allowed_workers) => {
+                    allowed_workers.retain(|worker_id| *worker_id == target.worker_id);
+                }
+                None => {
+                    allowed_worker_ids = Some(HashSet::from([target.worker_id]));
+                }
+            }
+        }
+        let explicit_pin = match (explicit_pin, worker_only_affinity) {
+            (Some((worker_id, None)), Some(affinity_target))
+                if worker_id == affinity_target.worker_id =>
+            {
+                // A worker-only session binding allows the KV scheduler to select this
+                // request's rank, so do not turn a matching worker-only request hint into an
+                // exact-rank pin.
+                None
+            }
+            (explicit_pin, _) => explicit_pin,
+        };
+        let affinity_pin = affinity_target.and_then(|target| {
+            target
+                .dp_rank
+                .map(|dp_rank| (target.worker_id, Some(dp_rank)))
+        });
         let Some((pinned_worker_id, requested_dp_rank)) =
             merge_affinity_pin(explicit_pin, affinity_pin)
         else {
@@ -216,7 +243,7 @@ where
                 let total_blocks = routing_parts
                     .token_ids
                     .len()
-                    .div_ceil(self.chooser.block_size() as usize);
+                    .div_ceil(self.kv_router().block_size() as usize);
                 // tests/utils/router_logs.py parses the structured fields on this event.
                 tracing::debug!(
                     request_id = %context_id,
@@ -239,10 +266,10 @@ where
         let pinned_worker = resolve_pinned_worker_rank(
             pinned_worker_id,
             requested_dp_rank,
-            self.chooser.unique_dp_rank_for_worker(pinned_worker_id),
+            self.kv_router().unique_dp_rank_for_worker(pinned_worker_id),
         )?;
         {
-            let configs = self.chooser.workers_with_configs.borrow();
+            let configs = self.kv_router().workers_with_configs.borrow();
             let eligibility = RoutingEligibility::new(
                 allowed_worker_ids.as_ref(),
                 None,

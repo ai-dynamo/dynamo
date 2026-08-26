@@ -48,6 +48,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_tracking_key_id",
     "router_prefill_load_model",
     "router_ttl_secs",
+    "router_approximate_cache_policy",
     "router_queue_threshold",
     "router_policy_config",
     "router_prefill_policy",
@@ -208,6 +209,7 @@ class KvRouterConfigBase(ConfigBase):
     router_tracking_key_id: Optional[str] = None
     router_prefill_load_model: str
     router_ttl_secs: float
+    router_approximate_cache_policy: str = "ttl"
     router_queue_threshold: Optional[float]
     router_policy_config: Optional[str] = None
     router_prefill_policy: Optional[str] = None
@@ -516,6 +518,19 @@ class KvRouterArgGroup(ArgGroup):
                 "Only used when --no-router-kv-events is set."
             ),
             arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--router-approximate-cache-policy",
+            env_var="DYN_ROUTER_APPROXIMATE_CACHE_POLICY",
+            default="ttl",
+            choices=["ttl", "lru"],
+            help=(
+                "[EXPERIMENTAL] KV Router: Retention policy for the local primary "
+                "approximate indexer used with --no-router-kv-events. 'ttl' keeps "
+                "the existing time-based behavior; 'lru' uses each worker rank's "
+                "advertised KV capacity. Side indexers remain TTL-only."
+            ),
         )
         add_argument(
             g,
