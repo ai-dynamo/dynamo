@@ -116,9 +116,8 @@ spec:
           image: <your-registry>/dynamo-sidecar:1.3.0
           # Required: an omitted command inherits the operator's /bin/sh -c.
           command:
-          - /usr/local/bin/dynamo-sidecar
+          - dynamo-sglang-sidecar
           args:
-          - sglang
           - --grpc-endpoint
           - 127.0.0.1:30001
           env:
@@ -207,9 +206,8 @@ spec:
           image: <your-registry>/dynamo-sidecar:1.3.0
           # Required: an omitted command inherits the operator's /bin/sh -c.
           command:
-          - /usr/local/bin/dynamo-sidecar
+          - dynamo-sglang-sidecar
           args:
-          - sglang
           - --grpc-endpoint
           - 127.0.0.1:30001
           envFrom:

@@ -134,9 +134,8 @@ spec:
           image: <your-registry>/dynamo-sidecar:1.3.0
           # Required: an omitted command inherits the operator's /bin/sh -c.
           command:
-          - /usr/local/bin/dynamo-sidecar
+          - dynamo-vllm-sidecar
           args:
-          - vllm
           - --grpc-endpoint
           - 127.0.0.1:50051
           - --disaggregation-mode
@@ -227,9 +226,8 @@ spec:
           image: <your-registry>/dynamo-sidecar:1.3.0
           # Required: an omitted command inherits the operator's /bin/sh -c.
           command:
-          - /usr/local/bin/dynamo-sidecar
+          - dynamo-vllm-sidecar
           args:
-          - vllm
           - --grpc-endpoint
           - 127.0.0.1:50051
           - --disaggregation-mode
