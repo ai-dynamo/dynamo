@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use dynamo_kv_router::{
     identity::{CacheOwnerId, IndexerDomainId},
     indexer::KvStateProtocolVersion,
-    protocols::{WorkerId, WorkerWithDpRank},
+    protocols::{RouterHintSourceMetadata, WorkerId, WorkerWithDpRank},
 };
 use dynamo_runtime::{
     component::{Endpoint, Instance, build_transport_type},
@@ -51,6 +51,7 @@ pub struct KvStateAttachmentDescriptor {
     pub raw_zmq_endpoint: String,
     pub raw_topic: String,
     pub image_token_id: Option<u32>,
+    pub router_hint_source: Option<RouterHintSourceMetadata>,
 }
 
 /// Process-scoped owner of every state-agent intent emitted by one backend worker.
@@ -143,6 +144,7 @@ fn materialize_intents(
                 raw_zmq_endpoint: descriptor.raw_zmq_endpoint,
                 raw_topic: descriptor.raw_topic,
                 image_token_id: descriptor.image_token_id,
+                router_hint_source: descriptor.router_hint_source,
             },
         );
     }
@@ -510,6 +512,7 @@ mod tests {
                     raw_zmq_endpoint: format!("tcp://producer.example:{}", 20_000 + rank),
                     raw_topic: String::new(),
                     image_token_id: None,
+                    router_hint_source: None,
                 }
             })
             .collect()

@@ -661,6 +661,50 @@ sglang_configs = {
             )
         ],
     ),
+    "video_agg_fd_qwen": SGLangConfig(
+        name="video_agg_fd_qwen",
+        directory=sglang_dir,
+        script_name="agg_vision.sh",
+        marks=[
+            pytest.mark.multimodal,
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(10.0),
+            pytest.mark.requested_sglang_kv_tokens(8736),
+            pytest.mark.timeout(390),
+            pytest.mark.pre_merge,
+            # TODO: Enable media-ffmpeg in the SGLang container build, then
+            # remove this skip. Frontend video decoding requires the Dynamo
+            # binding to be built with media-ffmpeg support.
+            pytest.mark.skip(reason="SGLang container lacks media-ffmpeg support"),
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        script_args=[
+            "--model-path",
+            "Qwen/Qwen3-VL-2B-Instruct",
+            "--frontend-decoding",
+        ],
+        env={
+            "DYN_MM_ALLOW_INTERNAL": "1",
+            "DYN_MM_VIDEO_NUM_FRAMES": "4",
+        },
+        timeout=360,
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "Describe the video in detail"},
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": MULTIMODAL_VIDEO_URL},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=MULTIMODAL_VIDEO_EXPECTED,
+                temperature=0.0,
+                max_tokens=100,
+            )
+        ],
+    ),
     "video_e_pd_qwen_nvdec": SGLangConfig(
         # H.264/H.265 video input decoded on the GPU by NVDEC, which is the only
         # video decoder in the shipped image -- so unlike the cases above this

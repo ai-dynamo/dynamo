@@ -138,6 +138,7 @@ jobs:
       - vllm-dev-build
       - vllm-test
       - vllm-multi-gpu-test
+      - vllm-4-gpu-test
       - vllm-copy-to-acr
       - sglang-build
       - sglang-dev-build
@@ -190,11 +191,11 @@ jobs:
       - deploy-cleanup-checkpoint-vllm
       - deploy-cleanup-checkpoint-sglang
       - deploy-cleanup-checkpoint-trtllm
-    if: always()
+    if: always() && !cancelled()
     steps:
       - name: Check all deploy test jobs
         run: |
-          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped", "cancelled"] | any($result == .))'
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
   dynamo-status-check:
     runs-on: ubuntu-slim
@@ -785,13 +786,35 @@ jobs:
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: vllm
-      test_type: Multi-GPU Test
+      test_type: 2-GPU Test
+      amd_runner: prod-tester-amd-gpu-2-v2
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]' # No ARM GPUs available
+      run_sanity_check: false
+      gpu_test_markers: pre_merge and vllm and gpu_2
+      gpu_test_timeout_minutes: 60
+    secrets: inherit
+
+  vllm-4-gpu-test:
+    name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
+    needs: [changed-files, vllm-build]
+    if: |
+      needs.changed-files.outputs.run_multigpu_tests == 'true' &&
+      (needs.changed-files.outputs.core == 'true' ||
+       needs.changed-files.outputs.vllm == 'true' ||
+       needs.changed-files.outputs.deploy == 'true')
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: vllm
+      test_type: 4-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and vllm and (gpu_2 or gpu_4)
+      # Exercise the only vLLM gpu_4 topology before merge.
+      gpu_test_markers: (pre_merge or post_merge) and vllm and gpu_4
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -828,13 +851,13 @@ jobs:
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: sglang
-      test_type: Multi-GPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
+      test_type: 2-GPU Test
+      amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and sglang and (gpu_2 or gpu_4)
+      gpu_test_markers: pre_merge and sglang and gpu_2
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -871,13 +894,13 @@ jobs:
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: trtllm
-      test_type: Multi-GPU Test
-      amd_runner: prod-tester-amd-gpu-4-v2
+      test_type: 2-GPU Test
+      amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and trtllm and (gpu_2 or gpu_4)
+      gpu_test_markers: pre_merge and trtllm and gpu_2
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -1492,7 +1515,7 @@ jobs:
        needs.changed-files.outputs.snapshot_vllm == 'true') &&
       needs.deploy-operator-checkpoint-vllm.result == 'success'
     runs-on: prod-deploy-tester-v1
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -1528,7 +1551,8 @@ jobs:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-vllm.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-vllm.outputs.namespace }}
       - name: Install snapshot-agent
-        uses: $/.github/actions/setup-snapshot-agent
+        timeout-minutes: 20
+        uses: ./.github/actions/setup-snapshot-agent
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
@@ -1543,7 +1567,7 @@ jobs:
        needs.changed-files.outputs.snapshot_sglang == 'true') &&
       needs.deploy-operator-checkpoint-sglang.result == 'success'
     runs-on: prod-deploy-tester-v1
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -1579,7 +1603,8 @@ jobs:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-sglang.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-sglang.outputs.namespace }}
       - name: Install snapshot-agent
-        uses: $/.github/actions/setup-snapshot-agent
+        timeout-minutes: 20
+        uses: ./.github/actions/setup-snapshot-agent
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
@@ -1594,7 +1619,7 @@ jobs:
        needs.changed-files.outputs.snapshot_trtllm == 'true') &&
       needs.deploy-operator-checkpoint-trtllm.result == 'success'
     runs-on: prod-deploy-tester-v1
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -1630,7 +1655,8 @@ jobs:
           vcluster_name: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.vcluster_name }}
           vcluster_namespace: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.namespace }}
       - name: Install snapshot-agent
-        uses: $/.github/actions/setup-snapshot-agent
+        timeout-minutes: 20
+        uses: ./.github/actions/setup-snapshot-agent
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
@@ -1937,6 +1963,7 @@ jobs:
       - planner-copy-to-acr
       - vllm-copy-to-acr
       - vllm-multi-gpu-test
+      - vllm-4-gpu-test
       - vllm-efa-build
       - sglang-copy-to-acr
       - sglang-multi-gpu-test
@@ -1975,6 +2002,7 @@ jobs:
       - vllm-build
       - vllm-test
       - vllm-multi-gpu-test
+      - vllm-4-gpu-test
       - vllm-copy-to-acr
       - sglang-build
       - sglang-test
