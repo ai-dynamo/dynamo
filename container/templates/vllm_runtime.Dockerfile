@@ -19,7 +19,6 @@ ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG VLLM_OMNI_REF
-ARG TRANSFORMERS_VERSION
 ARG NIXL_REF
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
@@ -175,18 +174,6 @@ COPY --chmod=664 --chown=dynamo:0 LICENSE /workspace/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 
 {% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
-{% set python_executable = "python3" if device == "cuda" else "/opt/venv/bin/python" %}
-
-# The vLLM 0.27.1 CUDA and CPU release images resolve the unbounded
-# `transformers>=5.5.3` requirement to 5.15.0. That release changed Gemma 4 to
-# heterogeneous per-layer configs, but vLLM's corresponding support missed
-# 0.27.1 and the engine crashes during ModelConfig initialization. Install the
-# compatible version before layering vLLM-Omni so its dependency solve sees the
-# final Transformers invariant instead of resolving against 5.15.0 first.
-RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
-    export UV_CACHE_DIR=/root/.cache/uv && \
-    uv pip install {{ pip_target }} --no-deps \
-        "transformers==${TRANSFORMERS_VERSION}"
 
 {% if device != "cuda" %}
 # NIXL meta package always tries to find a cuda-backend
@@ -477,22 +464,6 @@ eps = [ep for ep in entry_points(group='vllm.general_plugins') if ep.name == 'mo
 assert eps, 'modelexpress vllm.general_plugins entry point not found'; \
 [ep.load()() for ep in eps]"
 {% endif %}
-
-# vLLM-Omni is installed with the current Transformers version in its protected
-# constraints file, so an incompatible Omni requirement fails during dependency
-# resolution. Check the completed image as well so a later package layer cannot
-# silently replace the vLLM 0.27.1-compatible Transformers release. A global
-# `uv pip check` is not appropriate here: the upstream runtime and Dynamo's
-# deliberate --no-deps layers contain unrelated package-metadata conflicts.
-RUN {{ python_executable }} - "${TRANSFORMERS_VERSION}" <<'PY'
-import importlib.metadata as md
-import sys
-
-actual = md.version("transformers")
-expected = sys.argv[1]
-if actual != expected:
-    raise RuntimeError(f"expected transformers {expected}, found {actual}")
-PY
 
 USER dynamo
 
