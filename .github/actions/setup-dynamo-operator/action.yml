@@ -133,7 +133,7 @@ runs:
         echo "operator_tag=${{ inputs.operator_tag }}" >> "$GITHUB_OUTPUT"
 
     - name: Install vCluster CLI
-      uses: ./.github/actions/install-vcluster-cli
+      uses: $/.github/actions/install-vcluster-cli
 
     - name: Create host namespace
       shell: bash
@@ -317,7 +317,7 @@ runs:
 
     - name: Connect to vCluster
       id: connect-vcluster
-      uses: ./.github/actions/connect-vcluster
+      uses: $/.github/actions/connect-vcluster
       with:
         host_kubeconfig_base64: ${{ inputs.kubeconfig_base64 }}
         vcluster_name: ${{ steps.resolve-names.outputs.vcluster_name }}
