@@ -42,9 +42,7 @@ class WorkflowOrchestrator:
         workflow_ir = workflow.build() if isinstance(workflow, Workflow) else workflow
         if not isinstance(workflow_ir, WorkflowIR):
             raise TypeError("workflow must be a Workflow or WorkflowIR")
-        dispatcher = await StageDispatcher.bind(
-            workflow_ir, bindings, runtime=runtime
-        )
+        dispatcher = await StageDispatcher.bind(workflow_ir, bindings, runtime=runtime)
         return cls(workflow_ir, dispatcher)
 
     @property

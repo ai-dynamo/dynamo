@@ -92,7 +92,10 @@ class StageDispatcher:
 
         for stage_id, contract in contracts.items():
             binding = bound_stages[stage_id]
-            if isinstance(binding, InlineBinding) and binding.runner.contract != contract:
+            if (
+                isinstance(binding, InlineBinding)
+                and binding.runner.contract != contract
+            ):
                 raise WorkflowValidationError(
                     f"inline runner for stage {stage_id!r} "
                     "does not match its authored contract"

@@ -8,7 +8,6 @@ from typing import Any
 import pytest
 
 from dynamo.experimental.workflow import (
-    DeploymentSpec,
     InlineBinding,
     RemoteBinding,
     StageContext,
@@ -16,7 +15,6 @@ from dynamo.experimental.workflow import (
     Workflow,
     WorkflowExecutionError,
     WorkflowOrchestrator,
-    compile_workflow,
 )
 from dynamo.experimental.workflow.remote import RemoteStageClient, RemoteStageServer
 
@@ -361,16 +359,22 @@ async def test_three_remote_stages_fan_out_and_join_through_direct_mappings() ->
         "classifier": _KeywordClassifier(),
         "generator": _TextGenerator(),
     }
-    plan = compile_workflow(workflow, DeploymentSpec.remote(**endpoint_ids))
     clients = {
         endpoint_ids[stage_id]: _LoopbackClient(RemoteStageServer(stage_id, runner))
         for stage_id, runner in runners.items()
     }
     runtime = _Runtime(clients)
-    executor = await WorkflowOrchestrator.bind(plan, runtime=runtime)
+    orchestrator = await WorkflowOrchestrator.bind(
+        workflow,
+        bindings={
+            stage_id: RemoteBinding(endpoint_id)
+            for stage_id, endpoint_id in endpoint_ids.items()
+        },
+        runtime=runtime,
+    )
 
     request_context = _ParentContext()
-    result = await executor.run(
+    result = await orchestrator.run(
         {"text": "Dynamo workflow runs across processes"},
         attempt_id="remote-example-1",
         request_context=request_context,
@@ -417,22 +421,16 @@ async def test_remote_branches_join_in_an_inline_response_stage() -> None:
         endpoint_ids[stage_id]: _LoopbackClient(RemoteStageServer(stage_id, runner))
         for stage_id, runner in runners.items()
     }
-    plan = compile_workflow(
-        workflow,
-        DeploymentSpec(
-            {
-                **{
-                    stage_id: RemoteBinding(endpoint_id)
-                    for stage_id, endpoint_id in endpoint_ids.items()
-                },
-                "response": InlineBinding("response"),
-            }
-        ),
-    )
     orchestrator = await WorkflowOrchestrator.bind(
-        plan,
+        workflow,
+        bindings={
+            **{
+                stage_id: RemoteBinding(endpoint_id)
+                for stage_id, endpoint_id in endpoint_ids.items()
+            },
+            "response": InlineBinding(_Response()),
+        },
         runtime=_Runtime(clients),
-        inline_runners={"response": _Response()},
     )
 
     result = await orchestrator.run({"text": "Dynamo workflow"})
