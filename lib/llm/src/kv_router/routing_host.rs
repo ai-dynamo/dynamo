@@ -195,7 +195,11 @@ where
     affinity: Option<AffinityCoordinator>,
     hosted_occupancy: Option<HostedOccupancy>,
     lora: Option<LoraRouting>,
-    _load_context: Option<Arc<crate::kv_router::RoutingLoadContext>>,
+    /// Retains the shared client, overload state, and cancellation subtree for this host.
+    ///
+    /// Compatibility construction paths that predate routing load ownership leave this unset.
+    #[allow(dead_code)]
+    routing_context: Option<Arc<crate::kv_router::RoutingLoadContext>>,
 }
 
 /// Compatibility name for the KV-only host used by existing callers.
@@ -279,7 +283,7 @@ where
             affinity,
             hosted_occupancy: None,
             lora: None,
-            _load_context: load_context,
+            routing_context: load_context,
         }
     }
 
@@ -358,7 +362,7 @@ where
                     load_estimator,
                     selector,
                 }),
-            _load_context: Some(load_context),
+            routing_context: Some(load_context),
         })
     }
 
