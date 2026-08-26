@@ -6,6 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 # Concurrency Grid
 
 Perform a concurrency sweep during benchmarking only if you deem it is necessary - it is not always required.
+Closed-loop concurrency grids are one of two measurement modes; `measurement-mode.md` governs which mode is primary
+for the engagement objective, and a latency-SLO capacity question is answered by open-loop rate sweeps, not by this
+grid.
 
 ## Selection Order
 

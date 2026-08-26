@@ -21,6 +21,7 @@ rules:
   - agent-docs/rules/benchmarking/comparison-uncertainty.md
   - agent-docs/rules/benchmarking/concurrency-grid.md
   - agent-docs/rules/benchmarking/evidence-eligibility.md
+  - agent-docs/rules/benchmarking/measurement-mode.md
   - agent-docs/rules/benchmarking/proxy-workload-selection.md
   - agent-docs/rules/benchmarking/result-storage.md
   - agent-docs/rules/benchmarking/series-boundaries.md
