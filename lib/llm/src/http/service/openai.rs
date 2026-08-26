@@ -41,7 +41,7 @@ use super::{
     error::{HttpError, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
     metrics::{
-        CancellationLabels, Endpoint, ErrorType, EventConverter,
+        CancellationLabels, Endpoint, ErrorType, EventConverter, InflightGuard,
         process_chat_response_and_observe_metrics,
         process_chat_response_using_event_converter_and_observe_metrics,
         process_response_and_observe_metrics,
@@ -3236,6 +3236,38 @@ pub(super) async fn responses_native_stream(
 pub(super) type NativeResponsesStream =
     std::pin::Pin<Box<dyn Stream<Item = ResponseStreamEvent> + Send + 'static>>;
 
+#[cfg(feature = "agent-rt-poc")]
+fn native_responses_stream(
+    stream: impl Stream<Item = ResponseStreamEvent> + Send + 'static,
+    mut inflight_guard: InflightGuard,
+    mut stream_handle: ConnectionHandle,
+) -> NativeResponsesStream {
+    stream_handle.arm();
+    inflight_guard.mark_error(ErrorType::Cancelled);
+    Box::pin(async_stream::stream! {
+        tokio::pin!(stream);
+        while let Some(event) = stream.next().await {
+            // agent-rt deliberately stops polling a model step as soon as it
+            // observes the terminal typed event. Disarm before yielding that
+            // event so dropping the exhausted step is not misclassified as a
+            // client disconnect. A drop before a terminal event remains armed
+            // and cancels the active engine context.
+            if matches!(
+                event,
+                ResponseStreamEvent::ResponseCompleted(_)
+                    | ResponseStreamEvent::ResponseFailed(_)
+                    | ResponseStreamEvent::ResponseIncomplete(_)
+            ) {
+                inflight_guard.mark_ok();
+                stream_handle.disarm();
+            }
+            yield event;
+        }
+        inflight_guard.mark_ok();
+        stream_handle.disarm();
+    })
+}
+
 enum ResponsesExecution {
     Http(Response),
     Native(NativeResponsesStream),
@@ -3498,18 +3530,11 @@ async fn responses_inner(
         };
 
         if native_output {
-            let mut stream_handle = stream_handle;
-            stream_handle.arm();
-            inflight_guard.mark_error(ErrorType::Cancelled);
-            let stream = async_stream::stream! {
-                tokio::pin!(typed_stream);
-                while let Some(event) = typed_stream.next().await {
-                    yield event;
-                }
-                inflight_guard.mark_ok();
-                stream_handle.disarm();
-            };
-            return Ok(ResponsesExecution::Native(Box::pin(stream)));
+            return Ok(ResponsesExecution::Native(native_responses_stream(
+                typed_stream,
+                inflight_guard,
+                stream_handle,
+            )));
         }
 
         let full_stream =
@@ -4679,6 +4704,10 @@ mod tests {
 
     use super::*;
     use crate::discovery::ModelManagerError;
+    #[cfg(feature = "agent-rt-poc")]
+    use crate::http::service::disconnect::ConnectionStatus;
+    #[cfg(feature = "agent-rt-poc")]
+    use crate::http::service::metrics::Metrics;
     use crate::protocols::common::StopConditionsProvider;
     use crate::protocols::common::extensions::{AgentCompaction, NvExt};
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
@@ -4694,6 +4723,77 @@ mod tests {
     };
 
     const BACKUP_ERROR_MESSAGE: &str = "Failed to generate completions";
+
+    #[cfg(feature = "agent-rt-poc")]
+    fn test_response(status: &str) -> dynamo_protocols::types::responses::Response {
+        serde_json::from_value(serde_json::json!({
+            "created_at": 1,
+            "id": "resp-native-stream-test",
+            "model": "test-model",
+            "object": "response",
+            "output": [],
+            "status": status
+        }))
+        .unwrap()
+    }
+
+    #[cfg(feature = "agent-rt-poc")]
+    #[tokio::test]
+    async fn native_response_terminal_event_disarms_before_downstream_drop() {
+        use dynamo_protocols::types::responses::ResponseCompletedEvent;
+
+        let metrics = Arc::new(Metrics::new());
+        let guard = metrics.clone().create_inflight_guard(
+            "test-model",
+            Endpoint::Responses,
+            true,
+            "request-terminal",
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let handle = ConnectionHandle::create_disabled(tx);
+        let event = ResponseStreamEvent::ResponseCompleted(ResponseCompletedEvent {
+            sequence_number: 0,
+            response: test_response("completed"),
+        });
+        let mut stream = native_responses_stream(stream::iter([event]), guard, handle);
+
+        assert!(matches!(
+            stream.next().await,
+            Some(ResponseStreamEvent::ResponseCompleted(_))
+        ));
+        drop(stream);
+
+        assert!(matches!(rx.await, Ok(ConnectionStatus::ClosedGracefully)));
+    }
+
+    #[cfg(feature = "agent-rt-poc")]
+    #[tokio::test]
+    async fn native_response_drop_before_terminal_remains_armed() {
+        use dynamo_protocols::types::responses::ResponseInProgressEvent;
+
+        let metrics = Arc::new(Metrics::new());
+        let guard = metrics.clone().create_inflight_guard(
+            "test-model",
+            Endpoint::Responses,
+            true,
+            "request-dropped",
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let handle = ConnectionHandle::create_disabled(tx);
+        let event = ResponseStreamEvent::ResponseInProgress(ResponseInProgressEvent {
+            sequence_number: 0,
+            response: test_response("in_progress"),
+        });
+        let mut stream = native_responses_stream(stream::iter([event]), guard, handle);
+
+        assert!(matches!(
+            stream.next().await,
+            Some(ResponseStreamEvent::ResponseInProgress(_))
+        ));
+        drop(stream);
+
+        assert!(matches!(rx.await, Ok(ConnectionStatus::ClosedUnexpectedly)));
+    }
 
     fn binary_pooling_response() -> NvCreatePoolingResponse {
         NvCreatePoolingResponse {
