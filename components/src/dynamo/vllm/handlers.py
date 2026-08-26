@@ -107,6 +107,7 @@ from .multimodal_utils.request_processor import (
     MissingMultimodalHandoffError,
     VllmMultimodalRequestProcessor,
 )
+from .state_agent import state_agent_settings
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -2232,6 +2233,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             self.config.engine_args,
             lora_worker_type,
             self.dp_range,
+            publish_source_endpoints=state_agent_settings(self.config) is None,
         )
         runtime_config.context_length = self.model_max_len
         publish_vllm_token_budget(runtime_config, self.model_max_len)

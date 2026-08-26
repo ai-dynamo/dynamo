@@ -5,7 +5,7 @@
 
 Both `dynamo.vllm` and `dynamo.sglang` (and any future backend) expose the
 same `--frontend-decoding` knob — when set, the Rust frontend decodes
-multimodal images and ships pre-decoded pixels via NIXL RDMA instead of
+multimodal images and videos and ships pre-decoded pixels via NIXL RDMA instead of
 letting the engine fetch + decode. The flag definition is identical
 modulo the engine-specific env-var prefix (`DYN_VLLM_*` vs `DYN_SGL_*`),
 so the per-backend `backend_args.py` modules call this helper instead of
@@ -34,8 +34,8 @@ def add_frontend_decoding_arg(g, *, env_prefix: str) -> None:
         env_var=f"DYN_{env_prefix}_FRONTEND_DECODING",
         default=False,
         help=(
-            "Enable frontend decoding of multimodal images. "
-            "Images are decoded in the Rust frontend and transferred to the "
+            "Enable frontend decoding of multimodal images and videos. "
+            "Media is decoded in the Rust frontend and transferred to the "
             "backend via NIXL RDMA, bypassing in-engine HTTP fetch + decode. "
             "Engine-specific topology constraints may apply — see backend "
             "validation."

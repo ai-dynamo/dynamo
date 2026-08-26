@@ -104,7 +104,7 @@ spec:
           command:
           - dynamo-trtllm-sidecar
           args:
-          - --trtllm-endpoint
+          - --grpc-endpoint
           - 127.0.0.1:50051
           - --model-path
           - Qwen/Qwen3-0.6B
