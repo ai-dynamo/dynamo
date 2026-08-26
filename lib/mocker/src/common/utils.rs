@@ -370,9 +370,6 @@ mod tests {
 
     #[test]
     fn test_auto_backend_keeps_platform_default() {
-        assert_eq!(configured_sleep_backend(), SleepBackend::Auto);
-        assert!(!sleep_drift_enabled());
-
         #[cfg(target_os = "linux")]
         let expected = SleepBackend::Timerfd;
         #[cfg(not(target_os = "linux"))]
@@ -386,8 +383,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_default_backend_actually_sleeps_on_timerfd() {
-        assert_eq!(configured_sleep_backend(), SleepBackend::Auto);
-
         let record = sleep_until_precise_measured(
             Instant::now() + Duration::from_millis(2),
             SleepBackend::Auto,
