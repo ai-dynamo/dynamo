@@ -1468,7 +1468,7 @@ impl ModelManager {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
         }
         let namespace = format!("__local_chat_{}", model);
-        let mut ws = WorkerSet::new(
+        let mut ws = WorkerSet::new_in_process(
             namespace.clone(),
             card_checksum.to_string(),
             Self::aggregated_local_card(),
@@ -1491,7 +1491,7 @@ impl ModelManager {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
         }
         let namespace = format!("__local_completions_{}", model);
-        let mut ws = WorkerSet::new(
+        let mut ws = WorkerSet::new_in_process(
             namespace.clone(),
             card_checksum.to_string(),
             Self::aggregated_local_card(),
@@ -1514,7 +1514,7 @@ impl ModelManager {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
         }
         let namespace = format!("__local_embeddings_{}", model);
-        let mut ws = WorkerSet::new(
+        let mut ws = WorkerSet::new_in_process(
             namespace.clone(),
             card_checksum.to_string(),
             Self::aggregated_local_card(),
@@ -1537,7 +1537,7 @@ impl ModelManager {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
         }
         let namespace = format!("__local_classify_{}", model);
-        let mut ws = WorkerSet::new(
+        let mut ws = WorkerSet::new_in_process(
             namespace.clone(),
             card_checksum.to_string(),
             Self::aggregated_local_card(),
@@ -1560,7 +1560,7 @@ impl ModelManager {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
         }
         let namespace = format!("__local_pooling_{}", model);
-        let mut ws = WorkerSet::new(
+        let mut ws = WorkerSet::new_in_process(
             namespace.clone(),
             card_checksum.to_string(),
             Self::aggregated_local_card(),
@@ -1583,7 +1583,7 @@ impl ModelManager {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
         }
         let namespace = format!("__local_tensor_{}", model);
-        let mut ws = WorkerSet::new(
+        let mut ws = WorkerSet::new_in_process(
             namespace.clone(),
             card_checksum.to_string(),
             Self::aggregated_local_card(),
@@ -1606,7 +1606,7 @@ impl ModelManager {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
         }
         let namespace = format!("__local_images_{}", model);
-        let mut ws = WorkerSet::new(
+        let mut ws = WorkerSet::new_in_process(
             namespace.clone(),
             card_checksum.to_string(),
             Self::aggregated_local_card(),
@@ -1629,7 +1629,7 @@ impl ModelManager {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
         }
         let namespace = format!("__local_videos_{}", model);
-        let mut ws = WorkerSet::new(
+        let mut ws = WorkerSet::new_in_process(
             namespace.clone(),
             card_checksum.to_string(),
             Self::aggregated_local_card(),
@@ -1652,7 +1652,7 @@ impl ModelManager {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
         }
         let namespace = format!("__local_audios_{}", model);
-        let mut ws = WorkerSet::new(
+        let mut ws = WorkerSet::new_in_process(
             namespace.clone(),
             card_checksum.to_string(),
             Self::aggregated_local_card(),
@@ -1675,7 +1675,7 @@ impl ModelManager {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
         }
         let namespace = format!("__local_realtime_{}", model);
-        let mut ws = WorkerSet::new(
+        let mut ws = WorkerSet::new_in_process(
             namespace.clone(),
             card_checksum.to_string(),
             Self::aggregated_local_card(),
@@ -1703,7 +1703,7 @@ impl ModelManager {
             VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
             serde_json::Value::Bool(true),
         );
-        let mut ws = WorkerSet::new(namespace.clone(), card_checksum.to_string(), card);
+        let mut ws = WorkerSet::new_in_process(namespace.clone(), card_checksum.to_string(), card);
         ws.generate_engine = Some(engine);
         model_entry.add_worker_set(namespace, Arc::new(ws));
         self.publish_catalog_locked();
@@ -1724,7 +1724,7 @@ impl ModelManager {
         let mut card = ModelDeploymentCard::default();
         card.worker_type = Some(crate::worker_type::WorkerType::Prefill);
         card.needs = vec![vec![crate::worker_type::WorkerType::Decode]];
-        let ws = WorkerSet::new(namespace.clone(), card_checksum.to_string(), card);
+        let ws = WorkerSet::new_in_process(namespace.clone(), card_checksum.to_string(), card);
         model_entry.add_worker_set(namespace, Arc::new(ws));
         self.publish_catalog_locked();
         Ok(())
@@ -2486,6 +2486,7 @@ fn has_required_kv_transfer_policy(configs: &HashMap<WorkerId, ModelRuntimeConfi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::discovery::worker_set::LOCAL_METRIC_NAMESPACE;
     use std::collections::HashMap;
 
     use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, WorkerWithDpRank};
@@ -3554,6 +3555,12 @@ mod tests {
         ))
     }
 
+    fn make_completions_engine() -> OpenAICompletionsStreamingEngine {
+        Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        ))
+    }
+
     #[test]
     fn test_is_model_ready_to_serve_false_for_unknown_model() {
         let mm = ModelManager::new();
@@ -3709,20 +3716,29 @@ mod tests {
 
     // -- namespace propagation through the ModelManager accessors --
 
-    /// In-process (non-discovery) models register under a synthetic namespace.
-    /// That value is what ends up in `dynamo_namespace`, so pin it: the HTTP
-    /// integration test in tests/http_metrics.rs asserts the same string.
+    /// In-process (non-discovery) models register under a synthetic per-endpoint-family
+    /// namespace, but that map key is an implementation detail and must not reach
+    /// `dynamo_namespace`. Every family reports one reserved value instead, so a
+    /// local model is one series. tests/http_metrics.rs asserts the same string.
     #[test]
-    fn local_chat_model_reports_synthetic_namespace() {
+    fn local_models_report_one_namespace_across_endpoint_families() {
         let mm = ModelManager::new();
         mm.add_chat_completions_model("local-model", "abc", make_chat_engine())
             .unwrap();
+        mm.add_completions_model("local-model", "abc", make_completions_engine())
+            .unwrap();
 
-        let selected = mm.get_chat_completions_engine("local-model").unwrap();
-        assert_eq!(selected.namespace, "__local_chat_local-model");
+        let chat = mm.get_chat_completions_engine("local-model").unwrap();
+        let completions = mm.get_completions_engine("local-model").unwrap();
+
+        assert_eq!(chat.namespace, LOCAL_METRIC_NAMESPACE);
+        assert_eq!(
+            completions.namespace, LOCAL_METRIC_NAMESPACE,
+            "chat and completions are separate WorkerSets but one deployment"
+        );
         assert!(
-            !selected.namespace.is_empty(),
-            "an empty namespace would collapse all in-process models into one series"
+            !chat.namespace.is_empty(),
+            "an empty namespace reads as an absent label in Prometheus"
         );
     }
 

@@ -793,7 +793,7 @@ impl Model {
         // for every eligible set on the request hot path and discard all but one.
         let selected = |ws: &WorkerSet, value: T| Selected {
             value,
-            namespace: ws.namespace().to_string(),
+            namespace: ws.metrics_namespace().to_string(),
         };
 
         // Fast path: single set (same zero-worker filtering as the multi-set path below)

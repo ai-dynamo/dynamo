@@ -2082,11 +2082,11 @@ mod namespace_scoping_tests {
             "each namespace must get its own metric set"
         );
         assert_eq!(
-            namespace_label(&metrics_a.requests_total.desc()[0]),
+            namespace_label(metrics_a.requests_total.desc()[0]),
             "pair_a"
         );
         assert_eq!(
-            namespace_label(&metrics_b.requests_total.desc()[0]),
+            namespace_label(metrics_b.requests_total.desc()[0]),
             "pair_b"
         );
 
@@ -2120,7 +2120,7 @@ mod namespace_scoping_tests {
         let metrics_b = RouterWorkerStatusMetrics::from_component(&comp_b);
 
         assert!(!Arc::ptr_eq(&metrics_a, &metrics_b));
-        assert_eq!(namespace_label(&metrics_a.registered.desc()[0]), "pair_c");
-        assert_eq!(namespace_label(&metrics_b.registered.desc()[0]), "pair_d");
+        assert_eq!(namespace_label(metrics_a.registered.desc()[0]), "pair_c");
+        assert_eq!(namespace_label(metrics_b.registered.desc()[0]), "pair_d");
     }
 }

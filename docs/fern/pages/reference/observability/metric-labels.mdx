@@ -87,7 +87,9 @@ Counters and histograms are **not** removed. Their value is the history they car
 
 #### Models served in-process
 
-A model registered by an in-process engine (`--engine-type echo`, single-process serving) has no Dynamo namespace — nothing registers in etcd and no worker is addressed over the network. These report `dynamo_namespace="__local__"`, one series per model regardless of how many endpoint families it serves. The value is reserved; an operator-chosen namespace never collides with it.
+A model registered by an in-process engine (`--engine-type echo`, single-process serving) has no Dynamo namespace — nothing registers in etcd and no worker is addressed over the network. These report `dynamo_namespace="__local__"`, one series per model regardless of how many endpoint families it serves.
+
+Whether a series is in-process is decided by the worker set's own identity — a discovery-built worker set carries the endpoint it was discovered at, an in-process one does not — and never by matching on the namespace string. The namespace validator accepts `^[a-z0-9-_]+$`, so `__local__` and `__local_prod` are names an operator can legitimately deploy; a discovered deployment with either name is reported under that name, not folded in with in-process models. A single frontend process is either discovery-backed or in-process, never both, so the two cannot appear in one exposition.
 
 ## Registration-time labels
 

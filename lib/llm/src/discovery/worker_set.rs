@@ -128,6 +128,14 @@ fn lora_context_engine<Req: Data, Resp: Data>(
     })
 }
 
+/// `dynamo_namespace` reported for a model served by an in-process engine
+/// rather than a discovered deployment. See [`WorkerSet::metrics_namespace`].
+///
+/// Never inferred from a namespace string: the runtime's namespace validator
+/// accepts `^[a-z0-9-_]+$`, so an operator may legitimately deploy a namespace
+/// beginning `__local_`. Identity comes from [`WorkerSet::is_in_process`].
+pub const LOCAL_METRIC_NAMESPACE: &str = "__local__";
+
 /// A set of workers from the same namespace/configuration with their own pipeline.
 pub struct WorkerSet {
     /// Full namespace (e.g., "ns-abc12345")
@@ -136,6 +144,9 @@ pub struct WorkerSet {
     /// Exact serving pool identity. Discovery-backed WorkerSets always set
     /// this; in-process models have no distributed endpoint.
     endpoint_id: Option<EndpointId>,
+
+    /// Set only by [`WorkerSet::new_in_process`]. See [`WorkerSet::is_in_process`].
+    in_process: bool,
 
     /// Endpoint handle used only by committed topology reconciliation.
     topology_endpoint: Option<Endpoint>,
@@ -183,10 +194,23 @@ pub struct WorkerSet {
 }
 
 impl WorkerSet {
+    /// A worker set whose engine runs inside the frontend process.
+    ///
+    /// Used by the `ModelManager::add_*_model` helpers. `namespace` is their
+    /// synthetic per-endpoint-family map key, which is an implementation detail
+    /// and is not what gets published -- see [`WorkerSet::metrics_namespace`].
+    pub fn new_in_process(namespace: String, mdcsum: String, card: ModelDeploymentCard) -> Self {
+        // Struct-update syntax is unavailable: WorkerSet implements Drop.
+        let mut ws = Self::new(namespace, mdcsum, card);
+        ws.in_process = true;
+        ws
+    }
+
     pub fn new(namespace: String, mdcsum: String, card: ModelDeploymentCard) -> Self {
         Self {
             namespace,
             endpoint_id: None,
+            in_process: false,
             topology_endpoint: None,
             mdcsum,
             card,
@@ -217,6 +241,38 @@ impl WorkerSet {
 
     pub fn endpoint_id(&self) -> Option<&EndpointId> {
         self.endpoint_id.as_ref()
+    }
+
+    /// Whether this worker set's engine runs inside the frontend process rather
+    /// than behind a discovered deployment.
+    ///
+    /// Set at construction by [`WorkerSet::new_in_process`], never inferred.
+    /// Deriving it from the namespace string would misclassify a legitimate
+    /// operator namespace -- the runtime validator allows `^[a-z0-9-_]+$`, so
+    /// `__local_prod` is a name someone can really deploy -- and deriving it
+    /// from `endpoint_id` would silently reclassify any set that has not been
+    /// given its topology endpoint yet.
+    pub fn is_in_process(&self) -> bool {
+        self.in_process
+    }
+
+    /// The `dynamo_namespace` value to publish for this worker set.
+    ///
+    /// In-process models have no Dynamo namespace: nothing registers in etcd and
+    /// no worker is addressed over the network. They still need a `WorkerSet`
+    /// map key, so `add_*_model` fabricates one per endpoint family
+    /// (`__local_chat_{model}`, `__local_completions_{model}`, ...) because
+    /// `Model::add_worker_set` replaces rather than merges and the matching
+    /// `remove_*_model` calls -- public through the Python bindings -- delete
+    /// exactly their own family's set. That key is an implementation detail, so
+    /// it is reported as [`LOCAL_METRIC_NAMESPACE`]: one local model is one
+    /// series, and the endpoint-family convention stays out of the exposition.
+    pub fn metrics_namespace(&self) -> &str {
+        if self.is_in_process() {
+            LOCAL_METRIC_NAMESPACE
+        } else {
+            &self.namespace
+        }
     }
 
     pub(crate) fn set_topology_endpoint(&mut self, endpoint: Endpoint) {
@@ -420,6 +476,8 @@ impl WorkerSet {
         let mut view = Self {
             namespace: self.namespace.clone(),
             endpoint_id: self.endpoint_id.clone(),
+            // An adapter served by an in-process model is itself in-process.
+            in_process: self.in_process,
             topology_endpoint: self.topology_endpoint.clone(),
             mdcsum: self.mdcsum.clone(),
             card,
@@ -805,6 +863,57 @@ mod tests {
                 "{:?} should remain prefill-classified",
                 role
             );
+        }
+    }
+
+    /// The metrics namespace must come from the worker set's identity, never
+    /// from sniffing its namespace string. The runtime validator accepts
+    /// `^[a-z0-9-_]+$`, so `__local_prod` is a namespace an operator can really
+    /// deploy; a prefix test would silently merge it with in-process models.
+    #[test]
+    fn discovered_namespaces_are_never_treated_as_in_process() {
+        let discovered = |namespace: &str| {
+            WorkerSet::new(
+                namespace.to_string(),
+                "ck".to_string(),
+                ModelDeploymentCard::default(),
+            )
+        };
+
+        for namespace in [
+            "__local_prod",
+            "__local_",
+            "__local__",
+            "__localhost",
+            "local",
+            "dynamo_cloud_vllm_v1_disagg_router_071de157",
+        ] {
+            let ws = discovered(namespace);
+            assert!(!ws.is_in_process());
+            assert_eq!(
+                ws.metrics_namespace(),
+                namespace,
+                "a discovered deployment named {namespace:?} must be reported verbatim"
+            );
+        }
+    }
+
+    /// In-process sets carry no endpoint, so every synthetic per-family key
+    /// collapses onto one series for the model.
+    #[test]
+    fn in_process_worker_sets_report_one_local_namespace() {
+        for key in [
+            "__local_chat_mymodel",
+            "__local_completions_mymodel",
+            "__local_prefill_mymodel",
+        ] {
+            let ws = WorkerSet::new_in_process(
+                key.to_string(),
+                "ck".to_string(),
+                ModelDeploymentCard::default(),
+            );
+            assert!(ws.is_in_process(), "{key} was built in-process");
+            assert_eq!(ws.metrics_namespace(), LOCAL_METRIC_NAMESPACE);
         }
     }
 }
