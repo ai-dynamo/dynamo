@@ -77,7 +77,7 @@ on:
 
 jobs:
   image:
-    uses: ./.github/workflows/shared-build-image.yml
+    uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
       target: runtime
@@ -207,7 +207,7 @@ jobs:
   parallel:
     name: test
     needs: image
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: dynamo
       test_type: parallel
@@ -228,7 +228,7 @@ jobs:
   sequential:
     name: test
     needs: image
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: dynamo
       test_type: sequential
@@ -249,7 +249,7 @@ jobs:
   gpu:
     name: test
     needs: image
-    uses: ./.github/workflows/shared-test.yml
+    uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: dynamo
       test_type: gpu
