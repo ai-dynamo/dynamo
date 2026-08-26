@@ -1369,22 +1369,21 @@ export const RELEASE_STATS: Record<string, ReleaseStats> = {
 
 export const NIGHTLY_BUILDS: NightlyBuild[] = [
   {
-    version: "1.4.0.dev20260803",
-    date: "Aug 3, 2026",
+    version: "1.5.0.dev20260826",
+    date: "Aug 26, 2026",
     packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"],
   },
   {
-    version: "1.4.0.dev20260802",
-    date: "Aug 2, 2026",
+    version: "1.5.0.dev20260825",
+    date: "Aug 25, 2026",
     packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"],
   },
   {
-    version: "1.4.0.dev20260730",
-    date: "Jul 30, 2026",
-    packages: ["ai-dynamo", "ai-dynamo-runtime"],
-    note: "kvbm was not published for this nightly.",
+    version: "1.5.0.dev20260823",
+    date: "Aug 23, 2026",
+    packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"],
   },
 ];
 
 export const NIGHTLIES_NOTE =
-  "ai-dynamo, ai-dynamo-runtime, and kvbm nightly builds from main publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026). Install with pip or uv using `--pre` and the NVIDIA extra-index pattern shown above. Runtime containers use rolling `*-runtime-nightly:latest` tags on NGC.";
+  "ai-dynamo, ai-dynamo-runtime, and kvbm nightly builds from main publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026). Install with pip or uv using `--pre` and the NVIDIA extra-index pattern shown above. Runtime containers publish to the `*-runtime-nightly` repositories on NGC, under a dated `YYYYMMDD-<shortsha>` tag plus rolling `latest` and `nightly` tags.";

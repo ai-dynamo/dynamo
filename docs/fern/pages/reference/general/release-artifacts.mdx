@@ -58,7 +58,7 @@ uv pip install --pre --extra-index-url https://pypi.nvidia.com/ ai-dynamo==1.3.0
 pip install --pre --extra-index-url https://pypi.nvidia.com ai-dynamo==1.3.0.dev1
 ```
 
-**Nightlies:** `ai-dynamo` and `ai-dynamo-runtime` nightly builds from `main` publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026). Install with the same `--pre` + extra-index pattern.
+**Nightlies:** `ai-dynamo`, `ai-dynamo-runtime`, and `kvbm` nightly builds from `main` publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026). Install with the same `--pre` + extra-index pattern. See [Nightly Releases](nightly-releases.md) for the full artifact list and container tags.
 
 </Accordion>
 
@@ -142,11 +142,11 @@ Current stable release: v1.4.1 (container tag `1.4.1`, wheel version `1.4.1`).
 
 | Version | Date | Packages | Notes |
 | --- | --- | --- | --- |
-| 1.4.0.dev20260803 | Aug 3, 2026 | ai-dynamo, ai-dynamo-runtime, kvbm | - |
-| 1.4.0.dev20260802 | Aug 2, 2026 | ai-dynamo, ai-dynamo-runtime, kvbm | - |
-| 1.4.0.dev20260730 | Jul 30, 2026 | ai-dynamo, ai-dynamo-runtime | kvbm was not published for this nightly. |
+| 1.5.0.dev20260826 | Aug 26, 2026 | ai-dynamo, ai-dynamo-runtime, kvbm | - |
+| 1.5.0.dev20260825 | Aug 25, 2026 | ai-dynamo, ai-dynamo-runtime, kvbm | - |
+| 1.5.0.dev20260823 | Aug 23, 2026 | ai-dynamo, ai-dynamo-runtime, kvbm | - |
 
-ai-dynamo, ai-dynamo-runtime, and kvbm nightly builds from main publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026). Install with pip or uv using `--pre` and the NVIDIA extra-index pattern shown above. Runtime containers use rolling `*-runtime-nightly:latest` tags on NGC.
+ai-dynamo, ai-dynamo-runtime, and kvbm nightly builds from main publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026). Install with pip or uv using `--pre` and the NVIDIA extra-index pattern shown above. Runtime containers publish to the `*-runtime-nightly` repositories on NGC, under a dated `YYYYMMDD-<shortsha>` tag plus rolling `latest` and `nightly` tags.
 
 **Crates: first published version on crates.io**
 
