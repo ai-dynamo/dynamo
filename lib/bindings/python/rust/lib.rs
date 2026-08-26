@@ -1188,41 +1188,25 @@ impl DistributedRuntime {
         let event_transport_kind =
             resolve_event_transport_kind(&discovery_backend_config, event_plane.as_deref())?;
 
-        // Build (or adopt) the process-wide runtime and hand it to the pyo3
-        // bridge BEFORE anything else can touch it.
+        // Hand the configured runtime to the pyo3 bridge before anything can touch it.
         //
-        // This used to live inside an `.or_else` on `runtime_from_existing()`,
-        // which meant `init_with_runtime` was never called: that function does
-        // not return `Err` — its final branch builds a runtime and returns `Ok`
-        // — so the error path was unreachable. With the bridge uninitialised,
-        // `pyo3_async_runtimes::tokio::get_runtime()` lazily built its OWN
-        // runtime from `Builder::new_multi_thread()` defaults, sized from
-        // `available_parallelism()` and ignoring DYN_RUNTIME_* entirely.
-        //
-        // That mattered because the frontend's whole lifetime runs on the pyo3
-        // runtime: `run_input` wraps everything in `future_into_py`, which
-        // spawns via `get_runtime()`. So the configured runtime was built
-        // correctly and then sat mostly idle while the workload ran on an
-        // unconfigured one.
+        // This used to sit in an `.or_else` on `runtime_from_existing()`, whose error path is
+        // unreachable — so `init_with_runtime` never ran. An uninitialised bridge makes
+        // `get_runtime()` lazily build its own runtime from `Builder::new_multi_thread()`
+        // defaults, ignoring DYN_RUNTIME_*. That runs the frontend's entire lifetime, since
+        // `run_input` wraps everything in `future_into_py`, so the configured runtime sat idle
+        // while the workload ran on an unconfigured one.
         let primary = rs::Worker::ensure_process_runtime().map_err(to_pyerr)?;
         INIT.get_or_try_init(|| -> anyhow::Result<()> {
-            // `init_with_runtime` fails if the bridge already holds a runtime,
-            // which is a legitimate state rather than an error: `backend::Worker`
-            // initialises the bridge with this same `RT` and deliberately ignores
-            // the same error, so any process that builds a Worker before a
-            // DistributedRuntime arrives here with the bridge already set. Treat
-            // it as idempotent — but only after confirming the bridge really does
-            // hold our runtime, because silently running on a foreign one is the
-            // exact failure this whole change exists to prevent.
+            // An already-initialised bridge is legitimate, not an error: `backend::Worker`
+            // initialises it with this same `RT` and ignores the same error. Accept it, but
+            // check it really is our runtime — running on a foreign one is the bug above.
             if pyo3_async_runtimes::tokio::init_with_runtime(primary).is_err() {
-                // Safe to call now: it only lazily builds a runtime when unset,
-                // and the failure above proves it is set.
-                let existing = pyo3_async_runtimes::tokio::get_runtime();
-                if !std::ptr::eq(existing, primary) {
+                // The failure proves the cell is set, so this can't hit the lazy-build path.
+                if !std::ptr::eq(pyo3_async_runtimes::tokio::get_runtime(), primary) {
                     anyhow::bail!(
-                        "the pyo3 async bridge was already initialized with a different tokio \
-                         runtime than the dynamo process runtime; refusing to run on a runtime \
-                         that ignores DYN_RUNTIME_*"
+                        "pyo3 async bridge already initialized with a different tokio runtime; \
+                         refusing to run on a runtime that ignores DYN_RUNTIME_*"
                     );
                 }
             }

@@ -85,17 +85,11 @@ pub struct RuntimeConfig {
     /// Blocking threads are used for blocking operations, this value must be greater than 0.
     /// Set this at runtime with environment variable DYN_RUNTIME_MAX_BLOCKING_THREADS.
     ///
-    /// Defaults to the machine's core count -- see `impl Default for RuntimeConfig`, which sets
-    /// `max_blocking_threads: num_cores`. The `#[builder(default = "512")]` below applies only when
-    /// constructing through `RuntimeConfigBuilder` without setting this field; it is NOT the
-    /// default a normally-configured process sees.
+    /// Defaults to the core count (`impl Default`). The `#[builder(default = "512")]` below
+    /// applies only when building through `RuntimeConfigBuilder` without setting this field.
     ///
-    /// This comment previously read "Defaults to 512", which is a good way to build an incorrect
-    /// model of how many threads a process will start.
-    ///
-    /// Note this is a ceiling, not a preallocation: Tokio spawns blocking threads on demand and
-    /// reaps them after an idle timeout, so an observed thread count is timing-sensitive and should
-    /// be taken at steady state under load.
+    /// This is a ceiling, not a preallocation: Tokio spawns blocking threads on demand and reaps
+    /// them when idle, so measure at steady state under load.
     #[validate(range(min = 1))]
     #[builder(default = "512")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
@@ -543,18 +537,12 @@ mod tests {
 
     /// Both thread-pool variables must survive `from_settings()`.
     ///
-    /// Regression guard. It has previously been unclear whether
-    /// `DYN_RUNTIME_MAX_BLOCKING_THREADS` was read at all, because setting it had
-    /// no observable effect on a frontend's thread count. The parsing was in fact
-    /// correct -- the runtime it configured was not the one serving traffic -- but
-    /// nothing pinned down the parsing side, so the question stayed open longer
-    /// than it needed to.
+    /// Regression guard: setting `DYN_RUNTIME_MAX_BLOCKING_THREADS` had no effect on a
+    /// frontend's thread count, which looked like a parsing bug. Parsing was fine — the
+    /// runtime it configured was not the one serving traffic — but nothing pinned that down.
     ///
-    /// Environment mutation goes through `temp_env::with_vars`, which holds a
-    /// process-global lock for the duration of the closure and restores the
-    /// previous values on the way out (including on panic). Setting the
-    /// variables directly would race any other test reading the environment on
-    /// another harness thread.
+    /// `temp_env::with_vars` holds a process-global lock and restores prior values on the way
+    /// out, so this can't race other tests reading the environment.
     #[test]
     fn test_from_settings_reads_both_thread_env_vars() {
         const WORKERS: &str = "DYN_RUNTIME_NUM_WORKER_THREADS";
@@ -567,12 +555,8 @@ mod tests {
         });
     }
 
-    /// `Default` sets `max_blocking_threads` to the core count, NOT 512.
-    ///
-    /// The doc comment on the field used to say 512 -- that is the
-    /// `#[builder(default)]`, which applies only when building through
-    /// `RuntimeConfigBuilder`. Reading the comment instead of the impl is an easy way to
-    /// mispredict how many threads a process will start.
+    /// `Default` sets `max_blocking_threads` to the core count, not the `#[builder(default)]`
+    /// of 512 — that applies only when building through `RuntimeConfigBuilder`.
     #[test]
     fn test_default_max_blocking_threads_is_core_count() {
         let cores = std::thread::available_parallelism().unwrap().get();
