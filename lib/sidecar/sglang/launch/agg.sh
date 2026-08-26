@@ -86,6 +86,6 @@ CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
 
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
     dynamo-sglang-sidecar \
-    --sglang-endpoint "${SGLANG_HOST}:${SGLANG_GRPC_PORT}" &
+    --grpc-endpoint "${SGLANG_HOST}:${SGLANG_GRPC_PORT}" &
 
 wait_any_exit
