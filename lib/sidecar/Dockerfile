@@ -24,12 +24,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /src
 
+COPY . .
+
 # ---- vLLM builder -----------------------------------------------------------
 FROM builder-base AS vllm-builder
 
 ARG TARGETARCH
-
-COPY . .
 
 # sharing=locked: cargo's .package-cache lock lives outside these mounts, so it
 # cannot serialize the concurrent cargo processes a multi-platform build starts.
@@ -45,8 +45,6 @@ FROM builder-base AS sglang-builder
 
 ARG TARGETARCH
 
-COPY . .
-
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH},target=/src/target,sharing=locked \
@@ -58,8 +56,6 @@ RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry,target=/usr/local/cargo/
 FROM builder-base AS trtllm-builder
 
 ARG TARGETARCH
-
-COPY . .
 
 RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=dynamo-sidecar-cargo-git,target=/usr/local/cargo/git,sharing=locked \
