@@ -37,12 +37,14 @@ spec:
     - name: Frontend
       replicas: 1
       type: frontend
+      runtimeVersionOverride: "1.5.0"
       podTemplate:
         spec:
           containers:
             - name: main
-              # TODO: pin the released image (tag + digest) before merging.
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:TODO-RELEASE-TAG
+              # Temporary staging build; carries dynamo PRs 12510 + 12541.
+              # Replace with the public release image before merging.
+              image: nvcr.io/nvstaging/nim/sungsooh:inkling-gb200probe-dyn150dev-p12541-p12510-v1@sha256:801a47a82216484ccc982425bb74d788347d1780e584ecec1d58185b98971c83
               imagePullPolicy: Always
               command: [python3, -m, dynamo.frontend]
               args:
@@ -82,6 +84,7 @@ spec:
     - name: VllmPrefillWorker
       replicas: 1
       type: prefill
+      runtimeVersionOverride: "1.5.0"
       # tmpfs at /dev/shm for the vLLM multiprocess executor's TP4 IPC buffers.
       # The operator default (8Gi) is too small for this context length.
       sharedMemorySize: 64Gi
@@ -97,7 +100,7 @@ spec:
               resourceClaimTemplateName: inkling-vllm-gb300-disagg-agentic-compute-domain-channel
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:TODO-RELEASE-TAG
+              image: nvcr.io/nvstaging/nim/sungsooh:inkling-gb200probe-dyn150dev-p12541-p12510-v1@sha256:801a47a82216484ccc982425bb74d788347d1780e584ecec1d58185b98971c83
               imagePullPolicy: Always
               command: [/bin/bash, -lc]
               args:
@@ -191,6 +194,7 @@ spec:
     - name: VllmDecodeWorker
       replicas: 1
       type: decode
+      runtimeVersionOverride: "1.5.0"
       sharedMemorySize: 64Gi
       podTemplate:
         metadata:
@@ -204,7 +208,7 @@ spec:
               resourceClaimTemplateName: inkling-vllm-gb300-disagg-agentic-compute-domain-channel
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:TODO-RELEASE-TAG
+              image: nvcr.io/nvstaging/nim/sungsooh:inkling-gb200probe-dyn150dev-p12541-p12510-v1@sha256:801a47a82216484ccc982425bb74d788347d1780e584ecec1d58185b98971c83
               imagePullPolicy: Always
               command: [/bin/bash, -lc]
               args:

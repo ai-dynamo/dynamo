@@ -135,7 +135,7 @@ spec:
             value: "1"
           - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
             value: mnnvl
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:TODO-RELEASE-TAG
+          image: nvcr.io/nvstaging/nim/sungsooh:inkling-gb200probe-dyn150dev-p12541-p12510-v1@sha256:801a47a82216484ccc982425bb74d788347d1780e584ecec1d58185b98971c83
           imagePullPolicy: Always
           name: main
           ports:
@@ -180,6 +180,7 @@ spec:
           persistentVolumeClaim:
             claimName: model-cache
     replicas: 1
+    runtimeVersionOverride: 1.5.0
     sharedMemorySize: 64Gi
     type: prefill
   - name: VllmDecodeWorker
@@ -270,7 +271,7 @@ spec:
             value: "1"
           - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
             value: mnnvl
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:TODO-RELEASE-TAG
+          image: nvcr.io/nvstaging/nim/sungsooh:inkling-gb200probe-dyn150dev-p12541-p12510-v1@sha256:801a47a82216484ccc982425bb74d788347d1780e584ecec1d58185b98971c83
           imagePullPolicy: Always
           name: main
           ports:
@@ -315,6 +316,7 @@ spec:
           persistentVolumeClaim:
             claimName: model-cache
     replicas: 1
+    runtimeVersionOverride: 1.5.0
     # tmpfs at /dev/shm for the vLLM multiprocess executor's TP4 IPC buffers.
     # The operator default (8Gi) is too small for this context length.
     sharedMemorySize: 64Gi
@@ -350,7 +352,7 @@ spec:
             value: "1"
           - name: TRANSFORMERS_OFFLINE
             value: "1"
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:TODO-RELEASE-TAG
+          image: nvcr.io/nvstaging/nim/sungsooh:inkling-gb200probe-dyn150dev-p12541-p12510-v1@sha256:801a47a82216484ccc982425bb74d788347d1780e584ecec1d58185b98971c83
           imagePullPolicy: Always
           name: main
           ports:
@@ -379,6 +381,7 @@ spec:
           persistentVolumeClaim:
             claimName: model-cache
     replicas: 1
+    runtimeVersionOverride: 1.5.0
     type: frontend
 ---
 apiVersion: resource.k8s.io/v1
