@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Execution lifecycle for compiled declarative workflows."""
+"""Binding and execution lifecycle for declarative workflows."""
 
 from __future__ import annotations
 
@@ -9,38 +9,45 @@ import asyncio
 import uuid
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Union
 
+from dynamo.experimental.workflow.bindings import Binding
+from dynamo.experimental.workflow.builder import Workflow
 from dynamo.experimental.workflow.dispatcher import StageDispatcher
-from dynamo.experimental.workflow.plan import ExecutionPlan
-from dynamo.experimental.workflow.runtime import StageRunner, WorkflowExecutionError
+from dynamo.experimental.workflow.ir import WorkflowIR
+from dynamo.experimental.workflow.runtime import WorkflowExecutionError
 from dynamo.experimental.workflow.scheduler import GraphScheduler
 
 
 class WorkflowOrchestrator:
-    """Own one compiled workflow's request and result lifecycle."""
+    """Bind and execute one declarative workflow."""
 
     # Declarative workflows execute through GraphScheduler.
     # TODO: Support imperative authoring through WorkflowHandler.
 
-    def __init__(self, plan: ExecutionPlan, dispatcher: StageDispatcher) -> None:
-        self._plan = plan
+    def __init__(self, workflow_ir: WorkflowIR, dispatcher: StageDispatcher) -> None:
+        self._workflow_ir = workflow_ir
         self._dispatcher = dispatcher
 
     @classmethod
     async def bind(
         cls,
-        plan: ExecutionPlan,
+        workflow: Union[Workflow, WorkflowIR],
         *,
-        inline_runners: Mapping[str, StageRunner] = MappingProxyType({}),
+        bindings: Mapping[str, Binding],
     ) -> "WorkflowOrchestrator":
-        """Bind initialized resources to an immutable execution plan."""
+        """Bind every authored stage to an initialized invocation target."""
 
-        return cls(plan, StageDispatcher(plan, inline_runners))
+        workflow_ir = workflow.build() if isinstance(workflow, Workflow) else workflow
+        if not isinstance(workflow_ir, WorkflowIR):
+            raise TypeError("workflow must be a Workflow or WorkflowIR")
+        return cls(workflow_ir, StageDispatcher(workflow_ir, bindings))
 
     @property
-    def plan(self) -> ExecutionPlan:
-        return self._plan
+    def workflow_ir(self) -> WorkflowIR:
+        """Return the normalized logical graph executed by this orchestrator."""
+
+        return self._workflow_ir
 
     async def run(
         self,
@@ -57,7 +64,7 @@ class WorkflowOrchestrator:
 
         if timeout is not None and timeout <= 0:
             raise ValueError("timeout must be positive")
-        workflow = self._plan.workflow
+        workflow = self._workflow_ir
         input_values = dict(inputs)
         expected_inputs = set(workflow.inputs)
         actual_inputs = set(input_values)

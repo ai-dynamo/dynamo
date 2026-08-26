@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from dynamo.experimental.workflow import (
-    DeploymentSpec,
+    InlineBinding,
     StageContext,
     StageContract,
     StageRunner,
@@ -16,7 +16,6 @@ from dynamo.experimental.workflow import (
     WorkflowExecutionError,
     WorkflowOrchestrator,
     WorkflowValidationError,
-    compile_workflow,
 )
 
 pytestmark = [
@@ -60,14 +59,15 @@ def _workflow() -> Workflow:
     return workflow
 
 
-async def _compile_local(
+async def _bind_local(
     workflow: Workflow, **runners: StageRunner
 ) -> WorkflowOrchestrator:
-    plan = compile_workflow(
+    return await WorkflowOrchestrator.bind(
         workflow,
-        DeploymentSpec.inline(**{stage_id: stage_id for stage_id in runners}),
+        bindings={
+            stage_id: InlineBinding(runner) for stage_id, runner in runners.items()
+        },
     )
-    return await WorkflowOrchestrator.bind(plan, inline_runners=runners)
 
 
 @dataclass
@@ -100,16 +100,16 @@ class _Generator:
         return {"text": "generated"}
 
 
-async def test_concise_compile_and_run_preserve_fanout_value_identity():
+async def test_concise_bind_and_run_preserve_fanout_value_identity():
     embedding = object()
-    plan = await _compile_local(
+    orchestrator = await _bind_local(
         _workflow(),
         encoder=_Encoder(embedding),
         classifier=_Classifier(embedding),
         generator=_Generator(embedding),
     )
 
-    result = await plan.run({"text": "hello"}, attempt_id="request-1")
+    result = await orchestrator.run({"text": "hello"}, attempt_id="request-1")
 
     assert result == {
         "scores": {"class-a": 0.75, "class-b": 0.25},
@@ -152,14 +152,14 @@ class _BarrierGenerator:
 async def test_independent_branches_run_concurrently_before_join():
     embedding = object()
     barrier = _BranchBarrier(2)
-    plan = await _compile_local(
+    orchestrator = await _bind_local(
         _workflow(),
         encoder=_Encoder(embedding),
         classifier=_BarrierClassifier(barrier),
         generator=_BarrierGenerator(barrier),
     )
 
-    assert await plan.run({"text": "hello"}) == {
+    assert await orchestrator.run({"text": "hello"}) == {
         "scores": {"ok": True},
         "text": "joined",
     }
@@ -198,7 +198,7 @@ async def test_first_worker_failure_cancels_and_awaits_sibling():
     embedding = object()
     barrier = _BranchBarrier(2)
     cancelled = asyncio.Event()
-    plan = await _compile_local(
+    orchestrator = await _bind_local(
         _workflow(),
         encoder=_Encoder(embedding),
         classifier=_FailingClassifier(barrier),
@@ -206,7 +206,7 @@ async def test_first_worker_failure_cancels_and_awaits_sibling():
     )
 
     with pytest.raises(WorkerFailure, match="classifier failed"):
-        await plan.run({"text": "hello"})
+        await orchestrator.run({"text": "hello"})
 
     assert cancelled.is_set()
 
@@ -230,7 +230,7 @@ async def test_timeout_cancels_and_awaits_running_stages():
     embedding = object()
     started = asyncio.Event()
     cancelled = asyncio.Event()
-    plan = await _compile_local(
+    orchestrator = await _bind_local(
         _workflow(),
         encoder=_Encoder(embedding),
         classifier=_BlockingClassifier(started, cancelled),
@@ -238,7 +238,7 @@ async def test_timeout_cancels_and_awaits_running_stages():
     )
 
     with pytest.raises(asyncio.TimeoutError):
-        await plan.run({"text": "hello"}, timeout=0.01)
+        await orchestrator.run({"text": "hello"}, timeout=0.01)
 
     assert started.is_set()
     assert cancelled.is_set()
@@ -248,13 +248,13 @@ async def test_caller_cancellation_cleans_up_running_stages():
     embedding = object()
     started = asyncio.Event()
     cancelled = asyncio.Event()
-    plan = await _compile_local(
+    orchestrator = await _bind_local(
         _workflow(),
         encoder=_Encoder(embedding),
         classifier=_BlockingClassifier(started, cancelled),
         generator=_Generator(embedding),
     )
-    task = asyncio.create_task(plan.run({"text": "hello"}))
+    task = asyncio.create_task(orchestrator.run({"text": "hello"}))
     await started.wait()
 
     task.cancel()
@@ -264,43 +264,38 @@ async def test_caller_cancellation_cleans_up_running_stages():
     assert cancelled.is_set()
 
 
-async def test_compile_requires_exact_bindings_and_matching_contracts():
+async def test_bind_requires_exact_bindings_and_matching_contracts():
     with pytest.raises(WorkflowValidationError, match="missing"):
-        compile_workflow(_workflow(), DeploymentSpec.inline(encoder="encoder"))
+        await WorkflowOrchestrator.bind(
+            _workflow(), bindings={"encoder": InlineBinding(_Encoder(object()))}
+        )
 
     wrong = SimpleNamespace(contract=CLASSIFIER, run=_Generator(object()).run)
     with pytest.raises(WorkflowValidationError, match="does not match"):
         await WorkflowOrchestrator.bind(
-            compile_workflow(
-                _workflow(),
-                DeploymentSpec.inline(
-                    encoder="encoder",
-                    classifier="classifier",
-                    generator="generator",
-                ),
-            ),
-            inline_runners={
-                "encoder": _Encoder(object()),
-                "classifier": _Classifier(object()),
-                "generator": wrong,
+            _workflow(),
+            bindings={
+                "encoder": InlineBinding(_Encoder(object())),
+                "classifier": InlineBinding(_Classifier(object())),
+                "generator": InlineBinding(wrong),
             },
         )
 
 
 async def test_runtime_accepts_opaque_values_and_rejects_bad_outputs():
     embedding = object()
-    plan = await _compile_local(
+    orchestrator = await _bind_local(
         _workflow(),
         encoder=_Encoder(embedding),
         classifier=_Classifier(embedding),
         generator=_Generator(embedding),
     )
-    assert await plan.run({"text": object()}) == {
+    assert await orchestrator.run({"text": object()}) == {
         "scores": {"class-a": 0.75, "class-b": 0.25},
         "text": "generated",
     }
     with pytest.raises(WorkflowExecutionError, match="extra"):
-        await plan.run({"text": "hello", "extra": "value"})
+        await orchestrator.run({"text": "hello", "extra": "value"})
 
     class BadGenerator:
         contract = GENERATOR
@@ -308,11 +303,11 @@ async def test_runtime_accepts_opaque_values_and_rejects_bad_outputs():
         async def run(self, inputs, context):
             return {"wrong": "value"}
 
-    bad_plan = await _compile_local(
+    bad_orchestrator = await _bind_local(
         _workflow(),
         encoder=_Encoder(embedding),
         classifier=_Classifier(embedding),
         generator=BadGenerator(),
     )
     with pytest.raises(WorkflowExecutionError, match="outputs differ"):
-        await bad_plan.run({"text": "hello"})
+        await bad_orchestrator.run({"text": "hello"})
