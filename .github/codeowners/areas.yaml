@@ -357,6 +357,7 @@ areas:
   - docs/
   - examples/README.md
   - examples/__init__.py
+  - tests/docs/
 - label: process
   github_team: '@ai-dynamo/dynamo-process-codeowners'
   path_globs:
@@ -1097,7 +1098,66 @@ shared:
 - glob: tests/gpu_memory_service/
   owners:
   - gms
+- glob: tests/serve/test_vllm.py
+  owners:
+  - runtime
+  - backend-vllm
+- glob: tests/serve/test_vllm_omni.py
+  owners:
+  - runtime
+  - backend-vllm
+- glob: tests/serve/test_sglang.py
+  owners:
+  - runtime
+  - backend-sglang
+- glob: tests/serve/test_sglang_mm_hashes_protocol.py
+  owners:
+  - runtime
+  - backend-sglang
+- glob: tests/serve/test_trtllm.py
+  owners:
+  - runtime
+  - backend-trtllm
+- glob: tests/serve/test_trtllm_mm_hashes_protocol.py
+  owners:
+  - runtime
+  - backend-trtllm
+- glob: tests/serve/trtllm/
+  owners:
+  - runtime
+  - backend-trtllm
+- glob: tests/serve/test_sample_diffusion.py
+  owners:
+  - runtime
+  - diffusion
+- glob: tests/serve/multimodal_profiles/
+  owners:
+  - runtime
+  - multimodal
+- glob: tests/serve/multimodal_profiles/vllm_xpu.py
+  owners:
+  - xpu
+- glob: tests/test_kustomize_matrix.py
+  owners:
+  - runtime
+  - ops
+- glob: tests/test_generate_kustomize_openapi.py
+  owners:
+  - runtime
+  - ops
+- glob: tests/wheels/
+  owners:
+  - ops
+- glob: tests/dependencies/test_kvbm_imports.py
+  owners:
+  - runtime
+  - kv-memory
+- glob: lib/bindings/kvbm/pyproject.toml
+  owners:
+  - ops
 classify:
   filetype_rules:
   - pattern: '*Dockerfile*'
+    coowner: ops
+  - pattern: pyproject.toml
     coowner: ops
