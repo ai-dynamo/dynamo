@@ -359,3 +359,31 @@ async def test_video_missing_decoder_error_is_actionable(monkeypatch) -> None:
     assert "install_media_decoders trtllm" in msg
     # The vendor loader's own text survives as the cause.
     assert "OpenCV (cv2) is required for video decoding" in msg
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "request_extra, expected",
+    [
+        ({"mm_processor_kwargs": {"num_crops": 4}}, {"num_crops": 4}),
+        ({"extra_args": {"mm_processor_kwargs": {"num_crops": 4}}}, {"num_crops": 4}),
+        ({}, {}),
+    ],
+)
+async def test_mm_processor_kwargs_forwarded(request_extra, expected) -> None:
+    """Overrides reach the engine inputs from either location; absent yields {},
+    which TRT-LLM's processor requires instead of None."""
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+
+    processed = await processor.process_openai_request(
+        {"token_ids": [1, 2, 3], **request_extra},
+        embeddings=None,
+        ep_disaggregated_params=None,
+    )
+
+    assert processed["mm_processor_kwargs"] == expected

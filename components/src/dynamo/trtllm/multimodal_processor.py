@@ -340,12 +340,15 @@ class MultimodalRequestProcessor:
 
         # Initialize result in TokensPrompt format
         # mm_processor_kwargs must be a dict (not None) for TRT-LLM's processor
-        processed_inputs: Dict[str, Any] = {"mm_processor_kwargs": {}}
+        extra_args = request.get("extra_args") or {}
+        mm_kwargs = request.get("mm_processor_kwargs") or extra_args.get(
+            "mm_processor_kwargs"
+        )
+        processed_inputs: Dict[str, Any] = {"mm_processor_kwargs": mm_kwargs or {}}
 
         # TODO(TRTLLM-11294): Remove the fallback to text_prompt for EPD-NIXL and embeddings cases.
         # This is a temporary workaround to bypass TRT-LLM's bug where token IDs & embeddings
         # are not processed correctly.
-        extra_args = request.get("extra_args") or {}
         formatted_prompt_from_frontend = extra_args.get("formatted_prompt")
 
         # EPD Flow Case 2: Embeddings received via NIXL from encode worker
