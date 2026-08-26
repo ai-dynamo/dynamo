@@ -73,7 +73,7 @@ required-features = ["request-trace-bench"]
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
 agent-rt-sandbox = { workspace = true, features = ["http-client"], optional = true }
 dynamo-agent-rt = { workspace = true, optional = true }
-dynamo-agent-rt-store = { workspace = true, features = ["duckdb"], optional = true }
+dynamo-agent-rt-store = { workspace = true, features = ["sqlite"], optional = true }
 dynamo-agent-tools = { workspace = true, optional = true }
 dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true, features = ["zmq-events"] }

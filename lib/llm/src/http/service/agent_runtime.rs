@@ -31,7 +31,7 @@ use dynamo_agent_rt::{
     ToolFailureDisposition, ToolFailurePolicy, ToolRoute, ToolRouter, ToolRunError, ToolRunner,
     TurnState, UuidGenerator,
 };
-use dynamo_agent_rt_store::{DuckDbStore, DuckDbStoreError, StoreInvariantError};
+use dynamo_agent_rt_store::{SqliteStore, SqliteStoreError, StoreInvariantError};
 use dynamo_agent_tools::{
     BraveWebSearchError, BraveWebSearchExecutor, BraveWebSearchFailurePolicy, BraveWebSearchProfile,
 };
@@ -83,7 +83,7 @@ const PERMITTED_CONNECTORS_ENV: &str = "DYN_AGENT_RT_PERMITTED_CONNECTORS";
 const AUTH_HEADER: &str = "x-dynamo-agent-rt-auth";
 const TENANT_HEADER: &str = "x-dynamo-tenant-id";
 const PRINCIPAL_HEADER: &str = "x-dynamo-principal-id";
-const DUCKDB_PATH_ENV: &str = "DYN_AGENT_RT_DUCKDB_PATH";
+const SQLITE_PATH_ENV: &str = "DYN_AGENT_RT_SQLITE_PATH";
 const STATEFUL_ANTHROPIC_ENV: &str = "DYN_AGENT_RT_STATEFUL_ANTHROPIC";
 const WEB_SEARCH_API_KEY_ENV: &str = "BRAVE_SEARCH_API_KEY";
 const WEB_SEARCH_TOOL_NAME_ENV: &str = "DYN_AGENT_RT_WEB_SEARCH_TOOL_NAME";
@@ -252,7 +252,7 @@ fn ingress_authorization(
     })
 }
 
-type ResponsesStore = DuckDbStore<OpenAiResponses>;
+type ResponsesStore = SqliteStore<OpenAiResponses>;
 
 #[derive(Clone, Default)]
 struct RuntimeToolRouter {
@@ -288,7 +288,7 @@ type ResponsesToolRunner = ToolRunner<
     RuntimeToolFailurePolicy,
 >;
 
-type AnthropicStore = DuckDbStore<AnthropicMessages>;
+type AnthropicStore = SqliteStore<AnthropicMessages>;
 type AnthropicOutcomePolicy = RoutedAnthropicOutcomePolicy<RuntimeToolRouter>;
 type AnthropicOutputInterpreter = PolicyAnthropicOutputInterpreter<AnthropicOutcomePolicy>;
 type AnthropicAgentRuntimeCore = AgentRuntime<
@@ -464,7 +464,7 @@ fn request_uses_runtime_tools(request: &CreateResponse, router: &impl ToolRouter
 }
 
 type ResponsesRuntimeError = AgentRuntimeError<
-    DuckDbStoreError,
+    SqliteStoreError,
     MaterializationError<Infallible>,
     serde_json::Error,
     DynamoResponsesInvocationError,
@@ -472,56 +472,56 @@ type ResponsesRuntimeError = AgentRuntimeError<
 >;
 
 type ResponsesStreamRuntimeError =
-    AgentStreamRuntimeError<ResponsesRuntimeError, Infallible, DuckDbStoreError>;
+    AgentStreamRuntimeError<ResponsesRuntimeError, Infallible, SqliteStoreError>;
 
-type RuntimeToolRunError = ToolRunError<DuckDbStoreError, RuntimeToolExecutorError>;
+type RuntimeToolRunError = ToolRunError<SqliteStoreError, RuntimeToolExecutorError>;
 type ResponsesToolRuntimeError = AgentToolRuntimeError<
     ResponsesRuntimeError,
     ResponsesToolAdapterError,
     RuntimeToolRunError,
-    DuckDbStoreError,
+    SqliteStoreError,
 >;
 type ResponsesToolStreamRuntimeError = AgentToolRuntimeError<
     ResponsesStreamRuntimeError,
     ResponsesToolAdapterError,
     RuntimeToolRunError,
-    DuckDbStoreError,
+    SqliteStoreError,
 >;
 
 type AnthropicRuntimeError = AgentRuntimeError<
-    DuckDbStoreError,
+    SqliteStoreError,
     AnthropicMaterializationError,
     serde_json::Error,
     DynamoAnthropicInvocationError,
     RoutedAnthropicOutcomeError,
 >;
 type AnthropicStreamRuntimeError =
-    AgentStreamRuntimeError<AnthropicRuntimeError, AnthropicStreamEventError, DuckDbStoreError>;
+    AgentStreamRuntimeError<AnthropicRuntimeError, AnthropicStreamEventError, SqliteStoreError>;
 type AnthropicToolRuntimeError =
-    AgentToolRuntimeError<AnthropicRuntimeError, Infallible, RuntimeToolRunError, DuckDbStoreError>;
+    AgentToolRuntimeError<AnthropicRuntimeError, Infallible, RuntimeToolRunError, SqliteStoreError>;
 type AnthropicToolStreamRuntimeError = AgentToolRuntimeError<
     AnthropicStreamRuntimeError,
     Infallible,
     RuntimeToolRunError,
-    DuckDbStoreError,
+    SqliteStoreError,
 >;
 
 #[derive(Debug, Error)]
 pub(super) enum AgentRuntimeInitError {
-    #[error("failed to initialize agent runtime DuckDB store: {0}")]
-    Store(#[from] DuckDbStoreError),
+    #[error("failed to initialize agent runtime SQLite store: {0}")]
+    Store(#[from] SqliteStoreError),
     #[error("invalid agent runtime deployment configuration: {0}")]
     Configuration(String),
 }
 
 pub(super) fn new_responses_runtime() -> Result<Arc<ResponsesAgentRuntime>, AgentRuntimeInitError> {
-    let store = match std::env::var_os(DUCKDB_PATH_ENV) {
+    let store = match std::env::var_os(SQLITE_PATH_ENV) {
         Some(path) if !path.is_empty() => ResponsesStore::open(path),
         _ => {
             if enabled() {
                 tracing::warn!(
-                    env = DUCKDB_PATH_ENV,
-                    "agent runtime is using an in-memory DuckDB store; set the path for restart durability"
+                    env = SQLITE_PATH_ENV,
+                    "agent runtime is using an in-memory SQLite store; set the path for restart durability"
                 );
             }
             ResponsesStore::open_in_memory()
@@ -562,7 +562,7 @@ pub(super) fn new_responses_runtime() -> Result<Arc<ResponsesAgentRuntime>, Agen
 }
 
 pub(super) fn new_anthropic_runtime() -> Result<Arc<AnthropicAgentRuntime>, AgentRuntimeInitError> {
-    let store = match std::env::var_os(DUCKDB_PATH_ENV) {
+    let store = match std::env::var_os(SQLITE_PATH_ENV) {
         Some(path) if !path.is_empty() => AnthropicStore::open(path),
         _ => AnthropicStore::open_in_memory(),
     }?;
@@ -1513,7 +1513,7 @@ fn tool_error_response<R>(
         R,
         ResponsesToolAdapterError,
         RuntimeToolRunError,
-        DuckDbStoreError,
+        SqliteStoreError,
     >,
     runtime_error: impl FnOnce(R) -> openai::ErrorResponse,
 ) -> openai::ErrorResponse
@@ -1566,7 +1566,7 @@ where
 }
 
 fn checkpoint_failure_status(
-    checkpoint_error: &Option<DuckDbStoreError>,
+    checkpoint_error: &Option<SqliteStoreError>,
     otherwise: StatusCode,
 ) -> StatusCode {
     if checkpoint_error.is_some() {
@@ -1789,17 +1789,17 @@ fn runtime_error_response(error: ResponsesRuntimeError) -> openai::ErrorResponse
     }
 }
 
-fn store_error_response(error: DuckDbStoreError) -> openai::ErrorResponse {
+fn store_error_response(error: SqliteStoreError) -> openai::ErrorResponse {
     let (status, message) = match &error {
-        DuckDbStoreError::Invariant(StoreInvariantError::NotFound) => (
+        SqliteStoreError::Invariant(StoreInvariantError::NotFound) => (
             StatusCode::NOT_FOUND,
             "Previous response was not found or is not accessible",
         ),
-        DuckDbStoreError::Invariant(StoreInvariantError::IdempotencyConflict) => (
+        SqliteStoreError::Invariant(StoreInvariantError::IdempotencyConflict) => (
             StatusCode::CONFLICT,
             "Idempotency key was already used for a different request",
         ),
-        DuckDbStoreError::Invariant(
+        SqliteStoreError::Invariant(
             StoreInvariantError::ResponseAlreadyExists(_)
             | StoreInvariantError::ParentNotReplayable(_)
             | StoreInvariantError::LeaseNotFound
@@ -1811,21 +1811,21 @@ fn store_error_response(error: DuckDbStoreError) -> openai::ErrorResponse {
             StatusCode::CONFLICT,
             "Agent turn changed concurrently; retry with the same idempotency key",
         ),
-        DuckDbStoreError::Invariant(
+        SqliteStoreError::Invariant(
             StoreInvariantError::InvalidLeaseDeadline
             | StoreInvariantError::LeaseDeadlineNotExtended
             | StoreInvariantError::InvalidTransition { .. }
             | StoreInvariantError::VersionOverflow
             | StoreInvariantError::Corrupt,
         )
-        | DuckDbStoreError::Json(_) => (
+        | SqliteStoreError::Json(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "Agent checkpoint store failed",
         ),
-        DuckDbStoreError::Database(_)
-        | DuckDbStoreError::Poisoned
-        | DuckDbStoreError::Closed
-        | DuckDbStoreError::Join(_) => (
+        SqliteStoreError::Database(_)
+        | SqliteStoreError::Poisoned
+        | SqliteStoreError::Closed
+        | SqliteStoreError::Join(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
             "Agent checkpoint store is unavailable",
         ),
@@ -1970,7 +1970,7 @@ mod tests {
         ModelStepKind, OutputIdentity, RequestFingerprint, ResponseId, StreamEventAction,
         StreamEventInterpreter, ToolRoute, ToolRouter, TurnState,
     };
-    use dynamo_agent_rt_store::{DuckDbStoreError, StoreInvariantError};
+    use dynamo_agent_rt_store::{SqliteStoreError, StoreInvariantError};
     use dynamo_protocols::types::anthropic::{
         AnthropicCreateMessageRequest, AnthropicResponseContentBlock, AnthropicStopReason,
         AnthropicStreamEvent, AnthropicUsage,
@@ -2133,9 +2133,9 @@ mod tests {
     }
 
     #[test]
-    fn duckdb_file_can_host_responses_and_anthropic_protocols() {
+    fn sqlite_file_can_host_responses_and_anthropic_protocols() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("agent-runtime.duckdb");
+        let path = directory.path().join("agent-runtime.sqlite");
         let responses = ResponsesStore::open(&path).expect("open Responses store");
         let anthropic = AnthropicStore::open(&path).expect("open Anthropic store");
         drop(anthropic);
@@ -2218,7 +2218,7 @@ mod tests {
     #[test]
     fn runtime_errors_have_stable_non_leaking_http_statuses() {
         let missing: ResponsesRuntimeError =
-            AgentRuntimeError::Store(DuckDbStoreError::Invariant(StoreInvariantError::NotFound));
+            AgentRuntimeError::Store(SqliteStoreError::Invariant(StoreInvariantError::NotFound));
         let response = runtime_error_response(missing);
         assert_eq!(response.0, StatusCode::NOT_FOUND);
         assert_eq!(
@@ -2227,7 +2227,7 @@ mod tests {
         );
 
         let conflict: ResponsesRuntimeError = AgentRuntimeError::Store(
-            DuckDbStoreError::Invariant(StoreInvariantError::IdempotencyConflict),
+            SqliteStoreError::Invariant(StoreInvariantError::IdempotencyConflict),
         );
         assert_eq!(runtime_error_response(conflict).0, StatusCode::CONFLICT);
 
@@ -2263,7 +2263,7 @@ mod tests {
                 status: StatusCode::BAD_REQUEST,
                 message: "bad request".to_owned(),
             },
-            checkpoint_error: Some(DuckDbStoreError::Poisoned),
+            checkpoint_error: Some(SqliteStoreError::Poisoned),
         };
         assert_eq!(
             runtime_error_response(durability_unknown).0,
