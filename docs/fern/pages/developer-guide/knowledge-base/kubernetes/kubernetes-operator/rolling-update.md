@@ -130,7 +130,7 @@ For DGDs backed by **Grove** (PodCliques, PodCliqueSets) or **LWS** (LeaderWorke
 ### What Happens
 
 - A modification to a pod spec triggers the rolling update behavior of the backing resource.
-- For Grove, PodCliques (PCLQ) and PodCliqueScalingGroups use a static rolling update strategy of `maxUnavailable: 1` and `maxSurge: 0`. LWS follows the same `maxUnavailable: 1` and `maxSurge: 0` strategy.
+- With Grove's default rolling behavior or `RollingRecreate`, PodCliques (PCLQ) and PodCliqueScalingGroups use `maxUnavailable: 1` and `maxSurge: 0`. These values do not apply when `OnDelete` is selected. LWS uses `maxUnavailable: 1` and `maxSurge: 0`.
 - Grove assigns one worker-spec hash to all worker components. A changed worker spec therefore moves prefill, decode, and other worker components to the new generation namespace together. New DGDs use hash suffixes from their first generation; existing DGDs adopt them on their next worker-generation change.
 - LWS also uses the DGD worker hash in worker runtime namespaces, while its underlying LeaderWorkerSets retain their native update behavior.
 
@@ -149,7 +149,7 @@ flowchart LR
     NP --> ND
 ```
 
-The frontend routes only to complete, ready generation namespaces. See [Mixed-Version Compatibility](../../../../reference/general/compatibility.mdx#mixed-version-compatibility) for the supported frontend/worker version window and WorkerSet selection behavior.
+The frontend routes only to complete namespaces for ready generations. See [Mixed-Version Compatibility](../../../../reference/general/compatibility.mdx#mixed-version-compatibility) for the supported frontend/worker version window and WorkerSet selection behavior.
 
 ### Grove Update Strategy Annotation
 
