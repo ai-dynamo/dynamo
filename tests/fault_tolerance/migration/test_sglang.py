@@ -41,6 +41,9 @@ AGGREGATED_MAX_MODEL_LEN = 1024
 AGGREGATED_MAX_TOKENS = 64
 DECODE_MAX_MODEL_LEN = 1024
 DECODE_MAX_TOKENS = 64
+KV_TRANSFER_MAX_MODEL_LEN = 1024
+KV_TRANSFER_MAX_TOKENS = 64
+KV_TRANSFER_PROMPT_REPETITIONS = 128
 
 SGLANG_MIGRATION_FRONTEND_STARTUP_TIMEOUT_S = 60
 # Last-resort ceiling; individual operations have their own bounded waits.
@@ -209,6 +212,30 @@ DECODE_MIGRATION_CASES = [
     ),
 ]
 
+# KV transfer is exercised only when migration is enabled and the request is
+# under the sequence cap; aggregate migration owns the shared policy outcomes.
+# The two rows retain both shutdown lifecycles and request-plane transports.
+KV_TRANSFER_CASES = [
+    pytest.param(
+        3,
+        None,
+        True,
+        "chat",
+        True,
+        "nats",
+        id="worker-failure-chat-stream-nats",
+    ),
+    pytest.param(
+        3,
+        None,
+        False,
+        "chat",
+        False,
+        "tcp",
+        id="graceful-shutdown-chat-unary-tcp",
+    ),
+]
+
 MIGRATION_PARAMETERS = pytest.mark.parametrize(
     (
         "migration_limit",
@@ -234,6 +261,19 @@ DECODE_MIGRATION_PARAMETERS = pytest.mark.parametrize(
     indirect=["request_plane"],
 )
 
+KV_TRANSFER_MIGRATION_PARAMETERS = pytest.mark.parametrize(
+    (
+        "migration_limit",
+        "migration_max_seq_len",
+        "immediate_kill",
+        "request_api",
+        "stream",
+        "request_plane",
+    ),
+    KV_TRANSFER_CASES,
+    indirect=["request_plane"],
+)
+
 pytestmark = [
     pytest.mark.fault_tolerance,
     pytest.mark.sglang,
@@ -241,57 +281,6 @@ pytestmark = [
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
 ]
-
-# The remaining migration targets retain their existing Cartesian collection
-# until their own stack layers classify and reduce them.
-LEGACY_MIGRATION_PARAMETERS = (
-    pytest.mark.parametrize(
-        "migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"]
-    ),
-    pytest.mark.parametrize(
-        "migration_max_seq_len",
-        [
-            pytest.param(None, id="max_seq_len_disabled"),
-            pytest.param(1_000_000, id="max_seq_len_not_exceeded"),
-            pytest.param(1, id="max_seq_len_exceeded"),
-        ],
-    ),
-    pytest.mark.parametrize(
-        "immediate_kill",
-        [
-            pytest.param(True, id="worker_failure"),
-            pytest.param(False, id="graceful_shutdown"),
-        ],
-    ),
-    pytest.mark.parametrize(
-        "request_api",
-        [
-            pytest.param("chat"),
-            pytest.param(
-                "completion",
-                marks=pytest.mark.skip(reason="Behavior unverified yet"),
-            ),
-        ],
-    ),
-    pytest.mark.parametrize(
-        "stream",
-        [
-            pytest.param(True, id="stream"),
-            pytest.param(
-                False,
-                id="unary",
-                marks=pytest.mark.skip(reason="Behavior unverified yet"),
-            ),
-        ],
-    ),
-    pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
-)
-
-
-def legacy_migration_parameters(test):
-    for marker in LEGACY_MIGRATION_PARAMETERS:
-        test = marker(test)
-    return test
 
 
 class DynamoWorkerProcess(ManagedProcess):
@@ -528,10 +517,11 @@ def test_request_migration_sglang_aggregated(
             )
 
 
-@pytest.mark.skip(reason="KV cache transfer may fail")
-@pytest.mark.timeout(230)  # 3x average
-@pytest.mark.nightly
-@legacy_migration_parameters
+@pytest.mark.timeout(180)  # >3x the measured 45-54s local runtime
+@pytest.mark.pre_merge
+@pytest.mark.profiled_vram_gib(7.8)  # measured NVML peak with three workers
+@pytest.mark.requested_sglang_kv_tokens(1024)
+@KV_TRANSFER_MIGRATION_PARAMETERS
 def test_request_migration_sglang_kv_transfer(
     request,
     runtime_services_dynamic_ports,
@@ -564,48 +554,58 @@ def test_request_migration_sglang_kv_transfer(
     ) as frontend:
         logger.info("Frontend started successfully")
 
-        # Step 2: Start prefill worker first
-        with DynamoWorkerProcess(
+        # Step 2: Start the independent prefill and decode workers concurrently.
+        prefill_worker = DynamoWorkerProcess(
             request,
             "worker0",
             frontend.frontend_port,
             tmp_path,
             disagg_mode="prefill",
-        ) as prefill_worker:
-            logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
-
-            # Step 3: Start 2 decode workers
-            with DynamoWorkerProcess(
-                request,
-                "worker1",
+            max_model_len=KV_TRANSFER_MAX_MODEL_LEN,
+        )
+        decode1 = DynamoWorkerProcess(
+            request,
+            "worker1",
+            frontend.frontend_port,
+            tmp_path,
+            disagg_mode="decode",
+            max_model_len=KV_TRANSFER_MAX_MODEL_LEN,
+        )
+        decode2 = DynamoWorkerProcess(
+            request,
+            "worker2",
+            frontend.frontend_port,
+            tmp_path,
+            disagg_mode="decode",
+            max_model_len=KV_TRANSFER_MAX_MODEL_LEN,
+        )
+        with managed_processes_concurrently(prefill_worker, decode1, decode2):
+            logger.info("Prefill Worker PID: %s", prefill_worker.get_pid())
+            logger.info("Decode Worker 1 PID: %s", decode1.get_pid())
+            logger.info("Decode Worker 2 PID: %s", decode2.get_pid())
+            wait_for_endpoint_instances(
                 frontend.frontend_port,
-                tmp_path,
-                disagg_mode="decode",
-            ) as decode1:
-                logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
+                {("prefill", "generate"): 1, ("backend", "generate"): 2},
+            )
 
-                with DynamoWorkerProcess(
-                    request,
-                    "worker2",
-                    frontend.frontend_port,
-                    tmp_path,
-                    disagg_mode="decode",
-                ) as decode2:
-                    logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
-
-                    # Step 4: Run migration test
-                    run_migration_test(
-                        frontend,
-                        decode1,
-                        decode2,
-                        receiving_pattern="New Request ID: ",
-                        migration_limit=migration_limit,
-                        migration_max_seq_len=migration_max_seq_len,
-                        immediate_kill=immediate_kill,
-                        use_chat_completion=(request_api == "chat"),
-                        stream=stream,
-                        use_long_prompt=True,
-                    )
+            # Step 3: Inject the fault after decode accepts the long-prefill request.
+            run_migration_test(
+                frontend,
+                decode1,
+                decode2,
+                receiving_pattern="New Request ID: ",
+                migration_limit=migration_limit,
+                migration_max_seq_len=migration_max_seq_len,
+                immediate_kill=immediate_kill,
+                use_chat_completion=(request_api == "chat"),
+                stream=stream,
+                max_tokens=KV_TRANSFER_MAX_TOKENS,
+                use_long_prompt=True,
+                long_prompt_repetitions=KV_TRANSFER_PROMPT_REPETITIONS,
+                expected_ongoing_request_count=1,
+                graceful_shutdown_endpoint=("backend", "generate"),
+                wait_for_worker_health_shutdown=True,
+            )
 
 
 @pytest.mark.timeout(SGLANG_MIGRATION_TEST_TIMEOUT_S)
