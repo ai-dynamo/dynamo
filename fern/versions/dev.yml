@@ -370,6 +370,9 @@ navigation:
             path: ../pages-dev/use-cases/multimodal-serving/overview.md
           - page: Parallel Media Decoding
             path: ../pages-dev/use-cases/multimodal-serving/parallel-media-decoding.md
+          - page: Custom Vision Encoders
+            slug: custom-vision-encoders
+            path: ../pages-dev/use-cases/multimodal-serving/custom-vision-encoders.md
           - page: Embedding Cache
             path: ../pages-dev/use-cases/multimodal-serving/embedding-cache.md
           - page: Multimodal KV Routing
@@ -860,9 +863,6 @@ navigation:
             path: ../pages-dev/developer-guide/advanced-customizations/custom-worker-selection.mdx
           - page: Conditional Disaggregation
             path: ../pages-dev/developer-guide/advanced-customizations/conditional-disaggregation.md
-          - page: Custom Vision Encoders
-            slug: custom-vision-encoders
-            path: ../pages-dev/developer-guide/advanced-customizations/custom-vision-encoders.md
           - page: FastTokens Tokenizer
             slug: fastokens-tokenizer
             path: ../pages-dev/use-cases/fastokens-tokenizer/overview.md

@@ -62,11 +62,7 @@ The main multimodal vLLM launchers in this repo are:
 
 ### Custom Vision Encoders
 
-The aggregated vLLM worker can load an author-provided vision tower in
-process, batch images across concurrent requests, and splice the resulting
-embeddings into the language-model prompt. See [Custom Vision
-Encoders](../../../../advanced-customizations/custom-vision-encoders.md) for the backend contract, launch instructions,
-batch sizing guidance, and current limitations.
+The aggregated vLLM worker can load an author-provided vision tower in process, batch images across concurrent requests, and adapt the ordered results into decoder-compatible prompt input. See [Custom Vision Encoders](../../../../../use-cases/multimodal-serving/custom-vision-encoders.md) for the backend contract, launch instructions, batch sizing guidance, and current limitations.
 
 ## Multimodal KV Routing
 
