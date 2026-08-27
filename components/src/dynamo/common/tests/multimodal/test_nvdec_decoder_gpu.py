@@ -25,9 +25,7 @@ import pytest
 
 pytestmark = [
     pytest.mark.integration,
-    # TODO: revert to pytest.mark.post_merge after pre_merge validation
-    # on this PR (see .ai/ci-guidelines.md).
-    pytest.mark.pre_merge,
+    pytest.mark.post_merge,
     pytest.mark.gpu_1,
     pytest.mark.vllm,
 ]
