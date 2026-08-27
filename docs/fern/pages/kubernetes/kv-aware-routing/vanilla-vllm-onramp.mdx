@@ -177,7 +177,8 @@ creates the workload layer in `$NAMESPACE`:
 - Two stock vLLM workers with prefix caching, KV events, and readiness probes.
 - A `vllm-qwen-render` Service that selects those same workers and exposes their HTTP port for
   `/v1/chat/completions/render`.
-- Namespaced read-only RBAC for pods, `InferencePool`, and `EndpointSlice` resources.
+- Namespaced RBAC: `get`, `list`, and `watch` for pods, `InferencePool`, and `EndpointSlice`
+  resources; `get` for the EPP peer Service.
 - Two standalone EPP replicas and their gRPC and replica-synchronization Service.
 - An `InferencePool` and an `HTTPRoute` that attaches to the cross-namespace Gateway.
 
@@ -320,8 +321,9 @@ corresponding URL for the existing Service you reuse.
 ### Deploy a Replacement EPP
 
 Create a ServiceAccount with namespaced `get`, `list`, and `watch` access to pods, `InferencePool`
-resources, and `EndpointSlice` resources. Then create the replacement Deployment with the Dynamo EPP
-image. The environment variables belong to the EPP container in
+resources, and `EndpointSlice` resources. When you set `DYN_EPP_PEER_SERVICE`, also grant `get`
+access to Services. Then create the replacement Deployment with the Dynamo EPP image. The environment
+variables belong to the EPP container in
 `spec.template.spec.containers[].env`:
 
 ```yaml
@@ -522,7 +524,8 @@ operator-generated resource contract; that contract does not configure standalon
 | Symptom | Check |
 |---|---|
 | EPP exits with `standalone is not yet supported` | The image predates the standalone implementation. Build or select the required `dynamo-rust-epp` revision. |
-| EPP stays not ready | Confirm the pool exists, its selector is valid, at least one matching pod is Ready, and EPP RBAC can watch all three resource types. |
+| EPP stays not ready | Confirm the pool exists, its selector is valid, at least one matching pod is Ready, and EPP RBAC can watch pods, `InferencePool` resources, and `EndpointSlice` resources. |
+| EPP exits while validating its peer Service | Confirm the Service exists and EPP RBAC grants `get` access to Services. |
 | EPP reports no schedulable workers | Set `DYN_EPP_MAX_NUM_BATCHED_TOKENS` to the vLLM `--max-num-batched-tokens` value when queueing is enabled. |
 | Route has no accepted parent | Confirm `parentRefs[].namespace` names the Gateway namespace, `sectionName` names its listener, and the listener allows routes from the workload namespace. |
 | Tokenization fails | Check the render Service endpoints and call `/v1/chat/completions/render` from the EPP namespace. |
