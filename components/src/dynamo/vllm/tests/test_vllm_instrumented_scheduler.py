@@ -3751,3 +3751,59 @@ def test_seed_and_measuring_request_share_block_hashes():
     measuring_hashes = list(measuring_req.block_hashes)
     assert len(seed_hashes) == prefix_tokens // block_size
     assert measuring_hashes[: len(seed_hashes)] == seed_hashes
+
+
+def test_kvwarm_point_need_adds_repeats_only_for_giant_points():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    small = SimpleNamespace(total_kv_read_tokens=999_999)
+    giant = SimpleNamespace(total_kv_read_tokens=1_000_000)
+    # Non-giant: admission writes ctx-1, steady writes ctx -> need 2.
+    assert InstrumentedScheduler._kvwarm_point_need(stub, small) == 2
+    # Giant (>= threshold): median-of-repeats adds repeats-1 (default 3).
+    assert InstrumentedScheduler._kvwarm_point_need(stub, giant) == 4
+
+
+def test_kvwarm_covers_requires_ready_chains_deep_enough():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._kvwarm_plan = {2: 100}
+    stub._kvwarm_building = False
+    stub._kvwarm_stage_batch = 2
+    stub._kvwarm_chain_ids = ["c0", "c1"]
+    stub._kvwarm_chain_prompts = {"c0": [1] * 50, "c1": [1] * 50}
+    point = SimpleNamespace(batch_size=2, total_kv_read_tokens=10_000)
+    # injected + need(2) must fit inside every chain's prompt depth.
+    assert InstrumentedScheduler._kvwarm_covers(stub, point, [48, 48])
+    assert not InstrumentedScheduler._kvwarm_covers(stub, point, [49, 48])
+    # A fleet still under construction never covers.
+    stub._kvwarm_building = True
+    assert not InstrumentedScheduler._kvwarm_covers(stub, point, [10, 10])
+    stub._kvwarm_building = False
+    # Fewer live chains than the point's batch never covers.
+    wide = SimpleNamespace(batch_size=3, total_kv_read_tokens=10_000)
+    assert not InstrumentedScheduler._kvwarm_covers(stub, wide, [10, 10, 10])
+
+
+def _kvwarm_text_stub():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_grid_digest = "grid-digest"
+    stub._fpm_dp_rank = 0
+    stub._kvwarm_load_texts = lambda: ["alpha", "bravo", "charlie", "delta"]
+    stub._kvwarm_tokenizer = lambda: SimpleNamespace(
+        encode=lambda text, add_special_tokens=False: [ord(c) for c in text]
+    )
+    return stub
+
+
+def test_kvwarm_chain_tokens_are_deterministic_and_extend_monotonically():
+    first = InstrumentedScheduler._kvwarm_chain_token_ids(_kvwarm_text_stub(), 1, 6)
+    again = InstrumentedScheduler._kvwarm_chain_token_ids(_kvwarm_text_stub(), 1, 6)
+    assert first == again and len(first) >= 6
+    # Deepening the same chain only extends: the shallow draw stays a strict
+    # prefix (prefix-cache generational extension depends on this).
+    stub = _kvwarm_text_stub()
+    shallow = InstrumentedScheduler._kvwarm_chain_token_ids(stub, 2, 4)
+    deep = InstrumentedScheduler._kvwarm_chain_token_ids(stub, 2, 12)
+    assert deep[: len(shallow)] == shallow
+    # Distinct chains draw distinct conversation orders.
+    other = InstrumentedScheduler._kvwarm_chain_token_ids(_kvwarm_text_stub(), 3, 6)
+    assert other != first
