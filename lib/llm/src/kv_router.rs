@@ -979,16 +979,19 @@ where
                     RouterHintCandidateSource::Worker(worker) => {
                         worker != target
                             && configs.get(&worker.worker_id).is_some_and(|config| {
-                                config.kv_event_source_mode.as_deref() != Some("state_agent_v2")
-                                    && config
-                                        .router_hint_metadata_for_dp_rank(worker.dp_rank)
-                                        .is_some_and(|source_metadata| {
-                                            source_metadata.worker_type
-                                                == target_metadata.worker_type
-                                                && source_metadata
-                                                    .source_control_endpoint
-                                                    .is_some_and(|endpoint| !endpoint.is_empty())
-                                        })
+                                // Only the legacy and framework sources are eligible. An
+                                // unknown mode must not fall back, per the field's contract.
+                                matches!(
+                                    config.kv_event_source_mode.as_deref(),
+                                    None | Some("framework_v1")
+                                ) && config
+                                    .router_hint_metadata_for_dp_rank(worker.dp_rank)
+                                    .is_some_and(|source_metadata| {
+                                        source_metadata.worker_type == target_metadata.worker_type
+                                            && source_metadata
+                                                .source_control_endpoint
+                                                .is_some_and(|endpoint| !endpoint.is_empty())
+                                    })
                             })
                     }
                     RouterHintCandidateSource::CacheOwner(owner) => candidates
@@ -2743,6 +2746,63 @@ mod tests {
                     ExternalSequenceBlockHash(101),
                     ExternalSequenceBlockHash(102),
                     ExternalSequenceBlockHash(103),
+                ],
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn router_hint_suppresses_worker_with_unknown_source_mode() {
+        // "Unknown explicit values must disable KV-aware routing rather than
+        // falling back within the same worker lifecycle."
+        let target = WorkerWithDpRank::new(7, 0);
+        let stale_source = WorkerWithDpRank::new(8, 0);
+        let mut workers = HashMap::new();
+        workers.insert(7, router_hint_runtime_config(None));
+        let mut stale_source_config =
+            router_hint_runtime_config(Some("tcp://stale-worker-endpoint:23280"));
+        stale_source_config.kv_event_source_mode = Some("not_a_known_mode".to_string());
+        workers.insert(8, stale_source_config);
+        let router = make_test_router_with_workers(
+            InspectingSelector {
+                expected_hits: None,
+                selected_worker: target,
+            },
+            None,
+            workers,
+        )
+        .await;
+        let owner = router_hint_cache_owner();
+        let owner_key = ResidencyOwner::cache_owner(owner).compact_key();
+        let candidates = RouterHintRootCandidates {
+            block_hashes: vec![
+                ExternalSequenceBlockHash(101),
+                ExternalSequenceBlockHash(102),
+            ],
+            owner_prefix_blocks: vec![
+                (RouterHintCandidateSource::Worker(stale_source), 2),
+                (RouterHintCandidateSource::CacheOwner(owner_key), 2),
+            ],
+            routing_snapshot: Some(Arc::new(ResidencyRoutingSnapshot::new(
+                ResidencyProjection::default(),
+                [(
+                    owner,
+                    RouterHintSourceMetadata {
+                        source_control_endpoint: "tcp://persistent-owner:23280".to_string(),
+                        worker_type: "prefill".to_string(),
+                    },
+                    None,
+                )],
+            ))),
+        };
+
+        assert_eq!(
+            router.router_hint_for_selection(target, 0, Some(&candidates)),
+            Some(RouterHint {
+                source_control_endpoint: "tcp://persistent-owner:23280".to_string(),
+                block_hashes: vec![
+                    ExternalSequenceBlockHash(101),
+                    ExternalSequenceBlockHash(102),
                 ],
             })
         );
